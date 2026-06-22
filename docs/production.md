@@ -15,7 +15,7 @@ The development compose file runs `npm run dev`. It is intended only for local d
 Production:
 
 ```bash
-docker compose -f infra/docker-compose.prod.yml up --build
+docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 ```
 
 The production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands.
@@ -25,7 +25,7 @@ The production compose file builds with `infra/Dockerfile.prod` and starts the N
 Run the production compose path:
 
 ```bash
-docker compose -f infra/docker-compose.prod.yml up --build
+docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 ```
 
 Then validate the basic behavior:

@@ -44,7 +44,7 @@ Never commit:
 After `infra/docker-compose.prod.yml` is configured and working, start Cloudflare through the override:
 
 ```bash
-docker compose -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml up --build
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml up --build
 ```
 
 The `cloudflared` service exposes no local ports. It connects outbound to Cloudflare using `TUNNEL_TOKEN`, mapped from the private `CLOUDFLARE_TUNNEL_TOKEN` value in `.env`.
