@@ -65,6 +65,12 @@ npm run seed:owner
 
 The seed command reads `BIELOS_OWNER_EMAIL` and `BIELOS_OWNER_PASSWORD` from the environment. It hashes the password before storage.
 
+To remove expired or revoked sessions during local operation:
+
+```bash
+npm run sessions:cleanup
+```
+
 ## Docker Compose
 
 Docker Compose intentionally requires a local `.env` file for sensitive database configuration.

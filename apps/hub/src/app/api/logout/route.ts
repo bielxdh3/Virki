@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import {
   getExpiredSessionCookieOptions,
+  getSessionByToken,
   revokeSessionToken,
   SESSION_COOKIE_NAME
 } from "@bielos/auth";
@@ -10,8 +11,9 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const currentSession = sessionToken ? await getSessionByToken(sessionToken) : null;
 
-  if (sessionToken) {
+  if (sessionToken && currentSession) {
     await revokeSessionToken(sessionToken);
   }
 

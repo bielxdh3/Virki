@@ -1,13 +1,24 @@
 import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import { prisma } from "@bielos/database";
+import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
 
-export const SESSION_COOKIE_NAME = "bielos_session";
-export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
+export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
 
 const SESSION_TOKEN_BYTES = 32;
 const DUMMY_PASSWORD_HASH =
   "$argon2id$v=19$m=65536,t=3,p=1$KWdtXzW0AylnuGwdi+AYHQ$/T76IyJJw69emqMKm2cc7E1k2lQFMBFp/qTumxvHvHw";
+const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5;
+
+const globalForRateLimit = globalThis as unknown as {
+  bielosLoginRateLimit?: Map<string, LoginRateLimitEntry>;
+};
+
+type LoginRateLimitEntry = {
+  attempts: number;
+  resetAt: number;
+};
 
 export type AuthenticatedUser = {
   id: string;
@@ -44,8 +55,51 @@ export type ExpiredSessionCookieOptions = {
   maxAge: 0;
 };
 
+export type LoginRateLimitResult = {
+  allowed: boolean;
+  retryAfterSeconds?: number;
+};
+
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+export function checkLoginRateLimit(identifier: string, now = Date.now()): LoginRateLimitResult {
+  const key = normalizeRateLimitIdentifier(identifier);
+  const entry = getLoginRateLimitStore().get(key);
+
+  if (!entry || entry.resetAt <= now) {
+    return { allowed: true };
+  }
+
+  if (entry.attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.ceil((entry.resetAt - now) / 1000)
+    };
+  }
+
+  return { allowed: true };
+}
+
+export function recordFailedLogin(identifier: string, now = Date.now()): void {
+  const key = normalizeRateLimitIdentifier(identifier);
+  const store = getLoginRateLimitStore();
+  const entry = store.get(key);
+
+  if (!entry || entry.resetAt <= now) {
+    store.set(key, {
+      attempts: 1,
+      resetAt: now + LOGIN_RATE_LIMIT_WINDOW_MS
+    });
+    return;
+  }
+
+  entry.attempts += 1;
+}
+
+export function clearLoginRateLimit(identifier: string): void {
+  getLoginRateLimitStore().delete(normalizeRateLimitIdentifier(identifier));
 }
 
 export async function hashPassword(password: string): Promise<string> {
@@ -193,4 +247,27 @@ export async function revokeSessionToken(token: string): Promise<void> {
       revokedAt: new Date()
     }
   });
+}
+
+export async function cleanupInactiveSessions(now = new Date()): Promise<number> {
+  const result = await prisma.session.deleteMany({
+    where: {
+      OR: [
+        { expiresAt: { lt: now } },
+        { revokedAt: { not: null } }
+      ]
+    }
+  });
+
+  return result.count;
+}
+
+function getLoginRateLimitStore(): Map<string, LoginRateLimitEntry> {
+  globalForRateLimit.bielosLoginRateLimit ??= new Map<string, LoginRateLimitEntry>();
+  return globalForRateLimit.bielosLoginRateLimit;
+}
+
+function normalizeRateLimitIdentifier(identifier: string): string {
+  const normalized = normalizeEmail(identifier);
+  return normalized || "unknown";
 }

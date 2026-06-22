@@ -8,7 +8,8 @@ Cloudflare Access is still planned as an external boundary later. This phase onl
 
 - Auth logic lives in `packages/auth`.
 - Database access is performed through `packages/database`.
-- The hub reads and writes the session cookie through Next.js server actions and server components.
+- The hub reads and writes the session cookie through Next.js route handlers and server components.
+- Middleware protects private hub routes by default before the request reaches route handlers or pages.
 - The public site does not use or expose authentication details.
 
 ## Password Hashing
@@ -24,6 +25,12 @@ Successful login generates a cryptographically secure random session token.
 The raw token is sent to the browser as a cookie. The database stores only a SHA-256 hash of that token in `Session.tokenHash`.
 
 Sessions have an explicit expiration timestamp. Logout revokes the current session by setting `Session.revokedAt`.
+
+Expired and revoked sessions can be removed with:
+
+```bash
+npm run sessions:cleanup
+```
 
 ## Cookie Behavior
 
@@ -61,4 +68,4 @@ The seed command upserts the OWNER user and hashes the password with Argon2id. N
 - Cloudflare Access integration
 - Module-level sensitive unlocks
 - Audit logs
-- Rate limiting
+- Persistent distributed rate limiting

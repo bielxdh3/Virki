@@ -13,6 +13,7 @@
     "build": "npm run build --workspace @bielos/public-site && npm run build --workspace @bielos/hub",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "seed:owner": "npm run seed:owner --workspace @bielos/auth",
+    "sessions:cleanup": "npm run sessions:cleanup --workspace @bielos/auth",
     "prisma:push": "npm run prisma:push --workspace @bielos/database",
     "prisma:generate": "npm run prisma:generate --workspace @bielos/database",
     "prisma:validate": "npm run prisma:validate --workspace @bielos/database",
