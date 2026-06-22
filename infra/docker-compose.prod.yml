@@ -3,9 +3,6 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.prod
-    depends_on:
-      postgres:
-        condition: service_healthy
     env_file:
       - path: ../.env
         required: true
@@ -15,6 +12,17 @@ services:
     ports:
       - "${PUBLIC_SITE_PORT:-3000}:3000"
     command: npm run start --workspace @bielos/public-site
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   hub:
     build:
@@ -32,6 +40,17 @@ services:
     ports:
       - "${HUB_PORT:-3001}:3001"
     command: npm run start --workspace @bielos/hub
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/login',{redirect:'manual'}).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   postgres:
     image: postgres:17-alpine

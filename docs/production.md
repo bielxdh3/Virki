@@ -20,6 +20,21 @@ docker compose -f infra/docker-compose.prod.yml up --build
 
 The production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands.
 
+## Simple Production Validation
+
+Run the production compose path:
+
+```bash
+docker compose -f infra/docker-compose.prod.yml up --build
+```
+
+Then validate the basic behavior:
+
+- Confirm the public site loads on the configured public-site port.
+- Confirm the hub redirects unauthenticated users to `/login`.
+- Run `npm run prisma:push` and `npm run seed:owner` with a private `.env` file configured.
+- Confirm login works with the seeded OWNER account.
+
 ## Do Not Expose `next dev`
 
 `next dev` is not a production server. It is optimized for local feedback, verbose errors, source maps, file watching, and development behavior.
