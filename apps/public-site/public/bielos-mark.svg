@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BielOS mark">
+  <rect width="64" height="64" rx="12" fill="#101820"/>
+  <path d="M14 18h36v28H14z" fill="#172635" stroke="#5bd7e8" stroke-width="2"/>
+  <path d="M21 26h10v4H21zM21 35h22v4H21z" fill="#73e2a7"/>
+  <path d="M39 24l7 8-7 8" fill="none" stroke="#e8b15b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

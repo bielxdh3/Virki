@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BielOS Hub mark">
+  <rect width="64" height="64" rx="12" fill="#0f151d"/>
+  <path d="M13 16h38v32H13z" fill="#172230" stroke="#5bd7e8" stroke-width="2"/>
+  <path d="M18 24h13v5H18zM18 35h24v5H18z" fill="#73e2a7"/>
+  <path d="M47 16v32" stroke="#26313f" stroke-width="2"/>
+  <path d="M48 24l-7 8 7 8" fill="none" stroke="#e8b15b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

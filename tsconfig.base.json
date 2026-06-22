@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "ignoreDeprecations": "6.0",
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "baseUrl": ".",
+    "paths": {
+      "@bielos/ui": ["packages/ui/src"],
+      "@bielos/types": ["packages/types/src"],
+      "@bielos/config": ["packages/config/src"],
+      "@bielos/auth": ["packages/auth/src"],
+      "@bielos/database": ["packages/database/src"]
+    }
+  }
+}

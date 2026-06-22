@@ -1,0 +1,37 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: ${DATABASE_URL:-postgresql://bielos_app:change-me-in-your-local-env@postgres:5432/bielos?schema=public}
+      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:-https://hub.biel.dev.br}
+    ports:
+      - "${PUBLIC_SITE_PORT:-3000}:3000"
+      - "${HUB_PORT:-3001}:3001"
+    command: npm run dev
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bielos}
+      POSTGRES_USER: ${POSTGRES_USER:-bielos_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-your-local-env}
+    volumes:
+      - bielos_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  bielos_postgres_data:

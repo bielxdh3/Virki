@@ -1,0 +1,31 @@
+{
+  "name": "bielos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BielOS personal operating-system-style hub.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n public,hub -c cyan,magenta \"npm run dev --workspace @bielos/public-site\" \"npm run dev --workspace @bielos/hub\"",
+    "build": "npm run build --workspace @bielos/public-site && npm run build --workspace @bielos/hub",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "prisma:generate": "npm run prisma:generate --workspace @bielos/database",
+    "prisma:validate": "npm run prisma:validate --workspace @bielos/database",
+    "prisma:migrate": "npm run prisma:migrate --workspace @bielos/database"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  },
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": ">=11.0.0"
+  }
+}
