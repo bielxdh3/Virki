@@ -48,6 +48,19 @@ These modules are placeholders only. They are not implemented as full applicatio
    npm run dev
    ```
 
+## CI and Validation
+
+GitHub Actions runs the Phase 01 validation pipeline on pushes and pull requests to `main` using Node.js 22.
+
+The CI workflow runs:
+
+```bash
+npm ci
+npm run typecheck
+npm run prisma:validate
+npm run build
+```
+
 ## Security Baseline
 
 - Real secrets must stay out of Git.

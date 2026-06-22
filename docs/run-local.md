@@ -43,11 +43,16 @@ The public site and hub run as separate Next.js apps.
 
 ## Validation
 
+Run the same checks used by CI before committing changes:
+
 ```bash
+npm ci
 npm run typecheck
 npm run prisma:validate
 npm run build
 ```
+
+Use `npm install` during normal dependency work, then commit the resulting `package-lock.json` changes when dependencies intentionally change.
 
 ## Docker Compose
 
