@@ -1,4 +1,8 @@
 import { moduleCatalog } from "@bielos/ui";
+import { redirect } from "next/navigation";
+import { getCurrentSession } from "../lib/auth";
+
+export const dynamic = "force-dynamic";
 
 const privateStatus = [
   { label: "Core shell", value: "Ready" },
@@ -7,7 +11,13 @@ const privateStatus = [
   { label: "Backups", value: "Planned" }
 ];
 
-export default function HubDashboardPage() {
+export default async function HubDashboardPage() {
+  const session = await getCurrentSession();
+
+  if (!session) {
+    redirect("/login");
+  }
+
   return (
     <main className="hub-desktop">
       <aside className="sidebar" aria-label="BielOS navigation">
@@ -21,14 +31,14 @@ export default function HubDashboardPage() {
 
         <nav className="nav-stack" aria-label="Primary">
           <a href="/">Dashboard</a>
-          <a href="/login">Lock Screen</a>
           <a href="#modules">Modules</a>
           <a href="#status">Status</a>
         </nav>
 
         <div className="session-box">
           <span>Session</span>
-          <strong>Local placeholder</strong>
+          <strong>{session.user.email}</strong>
+          <span>{session.user.role}</span>
         </div>
       </aside>
 
@@ -38,9 +48,11 @@ export default function HubDashboardPage() {
             <p className="eyebrow">hub.biel.dev.br</p>
             <h1>Command dashboard</h1>
           </div>
-          <a className="lock-button" href="/login">
-            Internal login
-          </a>
+          <form action="/api/logout" method="post">
+            <button className="lock-button" type="submit">
+              Log out
+            </button>
+          </form>
         </header>
 
         <section className="status-grid" id="status" aria-label="Private status">

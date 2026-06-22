@@ -61,6 +61,18 @@ npm run prisma:validate
 npm run build
 ```
 
+## Internal Authentication
+
+The private hub uses internal email and password authentication backed by the `User` and `Session` database models. Passwords are hashed with Argon2id, and session cookies store only an opaque session token while the database stores only its hash.
+
+To prepare a local OWNER account, set `BIELOS_OWNER_EMAIL` and `BIELOS_OWNER_PASSWORD` in a private `.env` file, apply the Prisma schema to your local database, then run:
+
+```bash
+npm run seed:owner
+```
+
+See `docs/auth.md` for the auth architecture and current security limits.
+
 ## Security Baseline
 
 - Real secrets must stay out of Git.

@@ -4,5 +4,13 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
-  "types": "src/index.ts"
+  "types": "src/index.ts",
+  "scripts": {
+    "seed:owner": "tsx src/seed-owner.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bielos/database": "0.1.0",
+    "@node-rs/argon2": "^2.0.2"
+  }
 }

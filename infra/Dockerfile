@@ -9,6 +9,8 @@ COPY packages/ui/package*.json ./packages/ui/
 COPY packages/auth/package*.json ./packages/auth/
 COPY packages/config/package*.json ./packages/config/
 COPY packages/database/package*.json ./packages/database/
+COPY packages/database/prisma ./packages/database/prisma
+COPY packages/database/scripts ./packages/database/scripts
 COPY packages/types/package*.json ./packages/types/
 
 RUN npm ci

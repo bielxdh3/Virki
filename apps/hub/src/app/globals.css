@@ -146,6 +146,7 @@ p {
 
 .lock-button,
 .login-form button {
+  appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -155,7 +156,15 @@ p {
   border-radius: 6px;
   background: #d9fbff;
   color: #061014;
+  cursor: pointer;
+  font: inherit;
   font-weight: 800;
+}
+
+.lock-button:disabled,
+.login-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .status-grid {
@@ -348,6 +357,16 @@ p {
 
 .login-form input::placeholder {
   color: #667587;
+}
+
+.login-error {
+  margin: 0;
+  border: 1px solid rgba(238, 116, 116, 0.55);
+  border-radius: 6px;
+  background: rgba(238, 116, 116, 0.08);
+  color: #ffd0d0;
+  padding: 10px 12px;
+  line-height: 1.45;
 }
 
 .login-note {

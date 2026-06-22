@@ -28,3 +28,4 @@ infra/backups/*
 !infra/backups/.gitkeep
 
 prisma/generated/
+packages/database/generated/
