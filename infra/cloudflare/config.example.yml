@@ -1,0 +1,12 @@
+# Cloudflare Tunnel local-management template for BielOS.
+# Template only: do not put real tunnel IDs or credentials in Git.
+
+tunnel: <CLOUDFLARE_TUNNEL_ID>
+credentials-file: /etc/cloudflared/<CLOUDFLARE_TUNNEL_ID>.json
+
+ingress:
+  - hostname: biel.dev.br
+    service: http://public-site:3000
+  - hostname: hub.biel.dev.br
+    service: http://hub:3001
+  - service: http_status:404

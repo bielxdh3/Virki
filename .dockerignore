@@ -13,6 +13,8 @@ coverage
 *.dump
 backups
 infra/backups
+infra/cloudflare/*.json
+infra/cloudflare/cert.pem
 Google Takeout
 Takeout
 takeout-*.zip

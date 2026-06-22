@@ -26,6 +26,8 @@ Thumbs.db
 backups/
 infra/backups/*
 !infra/backups/.gitkeep
+infra/cloudflare/*.json
+infra/cloudflare/cert.pem
 
 prisma/generated/
 packages/database/generated/

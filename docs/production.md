@@ -68,9 +68,11 @@ When `NODE_ENV=production`, the cookie is also marked `Secure`. That means brows
 
 ## Cloudflare Status
 
-Cloudflare Tunnel and Cloudflare Access are still not configured in this repository.
+Cloudflare Tunnel and Cloudflare Access are prepared through templates, but they are still not configured in this repository.
 
 Do not add Cloudflare account IDs, tunnel IDs, tokens, or Access policies to Git. Configure those later through private environment variables and external Cloudflare configuration.
+
+Remote exposure remains blocked until Cloudflare Tunnel and Cloudflare Access are manually configured and tested. `hub.biel.dev.br` must not be exposed without Cloudflare Access. Cloudflare Access is not a replacement for BielOS internal authentication, and BielOS internal authentication is not a replacement for Cloudflare Access. Both layers are required for the hub.
 
 ## Current Production Blockers
 

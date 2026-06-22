@@ -39,7 +39,11 @@ Before exposing BielOS beyond a local trusted network:
 - Use `infra/docker-compose.prod.yml`, not the development compose file.
 - Serve through HTTPS so production session cookies marked `Secure` are sent by browsers.
 - Configure an external boundary such as Cloudflare Access.
+- Do not expose `hub.biel.dev.br` unless Cloudflare Access is enabled and tested.
+- Keep BielOS internal authentication enabled behind Cloudflare Access.
 - Keep the private `.env` file outside Git.
 - Validate database backup and restore procedures.
 - Add persistent or edge-level rate limiting before multi-user or internet-facing use.
 - Add explicit CSRF protection before broader write workflows are implemented.
+
+Cloudflare Access and BielOS internal authentication are separate layers. Access is not a replacement for internal auth, and internal auth is not a replacement for Access. Both are required for the private hub.
