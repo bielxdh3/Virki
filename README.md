@@ -73,6 +73,12 @@ npm run seed:owner
 
 See `docs/auth.md` for the auth architecture and current security limits.
 
+## Production Readiness
+
+Use `infra/docker-compose.prod.yml` and `infra/Dockerfile.prod` for production-style builds. The development compose file runs `next dev` and must not be exposed.
+
+Production still requires a private `.env` file and an external HTTPS/access boundary. Cloudflare is not configured yet. See `docs/production.md`.
+
 ## Security Baseline
 
 - Real secrets must stay out of Git.

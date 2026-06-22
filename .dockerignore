@@ -1,0 +1,23 @@
+node_modules
+.git
+.env
+.env.*
+.next
+dist
+build
+coverage
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+backups
+infra/backups
+Google Takeout
+Takeout
+takeout-*.zip
+takeout-*.tgz
+takeout-*.tar
+*.mbox
+*.tgz
+*.tar.gz

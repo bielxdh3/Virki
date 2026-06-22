@@ -79,4 +79,10 @@ Docker Compose intentionally requires a local `.env` file for sensitive database
 docker compose -f infra/docker-compose.yml up --build
 ```
 
+For production-style local validation, use:
+
+```bash
+docker compose -f infra/docker-compose.prod.yml up --build
+```
+
 Do not add real credentials, exported account data, logs, database dumps, or machine-specific paths to the repository.
