@@ -1,18 +1,28 @@
 const publicProjects = [
   {
     name: "BielOS Core",
-    description: "Operating-system-style interface for public project entry points.",
-    status: "Online"
+    description: "Core interface and public entry point for the BielOS project.",
+    status: "Public"
   },
   {
-    name: "Public Labs",
-    description: "Selected experiments and technical notes prepared for public viewing.",
-    status: "Curated"
+    name: "L-vault",
+    description: "Reserved module space for future personal tooling.",
+    status: "Reserved"
   },
   {
-    name: "Project Index",
-    description: "A clean route into public work without exposing private hub details.",
-    status: "Limited"
+    name: "root.ark",
+    description: "Reserved module space for future archive workflows.",
+    status: "Reserved"
+  },
+  {
+    name: "H-vault",
+    description: "Reserved module space for future organized storage.",
+    status: "Reserved"
+  },
+  {
+    name: "GymForge",
+    description: "Reserved module space for future training tools.",
+    status: "Reserved"
   }
 ];
 
@@ -29,7 +39,7 @@ export default function PublicLandingPage() {
           </div>
           <div className="status-pill" aria-label="Public status">
             <span className="pulse" />
-            Public node stable
+            Public status available
           </div>
         </header>
 

@@ -24,8 +24,8 @@ Use `.env.example` for documented configuration and keep real `.env` files ignor
 
 Reason: the project must move from Windows to Linux without hardcoded machine-specific values.
 
-## 0005: Next Canary With Webpack
+## 0005: Stable Runtime Foundation
 
-Use `next@16.3.0-canary.60` with Webpack build and dev commands for the initial scaffold.
+Use Node 22 LTS, TypeScript 5.x, and a stable Next.js release for the Phase 01 scaffold.
 
-Reason: the current stable Next release depends on a vulnerable PostCSS version, while this canary uses the fixed PostCSS release. Webpack is pinned because Turbopack build crashed during Windows validation.
+Reason: the core should start from predictable long-term-support runtime choices. Canary versions should be avoided unless a stable build becomes impossible, and any exception must be documented with the exact limitation.

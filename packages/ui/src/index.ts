@@ -30,9 +30,9 @@ export const moduleCatalog: ModuleSummary[] = [
     name: "H-vault",
     shortName: "HV",
     slug: "hvault",
-    description: "Reserved space for a future high-sensitivity vault module.",
+    description: "Reserved space for a future organized storage module.",
     status: "Reserved",
-    sensitivity: "sensitive"
+    sensitivity: "internal"
   },
   {
     name: "GymForge",
