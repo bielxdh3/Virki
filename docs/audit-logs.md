@@ -58,6 +58,15 @@ The current request context is intentionally small:
 
 Raw IP addresses are not stored. This avoids turning the audit log into a sensitive tracking dataset.
 
+## Session Cleanup
+
+The production `session-cleanup` worker runs the existing cleanup script on an interval. Its audit event is `AUTH_SESSION_CLEANUP` and metadata is limited to:
+
+- source: `sessions-cleanup`
+- deleted session count
+
+It must not include session tokens, token hashes, cookies, raw IPs, JWTs, raw headers, or Cloudflare values.
+
 ## Fail-Soft Behavior
 
 Audit logging is fail-soft for the MVP.

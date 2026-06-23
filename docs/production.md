@@ -23,6 +23,8 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 
 The production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands.
 
+Production Compose also starts a `session-cleanup` worker. It has no published ports, depends on PostgreSQL health, uses the same private database environment as the hub, and removes expired or revoked sessions every hour by default.
+
 Production host-published debug ports are also bound to loopback only:
 
 - `127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000`
@@ -69,6 +71,7 @@ Recommended values:
 - `POSTGRES_USER`
 - `PUBLIC_SITE_PORT`
 - `HUB_PORT`
+- `SESSION_CLEANUP_INTERVAL_SECONDS`
 - `BIELOS_OWNER_EMAIL`
 - `BIELOS_OWNER_PASSWORD`
 - `CLOUDFLARE_ACCESS_JWT_REQUIRED`
@@ -127,10 +130,17 @@ When origin-side Access JWT validation is enabled, denied hub page requests retu
 
 `infra/Dockerfile.prod` is shared by both Next.js apps. Its default command starts the hub only as a manual fallback; production compose overrides `command` for both `public-site` and `hub`.
 
+The `session-cleanup` service reuses the production image and runs a simple shell loop instead of a scheduler dependency:
+
+```text
+npm run sessions:cleanup --workspace @bielos/auth
+```
+
+The interval defaults to `3600` seconds and can be changed with `SESSION_CLEANUP_INTERVAL_SECONDS`. The worker must not publish ports and does not participate in Cloudflare Access or Tunnel routing.
+
 ## Current Production Blockers
 
 - Cloudflare Access JWT validation must be enabled with real private environment values and tested before treating the origin as production hardened.
-- No explicit CSRF tokens beyond `SameSite=Lax`.
 - Login rate limiting is in-memory and not distributed.
 - No backup and restore procedure validated through Docker.
 - No TLS termination configured in this repository.

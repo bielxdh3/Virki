@@ -80,6 +80,7 @@ The hub health endpoint returns only minimal liveness status. It does not requir
 
 - `public-site`: the public BielOS site for `biel.dev.br`.
 - `hub`: the private BielOS hub for `hub.biel.dev.br`.
+- `session-cleanup`: the production worker that periodically removes expired or revoked hub sessions.
 - `postgres`: the PostgreSQL database used by the hub.
 - `cloudflared`: the Cloudflare Tunnel connector that exposes BielOS through Cloudflare without opening router ports.
 
@@ -177,6 +178,18 @@ Then seed the OWNER user again.
 Confirm the email and password are the values in your private local `.env` file.
 
 If a login or logout POST returns HTTP `403` while the page itself loads normally, reload the form and try again. Hub POST routes require a short-lived CSRF token, and tokens generated before a hub restart may no longer validate.
+
+### Session Cleanup
+
+Production Compose starts a `session-cleanup` worker with no published ports. It uses the same private database configuration as the hub and runs `npm run sessions:cleanup --workspace @bielos/auth` every hour by default.
+
+To change the interval, set this non-secret value in the private local `.env` file:
+
+```bash
+SESSION_CLEANUP_INTERVAL_SECONDS=3600
+```
+
+The cleanup log prints only the number of inactive sessions removed. It must not print session tokens, cookies, raw IPs, JWTs, or Cloudflare values.
 
 ### Health Check Fails
 

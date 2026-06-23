@@ -41,6 +41,8 @@ The schema stores session tokens as hashes and includes a separate security unlo
 
 `Session.ipHash` and `Session.userAgent` were removed because they were unused and misleading. AuditLog is the intended path for minimal security event context, and it stores only sanitized metadata such as hashed user agent values.
 
+Production Compose runs a small `session-cleanup` worker that periodically deletes expired or revoked sessions. The worker uses the same private database environment as the hub, publishes no ports, and logs only the number of inactive sessions removed.
+
 ## Audit Logging
 
 BielOS records minimal local audit logs for internal auth and security operations. Logs include generic event types, results, optional actor user ids, optional email hashes, short messages, and small sanitized metadata.
@@ -87,6 +89,7 @@ Before exposing BielOS beyond a local trusted network:
 - Keep BielOS internal authentication enabled behind Cloudflare Access.
 - Keep the private `.env` file outside Git.
 - On public Linux servers or VPS hosts, also block inbound access to ports `3000` and `3001` with the host firewall.
+- Keep the production `session-cleanup` worker enabled so expired or revoked sessions do not accumulate indefinitely.
 - Validate database backup and restore procedures.
 - Add persistent or edge-level rate limiting before multi-user or internet-facing use.
 - Extend explicit CSRF protection to any future mutable hub routes before they ship.
