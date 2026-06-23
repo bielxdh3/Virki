@@ -116,11 +116,19 @@ export default async function HubDashboardPage() {
           </div>
         </section>
 
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">System panels</p>
+            <h2>Session, security, and operations</h2>
+          </div>
+          <span>Core shell only</span>
+        </div>
+
         <section className="dashboard-grid" aria-label="Hub dashboard">
           <article className="panel session-panel">
             <div className="panel-title">
               <span>Session</span>
-              <strong>Unlocked</strong>
+              <strong className="status-pill is-active">Unlocked</strong>
             </div>
             <div className="session-avatar" aria-hidden="true">
               {session.user.email.slice(0, 2).toUpperCase()}
@@ -140,7 +148,7 @@ export default async function HubDashboardPage() {
           <article className="panel deployment-panel anchor-section" id="ops">
             <div className="panel-title">
               <span>Deployment</span>
-              <strong>Remote path active</strong>
+              <strong className="status-pill">Remote path active</strong>
             </div>
             <div className="status-list">
               {deploymentStatus.map((item) => (
@@ -155,7 +163,7 @@ export default async function HubDashboardPage() {
           <article className="panel security-panel anchor-section" id="security">
             <div className="panel-title">
               <span>Security Layers</span>
-              <strong>Two gates</strong>
+              <strong className="status-pill is-guarded">Two gates</strong>
             </div>
             <div className="layer-stack">
               {securityLayers.map((layer) => (
@@ -173,7 +181,7 @@ export default async function HubDashboardPage() {
           <article className="panel quick-actions">
             <div className="panel-title">
               <span>Quick Actions</span>
-              <strong>Non-destructive</strong>
+              <strong className="status-pill">Non-destructive</strong>
             </div>
             <div className="action-stack">
               <a href="#modules">View modules</a>
@@ -215,7 +223,9 @@ export default async function HubDashboardPage() {
                 <h2>{module.name}</h2>
                 <p>{module.description}</p>
                 <div className="module-tags">
-                  <span>{module.status}</span>
+                  <span className={module.status === "Active" ? "is-active" : "is-reserved"}>
+                    {module.status}
+                  </span>
                   <span>{module.status === "Active" ? "Active" : "Planned"}</span>
                 </div>
               </article>

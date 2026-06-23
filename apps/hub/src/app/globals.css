@@ -15,6 +15,7 @@
   --amber: #e8b15b;
   --red: #ee7474;
   --shadow: rgba(0, 0, 0, 0.42);
+  --shadow-soft: rgba(0, 0, 0, 0.24);
 }
 
 * {
@@ -58,6 +59,7 @@ strong {
 }
 
 .hub-shell {
+  position: relative;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 88px minmax(0, 1fr);
@@ -67,6 +69,16 @@ strong {
     radial-gradient(circle at 72% 18%, rgba(91, 215, 232, 0.09), transparent 28%),
     var(--background);
   background-size: 42px 42px, 42px 42px, auto, auto;
+}
+
+.hub-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 22%),
+    radial-gradient(circle at 12% 82%, rgba(116, 221, 161, 0.055), transparent 26%);
 }
 
 .os-dock {
@@ -80,6 +92,7 @@ strong {
   border-right: 1px solid var(--line);
   background: rgba(10, 15, 21, 0.95);
   backdrop-filter: blur(18px);
+  box-shadow: 14px 0 44px rgba(0, 0, 0, 0.22);
 }
 
 .dock-identity {
@@ -119,6 +132,7 @@ strong {
 }
 
 .dock-nav a {
+  position: relative;
   min-height: 58px;
   display: grid;
   place-items: center;
@@ -127,20 +141,42 @@ strong {
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--muted-strong);
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
 }
 
-.dock-nav a:first-child,
+.hub-shell:not(:has(.anchor-section:target)) .dock-nav a:first-child,
 .dock-nav a:hover {
   border-color: var(--line-strong);
   background: #121b24;
   color: var(--text);
 }
 
+.hub-shell:has(#overview:target) .dock-nav a[href="#overview"],
+.hub-shell:has(#modules:target) .dock-nav a[href="#modules"],
+.hub-shell:has(#security:target) .dock-nav a[href="#security"],
+.hub-shell:has(#ops:target) .dock-nav a[href="#ops"] {
+  border-color: rgba(91, 215, 232, 0.72);
+  background:
+    linear-gradient(180deg, rgba(91, 215, 232, 0.14), rgba(116, 221, 161, 0.06)),
+    #121b24;
+  color: var(--text);
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+.dock-nav a:hover {
+  transform: translateY(-1px);
+}
+
 .dock-nav a:focus-visible,
 .icon-command:focus-visible,
 .action-stack a:focus-visible,
 .action-stack button:focus-visible,
-.login-form button:focus-visible {
+.login-form button:focus-visible,
+.login-form input:focus-visible {
   outline: 2px solid rgba(91, 215, 232, 0.72);
   outline-offset: 3px;
 }
@@ -191,7 +227,7 @@ strong {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(13, 19, 26, 0.9);
-  box-shadow: 0 18px 70px var(--shadow);
+  box-shadow: 0 18px 70px var(--shadow-soft);
 }
 
 .statusbar-left {
@@ -235,6 +271,17 @@ strong {
   color: #061014;
   cursor: pointer;
   font-weight: 800;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.icon-command:hover,
+.login-form button:hover {
+  background: #ffffff;
+  transform: translateY(-1px);
 }
 
 .icon-command span:first-child {
@@ -255,7 +302,7 @@ strong {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(16, 24, 32, 0.94);
-  box-shadow: 0 20px 70px var(--shadow);
+  box-shadow: 0 18px 60px var(--shadow-soft);
 }
 
 .anchor-section {
@@ -276,6 +323,10 @@ strong {
   align-items: stretch;
   margin-bottom: 16px;
   padding: clamp(18px, 3vw, 28px);
+  background:
+    linear-gradient(120deg, rgba(91, 215, 232, 0.1), transparent 38%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent),
+    rgba(16, 24, 32, 0.94);
 }
 
 .eyebrow {
@@ -313,6 +364,7 @@ strong {
   background:
     linear-gradient(180deg, rgba(116, 221, 161, 0.1), transparent 70%),
     var(--background-raised);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .identity-meter span {
@@ -332,12 +384,45 @@ strong {
   margin-bottom: 16px;
 }
 
+.section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 20px 0 12px;
+}
+
+.section-heading h2 {
+  margin: 6px 0 0;
+  font-size: 1.14rem;
+}
+
+.section-heading > span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
 .panel {
   min-height: 260px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.032), transparent 52%),
+    rgba(16, 24, 32, 0.94);
+}
+
+.panel:hover,
+.module-card:hover {
+  border-color: var(--line-strong);
 }
 
 .panel-title {
@@ -357,6 +442,26 @@ strong {
 .panel-title strong {
   color: var(--muted-strong);
   font-size: 0.82rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 27px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.status-pill.is-active {
+  border-color: rgba(116, 221, 161, 0.52);
+  color: #c8f5dc;
+}
+
+.status-pill.is-guarded {
+  border-color: rgba(91, 215, 232, 0.55);
+  color: #c7f5fb;
 }
 
 .session-avatar {
@@ -386,6 +491,14 @@ strong {
   gap: 5px;
   padding-top: 12px;
   border-top: 1px solid var(--line);
+}
+
+.status-list div {
+  min-height: 74px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(11, 17, 23, 0.58);
 }
 
 .detail-list dt,
@@ -423,6 +536,7 @@ strong {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--background-raised);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 
 .layer-item > span {
@@ -476,6 +590,8 @@ strong {
 .action-stack a:hover,
 .action-stack button:hover {
   border-color: var(--cyan);
+  background: #1d2a36;
+  transform: translateY(-1px);
 }
 
 .module-window {
@@ -492,6 +608,7 @@ strong {
   padding: 0 16px;
   border-bottom: 1px solid var(--line);
   background: #101820;
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.025);
 }
 
 .window-titlebar span,
@@ -522,6 +639,18 @@ strong {
   background: var(--line-strong);
 }
 
+.window-controls i:nth-child(1) {
+  background: var(--red);
+}
+
+.window-controls i:nth-child(2) {
+  background: var(--amber);
+}
+
+.window-controls i:nth-child(3) {
+  background: var(--green);
+}
+
 .module-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -530,6 +659,7 @@ strong {
 }
 
 .module-card {
+  position: relative;
   min-height: 280px;
   display: flex;
   flex-direction: column;
@@ -538,6 +668,15 @@ strong {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  transition:
+    border-color 150ms ease,
+    transform 150ms ease,
+    background 150ms ease;
+}
+
+.module-card:hover {
+  transform: translateY(-2px);
 }
 
 .module-card.is-active {
@@ -572,6 +711,7 @@ strong {
   background: #0d131a;
   color: var(--green);
   font-weight: 900;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 
 .module-card.is-sensitive .module-icon {
@@ -589,6 +729,16 @@ strong {
   color: #c8d5e2;
   font-size: 0.74rem;
   font-weight: 800;
+}
+
+.module-tags span.is-active {
+  border-color: rgba(116, 221, 161, 0.55);
+  color: #c8f5dc;
+}
+
+.module-tags span.is-reserved {
+  border-color: rgba(189, 203, 216, 0.25);
+  color: var(--muted-strong);
 }
 
 .module-card.is-sensitive .module-class {
@@ -620,6 +770,9 @@ strong {
   justify-content: space-between;
   gap: 18px;
   padding: 16px;
+  background:
+    linear-gradient(90deg, rgba(91, 215, 232, 0.055), transparent 42%),
+    rgba(16, 24, 32, 0.94);
 }
 
 .reserved-strip h2 {
@@ -662,6 +815,9 @@ strong {
 .login-window {
   width: min(100%, 460px);
   padding: 22px;
+  background:
+    linear-gradient(180deg, rgba(91, 215, 232, 0.08), transparent 52%),
+    rgba(16, 24, 32, 0.96);
 }
 
 .login-brand {
@@ -696,11 +852,15 @@ strong {
   background: #0b1016;
   color: var(--text);
   padding: 0 12px;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
 }
 
-.login-form input:focus {
-  outline: 2px solid rgba(91, 215, 232, 0.4);
-  outline-offset: 2px;
+.login-form input:focus,
+.login-form input:hover {
+  border-color: var(--line-strong);
+  background: #0d141c;
 }
 
 .login-form button {
@@ -783,6 +943,15 @@ strong {
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
+  }
+
+  .dock-nav a,
+  .icon-command,
+  .login-form button,
+  .action-stack a,
+  .action-stack button,
+  .module-card {
+    transition: none;
   }
 }
 
