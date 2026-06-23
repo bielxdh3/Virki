@@ -176,6 +176,8 @@ Then seed the OWNER user again.
 
 Confirm the email and password are the values in your private local `.env` file.
 
+If a login or logout POST returns HTTP `403` while the page itself loads normally, reload the form and try again. Hub POST routes require a short-lived CSRF token, and tokens generated before a hub restart may no longer validate.
+
 ### Health Check Fails
 
 Run:
@@ -211,6 +213,8 @@ npm run build
 ```
 
 The secret scan is intentionally safe to run locally. It scans tracked repository files plus new non-ignored files and reports only file paths, line numbers, and rule ids.
+
+For CSRF changes, also verify locally when feasible that the login and logout forms contain a hidden CSRF field, valid form submissions work, and missing-token POSTs return HTTP `403`.
 
 ## Security Notes
 

@@ -9,6 +9,7 @@ import {
   hashAuditEmail,
   writeAuditLog
 } from "@bielos/auth";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +18,13 @@ export async function POST(request: NextRequest) {
   const accessResult = await validateHubCloudflareAccess(request.headers, "hub-logout-api");
 
   if (!isCloudflareAccessAllowed(accessResult)) {
+    return new NextResponse("Forbidden", { status: 403 });
+  }
+
+  const formData = await request.formData();
+  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME));
+
+  if (!csrfResult.valid) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
@@ -57,4 +65,9 @@ export async function POST(request: NextRequest) {
   response.cookies.set(SESSION_COOKIE_NAME, "", getExpiredSessionCookieOptions());
 
   return response;
+}
+
+function getFormString(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : "";
 }

@@ -8,7 +8,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./cloudflare-access": "./src/cloudflare-access.ts",
-    "./constants": "./src/constants.ts"
+    "./constants": "./src/constants.ts",
+    "./csrf": "./src/csrf.ts"
   },
   "scripts": {
     "audit:recent": "tsx src/audit-recent.ts",

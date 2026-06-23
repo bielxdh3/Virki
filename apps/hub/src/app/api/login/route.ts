@@ -12,6 +12,7 @@ import {
   SESSION_COOKIE_NAME,
   writeAuditLog
 } from "@bielos/auth";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +25,12 @@ export async function POST(request: Request) {
   }
 
   const formData = await request.formData();
+  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME));
+
+  if (!csrfResult.valid) {
+    return new NextResponse("Forbidden", { status: 403 });
+  }
+
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
   const rateLimitIdentifier = normalizeEmail(email);
@@ -100,4 +107,9 @@ function redirectToLogin(request: Request, failed: boolean) {
   }
 
   return NextResponse.redirect(url, { status: 303 });
+}
+
+function getFormString(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : "";
 }

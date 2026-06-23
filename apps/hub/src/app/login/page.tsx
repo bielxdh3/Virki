@@ -1,3 +1,4 @@
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
@@ -26,6 +27,8 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     redirect("/");
   }
 
+  const csrfToken = createCsrfToken();
+
   return (
     <main className="login-screen">
       <section className="login-window" aria-label="BielOS internal login">
@@ -38,6 +41,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         </div>
 
         <form className="login-form" action="/api/login" method="post">
+          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
           <label>
             Access identity
             <input type="email" name="email" autoComplete="email" required />

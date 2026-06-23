@@ -1,3 +1,4 @@
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { moduleCatalog } from "@bielos/ui";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
@@ -58,6 +59,7 @@ export default async function HubDashboardPage() {
   }
 
   const reservedModules = moduleCards.filter((module) => module.status !== "Active");
+  const csrfToken = createCsrfToken();
 
   return (
     <main className="hub-shell">
@@ -103,6 +105,7 @@ export default async function HubDashboardPage() {
             <span>Protected</span>
           </div>
           <form action="/api/logout" method="post">
+            <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
             <button className="icon-command" type="submit" aria-label="Log out">
               <span>Log out</span>
             </button>
@@ -195,6 +198,7 @@ export default async function HubDashboardPage() {
               <a href="#modules">View modules</a>
               <a href="#ops">View deployment status</a>
               <form action="/api/logout" method="post">
+                <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                 <button type="submit">Log out</button>
               </form>
             </div>

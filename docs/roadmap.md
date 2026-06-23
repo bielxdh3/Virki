@@ -51,4 +51,10 @@ Phase 05.1R hardened denied Access origin validation to return HTTP 403 and adde
 
 Phase 05.2 added root linting and a basic committed-secret scan to CI. Future modules remain unimplemented, and runtime auth, Cloudflare, and Docker port behavior remain unchanged.
 
+Phase 05.2R aligned the root Node engine and CI Node version with the lint tooling requirements.
+
+Phase 05.2S bound development Compose host-published app and database ports to loopback.
+
+Phase 05.3 added explicit CSRF protection for mutable hub POST routes. Future modules remain unimplemented, and Cloudflare Access, internal auth, and Docker port behavior remain unchanged.
+
 Before private/non-discardable data ingestion, move from `prisma db push` to committed Prisma migrations and production `prisma migrate deploy`.

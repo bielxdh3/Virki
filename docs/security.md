@@ -12,15 +12,28 @@ Security is a first-class requirement for BielOS.
 
 ## Authentication
 
-The first scaffold includes only a login screen placeholder and auth package contracts. Real authentication must be implemented before the hub contains private data.
+The hub uses BielOS internal authentication behind Cloudflare Access. Session cookies are HttpOnly and SameSite=Lax, and mutable hub forms use explicit CSRF tokens.
 
-Planned layers:
+Current layers:
 
 - Application session management.
 - Password or passphrase verification using strong hashing.
 - Session token hashing at rest.
 - Cloudflare Access as an outer boundary for the private hub.
 - Security unlock flow for sensitive modules.
+
+## CSRF Protection
+
+Internal BielOS hub forms include a server-generated CSRF token for mutable POST routes.
+
+Protected routes:
+
+- `POST /api/login`
+- `POST /api/logout`
+
+CSRF tokens are signed by the hub process and expire after a short lifetime. Failed CSRF validation returns HTTP `403` before login or logout state changes are attempted.
+
+CSRF token values must not be logged, stored in audit metadata, exposed in API responses, or reused as session tokens. In the current MVP, CSRF signing material is process-local memory, so tokens created before a hub process restart may stop validating and the user may need to reload the form.
 
 ## Database
 
@@ -76,7 +89,7 @@ Before exposing BielOS beyond a local trusted network:
 - On public Linux servers or VPS hosts, also block inbound access to ports `3000` and `3001` with the host firewall.
 - Validate database backup and restore procedures.
 - Add persistent or edge-level rate limiting before multi-user or internet-facing use.
-- Add explicit CSRF protection before broader write workflows are implemented.
+- Extend explicit CSRF protection to any future mutable hub routes before they ship.
 
 Cloudflare Access and BielOS internal authentication are separate layers. Access is not a replacement for internal auth, and internal auth is not a replacement for Access. Both are required for the private hub.
 
