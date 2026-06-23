@@ -2,6 +2,20 @@
 
 Use this checklist after starting the production stack with the Cloudflare compose override.
 
+Start the stack with:
+
+```bash
+npm run start:prod
+```
+
+Inspect it with:
+
+```bash
+npm run status:prod
+npm run logs:prod
+npm run health:local
+```
+
 ## Stack
 
 - Confirm the production Docker Compose stack is running.

@@ -77,7 +77,22 @@ See `docs/auth.md` for the auth architecture and current security limits.
 
 Use `infra/docker-compose.prod.yml` and `infra/Dockerfile.prod` for production-style builds. The development compose file runs `next dev` and must not be exposed.
 
-Production still requires a private `.env` file and an external HTTPS/access boundary. Cloudflare is not configured yet. See `docs/production.md`.
+Production requires a private `.env` file and the Cloudflare Tunnel/Access boundary described in `docs/production.md`.
+
+## Operations
+
+Use the root operation scripts for the local production stack:
+
+```bash
+npm run start:prod
+npm run stop:prod
+npm run restart:prod
+npm run status:prod
+npm run logs:prod
+npm run health:local
+```
+
+See `docs/operations.md` for beginner-friendly start, stop, status, logs, health check, and troubleshooting steps.
 
 ## Security Baseline
 

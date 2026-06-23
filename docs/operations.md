@@ -1,0 +1,180 @@
+# Operations
+
+This guide is for running BielOS locally in production mode without memorizing Docker commands.
+
+## Before Starting
+
+Make sure Docker Desktop is running.
+
+Make sure the private `.env` file exists in the repository root. This file must stay local. Never commit it.
+
+The `.env` file contains private values such as:
+
+- PostgreSQL password
+- OWNER seed email and password
+- Cloudflare Tunnel token
+
+## Commands
+
+Start BielOS in production mode:
+
+```bash
+npm run start:prod
+```
+
+Stop BielOS:
+
+```bash
+npm run stop:prod
+```
+
+Restart BielOS:
+
+```bash
+npm run restart:prod
+```
+
+Show container status:
+
+```bash
+npm run status:prod
+```
+
+Show useful logs:
+
+```bash
+npm run logs:prod
+```
+
+Run local health checks:
+
+```bash
+npm run health:local
+```
+
+The health check verifies:
+
+- `http://127.0.0.1:3000`
+- `http://127.0.0.1:3001/login`
+
+## Services
+
+- `public-site`: the public BielOS site for `biel.dev.br`.
+- `hub`: the private BielOS hub for `hub.biel.dev.br`.
+- `postgres`: the PostgreSQL database used by the hub.
+- `cloudflared`: the Cloudflare Tunnel connector that exposes BielOS through Cloudflare without opening router ports.
+
+## Expected Remote Flow
+
+The expected remote flow is:
+
+1. `https://biel.dev.br` loads the public site.
+2. `https://hub.biel.dev.br` shows Cloudflare Access first.
+3. After Cloudflare Access, BielOS shows the internal login.
+4. After BielOS login, the hub dashboard loads.
+
+## Troubleshooting
+
+### Docker Is Not Running
+
+Open Docker Desktop and wait until it says Docker is running. Then run:
+
+```bash
+npm run status:prod
+```
+
+If Docker is still unavailable, restart Docker Desktop.
+
+### `biel.dev.br` Shows 502
+
+Check container status:
+
+```bash
+npm run status:prod
+```
+
+Check logs:
+
+```bash
+npm run logs:prod
+```
+
+In the Cloudflare dashboard, confirm the Docker route uses the service name:
+
+```text
+biel.dev.br -> http://public-site:3000
+www.biel.dev.br -> http://public-site:3000
+```
+
+Do not use `localhost` when `cloudflared` runs inside Docker.
+
+### `hub.biel.dev.br` Skips Cloudflare Access
+
+Check Cloudflare Access in the Cloudflare dashboard.
+
+The hub hostname must be protected:
+
+```text
+hub.biel.dev.br
+```
+
+Access should only allow the owner's email or an approved identity group.
+
+The Docker route should be:
+
+```text
+hub.biel.dev.br -> http://hub:3001
+```
+
+### Login Fails
+
+Confirm the OWNER user was seeded:
+
+```bash
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run seed:owner
+```
+
+If the database was recreated, apply the schema first:
+
+```bash
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:push
+```
+
+Then seed the OWNER user again.
+
+Confirm the email and password are the values in your private local `.env` file.
+
+### Health Check Fails
+
+Run:
+
+```bash
+npm run status:prod
+```
+
+If containers are not running, start them:
+
+```bash
+npm run start:prod
+```
+
+If containers are running but health still fails, inspect logs:
+
+```bash
+npm run logs:prod
+```
+
+## Security Notes
+
+Never commit:
+
+- `.env`
+- Cloudflare Tunnel token
+- Cloudflare account ID
+- real tunnel ID
+- tunnel credentials JSON
+- screenshots containing secrets
+- database dumps
+- backup archives
+
+The repository should contain only examples, placeholders, and documentation.
