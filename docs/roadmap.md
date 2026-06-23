@@ -25,9 +25,12 @@
 
 ## Phase 4: Modules
 
+- Redesign the private hub shell into a cleaner fake-OS command center before module implementation.
 - Implement L-vault.
 - Implement root.ark.
 - Implement H-vault.
 - Implement GymForge.
 
 Each module should be started only after Core authentication and authorization are stable.
+
+Phase 04 redesigned the hub shell only. L-vault, root.ark, H-vault, and GymForge remain reserved and are not implemented as module applications yet.
