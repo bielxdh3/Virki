@@ -69,8 +69,16 @@ Cloudflare Access protects `hub.biel.dev.br` at the edge before requests reach t
 
 BielOS internal authentication protects the hub inside the application after Access has allowed the request.
 
-Current limitation: BielOS does not yet validate Cloudflare Access JWTs at the application origin. This is acceptable for the MVP only while the origin is not directly exposed and traffic reaches the hub only through Cloudflare Tunnel.
+Phase 05.1 adds optional origin-side Cloudflare Access JWT validation for the hub. It reads the `cf-access-jwt-assertion` header, verifies the token against the Cloudflare Access JWKS endpoint for the configured team domain, checks issuer, audience, and expiration, and rejects the request when validation is required but missing or invalid.
 
-Future hardening should add optional Cloudflare Access JWT validation at the app layer before handling private hub routes.
+Enable it only with private local environment values:
+
+- `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`
+- `CLOUDFLARE_ACCESS_AUDIENCE=<Access application AUD tag>`
+- `CLOUDFLARE_TEAM_DOMAIN=https://<team-name>.cloudflareaccess.com`
+
+Keep `CLOUDFLARE_ACCESS_JWT_REQUIRED=false` for local development that does not run behind Cloudflare Access.
+
+No raw JWTs, raw headers, Cloudflare tokens, or Access secrets should be logged or stored. This origin check does not replace BielOS internal authentication; both layers are still required for the hub.
 
 Cloudflare Tunnel running inside Docker must route to Docker service names, not host ports. Host-published `127.0.0.1` ports are for local debugging and health checks only.

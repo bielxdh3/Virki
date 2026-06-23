@@ -1,5 +1,7 @@
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
+import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +12,13 @@ type LoginPageProps = {
 };
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
+  const requestHeaders = await headers();
+  const accessResult = await validateHubCloudflareAccess(requestHeaders, "hub-login-page");
+
+  if (!isCloudflareAccessAllowed(accessResult)) {
+    return <AccessDeniedScreen />;
+  }
+
   const session = await getCurrentSession();
   const params = await searchParams;
 
@@ -47,6 +56,25 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
 
         <p className="login-note">
           Internal access is required before the private hub can open.
+        </p>
+      </section>
+    </main>
+  );
+}
+
+function AccessDeniedScreen() {
+  return (
+    <main className="login-screen">
+      <section className="login-window" aria-label="Access boundary unavailable">
+        <div className="login-brand">
+          <img src="/hub-mark.svg" alt="" />
+          <div>
+            <p className="eyebrow">hub.biel.dev.br</p>
+            <h1>Access unavailable</h1>
+          </div>
+        </div>
+        <p className="login-note">
+          The external access boundary must validate before the internal login can open.
         </p>
       </section>
     </main>

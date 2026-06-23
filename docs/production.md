@@ -67,6 +67,9 @@ Recommended values:
 - `HUB_PORT`
 - `BIELOS_OWNER_EMAIL`
 - `BIELOS_OWNER_PASSWORD`
+- `CLOUDFLARE_ACCESS_JWT_REQUIRED`
+- `CLOUDFLARE_ACCESS_AUDIENCE`
+- `CLOUDFLARE_TEAM_DOMAIN`
 
 ## Cookie Security
 
@@ -98,11 +101,21 @@ Do not use `localhost` in the Cloudflare dashboard for the Docker production pat
 
 Exposing host port `3001` directly to the internet bypasses Cloudflare Access. If BielOS moves to a public Linux server or VPS, keep Docker ports bound to `127.0.0.1` and also block inbound internet access to `3000` and `3001` with the host firewall.
 
+For hardened production, enable origin-side Access JWT validation in the private `.env` file:
+
+```bash
+CLOUDFLARE_ACCESS_JWT_REQUIRED=true
+CLOUDFLARE_ACCESS_AUDIENCE=<Access application AUD tag>
+CLOUDFLARE_TEAM_DOMAIN=https://<team-name>.cloudflareaccess.com
+```
+
+Keep `CLOUDFLARE_ACCESS_JWT_REQUIRED=false` for local development outside Cloudflare Access. Never commit real Access values.
+
 `infra/Dockerfile.prod` is shared by both Next.js apps. Its default command starts the hub only as a manual fallback; production compose overrides `command` for both `public-site` and `hub`.
 
 ## Current Production Blockers
 
-- No origin-side Cloudflare Access JWT validation yet.
+- Cloudflare Access JWT validation must be enabled with real private environment values and tested before treating the origin as production hardened.
 - No explicit CSRF tokens beyond `SameSite=Lax`.
 - Login rate limiting is in-memory and not distributed.
 - No backup and restore procedure validated through Docker.

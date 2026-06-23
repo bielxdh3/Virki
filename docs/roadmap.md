@@ -45,4 +45,6 @@ Phase 05 added minimal safe audit logs for auth and security events. Future modu
 
 Phase 05.R bound production debug ports to loopback, removed dead Session request-context fields, and documented the migration plan. Future modules remain unimplemented.
 
+Phase 05.1 added optional origin-side Cloudflare Access JWT validation preparation for the hub. Future modules remain unimplemented, and BielOS internal authentication remains required.
+
 Before private/non-discardable data ingestion, move from `prisma db push` to committed Prisma migrations and production `prisma migrate deploy`.

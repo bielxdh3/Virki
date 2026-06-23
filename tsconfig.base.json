@@ -20,6 +20,7 @@
       "@bielos/types": ["packages/types/src"],
       "@bielos/config": ["packages/config/src"],
       "@bielos/auth": ["packages/auth/src"],
+      "@bielos/auth/cloudflare-access": ["packages/auth/src/cloudflare-access"],
       "@bielos/auth/constants": ["packages/auth/src/constants"],
       "@bielos/database": ["packages/database/src"]
     }

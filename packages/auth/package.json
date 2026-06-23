@@ -7,6 +7,7 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./cloudflare-access": "./src/cloudflare-access.ts",
     "./constants": "./src/constants.ts"
   },
   "scripts": {
@@ -17,6 +18,7 @@
   },
   "dependencies": {
     "@bielos/database": "0.1.0",
-    "@node-rs/argon2": "^2.0.2"
+    "@node-rs/argon2": "^2.0.2",
+    "jose": "^6.2.3"
   }
 }

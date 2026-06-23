@@ -9,10 +9,17 @@ import {
   hashAuditEmail,
   writeAuditLog
 } from "@bielos/auth";
+import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
+  const accessResult = await validateHubCloudflareAccess(request.headers, "hub-logout-api");
+
+  if (!isCloudflareAccessAllowed(accessResult)) {
+    return new NextResponse("Forbidden", { status: 403 });
+  }
+
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const currentSession = sessionToken ? await getSessionByToken(sessionToken) : null;
 

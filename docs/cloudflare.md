@@ -8,6 +8,8 @@ Cloudflare Tunnel will provide the remote ingress path for BielOS without openin
 
 Cloudflare Access will protect the private hub before requests reach the hub container. BielOS internal authentication remains active behind Access as a second layer.
 
+Phase 05.1 adds optional origin-side JWT validation so the hub can also verify the Access token that Cloudflare injects into the `cf-access-jwt-assertion` request header.
+
 ## Hostname Model
 
 - `biel.dev.br`: public site. This should remain public unless intentionally changed.
@@ -62,6 +64,28 @@ The `cloudflared` service exposes no local ports. It connects outbound to Cloudf
 
 The tunnel token must only be stored in the private local `.env` file. Never commit it, print it into logs, or paste it into repository documentation.
 
+## Origin JWT Validation
+
+Cloudflare Access JWT validation is controlled by local environment variables:
+
+```bash
+CLOUDFLARE_ACCESS_JWT_REQUIRED=false
+CLOUDFLARE_ACCESS_AUDIENCE=
+CLOUDFLARE_TEAM_DOMAIN=
+```
+
+For production, set the values only in the private `.env` file:
+
+- `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`
+- `CLOUDFLARE_ACCESS_AUDIENCE`: the Application Audience (AUD) tag from the Access application.
+- `CLOUDFLARE_TEAM_DOMAIN`: the team domain, for example `https://<team-name>.cloudflareaccess.com`.
+
+When enabled, the hub fetches public keys from `<team-domain>/cdn-cgi/access/certs` and verifies signature, issuer, audience, and expiration before the BielOS internal auth flow.
+
+Do not commit real Access audience values, team identifiers if treated as private, Cloudflare tokens, or dashboard exports.
+
+This validation does not replace Cloudflare Access at the edge and does not replace BielOS internal login. It is an additional origin-side check.
+
 ## Validation Checklist
 
 1. Start production compose with the Cloudflare override.
@@ -72,6 +96,7 @@ The tunnel token must only be stored in the private local `.env` file. Never com
 6. Confirm the BielOS internal login appears second.
 7. Log in with the seeded OWNER user.
 8. Confirm logout clears the BielOS session and returns to `/login`.
+9. If `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`, confirm direct local requests without the Access header are rejected by the hub.
 
 ## Current Status
 
@@ -81,3 +106,4 @@ The confirmed remote exposure model is:
 2. `biel.dev.br` and `www.biel.dev.br` route to the public site.
 3. `hub.biel.dev.br` is protected by Cloudflare Access at the edge.
 4. BielOS internal login remains the second authentication layer after Access.
+5. Optional origin JWT validation can be enabled after the Access audience and team domain are configured privately.

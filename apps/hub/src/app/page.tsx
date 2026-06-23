@@ -1,5 +1,7 @@
 import { moduleCatalog } from "@bielos/ui";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../lib/cloudflare-access";
 import { getCurrentSession } from "../lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +44,13 @@ const securityLayers = [
 ];
 
 export default async function HubDashboardPage() {
+  const requestHeaders = await headers();
+  const accessResult = await validateHubCloudflareAccess(requestHeaders, "hub-dashboard");
+
+  if (!isCloudflareAccessAllowed(accessResult)) {
+    return <AccessDeniedScreen />;
+  }
+
   const session = await getCurrentSession();
 
   if (!session) {
@@ -238,6 +247,25 @@ export default async function HubDashboardPage() {
             ))}
           </div>
         </section>
+      </section>
+    </main>
+  );
+}
+
+function AccessDeniedScreen() {
+  return (
+    <main className="login-screen">
+      <section className="login-window" aria-label="Access boundary unavailable">
+        <div className="login-brand">
+          <img src="/hub-mark.svg" alt="" />
+          <div>
+            <p className="eyebrow">hub.biel.dev.br</p>
+            <h1>Access unavailable</h1>
+          </div>
+        </div>
+        <p className="login-note">
+          The external access boundary must validate before the private hub can open.
+        </p>
       </section>
     </main>
   );

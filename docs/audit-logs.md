@@ -11,6 +11,8 @@ Audit logs may record:
 - logout
 - session revocation
 - inactive session cleanup
+- Cloudflare Access JWT validation success
+- Cloudflare Access JWT validation failure
 - OWNER seed creation
 - OWNER seed update
 
@@ -37,6 +39,7 @@ Audit logs must not store:
 - raw authorization headers
 - Cloudflare tokens
 - Cloudflare JWTs
+- raw Cloudflare Access headers
 - tunnel credentials
 - raw IP addresses
 - private file paths
@@ -51,6 +54,7 @@ The current request context is intentionally small:
 - event source, such as `hub-login` or `logout-route`
 - Cloudflare Access presence as a boolean
 - user agent hash, not the raw user agent
+- Access JWT status, such as `valid`, `missing`, `invalid`, or `misconfigured`
 
 Raw IP addresses are not stored. This avoids turning the audit log into a sensitive tracking dataset.
 
@@ -106,11 +110,10 @@ See `docs/database.md` for the current MVP `prisma db push` workflow and the mig
 - No export workflow exists yet.
 - No retention policy exists yet.
 - Audit metadata is intentionally minimal.
-- Cloudflare Access JWT validation at the origin is still not implemented.
+- Cloudflare Access JWT validation is optional and depends on private environment configuration.
 
 ## Future Improvements
 
 - Add retention and cleanup policy.
-- Add origin-side Cloudflare Access JWT validation.
 - Add a private audit viewer after authorization rules are stronger.
 - Add filtering by event type and time range for local inspection.
