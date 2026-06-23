@@ -8,7 +8,7 @@ const moduleCards = [
   {
     name: "BielOS Core",
     shortName: "OS",
-    description: "Core hub shell, session boundary, and command center surface.",
+    description: "Main hub interface, session boundary, and module overview.",
     status: "Active",
     sensitivity: "internal"
   },
@@ -22,22 +22,22 @@ const moduleCards = [
 ];
 
 const deploymentStatus = [
-  { label: "Public surface", value: "Online" },
-  { label: "Private hub", value: "Guarded" },
-  { label: "Tunnel path", value: "Managed" },
+  { label: "Public site", value: "Available" },
+  { label: "Hub", value: "Protected" },
+  { label: "Tunnel", value: "Managed" },
   { label: "Module data", value: "Not mounted" }
 ];
 
 const securityLayers = [
   {
     name: "Cloudflare Access",
-    description: "Edge gate before private hub traffic reaches BielOS.",
-    state: "Layer 01"
+    description: "External access check before the hub is reached.",
+    state: "First"
   },
   {
     name: "BielOS Internal Auth",
-    description: "Application session required before the dashboard opens.",
-    state: "Layer 02"
+    description: "Local application session for the private hub.",
+    state: "Second"
   }
 ];
 
@@ -63,26 +63,26 @@ export default async function HubDashboardPage() {
 
         <nav className="dock-nav" aria-label="Primary">
           <a href="#overview" aria-label="View overview">
-            <span aria-hidden="true">OV</span>
+            <span aria-hidden="true">01</span>
             <strong>Overview</strong>
           </a>
           <a href="#modules" aria-label="View modules">
-            <span aria-hidden="true">MD</span>
+            <span aria-hidden="true">02</span>
             <strong>Modules</strong>
           </a>
           <a href="#security" aria-label="View security layers">
-            <span aria-hidden="true">SC</span>
+            <span aria-hidden="true">03</span>
             <strong>Security</strong>
           </a>
           <a href="#ops" aria-label="View operations">
-            <span aria-hidden="true">OP</span>
+            <span aria-hidden="true">04</span>
             <strong>Ops</strong>
           </a>
         </nav>
 
         <div className="dock-footer">
-          <span>Runtime</span>
-          <strong>Core shell active</strong>
+          <span>Status</span>
+          <strong>Running</strong>
         </div>
       </aside>
 
@@ -91,11 +91,10 @@ export default async function HubDashboardPage() {
           <div className="statusbar-left">
             <span className="status-dot" aria-hidden="true" />
             <span>hub.biel.dev.br</span>
-            <span>Protected session</span>
+            <span>Protected</span>
           </div>
           <form action="/api/logout" method="post">
             <button className="icon-command" type="submit" aria-label="Log out">
-              <span aria-hidden="true">IO</span>
               <span>Log out</span>
             </button>
           </form>
@@ -103,25 +102,25 @@ export default async function HubDashboardPage() {
 
         <section className="identity-panel anchor-section" id="overview" aria-label="System identity">
           <div>
-            <p className="eyebrow">BielOS command center</p>
-            <h1>Private desktop shell</h1>
+            <p className="eyebrow">BielOS Hub</p>
+            <h1>Workspace</h1>
             <p>
-              A guarded workspace for projects, automation, archives, and technical labs.
-              Future modules stay reserved until the core remains stable.
+              Personal workspace for projects, tools, archives, automation, and technical labs.
+              Modules stay reserved until they are implemented.
             </p>
           </div>
           <div className="identity-meter" aria-label="Core readiness">
-            <span>Core</span>
-            <strong>Ready</strong>
+            <span>Session</span>
+            <strong>Active</strong>
           </div>
         </section>
 
         <div className="section-heading">
           <div>
-            <p className="eyebrow">System panels</p>
-            <h2>Session, security, and operations</h2>
+            <p className="eyebrow">Overview</p>
+            <h2>Session, security, and local stack</h2>
           </div>
-          <span>Core shell only</span>
+          <span>Core only</span>
         </div>
 
         <section className="dashboard-grid" aria-label="Hub dashboard">
@@ -147,8 +146,8 @@ export default async function HubDashboardPage() {
 
           <article className="panel deployment-panel anchor-section" id="ops">
             <div className="panel-title">
-              <span>Deployment</span>
-              <strong className="status-pill">Remote path active</strong>
+              <span>Operations</span>
+              <strong className="status-pill">Local stack</strong>
             </div>
             <div className="status-list">
               {deploymentStatus.map((item) => (
@@ -162,8 +161,8 @@ export default async function HubDashboardPage() {
 
           <article className="panel security-panel anchor-section" id="security">
             <div className="panel-title">
-              <span>Security Layers</span>
-              <strong className="status-pill is-guarded">Two gates</strong>
+              <span>Security</span>
+              <strong className="status-pill is-guarded">Two layers</strong>
             </div>
             <div className="layer-stack">
               {securityLayers.map((layer) => (
@@ -181,7 +180,7 @@ export default async function HubDashboardPage() {
           <article className="panel quick-actions">
             <div className="panel-title">
               <span>Quick Actions</span>
-              <strong className="status-pill">Non-destructive</strong>
+              <strong className="status-pill">Safe</strong>
             </div>
             <div className="action-stack">
               <a href="#modules">View modules</a>
@@ -196,13 +195,8 @@ export default async function HubDashboardPage() {
         <section className="module-window anchor-section" id="modules" aria-label="Module grid">
           <div className="window-titlebar">
             <div>
-              <span>Module bay</span>
-              <strong>Core and reserved surfaces</strong>
-            </div>
-            <div className="window-controls" aria-hidden="true">
-              <i />
-              <i />
-              <i />
+              <span>Modules</span>
+              <strong>Core and reserved areas</strong>
             </div>
           </div>
 
@@ -236,7 +230,7 @@ export default async function HubDashboardPage() {
         <section className="reserved-strip" aria-label="Reserved modules">
           <div>
             <p className="eyebrow">Reserved modules</p>
-            <h2>Future module work remains parked</h2>
+            <h2>Future module work is not active yet</h2>
           </div>
           <div className="reserved-list">
             {reservedModules.map((module) => (

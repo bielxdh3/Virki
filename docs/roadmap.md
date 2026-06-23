@@ -25,7 +25,7 @@
 
 ## Phase 4: Modules
 
-- Redesign the private hub shell into a cleaner fake-OS command center before module implementation.
+- Redesign the private hub shell into a cleaner personal workspace before module implementation.
 - Implement L-vault.
 - Implement root.ark.
 - Implement H-vault.
@@ -38,3 +38,5 @@ Phase 04 redesigned the hub shell only. L-vault, root.ark, H-vault, and GymForge
 Phase 04.1 fixed hub sidebar section navigation using real dashboard anchors. Future modules remain unimplemented.
 
 Phase 04.2 polished the hub visual shell. Auth, Cloudflare, Docker, Prisma, and future modules were intentionally unchanged.
+
+Phase 04.3 reduced artificial dashboard styling and copy. Future modules remain unimplemented, and auth, Cloudflare, Docker, and Prisma were intentionally unchanged.
