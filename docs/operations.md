@@ -68,9 +68,11 @@ npm run health:local
 The health check verifies:
 
 - `http://127.0.0.1:3000`
-- `http://127.0.0.1:3001/login`
+- `http://127.0.0.1:3001/api/health`
 
 These addresses are for local debugging only. They are not the remote ingress path.
+
+The hub health endpoint returns only minimal liveness status. It does not require Cloudflare Access JWT validation, so local Docker health checks keep working when `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`.
 
 ## Services
 
@@ -191,6 +193,8 @@ If containers are running but health still fails, inspect logs:
 ```bash
 npm run logs:prod
 ```
+
+The hub health check should use `/api/health`, not `/login`. `/login` can correctly return HTTP `403` when origin-side Cloudflare Access JWT validation is enabled and the request does not include a valid Access assertion.
 
 ## Security Notes
 

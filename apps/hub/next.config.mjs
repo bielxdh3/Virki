@@ -6,6 +6,9 @@ const workspaceRoot = path.resolve(appDir, "../..");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  experimental: {
+    authInterrupts: true
+  },
   outputFileTracingRoot: workspaceRoot,
   serverExternalPackages: ["@node-rs/argon2", "@prisma/client"],
   transpilePackages: ["@bielos/ui", "@bielos/auth", "@bielos/database"],

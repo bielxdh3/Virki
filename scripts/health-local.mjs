@@ -7,8 +7,8 @@ const checks = [
     expectedStatus: 200
   },
   {
-    name: "hub login",
-    url: "http://127.0.0.1:3001/login",
+    name: "hub health",
+    url: "http://127.0.0.1:3001/api/health",
     expectedStatus: 200
   }
 ];

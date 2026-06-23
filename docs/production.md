@@ -38,7 +38,8 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 Then validate the basic behavior:
 
 - Confirm the public site loads on `http://127.0.0.1:3000`.
-- Confirm the hub redirects unauthenticated users from `http://127.0.0.1:3001` to `/login`.
+- Confirm the hub health endpoint returns minimal status data on `http://127.0.0.1:3001/api/health`.
+- Confirm the hub redirects unauthenticated users from `http://127.0.0.1:3001` to `/login` when Access JWT validation is disabled for local development.
 - Confirm `npm run status:ports` shows `127.0.0.1` port bindings, not `0.0.0.0`.
 - Run `npm run prisma:push` and `npm run seed:owner` with a private `.env` file configured.
 - Confirm login works with the seeded OWNER account.
@@ -110,6 +111,8 @@ CLOUDFLARE_TEAM_DOMAIN=https://<team-name>.cloudflareaccess.com
 ```
 
 Keep `CLOUDFLARE_ACCESS_JWT_REQUIRED=false` for local development outside Cloudflare Access. Never commit real Access values.
+
+When origin-side Access JWT validation is enabled, denied hub page requests return HTTP `403` and render the Access unavailable screen. Docker and local health checks use `GET /api/health`, which stays minimal and does not require the Cloudflare Access JWT header.
 
 `infra/Dockerfile.prod` is shared by both Next.js apps. Its default command starts the hub only as a manual fallback; production compose overrides `command` for both `public-site` and `hub`.
 

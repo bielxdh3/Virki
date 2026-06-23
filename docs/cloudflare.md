@@ -82,9 +82,13 @@ For production, set the values only in the private `.env` file:
 
 When enabled, the hub fetches public keys from `<team-domain>/cdn-cgi/access/certs` and verifies signature, issuer, audience, and expiration before the BielOS internal auth flow.
 
+Denied origin validation returns HTTP `403` with the hub's Access unavailable screen. It must not fall through as a successful `200` response.
+
 Do not commit real Access audience values, team identifiers if treated as private, Cloudflare tokens, or dashboard exports.
 
 This validation does not replace Cloudflare Access at the edge and does not replace BielOS internal login. It is an additional origin-side check.
+
+The hub exposes `GET /api/health` for Docker and local liveness checks. It returns only minimal JSON status and intentionally does not require Cloudflare Access JWT validation. Do not add environment values, database URLs, Cloudflare configuration, user/session data, token/header/cookie data, or other private operational details to this endpoint.
 
 ## Validation Checklist
 
@@ -96,7 +100,8 @@ This validation does not replace Cloudflare Access at the edge and does not repl
 6. Confirm the BielOS internal login appears second.
 7. Log in with the seeded OWNER user.
 8. Confirm logout clears the BielOS session and returns to `/login`.
-9. If `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`, confirm direct local requests without the Access header are rejected by the hub.
+9. If `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`, confirm direct local requests without the Access header are rejected by the hub with HTTP `403`.
+10. Confirm `http://127.0.0.1:3001/api/health` returns minimal status JSON for local health checks.
 
 ## Current Status
 
