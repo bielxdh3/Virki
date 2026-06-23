@@ -28,6 +28,8 @@ These modules are placeholders only. They are not implemented as full applicatio
 
 ## Local Setup
 
+Use Node.js `22.13.0` or newer within Node 22. The lint tooling requires Node `22.13+`, and CI currently uses Node `22.20.0`.
+
 1. Install dependencies:
 
    ```bash
@@ -50,12 +52,14 @@ These modules are placeholders only. They are not implemented as full applicatio
 
 ## CI and Validation
 
-GitHub Actions runs the Phase 01 validation pipeline on pushes and pull requests to `main` using Node.js 22.
+GitHub Actions runs validation on pushes and pull requests to `main` using Node.js `22.20.0`.
 
 The CI workflow runs:
 
 ```bash
 npm ci
+npm run secrets:scan
+npm run lint
 npm run typecheck
 npm run prisma:validate
 npm run build

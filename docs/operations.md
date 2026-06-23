@@ -6,6 +6,8 @@ This guide is for running BielOS locally in production mode without memorizing D
 
 Make sure Docker Desktop is running.
 
+For local Node.js commands, use Node `22.13.0` or newer within Node 22. The lint tooling added in Phase 05.2 depends on packages that do not support early Node 22 releases.
+
 Make sure the private `.env` file exists in the repository root. This file must stay local. Never commit it.
 
 The `.env` file contains private values such as:
