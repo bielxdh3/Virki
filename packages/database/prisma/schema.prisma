@@ -59,6 +59,7 @@ model User {
   sessions        Session[]
   projectAccesses ProjectAccess[]
   securityUnlocks SecurityUnlock[]
+  auditLogs       AuditLog[]
 }
 
 model Project {
@@ -125,4 +126,23 @@ model SecurityUnlock {
   @@index([userId])
   @@index([projectId])
   @@index([expiresAt])
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  eventType      String
+  actorUserId    String?
+  actorEmailHash String?
+  result         String
+  resource       String?
+  message        String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([eventType])
+  @@index([actorUserId])
+  @@index([actorEmailHash])
+  @@index([createdAt])
 }

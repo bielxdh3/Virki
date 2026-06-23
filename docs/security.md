@@ -26,6 +26,16 @@ Planned layers:
 
 The schema stores session tokens as hashes and includes a separate security unlock model. IP addresses should not be stored directly; if needed, store a salted hash or avoid persistence.
 
+## Audit Logging
+
+BielOS records minimal local audit logs for internal auth and security operations. Logs include generic event types, results, optional actor user ids, optional email hashes, short messages, and small sanitized metadata.
+
+Audit logs must not store passwords, session tokens, cookies, raw authorization headers, Cloudflare secrets, raw IP addresses, private paths, or database dumps.
+
+Audit logging is fail-soft in the MVP: if an audit write fails, the application logs a safe server-side warning and keeps the user-facing auth flow working.
+
+See `docs/audit-logs.md`.
+
 ## Public Surface
 
 The public site can show the BielOS name, short description, public cards, generic status, and an enter button. It must not expose private modules beyond approved generic references.

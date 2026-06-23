@@ -4,6 +4,16 @@ import { prisma } from "@bielos/database";
 import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
 
 export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
+export {
+  createAuditRequestMetadata,
+  hashAuditEmail,
+  hashAuditUserAgent,
+  writeAuditLog,
+  type AuditEventType,
+  type AuditLogInput,
+  type AuditMetadata,
+  type AuditResult
+} from "./audit";
 
 const SESSION_TOKEN_BYTES = 32;
 const DUMMY_PASSWORD_HASH =
@@ -237,8 +247,8 @@ export async function getSessionByToken(token: string): Promise<AuthenticatedSes
   };
 }
 
-export async function revokeSessionToken(token: string): Promise<void> {
-  await prisma.session.updateMany({
+export async function revokeSessionToken(token: string): Promise<number> {
+  const result = await prisma.session.updateMany({
     where: {
       tokenHash: hashSessionToken(token),
       revokedAt: null
@@ -247,6 +257,8 @@ export async function revokeSessionToken(token: string): Promise<void> {
       revokedAt: new Date()
     }
   });
+
+  return result.count;
 }
 
 export async function cleanupInactiveSessions(now = new Date()): Promise<number> {

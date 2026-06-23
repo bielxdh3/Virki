@@ -10,6 +10,7 @@
     "./constants": "./src/constants.ts"
   },
   "scripts": {
+    "audit:recent": "tsx src/audit-recent.ts",
     "sessions:cleanup": "tsx src/cleanup-sessions.ts",
     "seed:owner": "tsx src/seed-owner.ts",
     "typecheck": "tsc --noEmit"

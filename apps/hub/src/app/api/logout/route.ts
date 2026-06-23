@@ -4,7 +4,10 @@ import {
   getExpiredSessionCookieOptions,
   getSessionByToken,
   revokeSessionToken,
-  SESSION_COOKIE_NAME
+  SESSION_COOKIE_NAME,
+  createAuditRequestMetadata,
+  hashAuditEmail,
+  writeAuditLog
 } from "@bielos/auth";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +17,33 @@ export async function POST(request: NextRequest) {
   const currentSession = sessionToken ? await getSessionByToken(sessionToken) : null;
 
   if (sessionToken && currentSession) {
-    await revokeSessionToken(sessionToken);
+    const revokedCount = await revokeSessionToken(sessionToken);
+    const metadata = {
+      ...createAuditRequestMetadata(request.headers, "logout-route"),
+      revokedCount
+    };
+
+    await writeAuditLog({
+      eventType: "AUTH_LOGOUT",
+      result: "SUCCESS",
+      actorUserId: currentSession.user.id,
+      actorEmailHash: hashAuditEmail(currentSession.user.email),
+      resource: "hub",
+      message: "User logged out.",
+      metadata
+    });
+
+    if (revokedCount > 0) {
+      await writeAuditLog({
+        eventType: "AUTH_SESSION_REVOKED",
+        result: "SUCCESS",
+        actorUserId: currentSession.user.id,
+        actorEmailHash: hashAuditEmail(currentSession.user.email),
+        resource: "session",
+        message: "Session revoked.",
+        metadata
+      });
+    }
   }
 
   const response = NextResponse.redirect(new URL("/login", request.url), { status: 303 });

@@ -1,5 +1,5 @@
 import { prisma } from "@bielos/database";
-import { hashPassword, normalizeEmail } from "./index";
+import { hashAuditEmail, hashPassword, normalizeEmail, writeAuditLog } from "./index";
 
 const ownerEmail = process.env.BIELOS_OWNER_EMAIL;
 const ownerPassword = process.env.BIELOS_OWNER_PASSWORD;
@@ -15,8 +15,12 @@ async function main() {
 
   const email = normalizeEmail(ownerEmail);
   const passwordHash = await hashPassword(ownerPassword);
+  const existingOwner = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true }
+  });
 
-  await prisma.user.upsert({
+  const owner = await prisma.user.upsert({
     where: { email },
     update: {
       passwordHash,
@@ -28,6 +32,18 @@ async function main() {
       passwordHash,
       role: "OWNER",
       isActive: true
+    }
+  });
+
+  await writeAuditLog({
+    eventType: existingOwner ? "OWNER_SEED_UPDATED" : "OWNER_SEED_CREATED",
+    result: "SUCCESS",
+    actorUserId: owner.id,
+    actorEmailHash: hashAuditEmail(email),
+    resource: "owner-seed",
+    message: existingOwner ? "OWNER seed updated." : "OWNER seed created.",
+    metadata: {
+      source: "seed-owner"
     }
   });
 
