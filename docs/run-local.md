@@ -79,6 +79,13 @@ Docker Compose intentionally requires a local `.env` file for sensitive database
 docker compose -f infra/docker-compose.yml up --build
 ```
 
+The development compose file publishes app ports on `127.0.0.1` only:
+
+- `127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000`
+- `127.0.0.1:${HUB_PORT:-3001}:3001`
+
+PostgreSQL is not published to the host by the development compose file.
+
 For production-style local validation, use:
 
 ```bash

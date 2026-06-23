@@ -10,7 +10,10 @@ Development:
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-The development compose file runs `npm run dev`. It is intended only for local development.
+The development compose file runs `npm run dev`. It is intended only for local development, and its host-published app ports are bound to loopback only:
+
+- `127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000`
+- `127.0.0.1:${HUB_PORT:-3001}:3001`
 
 Production:
 
@@ -20,7 +23,7 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 
 The production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands.
 
-Production host-published debug ports are bound to loopback only:
+Production host-published debug ports are also bound to loopback only:
 
 - `127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000`
 - `127.0.0.1:${HUB_PORT:-3001}:3001`

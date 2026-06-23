@@ -48,7 +48,7 @@ Show published port bindings:
 npm run status:ports
 ```
 
-The public-site and hub ports should show loopback bindings only:
+Development and production app ports should show loopback bindings only:
 
 ```text
 127.0.0.1:3000->3000
@@ -214,7 +214,7 @@ The secret scan is intentionally safe to run locally. It scans tracked repositor
 
 ## Security Notes
 
-Production debug ports are bound to `127.0.0.1` only. On a public Linux server or VPS, also block inbound internet access to ports `3000` and `3001` with the host firewall as defense in depth.
+Development and production debug ports are bound to `127.0.0.1` only. On a public Linux server or VPS, also block inbound internet access to ports `3000` and `3001` with the host firewall as defense in depth.
 
 Never commit:
 

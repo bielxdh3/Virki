@@ -61,7 +61,7 @@ The public site can show the BielOS name, short description, public cards, gener
 
 ## Production Exposure Blockers
 
-Do not expose the development server or `infra/docker-compose.yml` outside local development.
+Do not expose the development server or `infra/docker-compose.yml` outside local development. Development compose host ports must stay bound to `127.0.0.1`.
 
 Before exposing BielOS beyond a local trusted network:
 
@@ -69,7 +69,7 @@ Before exposing BielOS beyond a local trusted network:
 - Serve through HTTPS so production session cookies marked `Secure` are sent by browsers.
 - Configure an external boundary such as Cloudflare Access.
 - Do not expose `hub.biel.dev.br` unless Cloudflare Access is enabled and tested.
-- Keep production debug ports bound to `127.0.0.1` only.
+- Keep development and production debug ports bound to `127.0.0.1` only.
 - Do not expose port `3001` directly to the internet; it bypasses Cloudflare Access.
 - Keep BielOS internal authentication enabled behind Cloudflare Access.
 - Keep the private `.env` file outside Git.

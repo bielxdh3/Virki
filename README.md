@@ -44,6 +44,8 @@ Use Node.js `22.13.0` or newer within Node 22. The lint tooling requires Node `2
    docker compose -f infra/docker-compose.yml up --build
    ```
 
+   Development Docker ports bind to `127.0.0.1` only. They are for local browser access and should not expose BielOS to LAN/WAN by default.
+
 4. For direct local development without Docker:
 
    ```bash

@@ -14,8 +14,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:-https://hub.biel.dev.br}
     ports:
-      - "${PUBLIC_SITE_PORT:-3000}:3000"
-      - "${HUB_PORT:-3001}:3001"
+      - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
+      - "127.0.0.1:${HUB_PORT:-3001}:3001"
     command: npm run dev
 
   postgres:
