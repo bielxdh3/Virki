@@ -47,3 +47,13 @@ Before exposing BielOS beyond a local trusted network:
 - Add explicit CSRF protection before broader write workflows are implemented.
 
 Cloudflare Access and BielOS internal authentication are separate layers. Access is not a replacement for internal auth, and internal auth is not a replacement for Access. Both are required for the private hub.
+
+## Remote Exposure Hardening
+
+Cloudflare Access protects `hub.biel.dev.br` at the edge before requests reach the BielOS Docker network.
+
+BielOS internal authentication protects the hub inside the application after Access has allowed the request.
+
+Current limitation: BielOS does not yet validate Cloudflare Access JWTs at the application origin. This is acceptable for the MVP only while the origin is not directly exposed and traffic reaches the hub only through Cloudflare Tunnel.
+
+Future hardening should add optional Cloudflare Access JWT validation at the app layer before handling private hub routes.

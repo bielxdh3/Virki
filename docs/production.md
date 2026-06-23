@@ -1,6 +1,6 @@
 # Production
 
-Phase 02.2 adds a production deployment foundation. It does not configure Cloudflare Tunnel, Cloudflare Access, DNS, or public domains yet.
+Phase 02.2 adds a production deployment foundation. Phase 03.1 documents the confirmed Docker-based remote deployment path through Cloudflare Tunnel and Cloudflare Access.
 
 ## Development vs Production Compose
 
@@ -68,15 +68,29 @@ When `NODE_ENV=production`, the cookie is also marked `Secure`. That means brows
 
 ## Cloudflare Status
 
-Cloudflare Tunnel and Cloudflare Access are prepared through templates, but they are still not configured in this repository.
+Cloudflare Tunnel and Cloudflare Access are prepared through templates and documented for the confirmed Docker deployment path. Real Cloudflare credentials and dashboard configuration stay outside the repository.
 
 Do not add Cloudflare account IDs, tunnel IDs, tokens, or Access policies to Git. Configure those later through private environment variables and external Cloudflare configuration.
 
-Remote exposure remains blocked until Cloudflare Tunnel and Cloudflare Access are manually configured and tested. `hub.biel.dev.br` must not be exposed without Cloudflare Access. Cloudflare Access is not a replacement for BielOS internal authentication, and BielOS internal authentication is not a replacement for Cloudflare Access. Both layers are required for the hub.
+Remote exposure must use the production compose file plus the Cloudflare compose override:
+
+```bash
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml up --build
+```
+
+When `cloudflared` runs inside Docker, Cloudflare public hostname routes must use Docker service names:
+
+- `biel.dev.br` -> `http://public-site:3000`
+- `www.biel.dev.br` -> `http://public-site:3000`
+- `hub.biel.dev.br` -> `http://hub:3001`
+
+Do not use `localhost` in the Cloudflare dashboard for the Docker production path. Use `localhost` only if `cloudflared` is intentionally running directly on Windows outside Docker.
+
+`hub.biel.dev.br` must remain protected by Cloudflare Access. Cloudflare Access is not a replacement for BielOS internal authentication, and BielOS internal authentication is not a replacement for Cloudflare Access. Both layers are required for the hub.
 
 ## Current Production Blockers
 
-- No Cloudflare Access boundary yet.
+- No origin-side Cloudflare Access JWT validation yet.
 - No explicit CSRF tokens beyond `SameSite=Lax`.
 - Login rate limiting is in-memory and not distributed.
 - No login/logout audit log.
