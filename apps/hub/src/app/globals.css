@@ -32,6 +32,10 @@ body {
     sans-serif;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 a {
   color: inherit;
   text-decoration: none;
@@ -130,6 +134,15 @@ strong {
   border-color: var(--line-strong);
   background: #121b24;
   color: var(--text);
+}
+
+.dock-nav a:focus-visible,
+.icon-command:focus-visible,
+.action-stack a:focus-visible,
+.action-stack button:focus-visible,
+.login-form button:focus-visible {
+  outline: 2px solid rgba(91, 215, 232, 0.72);
+  outline-offset: 3px;
 }
 
 .dock-nav span {
@@ -243,6 +256,17 @@ strong {
   border-radius: 8px;
   background: rgba(16, 24, 32, 0.94);
   box-shadow: 0 20px 70px var(--shadow);
+}
+
+.anchor-section {
+  scroll-margin-top: 22px;
+}
+
+.anchor-section:target {
+  border-color: rgba(91, 215, 232, 0.8);
+  box-shadow:
+    0 0 0 1px rgba(91, 215, 232, 0.35),
+    0 24px 80px var(--shadow);
 }
 
 .identity-panel {
@@ -753,6 +777,12 @@ strong {
 
   .reserved-list {
     justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
   }
 }
 

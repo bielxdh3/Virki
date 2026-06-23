@@ -34,3 +34,5 @@
 Each module should be started only after Core authentication and authorization are stable.
 
 Phase 04 redesigned the hub shell only. L-vault, root.ark, H-vault, and GymForge remain reserved and are not implemented as module applications yet.
+
+Phase 04.1 fixed hub sidebar section navigation using real dashboard anchors. Future modules remain unimplemented.

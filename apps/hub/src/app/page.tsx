@@ -74,7 +74,7 @@ export default async function HubDashboardPage() {
             <span aria-hidden="true">SC</span>
             <strong>Security</strong>
           </a>
-          <a href="#operations" aria-label="View operations">
+          <a href="#ops" aria-label="View operations">
             <span aria-hidden="true">OP</span>
             <strong>Ops</strong>
           </a>
@@ -101,7 +101,7 @@ export default async function HubDashboardPage() {
           </form>
         </header>
 
-        <section className="identity-panel" id="overview" aria-label="System identity">
+        <section className="identity-panel anchor-section" id="overview" aria-label="System identity">
           <div>
             <p className="eyebrow">BielOS command center</p>
             <h1>Private desktop shell</h1>
@@ -137,7 +137,7 @@ export default async function HubDashboardPage() {
             </dl>
           </article>
 
-          <article className="panel deployment-panel" id="operations">
+          <article className="panel deployment-panel anchor-section" id="ops">
             <div className="panel-title">
               <span>Deployment</span>
               <strong>Remote path active</strong>
@@ -152,7 +152,7 @@ export default async function HubDashboardPage() {
             </div>
           </article>
 
-          <article className="panel security-panel" id="security">
+          <article className="panel security-panel anchor-section" id="security">
             <div className="panel-title">
               <span>Security Layers</span>
               <strong>Two gates</strong>
@@ -177,7 +177,7 @@ export default async function HubDashboardPage() {
             </div>
             <div className="action-stack">
               <a href="#modules">View modules</a>
-              <a href="#operations">View deployment status</a>
+              <a href="#ops">View deployment status</a>
               <form action="/api/logout" method="post">
                 <button type="submit">Log out</button>
               </form>
@@ -185,7 +185,7 @@ export default async function HubDashboardPage() {
           </article>
         </section>
 
-        <section className="module-window" id="modules" aria-label="Module grid">
+        <section className="module-window anchor-section" id="modules" aria-label="Module grid">
           <div className="window-titlebar">
             <div>
               <span>Module bay</span>
