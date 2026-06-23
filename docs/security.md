@@ -38,6 +38,23 @@ Audit logging is fail-soft in the MVP: if an audit write fails, the application 
 
 See `docs/audit-logs.md`.
 
+## Lint and Secret Scanning
+
+CI runs a root lint command and a basic repository secret scan before typecheck, Prisma validation, and build.
+
+Run locally:
+
+```bash
+npm run lint
+npm run secrets:scan
+```
+
+The secret scan checks tracked files for obvious sensitive paths and content patterns, including real `.env` files, Cloudflare credential JSON files, Cloudflare token assignments, JWT-like values, private keys, database dumps, Google Takeout or Gmail export paths, database URLs with non-placeholder passwords, and common API key formats.
+
+The scanner reports only file, line, and rule id. It must not print the matched secret value.
+
+This is an MVP guardrail for committed files and new non-ignored local files. It does not replace careful review, GitHub secret scanning if enabled for the private repository, or a full historical repository scan.
+
 ## Public Surface
 
 The public site can show the BielOS name, short description, public cards, generic status, and an enter button. It must not expose private modules beyond approved generic references.

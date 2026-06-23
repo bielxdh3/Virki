@@ -78,6 +78,14 @@ The hub session cookie is `HttpOnly` and `SameSite=Lax`.
 
 When `NODE_ENV=production`, the cookie is also marked `Secure`. That means browser delivery requires HTTPS in production.
 
+## CI Validation
+
+GitHub Actions validates the repository on pushes and pull requests to `main`.
+
+The CI job installs dependencies with `npm ci`, audits the lockfile, runs the local secret scan, runs lint, typechecks all workspaces, validates the Prisma schema, builds both Next.js apps, and builds the production Docker image.
+
+The secret scan is a private-repository MVP guardrail for obvious committed secrets. It does not require real Cloudflare, database, or owner credentials and must not be configured with real secret values.
+
 ## Cloudflare Status
 
 Cloudflare Tunnel and Cloudflare Access are prepared through templates and documented for the confirmed Docker deployment path. Real Cloudflare credentials and dashboard configuration stay outside the repository.
@@ -123,4 +131,4 @@ When origin-side Access JWT validation is enabled, denied hub page requests retu
 - Login rate limiting is in-memory and not distributed.
 - No backup and restore procedure validated through Docker.
 - No TLS termination configured in this repository.
-- Secret scanning and linting are not yet wired into CI.
+- Secret scanning and linting are basic MVP checks and should be expanded as the repository matures.

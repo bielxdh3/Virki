@@ -47,4 +47,8 @@ Phase 05.R bound production debug ports to loopback, removed dead Session reques
 
 Phase 05.1 added optional origin-side Cloudflare Access JWT validation preparation for the hub. Future modules remain unimplemented, and BielOS internal authentication remains required.
 
+Phase 05.1R hardened denied Access origin validation to return HTTP 403 and added a safe hub health endpoint for local and Docker health checks.
+
+Phase 05.2 added root linting and a basic committed-secret scan to CI. Future modules remain unimplemented, and runtime auth, Cloudflare, and Docker port behavior remain unchanged.
+
 Before private/non-discardable data ingestion, move from `prisma db push` to committed Prisma migrations and production `prisma migrate deploy`.

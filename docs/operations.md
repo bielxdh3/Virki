@@ -196,6 +196,20 @@ npm run logs:prod
 
 The hub health check should use `/api/health`, not `/login`. `/login` can correctly return HTTP `403` when origin-side Cloudflare Access JWT validation is enabled and the request does not include a valid Access assertion.
 
+### Local Validation Checks
+
+Before pushing a phase, run the same core checks used by CI when feasible:
+
+```bash
+npm run secrets:scan
+npm run lint
+npm run typecheck
+npm run prisma:validate
+npm run build
+```
+
+The secret scan is intentionally safe to run locally. It scans tracked repository files plus new non-ignored files and reports only file paths, line numbers, and rule ids.
+
 ## Security Notes
 
 Production debug ports are bound to `127.0.0.1` only. On a public Linux server or VPS, also block inbound internet access to ports `3000` and `3001` with the host firewall as defense in depth.

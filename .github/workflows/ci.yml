@@ -29,6 +29,12 @@ jobs:
       - name: Audit dependency lockfile
         run: npm audit --package-lock-only --audit-level=moderate
 
+      - name: Secret scan
+        run: npm run secrets:scan
+
+      - name: Lint
+        run: npm run lint
+
       - name: Typecheck
         run: npm run typecheck
 
