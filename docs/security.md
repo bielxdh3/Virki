@@ -26,6 +26,8 @@ Planned layers:
 
 The schema stores session tokens as hashes and includes a separate security unlock model. IP addresses should not be stored directly; if needed, store a salted hash or avoid persistence.
 
+`Session.ipHash` and `Session.userAgent` were removed because they were unused and misleading. AuditLog is the intended path for minimal security event context, and it stores only sanitized metadata such as hashed user agent values.
+
 ## Audit Logging
 
 BielOS records minimal local audit logs for internal auth and security operations. Logs include generic event types, results, optional actor user ids, optional email hashes, short messages, and small sanitized metadata.
@@ -50,8 +52,11 @@ Before exposing BielOS beyond a local trusted network:
 - Serve through HTTPS so production session cookies marked `Secure` are sent by browsers.
 - Configure an external boundary such as Cloudflare Access.
 - Do not expose `hub.biel.dev.br` unless Cloudflare Access is enabled and tested.
+- Keep production debug ports bound to `127.0.0.1` only.
+- Do not expose port `3001` directly to the internet; it bypasses Cloudflare Access.
 - Keep BielOS internal authentication enabled behind Cloudflare Access.
 - Keep the private `.env` file outside Git.
+- On public Linux servers or VPS hosts, also block inbound access to ports `3000` and `3001` with the host firewall.
 - Validate database backup and restore procedures.
 - Add persistent or edge-level rate limiting before multi-user or internet-facing use.
 - Add explicit CSRF protection before broader write workflows are implemented.
@@ -67,3 +72,5 @@ BielOS internal authentication protects the hub inside the application after Acc
 Current limitation: BielOS does not yet validate Cloudflare Access JWTs at the application origin. This is acceptable for the MVP only while the origin is not directly exposed and traffic reaches the hub only through Cloudflare Tunnel.
 
 Future hardening should add optional Cloudflare Access JWT validation at the app layer before handling private hub routes.
+
+Cloudflare Tunnel running inside Docker must route to Docker service names, not host ports. Host-published `127.0.0.1` ports are for local debugging and health checks only.

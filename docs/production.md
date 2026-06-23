@@ -20,6 +20,13 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 
 The production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands.
 
+Production host-published debug ports are bound to loopback only:
+
+- `127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000`
+- `127.0.0.1:${HUB_PORT:-3001}:3001`
+
+These bindings preserve local health checks while avoiding exposure on all host interfaces. Cloudflare Tunnel does not use these host-published ports when it runs inside Docker.
+
 ## Simple Production Validation
 
 Run the production compose path:
@@ -30,8 +37,9 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 
 Then validate the basic behavior:
 
-- Confirm the public site loads on the configured public-site port.
-- Confirm the hub redirects unauthenticated users to `/login`.
+- Confirm the public site loads on `http://127.0.0.1:3000`.
+- Confirm the hub redirects unauthenticated users from `http://127.0.0.1:3001` to `/login`.
+- Confirm `npm run status:ports` shows `127.0.0.1` port bindings, not `0.0.0.0`.
 - Run `npm run prisma:push` and `npm run seed:owner` with a private `.env` file configured.
 - Confirm login works with the seeded OWNER account.
 
@@ -88,11 +96,15 @@ Do not use `localhost` in the Cloudflare dashboard for the Docker production pat
 
 `hub.biel.dev.br` must remain protected by Cloudflare Access. Cloudflare Access is not a replacement for BielOS internal authentication, and BielOS internal authentication is not a replacement for Cloudflare Access. Both layers are required for the hub.
 
+Exposing host port `3001` directly to the internet bypasses Cloudflare Access. If BielOS moves to a public Linux server or VPS, keep Docker ports bound to `127.0.0.1` and also block inbound internet access to `3000` and `3001` with the host firewall.
+
+`infra/Dockerfile.prod` is shared by both Next.js apps. Its default command starts the hub only as a manual fallback; production compose overrides `command` for both `public-site` and `hub`.
+
 ## Current Production Blockers
 
 - No origin-side Cloudflare Access JWT validation yet.
 - No explicit CSRF tokens beyond `SameSite=Lax`.
 - Login rate limiting is in-memory and not distributed.
-- No login/logout audit log.
 - No backup and restore procedure validated through Docker.
 - No TLS termination configured in this repository.
+- Secret scanning and linting are not yet wired into CI.

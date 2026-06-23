@@ -42,3 +42,7 @@ Phase 04.2 polished the hub visual shell. Auth, Cloudflare, Docker, Prisma, and 
 Phase 04.3 reduced artificial dashboard styling and copy. Future modules remain unimplemented, and auth, Cloudflare, Docker, and Prisma were intentionally unchanged.
 
 Phase 05 added minimal safe audit logs for auth and security events. Future modules remain unimplemented.
+
+Phase 05.R bound production debug ports to loopback, removed dead Session request-context fields, and documented the migration plan. Future modules remain unimplemented.
+
+Before private/non-discardable data ingestion, move from `prisma db push` to committed Prisma migrations and production `prisma migrate deploy`.

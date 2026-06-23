@@ -98,6 +98,8 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-
 
 Do not seed fake audit data.
 
+See `docs/database.md` for the current MVP `prisma db push` workflow and the migration requirement before private/non-discardable data ingestion.
+
 ## Current Limitations
 
 - No audit log UI exists yet.

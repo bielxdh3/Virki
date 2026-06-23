@@ -16,6 +16,7 @@
     "stop:prod": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml down",
     "restart:prod": "npm run stop:prod && npm run start:prod",
     "status:prod": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml ps",
+    "status:ports": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml ps public-site hub",
     "logs:prod": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml logs --tail=120 -f",
     "health:local": "node scripts/health-local.mjs",
     "audit:recent": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run audit:recent --workspace @bielos/auth",

@@ -40,6 +40,19 @@ Show container status:
 npm run status:prod
 ```
 
+Show published port bindings:
+
+```bash
+npm run status:ports
+```
+
+The public-site and hub ports should show loopback bindings only:
+
+```text
+127.0.0.1:3000->3000
+127.0.0.1:3001->3001
+```
+
 Show useful logs:
 
 ```bash
@@ -57,12 +70,19 @@ The health check verifies:
 - `http://127.0.0.1:3000`
 - `http://127.0.0.1:3001/login`
 
+These addresses are for local debugging only. They are not the remote ingress path.
+
 ## Services
 
 - `public-site`: the public BielOS site for `biel.dev.br`.
 - `hub`: the private BielOS hub for `hub.biel.dev.br`.
 - `postgres`: the PostgreSQL database used by the hub.
 - `cloudflared`: the Cloudflare Tunnel connector that exposes BielOS through Cloudflare without opening router ports.
+
+Cloudflare Tunnel does not depend on the host-published `127.0.0.1` debug ports. When `cloudflared` runs inside Docker, it reaches the apps through Docker service names:
+
+- `http://public-site:3000`
+- `http://hub:3001`
 
 ## Expected Remote Flow
 
@@ -108,6 +128,12 @@ www.biel.dev.br -> http://public-site:3000
 
 Do not use `localhost` when `cloudflared` runs inside Docker.
 
+If `biel.dev.br` still returns 502, confirm the dashboard route is not using `localhost` and then run:
+
+```bash
+npm run status:ports
+```
+
 ### `hub.biel.dev.br` Skips Cloudflare Access
 
 Check Cloudflare Access in the Cloudflare dashboard.
@@ -125,6 +151,8 @@ The Docker route should be:
 ```text
 hub.biel.dev.br -> http://hub:3001
 ```
+
+Do not expose port `3001` directly to the internet. Direct access to port `3001` bypasses Cloudflare Access.
 
 ### Login Fails
 
@@ -165,6 +193,8 @@ npm run logs:prod
 ```
 
 ## Security Notes
+
+Production debug ports are bound to `127.0.0.1` only. On a public Linux server or VPS, also block inbound internet access to ports `3000` and `3001` with the host firewall as defense in depth.
 
 Never commit:
 

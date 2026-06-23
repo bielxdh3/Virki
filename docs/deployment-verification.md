@@ -12,6 +12,7 @@ Inspect it with:
 
 ```bash
 npm run status:prod
+npm run status:ports
 npm run logs:prod
 npm run health:local
 ```
@@ -19,6 +20,9 @@ npm run health:local
 ## Stack
 
 - Confirm the production Docker Compose stack is running.
+- Confirm `npm run status:ports` shows loopback bindings only:
+  - `127.0.0.1:3000->3000`
+  - `127.0.0.1:3001->3001`
 - Confirm the `cloudflared` container is connected.
 - Confirm `postgres`, `public-site`, and `hub` are healthy.
 - Confirm no real `.env`, tunnel token, credentials JSON, Cloudflare account ID, or Cloudflare secret is committed.
@@ -53,9 +57,13 @@ The preferred BielOS production path is Docker.
 
 ## Local Behavior
 
-- `http://localhost:3000` reaches the public site on the host machine.
-- `http://localhost:3001` reaches the hub login on the host machine.
-- Local host access is useful for validation, but remote hub exposure must remain behind Cloudflare Access.
+- `http://127.0.0.1:3000` reaches the public site on the host machine.
+- `http://127.0.0.1:3001/login` reaches the hub login on the host machine.
+- Local host access is useful for debugging only.
+- Remote hub exposure must remain behind Cloudflare Access.
+- Direct internet access to port `3001` would bypass Cloudflare Access and must be blocked.
+
+Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it reaches `http://public-site:3000` and `http://hub:3001` on the Docker network.
 
 ## Remaining Limitations
 
@@ -63,3 +71,4 @@ The preferred BielOS production path is Docker.
 - Login rate limiting is local/in-memory and not distributed.
 - CSRF protection currently relies on cookie posture and limited write flows.
 - Backup and restore procedures still need production validation.
+- Host firewall rules for public Linux/VPS deployment still need environment-specific validation.

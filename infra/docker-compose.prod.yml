@@ -10,7 +10,7 @@ services:
       NODE_ENV: production
       NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:?NEXT_PUBLIC_HUB_URL must be set in local .env}
     ports:
-      - "${PUBLIC_SITE_PORT:-3000}:3000"
+      - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
     command: npm run start --workspace @bielos/public-site
     healthcheck:
       test:
@@ -38,7 +38,7 @@ services:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
     ports:
-      - "${HUB_PORT:-3001}:3001"
+      - "127.0.0.1:${HUB_PORT:-3001}:3001"
     command: npm run start --workspace @bielos/hub
     healthcheck:
       test:

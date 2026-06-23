@@ -32,4 +32,6 @@ COPY --from=build /app ./
 
 EXPOSE 3000 3001
 
+# Compose overrides this default command for each app service. The neutral default
+# keeps the image runnable for the private hub if it is started manually.
 CMD ["npm", "run", "start", "--workspace", "@bielos/hub"]
