@@ -70,7 +70,8 @@ BielOS is a private personal hub, not a public SaaS.
   - `POST /api/logout`
 - `[DONE]` Missing/invalid CSRF returns HTTP `403`.
 - `[DONE]` Production session cleanup worker runs on an interval.
-- `[LATER]` Persistent/distributed rate limiting.
+- `[DONE]` Persistent login rate limiting.
+- `[LATER]` Edge-level or broader abuse controls if needed.
 - `[LATER]` Session management improvements after launch safety is proven.
 - `[LATER]` Shared CSRF secret or alternate strategy only if multiple hub replicas are used.
 
@@ -171,6 +172,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 07.0: production Prisma migrations.
 - `[DONE]` Phase 07.1: PostgreSQL backup procedure.
 - `[DONE]` Phase 07.2: restore validation.
-- `[NEXT]` Phase 08.0: persistent rate limiting.
-- `[LATER]` Phase 08.1: audit retention and cleanup.
+- `[DONE]` Phase 08.0: persistent login rate limiting.
+- `[NEXT]` Phase 08.1: audit retention and cleanup.
 - `[LATER]` Phase 09.0: begin module shell work only after data safety is complete.

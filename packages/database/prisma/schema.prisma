@@ -106,6 +106,20 @@ model Session {
   @@index([expiresAt])
 }
 
+model LoginRateLimit {
+  id              String    @id @default(cuid())
+  identifierHash  String    @unique
+  attempts        Int       @default(0)
+  windowStartedAt DateTime
+  blockedUntil    DateTime?
+  expiresAt       DateTime
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([blockedUntil])
+  @@index([expiresAt])
+}
+
 model SecurityUnlock {
   id            String       @id @default(cuid())
   userId        String

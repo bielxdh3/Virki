@@ -37,19 +37,7 @@ export async function POST(request: Request) {
   const auditMetadata = createAuditRequestMetadata(request.headers, "hub-login");
   const actorEmailHash = rateLimitIdentifier ? hashAuditEmail(rateLimitIdentifier) : undefined;
 
-  if (!email || !password) {
-    await writeAuditLog({
-      eventType: "AUTH_LOGIN_FAILURE",
-      result: "FAILURE",
-      actorEmailHash,
-      resource: "hub",
-      message: "Login failed.",
-      metadata: auditMetadata
-    });
-    return redirectToLogin(request, true);
-  }
-
-  const rateLimit = checkLoginRateLimit(rateLimitIdentifier);
+  const rateLimit = await checkLoginRateLimit(rateLimitIdentifier);
 
   if (!rateLimit.allowed) {
     await writeAuditLog({
@@ -57,7 +45,20 @@ export async function POST(request: Request) {
       result: "FAILURE",
       actorEmailHash,
       resource: "hub",
-      message: "Login rate limit reached.",
+      message: rateLimit.failureMode ? "Login rate limit unavailable." : "Login rate limit reached.",
+      metadata: auditMetadata
+    });
+    return redirectToLogin(request, true);
+  }
+
+  if (!email || !password) {
+    await recordFailedLogin(rateLimitIdentifier);
+    await writeAuditLog({
+      eventType: "AUTH_LOGIN_FAILURE",
+      result: "FAILURE",
+      actorEmailHash,
+      resource: "hub",
+      message: "Login failed.",
       metadata: auditMetadata
     });
     return redirectToLogin(request, true);
@@ -66,7 +67,7 @@ export async function POST(request: Request) {
   const user = await authenticateUser(email, password);
 
   if (!user) {
-    recordFailedLogin(rateLimitIdentifier);
+    await recordFailedLogin(rateLimitIdentifier);
     await writeAuditLog({
       eventType: "AUTH_LOGIN_FAILURE",
       result: "FAILURE",
@@ -78,7 +79,7 @@ export async function POST(request: Request) {
     return redirectToLogin(request, true);
   }
 
-  clearLoginRateLimit(rateLimitIdentifier);
+  await clearLoginRateLimit(rateLimitIdentifier);
   const session = await createSession(user.id);
   await writeAuditLog({
     eventType: "AUTH_LOGIN_SUCCESS",

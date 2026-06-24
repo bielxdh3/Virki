@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import { prisma } from "@bielos/database";
 import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
@@ -20,15 +20,7 @@ const DUMMY_PASSWORD_HASH =
   "$argon2id$v=19$m=65536,t=3,p=1$KWdtXzW0AylnuGwdi+AYHQ$/T76IyJJw69emqMKm2cc7E1k2lQFMBFp/qTumxvHvHw";
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5;
-
-const globalForRateLimit = globalThis as unknown as {
-  bielosLoginRateLimit?: Map<string, LoginRateLimitEntry>;
-};
-
-type LoginRateLimitEntry = {
-  attempts: number;
-  resetAt: number;
-};
+const LOGIN_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 export type AuthenticatedUser = {
   id: string;
@@ -68,48 +60,111 @@ export type ExpiredSessionCookieOptions = {
 export type LoginRateLimitResult = {
   allowed: boolean;
   retryAfterSeconds?: number;
+  failureMode?: "limiter-unavailable";
 };
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-export function checkLoginRateLimit(identifier: string, now = Date.now()): LoginRateLimitResult {
-  const key = normalizeRateLimitIdentifier(identifier);
-  const entry = getLoginRateLimitStore().get(key);
+export async function checkLoginRateLimit(
+  identifier: string,
+  now = new Date()
+): Promise<LoginRateLimitResult> {
+  try {
+    await pruneExpiredLoginRateLimits(now);
+    const entry = await prisma.loginRateLimit.findUnique({
+      where: { identifierHash: hashLoginRateLimitIdentifier(identifier) },
+      select: {
+        attempts: true,
+        windowStartedAt: true,
+        blockedUntil: true
+      }
+    });
 
-  if (!entry || entry.resetAt <= now) {
+    if (!entry) {
+      return { allowed: true };
+    }
+
+    if (entry.blockedUntil && entry.blockedUntil > now) {
+      return {
+        allowed: false,
+        retryAfterSeconds: Math.ceil((entry.blockedUntil.getTime() - now.getTime()) / 1000)
+      };
+    }
+
+    if (isRateLimitWindowExpired(entry.windowStartedAt, now)) {
+      return { allowed: true };
+    }
+
+    if (entry.attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS) {
+      const resetAt = getRateLimitWindowResetAt(entry.windowStartedAt);
+      return {
+        allowed: false,
+        retryAfterSeconds: Math.max(1, Math.ceil((resetAt.getTime() - now.getTime()) / 1000))
+      };
+    }
+
     return { allowed: true };
+  } catch {
+    return { allowed: false, failureMode: "limiter-unavailable" };
   }
-
-  if (entry.attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS) {
-    return {
-      allowed: false,
-      retryAfterSeconds: Math.ceil((entry.resetAt - now) / 1000)
-    };
-  }
-
-  return { allowed: true };
 }
 
-export function recordFailedLogin(identifier: string, now = Date.now()): void {
-  const key = normalizeRateLimitIdentifier(identifier);
-  const store = getLoginRateLimitStore();
-  const entry = store.get(key);
+export async function recordFailedLogin(identifier: string, now = new Date()): Promise<void> {
+  const identifierHash = hashLoginRateLimitIdentifier(identifier);
+  const existing = await prisma.loginRateLimit.findUnique({
+    where: { identifierHash },
+    select: {
+      attempts: true,
+      windowStartedAt: true
+    }
+  });
 
-  if (!entry || entry.resetAt <= now) {
-    store.set(key, {
-      attempts: 1,
-      resetAt: now + LOGIN_RATE_LIMIT_WINDOW_MS
+  const expiresAt = new Date(now.getTime() + LOGIN_RATE_LIMIT_RETENTION_MS);
+
+  if (!existing || isRateLimitWindowExpired(existing.windowStartedAt, now)) {
+    await prisma.loginRateLimit.upsert({
+      where: { identifierHash },
+      create: {
+        identifierHash,
+        attempts: 1,
+        windowStartedAt: now,
+        blockedUntil: null,
+        expiresAt
+      },
+      update: {
+        attempts: 1,
+        windowStartedAt: now,
+        blockedUntil: null,
+        expiresAt
+      }
     });
     return;
   }
 
-  entry.attempts += 1;
+  const attempts = existing.attempts + 1;
+  await prisma.loginRateLimit.update({
+    where: { identifierHash },
+    data: {
+      attempts,
+      blockedUntil:
+        attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+          ? getRateLimitWindowResetAt(existing.windowStartedAt)
+          : null,
+      expiresAt
+    }
+  });
 }
 
-export function clearLoginRateLimit(identifier: string): void {
-  getLoginRateLimitStore().delete(normalizeRateLimitIdentifier(identifier));
+export async function clearLoginRateLimit(identifier: string): Promise<void> {
+  await prisma.loginRateLimit.deleteMany({
+    where: { identifierHash: hashLoginRateLimitIdentifier(identifier) }
+  });
+}
+
+export async function cleanupExpiredLoginRateLimits(now = new Date()): Promise<number> {
+  return pruneExpiredLoginRateLimits(now);
 }
 
 export async function hashPassword(password: string): Promise<string> {
@@ -274,9 +329,34 @@ export async function cleanupInactiveSessions(now = new Date()): Promise<number>
   return result.count;
 }
 
-function getLoginRateLimitStore(): Map<string, LoginRateLimitEntry> {
-  globalForRateLimit.bielosLoginRateLimit ??= new Map<string, LoginRateLimitEntry>();
-  return globalForRateLimit.bielosLoginRateLimit;
+function isRateLimitWindowExpired(windowStartedAt: Date, now: Date): boolean {
+  return getRateLimitWindowResetAt(windowStartedAt) <= now;
+}
+
+function getRateLimitWindowResetAt(windowStartedAt: Date): Date {
+  return new Date(windowStartedAt.getTime() + LOGIN_RATE_LIMIT_WINDOW_MS);
+}
+
+async function pruneExpiredLoginRateLimits(now: Date): Promise<number> {
+  const result = await prisma.loginRateLimit.deleteMany({
+    where: { expiresAt: { lte: now } }
+  });
+
+  return result.count;
+}
+
+function hashLoginRateLimitIdentifier(identifier: string): string {
+  return createHmac("sha256", getLoginRateLimitHashKey())
+    .update(normalizeRateLimitIdentifier(identifier), "utf8")
+    .digest("hex");
+}
+
+function getLoginRateLimitHashKey(): string {
+  return (
+    process.env.BIELOS_RATE_LIMIT_HASH_SECRET
+    ?? process.env.DATABASE_URL
+    ?? "local-development-rate-limit-key"
+  );
 }
 
 function normalizeRateLimitIdentifier(identifier: string): string {

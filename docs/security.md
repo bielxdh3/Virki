@@ -19,6 +19,7 @@ Current layers:
 - Application session management.
 - Password or passphrase verification using strong hashing.
 - Session token hashing at rest.
+- Persistent login rate limiting using privacy-safe identifier hashes.
 - Cloudflare Access as an outer boundary for the private hub.
 - Security unlock flow for sensitive modules.
 
@@ -42,6 +43,8 @@ The schema stores session tokens as hashes and includes a separate security unlo
 `Session.ipHash` and `Session.userAgent` were removed because they were unused and misleading. AuditLog is the intended path for minimal security event context, and it stores only sanitized metadata such as hashed user agent values.
 
 Production Compose runs a small `session-cleanup` worker that periodically deletes expired or revoked sessions. The worker uses the same private database environment as the hub, publishes no ports, and logs only the number of inactive sessions removed.
+
+Login rate limiting stores only a keyed hash of the normalized submitted login identifier, attempt count, window timestamps, and expiration timestamp. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed for login when the limiter cannot be checked, while still returning the same generic login failure to the browser.
 
 ## Audit Logging
 
@@ -91,7 +94,7 @@ Before exposing BielOS beyond a local trusted network:
 - On public Linux servers or VPS hosts, also block inbound access to ports `3000` and `3001` with the host firewall.
 - Keep the production `session-cleanup` worker enabled so expired or revoked sessions do not accumulate indefinitely.
 - Validate database backup and restore procedures.
-- Add persistent or edge-level rate limiting before multi-user or internet-facing use.
+- Keep persistent login rate limiting enabled before multi-user or broader private use.
 - Extend explicit CSRF protection to any future mutable hub routes before they ship.
 
 Cloudflare Access and BielOS internal authentication are separate layers. Access is not a replacement for internal auth, and internal auth is not a replacement for Access. Both are required for the private hub.

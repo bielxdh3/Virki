@@ -26,18 +26,19 @@ If the cookie is missing, expired, revoked, or invalid, the route does not revok
 
 ## Rate Limit Strategy
 
-Login uses a basic in-memory limiter in `packages/auth`.
+Login uses a persistent database-backed limiter in `packages/auth`.
 
 Current behavior:
 
-- Keyed by normalized email.
-- Allows 5 failed attempts per 15-minute window.
-- Clears the counter after a successful login.
+- Keyed by a server-side HMAC of the normalized submitted login identifier.
+- Stores no raw email, raw IP address, raw user agent, password, token, cookie, JWT, or Cloudflare value.
+- Allows 5 failed attempts per 15-minute window per hashed identifier.
+- Clears the bucket after a successful login.
+- Expires old buckets after 24 hours.
+- Fails closed when the limiter cannot be checked, returning the same generic login failure to the browser.
 - Returns the same generic login error to avoid revealing whether the email or password was wrong.
 
-This is suitable for a local/self-hosted MVP with a single application process. It is not durable across restarts and is not shared across multiple app instances.
-
-Persistent database-backed rate limiting is intentionally not added yet because it would require a new table or schema change. Add it when deployment shape and abuse requirements are clearer.
+This keeps the limiter durable across hub restarts and shared by hub instances that use the same database and hash key.
 
 ## CSRF Posture
 
@@ -71,6 +72,6 @@ Cloudflare Access is the outer boundary for `hub.biel.dev.br`, and BielOS intern
 
 ## Remaining Limitations
 
-- No persistent distributed rate limit.
+- No edge-level or IP-based rate limit in this repository.
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.
