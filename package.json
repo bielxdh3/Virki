@@ -27,7 +27,9 @@
     "prisma:push": "npm run prisma:push --workspace @bielos/database",
     "prisma:generate": "npm run prisma:generate --workspace @bielos/database",
     "prisma:validate": "npm run prisma:validate --workspace @bielos/database",
-    "prisma:migrate": "npm run prisma:migrate --workspace @bielos/database"
+    "prisma:migrate": "npm run prisma:migrate --workspace @bielos/database",
+    "prisma:migrate:deploy": "npm run prisma:migrate:deploy --workspace @bielos/database",
+    "prisma:migrate:status": "npm run prisma:migrate:status --workspace @bielos/database"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -18,7 +18,9 @@ const forbiddenPathRules = [
   },
   {
     id: "database-dump",
-    test: (filePath) => /\.(?:bak|backup|db|dump|sqlite|sqlite3|sql)$/i.test(filePath)
+    test: (filePath) =>
+      /\.(?:bak|backup|db|dump|sqlite|sqlite3|sql)$/i.test(filePath) &&
+      !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/i.test(filePath)
   },
   {
     id: "google-takeout-export",

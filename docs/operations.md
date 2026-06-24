@@ -169,10 +169,10 @@ Confirm the OWNER user was seeded:
 docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run seed:owner
 ```
 
-If the database was recreated, apply the schema first:
+If the database was recreated, apply committed migrations first:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:push
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:migrate:deploy
 ```
 
 Then seed the OWNER user again.

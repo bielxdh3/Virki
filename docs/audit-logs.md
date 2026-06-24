@@ -103,15 +103,15 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-
 
 Phase 05 adds the `AuditLog` Prisma model.
 
-For an existing local database, apply the schema with:
+For a new durable database, apply committed migrations with:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:push
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:migrate:deploy
 ```
 
 Do not seed fake audit data.
 
-See `docs/database.md` for the current MVP `prisma db push` workflow and the migration requirement before private/non-discardable data ingestion.
+See `docs/database.md` for the migration workflow and the remaining disposable-local use of `prisma db push`.
 
 ## Current Limitations
 

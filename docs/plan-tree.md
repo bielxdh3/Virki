@@ -109,9 +109,9 @@ BielOS is a private personal hub, not a public SaaS.
 
 ## 8. Migrations Plan
 
-- `[NEXT]` Replace production reliance on `prisma db push` before private/non-discardable data ingestion.
-- `[NEXT]` Create committed Prisma migrations.
-- `[NEXT]` Document production `prisma migrate deploy`.
+- `[DONE]` Replace production reliance on `prisma db push` before private/non-discardable data ingestion.
+- `[DONE]` Create committed Prisma migrations.
+- `[DONE]` Document production `prisma migrate deploy`.
 - `[LATER]` Keep disposable/local-only schema workflows clearly separated from production.
 
 ## 9. Backup And Restore Plan
@@ -159,7 +159,7 @@ BielOS MVP is complete when:
 - `[CURRENT]` `biel.dev.br` works publicly through Cloudflare.
 - `[CURRENT]` `hub.biel.dev.br` works privately through Cloudflare Access.
 - `[CURRENT]` BielOS internal auth works after Cloudflare Access.
-- `[NEXT]` Prisma migrations replace production `db push`.
+- `[DONE]` Prisma migrations replace production `db push`.
 - `[NEXT]` Backup and restore are documented and tested.
 - `[BLOCKED]` No future modules are implemented prematurely.
 
@@ -168,7 +168,7 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 06.1: local production launch execution.
 - `[CURRENT]` Phase 06.2: live Cloudflare smoke test.
 - `[NEXT]` Phase 06.3: fix real launch blockers only.
-- `[NEXT]` Phase 07.0: production Prisma migrations.
+- `[DONE]` Phase 07.0: production Prisma migrations.
 - `[NEXT]` Phase 07.1: PostgreSQL backup procedure.
 - `[NEXT]` Phase 07.2: restore validation.
 - `[LATER]` Phase 08.0: persistent rate limiting.

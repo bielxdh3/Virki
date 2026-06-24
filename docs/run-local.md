@@ -56,12 +56,14 @@ Use `npm install` during normal dependency work, then commit the resulting `pack
 
 ## Local Owner Seed
 
-After PostgreSQL is running and your private `.env` file is configured, apply the schema and create the first OWNER user:
+After PostgreSQL is running and your private `.env` file is configured, apply migrations and create the first OWNER user:
 
 ```bash
-npm run prisma:push
+npm run prisma:migrate:deploy
 npm run seed:owner
 ```
+
+Use `npm run prisma:push` only for disposable local databases.
 
 The seed command reads `BIELOS_OWNER_EMAIL` and `BIELOS_OWNER_PASSWORD` from the environment. It hashes the password before storage.
 

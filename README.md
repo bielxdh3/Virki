@@ -71,9 +71,10 @@ npm run build
 
 The private hub uses internal email and password authentication backed by the `User` and `Session` database models. Passwords are hashed with Argon2id, and session cookies store only an opaque session token while the database stores only its hash.
 
-To prepare a local OWNER account, set `BIELOS_OWNER_EMAIL` and `BIELOS_OWNER_PASSWORD` in a private `.env` file, apply the Prisma schema to your local database, then run:
+To prepare a local OWNER account, set `BIELOS_OWNER_EMAIL` and `BIELOS_OWNER_PASSWORD` in a private `.env` file, apply Prisma migrations to your local database, then run:
 
 ```bash
+npm run prisma:migrate:deploy
 npm run seed:owner
 ```
 
@@ -104,5 +105,5 @@ See `docs/operations.md` for beginner-friendly start, stop, status, logs, health
 
 - Real secrets must stay out of Git.
 - Public pages must not expose private hub data, internal ports, stack internals, logs, or local paths.
-- Authentication is intentionally shallow in this first core scaffold and must be completed before private use.
-- Cloudflare Tunnel and Cloudflare Access are planned integration layers, not hardcoded assumptions.
+- The hub remains private behind Cloudflare Access and BielOS internal auth.
+- Production database changes use committed Prisma migrations, not `prisma db push`.

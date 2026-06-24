@@ -46,7 +46,7 @@ Then validate the basic behavior:
 - Confirm the hub health endpoint returns minimal status data on `http://127.0.0.1:3001/api/health`.
 - Confirm the hub redirects unauthenticated users from `http://127.0.0.1:3001` to `/login` when Access JWT validation is disabled for local development.
 - Confirm `npm run status:ports` shows `127.0.0.1` port bindings, not `0.0.0.0`.
-- Run `npm run prisma:push` and `npm run seed:owner` with a private `.env` file configured.
+- Run `npm run prisma:migrate:deploy` and `npm run seed:owner` with a private `.env` file configured.
 - Confirm login works with the seeded OWNER account.
 
 ## Do Not Expose `next dev`
@@ -91,6 +91,16 @@ GitHub Actions validates the repository on pushes and pull requests to `main`.
 The CI job installs dependencies with `npm ci`, audits the lockfile, runs the local secret scan, runs lint, typechecks all workspaces, validates the Prisma schema, builds both Next.js apps, and builds the production Docker image.
 
 The secret scan is a private-repository MVP guardrail for obvious committed secrets. It does not require real Cloudflare, database, or owner credentials and must not be configured with real secret values.
+
+## Database Migrations
+
+Production database updates use committed Prisma migrations:
+
+```bash
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:migrate:deploy
+```
+
+`prisma db push` is only for disposable local databases. Do not use it for private, durable, or non-discardable production data.
 
 ## Cloudflare Status
 

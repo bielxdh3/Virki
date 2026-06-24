@@ -77,7 +77,7 @@ The preferred BielOS production path is Docker.
 - If `biel.dev.br` returns `502`, confirm `cloudflared` is running and the Cloudflare public hostname routes use Docker service names.
 - If `hub.biel.dev.br` skips Cloudflare Access, stop and fix the Cloudflare Access application policy before using the hub remotely.
 - If local health fails, confirm `hub` healthcheck uses `/api/health`, not `/login`.
-- If login fails after a database reset, apply the schema and seed the OWNER user from private local values.
+- If login fails after a database reset, apply migrations and seed the OWNER user from private local values.
 
 ## Rollback
 

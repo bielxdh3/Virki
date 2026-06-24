@@ -1,42 +1,49 @@
 # Database
 
-BielOS currently uses Prisma with PostgreSQL.
+BielOS uses Prisma with PostgreSQL.
 
-## Current MVP Workflow
+## Migration Workflow
 
-The current local MVP workflow uses:
+Phase 07.0 adds committed Prisma migrations. Production and durable local databases should use:
+
+```bash
+npm run prisma:migrate:deploy
+```
+
+When the production Docker stack is running, run migrations inside the `hub` container so the command uses the same private database environment as the hub:
+
+```bash
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:migrate:deploy
+```
+
+Use this before seeding the OWNER user on a new durable database.
+
+## Local Disposable Workflow
+
+`prisma db push` remains available only for disposable local development databases:
 
 ```bash
 npm run prisma:push
 ```
 
-When the stack is running through Docker, apply schema changes inside the `hub` container:
+Do not use `db push` for private, durable, or non-discardable production data. It bypasses committed migration history and can hide destructive schema changes that production needs to review.
 
-```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:push
-```
+## Existing MVP Databases
 
-This is acceptable while the database is local, controlled, and has no non-discardable private data.
+Some local MVP databases were created with `prisma db push` before migrations existed.
 
-## Migration Requirement Before Private Data
+For a disposable local database, the cleanest transition is to recreate the local database volume and then run `prisma migrate deploy`.
 
-Before BielOS stores non-discardable private data, the project must switch to a Prisma migration workflow:
+For any database that must be preserved, do not run destructive reset or `db push`. First create and verify a backup, confirm the live schema matches the initial migration, then baseline the migration manually with Prisma migration tooling before future migrations are deployed.
 
-- use `prisma migrate dev` during development
-- commit migration files
-- use `prisma migrate deploy` for production updates
-- validate backup and restore before applying production migrations
+## Development Changes
 
-Phase 05.R removes unused `Session.ipHash` and `Session.userAgent` fields. For the current MVP database, apply the schema with `prisma db push`. Do not use this shortcut after private/non-discardable data ingestion begins.
+For future schema changes:
 
-Because this removes unused columns, a local MVP database may require:
+1. Edit `packages/database/prisma/schema.prisma`.
+2. Create a migration with `npm run prisma:migrate --workspace @bielos/database`.
+3. Review the generated SQL.
+4. Commit both the schema and migration files.
+5. Use `npm run prisma:migrate:deploy` for production updates.
 
-```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npx prisma db push --schema packages/database/prisma/schema.prisma --accept-data-loss
-```
-
-Use this only for the current discardable/local MVP database.
-
-## Deferred Decision
-
-A clean migration history is deferred for now to avoid disrupting the current local MVP setup. This must be revisited before BielOS becomes a durable private data system.
+Do not ingest private/non-discardable data until backup and restore validation is complete.
