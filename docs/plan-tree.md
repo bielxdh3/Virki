@@ -132,7 +132,7 @@ BielOS is a private personal hub, not a public SaaS.
   - `status:prod`
   - `status:ports`
   - `logs:prod`
-- `[LATER]` Audit retention policy.
+- `[DONE]` Audit retention policy and cleanup.
 - `[LATER]` Safe redacted diagnostics if needed.
 - `[BLOCKED]` Audit log UI is blocked until authorization and retention rules are stronger.
 
@@ -173,5 +173,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 07.1: PostgreSQL backup procedure.
 - `[DONE]` Phase 07.2: restore validation.
 - `[DONE]` Phase 08.0: persistent login rate limiting.
-- `[NEXT]` Phase 08.1: audit retention and cleanup.
+- `[DONE]` Phase 08.1: audit retention and cleanup.
 - `[LATER]` Phase 09.0: begin module shell work only after data safety is complete.

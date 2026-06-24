@@ -56,6 +56,8 @@ Audit logs must not store passwords, session tokens, cookies, raw authorization 
 
 Audit logging is fail-soft in the MVP: if an audit write fails, the application logs a safe server-side warning and keeps the user-facing auth flow working.
 
+Audit retention defaults to `180` days through `AUDIT_LOG_RETENTION_DAYS`. Cleanup deletes only audit rows older than the retention cutoff by `createdAt` and prints only the deleted row count. It must not print audit metadata, identifiers, headers, cookies, tokens, JWTs, raw IPs, or private values.
+
 See `docs/audit-logs.md`.
 
 ## Lint and Secret Scanning

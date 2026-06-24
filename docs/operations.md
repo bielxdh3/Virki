@@ -193,6 +193,24 @@ SESSION_CLEANUP_INTERVAL_SECONDS=3600
 
 The cleanup log prints only the number of inactive sessions removed. It must not print session tokens, cookies, raw IPs, JWTs, or Cloudflare values.
 
+### Audit Log Cleanup
+
+Production cleanup also runs audit log retention cleanup on the same interval. The default retention is `180` days.
+
+To change it, set this non-secret value in the private local `.env` file:
+
+```bash
+AUDIT_LOG_RETENTION_DAYS=180
+```
+
+Manual cleanup:
+
+```bash
+npm run audit:cleanup
+```
+
+The cleanup deletes only audit rows older than the retention window and prints only a deleted-row count. It must not print audit contents, metadata, identifiers, raw headers, raw IPs, cookies, JWTs, tokens, or private values.
+
 ### Database Backups
 
 Use `docs/database.md` for the PostgreSQL backup procedure.

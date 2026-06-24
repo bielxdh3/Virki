@@ -22,6 +22,7 @@
     "logs:prod": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml logs --tail=120 -f",
     "health:local": "node scripts/health-local.mjs",
     "audit:recent": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run audit:recent --workspace @bielos/auth",
+    "audit:cleanup": "docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run audit:cleanup --workspace @bielos/auth",
     "seed:owner": "npm run seed:owner --workspace @bielos/auth",
     "sessions:cleanup": "npm run sessions:cleanup --workspace @bielos/auth",
     "prisma:push": "npm run prisma:push --workspace @bielos/database",

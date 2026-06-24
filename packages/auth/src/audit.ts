@@ -7,6 +7,7 @@ export type AuditEventType =
   | "AUTH_LOGOUT"
   | "AUTH_SESSION_REVOKED"
   | "AUTH_SESSION_CLEANUP"
+  | "AUTH_AUDIT_LOG_CLEANUP"
   | "ACCESS_JWT_MISSING"
   | "ACCESS_JWT_INVALID"
   | "ACCESS_JWT_VALID"
@@ -30,6 +31,9 @@ export type AuditLogInput = {
 const MAX_MESSAGE_LENGTH = 160;
 const MAX_METADATA_KEYS = 12;
 const MAX_METADATA_STRING_LENGTH = 80;
+const DEFAULT_AUDIT_LOG_RETENTION_DAYS = 180;
+const MIN_AUDIT_LOG_RETENTION_DAYS = 1;
+const MAX_AUDIT_LOG_RETENTION_DAYS = 3650;
 
 export async function writeAuditLog(input: AuditLogInput): Promise<void> {
   try {
@@ -73,6 +77,38 @@ export function createAuditRequestMetadata(
     cloudflareAccessPresent: Boolean(headers.get("cf-access-jwt-assertion")),
     userAgentHash: userAgentHash ?? null
   };
+}
+
+export async function cleanupExpiredAuditLogs(
+  now = new Date(),
+  env: NodeJS.ProcessEnv = process.env
+): Promise<{ deletedCount: number; retentionDays: number; cutoff: Date }> {
+  const retentionDays = getAuditLogRetentionDays(env);
+  const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
+  const result = await prisma.auditLog.deleteMany({
+    where: {
+      createdAt: { lt: cutoff }
+    }
+  });
+
+  return {
+    deletedCount: result.count,
+    retentionDays,
+    cutoff
+  };
+}
+
+export function getAuditLogRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.AUDIT_LOG_RETENTION_DAYS ?? DEFAULT_AUDIT_LOG_RETENTION_DAYS);
+
+  if (!Number.isFinite(raw)) {
+    return DEFAULT_AUDIT_LOG_RETENTION_DAYS;
+  }
+
+  return Math.min(
+    Math.max(Math.floor(raw), MIN_AUDIT_LOG_RETENTION_DAYS),
+    MAX_AUDIT_LOG_RETENTION_DAYS
+  );
 }
 
 function sanitizeMetadata(metadata?: AuditMetadata): AuditMetadata | undefined {

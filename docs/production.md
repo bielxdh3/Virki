@@ -23,7 +23,7 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
 
 The production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands.
 
-Production Compose also starts a `session-cleanup` worker. It has no published ports, depends on PostgreSQL health, uses the same private database environment as the hub, and removes expired or revoked sessions every hour by default.
+Production Compose also starts a `session-cleanup` worker. It has no published ports, depends on PostgreSQL health, uses the same private database environment as the hub, removes expired or revoked sessions every hour by default, and applies audit log retention cleanup.
 
 Production host-published debug ports are also bound to loopback only:
 
@@ -72,6 +72,7 @@ Recommended values:
 - `PUBLIC_SITE_PORT`
 - `HUB_PORT`
 - `SESSION_CLEANUP_INTERVAL_SECONDS`
+- `AUDIT_LOG_RETENTION_DAYS`
 - `BIELOS_RATE_LIMIT_HASH_SECRET`
 - `BIELOS_OWNER_EMAIL`
 - `BIELOS_OWNER_PASSWORD`
@@ -157,10 +158,12 @@ npm run sessions:cleanup --workspace @bielos/auth
 
 The interval defaults to `3600` seconds and can be changed with `SESSION_CLEANUP_INTERVAL_SECONDS`. The worker must not publish ports and does not participate in Cloudflare Access or Tunnel routing.
 
+The same worker runs audit log retention cleanup with `AUDIT_LOG_RETENTION_DAYS`, defaulting to `180`. It deletes only audit rows older than the retention cutoff and logs only the deleted-row count.
+
 ## Current Production Blockers
 
 - Cloudflare Access JWT validation must be enabled with real private environment values and tested before treating the origin as production hardened.
-- Login rate limiting is in-memory and not distributed.
+- Edge-level or IP-based rate limiting is not configured in this repository.
 - Restore validation is manual and must be repeated for future backup procedure changes.
 - No TLS termination configured in this repository.
 - Secret scanning and linting are basic MVP checks and should be expanded as the repository matures.
