@@ -40,6 +40,8 @@ Current behavior:
 
 This keeps the limiter durable across hub restarts and shared by hub instances that use the same database and hash key.
 
+Set `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file to a stable private value. It is used only to HMAC login rate limit identifiers and must not be committed, logged, or shared. Rotating it invalidates existing rate limit buckets, which is acceptable.
+
 ## CSRF Posture
 
 Session cookies use `SameSite=Lax`, `HttpOnly`, and `Secure` in production.

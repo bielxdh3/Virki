@@ -72,11 +72,14 @@ Recommended values:
 - `PUBLIC_SITE_PORT`
 - `HUB_PORT`
 - `SESSION_CLEANUP_INTERVAL_SECONDS`
+- `BIELOS_RATE_LIMIT_HASH_SECRET`
 - `BIELOS_OWNER_EMAIL`
 - `BIELOS_OWNER_PASSWORD`
 - `CLOUDFLARE_ACCESS_JWT_REQUIRED`
 - `CLOUDFLARE_ACCESS_AUDIENCE`
 - `CLOUDFLARE_TEAM_DOMAIN`
+
+`BIELOS_RATE_LIMIT_HASH_SECRET` is a private stable secret used to HMAC login rate limit identifiers. Do not commit, log, paste, or share a real value. Rotating it clears the practical continuity of existing rate limit buckets, which is acceptable.
 
 ## Cookie Security
 

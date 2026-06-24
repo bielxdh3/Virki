@@ -46,6 +46,8 @@ Production Compose runs a small `session-cleanup` worker that periodically delet
 
 Login rate limiting stores only a keyed hash of the normalized submitted login identifier, attempt count, window timestamps, and expiration timestamp. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed for login when the limiter cannot be checked, while still returning the same generic login failure to the browser.
 
+Set `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private secret for HMAC hashing login rate limit identifiers. Do not commit, log, paste, or share a real value. Rotating this secret invalidates existing rate limit buckets, which is acceptable for this limiter.
+
 ## Audit Logging
 
 BielOS records minimal local audit logs for internal auth and security operations. Logs include generic event types, results, optional actor user ids, optional email hashes, short messages, and small sanitized metadata.
