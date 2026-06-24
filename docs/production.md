@@ -102,6 +102,12 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-
 
 `prisma db push` is only for disposable local databases. Do not use it for private, durable, or non-discardable production data.
 
+## Database Backups
+
+PostgreSQL backup and restore commands are documented in `docs/database.md`.
+
+Backups must stay outside Git tracking. Do not commit dumps, copied database volumes, or backup archives. Restore validation is intentionally separate and must use a disposable database before any private/non-discardable data is ingested.
+
 ## Cloudflare Status
 
 Cloudflare Tunnel and Cloudflare Access are prepared through templates and documented for the confirmed Docker deployment path. Real Cloudflare credentials and dashboard configuration stay outside the repository.
@@ -152,6 +158,6 @@ The interval defaults to `3600` seconds and can be changed with `SESSION_CLEANUP
 
 - Cloudflare Access JWT validation must be enabled with real private environment values and tested before treating the origin as production hardened.
 - Login rate limiting is in-memory and not distributed.
-- No backup and restore procedure validated through Docker.
+- Restore procedure still needs disposable validation through Docker.
 - No TLS termination configured in this repository.
 - Secret scanning and linting are basic MVP checks and should be expanded as the repository matures.

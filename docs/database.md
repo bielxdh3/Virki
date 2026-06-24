@@ -47,3 +47,54 @@ For future schema changes:
 5. Use `npm run prisma:migrate:deploy` for production updates.
 
 Do not ingest private/non-discardable data until backup and restore validation is complete.
+
+## Backup Procedure
+
+Backups are private operational artifacts. Never commit backup files, database dumps, or copied database volumes.
+
+The repository ignores `infra/backups/*` while keeping `infra/backups/.gitkeep`, so local backup files can be written there without being tracked by Git. A location outside the repository is also acceptable.
+
+Create a compressed custom-format PostgreSQL backup from the running production Compose stack:
+
+```bash
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' > infra/backups/bielos-YYYYMMDD-HHMMSS.dump
+```
+
+Rules:
+
+- Do not print `.env`.
+- Do not print database URLs or passwords.
+- Do not paste backup output into chat, issues, docs, or logs.
+- Confirm the backup file remains untracked before committing anything:
+
+```bash
+git status --short
+```
+
+For a plain SQL backup of disposable local data only:
+
+```bash
+docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --no-privileges' > infra/backups/bielos-YYYYMMDD-HHMMSS.sql
+```
+
+Prefer the custom dump format for restore testing because it is designed for `pg_restore`.
+
+## Restore Procedure
+
+Restore is potentially destructive. Do not restore over durable data unless there is a verified backup, a clear rollback plan, and explicit manual confirmation.
+
+Phase 07.2 must validate restore using a disposable database.
+
+Recommended validation shape:
+
+1. Start a disposable PostgreSQL container or disposable Compose project.
+2. Restore the custom dump into the disposable database:
+
+   ```bash
+   pg_restore --clean --if-exists --no-owner --no-privileges -d <disposable-database> <backup-file>
+   ```
+
+3. Run Prisma validation and application smoke checks against the disposable database.
+4. Delete the disposable database after validation.
+
+Do not run destructive restore commands against the real BielOS database during Phase 07.1.

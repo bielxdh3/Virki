@@ -193,6 +193,12 @@ SESSION_CLEANUP_INTERVAL_SECONDS=3600
 
 The cleanup log prints only the number of inactive sessions removed. It must not print session tokens, cookies, raw IPs, JWTs, or Cloudflare values.
 
+### Database Backups
+
+Use `docs/database.md` for the PostgreSQL backup procedure.
+
+Backups are private operational artifacts. Keep them out of Git, do not paste their contents into logs or chat, and verify restore only on a disposable database until Phase 07.2 is complete.
+
 ### Health Check Fails
 
 Run:

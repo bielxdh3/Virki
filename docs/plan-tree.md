@@ -116,9 +116,9 @@ BielOS is a private personal hub, not a public SaaS.
 
 ## 9. Backup And Restore Plan
 
-- `[NEXT]` Document PostgreSQL backup process.
-- `[NEXT]` Ensure backup output paths are ignored by Git.
-- `[NEXT]` Document restore command.
+- `[DONE]` Document PostgreSQL backup process.
+- `[DONE]` Ensure backup output paths are ignored by Git.
+- `[DONE]` Document restore command.
 - `[NEXT]` Validate restore on a disposable database.
 - `[BLOCKED]` Private data ingestion remains blocked until backup and restore are proven.
 
@@ -169,7 +169,7 @@ BielOS MVP is complete when:
 - `[CURRENT]` Phase 06.2: live Cloudflare smoke test.
 - `[NEXT]` Phase 06.3: fix real launch blockers only.
 - `[DONE]` Phase 07.0: production Prisma migrations.
-- `[NEXT]` Phase 07.1: PostgreSQL backup procedure.
+- `[DONE]` Phase 07.1: PostgreSQL backup procedure.
 - `[NEXT]` Phase 07.2: restore validation.
 - `[LATER]` Phase 08.0: persistent rate limiting.
 - `[LATER]` Phase 08.1: audit retention and cleanup.

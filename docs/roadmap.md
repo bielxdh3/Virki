@@ -60,3 +60,5 @@ Phase 05.3 added explicit CSRF protection for mutable hub POST routes. Future mo
 Phase 05.4 added an automatic production Compose session cleanup worker. Future modules remain unimplemented, and hub app behavior, Cloudflare Tunnel behavior, and Docker app port bindings remain unchanged.
 
 Phase 07.0 added the initial committed Prisma migration and production `prisma migrate deploy` scripts. Future modules remain unimplemented, and private/non-discardable data ingestion still waits for backup and restore validation.
+
+Phase 07.1 documented the PostgreSQL backup procedure and kept backup output paths ignored by Git. Future modules remain unimplemented, and private/non-discardable data ingestion still waits for restore validation.

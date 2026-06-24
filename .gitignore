@@ -25,6 +25,7 @@ Thumbs.db
 *.dump
 backups/
 infra/backups/*
+!infra/backups/
 !infra/backups/.gitkeep
 infra/cloudflare/*.json
 infra/cloudflare/cert.pem
