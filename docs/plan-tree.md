@@ -44,7 +44,8 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Safe hub health endpoint exists at `GET /api/health`.
 - `[DONE]` Local hub health responds at `http://127.0.0.1:3001/api/health`.
 - `[DONE]` Live private route smoke test for `https://hub.biel.dev.br`.
-- `[BLOCKED]` Future hub modules remain blocked until production safety is complete.
+- `[DONE]` Private hub module shell registry exists.
+- `[BLOCKED]` Real module implementations remain blocked until each has its own security and data design.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
 
@@ -138,13 +139,14 @@ BielOS is a private personal hub, not a public SaaS.
 
 ## 11. Future Modules Blocked List
 
-Do not implement these until production safety, migrations, and backup/restore are complete.
+Do not implement these beyond inert shell registry entries until each module has its own security and data design.
 
+- `[DONE]` BielOS Core shell registry entry.
 - `[DO NOT IMPLEMENT YET]` BielOS Core module expansion.
-- `[DO NOT IMPLEMENT YET]` L-vault.
-- `[DO NOT IMPLEMENT YET]` root.ark.
-- `[DO NOT IMPLEMENT YET]` H-vault.
-- `[DO NOT IMPLEMENT YET]` GymForge.
+- `[DO NOT IMPLEMENT YET]` L-vault implementation.
+- `[DO NOT IMPLEMENT YET]` root.ark implementation.
+- `[DO NOT IMPLEMENT YET]` H-vault implementation.
+- `[DO NOT IMPLEMENT YET]` GymForge implementation.
 
 ## 12. Definition Of MVP Complete
 
@@ -162,7 +164,8 @@ BielOS MVP is complete when:
 - `[DONE]` BielOS internal auth works after Cloudflare Access.
 - `[DONE]` Prisma migrations replace production `db push`.
 - `[DONE]` Backup and restore are documented and tested.
-- `[BLOCKED]` No future modules are implemented prematurely.
+- `[DONE]` Module shell registry exists without private data ingestion.
+- `[BLOCKED]` No real future modules are implemented prematurely.
 
 ## 13. Recommended Phase Order
 
@@ -174,4 +177,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 07.2: restore validation.
 - `[DONE]` Phase 08.0: persistent login rate limiting.
 - `[DONE]` Phase 08.1: audit retention and cleanup.
-- `[LATER]` Phase 09.0: begin module shell work only after data safety is complete.
+- `[DONE]` Phase 09.0: module shell registry only.
+- `[LATER]` Phase 09.1+: real modules only after module-specific security and data design.

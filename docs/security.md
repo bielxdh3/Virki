@@ -81,6 +81,10 @@ This is an MVP guardrail for committed files and new non-ignored local files. It
 
 The public site can show the BielOS name, short description, public cards, generic status, and an enter button. It must not expose private modules beyond approved generic references.
 
+## Module Shell
+
+The private hub may show an internal module shell registry with planned module names and locked statuses. This shell must not include private data fields, upload inputs, module APIs, vault storage, ingestion flows, encryption/key management, audit log UI, or real module logic. Each real module requires its own security and data design before implementation.
+
 ## Production Exposure Blockers
 
 Do not expose the development server or `infra/docker-compose.yml` outside local development. Development compose host ports must stay bound to `127.0.0.1`.

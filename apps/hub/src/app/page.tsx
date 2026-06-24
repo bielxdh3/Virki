@@ -1,5 +1,4 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import { moduleCatalog } from "@bielos/ui";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../lib/cloudflare-access";
@@ -10,18 +9,39 @@ export const dynamic = "force-dynamic";
 const moduleCards = [
   {
     name: "BielOS Core",
-    shortName: "OS",
-    description: "Main hub interface, session boundary, and module overview.",
-    status: "Active",
+    shortName: "BC",
+    description: "Core workspace shell and module registry placeholder.",
+    status: "Shell only",
     sensitivity: "internal"
   },
-  ...moduleCatalog.map((module) => ({
-    name: module.name,
-    shortName: module.shortName,
-    description: module.description,
-    status: module.status,
-    sensitivity: module.sensitivity
-  }))
+  {
+    name: "L-vault",
+    shortName: "LV",
+    description: "Planned private vault area. No storage or ingestion is enabled.",
+    status: "Locked",
+    sensitivity: "sensitive"
+  },
+  {
+    name: "root.ark",
+    shortName: "RA",
+    description: "Planned archive area. No documents or records are accepted.",
+    status: "Locked",
+    sensitivity: "sensitive"
+  },
+  {
+    name: "H-vault",
+    shortName: "HV",
+    description: "Planned sensitive vault area. No health or private data exists here.",
+    status: "Locked",
+    sensitivity: "sensitive"
+  },
+  {
+    name: "GymForge",
+    shortName: "GF",
+    description: "Planned training workspace. No tracking or personal data is enabled.",
+    status: "Locked",
+    sensitivity: "internal"
+  }
 ];
 
 const deploymentStatus = [
@@ -58,7 +78,7 @@ export default async function HubDashboardPage() {
     redirect("/login");
   }
 
-  const reservedModules = moduleCards.filter((module) => module.status !== "Active");
+  const reservedModules = moduleCards;
   const csrfToken = createCsrfToken();
 
   return (
@@ -118,7 +138,7 @@ export default async function HubDashboardPage() {
             <h1>Workspace</h1>
             <p>
               Personal workspace for projects, tools, archives, automation, and technical labs.
-              Modules stay reserved until they are implemented.
+              Modules stay locked until each one has its own security and data design.
             </p>
           </div>
           <div className="identity-meter" aria-label="Core readiness">
@@ -218,7 +238,7 @@ export default async function HubDashboardPage() {
               <article
                 className={`module-card ${
                   module.sensitivity === "sensitive" ? "is-sensitive" : ""
-                } ${module.status === "Active" ? "is-active" : ""}`}
+                }`}
                 key={module.name}
               >
                 <div className="module-card-header">
@@ -230,10 +250,8 @@ export default async function HubDashboardPage() {
                 <h2>{module.name}</h2>
                 <p>{module.description}</p>
                 <div className="module-tags">
-                  <span className={module.status === "Active" ? "is-active" : "is-reserved"}>
-                    {module.status}
-                  </span>
-                  <span>{module.status === "Active" ? "Active" : "Planned"}</span>
+                  <span className="is-reserved">{module.status}</span>
+                  <span>Planned</span>
                 </div>
               </article>
             ))}
@@ -244,6 +262,9 @@ export default async function HubDashboardPage() {
           <div>
             <p className="eyebrow">Reserved modules</p>
             <h2>Future module work is not active yet</h2>
+            <p>
+              Private data ingestion is still module-specific and is not enabled by this shell.
+            </p>
           </div>
           <div className="reserved-list">
             {reservedModules.map((module) => (
