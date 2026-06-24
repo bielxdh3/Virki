@@ -16,7 +16,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Public site target: `biel.dev.br`.
 - `[DONE]` Private hub target: `hub.biel.dev.br`.
 - `[DONE]` Hub security model: Cloudflare Access first, BielOS internal auth second.
-- `[BLOCKED]` Private/non-discardable data ingestion is blocked until migrations and backup/restore are ready.
+- `[DONE]` Private/non-discardable data ingestion safety prerequisites now include committed migrations plus documented and disposable-tested backup/restore.
 
 ## 1. Foundation
 
@@ -33,7 +33,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Public site builds independently from PostgreSQL.
 - `[DONE]` Public site production container starts locally.
 - `[DONE]` Local public site health responds at `http://127.0.0.1:3000`.
-- `[CURRENT]` Live public route smoke test for `https://biel.dev.br` and `https://www.biel.dev.br`.
+- `[DONE]` Live public route smoke test for `https://biel.dev.br` and `https://www.biel.dev.br`.
 - `[LATER]` Expand public content only with safe, non-private information.
 
 ## 3. Private Hub Plan
@@ -43,7 +43,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Hub dashboard shell exists.
 - `[DONE]` Safe hub health endpoint exists at `GET /api/health`.
 - `[DONE]` Local hub health responds at `http://127.0.0.1:3001/api/health`.
-- `[CURRENT]` Live private route smoke test for `https://hub.biel.dev.br`.
+- `[DONE]` Live private route smoke test for `https://hub.biel.dev.br`.
 - `[BLOCKED]` Future hub modules remain blocked until production safety is complete.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
@@ -56,7 +56,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Cloudflare Access is the required outer boundary for `hub.biel.dev.br`.
 - `[DONE]` Optional origin-side Cloudflare Access JWT validation exists.
 - `[DONE]` Required-and-missing/invalid Access JWT returns HTTP `403`.
-- `[NEXT]` Live Cloudflare smoke test confirms the public site is public and the hub shows Cloudflare Access first.
+- `[DONE]` Live Cloudflare smoke test confirmed the public site is public and the hub shows Cloudflare Access first.
 
 ## 5. Auth, Session, And CSRF Plan
 
@@ -103,8 +103,8 @@ BielOS is a private personal hub, not a public SaaS.
   - production stack start
   - status checks
   - local health checks
-- `[CURRENT]` Live Cloudflare smoke test.
-- `[NEXT]` Fix only real launch blockers found during live smoke testing.
+- `[DONE]` Live Cloudflare smoke test.
+- `[LATER]` Fix only real launch blockers found during future smoke testing.
 - `[LATER]` Add safe diagnostics only if repeated manual checks become error-prone.
 
 ## 8. Migrations Plan
@@ -119,8 +119,8 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Document PostgreSQL backup process.
 - `[DONE]` Ensure backup output paths are ignored by Git.
 - `[DONE]` Document restore command.
-- `[NEXT]` Validate restore on a disposable database.
-- `[BLOCKED]` Private data ingestion remains blocked until backup and restore are proven.
+- `[DONE]` Validate restore on a disposable database.
+- `[LATER]` Repeat restore validation after meaningful schema or backup procedure changes.
 
 ## 10. Observability And Operations
 
@@ -156,21 +156,21 @@ BielOS MVP is complete when:
 - `[DONE]` Session cleanup runs.
 - `[DONE]` CSRF protects current mutable routes.
 - `[DONE]` Secret scan, lint, typecheck, build, and Prisma validation pass.
-- `[CURRENT]` `biel.dev.br` works publicly through Cloudflare.
-- `[CURRENT]` `hub.biel.dev.br` works privately through Cloudflare Access.
-- `[CURRENT]` BielOS internal auth works after Cloudflare Access.
+- `[DONE]` `biel.dev.br` works publicly through Cloudflare.
+- `[DONE]` `hub.biel.dev.br` works privately through Cloudflare Access.
+- `[DONE]` BielOS internal auth works after Cloudflare Access.
 - `[DONE]` Prisma migrations replace production `db push`.
-- `[NEXT]` Backup and restore are documented and tested.
+- `[DONE]` Backup and restore are documented and tested.
 - `[BLOCKED]` No future modules are implemented prematurely.
 
 ## 13. Recommended Phase Order
 
 - `[DONE]` Phase 06.1: local production launch execution.
-- `[CURRENT]` Phase 06.2: live Cloudflare smoke test.
-- `[NEXT]` Phase 06.3: fix real launch blockers only.
+- `[DONE]` Phase 06.2: live Cloudflare smoke test.
+- `[LATER]` Phase 06.3: fix real launch blockers only.
 - `[DONE]` Phase 07.0: production Prisma migrations.
 - `[DONE]` Phase 07.1: PostgreSQL backup procedure.
-- `[NEXT]` Phase 07.2: restore validation.
-- `[LATER]` Phase 08.0: persistent rate limiting.
+- `[DONE]` Phase 07.2: restore validation.
+- `[NEXT]` Phase 08.0: persistent rate limiting.
 - `[LATER]` Phase 08.1: audit retention and cleanup.
 - `[LATER]` Phase 09.0: begin module shell work only after data safety is complete.

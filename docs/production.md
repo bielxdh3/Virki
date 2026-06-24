@@ -106,7 +106,7 @@ docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-
 
 PostgreSQL backup and restore commands are documented in `docs/database.md`.
 
-Backups must stay outside Git tracking. Do not commit dumps, copied database volumes, or backup archives. Restore validation is intentionally separate and must use a disposable database before any private/non-discardable data is ingested.
+Backups must stay outside Git tracking. Do not commit dumps, copied database volumes, or backup archives. Restore validation must use a disposable database and should be repeated after meaningful schema or backup procedure changes.
 
 ## Cloudflare Status
 
@@ -158,6 +158,6 @@ The interval defaults to `3600` seconds and can be changed with `SESSION_CLEANUP
 
 - Cloudflare Access JWT validation must be enabled with real private environment values and tested before treating the origin as production hardened.
 - Login rate limiting is in-memory and not distributed.
-- Restore procedure still needs disposable validation through Docker.
+- Restore validation is manual and must be repeated for future backup procedure changes.
 - No TLS termination configured in this repository.
 - Secret scanning and linting are basic MVP checks and should be expanded as the repository matures.

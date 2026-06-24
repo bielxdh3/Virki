@@ -46,7 +46,7 @@ For future schema changes:
 4. Commit both the schema and migration files.
 5. Use `npm run prisma:migrate:deploy` for production updates.
 
-Do not ingest private/non-discardable data until backup and restore validation is complete.
+Do not ingest private/non-discardable data until migrations are deployed and a current backup can be restored into a disposable database.
 
 ## Backup Procedure
 
@@ -83,9 +83,9 @@ Prefer the custom dump format for restore testing because it is designed for `pg
 
 Restore is potentially destructive. Do not restore over durable data unless there is a verified backup, a clear rollback plan, and explicit manual confirmation.
 
-Phase 07.2 must validate restore using a disposable database.
+Phase 07.2 validated restore using a disposable PostgreSQL container. The validation used a custom-format dump, restored it with `pg_restore`, confirmed the restored database could be inspected safely, and removed the disposable container and local validation dump afterward.
 
-Recommended validation shape:
+Use this shape for future restore validation:
 
 1. Start a disposable PostgreSQL container or disposable Compose project.
 2. Restore the custom dump into the disposable database:
@@ -97,4 +97,4 @@ Recommended validation shape:
 3. Run Prisma validation and application smoke checks against the disposable database.
 4. Delete the disposable database after validation.
 
-Do not run destructive restore commands against the real BielOS database during Phase 07.1.
+Do not run destructive restore commands against the real BielOS database while validating backups. Treat every restore target as disposable unless there is an explicit manual recovery plan.
