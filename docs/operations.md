@@ -67,6 +67,8 @@ Run local health checks:
 npm run health:local
 ```
 
+Use `docs/deployment-verification.md` for the first production launch checklist and live Cloudflare smoke test.
+
 The health check verifies:
 
 - `http://127.0.0.1:3000`
