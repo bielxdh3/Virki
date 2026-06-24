@@ -144,6 +144,7 @@ Do not implement these beyond inert shell registry entries until each module com
 
 - `[DONE]` BielOS Core shell registry entry.
 - `[DO NOT IMPLEMENT YET]` BielOS Core module expansion.
+- `[DONE]` L-vault planning document.
 - `[DO NOT IMPLEMENT YET]` L-vault implementation.
 - `[DO NOT IMPLEMENT YET]` root.ark implementation.
 - `[DO NOT IMPLEMENT YET]` H-vault implementation.
@@ -180,4 +181,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 08.1: audit retention and cleanup.
 - `[DONE]` Phase 09.0: module shell registry only.
 - `[DONE]` Phase 09.1: module security design template.
-- `[LATER]` Phase 09.2+: real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.2: L-vault planning only.
+- `[LATER]` Phase 09.3+: real modules only after module-specific security and data design.
