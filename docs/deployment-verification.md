@@ -24,7 +24,7 @@ npm run health:local
   - `127.0.0.1:3000->3000`
   - `127.0.0.1:3001->3001`
 - Confirm the `cloudflared` container is connected.
-- Confirm `postgres`, `public-site`, and `hub` are healthy.
+- Confirm `postgres`, `public-site`, `hub`, and `session-cleanup` are running.
 - Confirm no real `.env`, tunnel token, credentials JSON, Cloudflare account ID, or Cloudflare secret is committed.
 
 ## Remote Routes
@@ -58,7 +58,8 @@ The preferred BielOS production path is Docker.
 ## Local Behavior
 
 - `http://127.0.0.1:3000` reaches the public site on the host machine.
-- `http://127.0.0.1:3001/login` reaches the hub login on the host machine.
+- `http://127.0.0.1:3001/api/health` reaches the hub health endpoint on the host machine.
+- `http://127.0.0.1:3001/login` reaches the hub login on the host machine when origin-side Access JWT validation is disabled for local development.
 - Local host access is useful for debugging only.
 - Remote hub exposure must remain behind Cloudflare Access.
 - Direct internet access to port `3001` would bypass Cloudflare Access and must be blocked.
@@ -67,8 +68,8 @@ Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it re
 
 ## Remaining Limitations
 
-- The app does not yet validate Cloudflare Access JWTs at the origin.
+- Origin-side Cloudflare Access JWT validation is optional and depends on private environment configuration.
 - Login rate limiting is local/in-memory and not distributed.
-- CSRF protection currently relies on cookie posture and limited write flows.
+- CSRF protection currently covers the login and logout write flows.
 - Backup and restore procedures still need production validation.
 - Host firewall rules for public Linux/VPS deployment still need environment-specific validation.

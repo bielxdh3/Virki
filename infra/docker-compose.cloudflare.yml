@@ -5,9 +5,6 @@ services:
     depends_on:
       - public-site
       - hub
-    env_file:
-      - path: ../.env
-        required: true
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN must be set in local .env}
     command: tunnel --no-autoupdate run

@@ -10,6 +10,7 @@ Public paths:
 
 - `/login`
 - `/api/login`
+- `/api/health`
 - static assets
 - Next.js internal static/image assets
 
@@ -42,9 +43,9 @@ Persistent database-backed rate limiting is intentionally not added yet because 
 
 Session cookies use `SameSite=Lax`, `HttpOnly`, and `Secure` in production.
 
-Login and logout are POST-only routes. The current MVP does not include a dedicated CSRF token. SameSite cookie behavior is the current baseline.
+Login and logout are POST-only routes and require an explicit CSRF token. Missing or invalid CSRF tokens return HTTP `403` before login or logout state changes are attempted.
 
-Add explicit CSRF tokens before exposing broader write actions from the hub.
+Extend explicit CSRF tokens before exposing broader write actions from the hub.
 
 ## Expired Session Cleanup
 
@@ -58,11 +59,18 @@ npm run sessions:cleanup
 
 This deletes expired and revoked sessions from the database.
 
+Production Compose also starts a `session-cleanup` worker that runs this command on an interval without publishing ports.
+
+## Audit Logging
+
+Login, logout, session revocation, session cleanup, OWNER seed, and Cloudflare Access JWT validation events write minimal audit logs. Audit metadata must not include passwords, session tokens, cookies, raw headers, raw IPs, JWTs, Cloudflare secrets, private paths, or database dumps.
+
+## Cloudflare Access
+
+Cloudflare Access is the outer boundary for `hub.biel.dev.br`, and BielOS internal auth remains the second layer. Optional origin-side Access JWT validation can reject hub requests with HTTP `403` when required and missing or invalid. The hub health endpoint stays available for local and Docker health checks.
+
 ## Remaining Limitations
 
 - No persistent distributed rate limit.
-- No CSRF token beyond SameSite cookie posture.
-- No audit log for login/logout events.
 - No module-level sensitive unlock.
-- No Cloudflare Access integration yet.
 - No public registration, OAuth, email reset, or magic links.

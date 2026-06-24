@@ -1,14 +1,17 @@
 import http from "node:http";
 
+const publicSitePort = process.env.PUBLIC_SITE_PORT ?? "3000";
+const hubPort = process.env.HUB_PORT ?? "3001";
+
 const checks = [
   {
     name: "public-site",
-    url: "http://127.0.0.1:3000",
+    url: `http://127.0.0.1:${publicSitePort}`,
     expectedStatus: 200
   },
   {
     name: "hub health",
-    url: "http://127.0.0.1:3001/api/health",
+    url: `http://127.0.0.1:${hubPort}/api/health`,
     expectedStatus: 200
   }
 ];

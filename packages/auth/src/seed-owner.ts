@@ -47,7 +47,7 @@ async function main() {
     }
   });
 
-  console.log(`OWNER user is ready: ${email}`);
+  console.log("OWNER user is ready.");
 }
 
 main()

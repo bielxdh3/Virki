@@ -46,3 +46,11 @@ jobs:
 
       - name: Build production Docker image
         run: docker build -f infra/Dockerfile.prod .
+
+      - name: Validate production Compose config
+        env:
+          DATABASE_URL: postgresql://bielos_app:local-validation-only@postgres:5432/bielos
+          POSTGRES_PASSWORD: local-validation-only
+          NEXT_PUBLIC_HUB_URL: https://hub.example.invalid
+          CLOUDFLARE_TUNNEL_TOKEN: placeholder
+        run: docker compose -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml config --no-env-resolution --quiet
