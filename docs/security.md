@@ -83,7 +83,7 @@ The public site can show the BielOS name, short description, public cards, gener
 
 ## Module Shell
 
-The private hub may show an internal module shell registry with planned module names and locked statuses. This shell must not include private data fields, upload inputs, module APIs, vault storage, ingestion flows, encryption/key management, audit log UI, or real module logic. Each real module requires its own security and data design before implementation.
+The private hub may show an internal module shell registry with planned module names and locked statuses. This shell must not include private data fields, upload inputs, module APIs, vault storage, ingestion flows, encryption/key management, audit log UI, or real module logic. Each real module must complete `docs/module-security-template.md` before implementation.
 
 ## Production Exposure Blockers
 

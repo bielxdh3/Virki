@@ -45,7 +45,8 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Local hub health responds at `http://127.0.0.1:3001/api/health`.
 - `[DONE]` Live private route smoke test for `https://hub.biel.dev.br`.
 - `[DONE]` Private hub module shell registry exists.
-- `[BLOCKED]` Real module implementations remain blocked until each has its own security and data design.
+- `[DONE]` Module security design template exists.
+- `[BLOCKED]` Real module implementations remain blocked until each completes `docs/module-security-template.md`.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
 
@@ -139,7 +140,7 @@ BielOS is a private personal hub, not a public SaaS.
 
 ## 11. Future Modules Blocked List
 
-Do not implement these beyond inert shell registry entries until each module has its own security and data design.
+Do not implement these beyond inert shell registry entries until each module completes `docs/module-security-template.md`.
 
 - `[DONE]` BielOS Core shell registry entry.
 - `[DO NOT IMPLEMENT YET]` BielOS Core module expansion.
@@ -178,4 +179,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 08.0: persistent login rate limiting.
 - `[DONE]` Phase 08.1: audit retention and cleanup.
 - `[DONE]` Phase 09.0: module shell registry only.
-- `[LATER]` Phase 09.1+: real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.1: module security design template.
+- `[LATER]` Phase 09.2+: real modules only after module-specific security and data design.

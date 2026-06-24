@@ -64,3 +64,5 @@ Phase 07.0 added the initial committed Prisma migration and production `prisma m
 Phase 07.1 documented the PostgreSQL backup procedure and kept backup output paths ignored by Git. Future modules remain unimplemented, and private/non-discardable data ingestion still waits for restore validation.
 
 Phase 09.0 added only an inert private hub module shell registry. L-vault, root.ark, H-vault, GymForge, and real BielOS Core expansion remain unimplemented until each has its own security and data design.
+
+Phase 09.1 added the module security design template. Real module implementation remains blocked until the target module completes that template.
