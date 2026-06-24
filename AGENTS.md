@@ -124,6 +124,18 @@ For Docker-related changes, also validate the relevant Compose config when feasi
 
 For security changes, explicitly state what could not be validated locally.
 
+## Token Economy Rules
+
+- Prefer the smallest safe context.
+- Inspect only files relevant to the task.
+- Do not read broad repository context unless required.
+- For docs-only tasks, run only `npm run secrets:scan` unless the prompt explicitly asks for more.
+- Do not run `npm run build`, `npm run typecheck`, `npm run lint`, Docker commands, or Prisma commands for docs-only changes.
+- Use one skill at most unless the task is explicitly security-sensitive.
+- Do not spawn subagents unless explicitly requested.
+- Keep final output compact.
+- Report skipped validations as intentionally skipped when they are not relevant.
+
 ## Codex Behavior
 
 Follow repository instructions and relevant skills.
