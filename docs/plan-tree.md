@@ -1,0 +1,176 @@
+# BielOS Plan Tree
+
+Status labels:
+
+- `[DONE]` already implemented or documented.
+- `[CURRENT]` active planning focus.
+- `[NEXT]` should be implemented soon.
+- `[LATER]` planned after production safety.
+- `[BLOCKED]` blocked until prerequisites are complete.
+- `[DO NOT IMPLEMENT YET]` reserved future module.
+
+## 0. Project Goal
+
+BielOS is a private personal hub, not a public SaaS.
+
+- `[DONE]` Public site target: `biel.dev.br`.
+- `[DONE]` Private hub target: `hub.biel.dev.br`.
+- `[DONE]` Hub security model: Cloudflare Access first, BielOS internal auth second.
+- `[BLOCKED]` Private/non-discardable data ingestion is blocked until migrations and backup/restore are ready.
+
+## 1. Foundation
+
+- `[DONE]` Monorepo with Next.js apps, shared packages, TypeScript, Prisma, PostgreSQL, Docker Compose, CI, lint, build validation, and secret scan.
+- `[DONE]` Codex control layer:
+  - `AGENTS.md`
+  - `.agents/skills/bielos-phase-review/SKILL.md`
+  - `.agents/skills/bielos-security-review/SKILL.md`
+  - `.agents/skills/bielos-publication-check/SKILL.md`
+
+## 2. Public Site Plan
+
+- `[DONE]` Public site app exists at `apps/public-site`.
+- `[DONE]` Public site builds independently from PostgreSQL.
+- `[DONE]` Public site production container starts locally.
+- `[DONE]` Local public site health responds at `http://127.0.0.1:3000`.
+- `[CURRENT]` Live public route smoke test for `https://biel.dev.br` and `https://www.biel.dev.br`.
+- `[LATER]` Expand public content only with safe, non-private information.
+
+## 3. Private Hub Plan
+
+- `[DONE]` Private hub app exists at `apps/hub`.
+- `[DONE]` Hub depends on PostgreSQL where needed.
+- `[DONE]` Hub dashboard shell exists.
+- `[DONE]` Safe hub health endpoint exists at `GET /api/health`.
+- `[DONE]` Local hub health responds at `http://127.0.0.1:3001/api/health`.
+- `[CURRENT]` Live private route smoke test for `https://hub.biel.dev.br`.
+- `[BLOCKED]` Future hub modules remain blocked until production safety is complete.
+
+## 4. Cloudflare, Tunnel, And Access Plan
+
+- `[DONE]` Cloudflare Tunnel Compose service exists.
+- `[DONE]` Docker-mode tunnel routing is documented to use service names:
+  - `http://public-site:3000`
+  - `http://hub:3001`
+- `[DONE]` `cloudflared` publishes no host ports.
+- `[DONE]` Cloudflare Access is the required outer boundary for `hub.biel.dev.br`.
+- `[DONE]` Optional origin-side Cloudflare Access JWT validation exists.
+- `[DONE]` Required-and-missing/invalid Access JWT returns HTTP `403`.
+- `[NEXT]` Live Cloudflare smoke test confirms the public site is public and the hub shows Cloudflare Access first.
+
+## 5. Auth, Session, And CSRF Plan
+
+- `[DONE]` OWNER seed flow uses private local env values.
+- `[DONE]` Internal BielOS login is implemented.
+- `[DONE]` Session tokens are stored hashed at rest.
+- `[DONE]` Production session cookies are HttpOnly, SameSite=Lax, and Secure.
+- `[DONE]` Logout revokes the session and clears the cookie.
+- `[DONE]` CSRF protection covers:
+  - `POST /api/login`
+  - `POST /api/logout`
+- `[DONE]` Missing/invalid CSRF returns HTTP `403`.
+- `[DONE]` Production session cleanup worker runs on an interval.
+- `[LATER]` Persistent/distributed rate limiting.
+- `[LATER]` Session management improvements after launch safety is proven.
+- `[LATER]` Shared CSRF secret or alternate strategy only if multiple hub replicas are used.
+
+## 6. Docker And Production Plan
+
+- `[DONE]` Production Compose includes:
+  - `public-site`
+  - `hub`
+  - `postgres`
+  - `cloudflared`
+  - `session-cleanup`
+- `[DONE]` App host-published ports are bound to `127.0.0.1`.
+- `[DONE]` `session-cleanup` has no host-published ports.
+- `[DONE]` `cloudflared` has no host-published ports.
+- `[DONE]` Hub healthcheck uses `/api/health`.
+- `[DONE]` Local production stack starts from `E:\BielOS`.
+- `[DONE]` Local production health checks pass.
+- `[NEXT]` Keep Docker changes limited to real launch blockers.
+
+## 7. Launch Validation Plan
+
+- `[DONE]` First production launch checklist exists in `docs/deployment-verification.md`.
+- `[DONE]` Local launch execution passed:
+  - secret scan
+  - lint
+  - typecheck
+  - Prisma validation
+  - build
+  - Compose config validation
+  - production stack start
+  - status checks
+  - local health checks
+- `[CURRENT]` Live Cloudflare smoke test.
+- `[NEXT]` Fix only real launch blockers found during live smoke testing.
+- `[LATER]` Add safe diagnostics only if repeated manual checks become error-prone.
+
+## 8. Migrations Plan
+
+- `[NEXT]` Replace production reliance on `prisma db push` before private/non-discardable data ingestion.
+- `[NEXT]` Create committed Prisma migrations.
+- `[NEXT]` Document production `prisma migrate deploy`.
+- `[LATER]` Keep disposable/local-only schema workflows clearly separated from production.
+
+## 9. Backup And Restore Plan
+
+- `[NEXT]` Document PostgreSQL backup process.
+- `[NEXT]` Ensure backup output paths are ignored by Git.
+- `[NEXT]` Document restore command.
+- `[NEXT]` Validate restore on a disposable database.
+- `[BLOCKED]` Private data ingestion remains blocked until backup and restore are proven.
+
+## 10. Observability And Operations
+
+- `[DONE]` Minimal audit logs exist for auth/session/security events.
+- `[DONE]` Audit metadata is intentionally sanitized.
+- `[DONE]` Local health and status scripts exist:
+  - `health:local`
+  - `status:prod`
+  - `status:ports`
+  - `logs:prod`
+- `[LATER]` Audit retention policy.
+- `[LATER]` Safe redacted diagnostics if needed.
+- `[BLOCKED]` Audit log UI is blocked until authorization and retention rules are stronger.
+
+## 11. Future Modules Blocked List
+
+Do not implement these until production safety, migrations, and backup/restore are complete.
+
+- `[DO NOT IMPLEMENT YET]` BielOS Core module expansion.
+- `[DO NOT IMPLEMENT YET]` L-vault.
+- `[DO NOT IMPLEMENT YET]` root.ark.
+- `[DO NOT IMPLEMENT YET]` H-vault.
+- `[DO NOT IMPLEMENT YET]` GymForge.
+
+## 12. Definition Of MVP Complete
+
+BielOS MVP is complete when:
+
+- `[DONE]` Local production stack starts reliably.
+- `[DONE]` Local health checks pass.
+- `[DONE]` Production Compose config validates.
+- `[DONE]` App ports remain loopback-only.
+- `[DONE]` Session cleanup runs.
+- `[DONE]` CSRF protects current mutable routes.
+- `[DONE]` Secret scan, lint, typecheck, build, and Prisma validation pass.
+- `[CURRENT]` `biel.dev.br` works publicly through Cloudflare.
+- `[CURRENT]` `hub.biel.dev.br` works privately through Cloudflare Access.
+- `[CURRENT]` BielOS internal auth works after Cloudflare Access.
+- `[NEXT]` Prisma migrations replace production `db push`.
+- `[NEXT]` Backup and restore are documented and tested.
+- `[BLOCKED]` No future modules are implemented prematurely.
+
+## 13. Recommended Phase Order
+
+- `[DONE]` Phase 06.1: local production launch execution.
+- `[CURRENT]` Phase 06.2: live Cloudflare smoke test.
+- `[NEXT]` Phase 06.3: fix real launch blockers only.
+- `[NEXT]` Phase 07.0: production Prisma migrations.
+- `[NEXT]` Phase 07.1: PostgreSQL backup procedure.
+- `[NEXT]` Phase 07.2: restore validation.
+- `[LATER]` Phase 08.0: persistent rate limiting.
+- `[LATER]` Phase 08.1: audit retention and cleanup.
+- `[LATER]` Phase 09.0: begin module shell work only after data safety is complete.
