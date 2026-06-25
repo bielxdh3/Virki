@@ -46,6 +46,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Live private route smoke test for `https://hub.biel.dev.br`.
 - `[DONE]` Private hub module shell registry exists.
 - `[DONE]` Module security design template exists.
+- `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
 - `[BLOCKED]` Real module implementations remain blocked until each completes `docs/module-security-template.md`.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
@@ -142,6 +143,7 @@ BielOS is a private personal hub, not a public SaaS.
 
 Do not implement these beyond inert shell registry entries until each module completes `docs/module-security-template.md`.
 
+- `[DONE]` Consolidated module planning index: `docs/modules/README.md`.
 - `[DONE]` BielOS Core shell registry entry.
 - `[DO NOT IMPLEMENT YET]` BielOS Core module expansion.
 - `[DONE]` L-vault planning document.
@@ -188,4 +190,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.3: root.ark planning only.
 - `[DONE]` Phase 09.4: H-vault planning only.
 - `[DONE]` Phase 09.5: GymForge planning only.
-- `[LATER]` Phase 09.6+: real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.6: consolidate module planning docs.
+- `[LATER]` Phase 09.7+: real modules only after module-specific security and data design.

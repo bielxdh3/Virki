@@ -74,3 +74,5 @@ Phase 09.3 added the root.ark planning document only. Archive storage, upload, i
 Phase 09.4 added the H-vault planning document only. Health/sensitive storage, upload, import/export, UI, routes, APIs, schema, migrations, and private data ingestion remain blocked.
 
 Phase 09.5 added the GymForge planning document only. Workout tracking, body metrics, upload, import/export, UI, routes, APIs, schema, migrations, and private data ingestion remain blocked.
+
+Phase 09.6 consolidated module planning documents under `docs/modules/README.md`. Real module implementation remains blocked until module-specific design is complete.
