@@ -1,8 +1,10 @@
+import { CSRF_FORM_FIELD_NAME, createCsrfToken } from "@bielos/auth/csrf";
 import { prisma } from "@bielos/database";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
+import { changeGymForgeParticipantStatus, createGymForgeParticipant } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,10 @@ const foundationItems = [
 ];
 
 const formatCount = (count: number) => new Intl.NumberFormat("en-US").format(count);
+
+function isHubAdmin(role: string): boolean {
+  return role === "OWNER" || role === "ADMIN";
+}
 
 export default async function GymForgePage() {
   const requestHeaders = await headers();
@@ -36,7 +42,8 @@ export default async function GymForgePage() {
     activeParticipantsCount,
     exerciseCatalogCount,
     competitionsCount,
-    viewerParticipant
+    viewerParticipant,
+    participants
   ] = await Promise.all([
     prisma.gymForgeParticipant.count(),
     prisma.gymForgeParticipant.count({ where: { status: "ACTIVE" } }),
@@ -49,8 +56,22 @@ export default async function GymForgePage() {
         status: true,
         role: true
       }
+    }),
+    prisma.gymForgeParticipant.findMany({
+      orderBy: [{ createdAt: "desc" }],
+      take: 50,
+      select: {
+        id: true,
+        displayName: true,
+        status: true,
+        role: true,
+        createdAt: true
+      }
     })
   ]);
+
+  const isAdmin = isHubAdmin(session.user.role);
+  const csrfToken = createCsrfToken();
 
   const metrics = [
     { label: "Participants", value: formatCount(participantsCount) },
@@ -157,6 +178,81 @@ export default async function GymForgePage() {
             </div>
           </article>
         </section>
+
+        {isAdmin ? (
+          <section className="module-window anchor-section" id="participants" aria-label="GymForge participants">
+            <div className="window-titlebar">
+              <div>
+                <span>Admin</span>
+                <strong>Participant management</strong>
+              </div>
+            </div>
+
+            <div className="dashboard-grid">
+              <article className="panel">
+                <div className="panel-title">
+                  <span>Create</span>
+                  <strong className="status-pill">Admin only</strong>
+                </div>
+                <form className="login-form" action={createGymForgeParticipant}>
+                  <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                  <label>
+                    Display name
+                    <input name="displayName" minLength={2} maxLength={80} required />
+                  </label>
+                  <label>
+                    Role
+                    <select name="role" defaultValue="PARTICIPANT">
+                      <option value="PARTICIPANT">Participant</option>
+                      <option value="ADMIN">Admin</option>
+                    </select>
+                  </label>
+                  <label>
+                    Status
+                    <select name="status" defaultValue="INVITED">
+                      <option value="INVITED">Invited</option>
+                      <option value="ACTIVE">Active</option>
+                      <option value="DISABLED">Disabled</option>
+                      <option value="ARCHIVED">Archived</option>
+                    </select>
+                  </label>
+                  <button type="submit">Create participant</button>
+                </form>
+              </article>
+
+              <article className="panel">
+                <div className="panel-title">
+                  <span>Participants</span>
+                  <strong className="status-pill">Latest 50</strong>
+                </div>
+                <div className="status-list">
+                  {participants.map((participant) => (
+                    <div key={participant.id}>
+                      <span>{participant.displayName}</span>
+                      <strong>{participant.role} / {participant.status}</strong>
+                      <form className="action-stack" action={changeGymForgeParticipantStatus}>
+                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                        <input type="hidden" name="participantId" value={participant.id} />
+                        <button type="submit" name="status" value="DISABLED">
+                          Disable
+                        </button>
+                        <button type="submit" name="status" value="ARCHIVED">
+                          Archive
+                        </button>
+                      </form>
+                    </div>
+                  ))}
+                  {participants.length === 0 ? (
+                    <div>
+                      <span>Empty</span>
+                      <strong>No GymForge participants yet</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            </div>
+          </section>
+        ) : null}
 
         <section className="module-window anchor-section" id="foundation" aria-label="GymForge foundation">
           <div className="window-titlebar">
