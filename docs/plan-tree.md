@@ -50,6 +50,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[BLOCKED]` Real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
 - `[BLOCKED]` root.ark implementation also requires a dedicated public zero-knowledge architecture phase.
 - `[DONE]` GymForge MVP foundation exists behind the private hub with schema and placeholder route only.
+- `[DONE]` GymForge participant/admin read foundation exists behind the private hub.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
 
@@ -158,6 +159,7 @@ Do not implement these beyond inert shell registry entries until each module com
 - `[DONE]` GymForge gated competition planning revision.
 - `[DONE]` GymForge MVP architecture document.
 - `[DONE]` GymForge MVP foundation.
+- `[DONE]` GymForge participant/admin read foundation.
 - `[DO NOT IMPLEMENT YET]` GymForge check-ins, workout entry, upload, import/export, and public registration.
 
 ## 12. Definition Of MVP Complete
@@ -201,5 +203,6 @@ BielOS MVP is complete when:
 - `[LATER]` Phase 09.7: root.ark public zero-knowledge architecture.
 - `[DONE]` Phase 09.8: GymForge MVP architecture.
 - `[DONE]` Phase 09.9: GymForge MVP foundation.
-- `[NEXT]` Phase 09.10: GymForge participant/admin management.
-- `[LATER]` Phase 09.11+: other real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.10: GymForge participant/admin read foundation.
+- `[NEXT]` Phase 09.11: GymForge participant/admin management.
+- `[LATER]` Phase 09.12+: other real modules only after module-specific security and data design.

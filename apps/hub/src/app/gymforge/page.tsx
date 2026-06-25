@@ -1,3 +1,4 @@
+import { prisma } from "@bielos/database";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
@@ -14,6 +15,8 @@ const foundationItems = [
   "Competition metadata"
 ];
 
+const formatCount = (count: number) => new Intl.NumberFormat("en-US").format(count);
+
 export default async function GymForgePage() {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "gymforge");
@@ -27,6 +30,34 @@ export default async function GymForgePage() {
   if (!session) {
     redirect("/login");
   }
+
+  const [
+    participantsCount,
+    activeParticipantsCount,
+    exerciseCatalogCount,
+    competitionsCount,
+    viewerParticipant
+  ] = await Promise.all([
+    prisma.gymForgeParticipant.count(),
+    prisma.gymForgeParticipant.count({ where: { status: "ACTIVE" } }),
+    prisma.gymForgeExercise.count({ where: { isActive: true } }),
+    prisma.gymForgeCompetition.count(),
+    prisma.gymForgeParticipant.findUnique({
+      where: { userId: session.user.id },
+      select: {
+        displayName: true,
+        status: true,
+        role: true
+      }
+    })
+  ]);
+
+  const metrics = [
+    { label: "Participants", value: formatCount(participantsCount) },
+    { label: "Active", value: formatCount(activeParticipantsCount) },
+    { label: "Exercises", value: formatCount(exerciseCatalogCount) },
+    { label: "Competitions", value: formatCount(competitionsCount) }
+  ];
 
   return (
     <main className="hub-shell">
@@ -85,6 +116,46 @@ export default async function GymForgePage() {
             <span>Status</span>
             <strong>Schema only</strong>
           </div>
+        </section>
+
+        <section className="dashboard-grid" aria-label="GymForge read status">
+          <article className="panel session-panel">
+            <div className="panel-title">
+              <span>Viewer</span>
+              <strong className="status-pill is-active">
+                {viewerParticipant ? "Linked" : "Not linked"}
+              </strong>
+            </div>
+            <dl className="detail-list">
+              <div>
+                <dt>Participant</dt>
+                <dd>{viewerParticipant?.displayName ?? "No GymForge participant record"}</dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd>{viewerParticipant?.status ?? "Unavailable"}</dd>
+              </div>
+              <div>
+                <dt>Role</dt>
+                <dd>{viewerParticipant?.role ?? "Unavailable"}</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article className="panel deployment-panel">
+            <div className="panel-title">
+              <span>Registry</span>
+              <strong className="status-pill">Read only</strong>
+            </div>
+            <div className="status-list">
+              {metrics.map((metric) => (
+                <div key={metric.label}>
+                  <span>{metric.label}</span>
+                  <strong>{metric.value}</strong>
+                </div>
+              ))}
+            </div>
+          </article>
         </section>
 
         <section className="module-window anchor-section" id="foundation" aria-label="GymForge foundation">
