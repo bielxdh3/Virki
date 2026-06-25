@@ -82,3 +82,5 @@ Phase 09.3R revised root.ark planning toward a public zero-knowledge compartment
 Phase 09.5R revised GymForge planning toward a gated social gym competition model for invited or admin-created participants. Implementation remains blocked until a dedicated architecture or MVP phase covers gated entry, attendance, streaks, photo proof, workout logging, exercise catalog, competitions, group visibility, retention, deletion, and abuse controls.
 
 Phase 09.8 documented the GymForge MVP architecture for gated entry, participant/admin roles, exercise catalog, attendance, streaks, future photo proof, workout notes, exercise logs, group ranking, visibility, retention, audit events, and validation. GymForge implementation remains blocked until a dedicated implementation phase.
+
+Phase 09.9 added the GymForge MVP foundation: Prisma models, migration, and an authenticated hub placeholder route. Check-in creation, workout entry, uploads, import/export, public registration, and participant management remain blocked for later scoped phases.

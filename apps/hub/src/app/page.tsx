@@ -38,9 +38,10 @@ const moduleCards = [
   {
     name: "GymForge",
     shortName: "GF",
-    description: "Planned training workspace. No tracking or personal data is enabled.",
-    status: "Locked",
-    sensitivity: "internal"
+    description: "Gated gym competition foundation. Tracking and uploads are not enabled.",
+    status: "Foundation",
+    sensitivity: "internal",
+    href: "/gymforge"
   }
 ];
 
@@ -253,6 +254,7 @@ export default async function HubDashboardPage() {
                   <span className="is-reserved">{module.status}</span>
                   <span>Planned</span>
                 </div>
+                {"href" in module ? <a href={module.href}>Open foundation</a> : null}
               </article>
             ))}
           </div>

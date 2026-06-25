@@ -46,6 +46,32 @@ enum UnlockStatus {
   EXPIRED
 }
 
+enum GymForgeParticipantStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+  ARCHIVED
+}
+
+enum GymForgeParticipantRole {
+  ADMIN
+  PARTICIPANT
+}
+
+enum GymForgeWorkoutUnit {
+  KG
+  LB
+  BODYWEIGHT
+  OTHER
+}
+
+enum GymForgeCompetitionStatus {
+  DRAFT
+  ACTIVE
+  ENDED
+  ARCHIVED
+}
+
 model User {
   id           String           @id @default(cuid())
   email        String           @unique
@@ -60,6 +86,7 @@ model User {
   projectAccesses ProjectAccess[]
   securityUnlocks SecurityUnlock[]
   auditLogs       AuditLog[]
+  gymForgeParticipants GymForgeParticipant[]
 }
 
 model Project {
@@ -157,4 +184,110 @@ model AuditLog {
   @@index([actorUserId])
   @@index([actorEmailHash])
   @@index([createdAt])
+}
+
+model GymForgeParticipant {
+  id          String                    @id @default(cuid())
+  userId      String?
+  displayName String
+  status      GymForgeParticipantStatus @default(INVITED)
+  role        GymForgeParticipantRole   @default(PARTICIPANT)
+  createdAt   DateTime                  @default(now())
+  updatedAt   DateTime                  @updatedAt
+  archivedAt  DateTime?
+
+  user        User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  attendances GymForgeAttendance[]
+  workouts    GymForgeWorkout[]
+
+  @@unique([userId])
+  @@index([status])
+  @@index([role])
+  @@index([createdAt])
+}
+
+model GymForgeExercise {
+  id          String   @id @default(cuid())
+  name        String
+  category    String?
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  archivedAt  DateTime?
+
+  workoutSets GymForgeWorkoutSet[]
+
+  @@unique([name])
+  @@index([isActive])
+  @@index([category])
+}
+
+model GymForgeAttendance {
+  id              String   @id @default(cuid())
+  participantId   String
+  checkedInAt     DateTime @default(now())
+  effectiveDate   DateTime
+  source          String   @default("manual")
+  note            String?
+  countsForStreak Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  participant GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@unique([participantId, effectiveDate])
+  @@index([effectiveDate])
+  @@index([countsForStreak])
+}
+
+model GymForgeWorkout {
+  id            String   @id @default(cuid())
+  participantId String
+  workoutAt     DateTime @default(now())
+  note          String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  participant GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  sets        GymForgeWorkoutSet[]
+
+  @@index([participantId, workoutAt])
+  @@index([workoutAt])
+}
+
+model GymForgeWorkoutSet {
+  id         String              @id @default(cuid())
+  workoutId  String
+  exerciseId String
+  setNumber  Int
+  reps       Int
+  load       Decimal?
+  unit       GymForgeWorkoutUnit @default(KG)
+  note       String?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  workout  GymForgeWorkout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  exercise GymForgeExercise @relation(fields: [exerciseId], references: [id], onDelete: Restrict)
+
+  @@unique([workoutId, exerciseId, setNumber])
+  @@index([exerciseId])
+}
+
+model GymForgeCompetition {
+  id          String                    @id @default(cuid())
+  name        String
+  description String?
+  status      GymForgeCompetitionStatus @default(DRAFT)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  scoringRule String
+  createdAt   DateTime                  @default(now())
+  updatedAt   DateTime                  @updatedAt
+  archivedAt  DateTime?
+
+  @@index([status])
+  @@index([startsAt])
+  @@index([endsAt])
 }
