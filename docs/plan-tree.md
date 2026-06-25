@@ -148,6 +148,7 @@ Do not implement these beyond inert shell registry entries until each module com
 - `[DO NOT IMPLEMENT YET]` L-vault implementation.
 - `[DONE]` root.ark planning document.
 - `[DO NOT IMPLEMENT YET]` root.ark implementation.
+- `[DONE]` H-vault planning document.
 - `[DO NOT IMPLEMENT YET]` H-vault implementation.
 - `[DO NOT IMPLEMENT YET]` GymForge implementation.
 
@@ -184,4 +185,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.1: module security design template.
 - `[DONE]` Phase 09.2: L-vault planning only.
 - `[DONE]` Phase 09.3: root.ark planning only.
-- `[LATER]` Phase 09.4+: real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.4: H-vault planning only.
+- `[LATER]` Phase 09.5+: real modules only after module-specific security and data design.

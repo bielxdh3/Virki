@@ -70,3 +70,5 @@ Phase 09.1 added the module security design template. Real module implementation
 Phase 09.2 added the L-vault planning document only. L-vault upload, storage, encryption, import/export, UI, routes, APIs, schema, migrations, and private data ingestion remain blocked.
 
 Phase 09.3 added the root.ark planning document only. Archive storage, upload, import/export, indexing/search, UI, routes, APIs, schema, migrations, and private data ingestion remain blocked.
+
+Phase 09.4 added the H-vault planning document only. Health/sensitive storage, upload, import/export, UI, routes, APIs, schema, migrations, and private data ingestion remain blocked.
