@@ -10,9 +10,11 @@ import { formatGymForgeAttendanceDate, getGymForgeAttendanceEffectiveDate } from
 
 const PARTICIPANT_ROLES = ["ADMIN", "PARTICIPANT"] as const;
 const PARTICIPANT_STATUSES = ["INVITED", "ACTIVE", "DISABLED", "ARCHIVED"] as const;
+const WORKOUT_UNITS = ["KG", "LB", "BODYWEIGHT", "OTHER"] as const;
 
 type ParticipantRole = (typeof PARTICIPANT_ROLES)[number];
 type ParticipantStatus = (typeof PARTICIPANT_STATUSES)[number];
+type WorkoutUnit = (typeof WORKOUT_UNITS)[number];
 
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
@@ -29,6 +31,24 @@ function isParticipantRole(value: string): value is ParticipantRole {
 
 function isParticipantStatus(value: string): value is ParticipantStatus {
   return PARTICIPANT_STATUSES.includes(value as ParticipantStatus);
+}
+
+function isWorkoutUnit(value: string): value is WorkoutUnit {
+  return WORKOUT_UNITS.includes(value as WorkoutUnit);
+}
+
+function parsePositiveInteger(value: string, max: number): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= max ? parsed : null;
+}
+
+function parseLoad(value: string): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1000 ? value : null;
 }
 
 async function requireGymForgeAdmin(formData: FormData) {
@@ -269,6 +289,98 @@ export async function createGymForgeAttendanceCheckIn(formData: FormData) {
       participantId: attendance.participantId,
       effectiveDate: formatGymForgeAttendanceDate(attendance.effectiveDate),
       countsForStreak: attendance.countsForStreak
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function createGymForgeWorkout(formData: FormData) {
+  const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
+
+  if (!csrfResult.valid) {
+    forbidden();
+  }
+
+  const session = await getCurrentSession();
+
+  if (!session) {
+    redirect("/login");
+  }
+
+  const participant = await prisma.gymForgeParticipant.findUnique({
+    where: { userId: session.user.id },
+    select: { id: true, status: true }
+  });
+
+  if (!participant || participant.status !== "ACTIVE") {
+    forbidden();
+  }
+
+  const note = readFormString(formData, "workoutNote");
+  const setNote = readFormString(formData, "setNote");
+  const exerciseId = readFormString(formData, "exerciseId");
+  const setNumber = parsePositiveInteger(readFormString(formData, "setNumber"), 50);
+  const reps = parsePositiveInteger(readFormString(formData, "reps"), 500);
+  const load = parseLoad(readFormString(formData, "load"));
+  const unit = readFormString(formData, "unit");
+
+  if (note.length > 240 || setNote.length > 160) {
+    redirect("/gymforge?error=workout-note");
+  }
+
+  if (!exerciseId || !setNumber || !reps || !isWorkoutUnit(unit)) {
+    redirect("/gymforge?error=workout-set");
+  }
+
+  const exercise = await prisma.gymForgeExercise.findFirst({
+    where: {
+      id: exerciseId,
+      isActive: true,
+      archivedAt: null
+    },
+    select: { id: true }
+  });
+
+  if (!exercise) {
+    redirect("/gymforge?error=workout-exercise");
+  }
+
+  const workout = await prisma.gymForgeWorkout.create({
+    data: {
+      participantId: participant.id,
+      note: note || null,
+      sets: {
+        create: {
+          exerciseId: exercise.id,
+          setNumber,
+          reps,
+          load,
+          unit,
+          note: setNote || null
+        }
+      }
+    },
+    select: {
+      id: true,
+      participantId: true,
+      _count: {
+        select: { sets: true }
+      }
+    }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_WORKOUT_CREATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.workout",
+    message: "GymForge workout created.",
+    metadata: {
+      participantId: workout.participantId,
+      workoutId: workout.id,
+      setCount: workout._count.sets
     }
   });
 

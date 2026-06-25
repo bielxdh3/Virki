@@ -9,7 +9,8 @@ import {
   changeGymForgeParticipantStatus,
   createGymForgeAttendanceCheckIn,
   createGymForgeExercise,
-  createGymForgeParticipant
+  createGymForgeParticipant,
+  createGymForgeWorkout
 } from "./actions";
 import { getGymForgeAttendanceEffectiveDate } from "./dates";
 
@@ -52,8 +53,10 @@ export default async function GymForgePage() {
     viewerParticipant,
     viewerAttendanceCount,
     viewerTodayAttendance,
+    viewerWorkouts,
     participants,
-    exercises
+    exercises,
+    activeExercises
   ] = await Promise.all([
     prisma.gymForgeParticipant.count(),
     prisma.gymForgeParticipant.count({ where: { status: "ACTIVE" } }),
@@ -92,6 +95,30 @@ export default async function GymForgePage() {
         }
       })
       .then((participant) => participant?.attendances[0] ?? null),
+    prisma.gymForgeWorkout.findMany({
+      where: {
+        participant: {
+          userId: session.user.id,
+          status: "ACTIVE"
+        }
+      },
+      orderBy: [{ workoutAt: "desc" }],
+      take: 10,
+      select: {
+        id: true,
+        workoutAt: true,
+        sets: {
+          select: {
+            setNumber: true,
+            reps: true,
+            load: true,
+            unit: true,
+            exercise: { select: { name: true } }
+          },
+          orderBy: [{ setNumber: "asc" }]
+        }
+      }
+    }),
     prisma.gymForgeParticipant.findMany({
       orderBy: [{ createdAt: "desc" }],
       take: 50,
@@ -112,6 +139,17 @@ export default async function GymForgePage() {
         category: true,
         isActive: true,
         archivedAt: true
+      }
+    }),
+    prisma.gymForgeExercise.findMany({
+      where: {
+        isActive: true,
+        archivedAt: null
+      },
+      orderBy: [{ name: "asc" }],
+      select: {
+        id: true,
+        name: true
       }
     })
   ]);
@@ -276,6 +314,97 @@ export default async function GymForgePage() {
                 </form>
               </article>
             ) : null}
+          </div>
+        </section>
+
+        <section className="module-window anchor-section" id="workouts" aria-label="GymForge workouts">
+          <div className="window-titlebar">
+            <div>
+              <span>Workout</span>
+              <strong>Entry foundation</strong>
+            </div>
+          </div>
+
+          <div className="dashboard-grid">
+            {canCheckIn ? (
+              <article className="panel">
+                <div className="panel-title">
+                  <span>Create</span>
+                  <strong className="status-pill">One set</strong>
+                </div>
+                <form className="login-form" action={createGymForgeWorkout}>
+                  <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                  <label>
+                    Exercise
+                    <select name="exerciseId" required>
+                      <option value="">Select exercise</option>
+                      {activeExercises.map((exercise) => (
+                        <option key={exercise.id} value={exercise.id}>
+                          {exercise.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Set number
+                    <input name="setNumber" type="number" min={1} max={50} defaultValue={1} required />
+                  </label>
+                  <label>
+                    Reps
+                    <input name="reps" type="number" min={1} max={500} required />
+                  </label>
+                  <label>
+                    Load
+                    <input name="load" type="number" min={0} max={1000} step="0.01" />
+                  </label>
+                  <label>
+                    Unit
+                    <select name="unit" defaultValue="KG">
+                      <option value="KG">kg</option>
+                      <option value="LB">lb</option>
+                      <option value="BODYWEIGHT">bodyweight</option>
+                      <option value="OTHER">other</option>
+                    </select>
+                  </label>
+                  <label>
+                    Workout note
+                    <input name="workoutNote" maxLength={240} />
+                  </label>
+                  <label>
+                    Set note
+                    <input name="setNote" maxLength={160} />
+                  </label>
+                  <button type="submit" disabled={activeExercises.length === 0}>
+                    Create workout
+                  </button>
+                </form>
+              </article>
+            ) : null}
+
+            <article className="panel">
+              <div className="panel-title">
+                <span>Latest workouts</span>
+                <strong className="status-pill">Own logs</strong>
+              </div>
+              <div className="status-list">
+                {viewerWorkouts.map((workout) => (
+                  <div key={workout.id}>
+                    <span>{workout.workoutAt.toISOString().slice(0, 10)}</span>
+                    <strong>
+                      {workout.sets[0]
+                        ? `${workout.sets[0].exercise.name}: ${workout.sets[0].reps} reps`
+                        : "No sets"}
+                    </strong>
+                  </div>
+                ))}
+                {viewerWorkouts.length === 0 ? (
+                  <div>
+                    <span>Empty</span>
+                    <strong>No workouts yet</strong>
+                  </div>
+                ) : null}
+              </div>
+            </article>
           </div>
         </section>
 
