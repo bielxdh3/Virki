@@ -33,7 +33,7 @@
 
 Each module should be started only after Core authentication and authorization are stable.
 
-Phase 04 redesigned the hub shell only. L-vault, root.ark, H-vault, and GymForge remain reserved and are not implemented as module applications yet.
+Phase 04 redesigned the hub shell only. At that time, L-vault, root.ark, H-vault, and GymForge were reserved and not implemented as module applications.
 
 Phase 04.1 fixed hub sidebar section navigation using real dashboard anchors. Future modules remain unimplemented.
 
@@ -104,3 +104,5 @@ Phase 09.17 added GymForge competition foundation inside the authenticated hub r
 Phase 09.18 documented GymForge competition assignment and scoring design only. It defines explicit participant assignment, participant scope, attendance-count and streak scoring, tie breakers, date range behavior using the fixed `America/Sao_Paulo` GymForge policy, disabled/archived participant handling, admin override limits, visibility rules, future audit events, and validation requirements. Runtime assignment, automatic scoring, UI, APIs, server actions, schema changes, and migrations remain blocked.
 
 Phase 09.19 added a BielOS language selector for the public site, hub shell, login page, and current GymForge UI. The default locale is `pt-BR`; supported values are limited to `pt-BR` and `en` in the non-sensitive `bielos_locale` cookie. Runtime auth, Cloudflare behavior, Docker, Prisma, and module data flows were unchanged.
+
+Phase 09.20 synchronized GymForge documentation and visible status copy with the current implementation. GymForge is no longer described as entirely blocked or schema-only: its private hub MVP foundation includes participant/admin read data, admin participant management, admin exercise catalog management, attendance check-ins, explicit `America/Sao_Paulo` attendance dates, workout entry foundation, ranking/streak foundation, and competition metadata foundation. Photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, competition participant assignment implementation, and automatic competition scoring implementation remain blocked.

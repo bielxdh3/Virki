@@ -1,12 +1,14 @@
 # GymForge MVP Architecture
 
-GymForge is not implemented yet. This document defines the MVP architecture gate only and does not add runtime code, UI, routes, APIs, auth code, upload, database schema, Prisma migrations, workout tracking logic, private data storage, or private data ingestion.
+GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, competition participant assignment implementation, automatic competition scoring implementation, or broad social feed behavior.
 
 GymForge is a gated social gym competition app for Gabriel and invited or admin-created participants. It is not a zero-knowledge vault and not an open public internet app. Approved participants may see group competition and streak data inside the gated area.
 
 ## MVP Boundary
 
-- Included: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, and simple group ranking.
+- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, and competition metadata foundation.
+- Design-only: competition participant assignment and automatic scoring.
+- Included in the MVP boundary: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, simple group ranking, and competition metadata.
 - Future but planned: photo proof for check-ins.
 - Excluded from MVP: body metrics, health records, public registration, public profiles, open internet access, imports, exports, file upload, broad social feed, payments, and third-party integrations.
 - Security posture: gated community with explicit auth and role checks, not public access and not zero-knowledge encryption.

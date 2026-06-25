@@ -25,7 +25,9 @@ The repository represents the real private BielOS codebase. Treat it as security
   - L-vault
   - root.ark
   - H-vault
-  - GymForge
+- GymForge is no longer merely reserved: it has an implemented MVP foundation inside the private hub.
+- Future GymForge work must stay scoped and preserve existing Cloudflare Access, BielOS internal auth, CSRF, audit logging, and private hub boundaries.
+- Do not add GymForge upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, participant assignment, or automatic competition scoring unless explicitly requested in a scoped phase.
 
 ## Output Rules
 

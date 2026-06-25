@@ -1,6 +1,6 @@
 # GymForge Planning Document
 
-GymForge is not implemented yet. This document is a planning gate only and does not enable private data ingestion, workout tracking, body metrics, photo check-ins, upload, import/export, UI, routes, APIs, database schema, Prisma migrations, auth code, or tracking logic.
+GymForge now has an implemented MVP foundation inside the private BielOS hub. This document records the module boundary and remaining gates. It does not enable body metrics, health records, photo check-ins, upload, import/export, public registration, invite acceptance, workout editing/deletion, admin attendance correction, competition participant assignment implementation, or automatic competition scoring implementation.
 
 GymForge is intended as a gated social gym competition app for Gabriel and invited friends. It is not a public open internet app and it is not a zero-knowledge vault. Data may be visible inside the approved group, but it must not be exposed outside the gated site.
 
@@ -8,15 +8,15 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 - Module name: GymForge.
 - Module owner: BielOS owner.
-- Module purpose: Future gated social gym app for attendance, streaks, workouts, and group competitions.
-- Current status: Planning only. Implementation is blocked.
+- Module purpose: Gated social gym app for attendance, streaks, workouts, and group competitions.
+- Current status: MVP foundation implemented behind Cloudflare Access and BielOS internal auth.
 
 ## Data Classification
 
 - Classification: internal group data, with sensitive health-adjacent fields possible in future phases.
-- Private data types: Not collected in this phase. Future data may include attendance, streaks, workout notes, exercises, sets, reps, loads, competition participation, and photo check-in proof.
-- Data explicitly not collected in this phase: workouts, attendance, streaks, body metrics, health records, progress photos, check-in photos, uploads, passwords, secrets, raw logs, raw headers, raw IPs, JWTs, cookies, private keys, database dumps, backups, Gmail exports, Google Takeout exports, and any real private records.
-- Public or non-private data, if any: Module name and locked/planned status only.
+- Private data types: GymForge may store participant display names, participant status/role, attendance check-ins, optional attendance notes, exercise catalog entries, workout entries, workout sets, optional workout/set notes, competition metadata, and derived read-only ranking/streak views.
+- Data explicitly not collected: body metrics, health records, progress photos, check-in photos, uploads, passwords, secrets, raw logs, raw headers, raw IPs, JWTs, cookies, private keys, database dumps, backups, Gmail exports, Google Takeout exports, import/export files, invite acceptance data, and automatic competition scores.
+- Public or non-private data, if any: Module name and high-level status only. GymForge runtime data must stay inside the private hub.
 
 ## Access Model
 
@@ -55,26 +55,26 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 - Migration files: None in this phase.
 - Backfill requirements: None.
 - Rollback approach: Documentation-only rollback.
-- Disposable validation plan: Required before any future schema, storage, upload, or tracking work.
+- Disposable validation plan: Required before any future schema, storage, upload, import/export, editing/deletion, assignment, or scoring work.
 
 ## Backup And Restore
 
 - Backup impact: None in this phase.
 - Restore validation impact: None in this phase.
 - Data that must never be exported: Raw credentials, secrets, raw tokens, private logs, and any future data not explicitly approved for export.
-- Disaster recovery notes: Future design must define backup and restore behavior before non-discardable workout or competition data exists.
+- Disaster recovery notes: Existing PostgreSQL backup and restore procedures apply. Future upload/import/export work needs separate backup and restore design before use.
 
 ## Access Control
 
 - Required user roles: Admin and participant roles, pending module design.
 - Cloudflare Access assumptions: Deployment boundary must be decided before exposure. The app is gated, not open public.
-- BielOS internal auth requirements: Future design must decide whether GymForge reuses BielOS auth, has invite-created participants, or has a separate gated flow.
+- BielOS internal auth requirements: Current GymForge uses BielOS internal auth behind Cloudflare Access. Participant actions require a linked ACTIVE GymForge participant; admin management requires OWNER or ADMIN.
 - Module-specific unlocks: Not expected for ordinary competition data, but future design must revisit this if sensitive health data is added.
 - Cross-module access boundaries: GymForge must not share workout, participant, or competition data with other modules without explicit design.
 
 ## Audit Events
 
-- Events to record: Future design must define login/join, attendance check-in, photo proof upload, workout entry, exercise catalog changes, participant management, competition creation, competition updates, and admin actions.
+- Events to record: Current implementation audits participant creation/status changes, exercise creation/status changes, attendance check-in creation, workout creation, and competition creation with sanitized metadata. Future phases must define audit events for invite acceptance, photo proof upload, editing/deletion, admin attendance correction, competition assignment, and automatic scoring.
 - Event result values: Use existing sanitized success, failure, or info patterns.
 - Sanitized metadata only: Yes.
 - Data explicitly excluded from audit logs: Workout details, body metrics, photo contents, raw upload paths, secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, private paths, and backup contents.
@@ -108,8 +108,8 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 - No upload inputs until approved: Required.
 - No secret display: Required.
 - No raw logs or audit metadata display: Required.
-- Safe empty states: Must state that GymForge is locked and not collecting data.
-- Group visibility must be explicit before showing participant, streak, workout, or competition data.
+- Safe empty states: Must distinguish implemented MVP foundation features from blocked future features.
+- Group visibility must remain explicit before showing any new participant, streak, workout, or competition data beyond the current approved views.
 
 ## API Safety Constraints
 
@@ -137,7 +137,7 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 ## Required Architecture Phase
 
-Before implementation, GymForge needs an architecture or MVP design phase covering:
+Before future implementation beyond the current MVP foundation, GymForge needs scoped design for:
 
 - gated entry model
 - invite or admin-created account lifecycle

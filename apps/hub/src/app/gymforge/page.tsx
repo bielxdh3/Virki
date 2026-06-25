@@ -33,9 +33,9 @@ const copy = {
     gated: "Fechado",
     mvpFoundation: "Fundação MVP",
     hero:
-      "Fundação de competição de academia com acesso fechado para participantes convidados ou criados por admin. Tracking, check-ins, uploads, imports e cadastro público ainda não estão habilitados.",
+      "Fundação de competição de academia com acesso fechado. Check-ins, treinos, ranking, catálogo de exercícios, participantes e metadados de competição já estão ativos no hub privado.",
     implementationStatus: "Status da implementação",
-    schemaOnly: "Schema apenas",
+    implementationSummary: "Fundação ativa",
     viewer: "Visualizador",
     linked: "Vinculado",
     notLinked: "Não vinculado",
@@ -120,13 +120,13 @@ const copy = {
     deactivate: "Desativar",
     noExercises: "Nenhum exercício GymForge ainda",
     dataBoundaries: "Limites do modelo de dados implementado",
-    foundationText: "Modelo de fundação existe. Mutações visíveis para usuários não estão habilitadas nesta fase.",
+    foundationText: "Recurso de fundação ativo no hub privado, com controles de autenticação, CSRF e auditoria quando aplicável.",
     noForms: "Sem formulários",
     internal: "Interno",
     safetyBoundary: "Limite de segurança",
-    noPrivateIngestion: "Nenhuma ingestão de dados privados está habilitada",
+    noPrivateIngestion: "Recursos ainda bloqueados",
     limitations:
-      "GymForge permanece atrás da autenticação existente do hub. Prova por foto, edição de treinos, imports, exports e cadastro público permanecem bloqueados."
+      "GymForge permanece atrás da autenticação existente do hub. Prova por foto, edição/exclusão de treinos, correção admin de presença, imports, exports, cadastro público, aceite de convite, atribuição de participantes a competições e pontuação automática permanecem bloqueados."
   },
   en: {
     navLabel: "BielOS navigation",
@@ -140,9 +140,9 @@ const copy = {
     gated: "Gated",
     mvpFoundation: "MVP Foundation",
     hero:
-      "Gated gym competition foundation for invited or admin-created participants. Tracking, check-ins, uploads, imports, and public registration are not enabled yet.",
+      "Gated gym competition foundation. Check-ins, workouts, ranking, exercise catalog, participants, and competition metadata are active inside the private hub.",
     implementationStatus: "Implementation status",
-    schemaOnly: "Schema only",
+    implementationSummary: "Foundation active",
     viewer: "Viewer",
     linked: "Linked",
     notLinked: "Not linked",
@@ -227,13 +227,13 @@ const copy = {
     deactivate: "Deactivate",
     noExercises: "No GymForge exercises yet",
     dataBoundaries: "Implemented data model boundaries",
-    foundationText: "Foundation model exists. User-facing mutations are not enabled in this phase.",
+    foundationText: "Foundation feature is active in the private hub, with auth, CSRF, and audit controls where applicable.",
     noForms: "No forms",
     internal: "Internal",
     safetyBoundary: "Safety boundary",
-    noPrivateIngestion: "No private data ingestion is enabled",
+    noPrivateIngestion: "Still blocked",
     limitations:
-      "GymForge remains behind existing hub auth. Photo proof, workout editing, imports, exports, and public registration remain blocked."
+      "GymForge remains behind existing hub auth. Photo proof, workout editing/deletion, admin attendance correction, imports, exports, public registration, invite acceptance, competition participant assignment, and automatic scoring remain blocked."
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
@@ -564,7 +564,7 @@ export default async function GymForgePage() {
           </div>
           <div className="identity-meter" aria-label={t.implementationStatus}>
             <span>{t.status}</span>
-            <strong>{t.schemaOnly}</strong>
+            <strong>{t.implementationSummary}</strong>
           </div>
         </section>
 

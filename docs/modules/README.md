@@ -1,14 +1,14 @@
 # Module Planning Index
 
-This directory contains planning documents only. No real module implementation, private data ingestion, upload, storage, routes, APIs, UI, schema, migrations, tracking, import/export, or encryption/key-management is enabled by these documents.
+This directory contains module planning and design documents. GymForge now has an implemented MVP foundation in the private hub; the other module documents remain planning-only. These documents do not enable private data ingestion, upload, import/export, or encryption/key-management by themselves.
 
 ## Module Documents
 
 - `l-vault.md`: L-vault planning only. Implementation is blocked.
 - `root-ark.md`: root.ark public zero-knowledge compartment planning only. Implementation is blocked.
 - `h-vault.md`: H-vault planning only. Implementation is blocked.
-- `gymforge.md`: GymForge gated social gym competition planning only. Implementation is blocked.
-- `gymforge-mvp.md`: GymForge MVP architecture planning only. Implementation is blocked.
+- `gymforge.md`: GymForge gated social gym competition module plan, updated to reflect the implemented MVP foundation.
+- `gymforge-mvp.md`: GymForge MVP architecture and current implementation boundary.
 
 ## Implementation Status
 
@@ -16,7 +16,7 @@ This directory contains planning documents only. No real module implementation, 
 - L-vault: planning document complete; implementation blocked.
 - root.ark: public zero-knowledge compartment planning revised; implementation blocked until a dedicated architecture phase is complete.
 - H-vault: planning document complete; implementation blocked.
-- GymForge: gated social gym competition planning revised; MVP architecture documented; implementation blocked until an explicit implementation phase.
+- GymForge: MVP foundation implemented behind the private hub. Current capabilities include authenticated route access, participant/admin read foundation, admin participant management, admin exercise catalog management, attendance check-ins, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, competition metadata foundation, and competition assignment/scoring design only.
 
 ## Required Gate
 
@@ -26,7 +26,7 @@ The completed design must define purpose, data classification, private data type
 
 ## Blocked Items
 
-The following remain blocked for every module until explicitly designed and approved:
+For not-yet-implemented modules, the following remain blocked until explicitly designed and approved:
 
 - runtime code
 - UI
@@ -44,7 +44,7 @@ The following remain blocked for every module until explicitly designed and appr
 
 For root.ark specifically, public exposure, compartment access, capability links, encrypted blob storage, metadata handling, key lifecycle, revocation, and deletion remain blocked until a dedicated architecture phase is complete.
 
-For GymForge specifically, gated entry, invite or admin-created accounts, attendance, streaks, photo check-ins, workout logging, exercise catalog, competitions, group visibility, retention, deletion, and abuse controls remain blocked until a dedicated architecture or MVP phase is complete.
+For GymForge specifically, photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, competition participant assignment implementation, and automatic competition scoring implementation remain blocked until scoped phases complete their design and implementation checks.
 
 ## Data Safety
 

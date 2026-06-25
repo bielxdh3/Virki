@@ -47,9 +47,9 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Private hub module shell registry exists.
 - `[DONE]` Module security design template exists.
 - `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
-- `[BLOCKED]` Real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
+- `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
 - `[BLOCKED]` root.ark implementation also requires a dedicated public zero-knowledge architecture phase.
-- `[DONE]` GymForge MVP foundation exists behind the private hub with schema and placeholder route only.
+- `[DONE]` GymForge MVP foundation exists behind the private hub with an authenticated route and implemented foundation features.
 - `[DONE]` GymForge participant/admin read foundation exists behind the private hub.
 - `[DONE]` GymForge admin-only participant management exists behind the private hub.
 - `[DONE]` GymForge admin-only exercise catalog management exists behind the private hub.
@@ -151,9 +151,9 @@ BielOS is a private personal hub, not a public SaaS.
 - `[LATER]` Safe redacted diagnostics if needed.
 - `[BLOCKED]` Audit log UI is blocked until authorization and retention rules are stronger.
 
-## 11. Future Modules Blocked List
+## 11. Future Modules And Remaining Blocked Work
 
-Do not implement these beyond inert shell registry entries until each module completes `docs/module-security-template.md`.
+Do not implement new modules beyond inert shell registry entries until each module completes `docs/module-security-template.md`. GymForge is the exception: its MVP foundation is implemented, but its future work remains scoped by the blockers below.
 
 - `[DONE]` Consolidated module planning index: `docs/modules/README.md`.
 - `[DONE]` BielOS Core shell registry entry.
@@ -177,7 +177,7 @@ Do not implement these beyond inert shell registry entries until each module com
 - `[DONE]` GymForge ranking and streak foundation.
 - `[DONE]` GymForge competition foundation.
 - `[DONE]` GymForge competition assignment and scoring design.
-- `[DO NOT IMPLEMENT YET]` GymForge workout editing/deletion, upload, invite acceptance, import/export, public registration, and admin attendance correction.
+- `[DO NOT IMPLEMENT YET]` GymForge workout editing/deletion, upload, invite acceptance, import/export, public registration, admin attendance correction, competition participant assignment implementation, and automatic competition scoring implementation.
 
 ## 12. Definition Of MVP Complete
 
@@ -196,7 +196,7 @@ BielOS MVP is complete when:
 - `[DONE]` Prisma migrations replace production `db push`.
 - `[DONE]` Backup and restore are documented and tested.
 - `[DONE]` Module shell registry exists without private data ingestion.
-- `[BLOCKED]` No real future modules are implemented prematurely.
+- `[BLOCKED]` No new real future modules are implemented prematurely.
 
 ## 13. Recommended Phase Order
 
@@ -230,5 +230,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.17: GymForge competition foundation.
 - `[DONE]` Phase 09.18: GymForge competition assignment/scoring design.
 - `[DONE]` Phase 09.19: BielOS language selector and Portuguese default.
-- `[NEXT]` Phase 09.20: GymForge competition assignment/scoring implementation.
-- `[LATER]` Phase 09.21+: other real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.20: sync GymForge docs and status copy.
+- `[NEXT]` Phase 09.21: GymForge competition assignment/scoring implementation.
+- `[LATER]` Phase 09.22+: other real modules only after module-specific security and data design.
