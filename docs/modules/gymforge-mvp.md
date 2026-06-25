@@ -49,6 +49,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 - A check-in records that a participant attended the gym on a date or time window.
 - MVP should allow at most one streak-counting attendance check-in per participant per local day unless an admin override exists.
+- MVP day boundaries use a fixed `America/Sao_Paulo` GymForge policy and store the effective attendance date as a canonical UTC date for uniqueness and future streak computation.
 - Check-ins should store participant id, timestamp, effective local date, source, and optional note.
 - Check-ins must not store raw IP addresses, raw user agents, secrets, tokens, cookies, JWTs, or raw headers.
 - Admin correction rules must be designed before edits or backfills are implemented.
@@ -58,6 +59,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 - A streak is a count of consecutive qualifying attendance days.
 - Streaks should be computed from attendance records or stored as derived data that can be rebuilt.
 - Time zone must be explicit and stable for the group.
+- MVP timezone is fixed to `America/Sao_Paulo`; it must not infer private user location.
 - Missed days break the streak unless a future competition rule defines grace days.
 - Manual admin corrections must be audited.
 

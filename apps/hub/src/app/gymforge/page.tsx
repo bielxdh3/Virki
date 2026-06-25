@@ -11,6 +11,7 @@ import {
   createGymForgeExercise,
   createGymForgeParticipant
 } from "./actions";
+import { getGymForgeAttendanceEffectiveDate } from "./dates";
 
 export const dynamic = "force-dynamic";
 
@@ -27,10 +28,6 @@ const formatCount = (count: number) => new Intl.NumberFormat("en-US").format(cou
 
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
-}
-
-function getLocalDayStart(now = new Date()): Date {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
 }
 
 export default async function GymForgePage() {
@@ -88,7 +85,7 @@ export default async function GymForgePage() {
         where: { userId: session.user.id },
         select: {
           attendances: {
-            where: { effectiveDate: getLocalDayStart() },
+            where: { effectiveDate: getGymForgeAttendanceEffectiveDate() },
             select: { id: true, countsForStreak: true },
             take: 1
           }

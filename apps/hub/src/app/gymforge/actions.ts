@@ -6,6 +6,7 @@ import { prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
+import { formatGymForgeAttendanceDate, getGymForgeAttendanceEffectiveDate } from "./dates";
 
 const PARTICIPANT_ROLES = ["ADMIN", "PARTICIPANT"] as const;
 const PARTICIPANT_STATUSES = ["INVITED", "ACTIVE", "DISABLED", "ARCHIVED"] as const;
@@ -20,10 +21,6 @@ function isHubAdmin(role: string): boolean {
 function readFormString(formData: FormData, key: string): string {
   const value = formData.get(key);
   return typeof value === "string" ? value.trim() : "";
-}
-
-function getLocalDayStart(now = new Date()): Date {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
 }
 
 function isParticipantRole(value: string): value is ParticipantRole {
@@ -232,7 +229,7 @@ export async function createGymForgeAttendanceCheckIn(formData: FormData) {
     forbidden();
   }
 
-  const effectiveDate = getLocalDayStart();
+  const effectiveDate = getGymForgeAttendanceEffectiveDate();
   const existingAttendance = await prisma.gymForgeAttendance.findUnique({
     where: {
       participantId_effectiveDate: {
@@ -270,7 +267,7 @@ export async function createGymForgeAttendanceCheckIn(formData: FormData) {
     message: "GymForge attendance check-in created.",
     metadata: {
       participantId: attendance.participantId,
-      effectiveDate: attendance.effectiveDate.toISOString().slice(0, 10),
+      effectiveDate: formatGymForgeAttendanceDate(attendance.effectiveDate),
       countsForStreak: attendance.countsForStreak
     }
   });
