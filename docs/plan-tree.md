@@ -57,6 +57,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` GymForge attendance uses explicit `America/Sao_Paulo` day boundaries.
 - `[DONE]` GymForge workout entry foundation exists for linked ACTIVE participants.
 - `[DONE]` GymForge ranking and streak foundation exists for active participants.
+- `[DONE]` GymForge competition foundation exists for admin-created metadata and read-only display.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
 
@@ -172,6 +173,7 @@ Do not implement these beyond inert shell registry entries until each module com
 - `[DONE]` GymForge attendance timezone hardening.
 - `[DONE]` GymForge workout entry foundation.
 - `[DONE]` GymForge ranking and streak foundation.
+- `[DONE]` GymForge competition foundation.
 - `[DO NOT IMPLEMENT YET]` GymForge workout editing/deletion, upload, invite acceptance, import/export, public registration, and admin attendance correction.
 
 ## 12. Definition Of MVP Complete
@@ -222,5 +224,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.14: GymForge attendance timezone hardening.
 - `[DONE]` Phase 09.15: GymForge workout entry foundation.
 - `[DONE]` Phase 09.16: GymForge ranking/streak foundation.
-- `[NEXT]` Phase 09.17: GymForge competition foundation.
-- `[LATER]` Phase 09.18+: other real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.17: GymForge competition foundation.
+- `[NEXT]` Phase 09.18: GymForge competition assignment/scoring design.
+- `[LATER]` Phase 09.19+: other real modules only after module-specific security and data design.

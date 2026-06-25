@@ -8,6 +8,7 @@ import {
   changeGymForgeExerciseStatus,
   changeGymForgeParticipantStatus,
   createGymForgeAttendanceCheckIn,
+  createGymForgeCompetition,
   createGymForgeExercise,
   createGymForgeParticipant,
   createGymForgeWorkout
@@ -62,6 +63,22 @@ function calculateCurrentStreak(effectiveDates: Date[], today = getGymForgeAtten
   return streak;
 }
 
+function formatCompetitionDateRange(startsAt: Date | null, endsAt: Date | null): string {
+  if (startsAt && endsAt) {
+    return `${formatDateKey(startsAt)} to ${formatDateKey(endsAt)}`;
+  }
+
+  if (startsAt) {
+    return `From ${formatDateKey(startsAt)}`;
+  }
+
+  if (endsAt) {
+    return `Until ${formatDateKey(endsAt)}`;
+  }
+
+  return "Open dates";
+}
+
 export default async function GymForgePage() {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "gymforge");
@@ -88,7 +105,8 @@ export default async function GymForgePage() {
     rankingParticipants,
     participants,
     exercises,
-    activeExercises
+    activeExercises,
+    competitions
   ] = await Promise.all([
     prisma.gymForgeParticipant.count(),
     prisma.gymForgeParticipant.count({ where: { status: "ACTIVE" } }),
@@ -196,6 +214,18 @@ export default async function GymForgePage() {
       select: {
         id: true,
         name: true
+      }
+    }),
+    prisma.gymForgeCompetition.findMany({
+      orderBy: [{ createdAt: "desc" }],
+      take: 20,
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        startsAt: true,
+        endsAt: true,
+        scoringRule: true
       }
     })
   ]);
@@ -342,6 +372,83 @@ export default async function GymForgePage() {
               ))}
             </div>
           </article>
+        </section>
+
+        <section className="module-window anchor-section" id="competitions" aria-label="GymForge competitions">
+          <div className="window-titlebar">
+            <div>
+              <span>Competition</span>
+              <strong>Metadata foundation</strong>
+            </div>
+          </div>
+
+          <div className="dashboard-grid">
+            {isAdmin ? (
+              <article className="panel">
+                <div className="panel-title">
+                  <span>Create</span>
+                  <strong className="status-pill">Admin only</strong>
+                </div>
+                <form className="login-form" action={createGymForgeCompetition}>
+                  <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                  <label>
+                    Name
+                    <input name="name" minLength={2} maxLength={100} required />
+                  </label>
+                  <label>
+                    Description
+                    <input name="description" maxLength={240} />
+                  </label>
+                  <label>
+                    Status
+                    <select name="status" defaultValue="DRAFT">
+                      <option value="DRAFT">Draft</option>
+                      <option value="ACTIVE">Active</option>
+                      <option value="ENDED">Ended</option>
+                      <option value="ARCHIVED">Archived</option>
+                    </select>
+                  </label>
+                  <label>
+                    Starts at
+                    <input name="startsAt" type="date" />
+                  </label>
+                  <label>
+                    Ends at
+                    <input name="endsAt" type="date" />
+                  </label>
+                  <label>
+                    Scoring rule
+                    <input name="scoringRule" maxLength={120} required />
+                  </label>
+                  <button type="submit">Create competition</button>
+                </form>
+              </article>
+            ) : null}
+
+            <article className="panel">
+              <div className="panel-title">
+                <span>Competitions</span>
+                <strong className="status-pill">Read only</strong>
+              </div>
+              <div className="status-list">
+                {competitions.map((competition) => (
+                  <div key={competition.id}>
+                    <span>{competition.name}</span>
+                    <strong>
+                      {competition.status} / {formatCompetitionDateRange(competition.startsAt, competition.endsAt)} /{" "}
+                      {competition.scoringRule}
+                    </strong>
+                  </div>
+                ))}
+                {competitions.length === 0 ? (
+                  <div>
+                    <span>Empty</span>
+                    <strong>No competitions yet</strong>
+                  </div>
+                ) : null}
+              </div>
+            </article>
+          </div>
         </section>
 
         <section className="module-window anchor-section" id="ranking" aria-label="GymForge ranking">

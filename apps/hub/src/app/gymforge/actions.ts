@@ -10,11 +10,14 @@ import { formatGymForgeAttendanceDate, getGymForgeAttendanceEffectiveDate } from
 
 const PARTICIPANT_ROLES = ["ADMIN", "PARTICIPANT"] as const;
 const PARTICIPANT_STATUSES = ["INVITED", "ACTIVE", "DISABLED", "ARCHIVED"] as const;
+const COMPETITION_STATUSES = ["DRAFT", "ACTIVE", "ENDED", "ARCHIVED"] as const;
 const WORKOUT_UNITS = ["KG", "LB", "BODYWEIGHT", "OTHER"] as const;
 
 type ParticipantRole = (typeof PARTICIPANT_ROLES)[number];
 type ParticipantStatus = (typeof PARTICIPANT_STATUSES)[number];
+type CompetitionStatus = (typeof COMPETITION_STATUSES)[number];
 type WorkoutUnit = (typeof WORKOUT_UNITS)[number];
+type ParsedOptionalDate = Date | null | "invalid";
 
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
@@ -33,6 +36,10 @@ function isParticipantStatus(value: string): value is ParticipantStatus {
   return PARTICIPANT_STATUSES.includes(value as ParticipantStatus);
 }
 
+function isCompetitionStatus(value: string): value is CompetitionStatus {
+  return COMPETITION_STATUSES.includes(value as CompetitionStatus);
+}
+
 function isWorkoutUnit(value: string): value is WorkoutUnit {
   return WORKOUT_UNITS.includes(value as WorkoutUnit);
 }
@@ -49,6 +56,33 @@ function parseLoad(value: string): string | null {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1000 ? value : null;
+}
+
+function parseOptionalDate(value: string): ParsedOptionalDate {
+  if (!value) {
+    return null;
+  }
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+
+  if (!match) {
+    return "invalid";
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return "invalid";
+  }
+
+  return date;
 }
 
 async function requireGymForgeAdmin(formData: FormData) {
@@ -214,6 +248,72 @@ export async function changeGymForgeExerciseStatus(formData: FormData) {
       exerciseId: exercise.id,
       isActive: exercise.isActive,
       archived: Boolean(exercise.archivedAt)
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function createGymForgeCompetition(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const name = readFormString(formData, "name");
+  const description = readFormString(formData, "description");
+  const status = readFormString(formData, "status");
+  const startsAtResult = parseOptionalDate(readFormString(formData, "startsAt"));
+  const endsAtResult = parseOptionalDate(readFormString(formData, "endsAt"));
+  const scoringRule = readFormString(formData, "scoringRule");
+
+  if (name.length < 2 || name.length > 100) {
+    redirect("/gymforge?error=competition-name");
+  }
+
+  if (description.length > 240 || scoringRule.length < 2 || scoringRule.length > 120) {
+    redirect("/gymforge?error=competition-details");
+  }
+
+  if (!isCompetitionStatus(status)) {
+    redirect("/gymforge?error=competition-status");
+  }
+
+  if (startsAtResult === "invalid" || endsAtResult === "invalid") {
+    redirect("/gymforge?error=competition-dates");
+  }
+
+  const startsAt = startsAtResult;
+  const endsAt = endsAtResult;
+
+  if (startsAt && endsAt && startsAt.getTime() > endsAt.getTime()) {
+    redirect("/gymforge?error=competition-dates");
+  }
+
+  const competition = await prisma.gymForgeCompetition.create({
+    data: {
+      name,
+      description: description || null,
+      status,
+      startsAt,
+      endsAt,
+      scoringRule
+    },
+    select: {
+      id: true,
+      status: true,
+      startsAt: true,
+      endsAt: true
+    }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_COMPETITION_CREATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.competition",
+    message: "GymForge competition created.",
+    metadata: {
+      competitionId: competition.id,
+      status: competition.status,
+      hasDateRange: Boolean(competition.startsAt || competition.endsAt)
     }
   });
 
