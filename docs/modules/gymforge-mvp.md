@@ -97,6 +97,27 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 - Ties and late check-ins must have explicit rules.
 - Participant assignment, automatic scoring, editing, and deletion require later scoped phases.
 
+## Competition Assignment And Scoring Design
+
+This section is design-only. Runtime assignment, automatic scoring, admin correction, schema changes, APIs, server actions, and UI are blocked until a later scoped implementation phase.
+
+- Participant assignment should be explicit: an admin assigns ACTIVE GymForge participants to a competition before scoring includes them.
+- Participant scope should support at least `ALL_ACTIVE_AT_START` and `EXPLICIT_PARTICIPANTS`; MVP implementation should prefer explicit assignment when prizes, challenges, or sensitive group visibility are involved.
+- Disabled or archived participants must stop receiving new score credit. Historical results may remain visible only if the competition visibility rules say archived participant display names remain part of the group history.
+- Competition date ranges use GymForge effective attendance dates, not raw timestamps, and must use the existing fixed `America/Sao_Paulo` MVP timezone policy.
+- An attendance counts for a competition only when `countsForStreak=true`, the effective date is within the competition range, and the participant is in scope.
+- Open-ended ranges are allowed for draft display, but ACTIVE competitions should have explicit start and end rules before automatic scoring is enabled.
+- Initial scoring rule types should be limited to attendance count, current streak inside range, longest streak inside range, or a simple weighted combination of attendance and streak.
+- Attendance-count scoring gives one point per qualifying effective date and must ignore duplicate records if unexpected duplicates exist.
+- Streak scoring counts consecutive qualifying effective dates inside the competition range; missed days break the streak unless a later rule explicitly defines grace days.
+- Tie breakers should be deterministic: higher attendance count, higher longest streak, latest qualifying check-in, then display name sort. If prizes are involved, manual admin adjudication must be audited.
+- Admin overrides and corrections must be limited to explicit correction actions, require OWNER or ADMIN, require CSRF, preserve an audit trail, and never mutate raw historical audit records.
+- Visibility rules should show only display name, rank, score, attendance count, streak summary, and safe competition metadata to approved group participants.
+- Competition views must not expose workout notes, attendance notes, raw participant ids, raw audit metadata, raw request data, private exports, cookies, JWTs, headers, IPs, secrets, or database details.
+- Future audit events should include participant assigned to competition, participant removed from competition, scoring recalculated, score correction applied, competition activated, competition ended, and competition archived.
+- Audit metadata should include only sanitized ids, status, rule type, date range presence, affected counts, and result status; it must not include notes, descriptions beyond short labels, raw links, raw request data, or private values.
+- Validation before implementation must cover role checks, CSRF failures returning HTTP 403, date-boundary tests for `America/Sao_Paulo`, disabled/archived participant exclusion, duplicate attendance safety, tie breaker determinism, and visibility restrictions.
+
 ## Group Visibility
 
 - Approved group participants may see display names, ranking position, streak summaries, and competition participation.
