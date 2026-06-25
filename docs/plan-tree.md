@@ -52,6 +52,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` GymForge MVP foundation exists behind the private hub with schema and placeholder route only.
 - `[DONE]` GymForge participant/admin read foundation exists behind the private hub.
 - `[DONE]` GymForge admin-only participant management exists behind the private hub.
+- `[DONE]` GymForge admin-only exercise catalog management exists behind the private hub.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
 
@@ -162,6 +163,7 @@ Do not implement these beyond inert shell registry entries until each module com
 - `[DONE]` GymForge MVP foundation.
 - `[DONE]` GymForge participant/admin read foundation.
 - `[DONE]` GymForge admin-only participant management.
+- `[DONE]` GymForge admin-only exercise catalog management.
 - `[DO NOT IMPLEMENT YET]` GymForge check-ins, workout entry, upload, invite acceptance, import/export, and public registration.
 
 ## 12. Definition Of MVP Complete
@@ -207,5 +209,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.9: GymForge MVP foundation.
 - `[DONE]` Phase 09.10: GymForge participant/admin read foundation.
 - `[DONE]` Phase 09.11: GymForge admin participant management.
-- `[NEXT]` Phase 09.12: GymForge attendance check-in design and implementation.
-- `[LATER]` Phase 09.13+: other real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.12: GymForge admin exercise catalog management.
+- `[NEXT]` Phase 09.13: GymForge attendance check-in design and implementation.
+- `[LATER]` Phase 09.14+: other real modules only after module-specific security and data design.

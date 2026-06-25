@@ -4,7 +4,12 @@ import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
-import { changeGymForgeParticipantStatus, createGymForgeParticipant } from "./actions";
+import {
+  changeGymForgeExerciseStatus,
+  changeGymForgeParticipantStatus,
+  createGymForgeExercise,
+  createGymForgeParticipant
+} from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +48,8 @@ export default async function GymForgePage() {
     exerciseCatalogCount,
     competitionsCount,
     viewerParticipant,
-    participants
+    participants,
+    exercises
   ] = await Promise.all([
     prisma.gymForgeParticipant.count(),
     prisma.gymForgeParticipant.count({ where: { status: "ACTIVE" } }),
@@ -66,6 +72,17 @@ export default async function GymForgePage() {
         status: true,
         role: true,
         createdAt: true
+      }
+    }),
+    prisma.gymForgeExercise.findMany({
+      orderBy: [{ createdAt: "desc" }],
+      take: 50,
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        isActive: true,
+        archivedAt: true
       }
     })
   ]);
@@ -246,6 +263,83 @@ export default async function GymForgePage() {
                     <div>
                       <span>Empty</span>
                       <strong>No GymForge participants yet</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            </div>
+          </section>
+        ) : null}
+
+        {isAdmin ? (
+          <section className="module-window anchor-section" id="exercises" aria-label="GymForge exercises">
+            <div className="window-titlebar">
+              <div>
+                <span>Admin</span>
+                <strong>Exercise catalog</strong>
+              </div>
+            </div>
+
+            <div className="dashboard-grid">
+              <article className="panel">
+                <div className="panel-title">
+                  <span>Create</span>
+                  <strong className="status-pill">Catalog</strong>
+                </div>
+                <form className="login-form" action={createGymForgeExercise}>
+                  <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                  <label>
+                    Exercise name
+                    <input name="name" minLength={2} maxLength={100} required />
+                  </label>
+                  <label>
+                    Category
+                    <input name="category" maxLength={80} />
+                  </label>
+                  <label>
+                    Description
+                    <input name="description" maxLength={240} />
+                  </label>
+                  <label>
+                    Status
+                    <select name="isActive" defaultValue="true">
+                      <option value="true">Active</option>
+                      <option value="false">Inactive</option>
+                    </select>
+                  </label>
+                  <button type="submit">Create exercise</button>
+                </form>
+              </article>
+
+              <article className="panel">
+                <div className="panel-title">
+                  <span>Exercises</span>
+                  <strong className="status-pill">Latest 50</strong>
+                </div>
+                <div className="status-list">
+                  {exercises.map((exercise) => (
+                    <div key={exercise.id}>
+                      <span>{exercise.name}</span>
+                      <strong>
+                        {exercise.category ?? "Uncategorized"} /{" "}
+                        {exercise.archivedAt ? "ARCHIVED" : exercise.isActive ? "ACTIVE" : "INACTIVE"}
+                      </strong>
+                      <form className="action-stack" action={changeGymForgeExerciseStatus}>
+                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                        <input type="hidden" name="exerciseId" value={exercise.id} />
+                        <button type="submit" name="action" value="deactivate">
+                          Deactivate
+                        </button>
+                        <button type="submit" name="action" value="archive">
+                          Archive
+                        </button>
+                      </form>
+                    </div>
+                  ))}
+                  {exercises.length === 0 ? (
+                    <div>
+                      <span>Empty</span>
+                      <strong>No GymForge exercises yet</strong>
                     </div>
                   ) : null}
                 </div>

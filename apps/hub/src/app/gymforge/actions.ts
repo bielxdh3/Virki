@@ -123,3 +123,79 @@ export async function changeGymForgeParticipantStatus(formData: FormData) {
   revalidatePath("/gymforge");
   redirect("/gymforge");
 }
+
+export async function createGymForgeExercise(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const name = readFormString(formData, "name");
+  const category = readFormString(formData, "category");
+  const description = readFormString(formData, "description");
+  const isActive = readFormString(formData, "isActive") === "true";
+
+  if (name.length < 2 || name.length > 100) {
+    redirect("/gymforge?error=exercise-name");
+  }
+
+  if (category.length > 80 || description.length > 240) {
+    redirect("/gymforge?error=exercise-details");
+  }
+
+  const exercise = await prisma.gymForgeExercise.create({
+    data: {
+      name,
+      category: category || null,
+      description: description || null,
+      isActive
+    },
+    select: { id: true, isActive: true }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_EXERCISE_CREATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.exercise",
+    message: "GymForge exercise created.",
+    metadata: {
+      exerciseId: exercise.id,
+      isActive: exercise.isActive
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function changeGymForgeExerciseStatus(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const exerciseId = readFormString(formData, "exerciseId");
+  const action = readFormString(formData, "action");
+
+  if (!exerciseId || (action !== "deactivate" && action !== "archive")) {
+    redirect("/gymforge?error=exercise-status");
+  }
+
+  const exercise = await prisma.gymForgeExercise.update({
+    where: { id: exerciseId },
+    data: {
+      isActive: false,
+      archivedAt: action === "archive" ? new Date() : null
+    },
+    select: { id: true, isActive: true, archivedAt: true }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_EXERCISE_STATUS_CHANGED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.exercise",
+    message: "GymForge exercise status changed.",
+    metadata: {
+      exerciseId: exercise.id,
+      isActive: exercise.isActive,
+      archived: Boolean(exercise.archivedAt)
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}

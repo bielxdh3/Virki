@@ -88,3 +88,5 @@ Phase 09.9 added the GymForge MVP foundation: Prisma models, migration, and an a
 Phase 09.10 added read-only GymForge participant/admin foundation data on the authenticated hub route. It shows aggregate counts and the linked viewer participant status without adding forms, APIs, uploads, check-ins, workout entry, or public registration.
 
 Phase 09.11 added admin-only GymForge participant management inside the authenticated hub route. OWNER and ADMIN users can create unlinked participants and disable or archive participants with CSRF protection and sanitized audit events. Public registration, invite acceptance, uploads, check-ins, workout entry, and APIs remain blocked.
+
+Phase 09.12 added admin-only GymForge exercise catalog management inside the authenticated hub route. OWNER and ADMIN users can view latest catalog entries, create exercises, and deactivate or archive exercises with CSRF protection and sanitized audit events. Check-ins, workout entry, uploads, public registration, invite acceptance, and APIs remain blocked.
