@@ -31,6 +31,37 @@ function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
 }
 
+function formatDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function addUtcDays(date: Date, days: number): Date {
+  const nextDate = new Date(date);
+  nextDate.setUTCDate(nextDate.getUTCDate() + days);
+  return nextDate;
+}
+
+function calculateCurrentStreak(effectiveDates: Date[], today = getGymForgeAttendanceEffectiveDate()): number {
+  const uniqueDates = new Set(effectiveDates.map(formatDateKey));
+  const todayKey = formatDateKey(today);
+  const yesterday = addUtcDays(today, -1);
+  const yesterdayKey = formatDateKey(yesterday);
+
+  if (!uniqueDates.has(todayKey) && !uniqueDates.has(yesterdayKey)) {
+    return 0;
+  }
+
+  let streak = 0;
+  let cursor = uniqueDates.has(todayKey) ? today : yesterday;
+
+  while (uniqueDates.has(formatDateKey(cursor))) {
+    streak += 1;
+    cursor = addUtcDays(cursor, -1);
+  }
+
+  return streak;
+}
+
 export default async function GymForgePage() {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "gymforge");
@@ -54,6 +85,7 @@ export default async function GymForgePage() {
     viewerAttendanceCount,
     viewerTodayAttendance,
     viewerWorkouts,
+    rankingParticipants,
     participants,
     exercises,
     activeExercises
@@ -120,6 +152,20 @@ export default async function GymForgePage() {
       }
     }),
     prisma.gymForgeParticipant.findMany({
+      where: { status: "ACTIVE" },
+      orderBy: [{ displayName: "asc" }],
+      select: {
+        displayName: true,
+        attendances: {
+          where: { countsForStreak: true },
+          orderBy: [{ effectiveDate: "desc" }],
+          select: {
+            effectiveDate: true
+          }
+        }
+      }
+    }),
+    prisma.gymForgeParticipant.findMany({
       orderBy: [{ createdAt: "desc" }],
       take: 50,
       select: {
@@ -164,6 +210,36 @@ export default async function GymForgePage() {
     { label: "Exercises", value: formatCount(exerciseCatalogCount) },
     { label: "Competitions", value: formatCount(competitionsCount) }
   ];
+  const ranking = rankingParticipants
+    .map((participant) => {
+      const effectiveDates = participant.attendances.map((attendance) => attendance.effectiveDate);
+      const latestCheckInDate = effectiveDates[0] ?? null;
+
+      return {
+        displayName: participant.displayName,
+        totalAttendance: effectiveDates.length,
+        currentStreak: calculateCurrentStreak(effectiveDates),
+        latestCheckInDate
+      };
+    })
+    .sort((left, right) => {
+      if (right.totalAttendance !== left.totalAttendance) {
+        return right.totalAttendance - left.totalAttendance;
+      }
+
+      if (right.currentStreak !== left.currentStreak) {
+        return right.currentStreak - left.currentStreak;
+      }
+
+      const rightLatest = right.latestCheckInDate?.getTime() ?? 0;
+      const leftLatest = left.latestCheckInDate?.getTime() ?? 0;
+
+      if (rightLatest !== leftLatest) {
+        return rightLatest - leftLatest;
+      }
+
+      return left.displayName.localeCompare(right.displayName);
+    });
 
   return (
     <main className="hub-shell">
@@ -266,6 +342,65 @@ export default async function GymForgePage() {
               ))}
             </div>
           </article>
+        </section>
+
+        <section className="module-window anchor-section" id="ranking" aria-label="GymForge ranking">
+          <div className="window-titlebar">
+            <div>
+              <span>Ranking</span>
+              <strong>Attendance and streaks</strong>
+            </div>
+          </div>
+
+          <div className="dashboard-grid">
+            <article className="panel">
+              <div className="panel-title">
+                <span>Group</span>
+                <strong className="status-pill">Active only</strong>
+              </div>
+              <div className="status-list">
+                {ranking.map((participant, index) => (
+                  <div key={participant.displayName}>
+                    <span>{index + 1}. {participant.displayName}</span>
+                    <strong>
+                      {formatCount(participant.totalAttendance)} visits / {formatCount(participant.currentStreak)} streak
+                    </strong>
+                  </div>
+                ))}
+                {ranking.length === 0 ? (
+                  <div>
+                    <span>Empty</span>
+                    <strong>No active participants with attendance yet</strong>
+                  </div>
+                ) : null}
+              </div>
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <span>Latest check-ins</span>
+                <strong className="status-pill">Dates only</strong>
+              </div>
+              <div className="status-list">
+                {ranking.slice(0, 6).map((participant) => (
+                  <div key={participant.displayName}>
+                    <span>{participant.displayName}</span>
+                    <strong>
+                      {participant.latestCheckInDate
+                        ? formatDateKey(participant.latestCheckInDate)
+                        : "No check-in"}
+                    </strong>
+                  </div>
+                ))}
+                {ranking.length === 0 ? (
+                  <div>
+                    <span>Empty</span>
+                    <strong>No latest check-ins</strong>
+                  </div>
+                ) : null}
+              </div>
+            </article>
+          </div>
         </section>
 
         <section className="module-window anchor-section" id="check-in" aria-label="GymForge check-in">

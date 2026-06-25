@@ -90,6 +90,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 - MVP rankings may compare attendance count, current streak, longest streak, or challenge participation.
 - Ranking data is visible only to approved group participants.
+- Initial ranking foundation uses attendance records only and does not expose workout details, attendance notes, or workout notes.
 - Competition definitions should include name, date range, scoring rule, active status, and participant scope.
 - Scoring rules must be deterministic and explainable.
 - Ties and late check-ins must have explicit rules.
@@ -98,6 +99,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 - Approved group participants may see display names, ranking position, streak summaries, and competition participation.
 - Participants may see their own detailed logs.
+- Group ranking may show active participant display names, total attendance count, current streak, and latest check-in date.
 - Detailed workout notes and exercise logs are not group-visible unless a future design explicitly enables it.
 - Disabled, removed, or non-participants must not see group data.
 - Public users must not see any GymForge data.

@@ -96,3 +96,5 @@ Phase 09.13 added participant attendance check-ins inside the authenticated hub 
 Phase 09.14 hardened GymForge attendance date calculation with an explicit `America/Sao_Paulo` MVP timezone policy shared by the page and server action. Effective attendance dates are canonical UTC dates for stable uniqueness and future streak computation. No user location inference, workout entry, photo upload, invite acceptance, or public registration was added.
 
 Phase 09.15 added GymForge workout entry foundation for users linked to an ACTIVE participant. The authenticated hub route can create one workout with one active exercise set per submission and show the viewer's latest workouts. Workout editing, deletion, uploads, invite acceptance, public registration, APIs, and broad social views remain blocked.
+
+Phase 09.16 added read-only GymForge ranking and streak foundation inside the authenticated hub route. Ranking uses attendance records only, includes ACTIVE participants, computes current streaks server-side from GymForge effective dates, and shows display name, attendance count, streak, and latest check-in date without exposing workout details or notes.
