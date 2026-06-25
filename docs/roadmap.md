@@ -76,3 +76,5 @@ Phase 09.4 added the H-vault planning document only. Health/sensitive storage, u
 Phase 09.5 added the GymForge planning document only. Workout tracking, body metrics, upload, import/export, UI, routes, APIs, schema, migrations, and private data ingestion remain blocked.
 
 Phase 09.6 consolidated module planning documents under `docs/modules/README.md`. Real module implementation remains blocked until module-specific design is complete.
+
+Phase 09.3R revised root.ark planning toward a public zero-knowledge compartment model. Implementation remains blocked until a dedicated architecture phase covers capability links, encrypted blob storage, metadata minimization, key lifecycle, revocation, deletion, and public abuse controls.

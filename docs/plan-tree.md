@@ -48,6 +48,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Module security design template exists.
 - `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
 - `[BLOCKED]` Real module implementations remain blocked until each completes `docs/module-security-template.md`.
+- `[BLOCKED]` root.ark implementation also requires a dedicated public zero-knowledge architecture phase.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
 
@@ -148,7 +149,8 @@ Do not implement these beyond inert shell registry entries until each module com
 - `[DO NOT IMPLEMENT YET]` BielOS Core module expansion.
 - `[DONE]` L-vault planning document.
 - `[DO NOT IMPLEMENT YET]` L-vault implementation.
-- `[DONE]` root.ark planning document.
+- `[DONE]` root.ark public zero-knowledge planning revision.
+- `[BLOCKED]` root.ark architecture phase before implementation.
 - `[DO NOT IMPLEMENT YET]` root.ark implementation.
 - `[DONE]` H-vault planning document.
 - `[DO NOT IMPLEMENT YET]` H-vault implementation.
@@ -191,4 +193,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.4: H-vault planning only.
 - `[DONE]` Phase 09.5: GymForge planning only.
 - `[DONE]` Phase 09.6: consolidate module planning docs.
-- `[LATER]` Phase 09.7+: real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.3R: revise root.ark zero-knowledge planning.
+- `[LATER]` Phase 09.7: root.ark public zero-knowledge architecture.
+- `[LATER]` Phase 09.8+: real modules only after module-specific security and data design.

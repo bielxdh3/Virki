@@ -5,7 +5,7 @@ This directory contains planning documents only. No real module implementation, 
 ## Module Documents
 
 - `l-vault.md`: L-vault planning only. Implementation is blocked.
-- `root-ark.md`: root.ark planning only. Implementation is blocked.
+- `root-ark.md`: root.ark public zero-knowledge compartment planning only. Implementation is blocked.
 - `h-vault.md`: H-vault planning only. Implementation is blocked.
 - `gymforge.md`: GymForge planning only. Implementation is blocked.
 
@@ -13,7 +13,7 @@ This directory contains planning documents only. No real module implementation, 
 
 - BielOS Core: shell registry entry only; real expansion is blocked.
 - L-vault: planning document complete; implementation blocked.
-- root.ark: planning document complete; implementation blocked.
+- root.ark: public zero-knowledge compartment planning revised; implementation blocked until a dedicated architecture phase is complete.
 - H-vault: planning document complete; implementation blocked.
 - GymForge: planning document complete; implementation blocked.
 
@@ -40,6 +40,8 @@ The following remain blocked for every module until explicitly designed and appr
 - private data ingestion
 - import/export
 - public exposure
+
+For root.ark specifically, public exposure, compartment access, capability links, encrypted blob storage, metadata handling, key lifecycle, revocation, and deletion remain blocked until a dedicated architecture phase is complete.
 
 ## Data Safety
 

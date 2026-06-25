@@ -85,6 +85,8 @@ The public site can show the BielOS name, short description, public cards, gener
 
 The private hub may show an internal module shell registry with planned module names and locked statuses. This shell must not include private data fields, upload inputs, module APIs, vault storage, ingestion flows, encryption/key management, audit log UI, or real module logic. Each real module must complete `docs/module-security-template.md` before implementation.
 
+root.ark is planned differently from the private hub modules: it may become a public-facing zero-knowledge compartment system. That is higher risk and requires a dedicated architecture phase before implementation. The server and admin must not be able to decrypt user files, and audit logs must never include file contents, keys, raw links, raw tokens, passphrases, or sensitive filenames.
+
 ## Production Exposure Blockers
 
 Do not expose the development server or `infra/docker-compose.yml` outside local development. Development compose host ports must stay bound to `127.0.0.1`.
