@@ -7,6 +7,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../li
 import {
   changeGymForgeExerciseStatus,
   changeGymForgeParticipantStatus,
+  createGymForgeAttendanceCheckIn,
   createGymForgeExercise,
   createGymForgeParticipant
 } from "./actions";
@@ -26,6 +27,10 @@ const formatCount = (count: number) => new Intl.NumberFormat("en-US").format(cou
 
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
+}
+
+function getLocalDayStart(now = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
 }
 
 export default async function GymForgePage() {
@@ -48,6 +53,8 @@ export default async function GymForgePage() {
     exerciseCatalogCount,
     competitionsCount,
     viewerParticipant,
+    viewerAttendanceCount,
+    viewerTodayAttendance,
     participants,
     exercises
   ] = await Promise.all([
@@ -58,11 +65,36 @@ export default async function GymForgePage() {
     prisma.gymForgeParticipant.findUnique({
       where: { userId: session.user.id },
       select: {
+        id: true,
         displayName: true,
         status: true,
         role: true
       }
     }),
+    prisma.gymForgeParticipant
+      .findUnique({
+        where: { userId: session.user.id },
+        select: {
+          _count: {
+            select: {
+              attendances: true
+            }
+          }
+        }
+      })
+      .then((participant) => participant?._count.attendances ?? 0),
+    prisma.gymForgeParticipant
+      .findUnique({
+        where: { userId: session.user.id },
+        select: {
+          attendances: {
+            where: { effectiveDate: getLocalDayStart() },
+            select: { id: true, countsForStreak: true },
+            take: 1
+          }
+        }
+      })
+      .then((participant) => participant?.attendances[0] ?? null),
     prisma.gymForgeParticipant.findMany({
       orderBy: [{ createdAt: "desc" }],
       take: 50,
@@ -88,6 +120,7 @@ export default async function GymForgePage() {
   ]);
 
   const isAdmin = isHubAdmin(session.user.role);
+  const canCheckIn = viewerParticipant?.status === "ACTIVE";
   const csrfToken = createCsrfToken();
 
   const metrics = [
@@ -177,6 +210,10 @@ export default async function GymForgePage() {
                 <dt>Role</dt>
                 <dd>{viewerParticipant?.role ?? "Unavailable"}</dd>
               </div>
+              <div>
+                <dt>Attendance</dt>
+                <dd>{formatCount(viewerAttendanceCount)}</dd>
+              </div>
             </dl>
           </article>
 
@@ -194,6 +231,55 @@ export default async function GymForgePage() {
               ))}
             </div>
           </article>
+        </section>
+
+        <section className="module-window anchor-section" id="check-in" aria-label="GymForge check-in">
+          <div className="window-titlebar">
+            <div>
+              <span>Attendance</span>
+              <strong>Today check-in</strong>
+            </div>
+          </div>
+
+          <div className="dashboard-grid">
+            <article className="panel">
+              <div className="panel-title">
+                <span>Today</span>
+                <strong className="status-pill is-active">
+                  {viewerTodayAttendance ? "Checked in" : "Not checked in"}
+                </strong>
+              </div>
+              <dl className="detail-list">
+                <div>
+                  <dt>Eligibility</dt>
+                  <dd>{canCheckIn ? "Active participant" : "Requires ACTIVE participant link"}</dd>
+                </div>
+                <div>
+                  <dt>Streak count</dt>
+                  <dd>{viewerTodayAttendance?.countsForStreak ? "Included" : "Unavailable"}</dd>
+                </div>
+              </dl>
+            </article>
+
+            {canCheckIn ? (
+              <article className="panel">
+                <div className="panel-title">
+                  <span>Check in</span>
+                  <strong className="status-pill">One per day</strong>
+                </div>
+                <form className="login-form" action={createGymForgeAttendanceCheckIn}>
+                  <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                  <label>
+                    Note
+                    <input name="note" maxLength={160} />
+                  </label>
+                  <button type="submit" disabled={Boolean(viewerTodayAttendance)}>
+                    {viewerTodayAttendance ? "Already checked in" : "Create check-in"}
+                  </button>
+                </form>
+              </article>
+            ) : null}
+          </div>
         </section>
 
         {isAdmin ? (

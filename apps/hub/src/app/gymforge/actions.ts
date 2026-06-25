@@ -22,6 +22,10 @@ function readFormString(formData: FormData, key: string): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function getLocalDayStart(now = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
 function isParticipantRole(value: string): value is ParticipantRole {
   return PARTICIPANT_ROLES.includes(value as ParticipantRole);
 }
@@ -193,6 +197,81 @@ export async function changeGymForgeExerciseStatus(formData: FormData) {
       exerciseId: exercise.id,
       isActive: exercise.isActive,
       archived: Boolean(exercise.archivedAt)
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function createGymForgeAttendanceCheckIn(formData: FormData) {
+  const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
+
+  if (!csrfResult.valid) {
+    forbidden();
+  }
+
+  const session = await getCurrentSession();
+
+  if (!session) {
+    redirect("/login");
+  }
+
+  const note = readFormString(formData, "note");
+
+  if (note.length > 160) {
+    redirect("/gymforge?error=checkin-note");
+  }
+
+  const participant = await prisma.gymForgeParticipant.findUnique({
+    where: { userId: session.user.id },
+    select: { id: true, status: true }
+  });
+
+  if (!participant || participant.status !== "ACTIVE") {
+    forbidden();
+  }
+
+  const effectiveDate = getLocalDayStart();
+  const existingAttendance = await prisma.gymForgeAttendance.findUnique({
+    where: {
+      participantId_effectiveDate: {
+        participantId: participant.id,
+        effectiveDate
+      }
+    },
+    select: { id: true }
+  });
+
+  if (existingAttendance) {
+    revalidatePath("/gymforge");
+    redirect("/gymforge");
+  }
+
+  const attendance = await prisma.gymForgeAttendance.create({
+    data: {
+      participantId: participant.id,
+      effectiveDate,
+      note: note || null,
+      countsForStreak: true
+    },
+    select: {
+      participantId: true,
+      effectiveDate: true,
+      countsForStreak: true
+    }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_ATTENDANCE_CHECKIN_CREATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.attendance",
+    message: "GymForge attendance check-in created.",
+    metadata: {
+      participantId: attendance.participantId,
+      effectiveDate: attendance.effectiveDate.toISOString().slice(0, 10),
+      countsForStreak: attendance.countsForStreak
     }
   });
 

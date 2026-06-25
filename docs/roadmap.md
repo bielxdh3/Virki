@@ -90,3 +90,5 @@ Phase 09.10 added read-only GymForge participant/admin foundation data on the au
 Phase 09.11 added admin-only GymForge participant management inside the authenticated hub route. OWNER and ADMIN users can create unlinked participants and disable or archive participants with CSRF protection and sanitized audit events. Public registration, invite acceptance, uploads, check-ins, workout entry, and APIs remain blocked.
 
 Phase 09.12 added admin-only GymForge exercise catalog management inside the authenticated hub route. OWNER and ADMIN users can view latest catalog entries, create exercises, and deactivate or archive exercises with CSRF protection and sanitized audit events. Check-ins, workout entry, uploads, public registration, invite acceptance, and APIs remain blocked.
+
+Phase 09.13 added participant attendance check-ins inside the authenticated hub route. Only users linked to an ACTIVE GymForge participant can check in, one streak-counting attendance is allowed per participant per local day, notes are capped, and audit metadata stays sanitized. Photo proof, workout entry, invite acceptance, public registration, admin correction, and APIs remain blocked.
