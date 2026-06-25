@@ -7,7 +7,7 @@ This directory contains planning documents only. No real module implementation, 
 - `l-vault.md`: L-vault planning only. Implementation is blocked.
 - `root-ark.md`: root.ark public zero-knowledge compartment planning only. Implementation is blocked.
 - `h-vault.md`: H-vault planning only. Implementation is blocked.
-- `gymforge.md`: GymForge planning only. Implementation is blocked.
+- `gymforge.md`: GymForge gated social gym competition planning only. Implementation is blocked.
 
 ## Implementation Status
 
@@ -15,7 +15,7 @@ This directory contains planning documents only. No real module implementation, 
 - L-vault: planning document complete; implementation blocked.
 - root.ark: public zero-knowledge compartment planning revised; implementation blocked until a dedicated architecture phase is complete.
 - H-vault: planning document complete; implementation blocked.
-- GymForge: planning document complete; implementation blocked.
+- GymForge: gated social gym competition planning revised; implementation blocked until a dedicated architecture or MVP phase is complete.
 
 ## Required Gate
 
@@ -42,6 +42,8 @@ The following remain blocked for every module until explicitly designed and appr
 - public exposure
 
 For root.ark specifically, public exposure, compartment access, capability links, encrypted blob storage, metadata handling, key lifecycle, revocation, and deletion remain blocked until a dedicated architecture phase is complete.
+
+For GymForge specifically, gated entry, invite or admin-created accounts, attendance, streaks, photo check-ins, workout logging, exercise catalog, competitions, group visibility, retention, deletion, and abuse controls remain blocked until a dedicated architecture or MVP phase is complete.
 
 ## Data Safety
 

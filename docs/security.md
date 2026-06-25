@@ -87,6 +87,8 @@ The private hub may show an internal module shell registry with planned module n
 
 root.ark is planned differently from the private hub modules: it may become a public-facing zero-knowledge compartment system. That is higher risk and requires a dedicated architecture phase before implementation. The server and admin must not be able to decrypt user files, and audit logs must never include file contents, keys, raw links, raw tokens, passphrases, or sensitive filenames.
 
+GymForge is planned as a gated social gym competition app, not a vault and not a public open internet app. Invited or admin-created participants may see approved group and competition data after entry, but GymForge data must not be exposed outside the gated site. Implementation requires a dedicated architecture or MVP phase before tracking, uploads, workout logging, participant management, or competitions exist.
+
 ## Production Exposure Blockers
 
 Do not expose the development server or `infra/docker-compose.yml` outside local development. Development compose host ports must stay bound to `127.0.0.1`.

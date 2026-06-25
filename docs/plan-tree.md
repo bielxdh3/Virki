@@ -154,7 +154,8 @@ Do not implement these beyond inert shell registry entries until each module com
 - `[DO NOT IMPLEMENT YET]` root.ark implementation.
 - `[DONE]` H-vault planning document.
 - `[DO NOT IMPLEMENT YET]` H-vault implementation.
-- `[DONE]` GymForge planning document.
+- `[DONE]` GymForge gated competition planning revision.
+- `[BLOCKED]` GymForge architecture or MVP phase before implementation.
 - `[DO NOT IMPLEMENT YET]` GymForge implementation.
 
 ## 12. Definition Of MVP Complete
@@ -194,5 +195,7 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.5: GymForge planning only.
 - `[DONE]` Phase 09.6: consolidate module planning docs.
 - `[DONE]` Phase 09.3R: revise root.ark zero-knowledge planning.
+- `[DONE]` Phase 09.5R: revise GymForge gated competition planning.
 - `[LATER]` Phase 09.7: root.ark public zero-knowledge architecture.
-- `[LATER]` Phase 09.8+: real modules only after module-specific security and data design.
+- `[LATER]` Phase 09.8: GymForge gated competition architecture or MVP design.
+- `[LATER]` Phase 09.9+: real modules only after module-specific security and data design.

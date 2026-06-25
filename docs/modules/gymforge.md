@@ -1,26 +1,51 @@
 # GymForge Planning Document
 
-GymForge is not implemented yet. This document is a planning gate only and does not enable private data ingestion, workout tracking, body metrics, upload, import/export, UI, routes, APIs, database schema, Prisma migrations, or tracking logic.
+GymForge is not implemented yet. This document is a planning gate only and does not enable private data ingestion, workout tracking, body metrics, photo check-ins, upload, import/export, UI, routes, APIs, database schema, Prisma migrations, auth code, or tracking logic.
+
+GymForge is intended as a gated social gym competition app for Gabriel and invited friends. It is not a public open internet app and it is not a zero-knowledge vault. Data may be visible inside the approved group, but it must not be exposed outside the gated site.
 
 ## Module Identity
 
 - Module name: GymForge.
 - Module owner: BielOS owner.
-- Module purpose: Reserved future training workspace for workout planning and progress tracking, only if explicitly designed later.
+- Module purpose: Future gated social gym app for attendance, streaks, workouts, and group competitions.
 - Current status: Planning only. Implementation is blocked.
 
 ## Data Classification
 
-- Classification: sensitive.
-- Private data types: Not approved yet. Must be enumerated before implementation.
-- Data explicitly not collected: workouts, body metrics, health records, progress photos, uploads, passwords, secrets, raw logs, raw headers, raw IPs, JWTs, cookies, private keys, database dumps, backups, Gmail exports, Google Takeout exports, and any real private records.
+- Classification: internal group data, with sensitive health-adjacent fields possible in future phases.
+- Private data types: Not collected in this phase. Future data may include attendance, streaks, workout notes, exercises, sets, reps, loads, competition participation, and photo check-in proof.
+- Data explicitly not collected in this phase: workouts, attendance, streaks, body metrics, health records, progress photos, check-in photos, uploads, passwords, secrets, raw logs, raw headers, raw IPs, JWTs, cookies, private keys, database dumps, backups, Gmail exports, Google Takeout exports, and any real private records.
 - Public or non-private data, if any: Module name and locked/planned status only.
+
+## Access Model
+
+- GymForge should have a barrier before entering the site.
+- Users may join only by invite or admin-created account.
+- There is no open public registration.
+- Internal users may see approved group or competition data after entry.
+- Admin users may manage participants, exercise catalog entries, competitions, and challenges.
+- Data does not need zero-knowledge encryption, but access must remain gated.
+
+## Planned Features
+
+- Gym attendance recording.
+- Gym visit streaks.
+- Future photo or camera check-in proof.
+- Workout notes.
+- Exercise logging.
+- Sets, reps, and load tracking.
+- Group streak comparison.
+- Participation or challenge competition views.
+- Admin-managed exercise catalog.
+- Admin-managed users and participants.
+- Admin-managed competitions or challenges.
 
 ## Storage Model
 
 - Storage location: Not defined.
 - Database tables or files: None in this phase.
-- Encryption or key-management needs: Future design required before any workout or body metric storage exists.
+- Encryption or key-management needs: No zero-knowledge model expected. Future design must still define storage protection for group data and uploaded proof photos.
 - Search/indexing behavior: Not enabled.
 - Derived data or caches: Not enabled.
 
@@ -30,52 +55,52 @@ GymForge is not implemented yet. This document is a planning gate only and does 
 - Migration files: None in this phase.
 - Backfill requirements: None.
 - Rollback approach: Documentation-only rollback.
-- Disposable validation plan: Required before any future schema, storage, or tracking work.
+- Disposable validation plan: Required before any future schema, storage, upload, or tracking work.
 
 ## Backup And Restore
 
 - Backup impact: None in this phase.
 - Restore validation impact: None in this phase.
-- Data that must never be exported: Any future workout, body metric, photo, or health-adjacent contents unless explicitly designed and approved.
-- Disaster recovery notes: Future design must define restore behavior before ingestion.
+- Data that must never be exported: Raw credentials, secrets, raw tokens, private logs, and any future data not explicitly approved for export.
+- Disaster recovery notes: Future design must define backup and restore behavior before non-discardable workout or competition data exists.
 
 ## Access Control
 
-- Required user roles: OWNER by default, pending module design.
-- Cloudflare Access assumptions: Cloudflare Access remains the outer boundary for `hub.biel.dev.br`.
-- BielOS internal auth requirements: BielOS internal auth remains required after Cloudflare Access.
-- Module-specific unlocks: Required before sensitive body metric or health-adjacent data access is implemented.
-- Cross-module access boundaries: GymForge must not share training, body metric, or health-adjacent data with other modules without explicit design.
+- Required user roles: Admin and participant roles, pending module design.
+- Cloudflare Access assumptions: Deployment boundary must be decided before exposure. The app is gated, not open public.
+- BielOS internal auth requirements: Future design must decide whether GymForge reuses BielOS auth, has invite-created participants, or has a separate gated flow.
+- Module-specific unlocks: Not expected for ordinary competition data, but future design must revisit this if sensitive health data is added.
+- Cross-module access boundaries: GymForge must not share workout, participant, or competition data with other modules without explicit design.
 
 ## Audit Events
 
-- Events to record: Future design must define view, create, update, delete, import, export, and unlock events if those actions are added.
+- Events to record: Future design must define login/join, attendance check-in, photo proof upload, workout entry, exercise catalog changes, participant management, competition creation, competition updates, and admin actions.
 - Event result values: Use existing sanitized success, failure, or info patterns.
 - Sanitized metadata only: Yes.
-- Data explicitly excluded from audit logs: Workout details, body metrics, progress photos, health-adjacent contents, notes, secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, file contents, private paths, and backup contents.
+- Data explicitly excluded from audit logs: Workout details, body metrics, photo contents, raw upload paths, secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, private paths, and backup contents.
 
 ## Retention And Deletion
 
 - Retention period: Not defined.
 - Deletion behavior: Not defined.
 - Cleanup command or worker: Not defined.
-- User-visible deletion expectations: Future design must define permanent deletion, retention exceptions, recovery expectations, and backup implications.
+- User-visible deletion expectations: Future design must define participant removal, competition history retention, photo proof retention, and backup implications.
 
 ## Threat Model
 
-- Primary assets: Future workout plans, training history, body metrics, progress media, and health-adjacent notes.
-- Abuse cases: Unauthorized access, accidental exposure, unsafe export, unsafe logging, inference from trends, and backup leakage.
-- Accidental exposure risks: UI previews, logs, exports, debug output, backups, screenshots, browser cache, and notification text.
+- Primary assets: Future participant accounts, attendance records, streaks, workout logs, competition data, and check-in proof photos.
+- Abuse cases: Unauthorized entry, participant impersonation, fake check-ins, photo proof leakage, overexposed leaderboards, unsafe exports, unsafe logging, and backup leakage.
+- Accidental exposure risks: Public routes, screenshots, shared devices, logs, exports, debug output, browser cache, and notification text.
 - Local machine risks: Local filesystem exposure, Docker volume handling, and untracked generated files.
-- Remote access risks: Cloudflare Access misconfiguration and direct origin exposure.
+- Remote access risks: Gating misconfiguration, direct origin exposure, invite leakage, brute force of participant credentials or invites, and denial of service.
 
 ## Failure Modes
 
 - Database unavailable: Future implementation must fail closed for writes and sensitive reads.
 - Backup unavailable: Future implementation must block non-discardable ingestion until backup and restore are validated.
-- Cloudflare Access unavailable: Hub access should remain blocked remotely.
-- Internal auth unavailable: Module access must not proceed.
-- Partial write or import failure: Future implementation must define atomicity, cleanup, and rollback.
+- Auth or invite flow unavailable: Module access must not proceed.
+- Cloudflare unavailable: Remote exposure behavior must be defined before launch.
+- Partial write, upload, or import failure: Future implementation must define atomicity, cleanup, and rollback.
 
 ## UI Safety Constraints
 
@@ -84,30 +109,50 @@ GymForge is not implemented yet. This document is a planning gate only and does 
 - No secret display: Required.
 - No raw logs or audit metadata display: Required.
 - Safe empty states: Must state that GymForge is locked and not collecting data.
+- Group visibility must be explicit before showing participant, streak, workout, or competition data.
 
 ## API Safety Constraints
 
 - Allowed methods: None in this phase.
 - CSRF requirements: Required for any future mutable route.
 - Auth checks: Required for all future routes.
-- Rate limits: Required for sensitive mutations, imports, and exports.
+- Rate limits: Required for login/join, check-ins, uploads, participant management, and competition mutations.
 - Request and response redaction: Required.
-- Error message behavior: Generic for auth and access failures.
+- Error message behavior: Generic for auth, invite, and access failures.
 
 ## Secrets Handling
 
 - Required env names: None in this phase.
 - Placeholder-only docs: Required for any future env.
-- Rotation behavior: Future design required if secrets are introduced.
-- Logging restrictions: Never log secrets, tokens, private keys, raw headers, raw IPs, cookies, JWTs, workout details, body metrics, health-adjacent contents, progress media, or private notes.
+- Rotation behavior: Future design required if invite signing, upload signing, or service secrets are introduced.
+- Logging restrictions: Never log secrets, tokens, invite secrets, private keys, raw headers, raw IPs, cookies, JWTs, workout details, body metrics, check-in photo contents, upload paths, or private notes.
 
 ## Import And Export Rules
 
 - Import sources: Not enabled.
 - Export formats: Not enabled.
 - Manual confirmation requirements: Required before any future export.
-- Redaction requirements: Required before any future export.
-- Files that must stay out of Git: Any dumps, exports, backups, uploads, workout records, body metric records, progress media, private notes, or generated archives.
+- Redaction requirements: Required before any future export outside the group.
+- Files that must stay out of Git: Any dumps, exports, backups, uploads, check-in photos, workout records, body metric records, private notes, or generated archives.
+
+## Required Architecture Phase
+
+Before implementation, GymForge needs an architecture or MVP design phase covering:
+
+- gated entry model
+- invite or admin-created account lifecycle
+- participant roles
+- admin roles
+- exercise catalog management
+- attendance and streak semantics
+- photo check-in proof rules
+- workout logging schema
+- competition/challenge rules
+- group visibility boundaries
+- abuse controls for fake check-ins
+- retention and deletion
+- audit events
+- backup and restore behavior
 
 ## Validation Checklist
 
@@ -118,6 +163,6 @@ GymForge is not implemented yet. This document is a planning gate only and does 
 - Prisma validation: Required when schema changes are added.
 - Migration validation: Required when migrations are added.
 - Backup and restore validation: Required before ingestion.
-- Local auth check: Required before routes are added.
-- Cloudflare Access check: Required before remote exposure.
+- Local auth or gated-entry check: Required before routes are added.
+- Cloudflare exposure check: Required before remote access.
 - Negative tests for unauthorized access: Required before implementation.

@@ -78,3 +78,5 @@ Phase 09.5 added the GymForge planning document only. Workout tracking, body met
 Phase 09.6 consolidated module planning documents under `docs/modules/README.md`. Real module implementation remains blocked until module-specific design is complete.
 
 Phase 09.3R revised root.ark planning toward a public zero-knowledge compartment model. Implementation remains blocked until a dedicated architecture phase covers capability links, encrypted blob storage, metadata minimization, key lifecycle, revocation, deletion, and public abuse controls.
+
+Phase 09.5R revised GymForge planning toward a gated social gym competition model for invited or admin-created participants. Implementation remains blocked until a dedicated architecture or MVP phase covers gated entry, attendance, streaks, photo proof, workout logging, exercise catalog, competitions, group visibility, retention, deletion, and abuse controls.
