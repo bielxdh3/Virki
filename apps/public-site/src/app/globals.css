@@ -83,6 +83,13 @@ a {
   gap: 10px;
 }
 
+.top-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .brand-lockup {
   font-weight: 800;
 }
@@ -99,6 +106,40 @@ a {
   padding: 8px 11px;
   border-radius: 999px;
   font-size: 0.85rem;
+}
+
+.language-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.language-selector label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.language-selector select {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0e141b;
+  color: var(--text);
+  padding: 0 8px;
+}
+
+.language-selector button {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-strong);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
 }
 
 .pulse {
@@ -226,6 +267,11 @@ h1 {
 
   .top-bar,
   .status-line {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .top-actions {
     align-items: flex-start;
     flex-direction: column;
   }

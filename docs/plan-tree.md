@@ -59,6 +59,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` GymForge ranking and streak foundation exists for active participants.
 - `[DONE]` GymForge competition foundation exists for admin-created metadata and read-only display.
 - `[DONE]` GymForge competition assignment and scoring design exists.
+- `[DONE]` BielOS language selector exists with Portuguese default and English option.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
 
@@ -228,5 +229,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.16: GymForge ranking/streak foundation.
 - `[DONE]` Phase 09.17: GymForge competition foundation.
 - `[DONE]` Phase 09.18: GymForge competition assignment/scoring design.
-- `[NEXT]` Phase 09.19: GymForge competition assignment/scoring implementation.
-- `[LATER]` Phase 09.20+: other real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.19: BielOS language selector and Portuguese default.
+- `[NEXT]` Phase 09.20: GymForge competition assignment/scoring implementation.
+- `[LATER]` Phase 09.21+: other real modules only after module-specific security and data design.

@@ -1,4 +1,12 @@
 export type ModuleSensitivity = "internal" | "sensitive";
+export {
+  DEFAULT_LOCALE,
+  LOCALE_COOKIE_NAME,
+  LOCALE_OPTIONS,
+  SUPPORTED_LOCALES,
+  isSupportedLocale
+} from "./i18n";
+export type { BielosLocale } from "./i18n";
 
 export type ModuleSummary = {
   name: string;

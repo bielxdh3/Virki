@@ -1,45 +1,111 @@
-const publicProjects = [
-  {
-    name: "BielOS Core",
-    description: "Core interface and public entry point for the BielOS project.",
-    status: "Public"
+import type { BielosLocale } from "@bielos/ui";
+import { getLocale } from "./locale";
+import { LanguageSelector } from "./language-selector";
+
+const publicProjects = {
+  "pt-BR": [
+    {
+      name: "BielOS Core",
+      description: "Interface central e ponto de entrada público do projeto BielOS.",
+      status: "Público"
+    },
+    {
+      name: "L-vault",
+      description: "Espaço reservado para futuras ferramentas pessoais.",
+      status: "Reservado"
+    },
+    {
+      name: "root.ark",
+      description: "Espaço reservado para futuros fluxos de arquivo.",
+      status: "Reservado"
+    },
+    {
+      name: "H-vault",
+      description: "Espaço reservado para futura organização de dados.",
+      status: "Reservado"
+    },
+    {
+      name: "GymForge",
+      description: "Espaço reservado para futuras ferramentas de treino.",
+      status: "Reservado"
+    }
+  ],
+  en: [
+    {
+      name: "BielOS Core",
+      description: "Core interface and public entry point for the BielOS project.",
+      status: "Public"
+    },
+    {
+      name: "L-vault",
+      description: "Reserved module space for future personal tooling.",
+      status: "Reserved"
+    },
+    {
+      name: "root.ark",
+      description: "Reserved module space for future archive workflows.",
+      status: "Reserved"
+    },
+    {
+      name: "H-vault",
+      description: "Reserved module space for future organized storage.",
+      status: "Reserved"
+    },
+    {
+      name: "GymForge",
+      description: "Reserved module space for future training tools.",
+      status: "Reserved"
+    }
+  ]
+} satisfies Record<BielosLocale, Array<{ name: string; description: string; status: string }>>;
+
+const copy = {
+  "pt-BR": {
+    shellLabel: "Página pública BielOS",
+    statusLabel: "Status público",
+    status: "Status público disponível",
+    description:
+      "Um hub pessoal em estilo sistema operacional para projetos, ferramentas, arquivos, automação e laboratórios técnicos.",
+    enterHub: "Entrar no hub",
+    projectsLabel: "Projetos públicos",
+    footerStatus: "Status geral: disponível",
+    footerSurface: "Superfície pública apenas",
+    language: "Idioma"
   },
-  {
-    name: "L-vault",
-    description: "Reserved module space for future personal tooling.",
-    status: "Reserved"
-  },
-  {
-    name: "root.ark",
-    description: "Reserved module space for future archive workflows.",
-    status: "Reserved"
-  },
-  {
-    name: "H-vault",
-    description: "Reserved module space for future organized storage.",
-    status: "Reserved"
-  },
-  {
-    name: "GymForge",
-    description: "Reserved module space for future training tools.",
-    status: "Reserved"
+  en: {
+    shellLabel: "BielOS public landing",
+    statusLabel: "Public status",
+    status: "Public status available",
+    description:
+      "A personal operating-system-style hub for projects, tools, archives, automation, and technical labs.",
+    enterHub: "Enter hub",
+    projectsLabel: "Public projects",
+    footerStatus: "Generic status: available",
+    footerSurface: "Public surface only",
+    language: "Language"
   }
-];
+} satisfies Record<BielosLocale, Record<string, string>>;
 
 const hubUrl = process.env.NEXT_PUBLIC_HUB_URL ?? "https://hub.biel.dev.br";
 
-export default function PublicLandingPage() {
+export default async function PublicLandingPage() {
+  const locale = await getLocale();
+  const t = copy[locale];
+
   return (
     <main className="os-screen">
-      <section className="desktop-shell" aria-label="BielOS public landing">
+      <section className="desktop-shell" aria-label={t.shellLabel}>
         <header className="top-bar">
           <div className="brand-lockup">
             <img src="/bielos-mark.svg" alt="" className="brand-mark" />
             <span>BielOS</span>
           </div>
-          <div className="status-pill" aria-label="Public status">
-            <span className="pulse" />
-            Public status available
+          <div className="top-actions">
+            <LanguageSelector locale={locale} label={t.language} />
+            <div className="status-pill" aria-label={t.statusLabel}>
+              <span className="pulse" />
+              {t.status}
+            </div>
           </div>
         </header>
 
@@ -51,17 +117,14 @@ export default function PublicLandingPage() {
           </div>
           <p className="eyebrow">biel.dev.br</p>
           <h1>BielOS</h1>
-          <p className="description">
-            A personal operating-system-style hub for projects, tools, archives,
-            automation, and technical labs.
-          </p>
+          <p className="description">{t.description}</p>
           <a className="enter-button" href={hubUrl}>
-            Enter hub
+            {t.enterHub}
           </a>
         </section>
 
-        <section className="project-grid" aria-label="Public projects">
-          {publicProjects.map((project) => (
+        <section className="project-grid" aria-label={t.projectsLabel}>
+          {publicProjects[locale].map((project) => (
             <article className="project-card" key={project.name}>
               <div>
                 <p className="card-kicker">{project.status}</p>
@@ -73,8 +136,8 @@ export default function PublicLandingPage() {
         </section>
 
         <footer className="status-line">
-          <span>Generic status: available</span>
-          <span>Public surface only</span>
+          <span>{t.footerStatus}</span>
+          <span>{t.footerSurface}</span>
         </footer>
       </section>
     </main>
