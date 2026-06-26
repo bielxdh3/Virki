@@ -457,12 +457,14 @@ strong {
 .status-pill {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
+  min-height: 21px;
+  padding: 0 7px;
+  border: 1px solid rgba(121, 142, 160, 0.2);
   border-radius: 999px;
   background: transparent;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
+  font-weight: 720;
+  letter-spacing: 0;
 }
 
 .status-pill.is-active {
@@ -473,6 +475,26 @@ strong {
 .status-pill.is-guarded {
   border-color: rgba(91, 215, 232, 0.55);
   color: #c7f5fb;
+}
+
+.status-pill.status-active {
+  border-color: rgba(116, 221, 161, 0.45);
+  color: #c8f5dc;
+}
+
+.status-pill.status-draft {
+  border-color: rgba(121, 142, 160, 0.22);
+  color: var(--muted-strong);
+}
+
+.status-pill.status-ended {
+  border-color: rgba(235, 196, 110, 0.36);
+  color: #f1daa2;
+}
+
+.status-pill.status-archived {
+  border-color: rgba(238, 116, 116, 0.32);
+  color: #f0bcbc;
 }
 
 .session-avatar {
@@ -735,40 +757,42 @@ strong {
 }
 
 .gymforge-competition-board {
-  background: #0c1218;
+  background: #0b1117;
 }
 
 .competition-toolbar {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(121, 142, 160, 0.12);
 }
 
 .competition-toolbar h2 {
-  margin: 6px 0 0;
-  font-size: 1.1rem;
+  margin: 3px 0 0;
+  font-size: 1rem;
+  font-weight: 750;
 }
 
 .admin-drawer {
-  border: 1px solid rgba(121, 142, 160, 0.18);
-  border-radius: 7px;
-  background: rgba(12, 18, 24, 0.66);
+  overflow: clip;
+  border: 1px solid rgba(121, 142, 160, 0.12);
+  border-radius: 6px;
+  background: rgba(12, 18, 24, 0.34);
 }
 
 .admin-drawer summary {
-  min-height: 36px;
+  min-height: 30px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
-  padding: 0 10px;
+  padding: 0 9px;
   color: var(--muted-strong);
   cursor: pointer;
-  font-size: 0.82rem;
-  font-weight: 800;
+  font-size: 0.76rem;
+  font-weight: 700;
   list-style: none;
 }
 
@@ -779,11 +803,12 @@ strong {
 .admin-drawer summary::after {
   content: "+";
   color: var(--muted);
-  font-weight: 900;
+  font-size: 0.82rem;
+  font-weight: 750;
 }
 
 .admin-drawer[open] summary {
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid rgba(121, 142, 160, 0.14);
   color: var(--text);
 }
 
@@ -793,30 +818,39 @@ strong {
 
 .competition-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-  gap: 12px;
-  padding: 14px;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  padding: 12px;
 }
 
 .competition-card {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid rgba(121, 142, 160, 0.16);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(121, 142, 160, 0.12);
+  border-left: 2px solid rgba(91, 215, 232, 0.36);
   border-radius: 8px;
-  background: #0f171f;
+  background: rgba(13, 20, 27, 0.9);
 }
 
 .competition-card-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
+}
+
+.competition-titleline {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .competition-card-header h3 {
-  margin: 4px 0 0;
-  font-size: 0.98rem;
+  margin: 0;
+  font-size: 0.94rem;
+  font-weight: 740;
   line-height: 1.25;
 }
 
@@ -825,83 +859,137 @@ strong {
   font-size: 0.82rem;
 }
 
+.competition-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.competition-count strong {
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 750;
+}
+
 .competition-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
   margin: 0;
 }
 
 .competition-meta div {
-  padding: 7px 8px;
-  border: 1px solid rgba(121, 142, 160, 0.14);
-  border-radius: 6px;
-  background: rgba(8, 12, 17, 0.32);
+  padding: 6px 0;
+  border-top: 1px solid rgba(121, 142, 160, 0.1);
+  background: transparent;
 }
 
 .competition-meta dt {
   color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 900;
+  font-size: 0.68rem;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
 .competition-meta dd {
-  margin: 5px 0 0;
+  margin: 3px 0 0;
   color: var(--text);
-  font-weight: 800;
+  font-size: 0.82rem;
+  font-weight: 650;
 }
 
 .competition-scoreboard {
   display: grid;
-  gap: 8px;
-}
-
-.competition-scoreboard .status-list {
-  grid-template-columns: 1fr;
   gap: 6px;
-  margin-top: 0;
-}
-
-.competition-scoreboard .status-list div {
   padding: 8px;
-  background: rgba(8, 12, 17, 0.36);
+  border-radius: 7px;
+  background: rgba(6, 10, 14, 0.42);
 }
 
-.admin-tool-grid {
+.scoreboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.scoreboard-header > strong:first-child {
+  color: var(--muted-strong);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.score-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 6px;
+}
+
+.score-row {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(12, 18, 24, 0.82);
+}
+
+.score-row strong {
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.score-row span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.score-row.is-empty {
+  background: transparent;
+  color: var(--muted);
+}
+
+.competition-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding-top: 2px;
 }
 
 .compact-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  padding: 10px;
+  gap: 8px;
+  padding: 9px;
 }
 
 .compact-form label {
   display: grid;
-  gap: 8px;
-  color: #d7e3ee;
-  font-weight: 700;
+  gap: 5px;
+  color: var(--muted-strong);
+  font-size: 0.76rem;
+  font-weight: 650;
 }
 
 .compact-form input,
 .compact-form select {
   width: 100%;
-  min-height: 38px;
-  border: 1px solid var(--line);
+  min-height: 34px;
+  border: 1px solid rgba(121, 142, 160, 0.18);
   border-radius: 6px;
-  background: #0b1016;
+  background: #090e14;
   color: var(--text);
-  padding: 0 10px;
+  padding: 0 9px;
 }
 
 .compact-form select[multiple] {
-  min-height: 132px;
-  padding: 8px 10px;
+  min-height: 92px;
+  padding: 7px 9px;
 }
 
 .compact-form button {
@@ -909,8 +997,8 @@ strong {
 }
 
 .danger-zone {
-  border-color: rgba(238, 116, 116, 0.24);
-  background: rgba(238, 116, 116, 0.035);
+  border-color: rgba(238, 116, 116, 0.16);
+  background: rgba(77, 31, 34, 0.12);
 }
 
 .danger-zone summary {
@@ -918,34 +1006,68 @@ strong {
 }
 
 .danger-zone p {
-  margin: 10px;
+  margin: 8px 9px;
   color: #e6b8b8;
-  font-size: 0.82rem;
+  font-size: 0.76rem;
   line-height: 1.45;
 }
 
-.admin-compact-section {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-}
-
-.admin-create-drawer {
-  max-width: 720px;
-}
-
-.compact-list-panel {
+.management-strip {
   display: grid;
   gap: 8px;
-  padding: 10px;
+  padding: 10px 12px 12px;
+}
+
+.management-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(8, 12, 17, 0.42);
+}
+
+.management-strip-header div {
+  display: grid;
+  gap: 2px;
+}
+
+.management-strip-header span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.management-strip-header strong {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 740;
+}
+
+.management-count {
+  display: inline-flex;
+  min-width: 32px;
+  justify-content: center;
+  padding: 3px 8px;
   border: 1px solid rgba(121, 142, 160, 0.16);
-  border-radius: 8px;
-  background: #0f171f;
+  border-radius: 999px;
+  color: var(--muted-strong) !important;
+  font-size: 0.76rem !important;
+}
+
+.create-strip-drawer {
+  max-width: none;
 }
 
 .management-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
+}
+
+.compact-management-list {
+  padding: 0;
 }
 
 .management-row,
@@ -953,40 +1075,41 @@ strong {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 8px 9px;
-  border: 1px solid rgba(121, 142, 160, 0.14);
-  border-radius: 7px;
-  background: rgba(8, 12, 17, 0.32);
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(121, 142, 160, 0.1);
+  border-radius: 6px;
+  background: rgba(8, 12, 17, 0.24);
 }
 
 .management-row span,
 .empty-row span {
   display: block;
   color: var(--text);
-  font-weight: 800;
+  font-size: 0.84rem;
+  font-weight: 680;
 }
 
 .management-row strong,
 .empty-row strong {
   display: block;
-  margin-top: 3px;
+  margin-top: 2px;
   color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 700;
+  font-size: 0.72rem;
+  font-weight: 600;
 }
 
 .row-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
 }
 
 .row-actions button {
-  min-height: 34px;
-  padding: 0 10px;
-  font-size: 0.78rem;
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 0.72rem;
 }
 
 .button-primary {
@@ -1196,7 +1319,7 @@ strong {
     flex-direction: column;
   }
 
-  .admin-tool-grid,
+  .competition-actions,
   .compact-form,
   .management-row,
   .empty-row {

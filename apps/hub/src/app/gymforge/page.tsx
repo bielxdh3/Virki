@@ -905,11 +905,14 @@ export default async function GymForgePage() {
               return (
                 <article className="competition-card" key={competition.id}>
                   <div className="competition-card-header">
-                    <div>
-                      <span className="status-pill">{competition.status}</span>
+                    <div className="competition-titleline">
+                      <span className={`status-pill status-${competition.status.toLowerCase()}`}>{competition.status}</span>
                       <h3>{competition.name}</h3>
                     </div>
-                    <strong>{formatCount(competition._count.assignments)} {t.assigned}</strong>
+                    <div className="competition-count">
+                      <strong>{formatCount(competition._count.assignments)}</strong>
+                      <span>{t.assigned}</span>
+                    </div>
                   </div>
 
                   <dl className="competition-meta">
@@ -924,24 +927,24 @@ export default async function GymForgePage() {
                   </dl>
 
                   <section className="competition-scoreboard" aria-label={t.automaticScoring}>
-                    <div className="panel-title">
-                      <span>{t.automaticScoring}</span>
+                    <div className="scoreboard-header">
+                      <strong>{t.automaticScoring}</strong>
                       <strong className="status-pill">{t.readOnly}</strong>
                     </div>
-                    <div className="status-list">
+                    <div className="score-list">
                       {scores.length === 0 ? (
-                        <div>
-                          <span>{t.empty}</span>
+                        <div className="score-row is-empty">
                           <strong>{t.noScores}</strong>
+                          <span>{t.empty}</span>
                         </div>
                       ) : (
                         scores.slice(0, 5).map((score, index) => (
-                          <div key={`${competition.id}-${score.displayName}`}>
-                            <span>{index + 1}. {score.displayName}</span>
-                            <strong>
+                          <div className="score-row" key={`${competition.id}-${score.displayName}`}>
+                            <strong>{index + 1}. {score.displayName}</strong>
+                            <span>
                               {formatCount(score.score)} {t.score} / {formatCount(score.attendanceCount)}{" "}
                               {t.attendanceCount} / {formatCount(score.longestStreak)} {t.longestStreak}
-                            </strong>
+                            </span>
                           </div>
                         ))
                       )}
@@ -949,7 +952,7 @@ export default async function GymForgePage() {
                   </section>
 
                   {isAdmin ? (
-                    <div className="admin-tool-grid">
+                    <div className="competition-actions">
                       <details className="admin-drawer">
                         <summary>{t.updateCompetition}</summary>
                         <form className="compact-form" action={updateGymForgeCompetition}>
@@ -1292,8 +1295,16 @@ export default async function GymForgePage() {
               </div>
             </div>
 
-            <div className="admin-compact-section">
-              <details className="admin-drawer admin-create-drawer">
+            <div className="management-strip">
+              <div className="management-strip-header">
+                <div>
+                  <span>Admin</span>
+                  <strong>{t.participantManagement}</strong>
+                </div>
+                <span className="management-count">{formatCount(participants.length)}</span>
+              </div>
+
+              <details className="admin-drawer create-strip-drawer">
                 <summary>
                   <span>{t.createParticipant}</span>
                   <strong className="status-pill">{t.adminOnly}</strong>
@@ -1324,38 +1335,32 @@ export default async function GymForgePage() {
                 </form>
               </details>
 
-              <article className="compact-list-panel">
-                <div className="panel-title">
-                  <span>{t.participants}</span>
-                  <strong className="status-pill">{t.latest50}</strong>
-                </div>
-                <div className="management-list">
-                  {participants.map((participant) => (
-                    <div className="management-row" key={participant.id}>
-                      <div>
-                        <span>{participant.displayName}</span>
-                        <strong>{participant.role} / {participant.status}</strong>
-                      </div>
-                      <form className="row-actions" action={changeGymForgeParticipantStatus}>
-                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                        <input type="hidden" name="participantId" value={participant.id} />
-                        <button className="button-secondary" type="submit" name="status" value="DISABLED">
-                          {t.disable}
-                        </button>
-                        <button className="button-danger" type="submit" name="status" value="ARCHIVED">
-                          {t.archive}
-                        </button>
-                      </form>
+              <div className="management-list compact-management-list" aria-label={t.participants}>
+                {participants.map((participant) => (
+                  <div className="management-row" key={participant.id}>
+                    <div>
+                      <span>{participant.displayName}</span>
+                      <strong>{participant.role} / {participant.status}</strong>
                     </div>
-                  ))}
-                  {participants.length === 0 ? (
-                    <div className="empty-row">
-                      <span>{t.empty}</span>
-                      <strong>{t.noParticipants}</strong>
-                    </div>
-                  ) : null}
-                </div>
-              </article>
+                    <form className="row-actions" action={changeGymForgeParticipantStatus}>
+                      <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                      <input type="hidden" name="participantId" value={participant.id} />
+                      <button className="button-secondary" type="submit" name="status" value="DISABLED">
+                        {t.disable}
+                      </button>
+                      <button className="button-danger" type="submit" name="status" value="ARCHIVED">
+                        {t.archive}
+                      </button>
+                    </form>
+                  </div>
+                ))}
+                {participants.length === 0 ? (
+                  <div className="empty-row">
+                    <span>{t.empty}</span>
+                    <strong>{t.noParticipants}</strong>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </section>
         ) : null}
@@ -1369,8 +1374,16 @@ export default async function GymForgePage() {
               </div>
             </div>
 
-            <div className="admin-compact-section">
-              <details className="admin-drawer admin-create-drawer">
+            <div className="management-strip">
+              <div className="management-strip-header">
+                <div>
+                  <span>Admin</span>
+                  <strong>{t.exerciseCatalog}</strong>
+                </div>
+                <span className="management-count">{formatCount(exercises.length)}</span>
+              </div>
+
+              <details className="admin-drawer create-strip-drawer">
                 <summary>
                   <span>{t.createExercise}</span>
                   <strong className="status-pill">{t.catalog}</strong>
@@ -1400,41 +1413,35 @@ export default async function GymForgePage() {
                 </form>
               </details>
 
-              <article className="compact-list-panel">
-                <div className="panel-title">
-                  <span>{t.exercises}</span>
-                  <strong className="status-pill">{t.latest50}</strong>
-                </div>
-                <div className="management-list">
-                  {exercises.map((exercise) => (
-                    <div className="management-row" key={exercise.id}>
-                      <div>
-                        <span>{exercise.name}</span>
-                        <strong>
-                          {exercise.category ?? t.uncategorized} /{" "}
-                          {exercise.archivedAt ? "ARCHIVED" : exercise.isActive ? "ACTIVE" : "INACTIVE"}
-                        </strong>
-                      </div>
-                      <form className="row-actions" action={changeGymForgeExerciseStatus}>
-                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                        <input type="hidden" name="exerciseId" value={exercise.id} />
-                        <button className="button-secondary" type="submit" name="action" value="deactivate">
-                          {t.deactivate}
-                        </button>
-                        <button className="button-danger" type="submit" name="action" value="archive">
-                          {t.archive}
-                        </button>
-                      </form>
+              <div className="management-list compact-management-list" aria-label={t.exercises}>
+                {exercises.map((exercise) => (
+                  <div className="management-row" key={exercise.id}>
+                    <div>
+                      <span>{exercise.name}</span>
+                      <strong>
+                        {exercise.category ?? t.uncategorized} /{" "}
+                        {exercise.archivedAt ? "ARCHIVED" : exercise.isActive ? "ACTIVE" : "INACTIVE"}
+                      </strong>
                     </div>
-                  ))}
-                  {exercises.length === 0 ? (
-                    <div className="empty-row">
-                      <span>{t.empty}</span>
-                      <strong>{t.noExercises}</strong>
-                    </div>
-                  ) : null}
-                </div>
-              </article>
+                    <form className="row-actions" action={changeGymForgeExerciseStatus}>
+                      <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                      <input type="hidden" name="exerciseId" value={exercise.id} />
+                      <button className="button-secondary" type="submit" name="action" value="deactivate">
+                        {t.deactivate}
+                      </button>
+                      <button className="button-danger" type="submit" name="action" value="archive">
+                        {t.archive}
+                      </button>
+                    </form>
+                  </div>
+                ))}
+                {exercises.length === 0 ? (
+                  <div className="empty-row">
+                    <span>{t.empty}</span>
+                    <strong>{t.noExercises}</strong>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </section>
         ) : null}
