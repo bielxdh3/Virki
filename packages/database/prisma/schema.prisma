@@ -199,6 +199,7 @@ model GymForgeParticipant {
   user        User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
   attendances GymForgeAttendance[]
   workouts    GymForgeWorkout[]
+  competitionAssignments GymForgeCompetitionAssignment[]
 
   @@unique([userId])
   @@index([status])
@@ -287,7 +288,25 @@ model GymForgeCompetition {
   updatedAt   DateTime                  @updatedAt
   archivedAt  DateTime?
 
+  assignments GymForgeCompetitionAssignment[]
+
   @@index([status])
   @@index([startsAt])
   @@index([endsAt])
+}
+
+model GymForgeCompetitionAssignment {
+  id            String   @id @default(cuid())
+  competitionId String
+  participantId String
+  assignedAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  competition GymForgeCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  participant GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@unique([competitionId, participantId])
+  @@index([competitionId])
+  @@index([participantId])
 }

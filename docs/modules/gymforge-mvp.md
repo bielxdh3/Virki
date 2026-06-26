@@ -1,13 +1,13 @@
 # GymForge MVP Architecture
 
-GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, competition participant assignment implementation, automatic competition scoring implementation, or broad social feed behavior.
+GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, score corrections, competition editing/deletion, or broad social feed behavior.
 
 GymForge is a gated social gym competition app for Gabriel and invited or admin-created participants. It is not a zero-knowledge vault and not an open public internet app. Approved participants may see group competition and streak data inside the gated area.
 
 ## MVP Boundary
 
-- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, and competition metadata foundation.
-- Design-only: competition participant assignment and automatic scoring.
+- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, and deterministic automatic scoring.
+- Design-only: photo proof, invite acceptance, imports/exports, workout editing/deletion, admin attendance correction, score correction, competition editing/deletion, and broad social feed behavior.
 - Included in the MVP boundary: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, simple group ranking, and competition metadata.
 - Future but planned: photo proof for check-ins.
 - Excluded from MVP: body metrics, health records, public registration, public profiles, open internet access, imports, exports, file upload, broad social feed, payments, and third-party integrations.
@@ -93,15 +93,15 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 - MVP rankings may compare attendance count, current streak, longest streak, or challenge participation.
 - Ranking data is visible only to approved group participants.
 - Initial ranking foundation uses attendance records only and does not expose workout details, attendance notes, or workout notes.
-- Initial competition foundation supports admin-created competition metadata and read-only display only.
+- Initial competition foundation supports admin-created competition metadata, admin-only explicit participant assignment, and read-only deterministic scoring display.
 - Competition definitions should include name, date range, scoring rule, active status, and participant scope.
 - Scoring rules must be deterministic and explainable.
 - Ties and late check-ins must have explicit rules.
-- Participant assignment, automatic scoring, editing, and deletion require later scoped phases.
+- Competition editing/deletion, score correction, and admin adjudication require later scoped phases.
 
 ## Competition Assignment And Scoring Design
 
-This section is design-only. Runtime assignment, automatic scoring, admin correction, schema changes, APIs, server actions, and UI are blocked until a later scoped implementation phase.
+This section is implemented for explicit participant assignment and deterministic read-only scoring. Admin correction, score overrides, APIs, competition editing/deletion, and broad social behavior remain blocked until later scoped phases.
 
 - Participant assignment should be explicit: an admin assigns ACTIVE GymForge participants to a competition before scoring includes them.
 - Participant scope should support at least `ALL_ACTIVE_AT_START` and `EXPLICIT_PARTICIPANTS`; MVP implementation should prefer explicit assignment when prizes, challenges, or sensitive group visibility are involved.
@@ -116,7 +116,7 @@ This section is design-only. Runtime assignment, automatic scoring, admin correc
 - Admin overrides and corrections must be limited to explicit correction actions, require OWNER or ADMIN, require CSRF, preserve an audit trail, and never mutate raw historical audit records.
 - Visibility rules should show only display name, rank, score, attendance count, streak summary, and safe competition metadata to approved group participants.
 - Competition views must not expose workout notes, attendance notes, raw participant ids, raw audit metadata, raw request data, private exports, cookies, JWTs, headers, IPs, secrets, or database details.
-- Future audit events should include participant assigned to competition, participant removed from competition, scoring recalculated, score correction applied, competition activated, competition ended, and competition archived.
+- Audit events include competition assignment updates with sanitized counts. Future audit events should include score correction applied, competition activated, competition ended, and competition archived when those mutable lifecycle features exist.
 - Audit metadata should include only sanitized ids, status, rule type, date range presence, affected counts, and result status; it must not include notes, descriptions beyond short labels, raw links, raw request data, or private values.
 - Validation before implementation must cover role checks, CSRF failures returning HTTP 403, date-boundary tests for `America/Sao_Paulo`, disabled/archived participant exclusion, duplicate attendance safety, tie breaker determinism, and visibility restrictions.
 

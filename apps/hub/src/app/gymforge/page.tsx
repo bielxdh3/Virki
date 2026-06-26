@@ -14,7 +14,8 @@ import {
   createGymForgeCompetition,
   createGymForgeExercise,
   createGymForgeParticipant,
-  createGymForgeWorkout
+  createGymForgeWorkout,
+  updateGymForgeCompetitionAssignments
 } from "./actions";
 import { getGymForgeAttendanceEffectiveDate } from "./dates";
 
@@ -51,7 +52,7 @@ const copy = {
     exercises: "Exercícios",
     competitions: "Competições",
     competition: "Competição",
-    metadataFoundation: "Fundação de metadados",
+    metadataFoundation: "Atribuição e pontuação",
     create: "Criar",
     adminOnly: "Admin apenas",
     name: "Nome",
@@ -59,7 +60,21 @@ const copy = {
     startsAt: "Início",
     endsAt: "Fim",
     scoringRule: "Regra de pontuação",
+    scoringRuleAttendance: "Presença total",
+    scoringRuleCurrentStreak: "Sequência atual",
+    scoringRuleLongestStreak: "Maior sequência",
+    scoringRuleWeighted: "Presença + maior sequência",
     createCompetition: "Criar competição",
+    assignment: "Atribuição",
+    assignParticipants: "Atribuir participantes",
+    updateAssignments: "Atualizar atribuições",
+    assigned: "Atribuídos",
+    automaticScoring: "Pontuação automática",
+    score: "pontos",
+    attendanceCount: "presenças",
+    currentStreak: "sequência atual",
+    longestStreak: "maior sequência",
+    noScores: "Sem ranking automático disponível",
     empty: "Vazio",
     noCompetitions: "Nenhuma competição ainda",
     ranking: "Ranking",
@@ -126,7 +141,7 @@ const copy = {
     safetyBoundary: "Limite de segurança",
     noPrivateIngestion: "Recursos ainda bloqueados",
     limitations:
-      "GymForge permanece atrás da autenticação existente do hub. Prova por foto, edição/exclusão de treinos, correção admin de presença, imports, exports, cadastro público, aceite de convite, atribuição de participantes a competições e pontuação automática permanecem bloqueados."
+      "GymForge permanece atrás da autenticação existente do hub. Prova por foto, edição/exclusão de treinos, correção admin de presença, imports, exports, cadastro público, aceite de convite e feed social amplo permanecem bloqueados."
   },
   en: {
     navLabel: "BielOS navigation",
@@ -158,7 +173,7 @@ const copy = {
     exercises: "Exercises",
     competitions: "Competitions",
     competition: "Competition",
-    metadataFoundation: "Metadata foundation",
+    metadataFoundation: "Assignment and scoring",
     create: "Create",
     adminOnly: "Admin only",
     name: "Name",
@@ -166,7 +181,21 @@ const copy = {
     startsAt: "Starts at",
     endsAt: "Ends at",
     scoringRule: "Scoring rule",
+    scoringRuleAttendance: "Total attendance",
+    scoringRuleCurrentStreak: "Current streak",
+    scoringRuleLongestStreak: "Longest streak",
+    scoringRuleWeighted: "Attendance + longest streak",
     createCompetition: "Create competition",
+    assignment: "Assignment",
+    assignParticipants: "Assign participants",
+    updateAssignments: "Update assignments",
+    assigned: "Assigned",
+    automaticScoring: "Automatic scoring",
+    score: "points",
+    attendanceCount: "attendance",
+    currentStreak: "current streak",
+    longestStreak: "longest streak",
+    noScores: "No automatic ranking available",
     empty: "Empty",
     noCompetitions: "No competitions yet",
     ranking: "Ranking",
@@ -233,7 +262,7 @@ const copy = {
     safetyBoundary: "Safety boundary",
     noPrivateIngestion: "Still blocked",
     limitations:
-      "GymForge remains behind existing hub auth. Photo proof, workout editing/deletion, admin attendance correction, imports, exports, public registration, invite acceptance, competition participant assignment, and automatic scoring remain blocked."
+      "GymForge remains behind existing hub auth. Photo proof, workout editing/deletion, admin attendance correction, imports, exports, public registration, invite acceptance, and broad social feed remain blocked."
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
@@ -244,7 +273,8 @@ const foundationItems = {
     "Schema de presença",
     "Notas de treino",
     "Séries de treino",
-    "Metadados de competição"
+    "Metadados de competição",
+    "Atribuição e pontuação"
   ],
   en: [
     "Participant records",
@@ -252,14 +282,57 @@ const foundationItems = {
     "Attendance schema",
     "Workout notes",
     "Workout sets",
-    "Competition metadata"
+    "Competition metadata",
+    "Assignment and scoring"
   ]
 } satisfies Record<BielosLocale, string[]>;
 
 const formatCount = (count: number) => new Intl.NumberFormat("en-US").format(count);
 
+const COMPETITION_SCORING_RULES = [
+  "ATTENDANCE_COUNT",
+  "CURRENT_STREAK",
+  "LONGEST_STREAK",
+  "ATTENDANCE_PLUS_LONGEST_STREAK"
+] as const;
+
+type CompetitionScoringRule = (typeof COMPETITION_SCORING_RULES)[number];
+
+const COMPETITION_SCORING_RULE_LABELS = {
+  "pt-BR": {
+    ATTENDANCE_COUNT: "Presença total",
+    CURRENT_STREAK: "Sequência atual",
+    LONGEST_STREAK: "Maior sequência",
+    ATTENDANCE_PLUS_LONGEST_STREAK: "Presença + maior sequência"
+  },
+  en: {
+    ATTENDANCE_COUNT: "Total attendance",
+    CURRENT_STREAK: "Current streak",
+    LONGEST_STREAK: "Longest streak",
+    ATTENDANCE_PLUS_LONGEST_STREAK: "Attendance + longest streak"
+  }
+} satisfies Record<BielosLocale, Record<CompetitionScoringRule, string>>;
+
+type CompetitionForScoring = {
+  startsAt: Date | null;
+  endsAt: Date | null;
+  scoringRule: string;
+  assignments: {
+    participant: {
+      displayName: string;
+      attendances: {
+        effectiveDate: Date;
+      }[];
+    };
+  }[];
+};
+
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
+}
+
+function isCompetitionScoringRule(value: string): value is CompetitionScoringRule {
+  return COMPETITION_SCORING_RULES.includes(value as CompetitionScoringRule);
 }
 
 function formatDateKey(date: Date): string {
@@ -291,6 +364,89 @@ function calculateCurrentStreak(effectiveDates: Date[], today = getGymForgeAtten
   }
 
   return streak;
+}
+
+function calculateLongestStreak(effectiveDates: Date[]): number {
+  const uniqueDateKeys = Array.from(new Set(effectiveDates.map(formatDateKey))).sort();
+  let longestStreak = 0;
+  let currentStreak = 0;
+  let previousDate: Date | null = null;
+
+  for (const dateKey of uniqueDateKeys) {
+    const date = new Date(`${dateKey}T00:00:00.000Z`);
+    const expectedDate = previousDate ? addUtcDays(previousDate, 1) : null;
+    currentStreak = expectedDate && formatDateKey(expectedDate) === dateKey ? currentStreak + 1 : 1;
+    longestStreak = Math.max(longestStreak, currentStreak);
+    previousDate = date;
+  }
+
+  return longestStreak;
+}
+
+function calculateCompetitionScores(competition: CompetitionForScoring) {
+  if (!competition.startsAt || !competition.endsAt || !isCompetitionScoringRule(competition.scoringRule)) {
+    return [];
+  }
+
+  const rangeStart = competition.startsAt.getTime();
+  const rangeEnd = competition.endsAt.getTime();
+
+  return competition.assignments
+    .map((assignment) => {
+      const effectiveDates = Array.from(
+        new Map(
+          assignment.participant.attendances
+            .filter((attendance) => {
+              const time = attendance.effectiveDate.getTime();
+              return time >= rangeStart && time <= rangeEnd;
+            })
+            .map((attendance) => [formatDateKey(attendance.effectiveDate), attendance.effectiveDate])
+        ).values()
+      ).sort((left, right) => left.getTime() - right.getTime());
+      const attendanceCount = effectiveDates.length;
+      const currentStreak = calculateCurrentStreak(effectiveDates, competition.endsAt ?? undefined);
+      const longestStreak = calculateLongestStreak(effectiveDates);
+      const latestCheckInDate = effectiveDates.at(-1) ?? null;
+      const score =
+        competition.scoringRule === "ATTENDANCE_COUNT"
+          ? attendanceCount
+          : competition.scoringRule === "CURRENT_STREAK"
+            ? currentStreak
+            : competition.scoringRule === "LONGEST_STREAK"
+              ? longestStreak
+              : attendanceCount + longestStreak;
+
+      return {
+        displayName: assignment.participant.displayName,
+        score,
+        attendanceCount,
+        currentStreak,
+        longestStreak,
+        latestCheckInDate
+      };
+    })
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      if (right.attendanceCount !== left.attendanceCount) {
+        return right.attendanceCount - left.attendanceCount;
+      }
+
+      if (right.longestStreak !== left.longestStreak) {
+        return right.longestStreak - left.longestStreak;
+      }
+
+      const rightLatest = right.latestCheckInDate?.getTime() ?? 0;
+      const leftLatest = left.latestCheckInDate?.getTime() ?? 0;
+
+      if (rightLatest !== leftLatest) {
+        return rightLatest - leftLatest;
+      }
+
+      return left.displayName.localeCompare(right.displayName);
+    });
 }
 
 function formatCompetitionDateRange(
@@ -344,6 +500,7 @@ export default async function GymForgePage() {
     participants,
     exercises,
     activeExercises,
+    activeParticipantsForAssignment,
     competitions
   ] = await Promise.all([
     prisma.gymForgeParticipant.count(),
@@ -454,6 +611,14 @@ export default async function GymForgePage() {
         name: true
       }
     }),
+    prisma.gymForgeParticipant.findMany({
+      where: { status: "ACTIVE" },
+      orderBy: [{ displayName: "asc" }],
+      select: {
+        id: true,
+        displayName: true
+      }
+    }),
     prisma.gymForgeCompetition.findMany({
       orderBy: [{ createdAt: "desc" }],
       take: 20,
@@ -463,7 +628,29 @@ export default async function GymForgePage() {
         status: true,
         startsAt: true,
         endsAt: true,
-        scoringRule: true
+        scoringRule: true,
+        assignments: {
+          where: {
+            participant: {
+              status: "ACTIVE"
+            }
+          },
+          orderBy: [{ assignedAt: "asc" }],
+          select: {
+            participantId: true,
+            participant: {
+              select: {
+                displayName: true,
+                status: true,
+                attendances: {
+                  where: { countsForStreak: true },
+                  select: { effectiveDate: true },
+                  orderBy: [{ effectiveDate: "asc" }]
+                }
+              }
+            }
+          }
+        }
       }
     })
   ]);
@@ -656,7 +843,12 @@ export default async function GymForgePage() {
                   </label>
                   <label>
                     {t.scoringRule}
-                    <input name="scoringRule" maxLength={120} required />
+                    <select name="scoringRule" defaultValue="ATTENDANCE_COUNT">
+                      <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
+                      <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
+                      <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
+                      <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
+                    </select>
                   </label>
                   <button type="submit">{t.createCompetition}</button>
                 </form>
@@ -675,10 +867,100 @@ export default async function GymForgePage() {
                     <strong>
                       {competition.status} /{" "}
                       {formatCompetitionDateRange(competition.startsAt, competition.endsAt, locale)} /{" "}
-                      {competition.scoringRule}
+                      {isCompetitionScoringRule(competition.scoringRule)
+                        ? COMPETITION_SCORING_RULE_LABELS[locale][competition.scoringRule]
+                        : competition.scoringRule} / {formatCount(competition.assignments.length)} {t.assigned}
                     </strong>
                   </div>
                 ))}
+                {competitions.length === 0 ? (
+                  <div>
+                    <span>{t.empty}</span>
+                    <strong>{t.noCompetitions}</strong>
+                  </div>
+                ) : null}
+              </div>
+            </article>
+
+            {isAdmin ? (
+              <article className="panel">
+                <div className="panel-title">
+                  <span>{t.assignment}</span>
+                  <strong className="status-pill">{t.adminOnly}</strong>
+                </div>
+                <div className="status-list">
+                  {competitions.map((competition) => {
+                    const assignedParticipantIds = new Set(
+                      competition.assignments.map((assignment) => assignment.participantId)
+                    );
+
+                    return (
+                      <form
+                        className="login-form"
+                        action={updateGymForgeCompetitionAssignments}
+                        key={competition.id}
+                      >
+                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                        <input type="hidden" name="competitionId" value={competition.id} />
+                        <label>
+                          {competition.name}
+                          <select
+                            name="participantId"
+                            multiple
+                            size={Math.max(1, Math.min(activeParticipantsForAssignment.length, 6))}
+                            defaultValue={Array.from(assignedParticipantIds)}
+                          >
+                            {activeParticipantsForAssignment.map((participant) => (
+                              <option key={participant.id} value={participant.id}>
+                                {participant.displayName}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <button type="submit" disabled={activeParticipantsForAssignment.length === 0}>
+                          {t.updateAssignments}
+                        </button>
+                      </form>
+                    );
+                  })}
+                  {competitions.length === 0 ? (
+                    <div>
+                      <span>{t.empty}</span>
+                      <strong>{t.noCompetitions}</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            ) : null}
+
+            <article className="panel">
+              <div className="panel-title">
+                <span>{t.automaticScoring}</span>
+                <strong className="status-pill">{t.readOnly}</strong>
+              </div>
+              <div className="status-list">
+                {competitions.flatMap((competition) => {
+                  const scores = calculateCompetitionScores(competition);
+
+                  if (scores.length === 0) {
+                    return [
+                      <div key={`${competition.id}-empty`}>
+                        <span>{competition.name}</span>
+                        <strong>{t.noScores}</strong>
+                      </div>
+                    ];
+                  }
+
+                  return scores.slice(0, 5).map((score, index) => (
+                    <div key={`${competition.id}-${score.displayName}`}>
+                      <span>{competition.name}: {index + 1}. {score.displayName}</span>
+                      <strong>
+                        {formatCount(score.score)} {t.score} / {formatCount(score.attendanceCount)}{" "}
+                        {t.attendanceCount} / {formatCount(score.longestStreak)} {t.longestStreak}
+                      </strong>
+                    </div>
+                  ));
+                })}
                 {competitions.length === 0 ? (
                   <div>
                     <span>{t.empty}</span>

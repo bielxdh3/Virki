@@ -11,11 +11,18 @@ import { formatGymForgeAttendanceDate, getGymForgeAttendanceEffectiveDate } from
 const PARTICIPANT_ROLES = ["ADMIN", "PARTICIPANT"] as const;
 const PARTICIPANT_STATUSES = ["INVITED", "ACTIVE", "DISABLED", "ARCHIVED"] as const;
 const COMPETITION_STATUSES = ["DRAFT", "ACTIVE", "ENDED", "ARCHIVED"] as const;
+const COMPETITION_SCORING_RULES = [
+  "ATTENDANCE_COUNT",
+  "CURRENT_STREAK",
+  "LONGEST_STREAK",
+  "ATTENDANCE_PLUS_LONGEST_STREAK"
+] as const;
 const WORKOUT_UNITS = ["KG", "LB", "BODYWEIGHT", "OTHER"] as const;
 
 type ParticipantRole = (typeof PARTICIPANT_ROLES)[number];
 type ParticipantStatus = (typeof PARTICIPANT_STATUSES)[number];
 type CompetitionStatus = (typeof COMPETITION_STATUSES)[number];
+type CompetitionScoringRule = (typeof COMPETITION_SCORING_RULES)[number];
 type WorkoutUnit = (typeof WORKOUT_UNITS)[number];
 type ParsedOptionalDate = Date | null | "invalid";
 
@@ -38,6 +45,10 @@ function isParticipantStatus(value: string): value is ParticipantStatus {
 
 function isCompetitionStatus(value: string): value is CompetitionStatus {
   return COMPETITION_STATUSES.includes(value as CompetitionStatus);
+}
+
+function isCompetitionScoringRule(value: string): value is CompetitionScoringRule {
+  return COMPETITION_SCORING_RULES.includes(value as CompetitionScoringRule);
 }
 
 function isWorkoutUnit(value: string): value is WorkoutUnit {
@@ -272,6 +283,10 @@ export async function createGymForgeCompetition(formData: FormData) {
     redirect("/gymforge?error=competition-details");
   }
 
+  if (!isCompetitionScoringRule(scoringRule)) {
+    redirect("/gymforge?error=competition-scoring");
+  }
+
   if (!isCompetitionStatus(status)) {
     redirect("/gymforge?error=competition-status");
   }
@@ -284,6 +299,10 @@ export async function createGymForgeCompetition(formData: FormData) {
   const endsAt = endsAtResult;
 
   if (startsAt && endsAt && startsAt.getTime() > endsAt.getTime()) {
+    redirect("/gymforge?error=competition-dates");
+  }
+
+  if (status === "ACTIVE" && (!startsAt || !endsAt)) {
     redirect("/gymforge?error=competition-dates");
   }
 
@@ -314,6 +333,88 @@ export async function createGymForgeCompetition(formData: FormData) {
       competitionId: competition.id,
       status: competition.status,
       hasDateRange: Boolean(competition.startsAt || competition.endsAt)
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function updateGymForgeCompetitionAssignments(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const competitionId = readFormString(formData, "competitionId");
+  const selectedParticipantIds = formData
+    .getAll("participantId")
+    .filter((value): value is string => typeof value === "string" && Boolean(value));
+
+  if (!competitionId) {
+    redirect("/gymforge?error=competition-assignment");
+  }
+
+  const uniqueSelectedParticipantIds = Array.from(new Set(selectedParticipantIds));
+
+  const [competition, activeParticipants] = await Promise.all([
+    prisma.gymForgeCompetition.findUnique({
+      where: { id: competitionId },
+      select: { id: true }
+    }),
+    prisma.gymForgeParticipant.findMany({
+      where: {
+        id: { in: uniqueSelectedParticipantIds },
+        status: "ACTIVE"
+      },
+      select: { id: true }
+    })
+  ]);
+
+  if (!competition) {
+    redirect("/gymforge?error=competition-assignment");
+  }
+
+  const activeParticipantIds = new Set(activeParticipants.map((participant) => participant.id));
+
+  if (activeParticipantIds.size !== uniqueSelectedParticipantIds.length) {
+    redirect("/gymforge?error=competition-assignment");
+  }
+
+  await prisma.$transaction(async (transaction) => {
+    await transaction.gymForgeCompetitionAssignment.deleteMany({
+      where: {
+        competitionId,
+        participantId: {
+          notIn: uniqueSelectedParticipantIds
+        }
+      }
+    });
+
+    await Promise.all(
+      uniqueSelectedParticipantIds.map((participantId) =>
+        transaction.gymForgeCompetitionAssignment.upsert({
+          where: {
+            competitionId_participantId: {
+              competitionId,
+              participantId
+            }
+          },
+          update: {},
+          create: {
+            competitionId,
+            participantId
+          }
+        })
+      )
+    );
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_COMPETITION_ASSIGNMENT_UPDATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.competition",
+    message: "GymForge competition assignments updated.",
+    metadata: {
+      competitionId,
+      assignedCount: uniqueSelectedParticipantIds.length
     }
   });
 

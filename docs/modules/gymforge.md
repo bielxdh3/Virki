@@ -1,6 +1,6 @@
 # GymForge Planning Document
 
-GymForge now has an implemented MVP foundation inside the private BielOS hub. This document records the module boundary and remaining gates. It does not enable body metrics, health records, photo check-ins, upload, import/export, public registration, invite acceptance, workout editing/deletion, admin attendance correction, competition participant assignment implementation, or automatic competition scoring implementation.
+GymForge now has an implemented MVP foundation inside the private BielOS hub. This document records the module boundary and remaining gates. It does not enable body metrics, health records, photo check-ins, upload, import/export, public registration, invite acceptance, workout editing/deletion, admin attendance correction, scoring corrections, competition editing/deletion, or broad social feed behavior.
 
 GymForge is intended as a gated social gym competition app for Gabriel and invited friends. It is not a public open internet app and it is not a zero-knowledge vault. Data may be visible inside the approved group, but it must not be exposed outside the gated site.
 
@@ -15,7 +15,7 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 - Classification: internal group data, with sensitive health-adjacent fields possible in future phases.
 - Private data types: GymForge may store participant display names, participant status/role, attendance check-ins, optional attendance notes, exercise catalog entries, workout entries, workout sets, optional workout/set notes, competition metadata, and derived read-only ranking/streak views.
-- Data explicitly not collected: body metrics, health records, progress photos, check-in photos, uploads, passwords, secrets, raw logs, raw headers, raw IPs, JWTs, cookies, private keys, database dumps, backups, Gmail exports, Google Takeout exports, import/export files, invite acceptance data, and automatic competition scores.
+- Data explicitly not collected: body metrics, health records, progress photos, check-in photos, uploads, passwords, secrets, raw logs, raw headers, raw IPs, JWTs, cookies, private keys, database dumps, backups, Gmail exports, Google Takeout exports, import/export files, invite acceptance data, and manually corrected competition scores.
 - Public or non-private data, if any: Module name and high-level status only. GymForge runtime data must stay inside the private hub.
 
 ## Access Model
@@ -55,7 +55,7 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 - Migration files: None in this phase.
 - Backfill requirements: None.
 - Rollback approach: Documentation-only rollback.
-- Disposable validation plan: Required before any future schema, storage, upload, import/export, editing/deletion, assignment, or scoring work.
+- Disposable validation plan: Required before future schema changes, storage, upload, import/export, editing/deletion, assignment rule changes, scoring rule changes, or score correction work.
 
 ## Backup And Restore
 
@@ -74,7 +74,7 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 ## Audit Events
 
-- Events to record: Current implementation audits participant creation/status changes, exercise creation/status changes, attendance check-in creation, workout creation, and competition creation with sanitized metadata. Future phases must define audit events for invite acceptance, photo proof upload, editing/deletion, admin attendance correction, competition assignment, and automatic scoring.
+- Events to record: Current implementation audits participant creation/status changes, exercise creation/status changes, attendance check-in creation, workout creation, competition creation, and competition assignment updates with sanitized metadata. Future phases must define audit events for invite acceptance, photo proof upload, editing/deletion, admin attendance correction, score corrections, and competition lifecycle changes.
 - Event result values: Use existing sanitized success, failure, or info patterns.
 - Sanitized metadata only: Yes.
 - Data explicitly excluded from audit logs: Workout details, body metrics, photo contents, raw upload paths, secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, private paths, and backup contents.
