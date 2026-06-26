@@ -732,7 +732,7 @@ export default async function GymForgePage() {
     <main className="hub-shell">
       <aside className="os-dock" aria-label={t.navLabel}>
         <div className="dock-identity">
-          <img src="/hub-mark.svg" alt="" />
+          <img src="/hub-mark.svg" alt="" width={64} height={64} />
           <div>
             <strong>BielOS</strong>
             <span>{t.privateHub}</span>
@@ -859,7 +859,7 @@ export default async function GymForgePage() {
                   </label>
                   <label>
                     {t.status}
-                    <select name="status" defaultValue="DRAFT">
+                    <select name="status" defaultValue="DRAFT" aria-label={t.status}>
                       <option value="DRAFT">Draft</option>
                       <option value="ACTIVE">Active</option>
                       <option value="ENDED">Ended</option>
@@ -876,7 +876,7 @@ export default async function GymForgePage() {
                   </label>
                   <label>
                     {t.scoringRule}
-                    <select name="scoringRule" defaultValue="ATTENDANCE_COUNT">
+                    <select name="scoringRule" defaultValue="ATTENDANCE_COUNT" aria-label={t.scoringRule}>
                       <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
                       <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
                       <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
@@ -967,6 +967,7 @@ export default async function GymForgePage() {
                             {t.status}
                             <select
                               name="status"
+                              aria-label={t.status}
                               defaultValue={competition.status === "ARCHIVED" ? "DRAFT" : competition.status}
                             >
                               <option value="DRAFT">Draft</option>
@@ -992,7 +993,11 @@ export default async function GymForgePage() {
                           </label>
                           <label>
                             {t.scoringRule}
-                            <select name="scoringRule" defaultValue={isCompetitionScoringRule(competition.scoringRule) ? competition.scoringRule : "ATTENDANCE_COUNT"}>
+                            <select
+                              name="scoringRule"
+                              aria-label={t.scoringRule}
+                              defaultValue={isCompetitionScoringRule(competition.scoringRule) ? competition.scoringRule : "ATTENDANCE_COUNT"}
+                            >
                               <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
                               <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
                               <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
@@ -1012,6 +1017,7 @@ export default async function GymForgePage() {
                             {t.assignParticipants}
                             <select
                               name="participantId"
+                              aria-label={t.assignParticipants}
                               multiple
                               size={Math.max(1, Math.min(activeParticipantsForAssignment.length, 6))}
                               defaultValue={Array.from(assignedParticipantIds)}
@@ -1205,7 +1211,7 @@ export default async function GymForgePage() {
                   <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                   <label>
                     {t.exercise}
-                    <select name="exerciseId" required>
+                    <select name="exerciseId" required aria-label={t.exercise}>
                       <option value="">{t.selectExercise}</option>
                       {activeExercises.map((exercise) => (
                         <option key={exercise.id} value={exercise.id}>
@@ -1228,7 +1234,7 @@ export default async function GymForgePage() {
                   </label>
                   <label>
                     {t.unit}
-                    <select name="unit" defaultValue="KG">
+                    <select name="unit" defaultValue="KG" aria-label={t.unit}>
                       <option value="KG">kg</option>
                       <option value="LB">lb</option>
                       <option value="BODYWEIGHT">bodyweight</option>
@@ -1300,14 +1306,14 @@ export default async function GymForgePage() {
                   </label>
                   <label>
                     {t.role}
-                    <select name="role" defaultValue="PARTICIPANT">
+                    <select name="role" defaultValue="PARTICIPANT" aria-label={t.role}>
                       <option value="PARTICIPANT">Participant</option>
                       <option value="ADMIN">Admin</option>
                     </select>
                   </label>
                   <label>
                     {t.status}
-                    <select name="status" defaultValue="INVITED">
+                    <select name="status" defaultValue="INVITED" aria-label={t.status}>
                       <option value="INVITED">Invited</option>
                       <option value="ACTIVE">Active</option>
                       <option value="DISABLED">Disabled</option>
@@ -1385,7 +1391,7 @@ export default async function GymForgePage() {
                   </label>
                   <label>
                     {t.status}
-                    <select name="isActive" defaultValue="true">
+                    <select name="isActive" defaultValue="true" aria-label={t.status}>
                       <option value="true">{t.active}</option>
                       <option value="false">{t.inactive}</option>
                     </select>
