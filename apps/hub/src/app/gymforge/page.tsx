@@ -62,6 +62,7 @@ const copy = {
     description: "Descrição",
     startsAt: "Início",
     endsAt: "Fim",
+    dateRange: "Período",
     scoringRule: "Regra de pontuação",
     scoringRuleAttendance: "Presença total",
     scoringRuleCurrentStreak: "Sequência atual",
@@ -193,6 +194,7 @@ const copy = {
     description: "Description",
     startsAt: "Starts at",
     endsAt: "Ends at",
+    dateRange: "Date range",
     scoringRule: "Scoring rule",
     scoringRuleAttendance: "Total attendance",
     scoringRuleCurrentStreak: "Current streak",
@@ -881,7 +883,7 @@ export default async function GymForgePage() {
                       <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
                     </select>
                   </label>
-                  <button type="submit">{t.createCompetition}</button>
+                  <button className="button-primary" type="submit">{t.createCompetition}</button>
                 </form>
               </details>
             ) : null}
@@ -896,6 +898,9 @@ export default async function GymForgePage() {
               const scoringRuleLabel = isCompetitionScoringRule(competition.scoringRule)
                 ? COMPETITION_SCORING_RULE_LABELS[locale][competition.scoringRule]
                 : competition.scoringRule;
+              const dateRangeLabel = `${competition.startsAt ? formatDateKey(competition.startsAt) : t.unavailable} - ${
+                competition.endsAt ? formatDateKey(competition.endsAt) : t.unavailable
+              }`;
 
               return (
                 <article className="competition-card" key={competition.id}>
@@ -909,12 +914,8 @@ export default async function GymForgePage() {
 
                   <dl className="competition-meta">
                     <div>
-                      <dt>{t.startsAt}</dt>
-                      <dd>{competition.startsAt ? formatDateKey(competition.startsAt) : t.unavailable}</dd>
-                    </div>
-                    <div>
-                      <dt>{t.endsAt}</dt>
-                      <dd>{competition.endsAt ? formatDateKey(competition.endsAt) : t.unavailable}</dd>
+                      <dt>{t.dateRange}</dt>
+                      <dd>{dateRangeLabel}</dd>
                     </div>
                     <div>
                       <dt>{t.scoringRule}</dt>
@@ -998,7 +999,7 @@ export default async function GymForgePage() {
                               <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
                             </select>
                           </label>
-                          <button type="submit">{t.saveChanges}</button>
+                          <button className="button-primary" type="submit">{t.saveChanges}</button>
                         </form>
                       </details>
 
@@ -1022,7 +1023,11 @@ export default async function GymForgePage() {
                               ))}
                             </select>
                           </label>
-                          <button type="submit" disabled={activeParticipantsForAssignment.length === 0}>
+                          <button
+                            className="button-secondary"
+                            type="submit"
+                            disabled={activeParticipantsForAssignment.length === 0}
+                          >
                             {t.updateAssignments}
                           </button>
                         </form>
@@ -1034,7 +1039,7 @@ export default async function GymForgePage() {
                         <form className="action-stack" action={archiveGymForgeCompetition}>
                           <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                           <input type="hidden" name="competitionId" value={competition.id} />
-                          <button type="submit" disabled={competition.status === "ARCHIVED"}>
+                          <button className="button-secondary" type="submit" disabled={competition.status === "ARCHIVED"}>
                             {t.archiveCompetition}
                           </button>
                         </form>
@@ -1046,6 +1051,7 @@ export default async function GymForgePage() {
                             {t.confirmDelete}
                           </label>
                           <button
+                            className="button-danger"
                             type="submit"
                             disabled={competition.status === "ACTIVE" || competition._count.assignments > 0}
                           >
@@ -1280,13 +1286,13 @@ export default async function GymForgePage() {
               </div>
             </div>
 
-            <div className="dashboard-grid">
-              <article className="panel">
-                <div className="panel-title">
-                  <span>{t.create}</span>
+            <div className="admin-compact-section">
+              <details className="admin-drawer admin-create-drawer">
+                <summary>
+                  <span>{t.createParticipant}</span>
                   <strong className="status-pill">{t.adminOnly}</strong>
-                </div>
-                <form className="login-form" action={createGymForgeParticipant}>
+                </summary>
+                <form className="compact-form" action={createGymForgeParticipant}>
                   <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                   <label>
                     {t.displayName}
@@ -1308,34 +1314,36 @@ export default async function GymForgePage() {
                       <option value="ARCHIVED">Archived</option>
                     </select>
                   </label>
-                  <button type="submit">{t.createParticipant}</button>
+                  <button className="button-primary" type="submit">{t.createParticipant}</button>
                 </form>
-              </article>
+              </details>
 
-              <article className="panel">
+              <article className="compact-list-panel">
                 <div className="panel-title">
                   <span>{t.participants}</span>
                   <strong className="status-pill">{t.latest50}</strong>
                 </div>
-                <div className="status-list">
+                <div className="management-list">
                   {participants.map((participant) => (
-                    <div key={participant.id}>
-                      <span>{participant.displayName}</span>
-                      <strong>{participant.role} / {participant.status}</strong>
-                      <form className="action-stack" action={changeGymForgeParticipantStatus}>
+                    <div className="management-row" key={participant.id}>
+                      <div>
+                        <span>{participant.displayName}</span>
+                        <strong>{participant.role} / {participant.status}</strong>
+                      </div>
+                      <form className="row-actions" action={changeGymForgeParticipantStatus}>
                         <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                         <input type="hidden" name="participantId" value={participant.id} />
-                        <button type="submit" name="status" value="DISABLED">
+                        <button className="button-secondary" type="submit" name="status" value="DISABLED">
                           {t.disable}
                         </button>
-                        <button type="submit" name="status" value="ARCHIVED">
+                        <button className="button-danger" type="submit" name="status" value="ARCHIVED">
                           {t.archive}
                         </button>
                       </form>
                     </div>
                   ))}
                   {participants.length === 0 ? (
-                    <div>
+                    <div className="empty-row">
                       <span>{t.empty}</span>
                       <strong>{t.noParticipants}</strong>
                     </div>
@@ -1355,13 +1363,13 @@ export default async function GymForgePage() {
               </div>
             </div>
 
-            <div className="dashboard-grid">
-              <article className="panel">
-                <div className="panel-title">
-                  <span>{t.create}</span>
+            <div className="admin-compact-section">
+              <details className="admin-drawer admin-create-drawer">
+                <summary>
+                  <span>{t.createExercise}</span>
                   <strong className="status-pill">{t.catalog}</strong>
-                </div>
-                <form className="login-form" action={createGymForgeExercise}>
+                </summary>
+                <form className="compact-form" action={createGymForgeExercise}>
                   <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                   <label>
                     {t.exerciseName}
@@ -1382,37 +1390,39 @@ export default async function GymForgePage() {
                       <option value="false">{t.inactive}</option>
                     </select>
                   </label>
-                  <button type="submit">{t.createExercise}</button>
+                  <button className="button-primary" type="submit">{t.createExercise}</button>
                 </form>
-              </article>
+              </details>
 
-              <article className="panel">
+              <article className="compact-list-panel">
                 <div className="panel-title">
                   <span>{t.exercises}</span>
                   <strong className="status-pill">{t.latest50}</strong>
                 </div>
-                <div className="status-list">
+                <div className="management-list">
                   {exercises.map((exercise) => (
-                    <div key={exercise.id}>
-                      <span>{exercise.name}</span>
-                      <strong>
-                        {exercise.category ?? t.uncategorized} /{" "}
-                        {exercise.archivedAt ? "ARCHIVED" : exercise.isActive ? "ACTIVE" : "INACTIVE"}
-                      </strong>
-                      <form className="action-stack" action={changeGymForgeExerciseStatus}>
+                    <div className="management-row" key={exercise.id}>
+                      <div>
+                        <span>{exercise.name}</span>
+                        <strong>
+                          {exercise.category ?? t.uncategorized} /{" "}
+                          {exercise.archivedAt ? "ARCHIVED" : exercise.isActive ? "ACTIVE" : "INACTIVE"}
+                        </strong>
+                      </div>
+                      <form className="row-actions" action={changeGymForgeExerciseStatus}>
                         <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                         <input type="hidden" name="exerciseId" value={exercise.id} />
-                        <button type="submit" name="action" value="deactivate">
+                        <button className="button-secondary" type="submit" name="action" value="deactivate">
                           {t.deactivate}
                         </button>
-                        <button type="submit" name="action" value="archive">
+                        <button className="button-danger" type="submit" name="action" value="archive">
                           {t.archive}
                         </button>
                       </form>
                     </div>
                   ))}
                   {exercises.length === 0 ? (
-                    <div>
+                    <div className="empty-row">
                       <span>{t.empty}</span>
                       <strong>{t.noExercises}</strong>
                     </div>
