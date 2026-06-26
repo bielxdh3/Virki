@@ -254,23 +254,27 @@ strong {
 .login-form button,
 .language-selector button {
   appearance: none;
-  min-height: 42px;
+  box-sizing: border-box;
+  min-height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
-  padding: 0 14px;
+  gap: 8px;
+  padding: 0 12px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--surface-soft);
   color: var(--text);
   cursor: pointer;
-  font-weight: 800;
+  font-size: 0.78rem;
+  font-weight: 720;
+  line-height: 1;
+  text-decoration: none;
   transition:
     border-color 150ms ease,
     background 150ms ease,
     color 150ms ease,
-    transform 150ms ease;
+    box-shadow 150ms ease;
 }
 
 .icon-command:hover,
@@ -280,7 +284,7 @@ strong {
 .language-selector button:hover {
   border-color: var(--cyan);
   background: #202d38;
-  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(91, 215, 232, 0.18);
 }
 
 .language-selector {
@@ -599,8 +603,8 @@ strong {
 
 .action-stack {
   display: grid;
-  gap: 10px;
-  margin-top: auto;
+  gap: 6px;
+  margin: 8px 9px 0;
 }
 
 .action-stack form {
@@ -610,16 +614,11 @@ strong {
 .action-stack a,
 .action-stack button {
   width: 100%;
-  border-color: var(--line);
-  background: var(--surface-soft);
-  color: var(--text);
 }
 
 .action-stack a:hover,
 .action-stack button:hover {
-  border-color: var(--cyan);
-  background: #1d2a36;
-  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(91, 215, 232, 0.18);
 }
 
 .module-window {
@@ -777,6 +776,7 @@ strong {
 
 .admin-drawer {
   overflow: clip;
+  contain: layout paint;
   border: 1px solid rgba(121, 142, 160, 0.12);
   border-radius: 6px;
   background: rgba(12, 18, 24, 0.34);
@@ -784,6 +784,7 @@ strong {
 
 .admin-drawer summary {
   min-height: 30px;
+  box-sizing: border-box;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -793,7 +794,12 @@ strong {
   cursor: pointer;
   font-size: 0.76rem;
   font-weight: 700;
+  line-height: 1;
   list-style: none;
+  transition:
+    background 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
 }
 
 .admin-drawer summary::-webkit-details-marker {
@@ -802,9 +808,26 @@ strong {
 
 .admin-drawer summary::after {
   content: "+";
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  background: rgba(121, 142, 160, 0.08);
   color: var(--muted);
   font-size: 0.82rem;
   font-weight: 750;
+}
+
+.admin-drawer summary:hover {
+  background: rgba(91, 215, 232, 0.045);
+  color: var(--text);
+}
+
+.admin-drawer summary:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(91, 215, 232, 0.58);
 }
 
 .admin-drawer[open] summary {
@@ -827,6 +850,7 @@ strong {
   display: grid;
   gap: 8px;
   padding: 10px;
+  contain: layout paint;
   border: 1px solid rgba(121, 142, 160, 0.12);
   border-left: 2px solid rgba(91, 215, 232, 0.36);
   border-radius: 8px;
@@ -956,9 +980,13 @@ strong {
 
 .competition-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 6px;
   padding-top: 2px;
+}
+
+.competition-actions .admin-drawer {
+  width: 100%;
 }
 
 .compact-form {
@@ -1112,20 +1140,62 @@ strong {
   font-size: 0.72rem;
 }
 
+.button-row {
+  align-items: center;
+  gap: 6px;
+}
+
 .button-primary {
-  border-color: rgba(91, 215, 232, 0.56) !important;
-  background: #18313a !important;
+  border-color: rgba(91, 215, 232, 0.36) !important;
+  background: #162a32 !important;
+  color: #d8f8fb !important;
+}
+
+.button-primary:hover,
+.button-primary:focus-visible {
+  border-color: rgba(91, 215, 232, 0.72) !important;
+  background: #1a3540 !important;
+  box-shadow: 0 0 0 1px rgba(91, 215, 232, 0.22);
 }
 
 .button-secondary {
-  border-color: rgba(121, 142, 160, 0.34) !important;
-  background: #121b24 !important;
+  border-color: rgba(121, 142, 160, 0.22) !important;
+  background: #101820 !important;
+  color: #d7e3ee !important;
+}
+
+.button-secondary:hover,
+.button-secondary:focus-visible {
+  border-color: rgba(121, 142, 160, 0.42) !important;
+  background: #15202a !important;
+  box-shadow: 0 0 0 1px rgba(121, 142, 160, 0.16);
 }
 
 .button-danger {
-  border-color: rgba(238, 116, 116, 0.45) !important;
-  background: rgba(77, 31, 34, 0.78) !important;
-  color: #ffd0d0 !important;
+  border-color: rgba(238, 116, 116, 0.28) !important;
+  background: rgba(77, 31, 34, 0.42) !important;
+  color: #ffd6d6 !important;
+}
+
+.button-danger:hover,
+.button-danger:focus-visible {
+  border-color: rgba(238, 116, 116, 0.58) !important;
+  background: rgba(91, 36, 39, 0.72) !important;
+  box-shadow: 0 0 0 1px rgba(238, 116, 116, 0.18);
+}
+
+.button-ghost {
+  border-color: rgba(121, 142, 160, 0.18) !important;
+  background: rgba(12, 18, 24, 0.36) !important;
+  color: var(--muted-strong) !important;
+}
+
+.button-ghost:hover,
+.button-ghost:focus-visible {
+  border-color: rgba(91, 215, 232, 0.38) !important;
+  background: rgba(19, 29, 38, 0.82) !important;
+  color: var(--text) !important;
+  box-shadow: 0 0 0 1px rgba(91, 215, 232, 0.14);
 }
 
 .action-stack button:disabled,
@@ -1134,7 +1204,7 @@ strong {
 .login-form button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
-  transform: none;
+  box-shadow: none;
 }
 
 .checkbox-line {

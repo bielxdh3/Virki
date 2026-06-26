@@ -769,7 +769,7 @@ export default async function GymForgePage() {
           </div>
           <div className="top-actions">
             <LanguageSelector locale={locale} label={t.language} returnTo="/gymforge" />
-            <a className="icon-command" href="/">
+            <a className="icon-command button-ghost" href="/">
               <span>{t.returnHub}</span>
             </a>
           </div>
@@ -1045,14 +1045,14 @@ export default async function GymForgePage() {
                       <details className="admin-drawer danger-zone">
                         <summary>{t.dangerZone}</summary>
                         <p>{t.dangerZoneText}</p>
-                        <form className="action-stack" action={archiveGymForgeCompetition}>
+                        <form className="action-stack button-row" action={archiveGymForgeCompetition}>
                           <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                           <input type="hidden" name="competitionId" value={competition.id} />
                           <button className="button-secondary" type="submit" disabled={competition.status === "ARCHIVED"}>
                             {t.archiveCompetition}
                           </button>
                         </form>
-                        <form className="action-stack" action={deleteGymForgeCompetition}>
+                        <form className="action-stack button-row" action={deleteGymForgeCompetition}>
                           <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                           <input type="hidden" name="competitionId" value={competition.id} />
                           <label className="checkbox-line">
@@ -1186,7 +1186,7 @@ export default async function GymForgePage() {
                     {t.note}
                     <input name="note" maxLength={160} />
                   </label>
-                  <button type="submit" disabled={Boolean(viewerTodayAttendance)}>
+                  <button className="button-primary" type="submit" disabled={Boolean(viewerTodayAttendance)}>
                     {viewerTodayAttendance ? t.alreadyCheckedIn : t.createCheckin}
                   </button>
                 </form>
@@ -1252,7 +1252,7 @@ export default async function GymForgePage() {
                     {t.setNote}
                     <input name="setNote" maxLength={160} />
                   </label>
-                  <button type="submit" disabled={activeExercises.length === 0}>
+                  <button className="button-primary" type="submit" disabled={activeExercises.length === 0}>
                     {t.createWorkout}
                   </button>
                 </form>
@@ -1342,7 +1342,7 @@ export default async function GymForgePage() {
                       <span>{participant.displayName}</span>
                       <strong>{participant.role} / {participant.status}</strong>
                     </div>
-                    <form className="row-actions" action={changeGymForgeParticipantStatus}>
+                    <form className="row-actions button-row" action={changeGymForgeParticipantStatus}>
                       <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                       <input type="hidden" name="participantId" value={participant.id} />
                       <button className="button-secondary" type="submit" name="status" value="DISABLED">
@@ -1423,7 +1423,7 @@ export default async function GymForgePage() {
                         {exercise.archivedAt ? "ARCHIVED" : exercise.isActive ? "ACTIVE" : "INACTIVE"}
                       </strong>
                     </div>
-                    <form className="row-actions" action={changeGymForgeExerciseStatus}>
+                    <form className="row-actions button-row" action={changeGymForgeExerciseStatus}>
                       <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                       <input type="hidden" name="exerciseId" value={exercise.id} />
                       <button className="button-secondary" type="submit" name="action" value="deactivate">
