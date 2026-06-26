@@ -60,6 +60,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` GymForge competition foundation exists for admin-created metadata and read-only display.
 - `[DONE]` GymForge competition assignment and scoring design exists.
 - `[DONE]` GymForge competition participant assignment and automatic scoring implementation exists.
+- `[DONE]` GymForge competition lifecycle management exists for admin-only metadata/status edits and archival.
 - `[DONE]` BielOS language selector exists with Portuguese default and English option.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
@@ -179,7 +180,8 @@ Do not implement new modules beyond inert shell registry entries until each modu
 - `[DONE]` GymForge competition foundation.
 - `[DONE]` GymForge competition assignment and scoring design.
 - `[DONE]` GymForge competition participant assignment and automatic scoring implementation.
-- `[DO NOT IMPLEMENT YET]` GymForge workout editing/deletion, upload, invite acceptance, import/export, public registration, admin attendance correction, score correction, competition editing/deletion, and broad social feed behavior.
+- `[DONE]` GymForge competition lifecycle management.
+- `[DO NOT IMPLEMENT YET]` GymForge workout editing/deletion, upload, invite acceptance, import/export, public registration, admin attendance correction, score correction, competition deletion, and broad social feed behavior.
 
 ## 12. Definition Of MVP Complete
 
@@ -234,4 +236,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.19: BielOS language selector and Portuguese default.
 - `[DONE]` Phase 09.20: sync GymForge docs and status copy.
 - `[DONE]` Phase 09.21: GymForge competition assignment/scoring implementation.
-- `[LATER]` Phase 09.22+: other real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.22: GymForge competition lifecycle management.
+- `[LATER]` Phase 09.23+: other real modules only after module-specific security and data design.

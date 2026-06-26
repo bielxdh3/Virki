@@ -1,6 +1,6 @@
 # GymForge Planning Document
 
-GymForge now has an implemented MVP foundation inside the private BielOS hub. This document records the module boundary and remaining gates. It does not enable body metrics, health records, photo check-ins, upload, import/export, public registration, invite acceptance, workout editing/deletion, admin attendance correction, scoring corrections, competition editing/deletion, or broad social feed behavior.
+GymForge now has an implemented MVP foundation inside the private BielOS hub. This document records the module boundary and remaining gates. It does not enable body metrics, health records, photo check-ins, upload, import/export, public registration, invite acceptance, workout editing/deletion, admin attendance correction, scoring corrections, competition deletion, or broad social feed behavior.
 
 GymForge is intended as a gated social gym competition app for Gabriel and invited friends. It is not a public open internet app and it is not a zero-knowledge vault. Data may be visible inside the approved group, but it must not be exposed outside the gated site.
 
@@ -74,7 +74,7 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 ## Audit Events
 
-- Events to record: Current implementation audits participant creation/status changes, exercise creation/status changes, attendance check-in creation, workout creation, competition creation, and competition assignment updates with sanitized metadata. Future phases must define audit events for invite acceptance, photo proof upload, editing/deletion, admin attendance correction, score corrections, and competition lifecycle changes.
+- Events to record: Current implementation audits participant creation/status changes, exercise creation/status changes, attendance check-in creation, workout creation, competition creation, competition updates, competition archival, and competition assignment updates with sanitized metadata. Future phases must define audit events for invite acceptance, photo proof upload, editing/deletion, admin attendance correction, score corrections, and destructive competition lifecycle changes.
 - Event result values: Use existing sanitized success, failure, or info patterns.
 - Sanitized metadata only: Yes.
 - Data explicitly excluded from audit logs: Workout details, body metrics, photo contents, raw upload paths, secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, private paths, and backup contents.

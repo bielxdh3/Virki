@@ -11,6 +11,7 @@ import { formatGymForgeAttendanceDate, getGymForgeAttendanceEffectiveDate } from
 const PARTICIPANT_ROLES = ["ADMIN", "PARTICIPANT"] as const;
 const PARTICIPANT_STATUSES = ["INVITED", "ACTIVE", "DISABLED", "ARCHIVED"] as const;
 const COMPETITION_STATUSES = ["DRAFT", "ACTIVE", "ENDED", "ARCHIVED"] as const;
+const EDITABLE_COMPETITION_STATUSES = ["DRAFT", "ACTIVE", "ENDED"] as const;
 const COMPETITION_SCORING_RULES = [
   "ATTENDANCE_COUNT",
   "CURRENT_STREAK",
@@ -22,6 +23,7 @@ const WORKOUT_UNITS = ["KG", "LB", "BODYWEIGHT", "OTHER"] as const;
 type ParticipantRole = (typeof PARTICIPANT_ROLES)[number];
 type ParticipantStatus = (typeof PARTICIPANT_STATUSES)[number];
 type CompetitionStatus = (typeof COMPETITION_STATUSES)[number];
+type EditableCompetitionStatus = (typeof EDITABLE_COMPETITION_STATUSES)[number];
 type CompetitionScoringRule = (typeof COMPETITION_SCORING_RULES)[number];
 type WorkoutUnit = (typeof WORKOUT_UNITS)[number];
 type ParsedOptionalDate = Date | null | "invalid";
@@ -45,6 +47,10 @@ function isParticipantStatus(value: string): value is ParticipantStatus {
 
 function isCompetitionStatus(value: string): value is CompetitionStatus {
   return COMPETITION_STATUSES.includes(value as CompetitionStatus);
+}
+
+function isEditableCompetitionStatus(value: string): value is EditableCompetitionStatus {
+  return EDITABLE_COMPETITION_STATUSES.includes(value as EditableCompetitionStatus);
 }
 
 function isCompetitionScoringRule(value: string): value is CompetitionScoringRule {
@@ -415,6 +421,127 @@ export async function updateGymForgeCompetitionAssignments(formData: FormData) {
     metadata: {
       competitionId,
       assignedCount: uniqueSelectedParticipantIds.length
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function updateGymForgeCompetition(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const competitionId = readFormString(formData, "competitionId");
+  const name = readFormString(formData, "name");
+  const description = readFormString(formData, "description");
+  const status = readFormString(formData, "status");
+  const startsAtResult = parseOptionalDate(readFormString(formData, "startsAt"));
+  const endsAtResult = parseOptionalDate(readFormString(formData, "endsAt"));
+  const scoringRule = readFormString(formData, "scoringRule");
+
+  if (!competitionId) {
+    redirect("/gymforge?error=competition-update");
+  }
+
+  if (name.length < 2 || name.length > 100) {
+    redirect("/gymforge?error=competition-name");
+  }
+
+  if (description.length > 240 || scoringRule.length < 2 || scoringRule.length > 120) {
+    redirect("/gymforge?error=competition-details");
+  }
+
+  if (!isEditableCompetitionStatus(status)) {
+    redirect("/gymforge?error=competition-status");
+  }
+
+  if (!isCompetitionScoringRule(scoringRule)) {
+    redirect("/gymforge?error=competition-scoring");
+  }
+
+  if (startsAtResult === "invalid" || endsAtResult === "invalid") {
+    redirect("/gymforge?error=competition-dates");
+  }
+
+  const startsAt = startsAtResult;
+  const endsAt = endsAtResult;
+
+  if (startsAt && endsAt && startsAt.getTime() > endsAt.getTime()) {
+    redirect("/gymforge?error=competition-dates");
+  }
+
+  if (status === "ACTIVE" && (!startsAt || !endsAt)) {
+    redirect("/gymforge?error=competition-dates");
+  }
+
+  const competition = await prisma.gymForgeCompetition.update({
+    where: { id: competitionId },
+    data: {
+      name,
+      description: description || null,
+      status,
+      startsAt,
+      endsAt,
+      scoringRule,
+      archivedAt: null
+    },
+    select: {
+      id: true,
+      status: true,
+      startsAt: true,
+      endsAt: true,
+      scoringRule: true
+    }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_COMPETITION_UPDATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.competition",
+    message: "GymForge competition updated.",
+    metadata: {
+      competitionId: competition.id,
+      status: competition.status,
+      hasDateRange: Boolean(competition.startsAt || competition.endsAt),
+      scoringRule: competition.scoringRule
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function archiveGymForgeCompetition(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const competitionId = readFormString(formData, "competitionId");
+
+  if (!competitionId) {
+    redirect("/gymforge?error=competition-archive");
+  }
+
+  const competition = await prisma.gymForgeCompetition.update({
+    where: { id: competitionId },
+    data: {
+      status: "ARCHIVED",
+      archivedAt: new Date()
+    },
+    select: {
+      id: true,
+      status: true,
+      archivedAt: true
+    }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_COMPETITION_ARCHIVED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.competition",
+    message: "GymForge competition archived.",
+    metadata: {
+      competitionId: competition.id,
+      status: competition.status,
+      archived: Boolean(competition.archivedAt)
     }
   });
 

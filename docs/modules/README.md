@@ -44,7 +44,7 @@ For not-yet-implemented modules, the following remain blocked until explicitly d
 
 For root.ark specifically, public exposure, compartment access, capability links, encrypted blob storage, metadata handling, key lifecycle, revocation, and deletion remain blocked until a dedicated architecture phase is complete.
 
-For GymForge specifically, photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, broad social feed behavior, scoring corrections, and competition editing/deletion remain blocked until scoped phases complete their design and implementation checks.
+For GymForge specifically, photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, broad social feed behavior, scoring corrections, and competition deletion remain blocked until scoped phases complete their design and implementation checks.
 
 ## Data Safety
 

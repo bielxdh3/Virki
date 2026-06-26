@@ -8,6 +8,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../li
 import { getLocale } from "../locale";
 import { LanguageSelector } from "../language-selector";
 import {
+  archiveGymForgeCompetition,
   changeGymForgeExerciseStatus,
   changeGymForgeParticipantStatus,
   createGymForgeAttendanceCheckIn,
@@ -15,6 +16,7 @@ import {
   createGymForgeExercise,
   createGymForgeParticipant,
   createGymForgeWorkout,
+  updateGymForgeCompetition,
   updateGymForgeCompetitionAssignments
 } from "./actions";
 import { getGymForgeAttendanceEffectiveDate } from "./dates";
@@ -65,6 +67,10 @@ const copy = {
     scoringRuleLongestStreak: "Maior sequência",
     scoringRuleWeighted: "Presença + maior sequência",
     createCompetition: "Criar competição",
+    lifecycle: "Ciclo de vida",
+    updateCompetition: "Atualizar competição",
+    archiveCompetition: "Arquivar competição",
+    saveChanges: "Salvar alterações",
     assignment: "Atribuição",
     assignParticipants: "Atribuir participantes",
     updateAssignments: "Atualizar atribuições",
@@ -186,6 +192,10 @@ const copy = {
     scoringRuleLongestStreak: "Longest streak",
     scoringRuleWeighted: "Attendance + longest streak",
     createCompetition: "Create competition",
+    lifecycle: "Lifecycle",
+    updateCompetition: "Update competition",
+    archiveCompetition: "Archive competition",
+    saveChanges: "Save changes",
     assignment: "Assignment",
     assignParticipants: "Assign participants",
     updateAssignments: "Update assignments",
@@ -625,9 +635,11 @@ export default async function GymForgePage() {
       select: {
         id: true,
         name: true,
+        description: true,
         status: true,
         startsAt: true,
         endsAt: true,
+        archivedAt: true,
         scoringRule: true,
         assignments: {
           where: {
@@ -881,6 +893,101 @@ export default async function GymForgePage() {
                 ) : null}
               </div>
             </article>
+
+            {isAdmin ? (
+              <article className="panel">
+                <div className="panel-title">
+                  <span>{t.lifecycle}</span>
+                  <strong className="status-pill">{t.adminOnly}</strong>
+                </div>
+                <div className="status-list">
+                  {competitions.map((competition) => (
+                    <form className="login-form" action={updateGymForgeCompetition} key={competition.id}>
+                      <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                      <input type="hidden" name="competitionId" value={competition.id} />
+                      <label>
+                        {t.name}
+                        <input name="name" minLength={2} maxLength={100} defaultValue={competition.name} required />
+                      </label>
+                      <label>
+                        {t.description}
+                        <input name="description" maxLength={240} defaultValue={competition.description ?? ""} />
+                      </label>
+                      <label>
+                        {t.status}
+                        <select
+                          name="status"
+                          defaultValue={competition.status === "ARCHIVED" ? "DRAFT" : competition.status}
+                        >
+                          <option value="DRAFT">Draft</option>
+                          <option value="ACTIVE">Active</option>
+                          <option value="ENDED">Ended</option>
+                        </select>
+                      </label>
+                      <label>
+                        {t.startsAt}
+                        <input name="startsAt" type="date" defaultValue={competition.startsAt ? formatDateKey(competition.startsAt) : ""} />
+                      </label>
+                      <label>
+                        {t.endsAt}
+                        <input name="endsAt" type="date" defaultValue={competition.endsAt ? formatDateKey(competition.endsAt) : ""} />
+                      </label>
+                      <label>
+                        {t.scoringRule}
+                        <select
+                          name="scoringRule"
+                          defaultValue={
+                            isCompetitionScoringRule(competition.scoringRule)
+                              ? competition.scoringRule
+                              : "ATTENDANCE_COUNT"
+                          }
+                        >
+                          <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
+                          <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
+                          <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
+                          <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
+                        </select>
+                      </label>
+                      <button type="submit">{t.saveChanges}</button>
+                    </form>
+                  ))}
+                  {competitions.length === 0 ? (
+                    <div>
+                      <span>{t.empty}</span>
+                      <strong>{t.noCompetitions}</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            ) : null}
+
+            {isAdmin ? (
+              <article className="panel">
+                <div className="panel-title">
+                  <span>{t.archiveCompetition}</span>
+                  <strong className="status-pill">{t.adminOnly}</strong>
+                </div>
+                <div className="status-list">
+                  {competitions.map((competition) => (
+                    <form className="action-stack" action={archiveGymForgeCompetition} key={competition.id}>
+                      <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                      <input type="hidden" name="competitionId" value={competition.id} />
+                      <span>{competition.name}</span>
+                      <strong>{competition.status}</strong>
+                      <button type="submit" disabled={competition.status === "ARCHIVED"}>
+                        {t.archiveCompetition}
+                      </button>
+                    </form>
+                  ))}
+                  {competitions.length === 0 ? (
+                    <div>
+                      <span>{t.empty}</span>
+                      <strong>{t.noCompetitions}</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            ) : null}
 
             {isAdmin ? (
               <article className="panel">
