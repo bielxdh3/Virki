@@ -549,6 +549,45 @@ export async function archiveGymForgeCompetition(formData: FormData) {
   redirect("/gymforge");
 }
 
+export async function deleteGymForgeCompetition(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const competitionId = readFormString(formData, "competitionId");
+  const confirmed = readFormString(formData, "confirmDelete") === "true";
+
+  if (!competitionId || !confirmed) {
+    redirect("/gymforge?error=competition-delete");
+  }
+
+  const result = await prisma.gymForgeCompetition.deleteMany({
+    where: {
+      id: competitionId,
+      status: { not: "ACTIVE" },
+      assignments: {
+        none: {}
+      }
+    }
+  });
+
+  if (result.count !== 1) {
+    redirect("/gymforge?error=competition-delete");
+  }
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_COMPETITION_DELETED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.competition",
+    message: "GymForge competition deleted.",
+    metadata: {
+      competitionId,
+      deleted: true
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
 export async function createGymForgeAttendanceCheckIn(formData: FormData) {
   const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
 

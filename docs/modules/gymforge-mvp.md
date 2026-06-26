@@ -1,13 +1,13 @@
 # GymForge MVP Architecture
 
-GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, score corrections, competition deletion, or broad social feed behavior.
+GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, score corrections, unsafe competition deletion, or broad social feed behavior.
 
 GymForge is a gated social gym competition app for Gabriel and invited or admin-created participants. It is not a zero-knowledge vault and not an open public internet app. Approved participants may see group competition and streak data inside the gated area.
 
 ## MVP Boundary
 
-- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic scoring, and admin-only competition lifecycle management.
-- Design-only: photo proof, invite acceptance, imports/exports, workout editing/deletion, admin attendance correction, score correction, competition deletion, and broad social feed behavior.
+- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
+- Design-only: photo proof, invite acceptance, imports/exports, workout editing/deletion, admin attendance correction, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
 - Included in the MVP boundary: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, simple group ranking, and competition metadata.
 - Future but planned: photo proof for check-ins.
 - Excluded from MVP: body metrics, health records, public registration, public profiles, open internet access, imports, exports, file upload, broad social feed, payments, and third-party integrations.
@@ -93,15 +93,15 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 - MVP rankings may compare attendance count, current streak, longest streak, or challenge participation.
 - Ranking data is visible only to approved group participants.
 - Initial ranking foundation uses attendance records only and does not expose workout details, attendance notes, or workout notes.
-- Initial competition foundation supports admin-created and admin-editable competition metadata, admin-only explicit participant assignment, admin-only archival, and read-only deterministic scoring display.
+- Initial competition foundation supports admin-created and admin-editable competition metadata, admin-only explicit participant assignment, admin-only archival, admin-only safe deletion for non-ACTIVE competitions with zero assignments, and read-only deterministic scoring display.
 - Competition definitions should include name, date range, scoring rule, active status, and participant scope.
 - Scoring rules must be deterministic and explainable.
 - Ties and late check-ins must have explicit rules.
-- Competition deletion, score correction, and admin adjudication require later scoped phases.
+- Deletion of ACTIVE or assigned competitions, score correction, and admin adjudication require later scoped phases.
 
 ## Competition Assignment And Scoring Design
 
-This section is implemented for explicit participant assignment, deterministic read-only scoring, and admin-only competition metadata/status lifecycle changes. Admin correction, score overrides, APIs, competition deletion, and broad social behavior remain blocked until later scoped phases.
+This section is implemented for explicit participant assignment, deterministic read-only scoring, admin-only competition metadata/status lifecycle changes, and safe deletion for non-ACTIVE competitions with zero assignments. Admin correction, score overrides, APIs, deletion of ACTIVE or assigned competitions, and broad social behavior remain blocked until later scoped phases.
 
 - Participant assignment should be explicit: an admin assigns ACTIVE GymForge participants to a competition before scoring includes them.
 - Participant scope should support at least `ALL_ACTIVE_AT_START` and `EXPLICIT_PARTICIPANTS`; MVP implementation should prefer explicit assignment when prizes, challenges, or sensitive group visibility are involved.
@@ -116,7 +116,7 @@ This section is implemented for explicit participant assignment, deterministic r
 - Admin overrides and corrections must be limited to explicit correction actions, require OWNER or ADMIN, require CSRF, preserve an audit trail, and never mutate raw historical audit records.
 - Visibility rules should show only display name, rank, score, attendance count, streak summary, and safe competition metadata to approved group participants.
 - Competition views must not expose workout notes, attendance notes, raw participant ids, raw audit metadata, raw request data, private exports, cookies, JWTs, headers, IPs, secrets, or database details.
-- Audit events include competition updates, competition archival, and competition assignment updates with sanitized metadata. Future audit events should include score correction applied when score correction exists.
+- Audit events include competition updates, competition archival, competition deletion, and competition assignment updates with sanitized metadata. Future audit events should include score correction applied when score correction exists.
 - Audit metadata should include only sanitized ids, status, rule type, date range presence, affected counts, and result status; it must not include notes, descriptions beyond short labels, raw links, raw request data, or private values.
 - Validation before implementation must cover role checks, CSRF failures returning HTTP 403, date-boundary tests for `America/Sao_Paulo`, disabled/archived participant exclusion, duplicate attendance safety, tie breaker determinism, and visibility restrictions.
 
@@ -147,7 +147,7 @@ MVP controls should include gated entry, generic auth errors, rate limiting, one
 - Attendance and ranking data retention should be defined before implementation.
 - Participant removal should disable access and preserve required audit records.
 - Workout notes and logs need a user deletion path before broad use.
-- Competition history may be retained for group continuity, but participant removal behavior must be explicit.
+- Competition history may be retained for group continuity. Permanent competition deletion is limited to non-ACTIVE competitions with zero participant assignments; assigned or ACTIVE competitions must be archived or retained.
 - Backup and restore implications must be documented before non-discardable GymForge data is created.
 
 ## Audit Events
@@ -162,7 +162,7 @@ Audit events should cover:
 - attendance check-in created
 - attendance check-in corrected by admin
 - workout log created, updated, or deleted
-- competition created, updated, started, ended, or archived
+- competition created, updated, started, ended, archived, or safely deleted
 - ranking recalculation failure if stored rankings are used
 
 Audit logs must never include workout note text, exercise detail payloads, photo contents, raw filenames, upload paths, raw invite links, invite secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, passwords, private keys, or database URLs.

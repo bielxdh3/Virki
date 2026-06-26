@@ -16,6 +16,7 @@ import {
   createGymForgeExercise,
   createGymForgeParticipant,
   createGymForgeWorkout,
+  deleteGymForgeCompetition,
   updateGymForgeCompetition,
   updateGymForgeCompetitionAssignments
 } from "./actions";
@@ -70,7 +71,13 @@ const copy = {
     lifecycle: "Ciclo de vida",
     updateCompetition: "Atualizar competição",
     archiveCompetition: "Arquivar competição",
+    deleteCompetition: "Excluir competição",
+    dangerZone: "Zona de risco",
+    dangerZoneText: "Exclusão permanente só é permitida para competições não ACTIVE e sem participantes atribuídos.",
+    confirmDelete: "Confirmo exclusão permanente",
     saveChanges: "Salvar alterações",
+    manage: "Gerenciar",
+    summary: "Resumo",
     assignment: "Atribuição",
     assignParticipants: "Atribuir participantes",
     updateAssignments: "Atualizar atribuições",
@@ -195,7 +202,13 @@ const copy = {
     lifecycle: "Lifecycle",
     updateCompetition: "Update competition",
     archiveCompetition: "Archive competition",
+    deleteCompetition: "Delete competition",
+    dangerZone: "Danger zone",
+    dangerZoneText: "Permanent deletion is only allowed for non-ACTIVE competitions with no assigned participants.",
+    confirmDelete: "I confirm permanent deletion",
     saveChanges: "Save changes",
+    manage: "Manage",
+    summary: "Summary",
     assignment: "Assignment",
     assignParticipants: "Assign participants",
     updateAssignments: "Update assignments",
@@ -459,7 +472,7 @@ function calculateCompetitionScores(competition: CompetitionForScoring) {
     });
 }
 
-function formatCompetitionDateRange(
+function _formatCompetitionDateRange(
   startsAt: Date | null,
   endsAt: Date | null,
   locale: BielosLocale
@@ -641,6 +654,11 @@ export default async function GymForgePage() {
         endsAt: true,
         archivedAt: true,
         scoringRule: true,
+        _count: {
+          select: {
+            assignments: true
+          }
+        },
         assignments: {
           where: {
             participant: {
@@ -811,7 +829,7 @@ export default async function GymForgePage() {
           </article>
         </section>
 
-        <section className="module-window anchor-section" id="competitions" aria-label="GymForge competitions">
+        <section className="module-window anchor-section gymforge-competition-board" id="competitions" aria-label="GymForge competitions">
           <div className="window-titlebar">
             <div>
               <span>{t.competition}</span>
@@ -819,14 +837,15 @@ export default async function GymForgePage() {
             </div>
           </div>
 
-          <div className="dashboard-grid">
+          <div className="competition-toolbar">
+            <div>
+              <p className="eyebrow">{t.summary}</p>
+              <h2>{t.competitions}</h2>
+            </div>
             {isAdmin ? (
-              <article className="panel">
-                <div className="panel-title">
-                  <span>{t.create}</span>
-                  <strong className="status-pill">{t.adminOnly}</strong>
-                </div>
-                <form className="login-form" action={createGymForgeCompetition}>
+              <details className="admin-drawer">
+                <summary>{t.createCompetition}</summary>
+                <form className="compact-form" action={createGymForgeCompetition}>
                   <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                   <label>
                     {t.name}
@@ -864,218 +883,191 @@ export default async function GymForgePage() {
                   </label>
                   <button type="submit">{t.createCompetition}</button>
                 </form>
-              </article>
+              </details>
             ) : null}
+          </div>
 
-            <article className="panel">
-              <div className="panel-title">
-                <span>{t.competitions}</span>
-                <strong className="status-pill">{t.readOnly}</strong>
-              </div>
-              <div className="status-list">
-                {competitions.map((competition) => (
-                  <div key={competition.id}>
-                    <span>{competition.name}</span>
-                    <strong>
-                      {competition.status} /{" "}
-                      {formatCompetitionDateRange(competition.startsAt, competition.endsAt, locale)} /{" "}
-                      {isCompetitionScoringRule(competition.scoringRule)
-                        ? COMPETITION_SCORING_RULE_LABELS[locale][competition.scoringRule]
-                        : competition.scoringRule} / {formatCount(competition.assignments.length)} {t.assigned}
-                    </strong>
-                  </div>
-                ))}
-                {competitions.length === 0 ? (
-                  <div>
-                    <span>{t.empty}</span>
-                    <strong>{t.noCompetitions}</strong>
-                  </div>
-                ) : null}
-              </div>
-            </article>
+          <div className="competition-card-grid">
+            {competitions.map((competition) => {
+              const assignedParticipantIds = new Set(
+                competition.assignments.map((assignment) => assignment.participantId)
+              );
+              const scores = calculateCompetitionScores(competition);
+              const scoringRuleLabel = isCompetitionScoringRule(competition.scoringRule)
+                ? COMPETITION_SCORING_RULE_LABELS[locale][competition.scoringRule]
+                : competition.scoringRule;
 
-            {isAdmin ? (
-              <article className="panel">
-                <div className="panel-title">
-                  <span>{t.lifecycle}</span>
-                  <strong className="status-pill">{t.adminOnly}</strong>
-                </div>
-                <div className="status-list">
-                  {competitions.map((competition) => (
-                    <form className="login-form" action={updateGymForgeCompetition} key={competition.id}>
-                      <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                      <input type="hidden" name="competitionId" value={competition.id} />
-                      <label>
-                        {t.name}
-                        <input name="name" minLength={2} maxLength={100} defaultValue={competition.name} required />
-                      </label>
-                      <label>
-                        {t.description}
-                        <input name="description" maxLength={240} defaultValue={competition.description ?? ""} />
-                      </label>
-                      <label>
-                        {t.status}
-                        <select
-                          name="status"
-                          defaultValue={competition.status === "ARCHIVED" ? "DRAFT" : competition.status}
-                        >
-                          <option value="DRAFT">Draft</option>
-                          <option value="ACTIVE">Active</option>
-                          <option value="ENDED">Ended</option>
-                        </select>
-                      </label>
-                      <label>
-                        {t.startsAt}
-                        <input name="startsAt" type="date" defaultValue={competition.startsAt ? formatDateKey(competition.startsAt) : ""} />
-                      </label>
-                      <label>
-                        {t.endsAt}
-                        <input name="endsAt" type="date" defaultValue={competition.endsAt ? formatDateKey(competition.endsAt) : ""} />
-                      </label>
-                      <label>
-                        {t.scoringRule}
-                        <select
-                          name="scoringRule"
-                          defaultValue={
-                            isCompetitionScoringRule(competition.scoringRule)
-                              ? competition.scoringRule
-                              : "ATTENDANCE_COUNT"
-                          }
-                        >
-                          <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
-                          <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
-                          <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
-                          <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
-                        </select>
-                      </label>
-                      <button type="submit">{t.saveChanges}</button>
-                    </form>
-                  ))}
-                  {competitions.length === 0 ? (
+              return (
+                <article className="competition-card" key={competition.id}>
+                  <div className="competition-card-header">
                     <div>
-                      <span>{t.empty}</span>
-                      <strong>{t.noCompetitions}</strong>
+                      <span className="status-pill">{competition.status}</span>
+                      <h3>{competition.name}</h3>
                     </div>
-                  ) : null}
-                </div>
-              </article>
-            ) : null}
+                    <strong>{formatCount(competition._count.assignments)} {t.assigned}</strong>
+                  </div>
 
-            {isAdmin ? (
-              <article className="panel">
-                <div className="panel-title">
-                  <span>{t.archiveCompetition}</span>
-                  <strong className="status-pill">{t.adminOnly}</strong>
-                </div>
-                <div className="status-list">
-                  {competitions.map((competition) => (
-                    <form className="action-stack" action={archiveGymForgeCompetition} key={competition.id}>
-                      <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                      <input type="hidden" name="competitionId" value={competition.id} />
-                      <span>{competition.name}</span>
-                      <strong>{competition.status}</strong>
-                      <button type="submit" disabled={competition.status === "ARCHIVED"}>
-                        {t.archiveCompetition}
-                      </button>
-                    </form>
-                  ))}
-                  {competitions.length === 0 ? (
+                  <dl className="competition-meta">
                     <div>
-                      <span>{t.empty}</span>
-                      <strong>{t.noCompetitions}</strong>
+                      <dt>{t.startsAt}</dt>
+                      <dd>{competition.startsAt ? formatDateKey(competition.startsAt) : t.unavailable}</dd>
                     </div>
-                  ) : null}
-                </div>
-              </article>
-            ) : null}
+                    <div>
+                      <dt>{t.endsAt}</dt>
+                      <dd>{competition.endsAt ? formatDateKey(competition.endsAt) : t.unavailable}</dd>
+                    </div>
+                    <div>
+                      <dt>{t.scoringRule}</dt>
+                      <dd>{scoringRuleLabel}</dd>
+                    </div>
+                  </dl>
 
-            {isAdmin ? (
-              <article className="panel">
-                <div className="panel-title">
-                  <span>{t.assignment}</span>
-                  <strong className="status-pill">{t.adminOnly}</strong>
-                </div>
-                <div className="status-list">
-                  {competitions.map((competition) => {
-                    const assignedParticipantIds = new Set(
-                      competition.assignments.map((assignment) => assignment.participantId)
-                    );
+                  <section className="competition-scoreboard" aria-label={t.automaticScoring}>
+                    <div className="panel-title">
+                      <span>{t.automaticScoring}</span>
+                      <strong className="status-pill">{t.readOnly}</strong>
+                    </div>
+                    <div className="status-list">
+                      {scores.length === 0 ? (
+                        <div>
+                          <span>{t.empty}</span>
+                          <strong>{t.noScores}</strong>
+                        </div>
+                      ) : (
+                        scores.slice(0, 5).map((score, index) => (
+                          <div key={`${competition.id}-${score.displayName}`}>
+                            <span>{index + 1}. {score.displayName}</span>
+                            <strong>
+                              {formatCount(score.score)} {t.score} / {formatCount(score.attendanceCount)}{" "}
+                              {t.attendanceCount} / {formatCount(score.longestStreak)} {t.longestStreak}
+                            </strong>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </section>
 
-                    return (
-                      <form
-                        className="login-form"
-                        action={updateGymForgeCompetitionAssignments}
-                        key={competition.id}
-                      >
-                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                        <input type="hidden" name="competitionId" value={competition.id} />
-                        <label>
-                          {competition.name}
-                          <select
-                            name="participantId"
-                            multiple
-                            size={Math.max(1, Math.min(activeParticipantsForAssignment.length, 6))}
-                            defaultValue={Array.from(assignedParticipantIds)}
+                  {isAdmin ? (
+                    <div className="admin-tool-grid">
+                      <details className="admin-drawer">
+                        <summary>{t.updateCompetition}</summary>
+                        <form className="compact-form" action={updateGymForgeCompetition}>
+                          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                          <input type="hidden" name="competitionId" value={competition.id} />
+                          <label>
+                            {t.name}
+                            <input name="name" minLength={2} maxLength={100} defaultValue={competition.name} required />
+                          </label>
+                          <label>
+                            {t.description}
+                            <input name="description" maxLength={240} defaultValue={competition.description ?? ""} />
+                          </label>
+                          <label>
+                            {t.status}
+                            <select
+                              name="status"
+                              defaultValue={competition.status === "ARCHIVED" ? "DRAFT" : competition.status}
+                            >
+                              <option value="DRAFT">Draft</option>
+                              <option value="ACTIVE">Active</option>
+                              <option value="ENDED">Ended</option>
+                            </select>
+                          </label>
+                          <label>
+                            {t.startsAt}
+                            <input
+                              name="startsAt"
+                              type="date"
+                              defaultValue={competition.startsAt ? formatDateKey(competition.startsAt) : ""}
+                            />
+                          </label>
+                          <label>
+                            {t.endsAt}
+                            <input
+                              name="endsAt"
+                              type="date"
+                              defaultValue={competition.endsAt ? formatDateKey(competition.endsAt) : ""}
+                            />
+                          </label>
+                          <label>
+                            {t.scoringRule}
+                            <select name="scoringRule" defaultValue={isCompetitionScoringRule(competition.scoringRule) ? competition.scoringRule : "ATTENDANCE_COUNT"}>
+                              <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
+                              <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
+                              <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
+                              <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
+                            </select>
+                          </label>
+                          <button type="submit">{t.saveChanges}</button>
+                        </form>
+                      </details>
+
+                      <details className="admin-drawer">
+                        <summary>{t.assignment}</summary>
+                        <form className="compact-form" action={updateGymForgeCompetitionAssignments}>
+                          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                          <input type="hidden" name="competitionId" value={competition.id} />
+                          <label>
+                            {t.assignParticipants}
+                            <select
+                              name="participantId"
+                              multiple
+                              size={Math.max(1, Math.min(activeParticipantsForAssignment.length, 6))}
+                              defaultValue={Array.from(assignedParticipantIds)}
+                            >
+                              {activeParticipantsForAssignment.map((participant) => (
+                                <option key={participant.id} value={participant.id}>
+                                  {participant.displayName}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <button type="submit" disabled={activeParticipantsForAssignment.length === 0}>
+                            {t.updateAssignments}
+                          </button>
+                        </form>
+                      </details>
+
+                      <details className="admin-drawer danger-zone">
+                        <summary>{t.dangerZone}</summary>
+                        <p>{t.dangerZoneText}</p>
+                        <form className="action-stack" action={archiveGymForgeCompetition}>
+                          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                          <input type="hidden" name="competitionId" value={competition.id} />
+                          <button type="submit" disabled={competition.status === "ARCHIVED"}>
+                            {t.archiveCompetition}
+                          </button>
+                        </form>
+                        <form className="action-stack" action={deleteGymForgeCompetition}>
+                          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                          <input type="hidden" name="competitionId" value={competition.id} />
+                          <label className="checkbox-line">
+                            <input name="confirmDelete" type="checkbox" value="true" />
+                            {t.confirmDelete}
+                          </label>
+                          <button
+                            type="submit"
+                            disabled={competition.status === "ACTIVE" || competition._count.assignments > 0}
                           >
-                            {activeParticipantsForAssignment.map((participant) => (
-                              <option key={participant.id} value={participant.id}>
-                                {participant.displayName}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <button type="submit" disabled={activeParticipantsForAssignment.length === 0}>
-                          {t.updateAssignments}
-                        </button>
-                      </form>
-                    );
-                  })}
-                  {competitions.length === 0 ? (
-                    <div>
-                      <span>{t.empty}</span>
-                      <strong>{t.noCompetitions}</strong>
+                            {t.deleteCompetition}
+                          </button>
+                        </form>
+                      </details>
                     </div>
                   ) : null}
+                </article>
+              );
+            })}
+            {competitions.length === 0 ? (
+              <article className="competition-card">
+                <div className="competition-card-header">
+                  <div>
+                    <span className="status-pill">{t.empty}</span>
+                    <h3>{t.noCompetitions}</h3>
+                  </div>
                 </div>
               </article>
             ) : null}
-
-            <article className="panel">
-              <div className="panel-title">
-                <span>{t.automaticScoring}</span>
-                <strong className="status-pill">{t.readOnly}</strong>
-              </div>
-              <div className="status-list">
-                {competitions.flatMap((competition) => {
-                  const scores = calculateCompetitionScores(competition);
-
-                  if (scores.length === 0) {
-                    return [
-                      <div key={`${competition.id}-empty`}>
-                        <span>{competition.name}</span>
-                        <strong>{t.noScores}</strong>
-                      </div>
-                    ];
-                  }
-
-                  return scores.slice(0, 5).map((score, index) => (
-                    <div key={`${competition.id}-${score.displayName}`}>
-                      <span>{competition.name}: {index + 1}. {score.displayName}</span>
-                      <strong>
-                        {formatCount(score.score)} {t.score} / {formatCount(score.attendanceCount)}{" "}
-                        {t.attendanceCount} / {formatCount(score.longestStreak)} {t.longestStreak}
-                      </strong>
-                    </div>
-                  ));
-                })}
-                {competitions.length === 0 ? (
-                  <div>
-                    <span>{t.empty}</span>
-                    <strong>{t.noCompetitions}</strong>
-                  </div>
-                ) : null}
-              </div>
-            </article>
           </div>
         </section>
 

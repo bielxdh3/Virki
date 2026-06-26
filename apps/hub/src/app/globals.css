@@ -155,6 +155,9 @@ strong {
 .icon-command:focus-visible,
 .action-stack a:focus-visible,
 .action-stack button:focus-visible,
+.compact-form button:focus-visible,
+.compact-form input:focus-visible,
+.compact-form select:focus-visible,
 .login-form button:focus-visible,
 .login-form input:focus-visible,
 .login-form select:focus-visible,
@@ -246,6 +249,7 @@ strong {
 .icon-command,
 .action-stack button,
 .action-stack a,
+.compact-form button,
 .login-form button,
 .language-selector button {
   appearance: none;
@@ -269,6 +273,7 @@ strong {
 }
 
 .icon-command:hover,
+.compact-form button:hover,
 .login-form button:hover,
 .language-selector button:hover {
   border-color: var(--cyan);
@@ -727,6 +732,177 @@ strong {
   margin-top: auto;
 }
 
+.gymforge-competition-board {
+  background: #0d131a;
+}
+
+.competition-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.competition-toolbar h2 {
+  margin: 6px 0 0;
+  font-size: 1.1rem;
+}
+
+.admin-drawer {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--background-raised);
+}
+
+.admin-drawer summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  color: var(--muted-strong);
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.admin-drawer[open] summary {
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+}
+
+.competition-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 14px;
+}
+
+.competition-card {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.competition-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.competition-card-header h3 {
+  margin: 8px 0 0;
+  font-size: 1.05rem;
+}
+
+.competition-card-header > strong {
+  color: var(--muted-strong);
+  font-size: 0.82rem;
+}
+
+.competition-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.competition-meta div {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--background-raised);
+}
+
+.competition-meta dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.competition-meta dd {
+  margin: 5px 0 0;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.competition-scoreboard {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.compact-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.compact-form label {
+  display: grid;
+  gap: 8px;
+  color: #d7e3ee;
+  font-weight: 700;
+}
+
+.compact-form input,
+.compact-form select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0b1016;
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.compact-form select[multiple] {
+  min-height: 132px;
+  padding: 8px 10px;
+}
+
+.compact-form button {
+  grid-column: 1 / -1;
+}
+
+.danger-zone {
+  border-color: rgba(238, 116, 116, 0.45);
+}
+
+.danger-zone summary {
+  color: #ffd0d0;
+}
+
+.danger-zone p {
+  margin: 12px;
+  color: #ffd0d0;
+  line-height: 1.45;
+}
+
+.checkbox-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-strong);
+  font-weight: 800;
+}
+
+.checkbox-line input {
+  width: auto;
+  min-height: 0;
+}
+
 .reserved-strip {
   display: flex;
   align-items: center;
@@ -890,7 +1066,18 @@ strong {
   }
 
   .identity-panel,
-  .dashboard-grid {
+  .dashboard-grid,
+  .competition-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .competition-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-tool-grid,
+  .compact-form {
     grid-template-columns: 1fr;
   }
 
@@ -915,6 +1102,7 @@ strong {
 
   .dock-nav a,
   .icon-command,
+.compact-form button,
   .login-form button,
   .action-stack a,
   .action-stack button,
@@ -961,6 +1149,7 @@ strong {
   }
 
   .module-grid,
+  .competition-meta,
   .status-list {
     grid-template-columns: 1fr;
   }
