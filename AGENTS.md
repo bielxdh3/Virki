@@ -14,6 +14,29 @@ The repository represents the real private BielOS codebase. Treat it as security
 6. Prefer boring, maintainable solutions over clever complexity.
 7. Do not invent repository state. Inspect files before making claims.
 
+## Required BielOS Skill Selection
+
+Every BielOS prompt must explicitly name the required BielOS skill at the top before general instructions.
+
+The agent must follow the selected skill strictly before applying the general rules in this `AGENTS.md` file.
+
+Use these skills by task type:
+
+- Phase review, commit review, completed phase check, next-step review, or deciding the next BielOS phase:
+  `.agents/skills/bielos-phase-review/SKILL.md`
+- Security, authentication, CSRF, sessions, Cloudflare, Docker exposure, secrets, audit logs, or production hardening:
+  `.agents/skills/bielos-security-review/SKILL.md`
+- Making the repository public, sharing repository access, publication safety, or sanitized public release:
+  `.agents/skills/bielos-publication-check/SKILL.md`
+
+If no existing BielOS skill matches the task, stop and report exactly:
+
+`No matching BielOS skill found for this task.`
+
+Do not proceed with implementation when no matching BielOS skill exists.
+
+Do not invent a new skill unless the user explicitly requests creating one.
+
 ## Project Model
 
 - `biel.dev.br` is the public site.
