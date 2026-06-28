@@ -1,13 +1,13 @@
 # GymForge MVP Architecture
 
-GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, score corrections, unsafe competition deletion, or broad social feed behavior.
+GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, workout editing/deletion, score corrections, unsafe competition deletion, or broad social feed behavior.
 
 GymForge is a gated social gym competition app for Gabriel and invited or admin-created participants. It is not a zero-knowledge vault and not an open public internet app. Approved participants may see group competition and streak data inside the gated area.
 
 ## MVP Boundary
 
-- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
-- Design-only: photo proof, invite acceptance, imports/exports, workout editing/deletion, admin attendance correction, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
+- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, admin-only attendance correction, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
+- Design-only: photo proof, invite acceptance, imports/exports, workout editing/deletion, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
 - Included in the MVP boundary: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, simple group ranking, and competition metadata.
 - Future but planned: photo proof for check-ins.
 - Excluded from MVP: body metrics, health records, public registration, public profiles, open internet access, imports, exports, file upload, broad social feed, payments, and third-party integrations.
@@ -54,7 +54,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 - MVP day boundaries use a fixed `America/Sao_Paulo` GymForge policy and store the effective attendance date as a canonical UTC date for uniqueness and future streak computation.
 - Check-ins should store participant id, timestamp, effective local date, source, and optional note.
 - Check-ins must not store raw IP addresses, raw user agents, secrets, tokens, cookies, JWTs, or raw headers.
-- Admin correction rules must be designed before edits or backfills are implemented.
+- Admin correction is limited to OWNER/ADMIN users, requires CSRF, uses the fixed `America/Sao_Paulo` effective date policy, prevents duplicate participant/date attendance, and writes sanitized audit events.
 
 ## Streak Rules
 
@@ -101,7 +101,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 ## Competition Assignment And Scoring Design
 
-This section is implemented for explicit participant assignment, deterministic read-only scoring, admin-only competition metadata/status lifecycle changes, and safe deletion for non-ACTIVE competitions with zero assignments. Admin correction, score overrides, APIs, deletion of ACTIVE or assigned competitions, and broad social behavior remain blocked until later scoped phases.
+This section is implemented for explicit participant assignment, deterministic read-only scoring, admin-only competition metadata/status lifecycle changes, and safe deletion for non-ACTIVE competitions with zero assignments. Admin attendance correction is implemented through attendance records and automatically affects ranking/scoring. Score overrides, APIs, deletion of ACTIVE or assigned competitions, and broad social behavior remain blocked until later scoped phases.
 
 - Participant assignment should be explicit: an admin assigns ACTIVE GymForge participants to a competition before scoring includes them.
 - Participant scope should support at least `ALL_ACTIVE_AT_START` and `EXPLICIT_PARTICIPANTS`; MVP implementation should prefer explicit assignment when prizes, challenges, or sensitive group visibility are involved.

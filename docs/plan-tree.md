@@ -62,6 +62,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` GymForge competition participant assignment and automatic scoring implementation exists.
 - `[DONE]` GymForge competition lifecycle management exists for admin-only metadata/status edits and archival.
 - `[DONE]` GymForge UI usability pass and safe competition deletion exists for non-ACTIVE competitions with zero assignments.
+- `[DONE]` GymForge admin attendance correction exists behind OWNER/ADMIN, CSRF, and sanitized audit events.
 - `[DONE]` BielOS language selector exists with Portuguese default and English option.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
@@ -183,7 +184,8 @@ Do not implement new modules beyond inert shell registry entries until each modu
 - `[DONE]` GymForge competition participant assignment and automatic scoring implementation.
 - `[DONE]` GymForge competition lifecycle management.
 - `[DONE]` GymForge UI usability pass and safe competition deletion.
-- `[DO NOT IMPLEMENT YET]` GymForge workout editing/deletion, upload, invite acceptance, import/export, public registration, admin attendance correction, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
+- `[DONE]` GymForge admin attendance correction.
+- `[DO NOT IMPLEMENT YET]` GymForge workout editing/deletion, upload, invite acceptance, import/export, public registration, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
 
 ## 12. Definition Of MVP Complete
 
@@ -240,4 +242,5 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.21: GymForge competition assignment/scoring implementation.
 - `[DONE]` Phase 09.22: GymForge competition lifecycle management.
 - `[DONE]` Phase 09.23: GymForge UI usability pass and safe competition deletion.
-- `[LATER]` Phase 09.24+: other real modules only after module-specific security and data design.
+- `[DONE]` Phase 09.25: GymForge admin attendance correction.
+- `[LATER]` Phase 09.26+: other real modules only after module-specific security and data design.

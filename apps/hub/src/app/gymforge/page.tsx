@@ -11,12 +11,14 @@ import {
   archiveGymForgeCompetition,
   changeGymForgeExerciseStatus,
   changeGymForgeParticipantStatus,
+  createGymForgeAdminAttendanceCorrection,
   createGymForgeAttendanceCheckIn,
   createGymForgeCompetition,
   createGymForgeExercise,
   createGymForgeParticipant,
   createGymForgeWorkout,
   deleteGymForgeCompetition,
+  removeGymForgeAdminAttendanceCorrection,
   updateGymForgeCompetition,
   updateGymForgeCompetitionAssignments
 } from "./actions";
@@ -102,6 +104,13 @@ const copy = {
     datesOnly: "Datas apenas",
     noCheckin: "Sem check-in",
     noLatestCheckins: "Sem últimos check-ins",
+    attendanceCorrection: "Correcao admin de presenca",
+    createAttendanceCorrection: "Criar correcao de presenca",
+    removeAttendanceCorrection: "Remover presenca",
+    recentAttendance: "Presencas recentes",
+    correctionDate: "Data da presenca",
+    noRecentAttendance: "Sem presencas recentes",
+    correctionSource: "Origem",
     todayCheckin: "Check-in de hoje",
     today: "Hoje",
     checkedIn: "Check-in feito",
@@ -155,7 +164,7 @@ const copy = {
     safetyBoundary: "Limite de segurança",
     noPrivateIngestion: "Recursos ainda bloqueados",
     limitations:
-      "GymForge permanece atrás da autenticação existente do hub. Prova por foto, edição/exclusão de treinos, correção admin de presença, imports, exports, cadastro público, aceite de convite e feed social amplo permanecem bloqueados."
+      "GymForge permanece atras da autenticacao existente do hub. Prova por foto, edicao/exclusao de treinos, imports, exports, cadastro publico, aceite de convite, correcao de pontuacao e feed social amplo permanecem bloqueados."
   },
   en: {
     navLabel: "BielOS navigation",
@@ -234,6 +243,13 @@ const copy = {
     datesOnly: "Dates only",
     noCheckin: "No check-in",
     noLatestCheckins: "No latest check-ins",
+    attendanceCorrection: "Admin attendance correction",
+    createAttendanceCorrection: "Create attendance correction",
+    removeAttendanceCorrection: "Remove attendance",
+    recentAttendance: "Recent attendance",
+    correctionDate: "Attendance date",
+    noRecentAttendance: "No recent attendance",
+    correctionSource: "Source",
     todayCheckin: "Today check-in",
     today: "Today",
     checkedIn: "Checked in",
@@ -287,7 +303,7 @@ const copy = {
     safetyBoundary: "Safety boundary",
     noPrivateIngestion: "Still blocked",
     limitations:
-      "GymForge remains behind existing hub auth. Photo proof, workout editing/deletion, admin attendance correction, imports, exports, public registration, invite acceptance, and broad social feed remain blocked."
+      "GymForge remains behind existing hub auth. Photo proof, workout editing/deletion, imports, exports, public registration, invite acceptance, score correction, and broad social feed remain blocked."
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
@@ -512,6 +528,7 @@ export default async function GymForgePage() {
 
   const locale = await getLocale();
   const t = copy[locale];
+  const isAdmin = isHubAdmin(session.user.role);
   const [
     participantsCount,
     activeParticipantsCount,
@@ -526,7 +543,8 @@ export default async function GymForgePage() {
     exercises,
     activeExercises,
     activeParticipantsForAssignment,
-    competitions
+    competitions,
+    recentAttendances
   ] = await Promise.all([
     prisma.gymForgeParticipant.count(),
     prisma.gymForgeParticipant.count({ where: { status: "ACTIVE" } }),
@@ -684,10 +702,27 @@ export default async function GymForgePage() {
           }
         }
       }
-    })
+    }),
+    isAdmin
+      ? prisma.gymForgeAttendance.findMany({
+          orderBy: [{ effectiveDate: "desc" }, { checkedInAt: "desc" }],
+          take: 30,
+          select: {
+            id: true,
+            effectiveDate: true,
+            source: true,
+            countsForStreak: true,
+            participant: {
+              select: {
+                displayName: true,
+                status: true
+              }
+            }
+          }
+        })
+      : Promise.resolve([])
   ]);
 
-  const isAdmin = isHubAdmin(session.user.role);
   const canCheckIn = viewerParticipant?.status === "ACTIVE";
   const csrfToken = createCsrfToken();
 
@@ -1193,6 +1228,69 @@ export default async function GymForgePage() {
               </article>
             ) : null}
           </div>
+
+          {isAdmin ? (
+            <div className="management-strip">
+              <details className="admin-drawer create-strip-drawer">
+                <summary>
+                  <span>{t.attendanceCorrection}</span>
+                  <strong className="status-pill">{t.adminOnly}</strong>
+                </summary>
+                <form className="compact-form" action={createGymForgeAdminAttendanceCorrection}>
+                  <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                  <label>
+                    {t.participant}
+                    <select name="participantId" required aria-label={t.participant}>
+                      <option value="">{t.participant}</option>
+                      {activeParticipantsForAssignment.map((participant) => (
+                        <option key={participant.id} value={participant.id}>
+                          {participant.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    {t.correctionDate}
+                    <input name="effectiveDate" type="date" required />
+                  </label>
+                  <button
+                    className="button-primary"
+                    type="submit"
+                    disabled={activeParticipantsForAssignment.length === 0}
+                  >
+                    {t.createAttendanceCorrection}
+                  </button>
+                </form>
+              </details>
+
+              <div className="management-list compact-management-list" aria-label={t.recentAttendance}>
+                {recentAttendances.map((attendance) => (
+                  <div className="management-row" key={attendance.id}>
+                    <div>
+                      <span>{attendance.participant.displayName}</span>
+                      <strong>
+                        {formatDateKey(attendance.effectiveDate)} / {attendance.participant.status} /{" "}
+                        {attendance.source || t.correctionSource}
+                      </strong>
+                    </div>
+                    <form className="row-actions button-row" action={removeGymForgeAdminAttendanceCorrection}>
+                      <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                      <input type="hidden" name="attendanceId" value={attendance.id} />
+                      <button className="button-danger" type="submit">
+                        {t.removeAttendanceCorrection}
+                      </button>
+                    </form>
+                  </div>
+                ))}
+                {recentAttendances.length === 0 ? (
+                  <div className="empty-row">
+                    <span>{t.empty}</span>
+                    <strong>{t.noRecentAttendance}</strong>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section className="module-window anchor-section" id="workouts" aria-label="GymForge workouts">

@@ -27,6 +27,7 @@ type EditableCompetitionStatus = (typeof EDITABLE_COMPETITION_STATUSES)[number];
 type CompetitionScoringRule = (typeof COMPETITION_SCORING_RULES)[number];
 type WorkoutUnit = (typeof WORKOUT_UNITS)[number];
 type ParsedOptionalDate = Date | null | "invalid";
+type ParsedRequiredDate = Date | "invalid";
 
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
@@ -100,6 +101,10 @@ function parseOptionalDate(value: string): ParsedOptionalDate {
   }
 
   return date;
+}
+
+function parseRequiredDate(value: string): ParsedRequiredDate {
+  return parseOptionalDate(value) ?? "invalid";
 }
 
 async function requireGymForgeAdmin(formData: FormData) {
@@ -656,6 +661,126 @@ export async function createGymForgeAttendanceCheckIn(formData: FormData) {
       participantId: attendance.participantId,
       effectiveDate: formatGymForgeAttendanceDate(attendance.effectiveDate),
       countsForStreak: attendance.countsForStreak
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function createGymForgeAdminAttendanceCorrection(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const participantId = readFormString(formData, "participantId");
+  const effectiveDate = parseRequiredDate(readFormString(formData, "effectiveDate"));
+
+  if (!participantId || effectiveDate === "invalid") {
+    redirect("/gymforge?error=attendance-correction");
+  }
+
+  const participant = await prisma.gymForgeParticipant.findFirst({
+    where: {
+      id: participantId,
+      archivedAt: null
+    },
+    select: { id: true, status: true }
+  });
+
+  if (!participant) {
+    redirect("/gymforge?error=attendance-correction");
+  }
+
+  const existingAttendance = await prisma.gymForgeAttendance.findUnique({
+    where: {
+      participantId_effectiveDate: {
+        participantId,
+        effectiveDate
+      }
+    },
+    select: { id: true }
+  });
+
+  if (existingAttendance) {
+    redirect("/gymforge?error=attendance-duplicate");
+  }
+
+  const attendance = await prisma.gymForgeAttendance.create({
+    data: {
+      participantId,
+      effectiveDate,
+      source: "admin_correction",
+      note: null,
+      countsForStreak: true
+    },
+    select: {
+      id: true,
+      participantId: true,
+      effectiveDate: true,
+      source: true,
+      countsForStreak: true
+    }
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_ATTENDANCE_CORRECTION_CREATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.attendance",
+    message: "GymForge admin attendance correction created.",
+    metadata: {
+      attendanceId: attendance.id,
+      participantId: attendance.participantId,
+      effectiveDate: formatGymForgeAttendanceDate(attendance.effectiveDate),
+      source: attendance.source,
+      countsForStreak: attendance.countsForStreak
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function removeGymForgeAdminAttendanceCorrection(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const attendanceId = readFormString(formData, "attendanceId");
+
+  if (!attendanceId) {
+    redirect("/gymforge?error=attendance-remove");
+  }
+
+  const attendance = await prisma.gymForgeAttendance.findUnique({
+    where: { id: attendanceId },
+    select: {
+      id: true,
+      participantId: true,
+      effectiveDate: true,
+      source: true
+    }
+  });
+
+  if (!attendance) {
+    redirect("/gymforge?error=attendance-remove");
+  }
+
+  const result = await prisma.gymForgeAttendance.deleteMany({
+    where: { id: attendance.id }
+  });
+
+  if (result.count !== 1) {
+    redirect("/gymforge?error=attendance-remove");
+  }
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_ATTENDANCE_CORRECTION_REMOVED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.attendance",
+    message: "GymForge admin attendance correction removed.",
+    metadata: {
+      attendanceId: attendance.id,
+      participantId: attendance.participantId,
+      effectiveDate: formatGymForgeAttendanceDate(attendance.effectiveDate),
+      source: attendance.source,
+      removed: true
     }
   });
 
