@@ -1,6 +1,6 @@
 # GymForge Planning Document
 
-GymForge now has an implemented MVP foundation inside the private BielOS hub. This document records the module boundary and remaining gates. It does not enable body metrics, health records, photo check-ins, upload, import/export, public registration, invite acceptance, workout editing/deletion, scoring corrections, unsafe competition deletion, or broad social feed behavior.
+GymForge now has an implemented MVP foundation inside the private BielOS hub. This document records the module boundary and remaining gates. It does not enable body metrics, health records, photo check-ins, upload, import/export, public registration, invite acceptance, scoring corrections, unsafe competition deletion, or broad social feed behavior.
 
 GymForge is intended as a gated social gym competition app for Gabriel and invited friends. It is not a public open internet app and it is not a zero-knowledge vault. Data may be visible inside the approved group, but it must not be exposed outside the gated site.
 
@@ -74,7 +74,7 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 ## Audit Events
 
-- Events to record: Current implementation audits participant creation/status changes, exercise creation/status changes, attendance check-in creation, admin attendance correction creation/removal, workout creation, competition creation, competition updates, competition archival, competition deletion, and competition assignment updates with sanitized metadata. Future phases must define audit events for invite acceptance, photo proof upload, workout editing/deletion, score corrections, and broader destructive lifecycle changes.
+- Events to record: Current implementation audits participant creation/status changes, exercise creation/status changes, attendance check-in creation, admin attendance correction creation/removal, workout creation/update/deletion, competition creation, competition updates, competition archival, competition deletion, and competition assignment updates with sanitized metadata. Future phases must define audit events for invite acceptance, photo proof upload, score corrections, and broader destructive lifecycle changes.
 - Event result values: Use existing sanitized success, failure, or info patterns.
 - Sanitized metadata only: Yes.
 - Data explicitly excluded from audit logs: Workout details, body metrics, photo contents, raw upload paths, secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, private paths, and backup contents.
@@ -82,7 +82,7 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 ## Retention And Deletion
 
 - Retention period: Not defined.
-- Deletion behavior: Admins may permanently delete only non-ACTIVE competitions with zero participant assignments. Competitions that are ACTIVE or have assignments must be archived or retained.
+- Deletion behavior: Participants may delete only their own workout entries after explicit confirmation, while OWNER/ADMIN users may delete any workout entry. Admins may permanently delete only non-ACTIVE competitions with zero participant assignments. Competitions that are ACTIVE or have assignments must be archived or retained.
 - Cleanup command or worker: Not defined.
 - User-visible deletion expectations: Future design must define participant removal, competition history retention, photo proof retention, and backup implications.
 

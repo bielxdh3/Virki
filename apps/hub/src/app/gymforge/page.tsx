@@ -18,7 +18,9 @@ import {
   createGymForgeParticipant,
   createGymForgeWorkout,
   deleteGymForgeCompetition,
+  deleteGymForgeWorkout,
   removeGymForgeAdminAttendanceCorrection,
+  updateGymForgeWorkout,
   updateGymForgeCompetition,
   updateGymForgeCompetitionAssignments
 } from "./actions";
@@ -137,6 +139,10 @@ const copy = {
     workoutNote: "Nota do treino",
     setNote: "Nota da série",
     createWorkout: "Criar treino",
+    updateWorkout: "Editar treino",
+    deleteWorkout: "Excluir treino",
+    confirmWorkoutDelete: "Confirmo exclusao do treino",
+    workoutDate: "Data do treino",
     latestWorkouts: "Últimos treinos",
     ownLogs: "Registros próprios",
     noSets: "Sem séries",
@@ -276,6 +282,10 @@ const copy = {
     workoutNote: "Workout note",
     setNote: "Set note",
     createWorkout: "Create workout",
+    updateWorkout: "Edit workout",
+    deleteWorkout: "Delete workout",
+    confirmWorkoutDelete: "I confirm workout deletion",
+    workoutDate: "Workout date",
     latestWorkouts: "Latest workouts",
     ownLogs: "Own logs",
     noSets: "No sets",
@@ -584,23 +594,35 @@ export default async function GymForgePage() {
       })
       .then((participant) => participant?.attendances[0] ?? null),
     prisma.gymForgeWorkout.findMany({
-      where: {
-        participant: {
-          userId: session.user.id,
-          status: "ACTIVE"
-        }
-      },
+      where: isAdmin
+        ? {}
+        : {
+            participant: {
+              userId: session.user.id,
+              status: "ACTIVE"
+            }
+          },
       orderBy: [{ workoutAt: "desc" }],
-      take: 10,
+      take: isAdmin ? 30 : 10,
       select: {
         id: true,
         workoutAt: true,
+        note: true,
+        participant: {
+          select: {
+            displayName: true,
+            status: true
+          }
+        },
         sets: {
           select: {
+            id: true,
             setNumber: true,
             reps: true,
             load: true,
             unit: true,
+            note: true,
+            exerciseId: true,
             exercise: { select: { name: true } }
           },
           orderBy: [{ setNumber: "asc" }]
@@ -1362,19 +1384,101 @@ export default async function GymForgePage() {
                 <span>{t.latestWorkouts}</span>
                 <strong className="status-pill">{t.ownLogs}</strong>
               </div>
-              <div className="status-list">
+              <div className="management-list compact-management-list">
                 {viewerWorkouts.map((workout) => (
-                  <div key={workout.id}>
-                    <span>{workout.workoutAt.toISOString().slice(0, 10)}</span>
-                    <strong>
-                      {workout.sets[0]
-                        ? `${workout.sets[0].exercise.name}: ${workout.sets[0].reps} reps`
-                        : t.noSets}
-                    </strong>
+                  <div className="management-row workout-row" key={workout.id}>
+                    <div>
+                      <span>
+                        {formatDateKey(workout.workoutAt)}
+                        {isAdmin ? ` / ${workout.participant.displayName}` : ""}
+                      </span>
+                      <strong>
+                        {workout.sets[0]
+                          ? `${workout.sets[0].exercise.name}: ${workout.sets[0].reps} reps`
+                          : t.noSets}
+                      </strong>
+                    </div>
+                    <div className="workout-actions">
+                      <details className="admin-drawer">
+                        <summary>{t.updateWorkout}</summary>
+                        <form className="compact-form" action={updateGymForgeWorkout}>
+                          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                          <input type="hidden" name="workoutId" value={workout.id} />
+                          <label>
+                            {t.workoutDate}
+                            <input name="workoutAt" type="date" defaultValue={formatDateKey(workout.workoutAt)} required />
+                          </label>
+                          <label>
+                            {t.exercise}
+                            <select name="exerciseId" required aria-label={t.exercise} defaultValue={workout.sets[0]?.exerciseId ?? ""}>
+                              <option value="">{t.selectExercise}</option>
+                              {activeExercises.map((exercise) => (
+                                <option key={exercise.id} value={exercise.id}>
+                                  {exercise.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            {t.setNumber}
+                            <input name="setNumber" type="number" min={1} max={50} defaultValue={workout.sets[0]?.setNumber ?? 1} required />
+                          </label>
+                          <label>
+                            {t.reps}
+                            <input name="reps" type="number" min={1} max={500} defaultValue={workout.sets[0]?.reps ?? 1} required />
+                          </label>
+                          <label>
+                            {t.load}
+                            <input
+                              name="load"
+                              type="number"
+                              min={0}
+                              max={1000}
+                              step="0.01"
+                              defaultValue={workout.sets[0]?.load?.toString() ?? ""}
+                            />
+                          </label>
+                          <label>
+                            {t.unit}
+                            <select name="unit" defaultValue={workout.sets[0]?.unit ?? "KG"} aria-label={t.unit}>
+                              <option value="KG">kg</option>
+                              <option value="LB">lb</option>
+                              <option value="BODYWEIGHT">bodyweight</option>
+                              <option value="OTHER">other</option>
+                            </select>
+                          </label>
+                          <label>
+                            {t.workoutNote}
+                            <input name="workoutNote" maxLength={240} defaultValue={workout.note ?? ""} />
+                          </label>
+                          <label>
+                            {t.setNote}
+                            <input name="setNote" maxLength={160} defaultValue={workout.sets[0]?.note ?? ""} />
+                          </label>
+                          <button className="button-primary" type="submit" disabled={activeExercises.length === 0}>
+                            {t.updateWorkout}
+                          </button>
+                        </form>
+                      </details>
+                      <details className="admin-drawer danger-zone">
+                        <summary>{t.deleteWorkout}</summary>
+                        <form className="action-stack button-row" action={deleteGymForgeWorkout}>
+                          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                          <input type="hidden" name="workoutId" value={workout.id} />
+                          <label className="checkbox-line">
+                            <input name="confirmDelete" type="checkbox" value="true" />
+                            {t.confirmWorkoutDelete}
+                          </label>
+                          <button className="button-danger" type="submit">
+                            {t.deleteWorkout}
+                          </button>
+                        </form>
+                      </details>
+                    </div>
                   </div>
                 ))}
                 {viewerWorkouts.length === 0 ? (
-                  <div>
+                  <div className="empty-row">
                     <span>{t.empty}</span>
                     <strong>{t.noWorkouts}</strong>
                   </div>

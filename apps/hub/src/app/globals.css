@@ -1127,6 +1127,16 @@ strong {
   font-weight: 600;
 }
 
+.workout-row {
+  align-items: start;
+}
+
+.workout-actions {
+  display: grid;
+  width: min(360px, 100%);
+  gap: 6px;
+}
+
 .row-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1394,6 +1404,10 @@ strong {
   .management-row,
   .empty-row {
     grid-template-columns: 1fr;
+  }
+
+  .workout-actions {
+    width: 100%;
   }
 
   .row-actions {

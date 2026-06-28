@@ -16,7 +16,7 @@ This directory contains module planning and design documents. GymForge now has a
 - L-vault: planning document complete; implementation blocked.
 - root.ark: public zero-knowledge compartment planning revised; implementation blocked until a dedicated architecture phase is complete.
 - H-vault: planning document complete; implementation blocked.
-- GymForge: MVP foundation implemented behind the private hub. Current capabilities include authenticated route access, participant/admin read foundation, admin participant management, admin exercise catalog management, attendance check-ins, admin-only attendance correction, fixed `America/Sao_Paulo` attendance date policy, workout entry foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic competition scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
+- GymForge: MVP foundation implemented behind the private hub. Current capabilities include authenticated route access, participant/admin read foundation, admin participant management, admin exercise catalog management, attendance check-ins, admin-only attendance correction, fixed `America/Sao_Paulo` attendance date policy, workout entry/edit/delete foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic competition scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
 
 ## Required Gate
 
@@ -44,7 +44,7 @@ For not-yet-implemented modules, the following remain blocked until explicitly d
 
 For root.ark specifically, public exposure, compartment access, capability links, encrypted blob storage, metadata handling, key lifecycle, revocation, and deletion remain blocked until a dedicated architecture phase is complete.
 
-For GymForge specifically, photo upload, public registration, invite acceptance, import/export, workout editing/deletion, broad social feed behavior, scoring corrections, and deletion of ACTIVE or assigned competitions remain blocked until scoped phases complete their design and implementation checks.
+For GymForge specifically, photo upload, public registration, invite acceptance, import/export, broad social feed behavior, scoring corrections, and deletion of ACTIVE or assigned competitions remain blocked until scoped phases complete their design and implementation checks.
 
 ## Data Safety
 

@@ -879,3 +879,184 @@ export async function createGymForgeWorkout(formData: FormData) {
   revalidatePath("/gymforge");
   redirect("/gymforge");
 }
+
+export async function updateGymForgeWorkout(formData: FormData) {
+  const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
+
+  if (!csrfResult.valid) {
+    forbidden();
+  }
+
+  const session = await getCurrentSession();
+
+  if (!session) {
+    redirect("/login");
+  }
+
+  const workoutId = readFormString(formData, "workoutId");
+  const workoutAt = parseRequiredDate(readFormString(formData, "workoutAt"));
+  const note = readFormString(formData, "workoutNote");
+  const setNote = readFormString(formData, "setNote");
+  const exerciseId = readFormString(formData, "exerciseId");
+  const setNumber = parsePositiveInteger(readFormString(formData, "setNumber"), 50);
+  const reps = parsePositiveInteger(readFormString(formData, "reps"), 500);
+  const load = parseLoad(readFormString(formData, "load"));
+  const unit = readFormString(formData, "unit");
+
+  if (!workoutId || workoutAt === "invalid") {
+    redirect("/gymforge?error=workout-update");
+  }
+
+  if (note.length > 240 || setNote.length > 160) {
+    redirect("/gymforge?error=workout-note");
+  }
+
+  if (!exerciseId || !setNumber || !reps || !isWorkoutUnit(unit)) {
+    redirect("/gymforge?error=workout-set");
+  }
+
+  const [workout, exercise] = await Promise.all([
+    prisma.gymForgeWorkout.findUnique({
+      where: { id: workoutId },
+      select: {
+        id: true,
+        participantId: true,
+        participant: {
+          select: {
+            userId: true
+          }
+        },
+        _count: {
+          select: { sets: true }
+        }
+      }
+    }),
+    prisma.gymForgeExercise.findFirst({
+      where: {
+        id: exerciseId,
+        isActive: true,
+        archivedAt: null
+      },
+      select: { id: true }
+    })
+  ]);
+
+  if (!workout || !exercise) {
+    redirect("/gymforge?error=workout-update");
+  }
+
+  if (!isHubAdmin(session.user.role) && workout.participant.userId !== session.user.id) {
+    forbidden();
+  }
+
+  await prisma.$transaction(async (transaction) => {
+    await transaction.gymForgeWorkoutSet.deleteMany({
+      where: { workoutId: workout.id }
+    });
+
+    await transaction.gymForgeWorkout.update({
+      where: { id: workout.id },
+      data: {
+        workoutAt,
+        note: note || null,
+        sets: {
+          create: {
+            exerciseId: exercise.id,
+            setNumber,
+            reps,
+            load,
+            unit,
+            note: setNote || null
+          }
+        }
+      }
+    });
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_WORKOUT_UPDATED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.workout",
+    message: "GymForge workout updated.",
+    metadata: {
+      workoutId: workout.id,
+      participantId: workout.participantId,
+      setCount: 1
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function deleteGymForgeWorkout(formData: FormData) {
+  const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
+
+  if (!csrfResult.valid) {
+    forbidden();
+  }
+
+  const session = await getCurrentSession();
+
+  if (!session) {
+    redirect("/login");
+  }
+
+  const workoutId = readFormString(formData, "workoutId");
+  const confirmed = readFormString(formData, "confirmDelete") === "true";
+
+  if (!workoutId || !confirmed) {
+    redirect("/gymforge?error=workout-delete");
+  }
+
+  const workout = await prisma.gymForgeWorkout.findUnique({
+    where: { id: workoutId },
+    select: {
+      id: true,
+      participantId: true,
+      participant: {
+        select: {
+          userId: true
+        }
+      },
+      _count: {
+        select: { sets: true }
+      }
+    }
+  });
+
+  if (!workout) {
+    redirect("/gymforge?error=workout-delete");
+  }
+
+  if (!isHubAdmin(session.user.role) && workout.participant.userId !== session.user.id) {
+    forbidden();
+  }
+
+  await prisma.$transaction(async (transaction) => {
+    await transaction.gymForgeWorkoutSet.deleteMany({
+      where: { workoutId: workout.id }
+    });
+    await transaction.gymForgeWorkout.delete({
+      where: { id: workout.id }
+    });
+  });
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_WORKOUT_DELETED",
+    result: "SUCCESS",
+    actorUserId: session.user.id,
+    resource: "gymforge.workout",
+    message: "GymForge workout deleted.",
+    metadata: {
+      workoutId: workout.id,
+      participantId: workout.participantId,
+      setCount: workout._count.sets,
+      deleted: true
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
