@@ -189,7 +189,10 @@ Do not implement new modules beyond inert shell registry entries until each modu
 - `[DONE]` GymForge admin attendance correction.
 - `[DONE]` GymForge workout editing/deletion.
 - `[DONE]` GymForge one-set workout integrity and transactional dependent-set deletion.
-- `[DO NOT IMPLEMENT YET]` GymForge upload, invite acceptance, import/export, public registration, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
+- `[DONE]` GymForge competition score-correction Phase 2 docs-only design.
+- `[NEXT]` GymForge competition score-correction Phase 3 additive schema/migration and private-hub implementation.
+- `[BLOCKED]` GymForge score-correction runtime remains unavailable until Phase 3 authorization, CSRF, idempotency, concurrency guards, audit redaction, UI, migration, and validation are complete.
+- `[DO NOT IMPLEMENT YET]` GymForge upload, invite acceptance, import/export, public registration, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
 
 ## 12. Definition Of MVP Complete
 
@@ -248,4 +251,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.23: GymForge UI usability pass and safe competition deletion.
 - `[DONE]` Phase 09.25: GymForge admin attendance correction.
 - `[DONE]` Phase 09.26: GymForge workout editing and deletion.
+- `[DONE]` GymForge competition score-correction Phase 2: docs-only design.
+- `[NEXT]` GymForge competition score-correction Phase 3: additive migration, server-side OWNER/ADMIN correction actions, current-state score integration, private UI, audit events, and tests.
 - `[LATER]` Phase 09.26+: other real modules only after module-specific security and data design.
