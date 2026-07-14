@@ -35,8 +35,10 @@ export async function resolveBoundedCoreProbe(
   let timeout: ReturnType<typeof setTimeout> | undefined;
 
   try {
+    const probeResult = Promise.resolve().then(probe);
+
     return await Promise.race([
-      probe().then(
+      probeResult.then(
         () => "verified" as const,
         () => "unknown" as const
       ),
@@ -59,8 +61,20 @@ export async function getCoreOperationsSnapshot(): Promise<{
   hubRequest: "verified";
   authenticatedSession: "verified";
   database: CoreLiveCheckState;
-}> {
-  const database = await resolveBoundedCoreProbe(runDatabaseProbe, DATABASE_PROBE_TIMEOUT_MS);
+}>;
+export async function getCoreOperationsSnapshot(
+  databaseProbe: () => Promise<unknown>,
+  timeoutMs?: number
+): Promise<{
+  hubRequest: "verified";
+  authenticatedSession: "verified";
+  database: CoreLiveCheckState;
+}>;
+export async function getCoreOperationsSnapshot(
+  databaseProbe = runDatabaseProbe,
+  timeoutMs = DATABASE_PROBE_TIMEOUT_MS
+) {
+  const database = await resolveBoundedCoreProbe(databaseProbe, timeoutMs);
 
   return {
     hubRequest: "verified",
