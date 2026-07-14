@@ -2,7 +2,7 @@
 
 ## Implementation Status
 
-Core project registry, project management, and project access administration are implemented in the private hub at `/core/projects`. Personal session management is implemented at `/core/security`. Read scope follows this document; mutations require Cloudflare Access, BielOS authentication, CSRF, bounded validation, generic errors, and sanitized audits. Access changes use serializable transactions, prevent duplicate rows and role escalation, and retain the last active project owner. Session queries are user-scoped and omit token material; users may revoke only their own other sessions, with an explicit confirmation for the all-other action. Permanent project deletion remains unavailable.
+Core project registry, project management, and project access administration are implemented in the private hub at `/core/projects`. Personal session management and the owner-only audit activity view are implemented at `/core/security`. Read scope follows this document; mutations require Cloudflare Access, BielOS authentication, CSRF, bounded validation, generic errors, and sanitized audits. Access changes use serializable transactions, prevent duplicate rows and role escalation, and retain the last active project owner. Session queries are user-scoped and omit token material; users may revoke only their own other sessions, with an explicit confirmation for the all-other action. Permanent project deletion remains unavailable.
 
 The hub uses a typed application registry that separates Core workspace surfaces, the available GymForge application, and inert reserved modules. Registry links do not weaken the authentication boundary or create reserved-module routes.
 
@@ -84,11 +84,11 @@ The dedicated gate and unresolved decision set are recorded in `docs/security-un
 
 ## Audit Contract
 
-Core event types are allowlisted for project create/update/archive, access grant/change/revoke, and personal session revocation. Conditional audit viewing is read-only and owner-only.
+Core event types are allowlisted for project create/update/archive, access grant/change/revoke, and personal session revocation. Audit viewing is read-only and restricted to the global `OWNER` role.
 
 Audit metadata may contain only bounded enum values, aggregate counts, generic action scope, and stable hashed resource references. It must not contain names, slugs, descriptions, emails, raw identifiers, form values, request bodies, passwords, secrets, cookies, tokens, token hashes, JWTs, headers, IPs, environment values, database URLs, logs, or unrestricted free text.
 
-The viewer, if its later gate passes, exposes only event type, result, safe resource category, creation time, and generic actor state (`user` or `system`). It does not render raw metadata or arbitrary messages. Queries are newest-first and strictly bounded. Existing audit retention remains authoritative.
+The viewer exposes only allowlisted event type, allowlisted result, safe resource category, creation time, and generic actor state (`user` or `system`). Unknown stored values collapse to generic categories. It does not select or render raw metadata, arbitrary messages, emails, or raw identifiers. Queries are newest-first and limited to 50 rows. Existing audit retention remains authoritative.
 
 ## Safe Operations Visibility
 

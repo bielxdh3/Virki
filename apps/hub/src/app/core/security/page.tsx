@@ -12,10 +12,19 @@ import {
 import { LanguageSelector } from "../../language-selector";
 import { getLocale } from "../../locale";
 import { revokeAllOtherCoreSessions, revokeCoreSession } from "./actions";
+import {
+  getSafeAuditActorState,
+  getSafeAuditEventType,
+  getSafeAuditResource,
+  getSafeAuditResult,
+  type SafeAuditResource,
+  type SafeAuditResult
+} from "./audit-view";
 
 export const dynamic = "force-dynamic";
 
 const SESSION_LIMIT = 100;
+const AUDIT_LIMIT = 50;
 
 const copy = {
   "pt-BR": {
@@ -44,7 +53,29 @@ const copy = {
     dangerCopy: "Revoga todas as outras sessões ativas desta conta e preserva a sessão atual.",
     dangerConfirm: "Confirmo a revogação de todas as outras sessões.",
     revokeAll: "Revogar todas as outras",
-    noOthers: "Não há outras sessões ativas."
+    noOthers: "Não há outras sessões ativas.",
+    auditActivity: "Atividade de auditoria",
+    ownerOnly: "Somente OWNER",
+    newestAudit: "50 eventos mais recentes dentro da retenção ativa.",
+    event: "Evento",
+    result: "Resultado",
+    resource: "Categoria",
+    actor: "Ator",
+    time: "Horário",
+    actorUser: "Usuário",
+    actorSystem: "Sistema",
+    auditEmpty: "Nenhum evento de auditoria disponível.",
+    resultSuccess: "Sucesso",
+    resultFailure: "Falha",
+    resultInfo: "Informação",
+    resultOther: "Outro",
+    resourceHub: "Hub",
+    resourceSession: "Sessão",
+    resourceProject: "Projeto",
+    resourceProjectAccess: "Acesso de projeto",
+    resourceApplication: "Aplicação",
+    resourceSystem: "Sistema",
+    resourceOther: "Outro"
   },
   en: {
     privateHub: "Private Hub",
@@ -72,7 +103,29 @@ const copy = {
     dangerCopy: "Revokes every other active session for this account and preserves the current session.",
     dangerConfirm: "I confirm revocation of every other session.",
     revokeAll: "Revoke all other sessions",
-    noOthers: "There are no other active sessions."
+    noOthers: "There are no other active sessions.",
+    auditActivity: "Audit activity",
+    ownerOnly: "OWNER only",
+    newestAudit: "50 newest events within active retention.",
+    event: "Event",
+    result: "Result",
+    resource: "Category",
+    actor: "Actor",
+    time: "Time",
+    actorUser: "User",
+    actorSystem: "System",
+    auditEmpty: "No audit activity is available.",
+    resultSuccess: "Success",
+    resultFailure: "Failure",
+    resultInfo: "Information",
+    resultOther: "Other",
+    resourceHub: "Hub",
+    resourceSession: "Session",
+    resourceProject: "Project",
+    resourceProjectAccess: "Project access",
+    resourceApplication: "Application",
+    resourceSystem: "System",
+    resourceOther: "Other"
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
@@ -81,6 +134,42 @@ function formatSessionTime(value: Date, locale: BielosLocale): string {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(value);
+}
+
+function getAuditResultLabel(result: SafeAuditResult, locale: BielosLocale): string {
+  const t = copy[locale];
+
+  switch (result) {
+    case "SUCCESS":
+      return t.resultSuccess;
+    case "FAILURE":
+      return t.resultFailure;
+    case "INFO":
+      return t.resultInfo;
+    default:
+      return t.resultOther;
+  }
+}
+
+function getAuditResourceLabel(resource: SafeAuditResource, locale: BielosLocale): string {
+  const t = copy[locale];
+
+  switch (resource) {
+    case "hub":
+      return t.resourceHub;
+    case "session":
+      return t.resourceSession;
+    case "project":
+      return t.resourceProject;
+    case "project-access":
+      return t.resourceProjectAccess;
+    case "application":
+      return t.resourceApplication;
+    case "system":
+      return t.resourceSystem;
+    default:
+      return t.resourceOther;
+  }
 }
 
 export default async function CoreSecurityPage() {
@@ -101,6 +190,7 @@ export default async function CoreSecurityPage() {
   const t = copy[locale];
   const csrfToken = createCsrfToken();
   const now = new Date();
+  const isOwner = session.user.role === "OWNER";
   const sessions = await prisma.session.findMany({
     where: {
       userId: session.user.id,
@@ -116,6 +206,19 @@ export default async function CoreSecurityPage() {
     orderBy: { createdAt: "desc" },
     take: SESSION_LIMIT
   });
+  const auditLogs = isOwner
+    ? await prisma.auditLog.findMany({
+        select: {
+          eventType: true,
+          result: true,
+          resource: true,
+          actorUserId: true,
+          createdAt: true
+        },
+        orderBy: { createdAt: "desc" },
+        take: AUDIT_LIMIT
+      })
+    : [];
   const otherSessionCount = sessions.filter((item) => item.id !== session.id).length;
 
   return (
@@ -142,6 +245,12 @@ export default async function CoreSecurityPage() {
             <span aria-hidden="true">03</span>
             <strong>{t.security}</strong>
           </a>
+          {isOwner ? (
+            <a href="#audit" aria-label={t.auditActivity}>
+              <span aria-hidden="true">04</span>
+              <strong>{t.auditActivity}</strong>
+            </a>
+          ) : null}
         </nav>
 
         <div className="dock-footer">
@@ -243,6 +352,68 @@ export default async function CoreSecurityPage() {
             </div>
           </details>
         </section>
+
+        {isOwner ? (
+          <section className="core-audit-section anchor-section" id="audit" aria-labelledby="core-audit-heading">
+            <div className="section-heading core-audit-heading">
+              <div>
+                <p className="eyebrow">{t.ownerOnly}</p>
+                <h2 id="core-audit-heading">{t.auditActivity}</h2>
+              </div>
+              <span>{auditLogs.length} / {AUDIT_LIMIT}</span>
+            </div>
+
+            {auditLogs.length === 0 ? (
+              <div className="core-project-empty core-audit-empty">
+                <strong>{t.auditEmpty}</strong>
+              </div>
+            ) : (
+              <div className="core-audit-list">
+                {auditLogs.map((item, index) => {
+                  const safeResult = getSafeAuditResult(item.result);
+                  const safeResource = getSafeAuditResource(item.resource);
+                  const safeActor = getSafeAuditActorState(item.actorUserId);
+
+                  return (
+                    <article
+                      className="core-audit-row"
+                      key={`${item.createdAt.toISOString()}-${index}`}
+                    >
+                      <div className="core-audit-event">
+                        <span>{t.event}</span>
+                        <code>{getSafeAuditEventType(item.eventType)}</code>
+                      </div>
+                      <dl>
+                        <div>
+                          <dt>{t.result}</dt>
+                          <dd>
+                            <span className={`core-audit-result is-${safeResult.toLowerCase()}`}>
+                              {getAuditResultLabel(safeResult, locale)}
+                            </span>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t.resource}</dt>
+                          <dd>{getAuditResourceLabel(safeResource, locale)}</dd>
+                        </div>
+                        <div>
+                          <dt>{t.actor}</dt>
+                          <dd>{safeActor === "user" ? t.actorUser : t.actorSystem}</dd>
+                        </div>
+                        <div>
+                          <dt>{t.time}</dt>
+                          <dd>{formatSessionTime(item.createdAt, locale)}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+
+            <p className="core-project-limit-note">{t.newestAudit}</p>
+          </section>
+        ) : null}
       </section>
     </main>
   );
