@@ -12,6 +12,23 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: bielos_core_test
+          POSTGRES_USER: bielos_test
+          POSTGRES_PASSWORD: local-validation-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bielos_test -d bielos_core_test"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      CORE_TEST_DATABASE_URL: postgresql://bielos_test:local-validation-only@127.0.0.1:5432/bielos_core_test
 
     steps:
       - name: Checkout
@@ -40,6 +57,15 @@ jobs:
 
       - name: Validate Prisma schema
         run: npm run prisma:validate
+
+      - name: Core unit tests
+        run: npm run test:core:unit
+
+      - name: Core database integration tests
+        run: npm run test:core:db:integration
+
+      - name: Core concurrency tests
+        run: npm run test:core:concurrency
 
       - name: Build
         run: npm run build

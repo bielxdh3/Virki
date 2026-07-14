@@ -15,6 +15,7 @@
     "test:core": "npm run test:core:unit && npm run test:core:db",
     "test:core:unit": "tsx --test scripts/core-test-database-safety.test.mjs apps/hub/src/app/core/projects/validation.test.ts apps/hub/src/app/core/projects/access-policy.test.ts apps/hub/src/app/core/security/session-policy.test.ts apps/hub/src/app/core/security/audit-view.test.ts apps/hub/src/app/core/operations.test.ts",
     "test:core:db": "node scripts/run-core-db-tests.mjs --suite all",
+    "test:core:db:integration": "node scripts/run-core-db-tests.mjs --suite integration",
     "test:core:db:smoke": "node scripts/run-core-db-tests.mjs --suite smoke",
     "test:core:concurrency": "node scripts/run-core-db-tests.mjs --suite concurrency",
     "test:core-projects": "tsx --test apps/hub/src/app/core/projects/validation.test.ts",

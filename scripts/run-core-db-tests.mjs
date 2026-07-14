@@ -125,8 +125,15 @@ function readSuite(argumentsList) {
   const suiteIndex = argumentsList.indexOf("--suite");
   const value = suiteIndex >= 0 ? argumentsList[suiteIndex + 1] : "all";
 
-  if (value !== "all" && value !== "smoke" && value !== "concurrency") {
-    throw new Error("Core database test suite must be all, smoke, or concurrency.");
+  if (
+    value !== "all" &&
+    value !== "smoke" &&
+    value !== "integration" &&
+    value !== "concurrency"
+  ) {
+    throw new Error(
+      "Core database test suite must be all, smoke, integration, or concurrency."
+    );
   }
 
   return value;
@@ -144,6 +151,10 @@ function getTestFiles(selectedSuite) {
 
   if (selectedSuite === "concurrency") {
     return files.filter((filePath) => filePath.endsWith(".concurrency.db.test.ts"));
+  }
+
+  if (selectedSuite === "integration") {
+    return files.filter((filePath) => !filePath.endsWith(".concurrency.db.test.ts"));
   }
 
   return files;
