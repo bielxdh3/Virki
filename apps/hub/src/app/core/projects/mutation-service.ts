@@ -7,6 +7,10 @@ import {
   validateCoreProjectInput,
   type CoreProjectFields
 } from "./validation";
+import {
+  lockCoreProjectMutation,
+  runCoreProjectSerializableTransaction
+} from "./transaction";
 
 export class CoreProjectMutationError extends Error {
   constructor() {
@@ -112,17 +116,21 @@ export async function archiveCoreProjectRecord(
 
   try {
     await requireActiveCoreAdministrator(actor);
-    const result = await prisma.project.updateMany({
-      where: {
-        id: projectId,
-        status: { not: "ARCHIVED" }
-      },
-      data: { status: "ARCHIVED" }
-    });
+    await runCoreProjectSerializableTransaction(async (transaction) => {
+      await lockCoreProjectMutation(transaction, projectId);
 
-    if (result.count !== 1) {
-      throw new CoreProjectMutationError();
-    }
+      const result = await transaction.project.updateMany({
+        where: {
+          id: projectId,
+          status: { not: "ARCHIVED" }
+        },
+        data: { status: "ARCHIVED" }
+      });
+
+      if (result.count !== 1) {
+        throw new CoreProjectMutationError();
+      }
+    });
   } catch {
     throw new CoreProjectMutationError();
   }

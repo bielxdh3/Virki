@@ -1,5 +1,5 @@
 import { hashAuditIdentifier, writeAuditLog, type AuditEventType } from "@bielos/auth";
-import { prisma, type Prisma } from "@bielos/database";
+import type { Prisma } from "@bielos/database";
 
 import { isCoreAdministrator, type CoreProjectPrincipal } from "../authorization";
 import {
@@ -10,8 +10,10 @@ import {
   type CoreProjectAccessLevel
 } from "./access-policy";
 import { isValidCoreResourceId } from "./validation";
-
-const SERIALIZABLE_RETRY_LIMIT = 3;
+import {
+  lockCoreProjectMutation,
+  runCoreProjectSerializableTransaction
+} from "./transaction";
 
 export class CoreProjectAccessMutationError extends Error {
   constructor() {
@@ -40,7 +42,9 @@ export async function setCoreProjectAccessRecord(
   };
 
   try {
-    result = await runSerializableTransaction(async (transaction) => {
+    result = await runCoreProjectSerializableTransaction(async (transaction) => {
+      await lockCoreProjectMutation(transaction, projectId);
+
       const [persistedActor, project, targetUser, current] = await Promise.all([
         transaction.user.findUnique({
           where: { id: actor.id },
@@ -134,7 +138,9 @@ export async function revokeCoreProjectAccessRecord(
   let removed: { accessId: string };
 
   try {
-    removed = await runSerializableTransaction(async (transaction) => {
+    removed = await runCoreProjectSerializableTransaction(async (transaction) => {
+      await lockCoreProjectMutation(transaction, projectId);
+
       const [persistedActor, current] = await Promise.all([
         transaction.user.findUnique({
           where: { id: actor.id },
@@ -221,35 +227,6 @@ async function requireMultipleActiveOwners(
   if (activeOwnerCount <= 1) {
     throw new CoreProjectAccessMutationError();
   }
-}
-
-function isRetryableTransactionError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "P2034"
-  );
-}
-
-async function runSerializableTransaction<T>(
-  operation: (transaction: Prisma.TransactionClient) => Promise<T>
-): Promise<T> {
-  for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_LIMIT; attempt += 1) {
-    try {
-      return await prisma.$transaction(operation, { isolationLevel: "Serializable" });
-    } catch (error) {
-      if (
-        error instanceof CoreProjectAccessMutationError ||
-        !isRetryableTransactionError(error) ||
-        attempt === SERIALIZABLE_RETRY_LIMIT
-      ) {
-        throw error;
-      }
-    }
-  }
-
-  throw new CoreProjectAccessMutationError();
 }
 
 async function writeProjectAccessAudit(input: {
