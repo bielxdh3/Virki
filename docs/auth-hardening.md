@@ -81,7 +81,7 @@ Cloudflare Access is the outer boundary for `hub.biel.dev.br`, and BielOS intern
 ## Remaining Limitations
 
 - No edge-level or IP-based rate limit in this repository.
-- The closeout runtime cannot be deployed until the dedicated private production limiter key is configured.
+- The dedicated production limiter key is configured privately and the closeout runtime is deployed; the value remains outside Git and operational output.
 - Authenticated production OWNER/MEMBER browser smoke and final remote CI evidence remain pending.
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.

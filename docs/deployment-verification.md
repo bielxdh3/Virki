@@ -116,7 +116,8 @@ Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it re
 - A current PostgreSQL backup was created and verified before the committed migrations were deployed with `prisma migrate deploy`; restore was validated against a disposable target.
 - The latest complete local gate, production image build, production Compose validation, production restart, local/public health checks, Cloudflare-first hub routing, and loopback port checks passed.
 - `CI remoto não confirmado.` for the final hardening SHA because authenticated GitHub Actions evidence was unavailable.
-- The closeout local/database/build/image gate passed, and the existing prior production stack remains healthy with Cloudflare Access first and loopback-only ports. The closeout runtime was not restarted because `BIELOS_RATE_LIMIT_HASH_SECRET` is not yet configured in the private production environment.
-- Authenticated OWNER/MEMBER production browser smoke remains incomplete and must run after the private key is configured and the current runtime is deployed, using the real Cloudflare Access and BielOS login flow without bypassing either boundary.
+- The dedicated limiter key is configured only in the ignored private environment. The current runtime was rebuilt and deployed without schema changes; migrations remain current and all expected services are healthy or running.
+- Local/public health, Cloudflare-first routing, direct-origin `403`, and loopback-only port checks passed. This is a local Windows/Docker Desktop deployment through Cloudflare Tunnel, so public Linux/VPS host-firewall validation is not applicable.
+- Authenticated OWNER/MEMBER production browser smoke remains incomplete and must use the real Cloudflare Access and BielOS login flow without bypassing either boundary when a safe controllable browser session and existing disposable identities are available.
 - Origin-side Cloudflare Access JWT validation depends on private environment configuration. Keep it enabled where required; never disable it merely to make a smoke test pass.
 - Host firewall rules for public Linux/VPS deployment remain environment-specific and require manual validation.

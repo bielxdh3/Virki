@@ -64,8 +64,9 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` The final Core gate passed unit, database integration, concurrency, build, production image, Compose, restart, health, Cloudflare-ordering, and loopback-exposure checks.
 - `[DONE]` Core closeout requires a dedicated production login-limit HMAC key, exercises the real login POST route, covers limiter lifecycle and independent identifiers, bounds advisory-lock waits, and tests complete operational command error boundaries.
 - `[DONE]` The closeout local gate passed 33 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, synthetic Compose, health, Access-ordering, and loopback checks.
+- `[DONE]` The dedicated limiter key is configured only in the ignored private environment, and the current Core runtime was rebuilt and deployed with current migrations, five healthy/running services, Cloudflare-first routing, origin JWT denial, and loopback-only application ports.
 - `[LATER]` Reconfirm remote CI evidence when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.` for the final hardening SHA.
-- `[NEXT]` Configure the dedicated rate-limit HMAC key in the private production environment, restart the current runtime, then complete authenticated OWNER/MEMBER browser smoke without bypassing either authentication boundary.
+- `[NEXT]` Complete authenticated OWNER/MEMBER production browser smoke with existing disposable identities; do not bypass Cloudflare Access or BielOS authentication.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
 - `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
 - `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
@@ -211,7 +212,7 @@ BielOS Core is the private hub platform and workspace, not a reserved module. It
 - `[DONE]` Cover limiter window boundaries, retention, stale-bucket clearing, inactive/passwordless/unknown users, independent identifiers, and the five-attempt cap on migrated PostgreSQL.
 - `[DONE]` Bound advisory-lock waits with a transaction-local PostgreSQL timeout while retaining strict same-identifier serialization and multi-instance correctness.
 - `[DONE]` Test complete auth maintenance command boundaries for fixed error output, nonzero exit state, and database disconnect attempts.
-- `[BLOCKED]` Current closeout deployment and authenticated production smoke require the dedicated private limiter key; do not substitute another environment value.
+- `[DONE]` Deploy the closeout runtime with its dedicated private limiter key, current migrations, healthy services, Cloudflare-first ordering, origin enforcement, and loopback-only exposure.
 - `[BLOCKED]` Keep `SecurityUnlock` runtime changes blocked until its intended semantics are sufficiently defined.
 
 ### Available Applications
@@ -331,4 +332,5 @@ BielOS MVP is complete when:
 - `[DONE]` Core hardening follow-up: database-backed authorization, concurrency, session, audit, and operations verification plus CI integration.
 - `[DONE]` Core hardening campaign: correct verification drift, fix the concurrent login limiter, sanitize operational auth errors, run the full local/Docker/production gate, and synchronize status.
 - `[DONE]` Core closeout campaign: enforce dedicated production limiter configuration, add real route/lifecycle coverage, bound lock contention, strengthen command-boundary tests, and complete the local/Docker verification gate.
+- `[DONE]` Core production readiness deployment: configure the private limiter key, deploy current `main`, and verify migrations, services, health, Access ordering, origin denial, and loopback ports.
 - `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.

@@ -275,7 +275,9 @@ Authenticated OWNER/MEMBER browser smoke must use an existing safe browser sessi
 
 The latest Core hardening campaign passed the complete local gate, production image and Compose checks, production restart, local/public health checks, Cloudflare-first hub routing, and loopback port verification. Remote CI evidence was unavailable, and authenticated OWNER/MEMBER browser smoke remains pending because no safe authenticated browser session was available.
 
-The closeout campaign passed its complete local/database gate, production build and image, and synthetic Compose validation; disposable database resources were removed. The existing production stack remained healthy with Cloudflare-first routing and loopback-only application ports. The new runtime was intentionally not restarted because the dedicated private limiter key was absent. `CI remoto não confirmado.` and authenticated production smoke remains pending.
+The closeout campaign passed its complete local/database gate, production build and image, and synthetic Compose validation; disposable database resources were removed. The dedicated limiter key was configured only in the ignored private environment, then the current runtime was rebuilt and restarted. Migrations remained current; all expected services run; local/public health, Cloudflare-first routing, origin JWT denial, and loopback port checks pass. `CI remoto não confirmado.` and authenticated production smoke remains pending because no safe controllable browser session was available.
+
+This deployment runs on local Windows with Docker Desktop and Cloudflare Tunnel. Public Linux/VPS host-firewall validation is not applicable; application listeners remain bound to loopback and the tunnel remains the ingress path.
 
 Diagnostic reports should summarize pass/fail state and non-sensitive errors only. Do not include raw command logs when they could expose environment values, private identifiers, headers, IPs, cookies, JWTs, tokens, or database URLs.
 
