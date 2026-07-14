@@ -40,3 +40,5 @@ BielOS Core owns project, access, personal session, safe operations, and gated a
 The Core authorization and data contract is documented in `docs/modules/bielos-core.md`.
 
 `packages/ui` owns the small typed hub registry. It classifies Core surfaces, available applications, and reserved modules without introducing a plugin runtime or placeholder routes.
+
+The Core operations panel performs only local, bounded application checks. It does not inspect Docker, read raw logs or environment values, or make external requests while rendering. Deployment and edge status remain separate manual validation.

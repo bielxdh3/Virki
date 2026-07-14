@@ -10,6 +10,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../lib/c
 import { getCurrentSession } from "../lib/auth";
 import { getLocale } from "./locale";
 import { LanguageSelector } from "./language-selector";
+import { getCoreOperationsSnapshot } from "./core/operations";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,23 @@ const copy = {
     role: "Papel",
     operations: "Operações",
     localStack: "Stack local",
+    liveChecks: "Verificações nesta requisição",
+    verified: "Verificado",
+    unknown: "Desconhecido",
+    configuredArchitecture: "Arquitetura configurada",
+    configured: "Configurado",
+    manualChecks: "Validação externa",
+    manual: "Manual",
+    hubRequest: "Processo do hub responde",
+    databaseQuery: "Consulta mínima ao banco",
+    authenticatedSession: "Sessão autenticada válida",
+    publicSurface: "Site público separado",
+    privateSurface: "Hub privado em duas camadas",
+    loopbackPorts: "Portas de origem em loopback",
+    containerHealth: "Saúde dos containers",
+    externalRoutes: "Respostas dos domínios externos",
+    migrationState: "Estado de migrações",
+    honestStatus: "Sem telemetria simulada",
     twoLayers: "Duas camadas",
     quickActions: "Ações rápidas",
     safe: "Seguro",
@@ -86,6 +104,23 @@ const copy = {
     role: "Role",
     operations: "Operations",
     localStack: "Local stack",
+    liveChecks: "Checks in this request",
+    verified: "Verified",
+    unknown: "Unknown",
+    configuredArchitecture: "Configured architecture",
+    configured: "Configured",
+    manualChecks: "External validation",
+    manual: "Manual",
+    hubRequest: "Hub process responds",
+    databaseQuery: "Minimal database query",
+    authenticatedSession: "Authenticated session valid",
+    publicSurface: "Separate public site",
+    privateSurface: "Two-layer private hub",
+    loopbackPorts: "Loopback origin ports",
+    containerHealth: "Container health",
+    externalRoutes: "External domain responses",
+    migrationState: "Migration state",
+    honestStatus: "No simulated telemetry",
     twoLayers: "Two layers",
     quickActions: "Quick Actions",
     safe: "Safe",
@@ -189,11 +224,21 @@ export default async function HubDashboardPage() {
   ] as const;
   const reservedModules = hubRegistry.filter((item) => item.category === "reserved");
   const csrfToken = createCsrfToken();
-  const deploymentStatus = [
-    { label: locale === "pt-BR" ? "Site público" : "Public site", value: locale === "pt-BR" ? "Disponível" : "Available" },
-    { label: "Hub", value: t.protected },
-    { label: "Tunnel", value: locale === "pt-BR" ? "Gerenciado" : "Managed" },
-    { label: "BielOS Core", value: t.active }
+  const operationsSnapshot = await getCoreOperationsSnapshot();
+  const liveChecks = [
+    { label: t.hubRequest, state: operationsSnapshot.hubRequest },
+    { label: t.databaseQuery, state: operationsSnapshot.database },
+    { label: t.authenticatedSession, state: operationsSnapshot.authenticatedSession }
+  ];
+  const configuredArchitecture = [
+    t.publicSurface,
+    t.privateSurface,
+    t.loopbackPorts
+  ];
+  const manualChecks = [
+    t.containerHealth,
+    t.externalRoutes,
+    t.migrationState
   ];
   const securityLayers = [
     {
@@ -312,15 +357,44 @@ export default async function HubDashboardPage() {
           <article className="panel deployment-panel anchor-section" id="ops">
             <div className="panel-title">
               <span>{t.operations}</span>
-              <strong className="status-pill">{t.localStack}</strong>
+              <strong className="status-pill">{t.honestStatus}</strong>
             </div>
-            <div className="status-list">
-              {deploymentStatus.map((item) => (
-                <div key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
+            <div className="core-operations-groups">
+              <section>
+                <h3>{t.liveChecks}</h3>
+                <div className="status-list">
+                  {liveChecks.map((item) => (
+                    <div key={item.label}>
+                      <span>{item.label}</span>
+                      <strong className={item.state === "verified" ? "is-verified" : "is-unknown"}>
+                        {item.state === "verified" ? t.verified : t.unknown}
+                      </strong>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </section>
+              <section>
+                <h3>{t.configuredArchitecture}</h3>
+                <div className="status-list">
+                  {configuredArchitecture.map((label) => (
+                    <div key={label}>
+                      <span>{label}</span>
+                      <strong>{t.configured}</strong>
+                    </div>
+                  ))}
+                </div>
+              </section>
+              <section>
+                <h3>{t.manualChecks}</h3>
+                <div className="status-list">
+                  {manualChecks.map((label) => (
+                    <div key={label}>
+                      <span>{label}</span>
+                      <strong className="is-unknown">{t.manual}</strong>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </div>
           </article>
 

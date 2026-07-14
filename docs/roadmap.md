@@ -4,7 +4,7 @@
 
 BielOS Core expansion is explicitly authorized and is now the active roadmap. Core is the private hub platform and workspace, distinct from applications and reserved modules. The existing `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models are foundations only; no future Core runtime phase is complete merely because those models exist.
 
-The Core security and architecture gate is complete in `docs/modules/bielos-core.md`. Core projects and access are implemented at `/core/projects`, and personal sessions at `/core/security`. The typed hub registry now separates Core workspace surfaces, available GymForge, and inert L-vault/root.ark/H-vault entries. GymForge integration is link/status only. Safe Core operations visibility is the next phase; `SecurityUnlock` remains design-only and blocked.
+The Core security and architecture gate is complete in `docs/modules/bielos-core.md`. Core projects, access, and personal sessions are implemented, and the typed hub registry separates Core, available GymForge, and inert reserved modules. The operations panel now distinguishes verified local checks, configured architecture, and external manual validation, with a timeout-bounded database probe and no Docker socket, logs, environment display, or render-time network dependency. Owner-only audit visibility is the next conditional gate; `SecurityUnlock` remains design-only and blocked.
 
 Project access, session management, operations, audit visibility, and hub integration remain future scoped phases until implemented and validated.
 
