@@ -1,5 +1,4 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import { prisma } from "@bielos/database";
 import type { BielosLocale } from "@bielos/ui";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
@@ -13,21 +12,19 @@ import { LanguageSelector } from "../../language-selector";
 import { getLocale } from "../../locale";
 import { revokeAllOtherCoreSessions, revokeCoreSession } from "./actions";
 import {
-  getSafeAuditActorState,
-  getSafeAuditEventType,
-  getSafeAuditResource,
-  getSafeAuditResult,
   type SafeAuditResource,
   type SafeAuditResult
 } from "./audit-view";
+import {
+  CORE_AUDIT_DISPLAY_LIMIT,
+  listCoreAuditActivity
+} from "./audit-service";
 import {
   CORE_SESSION_LIST_LIMIT,
   listCoreSessionsForPrincipal
 } from "./session-service";
 
 export const dynamic = "force-dynamic";
-
-const AUDIT_LIMIT = 50;
 
 const copy = {
   "pt-BR": {
@@ -195,19 +192,7 @@ export default async function CoreSecurityPage() {
   const now = new Date();
   const isOwner = session.user.role === "OWNER";
   const sessions = await listCoreSessionsForPrincipal(session.user, session.id, now);
-  const auditLogs = isOwner
-    ? await prisma.auditLog.findMany({
-        select: {
-          eventType: true,
-          result: true,
-          resource: true,
-          actorUserId: true,
-          createdAt: true
-        },
-        orderBy: { createdAt: "desc" },
-        take: AUDIT_LIMIT
-      })
-    : [];
+  const auditLogs = isOwner ? await listCoreAuditActivity(session.user) : [];
   const otherSessionCount = sessions.filter((item) => !item.isCurrent).length;
 
   return (
@@ -349,7 +334,7 @@ export default async function CoreSecurityPage() {
                 <p className="eyebrow">{t.ownerOnly}</p>
                 <h2 id="core-audit-heading">{t.auditActivity}</h2>
               </div>
-              <span>{auditLogs.length} / {AUDIT_LIMIT}</span>
+              <span>{auditLogs.length} / {CORE_AUDIT_DISPLAY_LIMIT}</span>
             </div>
 
             {auditLogs.length === 0 ? (
@@ -359,10 +344,6 @@ export default async function CoreSecurityPage() {
             ) : (
               <div className="core-audit-list">
                 {auditLogs.map((item, index) => {
-                  const safeResult = getSafeAuditResult(item.result);
-                  const safeResource = getSafeAuditResource(item.resource);
-                  const safeActor = getSafeAuditActorState(item.actorUserId);
-
                   return (
                     <article
                       className="core-audit-row"
@@ -370,24 +351,24 @@ export default async function CoreSecurityPage() {
                     >
                       <div className="core-audit-event">
                         <span>{t.event}</span>
-                        <code>{getSafeAuditEventType(item.eventType)}</code>
+                        <code>{item.eventType}</code>
                       </div>
                       <dl>
                         <div>
                           <dt>{t.result}</dt>
                           <dd>
-                            <span className={`core-audit-result is-${safeResult.toLowerCase()}`}>
-                              {getAuditResultLabel(safeResult, locale)}
+                            <span className={`core-audit-result is-${item.result.toLowerCase()}`}>
+                              {getAuditResultLabel(item.result, locale)}
                             </span>
                           </dd>
                         </div>
                         <div>
                           <dt>{t.resource}</dt>
-                          <dd>{getAuditResourceLabel(safeResource, locale)}</dd>
+                          <dd>{getAuditResourceLabel(item.resource, locale)}</dd>
                         </div>
                         <div>
                           <dt>{t.actor}</dt>
-                          <dd>{safeActor === "user" ? t.actorUser : t.actorSystem}</dd>
+                          <dd>{item.actorState === "user" ? t.actorUser : t.actorSystem}</dd>
                         </div>
                         <div>
                           <dt>{t.time}</dt>
