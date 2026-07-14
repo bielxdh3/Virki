@@ -51,7 +51,8 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
 - `[DONE]` BielOS Core security and architecture gate exists at `docs/modules/bielos-core.md`.
 - `[DONE]` Core project registry and project management use the existing `Project` model with bounded authorization, CSRF, archive-only deletion policy, and sanitized audits.
-- `[NEXT]` Implement Core project access management using the existing `ProjectAccess` model.
+- `[DONE]` Core project access management uses `ProjectAccess` with OWNER/ADMIN authority limits, serializable invariants, duplicate prevention, CSRF, and sanitized audits.
+- `[NEXT]` Complete the `SecurityUnlock` design gate without implementing ambiguous runtime behavior.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
 - `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
 - `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
@@ -177,7 +178,8 @@ BielOS Core is the private hub platform and workspace, not a reserved module. It
 - `[DONE]` Existing Core models: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
 - `[DONE]` Core security, authorization, lifecycle, audit, session, and operations boundary is defined in `docs/modules/bielos-core.md`.
 - `[DONE]` Scoped Core project registry and project management are implemented at `/core/projects`.
-- `[NEXT]` Implement project access management.
+- `[DONE]` Project access management is implemented with explicit VIEWER, EDITOR, and OWNER levels.
+- `[NEXT]` Complete the `SecurityUnlock` design gate.
 - `[LATER]` Implement personal session management, safe operations visibility, and gated audit visibility.
 - `[BLOCKED]` Keep `SecurityUnlock` runtime changes blocked until its intended semantics are sufficiently defined.
 
@@ -284,6 +286,7 @@ BielOS MVP is complete when:
 - `[DONE]` Core Phase 0: rebaseline the roadmap around BielOS Core and freeze further GymForge expansion.
 - `[DONE]` Core Phase 1: define BielOS Core security and data architecture.
 - `[DONE]` Core Phase 2: Core project registry and project management.
-- `[NEXT]` Core Phase 3: Core project access management.
-- `[LATER]` `SecurityUnlock` design gate, personal session management, hub registry integration, safe operations visibility, and conditional owner-only audit visibility.
+- `[DONE]` Core Phase 3: Core project access management.
+- `[NEXT]` Core Phase 4: `SecurityUnlock` design gate.
+- `[LATER]` Personal session management, hub registry integration, safe operations visibility, and conditional owner-only audit visibility.
 - `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.

@@ -1887,6 +1887,93 @@ strong {
   gap: 6px;
 }
 
+.core-project-access-drawer {
+  border-color: rgba(91, 215, 232, 0.13);
+}
+
+.core-project-access-panel {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.core-project-access-form {
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 0.38fr);
+  padding: 0;
+}
+
+.core-project-access-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.core-project-access-heading,
+.core-project-access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.core-project-access-heading {
+  padding-top: 8px;
+  border-top: 1px solid rgba(121, 142, 160, 0.12);
+}
+
+.core-project-access-heading strong {
+  font-size: 0.72rem;
+  font-weight: 680;
+}
+
+.core-project-access-heading span,
+.core-project-access-list > small {
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.core-project-access-row {
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(8, 13, 18, 0.54);
+}
+
+.core-project-access-row > div {
+  min-width: 0;
+}
+
+.core-project-access-row strong,
+.core-project-access-row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.core-project-access-row strong {
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.core-project-access-row span,
+.core-project-access-empty {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.core-project-access-row button {
+  min-height: 30px;
+  padding: 0 9px;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 680;
+}
+
 .core-project-drawer {
   width: 100%;
   background: rgba(8, 13, 18, 0.46);
@@ -2033,8 +2120,19 @@ strong {
   }
 
   .core-project-meta,
-  .core-project-form {
+  .core-project-form,
+  .core-project-access-form {
     grid-template-columns: 1fr;
+  }
+
+  .core-project-access-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .core-project-access-row form,
+  .core-project-access-row button {
+    width: 100%;
   }
 
   .core-project-description-field,

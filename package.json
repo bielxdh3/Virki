@@ -12,6 +12,7 @@
     "dev": "concurrently -n public,hub -c cyan,magenta \"npm run dev --workspace @bielos/public-site\" \"npm run dev --workspace @bielos/hub\"",
     "build": "npm run build --workspace @bielos/public-site && npm run build --workspace @bielos/hub",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "test:core": "tsx --test apps/hub/src/app/core/projects/validation.test.ts apps/hub/src/app/core/projects/access-policy.test.ts",
     "test:core-projects": "tsx --test apps/hub/src/app/core/projects/validation.test.ts",
     "test:gymforge-scoring": "tsx --test apps/hub/src/app/gymforge/scoring.test.ts",
     "lint": "eslint . --max-warnings=0",

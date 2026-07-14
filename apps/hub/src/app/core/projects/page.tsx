@@ -8,7 +8,13 @@ import { getCurrentSession } from "../../../lib/auth";
 import { getLocale } from "../../locale";
 import { LanguageSelector } from "../../language-selector";
 import { getCoreProjectWhere, isCoreAdministrator } from "../authorization";
-import { archiveCoreProject, createCoreProject, updateCoreProject } from "./actions";
+import {
+  archiveCoreProject,
+  createCoreProject,
+  revokeCoreProjectAccess,
+  setCoreProjectAccess,
+  updateCoreProject
+} from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -64,6 +70,17 @@ const copy = {
     authenticated: "Usuário autenticado",
     actions: "Ações administrativas",
     editDetails: "Editar metadados",
+    accessDetails: "Gerenciar acesso",
+    grantAccess: "Conceder ou alterar acesso",
+    selectUser: "Selecionar usuário",
+    accessLevel: "Nível de acesso",
+    applyAccess: "Aplicar acesso",
+    currentAccess: "Acessos atuais",
+    noAccess: "Nenhum acesso explícito adicional.",
+    inactiveUser: "Inativo",
+    activeUser: "Ativo",
+    revokeAccess: "Revogar",
+    accessLimit: "Até 100 acessos exibidos por projeto.",
     archiveDetails: "Área de arquivamento",
     slugHint: "Letras minúsculas, números e hífens simples.",
     limitNote: "Lista limitada aos 100 projetos mais recentes."
@@ -117,6 +134,17 @@ const copy = {
     authenticated: "Authenticated user",
     actions: "Administrative actions",
     editDetails: "Edit metadata",
+    accessDetails: "Manage access",
+    grantAccess: "Grant or change access",
+    selectUser: "Select user",
+    accessLevel: "Access level",
+    applyAccess: "Apply access",
+    currentAccess: "Current access",
+    noAccess: "No additional explicit access.",
+    inactiveUser: "Inactive",
+    activeUser: "Active",
+    revokeAccess: "Revoke",
+    accessLimit: "Up to 100 access rows are shown per project.",
     archiveDetails: "Archive area",
     slugHint: "Lowercase letters, numbers, and single hyphens.",
     limitNote: "List limited to the 100 most recently updated projects."
@@ -203,14 +231,34 @@ export default async function CoreProjectsPage() {
       status: true,
       updatedAt: true,
       accesses: {
-        where: { userId: session.user.id },
-        select: { accessLevel: true },
-        take: 1
+        where: isAdministrator ? undefined : { userId: session.user.id },
+        select: {
+          accessLevel: true,
+          user: {
+            select: {
+              id: true,
+              email: true,
+              displayName: true,
+              role: true,
+              isActive: true
+            }
+          }
+        },
+        orderBy: { createdAt: "asc" },
+        take: 100
       }
     },
     orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
     take: PROJECT_LIMIT
   });
+  const activeUsers = isAdministrator
+    ? await prisma.user.findMany({
+        where: { isActive: true },
+        select: { id: true, email: true, displayName: true, role: true },
+        orderBy: { email: "asc" },
+        take: 200
+      })
+    : [];
 
   return (
     <main className="hub-shell core-projects-shell">
@@ -435,6 +483,80 @@ export default async function CoreProjectsPage() {
                               <button className="button-primary" type="submit">{t.save}</button>
                             </div>
                           </form>
+                        </details>
+
+                        <details className="admin-drawer core-project-drawer core-project-access-drawer">
+                          <summary>{t.accessDetails}</summary>
+                          <div className="core-project-access-panel">
+                            <form className="compact-form core-project-access-form" action={setCoreProjectAccess}>
+                              <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                              <input type="hidden" name="projectId" value={project.id} />
+                              <label>
+                                <span>{t.selectUser}</span>
+                                <select name="userId" required defaultValue="">
+                                  <option value="" disabled>{t.selectUser}</option>
+                                  {activeUsers
+                                    .filter((user) =>
+                                      session.user.role === "OWNER" ||
+                                      !project.accesses.some(
+                                        (access) =>
+                                          access.user.id === user.id && access.accessLevel === "OWNER"
+                                      )
+                                    )
+                                    .map((user) => (
+                                      <option key={user.id} value={user.id}>
+                                        {user.displayName ? `${user.displayName} - ` : ""}
+                                        {user.email} ({user.role})
+                                      </option>
+                                    ))}
+                                </select>
+                              </label>
+                              <label>
+                                <span>{t.accessLevel}</span>
+                                <select name="accessLevel" defaultValue="VIEWER">
+                                  <option value="VIEWER">{t.viewer}</option>
+                                  <option value="EDITOR">{t.editor}</option>
+                                  {session.user.role === "OWNER" ? (
+                                    <option value="OWNER">{t.owner}</option>
+                                  ) : null}
+                                </select>
+                              </label>
+                              <div className="button-row core-project-form-actions">
+                                <button className="button-primary" type="submit">{t.applyAccess}</button>
+                              </div>
+                            </form>
+
+                            <div className="core-project-access-list" aria-label={t.currentAccess}>
+                              <div className="core-project-access-heading">
+                                <strong>{t.currentAccess}</strong>
+                                <span>{project.accesses.length} / 100</span>
+                              </div>
+                              {project.accesses.length === 0 ? (
+                                <p className="core-project-access-empty">{t.noAccess}</p>
+                              ) : (
+                                project.accesses.map((access) => (
+                                  <div className="core-project-access-row" key={access.user.id}>
+                                    <div>
+                                      <strong>{access.user.displayName ?? access.user.email}</strong>
+                                      <span>
+                                        {access.user.displayName ? `${access.user.email} / ` : ""}
+                                        {getAccessLabel(access.accessLevel, project.visibility, false, t)} / {access.user.isActive ? t.activeUser : t.inactiveUser}
+                                      </span>
+                                    </div>
+                                    {session.user.role === "OWNER" || access.accessLevel !== "OWNER" ? (
+                                      <form action={revokeCoreProjectAccess}>
+                                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                                        <input type="hidden" name="projectId" value={project.id} />
+                                        <input type="hidden" name="userId" value={access.user.id} />
+                                        <button className="button-danger" type="submit">{t.revokeAccess}</button>
+                                      </form>
+                                    ) : null}
+                                  </div>
+                                ))
+                              )}
+                              <small>{t.accessLimit}</small>
+                            </div>
+                          </div>
                         </details>
 
                         <details className="admin-drawer core-project-drawer core-project-archive-drawer">
