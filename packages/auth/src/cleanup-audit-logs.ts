@@ -1,5 +1,6 @@
 import { prisma } from "@bielos/database";
 import { cleanupExpiredAuditLogs, writeAuditLog } from "./audit";
+import { getSafeAuthCommandFailureMessage } from "./command-output";
 
 async function main() {
   const result = await cleanupExpiredAuditLogs();
@@ -20,8 +21,8 @@ async function main() {
 }
 
 main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : "Audit log cleanup failed.");
+  .catch(() => {
+    console.error(getSafeAuthCommandFailureMessage("audit-cleanup"));
     process.exitCode = 1;
   })
   .finally(async () => {
