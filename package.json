@@ -13,7 +13,7 @@
     "build": "npm run build --workspace @bielos/public-site && npm run build --workspace @bielos/hub",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test:core": "npm run test:core:unit && npm run test:core:db",
-    "test:core:unit": "tsx --test scripts/core-test-database-safety.test.mjs packages/auth/src/command-output.test.ts packages/auth/src/rate-limit-config.test.ts apps/hub/src/app/core/projects/validation.test.ts apps/hub/src/app/core/projects/access-policy.test.ts apps/hub/src/app/core/security/session-policy.test.ts apps/hub/src/app/core/security/audit-view.test.ts apps/hub/src/app/core/operations.test.ts",
+    "test:core:unit": "tsx --test scripts/core-test-database-safety.test.mjs packages/auth/src/command-output.test.ts packages/auth/src/rate-limit-config.test.ts packages/auth/src/session-cookie.test.ts apps/hub/src/app/core/projects/validation.test.ts apps/hub/src/app/core/projects/access-policy.test.ts apps/hub/src/app/core/security/session-policy.test.ts apps/hub/src/app/core/security/audit-view.test.ts apps/hub/src/app/core/operations.test.ts",
     "test:core:db": "node scripts/run-core-db-tests.mjs --suite all",
     "test:core:db:integration": "node scripts/run-core-db-tests.mjs --suite integration",
     "test:core:db:smoke": "node scripts/run-core-db-tests.mjs --suite smoke",
