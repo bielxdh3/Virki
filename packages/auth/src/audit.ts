@@ -71,9 +71,8 @@ export async function writeAuditLog(input: AuditLogInput): Promise<void> {
         metadata: sanitizeMetadata(input.metadata)
       }
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "unknown audit logging error";
-    console.warn(`Audit log write failed: ${message}`);
+  } catch {
+    console.warn("Audit log write failed.");
   }
 }
 
