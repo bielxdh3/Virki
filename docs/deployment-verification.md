@@ -107,10 +107,11 @@ npm run stop:prod
 
 Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it reaches `http://public-site:3000` and `http://hub:3001` on the Docker network. Remote hub exposure must remain behind Cloudflare Access, and direct internet access to port `3001` must stay blocked.
 
-## Remaining Limitations
+## Current Verification State And Remaining Limitations
 
-- Origin-side Cloudflare Access JWT validation is optional and depends on private environment configuration.
-- Login rate limiting is local/in-memory and not distributed.
-- CSRF protection currently covers the login and logout write flows.
-- Backup and restore procedures still need production validation.
-- Host firewall rules for public Linux/VPS deployment still need environment-specific validation.
+- Login rate limiting is persisted in PostgreSQL and stores only a keyed hash of the normalized identifier plus bounded attempt/window state.
+- CSRF protection covers login, logout, Core project lifecycle and access management, personal session management, and existing mutable GymForge flows.
+- A current PostgreSQL backup was created and verified before the committed migrations were deployed with `prisma migrate deploy`; restore was validated against a disposable target.
+- Authenticated OWNER/MEMBER browser smoke remains incomplete and must use the real Cloudflare Access and BielOS login flow without bypassing either boundary.
+- Origin-side Cloudflare Access JWT validation depends on private environment configuration. Keep it enabled where required; never disable it merely to make a smoke test pass.
+- Host firewall rules for public Linux/VPS deployment remain environment-specific and require manual validation.

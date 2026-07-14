@@ -263,7 +263,13 @@ Without `CORE_TEST_DATABASE_URL`, these commands create an isolated PostgreSQL C
 
 The secret scan is intentionally safe to run locally. It scans tracked repository files plus new non-ignored files and reports only file paths, line numbers, and rule ids.
 
-For CSRF changes, also verify locally when feasible that the login and logout forms contain a hidden CSRF field, valid form submissions work, and missing-token POSTs return HTTP `403`.
+For CSRF changes, inventory login, logout, Core project lifecycle/access, personal session, and existing GymForge mutation forms. Verify locally when feasible that each form carries the CSRF field, valid submissions work, and missing-token mutations return HTTP `403` without changing state.
+
+Remote CI evidence must identify the exact commit SHA and completed workflow result. Do not infer success from local validation or create a dummy commit merely to trigger CI. If the GitHub run cannot be inspected safely, report exactly: `CI remoto não confirmado.`
+
+Authenticated OWNER/MEMBER browser smoke must use an existing safe browser session and disposable identities through Cloudflare Access and BielOS login. Do not request credentials, extract cookies or tokens, reset passwords, or weaken either boundary. If no safe authenticated session is available, preserve the manual checklist in `docs/deployment-verification.md` and report the smoke as incomplete.
+
+Diagnostic reports should summarize pass/fail state and non-sensitive errors only. Do not include raw command logs when they could expose environment values, private identifiers, headers, IPs, cookies, JWTs, tokens, or database URLs.
 
 ## Security Notes
 

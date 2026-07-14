@@ -27,12 +27,15 @@ Current layers:
 
 Internal BielOS hub forms include a server-generated CSRF token for mutable POST routes.
 
-Protected routes:
+Protected mutation categories:
 
-- `POST /api/login`
-- `POST /api/logout`
+- login and logout;
+- Core project lifecycle and project access;
+- personal session management;
+- existing mutable GymForge flows;
+- every future mutable route before it ships.
 
-CSRF tokens are signed by the hub process and expire after a short lifetime. Failed CSRF validation returns HTTP `403` before login or logout state changes are attempted.
+CSRF tokens are signed by the hub process and expire after a short lifetime. Failed CSRF validation returns HTTP `403` before the protected state change is attempted.
 
 CSRF token values must not be logged, stored in audit metadata, exposed in API responses, or reused as session tokens. In the current MVP, CSRF signing material is process-local memory, so tokens created before a hub process restart may stop validating and the user may need to reload the form.
 
@@ -150,9 +153,9 @@ Before exposing BielOS beyond a local trusted network:
 - Keep the private `.env` file outside Git.
 - On public Linux servers or VPS hosts, also block inbound access to ports `3000` and `3001` with the host firewall.
 - Keep the production `session-cleanup` worker enabled so expired or revoked sessions do not accumulate indefinitely.
-- Validate database backup and restore procedures.
+- Repeat disposable backup/restore validation after meaningful schema or procedure changes.
 - Keep persistent login rate limiting enabled before multi-user or broader private use.
-- Extend explicit CSRF protection to any future mutable hub routes before they ship.
+- Preserve explicit CSRF protection on every current and future mutable hub route.
 
 Cloudflare Access and BielOS internal authentication are separate layers. Access is not a replacement for internal auth, and internal auth is not a replacement for Access. Both are required for the private hub.
 

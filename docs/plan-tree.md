@@ -58,7 +58,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Core operations visibility separates verified request-time checks, configured architecture, and external manual checks without fabricated telemetry.
 - `[DONE]` The owner-only audit activity viewer exposes a bounded, sanitized, read-only event summary without raw metadata, messages, emails, or identifiers.
 - `[DONE]` BielOS Core adversarial security/static-UI review found no medium/high/critical issue and fixed bounded identifiers, generic audit failure logging, and operations probe accumulation.
-- `[DONE]` Full Core validation, current backup, pending committed migration deployment, production restart, and unauthenticated smoke checks passed.
+- `[DONE]` Full Core validation, current backup, committed migration deployment, production restart, and unauthenticated smoke checks passed.
 - `[DONE]` Database-backed Core authorization, mutation, access-invariant, session-isolation, audit-bound, operations, and concurrency tests run against disposable migrated PostgreSQL and are integrated into CI.
 - `[NEXT]` Complete the authenticated OWNER/MEMBER browser smoke with existing disposable identities; do not bypass Cloudflare Access or BielOS authentication.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
@@ -104,8 +104,10 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Production session cookies are HttpOnly, SameSite=Lax, and Secure.
 - `[DONE]` Logout revokes the session and clears the cookie.
 - `[DONE]` CSRF protection covers:
-  - `POST /api/login`
-  - `POST /api/logout`
+  - login and logout
+  - Core project lifecycle and project access mutations
+  - personal session mutations
+  - existing mutable GymForge flows
 - `[DONE]` Missing/invalid CSRF returns HTTP `403`.
 - `[DONE]` Production session cleanup worker runs on an interval.
 - `[DONE]` Persistent login rate limiting.
@@ -174,7 +176,7 @@ BielOS is a private personal hub, not a public SaaS.
   - `logs:prod`
 - `[DONE]` Audit retention policy and cleanup.
 - `[LATER]` Safe redacted diagnostics if needed.
-- `[BLOCKED]` Audit log UI is blocked until authorization and retention rules are stronger.
+- `[DONE]` The bounded, read-only audit log UI is restricted to the global `OWNER` and renders only allowlisted safe fields.
 
 ## 11. Core, Available Applications, And Reserved Modules
 
@@ -196,7 +198,6 @@ BielOS Core is the private hub platform and workspace, not a reserved module. It
 - `[DONE]` Complete full validation, backup/migration deployment, production restart, and unauthenticated smoke checks.
 - `[DONE]` Add disposable PostgreSQL integration coverage for Core authorization, mutations, access invariants, concurrency, session isolation, audit visibility, and operations reliability.
 - `[DONE]` Run the Core database integration and concurrency suites in CI with one synthetic PostgreSQL service.
-- `[NEXT]` Complete authenticated OWNER/MEMBER browser smoke using the manual checklist in `docs/deployment-verification.md`.
 - `[BLOCKED]` Keep `SecurityUnlock` runtime changes blocked until its intended semantics are sufficiently defined.
 
 ### Available Applications
@@ -314,5 +315,4 @@ BielOS MVP is complete when:
 - `[DONE]` Core Phase 12: production restart and unauthenticated health/exposure smoke.
 - `[DONE]` Core Phase 13: final plan-tree and operational status synchronization.
 - `[DONE]` Core hardening follow-up: database-backed authorization, concurrency, session, audit, and operations verification plus CI integration.
-- `[NEXT]` Core verification follow-up: authenticated OWNER/MEMBER browser smoke with existing disposable identities.
 - `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.
