@@ -62,7 +62,7 @@ See `docs/audit-logs.md`.
 
 ## Lint and Secret Scanning
 
-CI runs a root lint command and a basic repository secret scan before typecheck, Prisma validation, and build.
+CI runs secret scan, lint, typecheck, Prisma validation, Core unit tests, migrated PostgreSQL integration tests, real concurrency tests, build, production image build, and production Compose validation. The Core database suites use one synthetic PostgreSQL service and do not require production secrets.
 
 Run locally:
 
@@ -97,13 +97,15 @@ Further GymForge expansion is frozen. Upload/photo proof, public registration, i
 
 - Cloudflare Access remains the first private-hub boundary; BielOS internal authentication and active-user checks remain the second.
 - Global `OWNER` and `ADMIN` users manage project lifecycle. An active `MEMBER` sees authenticated-hub `PUBLIC` projects or projects with an explicit `ProjectAccess` row; descriptions are never returned for unauthorized projects.
+- Core project reads require the supplied role to match the active persisted user role, so a crafted or stale principal cannot widen read scope.
 - Project access levels do not grant global administration. Global `OWNER` may manage all levels; global `ADMIN` is limited to `VIEWER` and `EDITOR`; global `MEMBER` cannot manage access. Every project retains at least one project-owner row.
 - Projects are archived rather than permanently deleted. Archived projects and their access history remain read-only in the initial Core runtime.
 - Every mutation rechecks server-side authorization, validates CSRF, validates bounded allowlisted values, and returns generic failures without confirming hidden resources.
 - Core audits contain only allowlisted event types, enum values, aggregate counts, and stable hashed resource references. They exclude names, slugs, descriptions, emails, raw identifiers, raw forms, secrets, cookies, tokens, token hashes, JWTs, headers, IPs, environment values, database URLs, logs, and unrestricted free text.
-- Personal session management at `/core/security` selects only safe timestamps and revocation/current state. Users cannot inspect another user's sessions, current-session revocation is excluded from this surface, all-other revocation requires explicit confirmation, and administrators receive no broad session-spying capability.
+- Personal session management at `/core/security` selects only active-session identifiers, safe timestamps, and current-session state; revoked and expired rows are excluded. Users cannot inspect another user's sessions, current-session revocation is excluded from this surface, all-other revocation requires explicit confirmation, and administrators receive no broad session-spying capability.
 - The audit activity view at `/core/security` is read-only and visible only to the global `OWNER`. It selects at most 50 newest rows and renders only allowlisted event/result values, safe resource categories, timestamps, and generic user/system actor state; unknown values collapse to generic labels, and raw metadata, messages, emails, and identifiers are not selected for the view.
 - Operations UI reports only the current request/session and a timeout-bounded minimal database check as verified. Configured architecture and external/manual deployment checks are labeled separately. It does not access the Docker socket, raw logs, environment values, private Cloudflare identifiers, or external network services during page rendering; unknown state stays explicit.
+- Core database tests run only against explicitly disposable test identities on allowlisted local/CI hosts, apply committed migrations, use synthetic fixtures, and remove their local Compose project even after failure.
 - `SecurityUnlock` runtime behavior remains blocked by the completed design-only gate in `docs/security-unlock.md` because challenge issuance, approval, consumption, denial, recovery, and rate-limit semantics are not sufficiently defined. It can only become an additional scoped gate, never a replacement for existing access boundaries.
 
 The complete contract is in `docs/modules/bielos-core.md`.

@@ -8,7 +8,7 @@ The hub uses a typed application registry that separates Core workspace surfaces
 
 The hub operations panel separates request-time checks, configured architecture, and external manual validation. It verifies only the current hub render, authenticated session, and a timeout-bounded minimal database query. Container health, public routes, Cloudflare ordering, ports, and migration state remain manual checks; no Docker socket, raw logs, environment values, or external network dependency is introduced.
 
-The initial Core expansion passed focused adversarial review and full repository validation and is deployed in the production Compose stack. The review fixed bounded project identifiers, generic audit-write failure logging, and single-flight database probes. Public/local health, Cloudflare-first ordering, container state, migration state, and loopback port exposure were verified. Authenticated browser smoke and database-backed authorization/concurrency integration tests remain explicit follow-up gates.
+The Core hardening gate passed focused adversarial review and full repository validation and is deployed in the production Compose stack. Migrated disposable PostgreSQL tests cover project authorization and mutations, access authority and races, session isolation and revocation, owner-only bounded audit display, and operations probes. The review additionally fixed persisted-role revalidation for project reads, per-project access/archive serialization, current-session inclusion in bounded session lists, synchronous operations-probe failures, and safe display-service boundaries. Public/local health, Cloudflare-first ordering, container state, and loopback port exposure were verified after restart. Authenticated OWNER/MEMBER browser smoke remains a manual follow-up because browser control was unavailable to automation.
 
 ## Identity
 
@@ -39,6 +39,7 @@ Descriptions are returned only with projects the requester is authorized to view
 - Project creation transactionally creates an `OWNER` access row for the creating global owner or admin.
 - A project must retain at least one active project `OWNER`; the last such row cannot be demoted or revoked.
 - Duplicate `(userId, projectId)` rows are rejected by the existing unique constraint and handled transactionally by the application.
+- Access grant, change, revoke, and archive operations take the same transaction-scoped PostgreSQL advisory lock per project. Serializable transactions use bounded retry for database write conflicts.
 - Only active users and existing, non-archived projects may receive new access.
 - A caller cannot grant a level above the authority allowed by their global role.
 
@@ -78,7 +79,8 @@ The dedicated gate and unresolved decision set are recorded in `docs/security-un
 ## Sessions
 
 - Users may see only their own sessions.
-- Safe display fields are creation time, expiry time, revocation state, and whether the row is the current session.
+- The active-session display selects only creation time, expiry time, and whether the row is the current session; revoked and expired rows are excluded.
+- The bounded 100-row display always reserves a row for the authenticated current session and fills the remaining rows newest-first.
 - Raw session tokens, token hashes, cookies, IPs, headers, and user agents are never selected for UI display.
 - A user may revoke their own other sessions or all other sessions. Current-session revocation is omitted unless a later explicit confirmed flow is designed.
 - Global administrators do not gain broad session visibility.
@@ -130,3 +132,15 @@ Core project and access rows are covered by the existing PostgreSQL backup and r
 ## Validation Gate
 
 Runtime phases require secret scan, lint, typecheck, Prisma validation, production build, focused authorization tests where practical, and adversarial review of IDOR, CSRF, role escalation, query bounds, archive behavior, and audit redaction. Schema changes require a committed migration and verified backup before durable deployment.
+
+The Core database runner creates an isolated PostgreSQL service locally or uses an explicitly supplied synthetic CI test database. It rejects production mode, non-test database/user names, and non-allowlisted hosts; applies committed migrations; uses synthetic fixtures; serializes database test files; and always tears down the local disposable service. It never uses `db push` or prints the database target.
+
+Current automated coverage includes:
+
+- project visibility for `OWNER`, `ADMIN`, active/inactive `MEMBER`, direct IDs, and forged or stale roles;
+- create/edit/archive validation, authority, retained access history, generic failures, and sanitized audits;
+- access grant/change/revoke authority, last-owner retention, cross-project isolation, duplicate rows, and six real concurrent races;
+- personal-session read/revoke/revoke-all isolation, current-session preservation, expired/revoked behavior, post-revocation authentication, and cleanup compatibility;
+- owner-only newest-first 50-row audit display with safe legacy fallbacks and no private display columns;
+- successful, failed, synchronous-error, stalled, and single-flight operations probes;
+- CI execution on Node 22 with one synthetic PostgreSQL service and separate integration/concurrency selections.

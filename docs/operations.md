@@ -248,8 +248,18 @@ npm run secrets:scan
 npm run lint
 npm run typecheck
 npm run prisma:validate
+npm run test:core
 npm run build
 ```
+
+Focused database commands are also available:
+
+```bash
+npm run test:core:db:integration
+npm run test:core:concurrency
+```
+
+Without `CORE_TEST_DATABASE_URL`, these commands create an isolated PostgreSQL Compose project on a random loopback port, apply committed migrations, run synthetic fixtures, and remove the service and volume. The runner refuses production mode, non-test database/user identities, and non-allowlisted hosts. Do not point it at durable data and do not replace migration deployment with `db push`.
 
 The secret scan is intentionally safe to run locally. It scans tracked repository files plus new non-ignored files and reports only file paths, line numbers, and rule ids.
 
