@@ -27,7 +27,9 @@ export type AuditEventType =
   | "GYMFORGE_COMPETITION_UPDATED"
   | "GYMFORGE_COMPETITION_ARCHIVED"
   | "GYMFORGE_COMPETITION_DELETED"
-  | "GYMFORGE_COMPETITION_ASSIGNMENT_UPDATED";
+  | "GYMFORGE_COMPETITION_ASSIGNMENT_UPDATED"
+  | "GYMFORGE_SCORE_CORRECTION_CREATED"
+  | "GYMFORGE_SCORE_CORRECTION_REVOKED";
 
 export type AuditResult = "SUCCESS" | "FAILURE" | "INFO";
 
@@ -71,6 +73,10 @@ export async function writeAuditLog(input: AuditLogInput): Promise<void> {
 
 export function hashAuditEmail(email: string): string {
   return createHash("sha256").update(email.trim().toLowerCase(), "utf8").digest("hex");
+}
+
+export function hashAuditIdentifier(identifier: string): string {
+  return createHash("sha256").update(identifier, "utf8").digest("hex");
 }
 
 export function hashAuditUserAgent(userAgent: string | null): string | undefined {

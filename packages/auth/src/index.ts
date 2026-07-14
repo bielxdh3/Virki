@@ -7,6 +7,7 @@ export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
 export {
   createAuditRequestMetadata,
   hashAuditEmail,
+  hashAuditIdentifier,
   hashAuditUserAgent,
   writeAuditLog,
   type AuditEventType,

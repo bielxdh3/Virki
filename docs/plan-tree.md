@@ -65,6 +65,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` GymForge admin attendance correction exists behind OWNER/ADMIN, CSRF, and sanitized audit events.
 - `[DONE]` GymForge workout editing/deletion exists with participant ownership, OWNER/ADMIN override, CSRF, and sanitized audit events.
 - `[DONE]` GymForge workout integrity intentionally keeps creation/editing to exactly one set, rejects updates for unexpected zero/multi-set records, and transactionally removes all dependent sets on explicit workout deletion.
+- `[DONE]` GymForge competition score-correction Phases 2 and 3 exist with additive history, deterministic current-state scoring, guarded lifecycle mutations, private bilingual UI, and redacted audits.
 - `[DONE]` BielOS language selector exists with Portuguese default and English option.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
@@ -134,6 +135,8 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Replace production reliance on `prisma db push` before private/non-discardable data ingestion.
 - `[DONE]` Create committed Prisma migrations.
 - `[DONE]` Document production `prisma migrate deploy`.
+- `[DONE]` Add the committed additive GymForge score-correction migration; it is not yet applied to production.
+- `[LATER]` Deploy that migration only after a current verified backup, using `prisma migrate deploy`.
 - `[LATER]` Keep disposable/local-only schema workflows clearly separated from production.
 
 ## 9. Backup And Restore Plan
@@ -190,9 +193,10 @@ Do not implement new modules beyond inert shell registry entries until each modu
 - `[DONE]` GymForge workout editing/deletion.
 - `[DONE]` GymForge one-set workout integrity and transactional dependent-set deletion.
 - `[DONE]` GymForge competition score-correction Phase 2 docs-only design.
-- `[NEXT]` GymForge competition score-correction Phase 3 additive schema/migration and private-hub implementation.
-- `[BLOCKED]` GymForge score-correction runtime remains unavailable until Phase 3 authorization, CSRF, idempotency, concurrency guards, audit redaction, UI, migration, and validation are complete.
-- `[DO NOT IMPLEMENT YET]` GymForge upload, invite acceptance, import/export, public registration, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
+- `[DONE]` GymForge competition score-correction Phase 3 additive model/migration and private-hub implementation.
+- `[DONE]` Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and build pass before commit.
+- `[NEXT]` GymForge private invitation Phase 4; invite acceptance remains blocked until the phase is implemented and validated.
+- `[DO NOT IMPLEMENT YET]` GymForge upload/photo proof, public registration, invite acceptance until Phase 4, import/export, unsafe competition deletion, public API, and broad social feed behavior.
 
 ## 12. Definition Of MVP Complete
 
@@ -252,5 +256,6 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.25: GymForge admin attendance correction.
 - `[DONE]` Phase 09.26: GymForge workout editing and deletion.
 - `[DONE]` GymForge competition score-correction Phase 2: docs-only design.
-- `[NEXT]` GymForge competition score-correction Phase 3: additive migration, server-side OWNER/ADMIN correction actions, current-state score integration, private UI, audit events, and tests.
+- `[DONE]` GymForge competition score-correction Phase 3: additive migration, guarded OWNER/ADMIN actions, current-state score integration, private bilingual UI, redacted audit events, and tests.
+- `[NEXT]` GymForge private invitation Phase 4; invite acceptance stays blocked until completion.
 - `[LATER]` Phase 09.26+: other real modules only after module-specific security and data design.

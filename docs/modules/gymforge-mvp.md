@@ -1,14 +1,15 @@
 # GymForge MVP Architecture
 
-GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, score-correction runtime, unsafe competition deletion, or broad social feed behavior.
+GymForge has an implemented MVP foundation behind the private BielOS hub. This document defines the architecture boundary for that implementation and the remaining gates. It does not enable photo upload, public registration, invite acceptance, import/export, a public API, unsafe competition deletion, or broad social feed behavior.
 
 GymForge is a gated social gym competition app for Gabriel and invited or admin-created participants. It is not a zero-knowledge vault and not an open public internet app. Approved participants may see group competition and streak data inside the gated area.
 
 ## MVP Boundary
 
-- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, admin-only attendance correction, fixed `America/Sao_Paulo` attendance date policy, single-set workout entry/editing plus explicit deletion, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic base scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
-- Design complete: competition score-correction Phase 2. Phase 3 runtime/schema implementation is next.
-- Blocked until scoped or implemented: upload and photo proof, public registration, invite acceptance, import/export, score-correction runtime, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
+- Implemented foundation: authenticated private hub route, participant/exercise administration, attendance check-ins and correction, fixed `America/Sao_Paulo` dates, single-set workout entry/edit/delete, ranking/streak views, competition lifecycle and assignment, deterministic current-state scoring, additive score correction, and safe deletion for non-ACTIVE competitions with zero assignments and no correction history.
+- `[DONE]`: competition score-correction Phase 2 design and Phase 3 implementation.
+- `[NEXT]`: private invitations in Phase 4; invite acceptance remains unavailable until that phase is implemented and validated.
+- Blocked until scoped or implemented: upload/photo proof, public registration, invite acceptance until Phase 4, import/export, unsafe competition deletion, a public API, and broad social feed behavior.
 - Included in the MVP boundary: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, simple group ranking, and competition metadata.
 - Future but planned: photo proof for check-ins.
 - Excluded from MVP: body metrics, health records, public registration, public profiles, open internet access, imports, exports, file upload, broad social feed, payments, and third-party integrations.
@@ -33,7 +34,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 ## Admin Role
 
-- Admins currently manage participant records; invite creation and acceptance remain future work.
+- Admins currently manage participant records; private invitations are next in Phase 4, while invite creation and acceptance remain unavailable until that phase is complete.
 - Admins may disable or archive participants.
 - Admins may manage exercise catalog entries.
 - Admins may create and manage competitions or challenges.
@@ -102,11 +103,13 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 - Competition definitions should include name, date range, scoring rule, active status, and participant scope.
 - Scoring rules must be deterministic and explainable.
 - Ties and late check-ins must have explicit rules.
-- Deletion of ACTIVE or assigned competitions, score-correction runtime, and broader admin adjudication require later scoped phases.
+- Deletion of ACTIVE, assigned, or correction-bearing competitions and broader admin adjudication require later scoped phases.
 
 ## Competition Assignment And Scoring
 
-This section is implemented for explicit participant assignment, deterministic read-only base scoring, admin-only competition metadata/status lifecycle changes, and safe deletion for non-ACTIVE competitions with zero assignments. Admin attendance correction is implemented through attendance records and automatically affects ranking/scoring. Score-correction Phase 2 design is complete, but its schema, migration, server actions, UI, tests, APIs, deletion of ACTIVE or assigned competitions, and broad social behavior remain blocked until later scoped phases.
+This section is implemented for explicit participant assignment, deterministic current-state scoring, admin-only competition lifecycle, additive score correction, and safe deletion for non-ACTIVE competitions with zero assignments and no correction history.
+
+There is no GymForge public API; unsafe deletion and broad social behavior remain blocked.
 
 - Participant assignment should be explicit: an admin assigns ACTIVE GymForge participants to a competition before scoring includes them.
 - Participant scope should support at least `ALL_ACTIVE_AT_START` and `EXPLICIT_PARTICIPANTS`; MVP implementation should prefer explicit assignment when prizes, challenges, or sensitive group visibility are involved.
@@ -121,13 +124,13 @@ This section is implemented for explicit participant assignment, deterministic r
 - Score corrections must use only the append-only additive/revocation flow defined below. They never mutate attendance, workout, competition, assignment, or other scoring-source rows.
 - Visibility rules show display name, rank, current base score, aggregate active adjustment, final score, attendance count, streak summary, and safe competition metadata to approved group participants.
 - Competition views must not expose workout notes, attendance notes, raw participant ids, raw audit metadata, raw request data, private exports, cookies, JWTs, headers, IPs, secrets, or database details.
-- Audit events include competition updates, competition archival, competition deletion, and competition assignment updates with sanitized metadata. Phase 3 adds correction-created and correction-revoked events under the stricter redaction contract below.
+- Audit events include competition lifecycle, deletion, assignment, and correction create/revoke actions with sanitized metadata. Correction audit metadata follows the stricter redaction contract below.
 - Existing competition audit metadata stays sanitized. Score-correction audit metadata is narrower: stable hashed resource references and a generic result only.
 - Validation must cover role checks, CSRF failures returning HTTP 403, date-boundary tests for `America/Sao_Paulo`, disabled/archived participant exclusion, duplicate attendance safety, final-score arithmetic, tie-break determinism, and visibility restrictions.
 
-## Competition Score-Correction Phase 2 Design
+## Competition Score-Correction Phases 2 And 3
 
-Phase 2 design is `[DONE]`. Phase 3 implementation is `[NEXT]`; nothing in this section enables runtime correction yet.
+Phase 2 design and Phase 3 private-hub implementation are `[DONE]`.
 
 ### Current-State Score Model
 
@@ -147,23 +150,24 @@ Phase 2 design is `[DONE]`. Phase 3 implementation is `[NEXT]`; nothing in this 
 - Assignment removal is all-or-nothing and rejects any requested removal that has an unrevoked correction. The admin must revoke first; the assignment flow must not revoke corrections or alter attendance/workout/source rows on the admin's behalf.
 - Disabling or archiving a participant excludes the participant while preserving corrections. Reactivation with a retained assignment and unrevoked corrections is blocked until explicit revocation. Reassignment cannot revive old rows because removal was impossible until all active rows were revoked.
 - A transition back to `DRAFT` is blocked while any correction is unrevoked, because DRAFT cannot revoke it.
-- Phase 3 must make correction creation, revocation, assignment removal, and participant reactivation checks concurrency-safe through a common lock order or serializable transactions with bounded retry. A concurrent create/remove race must leave either the assignment plus correction or the removed assignment without an active correction, never an inconsistent pair.
+- Correction creation/revocation, assignment removal, participant reactivation, and `DRAFT` transition checks use serializable transactions with three bounded retries and generic failures. Concurrent operations cannot leave an active correction without its required assignment/state.
 
 ### Persistence And Idempotency
 
-- Planned Prisma model: `GymForgeCompetitionScoreCorrection` with `id`, `competitionId`, `participantId`, `pointsDelta`, optional `reason`, unique `requestKey`, nullable `createdByUserId`, `createdAt`, nullable `revokedAt`, and nullable `revokedByUserId`.
-- Competition and participant history relations use restrictive deletes. The two named actor relations are nullable and use `onDelete: SetNull`; actions still require and store the actor at create/revoke time so later user deletion cannot erase correction history.
+- The additive `GymForgeCompetitionScoreCorrection` model stores `id`, competition/participant references, `pointsDelta`, optional `reason`, unique `requestKey`, nullable create/revoke actor references, and create/revoke timestamps.
+- Competition and participant relations restrict deletes. Actor relations use `onDelete: SetNull`; actions require and store the actor, while non-null `revokedAt` preserves revocation if the revoker account is later removed.
 - Indexes support `(competitionId, participantId, revokedAt)` active lookup plus `(competitionId, createdAt)` and `(participantId, createdAt)` history lookup. `requestKey` has a unique index.
-- The additive SQL migration adds checks equivalent to `pointsDelta <> 0 AND pointsDelta BETWEEN -1000 AND 1000` and `reason IS NULL OR char_length(reason) <= 240`; server validation mirrors both and stores a blank reason as null.
-- `requestKey` is an opaque high-entropy idempotency key. The same key and same mutation returns without a duplicate insert; reuse with different mutation data fails generically. Request keys are never displayed, audited, or exported.
+- The additive SQL migration enforces nonzero `pointsDelta` in `-1000..1000`, reason length at most 240, request-key length, and valid revocation shape; server validation stores a blank reason as null.
+- `requestKey` is an opaque UUID v4 idempotency key. The same key and mutation returns without a duplicate insert; reuse with different data fails generically. Request keys are never displayed, audited, or exported.
 
 ### Private UI, Audit, And Retention
 
 - Participants see only the aggregate adjustment beside current base and final score. They never see correction rows, reason, actors, request keys, or internal ids.
-- OWNER/ADMIN users see compact history and revoke controls in a private drawer. The optional reason is private admin context, at most 240 characters, and is never participant-visible, written to audit logs, or exported by default.
-- Correction-created and correction-revoked audit events contain only stable hashed competition, participant, and correction references plus a generic result. They omit the raw audit actor id because actor attribution is preserved on the correction row, and exclude all raw ids, names, reason, `pointsDelta`, score/base/adjustment values, raw forms, request keys, and raw request data.
+- OWNER/ADMIN users see compact history, private reason, and revoke controls in a private drawer. Participant and admin surfaces are available in PT-BR and English. The reason is never participant-visible, audited, or exported by default.
+- Correction-created and correction-revoked audit events contain only stable hashed competition, participant, and correction references plus a generic result. They omit the raw audit actor id and all actor ids from metadata because actor attribution stays on the correction row, and exclude raw ids, names, reason, delta, score values, raw forms, request keys, and raw request data.
 - Correction and revocation rows are retained. Permanent competition deletion is blocked whenever any correction exists, even after every row is revoked; restrictive participant history also prevents correction loss through participant deletion.
-- The migration is additive and safe before runtime use. Dropping the correction table after first use is destructive and requires a verified backup and a forward migration or other explicit history-preservation path.
+- The committed additive migration has not been applied to production. Deployment waits for a current verified backup and `prisma migrate deploy`.
+- After the first correction write, dropping the table or rolling the application back to a pre-Phase-3 commit is unsafe because assignment, reactivation, and `DRAFT` guards live in the new runtime. Recovery requires a forward fix or verified restore.
 
 ## Group Visibility
 
@@ -193,7 +197,7 @@ MVP controls should include gated entry, generic auth errors, rate limiting, one
 - Attendance and ranking retention remains to be defined for long-term production use.
 - Participant removal should disable access and preserve required audit records.
 - Workout notes and logs have an authenticated user deletion path for the author's own entries and OWNER/ADMIN deletion for any entry; deletion transactionally removes every dependent set.
-- Competition history may be retained for group continuity. Permanent competition deletion is limited to non-ACTIVE competitions with zero participant assignments and, after Phase 3, zero correction rows; assigned, ACTIVE, or correction-bearing competitions must be archived or retained.
+- Competition history may be retained for group continuity. Permanent competition deletion is limited to non-ACTIVE competitions with zero participant assignments and zero correction rows; assigned, ACTIVE, or correction-bearing competitions must be archived or retained.
 - Score-correction creation and revocation history is preserved. There is no correction cleanup worker, edit, or hard-delete path.
 - Current GymForge records use the existing PostgreSQL backup and restore procedures; storage changes require renewed validation.
 
@@ -210,7 +214,7 @@ Audit events should cover:
 - attendance check-in corrected by admin
 - workout log created, updated, or deleted
 - competition created, updated, started, ended, archived, or safely deleted
-- competition score correction created or revoked after Phase 3 implementation
+- competition score correction created or revoked
 - ranking recalculation failure if stored rankings are used
 
 Audit logs must never include workout note text, exercise detail payloads, score-correction reasons or deltas, score payloads, raw resource ids, request keys, raw form/request data, photo contents, raw filenames, upload paths, raw invite links, invite secrets, tokens, cookies, JWTs, raw headers, raw IPs, raw user agents, passwords, private keys, or database URLs.
@@ -227,8 +231,8 @@ Audit logs must never include workout note text, exercise detail payloads, score
 - Approved group participants can view only approved competition and streak data.
 - Admin-only actions reject participant users.
 - Missing or invalid CSRF on mutable routes returns HTTP 403.
-- Rate limits apply to login, invite acceptance, and high-risk mutations.
+- Rate limits remain required for login, future invite acceptance, and high-risk mutations.
 - Audit events contain only sanitized metadata.
 - Workout creation/editing preserves exactly one set, update rejects unexpected zero/multi-set records without mutation, and explicit deletion transactionally removes all dependent sets.
 - Existing PostgreSQL backup and restore validation applies; storage changes require renewed validation.
-- Phase 3 score-correction tests must cover integer/reason SQL checks, idempotent create, additive and negative totals, current-state base recomputation, create/revoke status gates, role and CSRF rejection, assignment/reactivation races and guards, retained history, restrictive deletion, stable ties, participant/admin visibility, audit redaction, and destructive rollback warnings.
+- Eight focused scoring cases cover supported rules, date handling, additive/negative totals, eligibility, invalid inputs, input-order invariance, all deterministic tie breakers including hidden ids, and aggregate bounds. Secret scan, lint, typecheck, Prisma validation, and build pass; migration deployment and authenticated runtime smoke remain gated on backup/deploy.

@@ -73,20 +73,22 @@ enum GymForgeCompetitionStatus {
 }
 
 model User {
-  id           String           @id @default(cuid())
-  email        String           @unique
+  id           String   @id @default(cuid())
+  email        String   @unique
   displayName  String?
   passwordHash String?
-  role         UserRole         @default(MEMBER)
-  isActive     Boolean          @default(true)
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  role         UserRole @default(MEMBER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  sessions        Session[]
-  projectAccesses ProjectAccess[]
-  securityUnlocks SecurityUnlock[]
-  auditLogs       AuditLog[]
-  gymForgeParticipants GymForgeParticipant[]
+  sessions                        Session[]
+  projectAccesses                 ProjectAccess[]
+  securityUnlocks                 SecurityUnlock[]
+  auditLogs                       AuditLog[]
+  gymForgeParticipants            GymForgeParticipant[]
+  gymForgeScoreCorrectionsCreated GymForgeCompetitionScoreCorrection[] @relation("GymForgeScoreCorrectionCreatedBy")
+  gymForgeScoreCorrectionsRevoked GymForgeCompetitionScoreCorrection[] @relation("GymForgeScoreCorrectionRevokedBy")
 }
 
 model Project {
@@ -119,12 +121,12 @@ model ProjectAccess {
 }
 
 model Session {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   userId    String
-  tokenHash String   @unique
+  tokenHash String    @unique
   expiresAt DateTime
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
   revokedAt DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -148,16 +150,16 @@ model LoginRateLimit {
 }
 
 model SecurityUnlock {
-  id            String       @id @default(cuid())
+  id            String        @id @default(cuid())
   userId        String
   projectId     String?
   purpose       UnlockPurpose
-  status        UnlockStatus @default(PENDING)
+  status        UnlockStatus  @default(PENDING)
   challengeHash String
   approvedAt    DateTime?
   expiresAt     DateTime
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 
   user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
@@ -196,10 +198,11 @@ model GymForgeParticipant {
   updatedAt   DateTime                  @updatedAt
   archivedAt  DateTime?
 
-  user        User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
-  attendances GymForgeAttendance[]
-  workouts    GymForgeWorkout[]
-  competitionAssignments GymForgeCompetitionAssignment[]
+  user                        User?                                @relation(fields: [userId], references: [id], onDelete: SetNull)
+  attendances                 GymForgeAttendance[]
+  workouts                    GymForgeWorkout[]
+  competitionAssignments      GymForgeCompetitionAssignment[]
+  competitionScoreCorrections GymForgeCompetitionScoreCorrection[]
 
   @@unique([userId])
   @@index([status])
@@ -208,13 +211,13 @@ model GymForgeParticipant {
 }
 
 model GymForgeExercise {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   name        String
   category    String?
   description String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   archivedAt  DateTime?
 
   workoutSets GymForgeWorkoutSet[]
@@ -250,7 +253,7 @@ model GymForgeWorkout {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  participant GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  participant GymForgeParticipant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
   sets        GymForgeWorkoutSet[]
 
   @@index([participantId, workoutAt])
@@ -288,7 +291,8 @@ model GymForgeCompetition {
   updatedAt   DateTime                  @updatedAt
   archivedAt  DateTime?
 
-  assignments GymForgeCompetitionAssignment[]
+  assignments      GymForgeCompetitionAssignment[]
+  scoreCorrections GymForgeCompetitionScoreCorrection[]
 
   @@index([status])
   @@index([startsAt])
@@ -309,4 +313,28 @@ model GymForgeCompetitionAssignment {
   @@unique([competitionId, participantId])
   @@index([competitionId])
   @@index([participantId])
+}
+
+model GymForgeCompetitionScoreCorrection {
+  id              String    @id @default(cuid())
+  competitionId   String
+  participantId   String
+  pointsDelta     Int
+  reason          String?
+  requestKey      String    @unique
+  createdByUserId String?
+  createdAt       DateTime  @default(now())
+  revokedAt       DateTime?
+  revokedByUserId String?
+
+  competition   GymForgeCompetition @relation(fields: [competitionId], references: [id], onDelete: Restrict)
+  participant   GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Restrict)
+  createdByUser User?               @relation("GymForgeScoreCorrectionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  revokedByUser User?               @relation("GymForgeScoreCorrectionRevokedBy", fields: [revokedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([competitionId, participantId, revokedAt], map: "GymForgeScoreCorrection_active_pair_idx")
+  @@index([competitionId, createdAt])
+  @@index([participantId, createdAt])
+  @@index([createdByUserId])
+  @@index([revokedByUserId])
 }

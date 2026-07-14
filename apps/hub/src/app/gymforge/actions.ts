@@ -1,8 +1,8 @@
 "use server";
 
 import { validateCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import { writeAuditLog } from "@bielos/auth";
-import { prisma } from "@bielos/database";
+import { hashAuditIdentifier, writeAuditLog } from "@bielos/auth";
+import { prisma, type Prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
@@ -20,6 +20,10 @@ const COMPETITION_SCORING_RULES = [
 ] as const;
 const WORKOUT_UNITS = ["KG", "LB", "BODYWEIGHT", "OTHER"] as const;
 const GYMFORGE_MVP_WORKOUT_SET_COUNT = 1;
+const SCORE_CORRECTION_MIN = -1000;
+const SCORE_CORRECTION_MAX = 1000;
+const SCORE_CORRECTION_REASON_MAX_LENGTH = 240;
+const SERIALIZABLE_RETRY_LIMIT = 3;
 
 type ParticipantRole = (typeof PARTICIPANT_ROLES)[number];
 type ParticipantStatus = (typeof PARTICIPANT_STATUSES)[number];
@@ -30,6 +34,8 @@ type WorkoutUnit = (typeof WORKOUT_UNITS)[number];
 type ParsedOptionalDate = Date | null | "invalid";
 type ParsedRequiredDate = Date | "invalid";
 type ParsedLoad = string | null | "invalid";
+
+class GymForgeMutationError extends Error {}
 
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
@@ -67,6 +73,52 @@ function isWorkoutUnit(value: string): value is WorkoutUnit {
 function parsePositiveInteger(value: string, max: number): number | null {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= max ? parsed : null;
+}
+
+function parseScoreCorrectionDelta(value: string): number | null {
+  if (!/^-?\d+$/.test(value)) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) &&
+    parsed >= SCORE_CORRECTION_MIN &&
+    parsed <= SCORE_CORRECTION_MAX &&
+    parsed !== 0
+    ? parsed
+    : null;
+}
+
+function isValidRequestKey(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function hasDatabaseErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function isRetryableTransactionError(error: unknown): boolean {
+  return hasDatabaseErrorCode(error, "P2034");
+}
+
+async function runSerializableTransaction<T>(
+  operation: (transaction: Prisma.TransactionClient) => Promise<T>
+): Promise<T> {
+  for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_LIMIT; attempt += 1) {
+    try {
+      return await prisma.$transaction(operation, { isolationLevel: "Serializable" });
+    } catch (error) {
+      if (error instanceof GymForgeMutationError || !isRetryableTransactionError(error)) {
+        throw error;
+      }
+
+      if (attempt === SERIALIZABLE_RETRY_LIMIT) {
+        throw error;
+      }
+    }
+  }
+
+  throw new GymForgeMutationError("serializable transaction retry exhausted");
 }
 
 function parseLoad(value: string): ParsedLoad {
@@ -178,14 +230,44 @@ export async function changeGymForgeParticipantStatus(formData: FormData) {
     redirect("/gymforge?error=participant-status");
   }
 
-  const participant = await prisma.gymForgeParticipant.update({
-    where: { id: participantId },
-    data: {
-      status,
-      archivedAt: status === "ARCHIVED" ? new Date() : null
-    },
-    select: { id: true, status: true }
-  });
+  let participant: { id: string; status: ParticipantStatus };
+
+  try {
+    participant = await runSerializableTransaction(async (transaction) => {
+      const current = await transaction.gymForgeParticipant.findUnique({
+        where: { id: participantId },
+        select: { id: true, status: true }
+      });
+
+      if (!current) {
+        throw new GymForgeMutationError("participant status target unavailable");
+      }
+
+      if (status === "ACTIVE" && current.status !== "ACTIVE") {
+        const activeCorrectionCount = await transaction.gymForgeCompetitionScoreCorrection.count({
+          where: {
+            participantId,
+            revokedAt: null
+          }
+        });
+
+        if (activeCorrectionCount > 0) {
+          throw new GymForgeMutationError("participant has active score corrections");
+        }
+      }
+
+      return transaction.gymForgeParticipant.update({
+        where: { id: participantId },
+        data: {
+          status,
+          archivedAt: status === "ARCHIVED" ? new Date() : null
+        },
+        select: { id: true, status: true }
+      });
+    });
+  } catch {
+    redirect("/gymforge?error=participant-status");
+  }
 
   await writeAuditLog({
     eventType: "GYMFORGE_PARTICIPANT_STATUS_CHANGED",
@@ -366,43 +448,58 @@ export async function updateGymForgeCompetitionAssignments(formData: FormData) {
 
   const uniqueSelectedParticipantIds = Array.from(new Set(selectedParticipantIds));
 
-  const [competition, activeParticipants] = await Promise.all([
-    prisma.gymForgeCompetition.findUnique({
-      where: { id: competitionId },
-      select: { id: true }
-    }),
-    prisma.gymForgeParticipant.findMany({
-      where: {
-        id: { in: uniqueSelectedParticipantIds },
-        status: "ACTIVE"
-      },
-      select: { id: true }
-    })
-  ]);
+  try {
+    await runSerializableTransaction(async (transaction) => {
+      const [competition, activeParticipants, currentAssignments] = await Promise.all([
+        transaction.gymForgeCompetition.findUnique({
+          where: { id: competitionId },
+          select: { id: true }
+        }),
+        transaction.gymForgeParticipant.findMany({
+          where: {
+            id: { in: uniqueSelectedParticipantIds },
+            status: "ACTIVE"
+          },
+          select: { id: true }
+        }),
+        transaction.gymForgeCompetitionAssignment.findMany({
+          where: { competitionId },
+          select: { participantId: true }
+        })
+      ]);
 
-  if (!competition) {
-    redirect("/gymforge?error=competition-assignment");
-  }
-
-  const activeParticipantIds = new Set(activeParticipants.map((participant) => participant.id));
-
-  if (activeParticipantIds.size !== uniqueSelectedParticipantIds.length) {
-    redirect("/gymforge?error=competition-assignment");
-  }
-
-  await prisma.$transaction(async (transaction) => {
-    await transaction.gymForgeCompetitionAssignment.deleteMany({
-      where: {
-        competitionId,
-        participantId: {
-          notIn: uniqueSelectedParticipantIds
-        }
+      if (!competition || activeParticipants.length !== uniqueSelectedParticipantIds.length) {
+        throw new GymForgeMutationError("competition assignment target unavailable");
       }
-    });
 
-    await Promise.all(
-      uniqueSelectedParticipantIds.map((participantId) =>
-        transaction.gymForgeCompetitionAssignment.upsert({
+      const selectedParticipantIdSet = new Set(uniqueSelectedParticipantIds);
+      const removedParticipantIds = currentAssignments
+        .map((assignment) => assignment.participantId)
+        .filter((participantId) => !selectedParticipantIdSet.has(participantId));
+
+      if (removedParticipantIds.length > 0) {
+        const activeCorrectionCount = await transaction.gymForgeCompetitionScoreCorrection.count({
+          where: {
+            competitionId,
+            participantId: { in: removedParticipantIds },
+            revokedAt: null
+          }
+        });
+
+        if (activeCorrectionCount > 0) {
+          throw new GymForgeMutationError("active score correction blocks assignment removal");
+        }
+
+        await transaction.gymForgeCompetitionAssignment.deleteMany({
+          where: {
+            competitionId,
+            participantId: { in: removedParticipantIds }
+          }
+        });
+      }
+
+      for (const participantId of uniqueSelectedParticipantIds) {
+        await transaction.gymForgeCompetitionAssignment.upsert({
           where: {
             competitionId_participantId: {
               competitionId,
@@ -414,10 +511,12 @@ export async function updateGymForgeCompetitionAssignments(formData: FormData) {
             competitionId,
             participantId
           }
-        })
-      )
-    );
-  });
+        });
+      }
+    });
+  } catch {
+    redirect("/gymforge?error=competition-assignment");
+  }
 
   await writeAuditLog({
     eventType: "GYMFORGE_COMPETITION_ASSIGNMENT_UPDATED",
@@ -428,6 +527,229 @@ export async function updateGymForgeCompetitionAssignments(formData: FormData) {
     metadata: {
       competitionId,
       assignedCount: uniqueSelectedParticipantIds.length
+    }
+  });
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function createGymForgeCompetitionScoreCorrection(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const competitionId = readFormString(formData, "competitionId");
+  const participantId = readFormString(formData, "participantId");
+  const pointsDelta = parseScoreCorrectionDelta(readFormString(formData, "pointsDelta"));
+  const reason = readFormString(formData, "reason");
+  const requestKey = readFormString(formData, "requestKey");
+
+  if (
+    !competitionId ||
+    !participantId ||
+    pointsDelta === null ||
+    reason.length > SCORE_CORRECTION_REASON_MAX_LENGTH ||
+    !isValidRequestKey(requestKey)
+  ) {
+    redirect("/gymforge?error=score-correction");
+  }
+
+  let correction: {
+    id: string;
+    competitionId: string;
+    participantId: string;
+    created: boolean;
+  };
+
+  try {
+    correction = await runSerializableTransaction(async (transaction) => {
+      const existing = await transaction.gymForgeCompetitionScoreCorrection.findUnique({
+        where: { requestKey },
+        select: {
+          id: true,
+          competitionId: true,
+          participantId: true,
+          pointsDelta: true,
+          reason: true
+        }
+      });
+
+      if (existing) {
+        if (
+          existing.competitionId !== competitionId ||
+          existing.participantId !== participantId ||
+          existing.pointsDelta !== pointsDelta ||
+          existing.reason !== (reason || null)
+        ) {
+          throw new GymForgeMutationError("score correction request key conflict");
+        }
+
+        return {
+          id: existing.id,
+          competitionId: existing.competitionId,
+          participantId: existing.participantId,
+          created: false
+        };
+      }
+
+      const assignment = await transaction.gymForgeCompetitionAssignment.findUnique({
+        where: {
+          competitionId_participantId: {
+            competitionId,
+            participantId
+          }
+        },
+        select: {
+          competition: { select: { status: true } },
+          participant: { select: { status: true } }
+        }
+      });
+
+      if (
+        !assignment ||
+        !["ACTIVE", "ENDED"].includes(assignment.competition.status) ||
+        assignment.participant.status !== "ACTIVE"
+      ) {
+        throw new GymForgeMutationError("score correction target unavailable");
+      }
+
+      const created = await transaction.gymForgeCompetitionScoreCorrection.create({
+        data: {
+          competitionId,
+          participantId,
+          pointsDelta,
+          reason: reason || null,
+          requestKey,
+          createdByUserId: session.user.id
+        },
+        select: {
+          id: true,
+          competitionId: true,
+          participantId: true
+        }
+      });
+
+      return { ...created, created: true };
+    });
+  } catch (error) {
+    const existing = hasDatabaseErrorCode(error, "P2002")
+      ? await prisma.gymForgeCompetitionScoreCorrection
+          .findUnique({
+            where: { requestKey },
+            select: {
+              id: true,
+              competitionId: true,
+              participantId: true,
+              pointsDelta: true,
+              reason: true
+            }
+          })
+          .catch(() => null)
+      : null;
+
+    if (
+      !existing ||
+      existing.competitionId !== competitionId ||
+      existing.participantId !== participantId ||
+      existing.pointsDelta !== pointsDelta ||
+      existing.reason !== (reason || null)
+    ) {
+      redirect("/gymforge?error=score-correction");
+    }
+
+    correction = {
+      id: existing.id,
+      competitionId: existing.competitionId,
+      participantId: existing.participantId,
+      created: false
+    };
+  }
+
+  if (correction.created) {
+    await writeAuditLog({
+      eventType: "GYMFORGE_SCORE_CORRECTION_CREATED",
+      result: "SUCCESS",
+      resource: "gymforge.score-correction",
+      message: "GymForge score correction created.",
+      metadata: {
+        competitionRef: hashAuditIdentifier(correction.competitionId),
+        participantRef: hashAuditIdentifier(correction.participantId),
+        correctionRef: hashAuditIdentifier(correction.id)
+      }
+    });
+  }
+
+  revalidatePath("/gymforge");
+  redirect("/gymforge");
+}
+
+export async function revokeGymForgeCompetitionScoreCorrection(formData: FormData) {
+  const session = await requireGymForgeAdmin(formData);
+  const correctionId = readFormString(formData, "correctionId");
+
+  if (!correctionId) {
+    redirect("/gymforge?error=score-correction");
+  }
+
+  let correction: {
+    id: string;
+    competitionId: string;
+    participantId: string;
+  };
+
+  try {
+    correction = await runSerializableTransaction(async (transaction) => {
+      const current = await transaction.gymForgeCompetitionScoreCorrection.findUnique({
+        where: { id: correctionId },
+        select: {
+          id: true,
+          competitionId: true,
+          participantId: true,
+          revokedAt: true,
+          competition: { select: { status: true } }
+        }
+      });
+
+      if (
+        !current ||
+        current.revokedAt ||
+        !["ACTIVE", "ENDED", "ARCHIVED"].includes(current.competition.status)
+      ) {
+        throw new GymForgeMutationError("score correction cannot be revoked");
+      }
+
+      const result = await transaction.gymForgeCompetitionScoreCorrection.updateMany({
+        where: {
+          id: current.id,
+          revokedAt: null
+        },
+        data: {
+          revokedAt: new Date(),
+          revokedByUserId: session.user.id
+        }
+      });
+
+      if (result.count !== 1) {
+        throw new GymForgeMutationError("score correction revocation lost race");
+      }
+
+      return {
+        id: current.id,
+        competitionId: current.competitionId,
+        participantId: current.participantId
+      };
+    });
+  } catch {
+    redirect("/gymforge?error=score-correction");
+  }
+
+  await writeAuditLog({
+    eventType: "GYMFORGE_SCORE_CORRECTION_REVOKED",
+    result: "SUCCESS",
+    resource: "gymforge.score-correction",
+    message: "GymForge score correction revoked.",
+    metadata: {
+      competitionRef: hashAuditIdentifier(correction.competitionId),
+      participantRef: hashAuditIdentifier(correction.participantId),
+      correctionRef: hashAuditIdentifier(correction.id)
     }
   });
 
@@ -480,25 +802,61 @@ export async function updateGymForgeCompetition(formData: FormData) {
     redirect("/gymforge?error=competition-dates");
   }
 
-  const competition = await prisma.gymForgeCompetition.update({
-    where: { id: competitionId },
-    data: {
-      name,
-      description: description || null,
-      status,
-      startsAt,
-      endsAt,
-      scoringRule,
-      archivedAt: null
-    },
-    select: {
-      id: true,
-      status: true,
-      startsAt: true,
-      endsAt: true,
-      scoringRule: true
-    }
-  });
+  let competition: {
+    id: string;
+    status: string;
+    startsAt: Date | null;
+    endsAt: Date | null;
+    scoringRule: string;
+  };
+
+  try {
+    competition = await runSerializableTransaction(async (transaction) => {
+      const current = await transaction.gymForgeCompetition.findUnique({
+        where: { id: competitionId },
+        select: { id: true }
+      });
+
+      if (!current) {
+        throw new GymForgeMutationError("competition update target unavailable");
+      }
+
+      if (status === "DRAFT") {
+        const activeCorrectionCount = await transaction.gymForgeCompetitionScoreCorrection.count({
+          where: {
+            competitionId,
+            revokedAt: null
+          }
+        });
+
+        if (activeCorrectionCount > 0) {
+          throw new GymForgeMutationError("active score correction blocks draft transition");
+        }
+      }
+
+      return transaction.gymForgeCompetition.update({
+        where: { id: competitionId },
+        data: {
+          name,
+          description: description || null,
+          status,
+          startsAt,
+          endsAt,
+          scoringRule,
+          archivedAt: null
+        },
+        select: {
+          id: true,
+          status: true,
+          startsAt: true,
+          endsAt: true,
+          scoringRule: true
+        }
+      });
+    });
+  } catch {
+    redirect("/gymforge?error=competition-update");
+  }
 
   await writeAuditLog({
     eventType: "GYMFORGE_COMPETITION_UPDATED",
@@ -565,15 +923,24 @@ export async function deleteGymForgeCompetition(formData: FormData) {
     redirect("/gymforge?error=competition-delete");
   }
 
-  const result = await prisma.gymForgeCompetition.deleteMany({
-    where: {
-      id: competitionId,
-      status: { not: "ACTIVE" },
-      assignments: {
-        none: {}
+  let result: { count: number };
+
+  try {
+    result = await prisma.gymForgeCompetition.deleteMany({
+      where: {
+        id: competitionId,
+        status: { not: "ACTIVE" },
+        assignments: {
+          none: {}
+        },
+        scoreCorrections: {
+          none: {}
+        }
       }
-    }
-  });
+    });
+  } catch {
+    redirect("/gymforge?error=competition-delete");
+  }
 
   if (result.count !== 1) {
     redirect("/gymforge?error=competition-delete");

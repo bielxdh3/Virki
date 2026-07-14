@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { CSRF_FORM_FIELD_NAME, createCsrfToken } from "@bielos/auth/csrf";
 import type { BielosLocale } from "@bielos/ui";
 import { prisma } from "@bielos/database";
@@ -14,19 +15,34 @@ import {
   createGymForgeAdminAttendanceCorrection,
   createGymForgeAttendanceCheckIn,
   createGymForgeCompetition,
+  createGymForgeCompetitionScoreCorrection,
   createGymForgeExercise,
   createGymForgeParticipant,
   createGymForgeWorkout,
   deleteGymForgeCompetition,
   deleteGymForgeWorkout,
   removeGymForgeAdminAttendanceCorrection,
+  revokeGymForgeCompetitionScoreCorrection,
   updateGymForgeWorkout,
   updateGymForgeCompetition,
   updateGymForgeCompetitionAssignments
 } from "./actions";
 import { getGymForgeAttendanceEffectiveDate } from "./dates";
+import {
+  COMPETITION_SCORING_RULES,
+  calculateCompetitionScores,
+  calculateCurrentStreak,
+  isCompetitionScoringRule,
+  type CompetitionScoringRule
+} from "./scoring";
 
 export const dynamic = "force-dynamic";
+
+type GymForgePageProps = {
+  searchParams?: Promise<{
+    error?: string;
+  }>;
+};
 
 const copy = {
   "pt-BR": {
@@ -44,6 +60,7 @@ const copy = {
       "Fundação de competição de academia com acesso fechado. Check-ins, treinos, ranking, catálogo de exercícios, participantes e metadados de competição já estão ativos no hub privado.",
     implementationStatus: "Status da implementação",
     implementationSummary: "Fundação ativa",
+    actionError: "Não foi possível concluir a ação. Tente novamente.",
     viewer: "Visualizador",
     linked: "Vinculado",
     notLinked: "Não vinculado",
@@ -68,17 +85,15 @@ const copy = {
     endsAt: "Fim",
     dateRange: "Período",
     scoringRule: "Regra de pontuação",
-    scoringRuleAttendance: "Presença total",
-    scoringRuleCurrentStreak: "Sequência atual",
-    scoringRuleLongestStreak: "Maior sequência",
-    scoringRuleWeighted: "Presença + maior sequência",
     createCompetition: "Criar competição",
     lifecycle: "Ciclo de vida",
     updateCompetition: "Atualizar competição",
     archiveCompetition: "Arquivar competição",
     deleteCompetition: "Excluir competição",
     dangerZone: "Zona de risco",
-    dangerZoneText: "Exclusão permanente só é permitida para competições não ACTIVE e sem participantes atribuídos.",
+    dangerZoneText:
+      "Exclusão permanente só é permitida para competições não ACTIVE, sem participantes atribuídos e sem histórico de correções.",
+    correctionDeleteHint: "Exclusão bloqueada: esta competição possui histórico de correções.",
     confirmDelete: "Confirmo exclusão permanente",
     saveChanges: "Salvar alterações",
     manage: "Gerenciar",
@@ -89,10 +104,27 @@ const copy = {
     assigned: "Atribuídos",
     automaticScoring: "Pontuação automática",
     score: "pontos",
+    finalScore: "Pontuação final",
+    baseScore: "Pontuação base",
+    activeAdjustment: "Ajuste ativo",
     attendanceCount: "presenças",
     currentStreak: "sequência atual",
     longestStreak: "maior sequência",
     noScores: "Sem ranking automático disponível",
+    scoreCorrection: "Correções de pontuação",
+    createScoreCorrection: "Criar correção",
+    correctionParticipant: "Participante atribuído",
+    selectParticipant: "Selecionar participante",
+    pointsDelta: "Ajuste de pontos (-1000 a 1000, exceto 0)",
+    correctionReason: "Motivo (opcional)",
+    reason: "Motivo",
+    recentCorrections: "Histórico recente",
+    correctionSingular: "correção",
+    correctionPlural: "correções",
+    activeCorrection: "Ativa",
+    revokedCorrection: "Revogada",
+    revokeCorrection: "Revogar",
+    noCorrections: "Nenhuma correção registrada",
     empty: "Vazio",
     noCompetitions: "Nenhuma competição ainda",
     ranking: "Ranking",
@@ -170,7 +202,7 @@ const copy = {
     safetyBoundary: "Limite de segurança",
     noPrivateIngestion: "Recursos ainda bloqueados",
     limitations:
-      "GymForge permanece atras da autenticacao existente do hub. Prova por foto, imports, exports, cadastro publico, aceite de convite, correcao de pontuacao e feed social amplo permanecem bloqueados."
+      "GymForge permanece atrás da autenticação existente do hub. Prova por foto, imports, exports, cadastro público, aceite de convite e feed social amplo permanecem bloqueados."
   },
   en: {
     navLabel: "BielOS navigation",
@@ -187,6 +219,7 @@ const copy = {
       "Gated gym competition foundation. Check-ins, workouts, ranking, exercise catalog, participants, and competition metadata are active inside the private hub.",
     implementationStatus: "Implementation status",
     implementationSummary: "Foundation active",
+    actionError: "The action could not be completed. Try again.",
     viewer: "Viewer",
     linked: "Linked",
     notLinked: "Not linked",
@@ -211,17 +244,15 @@ const copy = {
     endsAt: "Ends at",
     dateRange: "Date range",
     scoringRule: "Scoring rule",
-    scoringRuleAttendance: "Total attendance",
-    scoringRuleCurrentStreak: "Current streak",
-    scoringRuleLongestStreak: "Longest streak",
-    scoringRuleWeighted: "Attendance + longest streak",
     createCompetition: "Create competition",
     lifecycle: "Lifecycle",
     updateCompetition: "Update competition",
     archiveCompetition: "Archive competition",
     deleteCompetition: "Delete competition",
     dangerZone: "Danger zone",
-    dangerZoneText: "Permanent deletion is only allowed for non-ACTIVE competitions with no assigned participants.",
+    dangerZoneText:
+      "Permanent deletion is only allowed for non-ACTIVE competitions with no assigned participants and no correction history.",
+    correctionDeleteHint: "Deletion blocked: this competition has correction history.",
     confirmDelete: "I confirm permanent deletion",
     saveChanges: "Save changes",
     manage: "Manage",
@@ -232,10 +263,27 @@ const copy = {
     assigned: "Assigned",
     automaticScoring: "Automatic scoring",
     score: "points",
+    finalScore: "Final score",
+    baseScore: "Base score",
+    activeAdjustment: "Active adjustment",
     attendanceCount: "attendance",
     currentStreak: "current streak",
     longestStreak: "longest streak",
     noScores: "No automatic ranking available",
+    scoreCorrection: "Score corrections",
+    createScoreCorrection: "Create correction",
+    correctionParticipant: "Assigned participant",
+    selectParticipant: "Select participant",
+    pointsDelta: "Point adjustment (-1000 to 1000, excluding 0)",
+    correctionReason: "Reason (optional)",
+    reason: "Reason",
+    recentCorrections: "Recent history",
+    correctionSingular: "correction",
+    correctionPlural: "corrections",
+    activeCorrection: "Active",
+    revokedCorrection: "Revoked",
+    revokeCorrection: "Revoke",
+    noCorrections: "No corrections recorded",
     empty: "Empty",
     noCompetitions: "No competitions yet",
     ranking: "Ranking",
@@ -313,7 +361,7 @@ const copy = {
     safetyBoundary: "Safety boundary",
     noPrivateIngestion: "Still blocked",
     limitations:
-      "GymForge remains behind existing hub auth. Photo proof, imports, exports, public registration, invite acceptance, score correction, and broad social feed remain blocked."
+      "GymForge remains behind existing hub auth. Photo proof, imports, exports, public registration, invite acceptance, and broad social feed remain blocked."
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
@@ -339,15 +387,8 @@ const foundationItems = {
 } satisfies Record<BielosLocale, string[]>;
 
 const formatCount = (count: number) => new Intl.NumberFormat("en-US").format(count);
-
-const COMPETITION_SCORING_RULES = [
-  "ATTENDANCE_COUNT",
-  "CURRENT_STREAK",
-  "LONGEST_STREAK",
-  "ATTENDANCE_PLUS_LONGEST_STREAK"
-] as const;
-
-type CompetitionScoringRule = (typeof COMPETITION_SCORING_RULES)[number];
+const formatSignedCount = (count: number) =>
+  new Intl.NumberFormat("en-US", { signDisplay: "always" }).format(count);
 
 const COMPETITION_SCORING_RULE_LABELS = {
   "pt-BR": {
@@ -364,140 +405,12 @@ const COMPETITION_SCORING_RULE_LABELS = {
   }
 } satisfies Record<BielosLocale, Record<CompetitionScoringRule, string>>;
 
-type CompetitionForScoring = {
-  startsAt: Date | null;
-  endsAt: Date | null;
-  scoringRule: string;
-  assignments: {
-    participant: {
-      displayName: string;
-      attendances: {
-        effectiveDate: Date;
-      }[];
-    };
-  }[];
-};
-
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
 }
 
-function isCompetitionScoringRule(value: string): value is CompetitionScoringRule {
-  return COMPETITION_SCORING_RULES.includes(value as CompetitionScoringRule);
-}
-
 function formatDateKey(date: Date): string {
   return date.toISOString().slice(0, 10);
-}
-
-function addUtcDays(date: Date, days: number): Date {
-  const nextDate = new Date(date);
-  nextDate.setUTCDate(nextDate.getUTCDate() + days);
-  return nextDate;
-}
-
-function calculateCurrentStreak(effectiveDates: Date[], today = getGymForgeAttendanceEffectiveDate()): number {
-  const uniqueDates = new Set(effectiveDates.map(formatDateKey));
-  const todayKey = formatDateKey(today);
-  const yesterday = addUtcDays(today, -1);
-  const yesterdayKey = formatDateKey(yesterday);
-
-  if (!uniqueDates.has(todayKey) && !uniqueDates.has(yesterdayKey)) {
-    return 0;
-  }
-
-  let streak = 0;
-  let cursor = uniqueDates.has(todayKey) ? today : yesterday;
-
-  while (uniqueDates.has(formatDateKey(cursor))) {
-    streak += 1;
-    cursor = addUtcDays(cursor, -1);
-  }
-
-  return streak;
-}
-
-function calculateLongestStreak(effectiveDates: Date[]): number {
-  const uniqueDateKeys = Array.from(new Set(effectiveDates.map(formatDateKey))).sort();
-  let longestStreak = 0;
-  let currentStreak = 0;
-  let previousDate: Date | null = null;
-
-  for (const dateKey of uniqueDateKeys) {
-    const date = new Date(`${dateKey}T00:00:00.000Z`);
-    const expectedDate = previousDate ? addUtcDays(previousDate, 1) : null;
-    currentStreak = expectedDate && formatDateKey(expectedDate) === dateKey ? currentStreak + 1 : 1;
-    longestStreak = Math.max(longestStreak, currentStreak);
-    previousDate = date;
-  }
-
-  return longestStreak;
-}
-
-function calculateCompetitionScores(competition: CompetitionForScoring) {
-  if (!competition.startsAt || !competition.endsAt || !isCompetitionScoringRule(competition.scoringRule)) {
-    return [];
-  }
-
-  const rangeStart = competition.startsAt.getTime();
-  const rangeEnd = competition.endsAt.getTime();
-
-  return competition.assignments
-    .map((assignment) => {
-      const effectiveDates = Array.from(
-        new Map(
-          assignment.participant.attendances
-            .filter((attendance) => {
-              const time = attendance.effectiveDate.getTime();
-              return time >= rangeStart && time <= rangeEnd;
-            })
-            .map((attendance) => [formatDateKey(attendance.effectiveDate), attendance.effectiveDate])
-        ).values()
-      ).sort((left, right) => left.getTime() - right.getTime());
-      const attendanceCount = effectiveDates.length;
-      const currentStreak = calculateCurrentStreak(effectiveDates, competition.endsAt ?? undefined);
-      const longestStreak = calculateLongestStreak(effectiveDates);
-      const latestCheckInDate = effectiveDates.at(-1) ?? null;
-      const score =
-        competition.scoringRule === "ATTENDANCE_COUNT"
-          ? attendanceCount
-          : competition.scoringRule === "CURRENT_STREAK"
-            ? currentStreak
-            : competition.scoringRule === "LONGEST_STREAK"
-              ? longestStreak
-              : attendanceCount + longestStreak;
-
-      return {
-        displayName: assignment.participant.displayName,
-        score,
-        attendanceCount,
-        currentStreak,
-        longestStreak,
-        latestCheckInDate
-      };
-    })
-    .sort((left, right) => {
-      if (right.score !== left.score) {
-        return right.score - left.score;
-      }
-
-      if (right.attendanceCount !== left.attendanceCount) {
-        return right.attendanceCount - left.attendanceCount;
-      }
-
-      if (right.longestStreak !== left.longestStreak) {
-        return right.longestStreak - left.longestStreak;
-      }
-
-      const rightLatest = right.latestCheckInDate?.getTime() ?? 0;
-      const leftLatest = left.latestCheckInDate?.getTime() ?? 0;
-
-      if (rightLatest !== leftLatest) {
-        return rightLatest - leftLatest;
-      }
-
-      return left.displayName.localeCompare(right.displayName);
-    });
 }
 
 function _formatCompetitionDateRange(
@@ -522,7 +435,7 @@ function _formatCompetitionDateRange(
   return locale === "pt-BR" ? "Datas abertas" : "Open dates";
 }
 
-export default async function GymForgePage() {
+export default async function GymForgePage({ searchParams }: GymForgePageProps) {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "gymforge");
 
@@ -536,9 +449,11 @@ export default async function GymForgePage() {
     redirect("/login");
   }
 
+  const params = await searchParams;
   const locale = await getLocale();
   const t = copy[locale];
   const isAdmin = isHubAdmin(session.user.role);
+  const todayAnchor = getGymForgeAttendanceEffectiveDate();
   const [
     participantsCount,
     activeParticipantsCount,
@@ -586,7 +501,7 @@ export default async function GymForgePage() {
         where: { userId: session.user.id },
         select: {
           attendances: {
-            where: { effectiveDate: getGymForgeAttendanceEffectiveDate() },
+            where: { effectiveDate: todayAnchor },
             select: { id: true, countsForStreak: true },
             take: 1
           }
@@ -698,20 +613,17 @@ export default async function GymForgePage() {
         scoringRule: true,
         _count: {
           select: {
-            assignments: true
+            assignments: true,
+            scoreCorrections: true
           }
         },
         assignments: {
-          where: {
-            participant: {
-              status: "ACTIVE"
-            }
-          },
           orderBy: [{ assignedAt: "asc" }],
           select: {
             participantId: true,
             participant: {
               select: {
+                id: true,
                 displayName: true,
                 status: true,
                 attendances: {
@@ -745,6 +657,58 @@ export default async function GymForgePage() {
       : Promise.resolve([])
   ]);
 
+  const competitionIds = competitions.map((competition) => competition.id);
+  const [activeCorrectionTotals, recentScoreCorrections] = await Promise.all([
+    prisma.gymForgeCompetitionScoreCorrection.groupBy({
+      by: ["competitionId", "participantId"],
+      where: {
+        competitionId: { in: competitionIds },
+        revokedAt: null
+      },
+      _sum: { pointsDelta: true }
+    }),
+    isAdmin
+      ? prisma.gymForgeCompetitionScoreCorrection.findMany({
+          where: { competitionId: { in: competitionIds } },
+          orderBy: [{ createdAt: "desc" }],
+          take: 200,
+          select: {
+            id: true,
+            competitionId: true,
+            participantId: true,
+            pointsDelta: true,
+            reason: true,
+            createdAt: true,
+            revokedAt: true,
+            participant: {
+              select: { displayName: true }
+            }
+          }
+        })
+      : Promise.resolve([])
+  ]);
+  const activeCorrectionsByCompetition = new Map<
+    string,
+    { participantId: string; pointsDelta: number; revokedAt: null }[]
+  >();
+  const correctionHistoryByCompetition = new Map<string, typeof recentScoreCorrections>();
+
+  for (const total of activeCorrectionTotals) {
+    const entries = activeCorrectionsByCompetition.get(total.competitionId) ?? [];
+    entries.push({
+      participantId: total.participantId,
+      pointsDelta: total._sum.pointsDelta ?? 0,
+      revokedAt: null
+    });
+    activeCorrectionsByCompetition.set(total.competitionId, entries);
+  }
+
+  for (const correction of recentScoreCorrections) {
+    const entries = correctionHistoryByCompetition.get(correction.competitionId) ?? [];
+    entries.push(correction);
+    correctionHistoryByCompetition.set(correction.competitionId, entries);
+  }
+
   const canCheckIn = viewerParticipant?.status === "ACTIVE";
   const csrfToken = createCsrfToken();
 
@@ -762,7 +726,7 @@ export default async function GymForgePage() {
       return {
         displayName: participant.displayName,
         totalAttendance: effectiveDates.length,
-        currentStreak: calculateCurrentStreak(effectiveDates),
+        currentStreak: calculateCurrentStreak(effectiveDates, todayAnchor),
         latestCheckInDate
       };
     })
@@ -831,6 +795,12 @@ export default async function GymForgePage() {
             </a>
           </div>
         </header>
+
+        {params?.error ? (
+          <p className="gymforge-module-alert" role="alert">
+            {t.actionError}
+          </p>
+        ) : null}
 
         <section className="identity-panel anchor-section" id="status" aria-label={t.status}>
           <div>
@@ -934,10 +904,11 @@ export default async function GymForgePage() {
                   <label>
                     {t.scoringRule}
                     <select name="scoringRule" defaultValue="ATTENDANCE_COUNT" aria-label={t.scoringRule}>
-                      <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
-                      <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
-                      <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
-                      <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
+                      {COMPETITION_SCORING_RULES.map((rule) => (
+                        <option key={rule} value={rule}>
+                          {COMPETITION_SCORING_RULE_LABELS[locale][rule]}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <button className="button-primary" type="submit">{t.createCompetition}</button>
@@ -951,7 +922,19 @@ export default async function GymForgePage() {
               const assignedParticipantIds = new Set(
                 competition.assignments.map((assignment) => assignment.participantId)
               );
-              const scores = calculateCompetitionScores(competition);
+              const correctionParticipants = competition.assignments.filter(
+                (assignment) => assignment.participant.status === "ACTIVE"
+              );
+              const canCreateScoreCorrection =
+                isAdmin && ["ACTIVE", "ENDED"].includes(competition.status);
+              const canRevokeScoreCorrection =
+                isAdmin && ["ACTIVE", "ENDED", "ARCHIVED"].includes(competition.status);
+              const correctionRequestKey = canCreateScoreCorrection ? randomUUID() : null;
+              const correctionHistory = correctionHistoryByCompetition.get(competition.id) ?? [];
+              const scores = calculateCompetitionScores({
+                ...competition,
+                scoreCorrections: activeCorrectionsByCompetition.get(competition.id) ?? []
+              });
               const scoringRuleLabel = isCompetitionScoringRule(competition.scoringRule)
                 ? COMPETITION_SCORING_RULE_LABELS[locale][competition.scoringRule]
                 : competition.scoringRule;
@@ -996,12 +979,17 @@ export default async function GymForgePage() {
                         </div>
                       ) : (
                         scores.slice(0, 5).map((score, index) => (
-                          <div className="score-row" key={`${competition.id}-${score.displayName}`}>
+                          <div className="score-row" key={score.participantId}>
                             <strong>{index + 1}. {score.displayName}</strong>
-                            <span>
-                              {formatCount(score.score)} {t.score} / {formatCount(score.attendanceCount)}{" "}
-                              {t.attendanceCount} / {formatCount(score.longestStreak)} {t.longestStreak}
-                            </span>
+                            <div className="score-breakdown">
+                              <span className="score-breakdown-primary">
+                                {t.finalScore}: <strong>{formatCount(score.finalScore)}</strong> {t.score}
+                              </span>
+                              <span>{t.baseScore}: {formatCount(score.baseScore)}</span>
+                              <span>{t.activeAdjustment}: {formatSignedCount(score.activeAdjustment)}</span>
+                              <span>{t.attendanceCount}: {formatCount(score.attendanceCount)}</span>
+                              <span>{t.longestStreak}: {formatCount(score.longestStreak)}</span>
+                            </div>
                           </div>
                         ))
                       )}
@@ -1058,10 +1046,11 @@ export default async function GymForgePage() {
                               aria-label={t.scoringRule}
                               defaultValue={isCompetitionScoringRule(competition.scoringRule) ? competition.scoringRule : "ATTENDANCE_COUNT"}
                             >
-                              <option value="ATTENDANCE_COUNT">{t.scoringRuleAttendance}</option>
-                              <option value="CURRENT_STREAK">{t.scoringRuleCurrentStreak}</option>
-                              <option value="LONGEST_STREAK">{t.scoringRuleLongestStreak}</option>
-                              <option value="ATTENDANCE_PLUS_LONGEST_STREAK">{t.scoringRuleWeighted}</option>
+                              {COMPETITION_SCORING_RULES.map((rule) => (
+                                <option key={rule} value={rule}>
+                                  {COMPETITION_SCORING_RULE_LABELS[locale][rule]}
+                                </option>
+                              ))}
                             </select>
                           </label>
                           <button className="button-primary" type="submit">{t.saveChanges}</button>
@@ -1099,9 +1088,141 @@ export default async function GymForgePage() {
                         </form>
                       </details>
 
+                      <details className="admin-drawer score-correction-drawer">
+                        <summary>
+                          {t.scoreCorrection} ({formatCount(competition._count.scoreCorrections)})
+                        </summary>
+                        <div className="score-correction-content">
+                          {canCreateScoreCorrection && correctionRequestKey ? (
+                            <form
+                              className="compact-form score-correction-form"
+                              action={createGymForgeCompetitionScoreCorrection}
+                            >
+                              <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+                              <input type="hidden" name="competitionId" value={competition.id} />
+                              <input type="hidden" name="requestKey" value={correctionRequestKey} />
+                              <label>
+                                {t.correctionParticipant}
+                                <select
+                                  name="participantId"
+                                  defaultValue=""
+                                  disabled={correctionParticipants.length === 0}
+                                  required
+                                >
+                                  <option value="" disabled>
+                                    {t.selectParticipant}
+                                  </option>
+                                  {correctionParticipants.map((assignment) => (
+                                    <option
+                                      key={assignment.participantId}
+                                      value={assignment.participantId}
+                                    >
+                                      {assignment.participant.displayName}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                {t.pointsDelta}
+                                <input
+                                  name="pointsDelta"
+                                  type="number"
+                                  min={-1000}
+                                  max={1000}
+                                  step={1}
+                                  required
+                                />
+                              </label>
+                              <label className="score-correction-reason">
+                                {t.correctionReason}
+                                <input name="reason" maxLength={240} />
+                              </label>
+                              <button
+                                className="button-primary"
+                                type="submit"
+                                disabled={correctionParticipants.length === 0}
+                              >
+                                {t.createScoreCorrection}
+                              </button>
+                            </form>
+                          ) : null}
+
+                          <section className="correction-history" aria-label={t.recentCorrections}>
+                            <div className="correction-history-header">
+                              <strong>{t.recentCorrections}</strong>
+                              <span>
+                                {formatCount(competition._count.scoreCorrections)}{" "}
+                                {competition._count.scoreCorrections === 1
+                                  ? t.correctionSingular
+                                  : t.correctionPlural}
+                              </span>
+                            </div>
+                            <div className="correction-list">
+                              {correctionHistory.map((correction) => (
+                                <div className="correction-row" key={correction.id}>
+                                  <div className="correction-row-copy">
+                                    <div className="correction-row-main">
+                                      <strong>{correction.participant.displayName}</strong>
+                                      <span
+                                        className={`status-pill ${
+                                          correction.revokedAt ? "status-archived" : "is-active"
+                                        }`}
+                                      >
+                                        {correction.revokedAt
+                                          ? t.revokedCorrection
+                                          : t.activeCorrection}
+                                      </span>
+                                    </div>
+                                    <div className="correction-row-meta">
+                                      <strong>
+                                        {formatSignedCount(correction.pointsDelta)} {t.score}
+                                      </strong>
+                                      <time dateTime={correction.createdAt.toISOString()}>
+                                        {formatDateKey(correction.createdAt)}
+                                      </time>
+                                    </div>
+                                    {correction.reason ? (
+                                      <p className="correction-reason">
+                                        <span>{t.reason}:</span> {correction.reason}
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                  {!correction.revokedAt && canRevokeScoreCorrection ? (
+                                    <form
+                                      className="row-actions correction-revoke-form"
+                                      action={revokeGymForgeCompetitionScoreCorrection}
+                                    >
+                                      <input
+                                        type="hidden"
+                                        name={CSRF_FORM_FIELD_NAME}
+                                        value={csrfToken}
+                                      />
+                                      <input
+                                        type="hidden"
+                                        name="correctionId"
+                                        value={correction.id}
+                                      />
+                                      <button className="button-ghost" type="submit">
+                                        {t.revokeCorrection}
+                                      </button>
+                                    </form>
+                                  ) : null}
+                                </div>
+                              ))}
+                              {correctionHistory.length === 0 ? (
+                                <p className="correction-empty">{t.noCorrections}</p>
+                              ) : null}
+                            </div>
+                          </section>
+                        </div>
+                      </details>
+
                       <details className="admin-drawer danger-zone">
                         <summary>{t.dangerZone}</summary>
                         <p>{t.dangerZoneText}</p>
+                        {competition._count.scoreCorrections > 0 ? (
+                          <p><strong>{t.correctionDeleteHint}</strong></p>
+                        ) : null}
                         <form className="action-stack button-row" action={archiveGymForgeCompetition}>
                           <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                           <input type="hidden" name="competitionId" value={competition.id} />
@@ -1119,7 +1240,11 @@ export default async function GymForgePage() {
                           <button
                             className="button-danger"
                             type="submit"
-                            disabled={competition.status === "ACTIVE" || competition._count.assignments > 0}
+                            disabled={
+                              competition.status === "ACTIVE" ||
+                              competition._count.assignments > 0 ||
+                              competition._count.scoreCorrections > 0
+                            }
                           >
                             {t.deleteCompetition}
                           </button>
