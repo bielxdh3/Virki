@@ -29,3 +29,11 @@ Reason: the project must move from Windows to Linux without hardcoded machine-sp
 Use Node 22 LTS, TypeScript 5.x, and a stable Next.js release for the Phase 01 scaffold.
 
 Reason: the core should start from predictable long-term-support runtime choices. Canary versions should be avoided unless a stable build becomes impossible, and any exception must be documented with the exact limitation.
+
+## 0006: Core Authorization And Application Classification
+
+BielOS Core is the authenticated private-hub platform, GymForge is an available integrated application, and L-vault, root.ark, and H-vault remain reserved modules.
+
+Core project authorization uses global role first and explicit `ProjectAccess` for non-public member visibility. Project access does not grant global administration. Permanent project deletion and `SecurityUnlock` runtime behavior remain blocked in the initial Core expansion.
+
+Reason: this uses the existing schema while keeping access precedence, lifecycle, and sensitive gates explicit.

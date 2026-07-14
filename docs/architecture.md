@@ -13,12 +13,12 @@ The public site must stay generic. It should not reveal private module data, int
 
 `apps/public-site` contains the public operating-system-style landing screen.
 
-`apps/hub` contains the private desktop/dashboard shell. Authentication is represented by a placeholder screen in this MVP and must be completed before real private use.
+`apps/hub` contains the private desktop/dashboard, BielOS Core workspace, and integrated private applications. Cloudflare Access is the outer boundary and BielOS internal authentication is the second boundary.
 
 ## Packages
 
 - `packages/ui`: shared module metadata and reusable UI contracts.
-- `packages/auth`: authentication boundary placeholders.
+- `packages/auth`: internal authentication, sessions, CSRF, Cloudflare Access validation, and sanitized audit primitives.
 - `packages/database`: Prisma schema and database client boundary.
 - `packages/config`: environment-driven configuration.
 - `packages/types`: shared TypeScript types.
@@ -31,4 +31,10 @@ PostgreSQL is the primary database. Prisma owns the application schema. Database
 
 The initial deployment target is Docker Compose on the user's primary Windows PC. The project should later move to Linux without path rewrites or hardcoded machine details.
 
-Cloudflare Tunnel and Cloudflare Access are planned as the external access boundary.
+Cloudflare Tunnel and Cloudflare Access provide the external boundary for the private hub. Host-published application ports remain loopback-only.
+
+## Core And Applications
+
+BielOS Core owns project, access, personal session, safe operations, and gated audit surfaces. GymForge is an available application linked from the hub; its feature expansion is frozen. L-vault, root.ark, and H-vault remain reserved and inert.
+
+The Core authorization and data contract is documented in `docs/modules/bielos-core.md`.

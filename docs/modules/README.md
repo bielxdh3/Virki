@@ -6,7 +6,8 @@ This directory contains application and reserved-module planning documents. Biel
 
 - Status: active expansion authorized.
 - Existing foundations: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
-- Next gate: Core-specific security and architecture design.
+- Security and architecture gate: complete in `bielos-core.md`.
+- Next runtime phase: Core project registry and project management.
 - Future Core phases must not be treated as complete until implemented and validated.
 
 ## Available Applications
@@ -22,6 +23,7 @@ This directory contains application and reserved-module planning documents. Biel
 
 ## Module Documents
 
+- `bielos-core.md`: BielOS Core security, authorization, lifecycle, session, audit, and operations design.
 - `l-vault.md`: L-vault planning only. Implementation is blocked.
 - `root-ark.md`: root.ark public zero-knowledge compartment planning only. Implementation is blocked.
 - `h-vault.md`: H-vault planning only. Implementation is blocked.

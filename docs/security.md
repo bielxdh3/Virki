@@ -81,9 +81,9 @@ This is an MVP guardrail for committed files and new non-ignored local files. It
 
 The public site can show the BielOS name, short description, public cards, generic status, and an enter button. It must not expose private modules beyond approved generic references.
 
-## Module Shell
+## Core And Application Registry
 
-The private hub may show an internal module shell registry with planned module names and locked statuses. This shell must not include private data fields, upload inputs, module APIs, vault storage, ingestion flows, encryption/key management, audit log UI, or real module logic. Each real module must complete `docs/module-security-template.md` before implementation.
+The private hub contains BielOS Core and an application registry. GymForge is an available authenticated application. L-vault, root.ark, and H-vault remain inert reserved modules and must not gain routes, storage, ingestion, or runtime behavior without a separately approved design.
 
 The UI language selector stores only an allowlisted locale value in the `bielos_locale` cookie. Supported values are `pt-BR` and `en`, with `pt-BR` as the fallback when the cookie is missing, invalid, or unsupported. On `biel.dev.br` and `hub.biel.dev.br`, the cookie may use the shared `.biel.dev.br` domain so the public site and private hub can honor the same preference. The cookie must not contain user identity, session data, secrets, tokens, or tracking identifiers.
 
@@ -91,13 +91,27 @@ root.ark is planned differently from the private hub modules: it may become a pu
 
 GymForge is a gated social gym competition app, not a vault or public open internet app. Its private-hub MVP includes participant/exercise administration, attendance and workout flows, ranking/streak views, competition lifecycle/assignment, deterministic current-state scoring, and additive score correction. Existing Cloudflare Access, BielOS auth, CSRF, role checks, fixed `America/Sao_Paulo` date policy, sanitized audits, and private visibility remain mandatory.
 
-Upload/photo proof, public registration, invite acceptance until Phase 4, import/export, unsafe competition deletion, a public API, and broad social feed behavior remain blocked.
+Further GymForge expansion is frozen. Upload/photo proof, public registration, invitations, import/export, a public API, broad social behavior, and further scoring work remain blocked.
+
+## BielOS Core Security Contract
+
+- Cloudflare Access remains the first private-hub boundary; BielOS internal authentication and active-user checks remain the second.
+- Global `OWNER` and `ADMIN` users manage project lifecycle. An active `MEMBER` sees authenticated-hub `PUBLIC` projects or projects with an explicit `ProjectAccess` row; descriptions are never returned for unauthorized projects.
+- Project access levels do not grant global administration. Global `OWNER` may manage all levels; global `ADMIN` is limited to `VIEWER` and `EDITOR`; global `MEMBER` cannot manage access. Every project retains at least one project-owner row.
+- Projects are archived rather than permanently deleted. Archived projects and their access history remain read-only in the initial Core runtime.
+- Every mutation rechecks server-side authorization, validates CSRF, validates bounded allowlisted values, and returns generic failures without confirming hidden resources.
+- Core audits contain only allowlisted event types, enum values, aggregate counts, and stable hashed resource references. They exclude names, slugs, descriptions, emails, raw identifiers, raw forms, secrets, cookies, tokens, token hashes, JWTs, headers, IPs, environment values, database URLs, logs, and unrestricted free text.
+- Personal session management selects only safe timestamps and revocation/current state. Users cannot inspect another user's sessions, and administrators receive no broad session-spying capability.
+- Operations UI reports only bounded application/database checks it actually performs. It does not access the Docker socket, raw logs, environment values, private Cloudflare identifiers, or external network services during page rendering; unknown state stays explicit.
+- `SecurityUnlock` runtime behavior remains blocked because challenge issuance, approval, consumption, denial, recovery, and rate-limit semantics are not sufficiently defined. It can only become an additional scoped gate, never a replacement for existing access boundaries.
+
+The complete contract is in `docs/modules/bielos-core.md`.
 
 ## GymForge Competition Score-Correction Security Contract
 
 Competition score-correction Phase 2 design and Phase 3 implementation are `[DONE]`.
 
-Private invitations are `[NEXT]` for Phase 4; invite acceptance remains blocked until that phase is implemented and validated.
+Private invitations are frozen with the rest of optional GymForge expansion.
 
 - Automatic `baseScore` remains derived from current attendance, competition dates/rule, assignment, and ACTIVE participant state. Separate correction rows are additive only and never mutate attendance, workout, assignment, competition, or other source rows.
 - Each correction delta is a nonzero integer in `-1000..1000`; all unrevoked rows sum into `activeAdjustment`, and `finalScore = baseScore + activeAdjustment` may be negative. Allowed attendance or competition metadata changes may recompute the current base, so the UI always separates current base, aggregate adjustment, and final score.
