@@ -19,7 +19,11 @@ import {
   requiresActiveOwnerRetentionCheck,
   type CoreProjectAccessLevel
 } from "./access-policy";
-import { validateCoreProjectInput, type CoreProjectFields } from "./validation";
+import {
+  isValidCoreResourceId,
+  validateCoreProjectInput,
+  type CoreProjectFields
+} from "./validation";
 
 const CORE_PROJECTS_PATH = "/core/projects";
 const SERIALIZABLE_RETRY_LIMIT = 3;
@@ -39,10 +43,6 @@ function readProjectFields(formData: FormData): CoreProjectFields {
     visibility: readFormString(formData, "visibility"),
     status: readFormString(formData, "status")
   };
-}
-
-function isValidResourceId(value: string): boolean {
-  return value.length > 0 && value.length <= 128;
 }
 
 function isRetryableTransactionError(error: unknown): boolean {
@@ -204,7 +204,7 @@ export async function updateCoreProject(formData: FormData) {
   const projectId = readFormString(formData, "projectId").trim();
   const input = validateCoreProjectInput(readProjectFields(formData));
 
-  if (!projectId || !input) {
+  if (!isValidCoreResourceId(projectId) || !input) {
     redirect(`${CORE_PROJECTS_PATH}?error=project-update`);
   }
 
@@ -245,7 +245,7 @@ export async function archiveCoreProject(formData: FormData) {
   const projectId = readFormString(formData, "projectId").trim();
   const confirmed = readFormString(formData, "confirmArchive") === "yes";
 
-  if (!projectId || !confirmed) {
+  if (!isValidCoreResourceId(projectId) || !confirmed) {
     redirect(`${CORE_PROJECTS_PATH}?error=project-archive`);
   }
 
@@ -289,8 +289,8 @@ export async function setCoreProjectAccess(formData: FormData) {
   const accessLevel = readFormString(formData, "accessLevel");
 
   if (
-    !isValidResourceId(projectId) ||
-    !isValidResourceId(userId) ||
+    !isValidCoreResourceId(projectId) ||
+    !isValidCoreResourceId(userId) ||
     !isCoreProjectAccessLevel(accessLevel)
   ) {
     redirect(`${CORE_PROJECTS_PATH}?error=project-access`);
@@ -394,7 +394,7 @@ export async function revokeCoreProjectAccess(formData: FormData) {
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
 
-  if (!isValidResourceId(projectId) || !isValidResourceId(userId)) {
+  if (!isValidCoreResourceId(projectId) || !isValidCoreResourceId(userId)) {
     redirect(`${CORE_PROJECTS_PATH}?error=project-access`);
   }
 

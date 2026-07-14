@@ -25,6 +25,10 @@ export type ValidatedCoreProjectInput = {
   status: CoreProjectEditableStatus;
 };
 
+export function isValidCoreResourceId(value: string): boolean {
+  return value.length > 0 && value.length <= 128;
+}
+
 export function validateCoreProjectInput(
   fields: CoreProjectFields
 ): ValidatedCoreProjectInput | null {

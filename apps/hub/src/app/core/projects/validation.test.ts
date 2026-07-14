@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateCoreProjectInput, type CoreProjectFields } from "./validation";
+import {
+  isValidCoreResourceId,
+  validateCoreProjectInput,
+  type CoreProjectFields
+} from "./validation";
 
 const validFields: CoreProjectFields = {
   name: "Core Workspace",
@@ -45,4 +49,10 @@ test("rejects unsafe slug forms", () => {
 test("rejects crafted enum values and archived status", () => {
   assert.equal(validateCoreProjectInput({ ...validFields, visibility: "PRIVATE" }), null);
   assert.equal(validateCoreProjectInput({ ...validFields, status: "ARCHIVED" }), null);
+});
+
+test("bounds project and access resource identifiers", () => {
+  assert.equal(isValidCoreResourceId("project-id"), true);
+  assert.equal(isValidCoreResourceId(""), false);
+  assert.equal(isValidCoreResourceId("x".repeat(129)), false);
 });
