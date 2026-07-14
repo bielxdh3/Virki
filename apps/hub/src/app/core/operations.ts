@@ -4,6 +4,30 @@ export type CoreLiveCheckState = "verified" | "unknown";
 
 const DATABASE_PROBE_TIMEOUT_MS = 800;
 
+export function createSingleFlightProbe(
+  probe: () => Promise<unknown>
+): () => Promise<unknown> {
+  let inFlight: Promise<unknown> | undefined;
+
+  return () => {
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const current = Promise.resolve().then(probe);
+    inFlight = current;
+
+    const clearCurrent = () => {
+      if (inFlight === current) {
+        inFlight = undefined;
+      }
+    };
+
+    void current.then(clearCurrent, clearCurrent);
+    return current;
+  };
+}
+
 export async function resolveBoundedCoreProbe(
   probe: () => Promise<unknown>,
   timeoutMs: number
@@ -27,17 +51,16 @@ export async function resolveBoundedCoreProbe(
   }
 }
 
+const runDatabaseProbe = createSingleFlightProbe(async () => {
+  await prisma.$queryRaw`SELECT 1`;
+});
+
 export async function getCoreOperationsSnapshot(): Promise<{
   hubRequest: "verified";
   authenticatedSession: "verified";
   database: CoreLiveCheckState;
 }> {
-  const database = await resolveBoundedCoreProbe(
-    async () => {
-      await prisma.$queryRaw`SELECT 1`;
-    },
-    DATABASE_PROBE_TIMEOUT_MS
-  );
+  const database = await resolveBoundedCoreProbe(runDatabaseProbe, DATABASE_PROBE_TIMEOUT_MS);
 
   return {
     hubRequest: "verified",
