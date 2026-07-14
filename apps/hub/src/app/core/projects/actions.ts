@@ -21,9 +21,13 @@ import {
 } from "./access-policy";
 import {
   isValidCoreResourceId,
-  validateCoreProjectInput,
   type CoreProjectFields
 } from "./validation";
+import {
+  archiveCoreProjectRecord,
+  createCoreProjectRecord,
+  updateCoreProjectRecord
+} from "./mutation-service";
 
 const CORE_PROJECTS_PATH = "/core/projects";
 const SERIALIZABLE_RETRY_LIMIT = 3;
@@ -100,28 +104,6 @@ async function requireCoreAdministrator(formData: FormData, source: string) {
   return session;
 }
 
-async function writeProjectAudit(input: {
-  eventType: AuditEventType;
-  actorUserId: string;
-  projectId: string;
-  status: string;
-  visibility?: string;
-  message: string;
-}) {
-  await writeAuditLog({
-    eventType: input.eventType,
-    result: "SUCCESS",
-    actorUserId: input.actorUserId,
-    resource: "core.project",
-    message: input.message,
-    metadata: {
-      projectRef: hashAuditIdentifier(input.projectId),
-      status: input.status,
-      ...(input.visibility ? { visibility: input.visibility } : {})
-    }
-  });
-}
-
 async function writeProjectAccessAudit(input: {
   eventType: AuditEventType;
   actorUserId: string;
@@ -153,47 +135,12 @@ function revalidateCoreProjects() {
 
 export async function createCoreProject(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-create");
-  const input = validateCoreProjectInput(readProjectFields(formData));
-
-  if (!input) {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-create`);
-  }
-
-  let project: { id: string; status: string; visibility: string };
 
   try {
-    project = await prisma.$transaction(async (transaction) => {
-      const createdProject = await transaction.project.create({
-        data: input,
-        select: {
-          id: true,
-          status: true,
-          visibility: true
-        }
-      });
-
-      await transaction.projectAccess.create({
-        data: {
-          projectId: createdProject.id,
-          userId: session.user.id,
-          accessLevel: "OWNER"
-        }
-      });
-
-      return createdProject;
-    });
+    await createCoreProjectRecord(session.user, readProjectFields(formData));
   } catch {
     redirect(`${CORE_PROJECTS_PATH}?error=project-create`);
   }
-
-  await writeProjectAudit({
-    eventType: "CORE_PROJECT_CREATED",
-    actorUserId: session.user.id,
-    projectId: project.id,
-    status: project.status,
-    visibility: project.visibility,
-    message: "Core project created."
-  });
 
   revalidateCoreProjects();
   redirect(`${CORE_PROJECTS_PATH}?status=created`);
@@ -202,39 +149,12 @@ export async function createCoreProject(formData: FormData) {
 export async function updateCoreProject(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-update");
   const projectId = readFormString(formData, "projectId").trim();
-  const input = validateCoreProjectInput(readProjectFields(formData));
-
-  if (!isValidCoreResourceId(projectId) || !input) {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-update`);
-  }
-
-  let updatedCount = 0;
 
   try {
-    const result = await prisma.project.updateMany({
-      where: {
-        id: projectId,
-        status: { not: "ARCHIVED" }
-      },
-      data: input
-    });
-    updatedCount = result.count;
+    await updateCoreProjectRecord(session.user, projectId, readProjectFields(formData));
   } catch {
     redirect(`${CORE_PROJECTS_PATH}?error=project-update`);
   }
-
-  if (updatedCount !== 1) {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-update`);
-  }
-
-  await writeProjectAudit({
-    eventType: "CORE_PROJECT_UPDATED",
-    actorUserId: session.user.id,
-    projectId,
-    status: input.status,
-    visibility: input.visibility,
-    message: "Core project updated."
-  });
 
   revalidateCoreProjects();
   redirect(`${CORE_PROJECTS_PATH}?status=updated`);
@@ -245,38 +165,11 @@ export async function archiveCoreProject(formData: FormData) {
   const projectId = readFormString(formData, "projectId").trim();
   const confirmed = readFormString(formData, "confirmArchive") === "yes";
 
-  if (!isValidCoreResourceId(projectId) || !confirmed) {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-archive`);
-  }
-
-  let archivedCount = 0;
-
   try {
-    const result = await prisma.project.updateMany({
-      where: {
-        id: projectId,
-        status: { not: "ARCHIVED" }
-      },
-      data: {
-        status: "ARCHIVED"
-      }
-    });
-    archivedCount = result.count;
+    await archiveCoreProjectRecord(session.user, projectId, confirmed);
   } catch {
     redirect(`${CORE_PROJECTS_PATH}?error=project-archive`);
   }
-
-  if (archivedCount !== 1) {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-archive`);
-  }
-
-  await writeProjectAudit({
-    eventType: "CORE_PROJECT_ARCHIVED",
-    actorUserId: session.user.id,
-    projectId,
-    status: "ARCHIVED",
-    message: "Core project archived."
-  });
 
   revalidateCoreProjects();
   redirect(`${CORE_PROJECTS_PATH}?status=archived`);
