@@ -170,7 +170,7 @@ const copy = {
     safetyBoundary: "Limite de segurança",
     noPrivateIngestion: "Recursos ainda bloqueados",
     limitations:
-      "GymForge permanece atras da autenticacao existente do hub. Prova por foto, edicao/exclusao de treinos, imports, exports, cadastro publico, aceite de convite, correcao de pontuacao e feed social amplo permanecem bloqueados."
+      "GymForge permanece atras da autenticacao existente do hub. Prova por foto, imports, exports, cadastro publico, aceite de convite, correcao de pontuacao e feed social amplo permanecem bloqueados."
   },
   en: {
     navLabel: "BielOS navigation",
@@ -313,7 +313,7 @@ const copy = {
     safetyBoundary: "Safety boundary",
     noPrivateIngestion: "Still blocked",
     limitations:
-      "GymForge remains behind existing hub auth. Photo proof, workout editing/deletion, imports, exports, public registration, invite acceptance, score correction, and broad social feed remain blocked."
+      "GymForge remains behind existing hub auth. Photo proof, imports, exports, public registration, invite acceptance, score correction, and broad social feed remain blocked."
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 

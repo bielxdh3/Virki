@@ -6,8 +6,8 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 ## MVP Boundary
 
-- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, admin-only attendance correction, fixed `America/Sao_Paulo` attendance date policy, workout entry/edit/delete foundation, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
-- Design-only: photo proof, invite acceptance, imports/exports, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
+- Implemented foundation: authenticated private hub route, participant/admin read foundation, admin participant management, admin exercise catalog, attendance check-ins, admin-only attendance correction, fixed `America/Sao_Paulo` attendance date policy, single-set workout entry/editing plus explicit deletion, ranking/streak foundation, competition metadata foundation, explicit competition participant assignment, deterministic automatic scoring, admin-only competition lifecycle management, and safe deletion for non-ACTIVE competitions with zero assignments.
+- Blocked until scoped: upload and photo proof, public registration, invite acceptance, import/export, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
 - Included in the MVP boundary: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, simple group ranking, and competition metadata.
 - Future but planned: photo proof for check-ins.
 - Excluded from MVP: body metrics, health records, public registration, public profiles, open internet access, imports, exports, file upload, broad social feed, payments, and third-party integrations.
@@ -15,7 +15,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 ## Entry Model
 
-- Participants enter only through invite or admin-created account.
+- Current MVP participant records are admin-created; invite acceptance is not implemented.
 - Open public registration is not allowed.
 - Invite acceptance must not reveal whether an email or account exists.
 - Invalid, expired, or already-used invites must return generic errors.
@@ -32,7 +32,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 ## Admin Role
 
-- Admins may create invites or accounts.
+- Admins currently manage participant records; invite creation and acceptance remain future work.
 - Admins may disable or archive participants.
 - Admins may manage exercise catalog entries.
 - Admins may create and manage competitions or challenges.
@@ -50,7 +50,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 ## Attendance Check-Ins
 
 - A check-in records that a participant attended the gym on a date or time window.
-- MVP should allow at most one streak-counting attendance check-in per participant per local day unless an admin override exists.
+- The MVP allows at most one streak-counting attendance check-in per participant per local day unless an admin correction applies.
 - MVP day boundaries use a fixed `America/Sao_Paulo` GymForge policy and store the effective attendance date as a canonical UTC date for uniqueness and future streak computation.
 - Check-ins should store participant id, timestamp, effective local date, source, and optional note.
 - Check-ins must not store raw IP addresses, raw user agents, secrets, tokens, cookies, JWTs, or raw headers.
@@ -84,8 +84,9 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 ## Exercise Logs
 
 - Exercise logs attach to a participant and optional workout date/session.
-- MVP fields may include exercise, sets, reps, load, unit, note, and timestamp.
-- Editing replaces the current one-set workout entry through the same validation rules used by workout creation.
+- The current MVP intentionally creates and edits exactly one exercise set per workout, with exercise, set number, reps, load, unit, note, and timestamp fields.
+- Editing transactionally replaces that one set through the same validation rules used by creation and fails safely before mutation if the stored workout unexpectedly has zero or multiple sets.
+- Explicit workout deletion transactionally removes every dependent set before deleting the workout, including unexpected multi-set records.
 - Exercise log details are private to the participant by default.
 - Aggregated competition views may show approved summary data only.
 - Validation must reject impossible or unsafe numeric values.
@@ -102,7 +103,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 - Ties and late check-ins must have explicit rules.
 - Deletion of ACTIVE or assigned competitions, score correction, and admin adjudication require later scoped phases.
 
-## Competition Assignment And Scoring Design
+## Competition Assignment And Scoring
 
 This section is implemented for explicit participant assignment, deterministic read-only scoring, admin-only competition metadata/status lifecycle changes, and safe deletion for non-ACTIVE competitions with zero assignments. Admin attendance correction is implemented through attendance records and automatically affects ranking/scoring. Score overrides, APIs, deletion of ACTIVE or assigned competitions, and broad social behavior remain blocked until later scoped phases.
 
@@ -121,7 +122,7 @@ This section is implemented for explicit participant assignment, deterministic r
 - Competition views must not expose workout notes, attendance notes, raw participant ids, raw audit metadata, raw request data, private exports, cookies, JWTs, headers, IPs, secrets, or database details.
 - Audit events include competition updates, competition archival, competition deletion, and competition assignment updates with sanitized metadata. Future audit events should include score correction applied when score correction exists.
 - Audit metadata should include only sanitized ids, status, rule type, date range presence, affected counts, and result status; it must not include notes, descriptions beyond short labels, raw links, raw request data, or private values.
-- Validation before implementation must cover role checks, CSRF failures returning HTTP 403, date-boundary tests for `America/Sao_Paulo`, disabled/archived participant exclusion, duplicate attendance safety, tie breaker determinism, and visibility restrictions.
+- Validation must cover role checks, CSRF failures returning HTTP 403, date-boundary tests for `America/Sao_Paulo`, disabled/archived participant exclusion, duplicate attendance safety, tie breaker determinism, and visibility restrictions.
 
 ## Group Visibility
 
@@ -147,11 +148,11 @@ MVP controls should include gated entry, generic auth errors, rate limiting, one
 
 ## Retention And Deletion
 
-- Attendance and ranking data retention should be defined before implementation.
+- Attendance and ranking retention remains to be defined for long-term production use.
 - Participant removal should disable access and preserve required audit records.
-- Workout notes and logs have an authenticated user deletion path for the author's own entries and OWNER/ADMIN deletion for any entry.
+- Workout notes and logs have an authenticated user deletion path for the author's own entries and OWNER/ADMIN deletion for any entry; deletion transactionally removes every dependent set.
 - Competition history may be retained for group continuity. Permanent competition deletion is limited to non-ACTIVE competitions with zero participant assignments; assigned or ACTIVE competitions must be archived or retained.
-- Backup and restore implications must be documented before non-discardable GymForge data is created.
+- Current GymForge records use the existing PostgreSQL backup and restore procedures; storage changes require renewed validation.
 
 ## Audit Events
 
@@ -173,7 +174,7 @@ Audit logs must never include workout note text, exercise detail payloads, photo
 ## Validation Checklist
 
 - Secret scan passes.
-- Runtime implementation adds lint, typecheck, build, and Prisma validation.
+- Runtime changes require lint, typecheck, build, and Prisma validation as relevant.
 - Prisma migration exists before schema changes are used.
 - Invite and login failures remain generic.
 - Public users cannot access GymForge routes.
@@ -184,4 +185,5 @@ Audit logs must never include workout note text, exercise detail payloads, photo
 - Missing or invalid CSRF on mutable routes returns HTTP 403.
 - Rate limits apply to login, invite acceptance, and high-risk mutations.
 - Audit events contain only sanitized metadata.
-- Backup and restore behavior is validated before non-discardable data exists.
+- Workout creation/editing preserves exactly one set, update rejects unexpected zero/multi-set records without mutation, and explicit deletion transactionally removes all dependent sets.
+- Existing PostgreSQL backup and restore validation applies; storage changes require renewed validation.

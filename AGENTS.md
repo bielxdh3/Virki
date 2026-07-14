@@ -48,9 +48,10 @@ Do not invent a new skill unless the user explicitly requests creating one.
   - L-vault
   - root.ark
   - H-vault
-- GymForge is no longer merely reserved: it has an implemented MVP foundation inside the private hub.
+- GymForge is no longer merely reserved: its private-hub MVP includes participant and exercise administration, attendance check-ins and correction, single-set workout creation/editing plus explicit deletion, rankings and streaks, competition lifecycle management, participant assignment, and deterministic automatic scoring.
+- The current workout MVP intentionally creates and edits exactly one set per workout. Updates must fail safely when a stored workout unexpectedly has zero or multiple sets, while explicit workout deletion must transactionally remove all dependent sets.
 - Future GymForge work must stay scoped and preserve existing Cloudflare Access, BielOS internal auth, CSRF, audit logging, and private hub boundaries.
-- Do not add GymForge upload, public registration, invite acceptance, import/export, workout editing/deletion, admin attendance correction, participant assignment, or automatic competition scoring unless explicitly requested in a scoped phase.
+- Do not add GymForge upload, public registration, invite acceptance, import/export, score correction, deletion of ACTIVE or assigned competitions, or broad social feed behavior unless explicitly requested in a scoped phase.
 
 ## Output Rules
 

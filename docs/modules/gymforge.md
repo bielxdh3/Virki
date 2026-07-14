@@ -20,54 +20,46 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 ## Access Model
 
-- GymForge should have a barrier before entering the site.
-- Users may join only by invite or admin-created account.
+- GymForge remains behind Cloudflare Access and BielOS internal authentication.
+- Current participant records are admin-created; invite acceptance is not implemented.
 - There is no open public registration.
 - Internal users may see approved group or competition data after entry.
 - Admin users may manage participants, exercise catalog entries, competitions, and challenges.
 - Data does not need zero-knowledge encryption, but access must remain gated.
 
-## Planned Features
+## Current MVP Scope
 
-- Gym attendance recording.
-- Gym visit streaks.
-- Future photo or camera check-in proof.
-- Workout notes.
-- Exercise logging.
-- Sets, reps, and load tracking.
-- Group streak comparison.
-- Participation or challenge competition views.
-- Admin-managed exercise catalog.
-- Admin-managed users and participants.
-- Admin-managed competitions or challenges.
+- Implemented: attendance check-ins and admin correction, streak/ranking views, workout notes and one-set exercise logging, admin participant and exercise catalog management, competition lifecycle and participant assignment, deterministic automatic scoring, and safe deletion for non-ACTIVE competitions with zero assignments.
+- Workout creation/editing intentionally supports exactly one set. An update fails safely before mutation if the stored workout unexpectedly has zero or multiple sets; explicit deletion transactionally removes all dependent sets.
+- Blocked until scoped: upload and photo proof, public registration, invite acceptance, import/export, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
 
 ## Storage Model
 
-- Storage location: Not defined.
-- Database tables or files: None in this phase.
+- Storage location: Existing private PostgreSQL database through Prisma.
+- Database tables or files: GymForge participant, exercise, attendance, workout/set, competition, and assignment records; file storage is not enabled.
 - Encryption or key-management needs: No zero-knowledge model expected. Future design must still define storage protection for group data and uploaded proof photos.
 - Search/indexing behavior: Not enabled.
-- Derived data or caches: Not enabled.
+- Derived data or caches: Ranking, streak, and competition score views are computed from persisted records; manual score correction is not enabled.
 
 ## Migration Plan
 
-- Prisma schema changes: None in this phase.
-- Migration files: None in this phase.
+- Prisma schema changes: Implemented for the current MVP foundation.
+- Migration files: Implemented for the current MVP foundation.
 - Backfill requirements: None.
-- Rollback approach: Documentation-only rollback.
-- Disposable validation plan: Required before future schema changes, storage, upload, import/export, editing/deletion, assignment rule changes, scoring rule changes, or score correction work.
+- Rollback approach: Use a scoped migration for schema rollback and the documented restore procedure for data recovery.
+- Disposable validation plan: Required before future schema changes, upload, import/export, assignment/scoring rule changes, or score correction work.
 
 ## Backup And Restore
 
-- Backup impact: None in this phase.
-- Restore validation impact: None in this phase.
+- Backup impact: Current GymForge records are covered by the existing PostgreSQL backup procedure.
+- Restore validation impact: Existing PostgreSQL restore validation applies.
 - Data that must never be exported: Raw credentials, secrets, raw tokens, private logs, and any future data not explicitly approved for export.
 - Disaster recovery notes: Existing PostgreSQL backup and restore procedures apply. Future upload/import/export work needs separate backup and restore design before use.
 
 ## Access Control
 
-- Required user roles: Admin and participant roles, pending module design.
-- Cloudflare Access assumptions: Deployment boundary must be decided before exposure. The app is gated, not open public.
+- Required user roles: Linked ACTIVE participants for participant actions; OWNER or ADMIN for administration and correction actions.
+- Cloudflare Access assumptions: Cloudflare Access remains the outer boundary for the private hub.
 - BielOS internal auth requirements: Current GymForge uses BielOS internal auth behind Cloudflare Access. Participant actions require a linked ACTIVE GymForge participant; admin management requires OWNER or ADMIN.
 - Module-specific unlocks: Not expected for ordinary competition data, but future design must revisit this if sensitive health data is added.
 - Cross-module access boundaries: GymForge must not share workout, participant, or competition data with other modules without explicit design.
@@ -82,13 +74,13 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 ## Retention And Deletion
 
 - Retention period: Not defined.
-- Deletion behavior: Participants may delete only their own workout entries after explicit confirmation, while OWNER/ADMIN users may delete any workout entry. Admins may permanently delete only non-ACTIVE competitions with zero participant assignments. Competitions that are ACTIVE or have assignments must be archived or retained.
+- Deletion behavior: Participants may delete only their own workout entries after explicit confirmation, while OWNER/ADMIN users may delete any workout entry. Workout deletion transactionally removes all dependent sets before deleting the workout. Admins may permanently delete only non-ACTIVE competitions with zero participant assignments; ACTIVE or assigned competitions must be archived or retained.
 - Cleanup command or worker: Not defined.
 - User-visible deletion expectations: Future design must define participant removal, competition history retention, photo proof retention, and backup implications.
 
 ## Threat Model
 
-- Primary assets: Future participant accounts, attendance records, streaks, workout logs, competition data, and check-in proof photos.
+- Primary assets: Participant records, attendance records, streaks, workout logs, and competition data; check-in proof photos remain future work.
 - Abuse cases: Unauthorized entry, participant impersonation, fake check-ins, photo proof leakage, overexposed leaderboards, unsafe exports, unsafe logging, and backup leakage.
 - Accidental exposure risks: Public routes, screenshots, shared devices, logs, exports, debug output, browser cache, and notification text.
 - Local machine risks: Local filesystem exposure, Docker volume handling, and untracked generated files.
@@ -98,13 +90,14 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 - Database unavailable: Future implementation must fail closed for writes and sensitive reads.
 - Backup unavailable: Future implementation must block non-discardable ingestion until backup and restore are validated.
-- Auth or invite flow unavailable: Module access must not proceed.
+- Auth unavailable: Module access must not proceed; any future invite flow must also fail closed.
 - Cloudflare unavailable: Remote exposure behavior must be defined before launch.
 - Partial write, upload, or import failure: Future implementation must define atomicity, cleanup, and rollback.
+- Unexpected workout set cardinality: Editing must fail safely before mutation; explicit deletion must still transactionally remove every dependent set.
 
 ## UI Safety Constraints
 
-- No private data fields until approved: Required.
+- New private data fields require scoped approval.
 - No upload inputs until approved: Required.
 - No secret display: Required.
 - No raw logs or audit metadata display: Required.
@@ -113,9 +106,9 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 
 ## API Safety Constraints
 
-- Allowed methods: None in this phase.
-- CSRF requirements: Required for any future mutable route.
-- Auth checks: Required for all future routes.
+- Current mutation surface: Authenticated server actions; no GymForge API is enabled.
+- CSRF requirements: Required for every mutable action.
+- Auth checks: Required for every GymForge read and mutation.
 - Rate limits: Required for login/join, check-ins, uploads, participant management, and competition mutations.
 - Request and response redaction: Required.
 - Error message behavior: Generic for auth, invite, and access failures.
@@ -135,24 +128,9 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 - Redaction requirements: Required before any future export outside the group.
 - Files that must stay out of Git: Any dumps, exports, backups, uploads, check-in photos, workout records, body metric records, private notes, or generated archives.
 
-## Required Architecture Phase
+## Remaining Scoped Phases
 
-Before future implementation beyond the current MVP foundation, GymForge needs scoped design for:
-
-- gated entry model
-- invite or admin-created account lifecycle
-- participant roles
-- admin roles
-- exercise catalog management
-- attendance and streak semantics
-- photo check-in proof rules
-- workout logging schema
-- competition/challenge rules
-- group visibility boundaries
-- abuse controls for fake check-ins
-- retention and deletion
-- audit events
-- backup and restore behavior
+Future work requires explicit design and validation for upload/photo proof, public registration, invite acceptance, import/export, score correction, unsafe competition deletion, and broader social visibility. Existing private-hub auth, role checks, CSRF, audit sanitization, backup/restore, and data-integrity rules must remain in place.
 
 ## Validation Checklist
 
@@ -162,7 +140,8 @@ Before future implementation beyond the current MVP foundation, GymForge needs s
 - Build: Required when UI or runtime code is added.
 - Prisma validation: Required when schema changes are added.
 - Migration validation: Required when migrations are added.
-- Backup and restore validation: Required before ingestion.
-- Local auth or gated-entry check: Required before routes are added.
+- Backup and restore validation: Existing PostgreSQL procedures apply and must be revalidated before storage changes.
+- Local auth or gated-entry check: Required for current and future routes.
 - Cloudflare exposure check: Required before remote access.
-- Negative tests for unauthorized access: Required before implementation.
+- Negative tests for unauthorized access: Required for current mutations and future visibility changes.
+- Workout integrity: Creation/editing supports exactly one set; update rejects unexpected zero/multi-set records; explicit deletion transactionally removes all dependent sets.

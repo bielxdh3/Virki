@@ -19,6 +19,7 @@ const COMPETITION_SCORING_RULES = [
   "ATTENDANCE_PLUS_LONGEST_STREAK"
 ] as const;
 const WORKOUT_UNITS = ["KG", "LB", "BODYWEIGHT", "OTHER"] as const;
+const GYMFORGE_MVP_WORKOUT_SET_COUNT = 1;
 
 type ParticipantRole = (typeof PARTICIPANT_ROLES)[number];
 type ParticipantStatus = (typeof PARTICIPANT_STATUSES)[number];
@@ -28,6 +29,7 @@ type CompetitionScoringRule = (typeof COMPETITION_SCORING_RULES)[number];
 type WorkoutUnit = (typeof WORKOUT_UNITS)[number];
 type ParsedOptionalDate = Date | null | "invalid";
 type ParsedRequiredDate = Date | "invalid";
+type ParsedLoad = string | null | "invalid";
 
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
@@ -67,13 +69,13 @@ function parsePositiveInteger(value: string, max: number): number | null {
   return Number.isInteger(parsed) && parsed > 0 && parsed <= max ? parsed : null;
 }
 
-function parseLoad(value: string): string | null {
+function parseLoad(value: string): ParsedLoad {
   if (!value) {
     return null;
   }
 
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1000 ? value : null;
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1000 ? value : "invalid";
 }
 
 function parseOptionalDate(value: string): ParsedOptionalDate {
@@ -822,7 +824,7 @@ export async function createGymForgeWorkout(formData: FormData) {
     redirect("/gymforge?error=workout-note");
   }
 
-  if (!exerciseId || !setNumber || !reps || !isWorkoutUnit(unit)) {
+  if (!exerciseId || !setNumber || !reps || load === "invalid" || !isWorkoutUnit(unit)) {
     redirect("/gymforge?error=workout-set");
   }
 
@@ -856,7 +858,6 @@ export async function createGymForgeWorkout(formData: FormData) {
     },
     select: {
       id: true,
-      participantId: true,
       _count: {
         select: { sets: true }
       }
@@ -870,8 +871,6 @@ export async function createGymForgeWorkout(formData: FormData) {
     resource: "gymforge.workout",
     message: "GymForge workout created.",
     metadata: {
-      participantId: workout.participantId,
-      workoutId: workout.id,
       setCount: workout._count.sets
     }
   });
@@ -893,6 +892,8 @@ export async function updateGymForgeWorkout(formData: FormData) {
     redirect("/login");
   }
 
+  const isAdmin = isHubAdmin(session.user.role);
+
   const workoutId = readFormString(formData, "workoutId");
   const workoutAt = parseRequiredDate(readFormString(formData, "workoutAt"));
   const note = readFormString(formData, "workoutNote");
@@ -911,7 +912,7 @@ export async function updateGymForgeWorkout(formData: FormData) {
     redirect("/gymforge?error=workout-note");
   }
 
-  if (!exerciseId || !setNumber || !reps || !isWorkoutUnit(unit)) {
+  if (!exerciseId || !setNumber || !reps || load === "invalid" || !isWorkoutUnit(unit)) {
     redirect("/gymforge?error=workout-set");
   }
 
@@ -920,10 +921,10 @@ export async function updateGymForgeWorkout(formData: FormData) {
       where: { id: workoutId },
       select: {
         id: true,
-        participantId: true,
         participant: {
           select: {
-            userId: true
+            userId: true,
+            status: true
           }
         },
         _count: {
@@ -945,8 +946,15 @@ export async function updateGymForgeWorkout(formData: FormData) {
     redirect("/gymforge?error=workout-update");
   }
 
-  if (!isHubAdmin(session.user.role) && workout.participant.userId !== session.user.id) {
+  if (
+    !isAdmin &&
+    (workout.participant.userId !== session.user.id || workout.participant.status !== "ACTIVE")
+  ) {
     forbidden();
+  }
+
+  if (workout._count.sets !== GYMFORGE_MVP_WORKOUT_SET_COUNT) {
+    redirect("/gymforge?error=workout-update");
   }
 
   await prisma.$transaction(async (transaction) => {
@@ -980,9 +988,8 @@ export async function updateGymForgeWorkout(formData: FormData) {
     resource: "gymforge.workout",
     message: "GymForge workout updated.",
     metadata: {
-      workoutId: workout.id,
-      participantId: workout.participantId,
-      setCount: 1
+      setCount: GYMFORGE_MVP_WORKOUT_SET_COUNT,
+      actorScope: isAdmin ? "ADMIN" : "PARTICIPANT"
     }
   });
 
@@ -1003,6 +1010,8 @@ export async function deleteGymForgeWorkout(formData: FormData) {
     redirect("/login");
   }
 
+  const isAdmin = isHubAdmin(session.user.role);
+
   const workoutId = readFormString(formData, "workoutId");
   const confirmed = readFormString(formData, "confirmDelete") === "true";
 
@@ -1014,10 +1023,10 @@ export async function deleteGymForgeWorkout(formData: FormData) {
     where: { id: workoutId },
     select: {
       id: true,
-      participantId: true,
       participant: {
         select: {
-          userId: true
+          userId: true,
+          status: true
         }
       },
       _count: {
@@ -1030,7 +1039,10 @@ export async function deleteGymForgeWorkout(formData: FormData) {
     redirect("/gymforge?error=workout-delete");
   }
 
-  if (!isHubAdmin(session.user.role) && workout.participant.userId !== session.user.id) {
+  if (
+    !isAdmin &&
+    (workout.participant.userId !== session.user.id || workout.participant.status !== "ACTIVE")
+  ) {
     forbidden();
   }
 
@@ -1050,10 +1062,9 @@ export async function deleteGymForgeWorkout(formData: FormData) {
     resource: "gymforge.workout",
     message: "GymForge workout deleted.",
     metadata: {
-      workoutId: workout.id,
-      participantId: workout.participantId,
       setCount: workout._count.sets,
-      deleted: true
+      deleted: true,
+      actorScope: isAdmin ? "ADMIN" : "PARTICIPANT"
     }
   });
 

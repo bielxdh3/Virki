@@ -64,6 +64,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` GymForge UI usability pass and safe competition deletion exists for non-ACTIVE competitions with zero assignments.
 - `[DONE]` GymForge admin attendance correction exists behind OWNER/ADMIN, CSRF, and sanitized audit events.
 - `[DONE]` GymForge workout editing/deletion exists with participant ownership, OWNER/ADMIN override, CSRF, and sanitized audit events.
+- `[DONE]` GymForge workout integrity intentionally keeps creation/editing to exactly one set, rejects updates for unexpected zero/multi-set records, and transactionally removes all dependent sets on explicit workout deletion.
 - `[DONE]` BielOS language selector exists with Portuguese default and English option.
 
 ## 4. Cloudflare, Tunnel, And Access Plan
@@ -187,6 +188,7 @@ Do not implement new modules beyond inert shell registry entries until each modu
 - `[DONE]` GymForge UI usability pass and safe competition deletion.
 - `[DONE]` GymForge admin attendance correction.
 - `[DONE]` GymForge workout editing/deletion.
+- `[DONE]` GymForge one-set workout integrity and transactional dependent-set deletion.
 - `[DO NOT IMPLEMENT YET]` GymForge upload, invite acceptance, import/export, public registration, score correction, deletion of ACTIVE or assigned competitions, and broad social feed behavior.
 
 ## 12. Definition Of MVP Complete
