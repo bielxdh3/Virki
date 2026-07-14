@@ -1,8 +1,6 @@
 "use server";
 
-import { hashAuditIdentifier, writeAuditLog } from "@bielos/auth";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
-import { prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
@@ -16,6 +14,10 @@ import {
   canRevokeOtherSession,
   isRevokeAllOtherSessionsConfirmed
 } from "./session-policy";
+import {
+  revokeAllOtherCoreSessionRecords,
+  revokeCoreSessionRecord
+} from "./session-service";
 
 const CORE_SECURITY_PATH = "/core/security";
 
@@ -59,38 +61,11 @@ export async function revokeCoreSession(formData: FormData) {
     redirect(`${CORE_SECURITY_PATH}?error=session`);
   }
 
-  const now = new Date();
-  let result: { count: number };
-
   try {
-    result = await prisma.session.updateMany({
-      where: {
-        id: targetSessionId,
-        userId: session.user.id,
-        revokedAt: null,
-        expiresAt: { gt: now }
-      },
-      data: { revokedAt: now }
-    });
+    await revokeCoreSessionRecord(session.user, session.id, targetSessionId);
   } catch {
     redirect(`${CORE_SECURITY_PATH}?error=session`);
   }
-
-  if (result.count !== 1) {
-    redirect(`${CORE_SECURITY_PATH}?error=session`);
-  }
-
-  await writeAuditLog({
-    eventType: "AUTH_SESSION_REVOKED",
-    result: "SUCCESS",
-    actorUserId: session.user.id,
-    resource: "session",
-    message: "Personal session revoked.",
-    metadata: {
-      scope: "single-other",
-      sessionRef: hashAuditIdentifier(targetSessionId)
-    }
-  });
 
   revalidateCoreSecurity();
   redirect(`${CORE_SECURITY_PATH}?status=session-revoked`);
@@ -106,34 +81,15 @@ export async function revokeAllOtherCoreSessions(formData: FormData) {
     redirect(`${CORE_SECURITY_PATH}?error=session`);
   }
 
-  const now = new Date();
-  let result: { count: number };
-
   try {
-    result = await prisma.session.updateMany({
-      where: {
-        userId: session.user.id,
-        id: { not: session.id },
-        revokedAt: null,
-        expiresAt: { gt: now }
-      },
-      data: { revokedAt: now }
-    });
+    await revokeAllOtherCoreSessionRecords(
+      session.user,
+      session.id,
+      confirmed
+    );
   } catch {
     redirect(`${CORE_SECURITY_PATH}?error=session`);
   }
-
-  await writeAuditLog({
-    eventType: "AUTH_SESSION_REVOKED",
-    result: "SUCCESS",
-    actorUserId: session.user.id,
-    resource: "session",
-    message: "Other personal sessions revoked.",
-    metadata: {
-      scope: "all-other",
-      revokedCount: result.count
-    }
-  });
 
   revalidateCoreSecurity();
   redirect(`${CORE_SECURITY_PATH}?status=sessions-revoked`);

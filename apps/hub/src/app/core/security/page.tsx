@@ -20,10 +20,13 @@ import {
   type SafeAuditResource,
   type SafeAuditResult
 } from "./audit-view";
+import {
+  CORE_SESSION_LIST_LIMIT,
+  listCoreSessionsForPrincipal
+} from "./session-service";
 
 export const dynamic = "force-dynamic";
 
-const SESSION_LIMIT = 100;
 const AUDIT_LIMIT = 50;
 
 const copy = {
@@ -191,21 +194,7 @@ export default async function CoreSecurityPage() {
   const csrfToken = createCsrfToken();
   const now = new Date();
   const isOwner = session.user.role === "OWNER";
-  const sessions = await prisma.session.findMany({
-    where: {
-      userId: session.user.id,
-      revokedAt: null,
-      expiresAt: { gt: now }
-    },
-    select: {
-      id: true,
-      createdAt: true,
-      expiresAt: true,
-      revokedAt: true
-    },
-    orderBy: { createdAt: "desc" },
-    take: SESSION_LIMIT
-  });
+  const sessions = await listCoreSessionsForPrincipal(session.user, session.id, now);
   const auditLogs = isOwner
     ? await prisma.auditLog.findMany({
         select: {
@@ -219,7 +208,7 @@ export default async function CoreSecurityPage() {
         take: AUDIT_LIMIT
       })
     : [];
-  const otherSessionCount = sessions.filter((item) => item.id !== session.id).length;
+  const otherSessionCount = sessions.filter((item) => !item.isCurrent).length;
 
   return (
     <main className="hub-shell core-security-shell">
@@ -255,7 +244,7 @@ export default async function CoreSecurityPage() {
 
         <div className="dock-footer">
           <span>{t.activeSessions}</span>
-          <strong>{sessions.length} / {SESSION_LIMIT}</strong>
+          <strong>{sessions.length} / {CORE_SESSION_LIST_LIMIT}</strong>
         </div>
       </aside>
 
@@ -284,7 +273,7 @@ export default async function CoreSecurityPage() {
               <p className="eyebrow">{t.security}</p>
               <h2 id="core-session-heading">{t.activeSessions}</h2>
             </div>
-            <span>{sessions.length} / {SESSION_LIMIT}</span>
+            <span>{sessions.length} / {CORE_SESSION_LIST_LIMIT}</span>
           </div>
 
           {sessions.length === 0 ? (
@@ -294,7 +283,7 @@ export default async function CoreSecurityPage() {
           ) : (
             <div className="core-session-list">
               {sessions.map((item) => {
-                const isCurrent = item.id === session.id;
+                const isCurrent = item.isCurrent;
 
                 return (
                   <article className={`core-session-row${isCurrent ? " is-current" : ""}`} key={item.id}>
