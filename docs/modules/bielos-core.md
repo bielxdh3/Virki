@@ -2,7 +2,7 @@
 
 ## Implementation Status
 
-Core project registry, project management, and project access administration are implemented in the private hub at `/core/projects`. Read scope follows this document; OWNER/ADMIN project mutations require Cloudflare Access, BielOS authentication, CSRF, bounded validation, generic errors, and sanitized audits. Access changes use serializable transactions, prevent duplicate rows and role escalation, and retain the last active project owner. Permanent project deletion remains unavailable.
+Core project registry, project management, and project access administration are implemented in the private hub at `/core/projects`. Personal session management is implemented at `/core/security`. Read scope follows this document; mutations require Cloudflare Access, BielOS authentication, CSRF, bounded validation, generic errors, and sanitized audits. Access changes use serializable transactions, prevent duplicate rows and role escalation, and retain the last active project owner. Session queries are user-scoped and omit token material; users may revoke only their own other sessions, with an explicit confirmation for the all-other action. Permanent project deletion remains unavailable.
 
 ## Identity
 

@@ -2151,3 +2151,175 @@ strong {
     width: 100%;
   }
 }
+
+/* BielOS Core personal session management */
+.core-security-workspace {
+  width: 100%;
+  max-width: 1180px;
+  margin-inline: auto;
+}
+
+.core-security-intro {
+  padding: 10px 2px 18px;
+  border-bottom: 1px solid rgba(121, 142, 160, 0.18);
+}
+
+.core-security-intro h1 {
+  margin: 4px 0 7px;
+  font-size: clamp(1.45rem, 2.5vw, 2rem);
+  font-weight: 720;
+}
+
+.core-security-intro > p:last-child {
+  max-width: 680px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.core-session-heading {
+  margin-top: 18px;
+  margin-bottom: 8px;
+}
+
+.core-session-list {
+  display: grid;
+  gap: 7px;
+}
+
+.core-session-row {
+  display: grid;
+  grid-template-columns: 94px minmax(260px, 1fr) minmax(180px, 0.5fr);
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(121, 142, 160, 0.14);
+  border-radius: 8px;
+  background: #0d141b;
+}
+
+.core-session-row.is-current {
+  border-left: 2px solid rgba(91, 215, 232, 0.55);
+}
+
+.core-session-row dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.core-session-row dt {
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 680;
+  text-transform: uppercase;
+}
+
+.core-session-row dd {
+  margin: 3px 0 0;
+  color: var(--text);
+  font-size: 0.76rem;
+}
+
+.core-session-action {
+  min-width: 0;
+  text-align: right;
+}
+
+.core-session-action > span {
+  display: inline-block;
+  max-width: 240px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.core-session-action button,
+.core-session-danger button {
+  min-height: 32px;
+  padding: 0 10px;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 680;
+}
+
+.core-session-danger {
+  margin-top: 12px;
+  border-color: rgba(238, 116, 116, 0.13);
+  background: rgba(34, 16, 19, 0.16);
+}
+
+.core-session-danger > summary {
+  color: #d9a4a4;
+}
+
+.core-session-danger-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.6fr);
+  align-items: start;
+  gap: 14px;
+  padding: 11px;
+}
+
+.core-session-danger-body strong {
+  font-size: 0.8rem;
+}
+
+.core-session-danger-body p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.core-session-danger-body form {
+  display: grid;
+  justify-items: end;
+  gap: 9px;
+}
+
+.core-session-danger-body .checkbox-line {
+  align-items: flex-start;
+  font-size: 0.72rem;
+  font-weight: 570;
+  line-height: 1.35;
+}
+
+@media (max-width: 820px) {
+  .core-session-row {
+    grid-template-columns: 82px minmax(0, 1fr);
+  }
+
+  .core-session-action {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+
+  .core-session-danger-body {
+    grid-template-columns: 1fr;
+  }
+
+  .core-session-danger-body form {
+    justify-items: stretch;
+  }
+}
+
+@media (max-width: 560px) {
+  .core-session-row,
+  .core-session-row dl {
+    grid-template-columns: 1fr;
+  }
+
+  .core-session-action form,
+  .core-session-action button,
+  .core-session-danger button {
+    width: 100%;
+  }
+}
