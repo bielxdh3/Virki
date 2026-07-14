@@ -7,7 +7,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../..
 import { getCurrentSession } from "../../../lib/auth";
 import { getLocale } from "../../locale";
 import { LanguageSelector } from "../../language-selector";
-import { getCoreProjectWhere, isCoreAdministrator } from "../authorization";
+import { isCoreAdministrator } from "../authorization";
 import {
   archiveCoreProject,
   createCoreProject,
@@ -15,10 +15,14 @@ import {
   setCoreProjectAccess,
   updateCoreProject
 } from "./actions";
+import {
+  CORE_PROJECT_READ_LIMIT,
+  listCoreProjectsForPrincipal
+} from "./read-service";
 
 export const dynamic = "force-dynamic";
 
-const PROJECT_LIMIT = 100;
+const PROJECT_LIMIT = CORE_PROJECT_READ_LIMIT;
 
 const copy = {
   "pt-BR": {
@@ -220,37 +224,7 @@ export default async function CoreProjectsPage() {
   const t = copy[locale];
   const isAdministrator = isCoreAdministrator(session.user.role);
   const csrfToken = createCsrfToken();
-  const projects = await prisma.project.findMany({
-    where: getCoreProjectWhere(session.user.id, session.user.role),
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      description: true,
-      visibility: true,
-      status: true,
-      updatedAt: true,
-      accesses: {
-        where: isAdministrator ? undefined : { userId: session.user.id },
-        select: {
-          accessLevel: true,
-          user: {
-            select: {
-              id: true,
-              email: true,
-              displayName: true,
-              role: true,
-              isActive: true
-            }
-          }
-        },
-        orderBy: { createdAt: "asc" },
-        take: 100
-      }
-    },
-    orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
-    take: PROJECT_LIMIT
-  });
+  const projects = await listCoreProjectsForPrincipal(session.user);
   const activeUsers = isAdministrator
     ? await prisma.user.findMany({
         where: { isActive: true },
