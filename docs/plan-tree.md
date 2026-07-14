@@ -62,8 +62,10 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Database-backed Core authorization, mutation, access-invariant, session-isolation, audit-bound, operations, and concurrency tests run against disposable migrated PostgreSQL and are integrated into CI.
 - `[DONE]` The Core hardening campaign corrected verification-document drift, serialized concurrent login-limit updates, bounded attempts at five, and replaced auth maintenance error output with fixed non-sensitive messages.
 - `[DONE]` The final Core gate passed unit, database integration, concurrency, build, production image, Compose, restart, health, Cloudflare-ordering, and loopback-exposure checks.
+- `[DONE]` Core closeout requires a dedicated production login-limit HMAC key, exercises the real login POST route, covers limiter lifecycle and independent identifiers, bounds advisory-lock waits, and tests complete operational command error boundaries.
+- `[DONE]` The closeout local gate passed 33 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, synthetic Compose, health, Access-ordering, and loopback checks.
 - `[LATER]` Reconfirm remote CI evidence when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.` for the final hardening SHA.
-- `[NEXT]` Complete the authenticated OWNER/MEMBER browser smoke with existing disposable identities; do not bypass Cloudflare Access or BielOS authentication.
+- `[NEXT]` Configure the dedicated rate-limit HMAC key in the private production environment, restart the current runtime, then complete authenticated OWNER/MEMBER browser smoke without bypassing either authentication boundary.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
 - `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
 - `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
@@ -204,6 +206,12 @@ BielOS Core is the private hub platform and workspace, not a reserved module. It
 - `[DONE]` Serialize same-identifier login-limit transactions with a PostgreSQL advisory lock and cover concurrent failures, route-level throttling, normalization, and successful-bucket clearing.
 - `[DONE]` Keep operational auth command failures on fixed command-specific messages rather than arbitrary runtime error text.
 - `[DONE]` Complete the final local hardening gate, production image and Compose checks, production restart, unauthenticated health/Access smoke, and loopback port verification.
+- `[DONE]` Require a dedicated production limiter key without database-URL fallback and keep only a synthetic development/test fallback.
+- `[DONE]` Exercise the actual login POST route with Access/CSRF denial, generic failures, success/session/cookie behavior, sanitized audits, normalization, production configuration failure, and real concurrency.
+- `[DONE]` Cover limiter window boundaries, retention, stale-bucket clearing, inactive/passwordless/unknown users, independent identifiers, and the five-attempt cap on migrated PostgreSQL.
+- `[DONE]` Bound advisory-lock waits with a transaction-local PostgreSQL timeout while retaining strict same-identifier serialization and multi-instance correctness.
+- `[DONE]` Test complete auth maintenance command boundaries for fixed error output, nonzero exit state, and database disconnect attempts.
+- `[BLOCKED]` Current closeout deployment and authenticated production smoke require the dedicated private limiter key; do not substitute another environment value.
 - `[BLOCKED]` Keep `SecurityUnlock` runtime changes blocked until its intended semantics are sufficiently defined.
 
 ### Available Applications
@@ -322,4 +330,5 @@ BielOS MVP is complete when:
 - `[DONE]` Core Phase 13: final plan-tree and operational status synchronization.
 - `[DONE]` Core hardening follow-up: database-backed authorization, concurrency, session, audit, and operations verification plus CI integration.
 - `[DONE]` Core hardening campaign: correct verification drift, fix the concurrent login limiter, sanitize operational auth errors, run the full local/Docker/production gate, and synchronize status.
+- `[DONE]` Core closeout campaign: enforce dedicated production limiter configuration, add real route/lifecycle coverage, bound lock contention, strengthen command-boundary tests, and complete the local/Docker verification gate.
 - `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.

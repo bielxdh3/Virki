@@ -34,14 +34,19 @@ Current behavior:
 - Stores no raw email, raw IP address, raw user agent, password, token, cookie, JWT, or Cloudflare value.
 - Allows 5 failed attempts per 15-minute window per hashed identifier.
 - Serializes same-identifier authentication attempts in PostgreSQL so concurrent failures cannot overwrite increments or exceed the verification limit.
+- Limits PostgreSQL advisory-lock waits to 5 seconds and the authentication transaction to 15 seconds; timeout or database failure returns the generic fail-closed result.
 - Clears the bucket after a successful login.
 - Expires old buckets after 24 hours.
 - Fails closed when the limiter cannot be checked, returning the same generic login failure to the browser.
 - Returns the same generic login error to avoid revealing whether the email or password was wrong.
 
-This keeps the limiter durable across hub restarts and shared by hub instances that use the same database and hash key.
+This keeps the limiter durable across hub restarts and shared by hub instances that use the same database and hash key. Password verification intentionally remains inside the locked transaction because moving it outside would allow more than five same-identifier verifications under concurrency. Database tests show bounded same-identifier completion, distinct-identifier independence, and fail-closed lock timeout. The accepted cost is holding one pool connection during Argon2 verification; the private Access boundary and current single hub replica keep this proportionate. Edge/IP controls remain future work.
 
 Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private value. It is used only to HMAC login rate limit identifiers and must not be committed, logged, or shared. Production never derives this key from `DATABASE_URL` and never uses the synthetic development/test fallback. Missing production configuration fails closed with the generic login response. Rotating the key creates new buckets because no raw identifier exists to migrate; existing hashed buckets expire through normal retention.
+
+Authentication prunes expired limiter rows with an indexed `expiresAt` delete before processing. Per-request cleanup remains appropriate for the current small private-hub volume and guarantees stale rows do not persist indefinitely; moving it into maintenance would add coordination without a reproduced operational benefit.
+
+Real PostgreSQL route tests invoke `POST /api/login` with actual requests, forms, CSRF validation, limiter rows, redirects, session creation, response-cookie attributes, and sanitized audits. They cover required Access denial, missing/invalid CSRF, invalid and rate-limited credentials, missing fields, normalized success, inactive users, unavailable production configuration, and concurrent requests.
 
 ## CSRF Posture
 
@@ -76,5 +81,7 @@ Cloudflare Access is the outer boundary for `hub.biel.dev.br`, and BielOS intern
 ## Remaining Limitations
 
 - No edge-level or IP-based rate limit in this repository.
+- The closeout runtime cannot be deployed until the dedicated private production limiter key is configured.
+- Authenticated production OWNER/MEMBER browser smoke and final remote CI evidence remain pending.
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.

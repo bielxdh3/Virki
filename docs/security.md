@@ -47,7 +47,7 @@ The schema stores session tokens as hashes and includes a separate security unlo
 
 Production Compose runs a small `session-cleanup` worker that periodically deletes expired or revoked sessions. The worker uses the same private database environment as the hub, publishes no ports, and logs only the number of inactive sessions removed.
 
-Login rate limiting stores only a keyed hash of the normalized submitted login identifier, attempt count, window timestamps, and expiration timestamp. Login transactions for the same identifier are serialized with a PostgreSQL transaction-scoped advisory lock, and retained attempts are capped at five. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed for login when the limiter cannot be checked, while still returning the same generic login failure to the browser.
+Login rate limiting stores only a keyed hash of the normalized submitted login identifier, attempt count, window timestamps, and expiration timestamp. Login transactions for the same identifier are serialized with a PostgreSQL transaction-scoped advisory lock, retained attempts are capped at five, advisory-lock waits are limited to five seconds, and the authentication transaction is limited to 15 seconds. Password verification remains inside that boundary to preserve the strict concurrent verification cap; distinct identifiers use independent locks. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed for login when configuration, locking, or database access is unavailable while returning the same generic login failure to the browser.
 
 Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private secret for HMAC hashing login rate limit identifiers. Production does not derive it from `DATABASE_URL` or use the synthetic development/test fallback. Missing or empty production configuration fails closed with the generic login response. Do not commit, log, paste, or share a real value. Rotating this secret creates new buckets; old hashed buckets expire through normal retention and cannot be migrated because raw identifiers are not stored.
 
@@ -57,7 +57,7 @@ BielOS records minimal local audit logs for internal auth and security operation
 
 Audit logs must not store passwords, session tokens, cookies, raw authorization headers, Cloudflare secrets, raw IP addresses, private paths, or database dumps.
 
-Audit logging is fail-soft in the MVP: if an audit write fails, the application logs only a fixed generic server-side warning and keeps the user-facing auth flow working. Auth maintenance commands also emit fixed command-specific failure messages instead of arbitrary runtime error text that could contain connection or ORM details.
+Audit logging is fail-soft in the MVP: if an audit write fails, the application logs only a fixed generic server-side warning and keeps the user-facing auth flow working. Auth maintenance commands use a shared bounded runner that discards operation and disconnect exceptions, attempts database disconnect, sets a nonzero exit state, and emits only a fixed command-specific message.
 
 Audit retention defaults to `180` days through `AUDIT_LOG_RETENTION_DAYS`. Cleanup deletes only audit rows older than the retention cutoff by `createdAt` and prints only the deleted row count. It must not print audit metadata, identifiers, headers, cookies, tokens, JWTs, raw IPs, or private values.
 
@@ -68,6 +68,8 @@ See `docs/audit-logs.md`.
 CI runs secret scan, lint, typecheck, Prisma validation, Core unit tests, migrated PostgreSQL integration tests, real concurrency tests, build, production image build, and production Compose validation. The Core database suites use one synthetic PostgreSQL service and do not require production secrets.
 
 The current hardening campaign passed the complete local gate, production image and Compose checks, production restart, unauthenticated health/Access checks, and loopback exposure checks. `CI remoto não confirmado.` for the final campaign SHA because authenticated GitHub Actions evidence was unavailable.
+
+The subsequent closeout gate passed 33 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, synthetic Compose, local/public health, Access-ordering, and loopback checks. Its runtime was not restarted because the required private limiter key is not yet configured; the healthy running stack therefore remains on the prior deployed runtime. Authenticated production browser smoke also remains pending.
 
 Run locally:
 

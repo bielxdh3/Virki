@@ -263,6 +263,8 @@ Without `CORE_TEST_DATABASE_URL`, these commands create an isolated PostgreSQL C
 
 Production requires a dedicated non-empty `BIELOS_RATE_LIMIT_HASH_SECRET` for login-identifier HMACs. Confirm only that the private variable exists; never print its value. Development and test may use the built-in synthetic fallback, while production fails closed and never derives the key from `DATABASE_URL`.
 
+Do not run a production restart when that private variable is absent. Configure it interactively, validate Compose without printing resolved environment values, and then restart. A synthetic placeholder is sufficient only for CI or local Compose syntax validation.
+
 The secret scan is intentionally safe to run locally. It scans tracked repository files plus new non-ignored files and reports only file paths, line numbers, and rule ids.
 
 For CSRF changes, inventory login, logout, Core project lifecycle/access, personal session, and existing GymForge mutation forms. Verify locally when feasible that each form carries the CSRF field, valid submissions work, and missing-token mutations return HTTP `403` without changing state.
@@ -272,6 +274,8 @@ Remote CI evidence must identify the exact commit SHA and completed workflow res
 Authenticated OWNER/MEMBER browser smoke must use an existing safe browser session and disposable identities through Cloudflare Access and BielOS login. Do not request credentials, extract cookies or tokens, reset passwords, or weaken either boundary. If no safe authenticated session is available, preserve the manual checklist in `docs/deployment-verification.md` and report the smoke as incomplete.
 
 The latest Core hardening campaign passed the complete local gate, production image and Compose checks, production restart, local/public health checks, Cloudflare-first hub routing, and loopback port verification. Remote CI evidence was unavailable, and authenticated OWNER/MEMBER browser smoke remains pending because no safe authenticated browser session was available.
+
+The closeout campaign passed its complete local/database gate, production build and image, and synthetic Compose validation; disposable database resources were removed. The existing production stack remained healthy with Cloudflare-first routing and loopback-only application ports. The new runtime was intentionally not restarted because the dedicated private limiter key was absent. `CI remoto não confirmado.` and authenticated production smoke remains pending.
 
 Diagnostic reports should summarize pass/fail state and non-sensitive errors only. Do not include raw command logs when they could expose environment values, private identifiers, headers, IPs, cookies, JWTs, tokens, or database URLs.
 

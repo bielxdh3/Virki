@@ -143,7 +143,10 @@ Current automated coverage includes:
 - personal-session read/revoke/revoke-all isolation, current-session preservation, expired/revoked behavior, post-revocation authentication, and cleanup compatibility;
 - owner-only newest-first 50-row audit display with safe legacy fallbacks and no private display columns;
 - successful, failed, synchronous-error, stalled, and single-flight operations probes;
-- persistent login limiting with same-identifier transaction serialization, bounded attempt retention, normalized identifiers, route-level throttling, and successful-bucket clearing;
+- persistent login limiting with a required dedicated production key, same-identifier transaction serialization, a five-second database lock timeout, bounded attempt retention, normalized identifiers, real route-level throttling, and successful-bucket clearing;
+- login-route Access/CSRF denial, generic failures, session/cookie success, inactive/configuration failure, sanitized audits, and concurrent request behavior;
+- exact limiter window reset, retention cleanup, stale-bucket clearing, independent identifiers, and inactive/passwordless/unknown-user behavior;
+- fixed operational command failure output across operation and disconnect errors;
 - CI execution on Node 22 with one synthetic PostgreSQL service and separate integration/concurrency selections.
 
-The latest complete local gate passed 25 unit tests, 22 database integration tests, 9 concurrency tests, the production build, production image build, and production Compose validation. Production restart, local/public health, Cloudflare-first hub routing, and loopback port checks also passed. The final remote CI result was not independently available, and authenticated OWNER/MEMBER browser smoke remains pending until a safe authenticated browser session is available.
+The latest complete local gate passed 33 unit tests, 47 aggregate database tests, 35 database integration tests, 12 concurrency tests, the production build, production image build, and production Compose validation with synthetic configuration. Disposable test containers and volumes were removed. The currently running prior stack passed local/public health, Cloudflare-first hub routing, and loopback port checks. The closeout runtime was not restarted because its required private limiter key is not yet configured. The final remote CI result was not independently available, and authenticated OWNER/MEMBER production browser smoke remains pending until the key is configured and a safe authenticated browser session is available.
