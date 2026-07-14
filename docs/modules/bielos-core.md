@@ -1,5 +1,9 @@
 # BielOS Core Security And Data Design
 
+## Implementation Status
+
+Core project registry and project management are implemented in the private hub at `/core/projects`. Read scope follows this document, OWNER/ADMIN mutations require Cloudflare Access, BielOS authentication, CSRF, bounded validation, generic errors, and sanitized audits, and permanent deletion remains unavailable. Project access administration is the next runtime phase.
+
 ## Identity
 
 - Status: Core expansion authorized; this document is the runtime gate for project, access, session, operations, and audit surfaces.

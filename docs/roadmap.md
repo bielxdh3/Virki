@@ -4,7 +4,7 @@
 
 BielOS Core expansion is explicitly authorized and is now the active roadmap. Core is the private hub platform and workspace, distinct from applications and reserved modules. The existing `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models are foundations only; no future Core runtime phase is complete merely because those models exist.
 
-The Core security and architecture gate is complete in `docs/modules/bielos-core.md`. It defines identity, project visibility and lifecycle, access precedence, session privacy, sanitized audit data, safe operations visibility, and a design-only block on `SecurityUnlock` runtime semantics. Core project registry and project management are the next runtime phase.
+The Core security and architecture gate is complete in `docs/modules/bielos-core.md`. Core project registry and project management are implemented at `/core/projects` using the existing schema, bounded read authorization, OWNER/ADMIN mutations, CSRF, archive-only lifecycle, and sanitized audits. Core project access management is the next runtime phase.
 
 Project access, session management, operations, audit visibility, and hub integration remain future scoped phases until implemented and validated.
 
