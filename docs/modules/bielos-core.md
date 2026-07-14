@@ -67,6 +67,8 @@ The existing model does not define how a challenge is issued or verified, who ma
 
 Runtime use is therefore blocked. A future design must define challenge entropy and delivery, verification, request/approval separation, expiration, one-time consumption, project and purpose scope, denial/revocation, recovery rules, concurrency, rate limits, and audit events. An unlock may only be an additional scoped gate; it can never replace Cloudflare Access, BielOS authentication, user activity checks, or project authorization.
 
+The dedicated gate and unresolved decision set are recorded in `docs/security-unlock.md`.
+
 ## Sessions
 
 - Users may see only their own sessions.

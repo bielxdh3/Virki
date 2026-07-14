@@ -103,7 +103,7 @@ Further GymForge expansion is frozen. Upload/photo proof, public registration, i
 - Core audits contain only allowlisted event types, enum values, aggregate counts, and stable hashed resource references. They exclude names, slugs, descriptions, emails, raw identifiers, raw forms, secrets, cookies, tokens, token hashes, JWTs, headers, IPs, environment values, database URLs, logs, and unrestricted free text.
 - Personal session management selects only safe timestamps and revocation/current state. Users cannot inspect another user's sessions, and administrators receive no broad session-spying capability.
 - Operations UI reports only bounded application/database checks it actually performs. It does not access the Docker socket, raw logs, environment values, private Cloudflare identifiers, or external network services during page rendering; unknown state stays explicit.
-- `SecurityUnlock` runtime behavior remains blocked because challenge issuance, approval, consumption, denial, recovery, and rate-limit semantics are not sufficiently defined. It can only become an additional scoped gate, never a replacement for existing access boundaries.
+- `SecurityUnlock` runtime behavior remains blocked by the completed design-only gate in `docs/security-unlock.md` because challenge issuance, approval, consumption, denial, recovery, and rate-limit semantics are not sufficiently defined. It can only become an additional scoped gate, never a replacement for existing access boundaries.
 
 The complete contract is in `docs/modules/bielos-core.md`.
 
