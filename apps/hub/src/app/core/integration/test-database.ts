@@ -16,6 +16,7 @@ export async function cleanCoreIntegrationTestData(): Promise<void> {
   await assertCoreIntegrationTestDatabase();
 
   await prisma.$transaction([
+    prisma.loginRateLimit.deleteMany(),
     prisma.auditLog.deleteMany(),
     prisma.securityUnlock.deleteMany(),
     prisma.session.deleteMany(),

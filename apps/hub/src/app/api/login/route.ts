@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server";
 import {
-  authenticateUser,
-  checkLoginRateLimit,
-  clearLoginRateLimit,
+  authenticateUserWithRateLimit,
   createAuditRequestMetadata,
   createSession,
   getSessionCookieOptions,
   hashAuditEmail,
   normalizeEmail,
-  recordFailedLogin,
   SESSION_COOKIE_NAME,
   writeAuditLog
 } from "@bielos/auth";
@@ -37,49 +34,26 @@ export async function POST(request: Request) {
   const auditMetadata = createAuditRequestMetadata(request.headers, "hub-login");
   const actorEmailHash = rateLimitIdentifier ? hashAuditEmail(rateLimitIdentifier) : undefined;
 
-  const rateLimit = await checkLoginRateLimit(rateLimitIdentifier);
-
-  if (!rateLimit.allowed) {
-    await writeAuditLog({
-      eventType: "AUTH_LOGIN_FAILURE",
-      result: "FAILURE",
-      actorEmailHash,
-      resource: "hub",
-      message: rateLimit.failureMode ? "Login rate limit unavailable." : "Login rate limit reached.",
-      metadata: auditMetadata
-    });
-    return redirectToLogin(request, true);
-  }
-
-  if (!email || !password) {
-    await recordFailedLogin(rateLimitIdentifier);
-    await writeAuditLog({
-      eventType: "AUTH_LOGIN_FAILURE",
-      result: "FAILURE",
-      actorEmailHash,
-      resource: "hub",
-      message: "Login failed.",
-      metadata: auditMetadata
-    });
-    return redirectToLogin(request, true);
-  }
-
-  const user = await authenticateUser(email, password);
+  const authentication = await authenticateUserWithRateLimit(email, password);
+  const user = authentication.user;
 
   if (!user) {
-    await recordFailedLogin(rateLimitIdentifier);
     await writeAuditLog({
       eventType: "AUTH_LOGIN_FAILURE",
       result: "FAILURE",
       actorEmailHash,
       resource: "hub",
-      message: "Login failed.",
+      message:
+        authentication.failureMode === "rate-limited"
+          ? "Login rate limit reached."
+          : authentication.failureMode === "limiter-unavailable"
+            ? "Login rate limit unavailable."
+            : "Login failed.",
       metadata: auditMetadata
     });
     return redirectToLogin(request, true);
   }
 
-  await clearLoginRateLimit(rateLimitIdentifier);
   const session = await createSession(user.id);
   await writeAuditLog({
     eventType: "AUTH_LOGIN_SUCCESS",

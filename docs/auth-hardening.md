@@ -33,6 +33,7 @@ Current behavior:
 - Keyed by a server-side HMAC of the normalized submitted login identifier.
 - Stores no raw email, raw IP address, raw user agent, password, token, cookie, JWT, or Cloudflare value.
 - Allows 5 failed attempts per 15-minute window per hashed identifier.
+- Serializes same-identifier authentication attempts in PostgreSQL so concurrent failures cannot overwrite increments or exceed the verification limit.
 - Clears the bucket after a successful login.
 - Expires old buckets after 24 hours.
 - Fails closed when the limiter cannot be checked, returning the same generic login failure to the browser.
