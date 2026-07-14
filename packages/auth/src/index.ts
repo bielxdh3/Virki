@@ -23,6 +23,7 @@ const DUMMY_PASSWORD_HASH =
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5;
 const LOGIN_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const LOGIN_RATE_LIMIT_LOCK_TIMEOUT_MS = 5_000;
 
 export type AuthenticatedUser = {
   id: string;
@@ -376,6 +377,9 @@ async function lockLoginRateLimitIdentifier(
   transaction: Prisma.TransactionClient,
   identifierHash: string
 ): Promise<void> {
+  await transaction.$queryRaw`
+    SELECT set_config('lock_timeout', ${`${LOGIN_RATE_LIMIT_LOCK_TIMEOUT_MS}ms`}, true)
+  `;
   await transaction.$queryRaw`
     SELECT pg_advisory_xact_lock(hashtextextended(${identifierHash}, 0)) IS NULL AS "locked"
   `;
