@@ -100,6 +100,22 @@ test("ungranted and inactive MEMBER principals cannot retrieve restricted data",
   assert.equal(serialized.includes(data.memberA.id), false);
 });
 
+test("crafted or stale principal roles cannot widen project reads", async () => {
+  const forgedOwner = { id: data.memberB.id, role: "OWNER" };
+  const invalidRole = { id: data.memberB.id, role: "SUPERUSER" };
+
+  assert.deepEqual(await listCoreProjectsForPrincipal(forgedOwner), []);
+  assert.deepEqual(await listCoreProjectsForPrincipal(invalidRole), []);
+  assert.equal(
+    await findCoreProjectForPrincipal(forgedOwner, data.sensitiveRestricted.id),
+    null
+  );
+  assert.equal(
+    await findCoreProjectForPrincipal(invalidRole, data.internalRestricted.id),
+    null
+  );
+});
+
 async function seedAuthorizationData() {
   const [owner, admin, memberA, memberB, inactiveMember] = await Promise.all([
     createUser("owner@example.invalid", "OWNER", true),

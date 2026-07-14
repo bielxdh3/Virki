@@ -20,18 +20,20 @@ const safeProjectFields = {
 } as const;
 
 export async function listCoreProjectsForPrincipal(principal: CoreProjectPrincipal) {
-  if (!(await isActivePrincipal(principal.id))) {
+  const persistedPrincipal = await getPersistedPrincipal(principal);
+
+  if (!persistedPrincipal) {
     return [];
   }
 
-  const administrator = isCoreAdministrator(principal.role);
+  const administrator = isCoreAdministrator(persistedPrincipal.role);
 
   return prisma.project.findMany({
-    where: getCoreProjectReadScope(principal),
+    where: getCoreProjectReadScope(persistedPrincipal),
     select: {
       ...safeProjectFields,
       accesses: {
-        where: administrator ? undefined : { userId: principal.id },
+        where: administrator ? undefined : { userId: persistedPrincipal.id },
         select: {
           accessLevel: true,
           user: {
@@ -57,27 +59,35 @@ export async function findCoreProjectForPrincipal(
   principal: CoreProjectPrincipal,
   projectId: string
 ) {
-  if (!isValidCoreResourceId(projectId) || !(await isActivePrincipal(principal.id))) {
+  const persistedPrincipal = await getPersistedPrincipal(principal);
+
+  if (!isValidCoreResourceId(projectId) || !persistedPrincipal) {
     return null;
   }
 
   return prisma.project.findFirst({
     where: {
-      AND: [{ id: projectId }, getCoreProjectReadScope(principal)]
+      AND: [{ id: projectId }, getCoreProjectReadScope(persistedPrincipal)]
     },
     select: safeProjectFields
   });
 }
 
-async function isActivePrincipal(userId: string): Promise<boolean> {
-  if (!isValidCoreResourceId(userId)) {
-    return false;
+async function getPersistedPrincipal(
+  principal: CoreProjectPrincipal
+): Promise<CoreProjectPrincipal | null> {
+  if (!isValidCoreResourceId(principal.id)) {
+    return null;
   }
 
   const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { isActive: true }
+    where: { id: principal.id },
+    select: { isActive: true, role: true }
   });
 
-  return user?.isActive === true;
+  if (!user?.isActive || user.role !== principal.role) {
+    return null;
+  }
+
+  return { id: principal.id, role: user.role };
 }
