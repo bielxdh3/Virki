@@ -7,6 +7,7 @@ Use this checklist for the first production launch and later smoke tests. Do not
 - Confirm the private `.env` file exists locally in the repository root.
 - Confirm the private `.env` defines these names without printing their values:
   - `DATABASE_URL`
+  - `BIELOS_RATE_LIMIT_HASH_SECRET`
   - `POSTGRES_PASSWORD`
   - `NEXT_PUBLIC_HUB_URL`
   - `CLOUDFLARE_TUNNEL_TOKEN`
@@ -109,7 +110,7 @@ Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it re
 
 ## Current Verification State And Remaining Limitations
 
-- Login rate limiting is persisted in PostgreSQL, serializes same-identifier updates with a transaction-scoped advisory lock, caps attempts at five, and stores only a keyed hash of the normalized identifier plus bounded attempt/window state.
+- Login rate limiting is persisted in PostgreSQL, requires a dedicated private HMAC key in production, serializes same-identifier updates with a transaction-scoped advisory lock, caps attempts at five, and stores only a keyed hash of the normalized identifier plus bounded attempt/window state.
 - CSRF protection covers login, logout, Core project lifecycle and access management, personal session management, and existing mutable GymForge flows.
 - A current PostgreSQL backup was created and verified before the committed migrations were deployed with `prisma migrate deploy`; restore was validated against a disposable target.
 - The latest complete local gate, production image build, production Compose validation, production restart, local/public health checks, Cloudflare-first hub routing, and loopback port checks passed.

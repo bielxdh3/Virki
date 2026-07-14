@@ -1,7 +1,8 @@
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import { prisma, type Prisma } from "@bielos/database";
 import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
+import { createLoginRateLimitIdentifierHash } from "./rate-limit-config";
 
 export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
 export {
@@ -214,9 +215,8 @@ export async function authenticateUserWithRateLimit(
   password: string,
   now = new Date()
 ): Promise<LoginAuthenticationResult> {
-  const identifierHash = hashLoginRateLimitIdentifier(email);
-
   try {
+    const identifierHash = hashLoginRateLimitIdentifier(email);
     await pruneExpiredLoginRateLimits(now);
 
     return await prisma.$transaction(
@@ -471,17 +471,7 @@ function findAuthenticationUser(
 }
 
 function hashLoginRateLimitIdentifier(identifier: string): string {
-  return createHmac("sha256", getLoginRateLimitHashKey())
-    .update(normalizeRateLimitIdentifier(identifier), "utf8")
-    .digest("hex");
-}
-
-function getLoginRateLimitHashKey(): string {
-  return (
-    process.env.BIELOS_RATE_LIMIT_HASH_SECRET
-    ?? process.env.DATABASE_URL
-    ?? "local-development-rate-limit-key"
-  );
+  return createLoginRateLimitIdentifierHash(normalizeRateLimitIdentifier(identifier));
 }
 
 function normalizeRateLimitIdentifier(identifier: string): string {

@@ -261,6 +261,8 @@ npm run test:core:concurrency
 
 Without `CORE_TEST_DATABASE_URL`, these commands create an isolated PostgreSQL Compose project on a random loopback port, apply committed migrations, run synthetic fixtures, and remove the service and volume. The runner refuses production mode, non-test database/user identities, and non-allowlisted hosts. Do not point it at durable data and do not replace migration deployment with `db push`.
 
+Production requires a dedicated non-empty `BIELOS_RATE_LIMIT_HASH_SECRET` for login-identifier HMACs. Confirm only that the private variable exists; never print its value. Development and test may use the built-in synthetic fallback, while production fails closed and never derives the key from `DATABASE_URL`.
+
 The secret scan is intentionally safe to run locally. It scans tracked repository files plus new non-ignored files and reports only file paths, line numbers, and rule ids.
 
 For CSRF changes, inventory login, logout, Core project lifecycle/access, personal session, and existing GymForge mutation forms. Verify locally when feasible that each form carries the CSRF field, valid submissions work, and missing-token mutations return HTTP `403` without changing state.

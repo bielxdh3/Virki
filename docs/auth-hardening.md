@@ -41,15 +41,15 @@ Current behavior:
 
 This keeps the limiter durable across hub restarts and shared by hub instances that use the same database and hash key.
 
-Set `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file to a stable private value. It is used only to HMAC login rate limit identifiers and must not be committed, logged, or shared. Rotating it invalidates existing rate limit buckets, which is acceptable.
+Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private value. It is used only to HMAC login rate limit identifiers and must not be committed, logged, or shared. Production never derives this key from `DATABASE_URL` and never uses the synthetic development/test fallback. Missing production configuration fails closed with the generic login response. Rotating the key creates new buckets because no raw identifier exists to migrate; existing hashed buckets expire through normal retention.
 
 ## CSRF Posture
 
 Session cookies use `SameSite=Lax`, `HttpOnly`, and `Secure` in production.
 
-Login and logout are POST-only routes and require an explicit CSRF token. Missing or invalid CSRF tokens return HTTP `403` before login or logout state changes are attempted.
+Explicit CSRF tokens protect login, logout, Core project lifecycle mutations, Core project-access mutations, personal session mutations, and existing mutable GymForge flows. Missing or invalid CSRF tokens return HTTP `403` before state changes are attempted, and every future mutable browser route must add the same protection before shipping.
 
-Extend explicit CSRF tokens before exposing broader write actions from the hub.
+CSRF token values must not be logged, stored in audit metadata, or reused as session tokens. Signing material is process-local in the current single-hub-replica deployment, so a form created before a process restart may require reload. Multiple hub replicas would require shared signing material or another separately approved strategy.
 
 ## Expired Session Cleanup
 

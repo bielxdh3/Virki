@@ -76,6 +76,7 @@ jobs:
       - name: Validate production Compose config
         env:
           DATABASE_URL: postgresql://bielos_app:local-validation-only@postgres:5432/bielos
+          BIELOS_RATE_LIMIT_HASH_SECRET: replace-with-test-secret
           POSTGRES_PASSWORD: local-validation-only
           NEXT_PUBLIC_HUB_URL: https://hub.example.invalid
           CLOUDFLARE_TUNNEL_TOKEN: placeholder

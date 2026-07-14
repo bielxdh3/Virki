@@ -49,7 +49,7 @@ Production Compose runs a small `session-cleanup` worker that periodically delet
 
 Login rate limiting stores only a keyed hash of the normalized submitted login identifier, attempt count, window timestamps, and expiration timestamp. Login transactions for the same identifier are serialized with a PostgreSQL transaction-scoped advisory lock, and retained attempts are capped at five. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed for login when the limiter cannot be checked, while still returning the same generic login failure to the browser.
 
-Set `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private secret for HMAC hashing login rate limit identifiers. Do not commit, log, paste, or share a real value. Rotating this secret invalidates existing rate limit buckets, which is acceptable for this limiter.
+Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private secret for HMAC hashing login rate limit identifiers. Production does not derive it from `DATABASE_URL` or use the synthetic development/test fallback. Missing or empty production configuration fails closed with the generic login response. Do not commit, log, paste, or share a real value. Rotating this secret creates new buckets; old hashed buckets expire through normal retention and cannot be migrated because raw identifiers are not stored.
 
 ## Audit Logging
 
