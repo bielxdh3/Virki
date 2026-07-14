@@ -57,7 +57,9 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` The typed hub registry separates Core workspace surfaces, available GymForge, and inert reserved modules.
 - `[DONE]` Core operations visibility separates verified request-time checks, configured architecture, and external manual checks without fabricated telemetry.
 - `[DONE]` The owner-only audit activity viewer exposes a bounded, sanitized, read-only event summary without raw metadata, messages, emails, or identifiers.
-- `[NEXT]` Run the BielOS Core adversarial security and UI review.
+- `[DONE]` BielOS Core adversarial security/static-UI review found no medium/high/critical issue and fixed bounded identifiers, generic audit failure logging, and operations probe accumulation.
+- `[DONE]` Full Core validation, current backup, pending committed migration deployment, production restart, and unauthenticated smoke checks passed.
+- `[NEXT]` Add database-backed Core authorization/concurrency integration tests and complete authenticated owner/member browser smoke.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
 - `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
 - `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
@@ -148,8 +150,8 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Replace production reliance on `prisma db push` before private/non-discardable data ingestion.
 - `[DONE]` Create committed Prisma migrations.
 - `[DONE]` Document production `prisma migrate deploy`.
-- `[DONE]` Add the committed additive GymForge score-correction migration; it is not yet applied to production.
-- `[LATER]` Deploy that migration only after a current verified backup, using `prisma migrate deploy`.
+- `[DONE]` Add the committed additive GymForge score-correction migration.
+- `[DONE]` Create and verify a current backup, deploy the committed migration with `prisma migrate deploy`, and confirm migration status is current.
 - `[LATER]` Keep disposable/local-only schema workflows clearly separated from production.
 
 ## 9. Backup And Restore Plan
@@ -189,7 +191,9 @@ BielOS Core is the private hub platform and workspace, not a reserved module. It
 - `[DONE]` Core workspace and available applications are integrated in the typed hub registry.
 - `[DONE]` Safe operations visibility uses a bounded database probe and honest unknown/manual states.
 - `[DONE]` Owner-only audit visibility is implemented with a 50-row newest-first bound and safe display categories.
-- `[NEXT]` Complete the BielOS Core adversarial security and UI review.
+- `[DONE]` Complete the BielOS Core adversarial security/static-UI review and resolve all confirmed findings; authenticated visual smoke remains a follow-up.
+- `[DONE]` Complete full validation, backup/migration deployment, production restart, and unauthenticated smoke checks.
+- `[NEXT]` Add database-backed Core authorization/concurrency tests and complete authenticated owner/member browser smoke.
 - `[BLOCKED]` Keep `SecurityUnlock` runtime changes blocked until its intended semantics are sufficiently defined.
 
 ### Available Applications
@@ -301,5 +305,10 @@ BielOS MVP is complete when:
 - `[DONE]` Core Phase 6: hub application registry integration.
 - `[DONE]` Core Phase 7: safe operations visibility.
 - `[DONE]` Core Phase 8: conditional owner-only audit visibility.
-- `[NEXT]` Core Phase 9: adversarial security and UI review.
+- `[DONE]` Core Phase 9: adversarial security/static-UI review with three low-severity fixes.
+- `[DONE]` Core Phase 10: full validation and Compose configuration gate.
+- `[DONE]` Core Phase 11: verified current PostgreSQL backup and committed migration deployment.
+- `[DONE]` Core Phase 12: production restart and unauthenticated health/exposure smoke.
+- `[DONE]` Core Phase 13: final plan-tree and operational status synchronization.
+- `[NEXT]` Core follow-up: database-backed authorization/concurrency tests and authenticated owner/member browser smoke.
 - `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.

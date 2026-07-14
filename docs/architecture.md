@@ -35,10 +35,12 @@ Cloudflare Tunnel and Cloudflare Access provide the external boundary for the pr
 
 ## Core And Applications
 
-BielOS Core owns project, access, personal session, safe operations, and gated audit surfaces. GymForge is an available application linked from the hub; its feature expansion is frozen. L-vault, root.ark, and H-vault remain reserved and inert.
+BielOS Core owns the deployed project, access, personal session, safe operations, and owner-only audit surfaces. GymForge is an available application linked from the hub; its feature expansion is frozen. L-vault, root.ark, and H-vault remain reserved and inert.
 
 The Core authorization and data contract is documented in `docs/modules/bielos-core.md`.
 
 `packages/ui` owns the small typed hub registry. It classifies Core surfaces, available applications, and reserved modules without introducing a plugin runtime or placeholder routes.
 
 The Core operations panel performs only local, bounded application checks. It does not inspect Docker, read raw logs or environment values, or make external requests while rendering. Deployment and edge status remain separate manual validation.
+
+The production Compose stack runs the public site, private hub, PostgreSQL, Cloudflare Tunnel, and session-cleanup worker. App ports remain published only on `127.0.0.1`; Cloudflare Access remains the first hub boundary and BielOS authentication remains the second.

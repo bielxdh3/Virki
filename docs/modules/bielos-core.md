@@ -8,6 +8,8 @@ The hub uses a typed application registry that separates Core workspace surfaces
 
 The hub operations panel separates request-time checks, configured architecture, and external manual validation. It verifies only the current hub render, authenticated session, and a timeout-bounded minimal database query. Container health, public routes, Cloudflare ordering, ports, and migration state remain manual checks; no Docker socket, raw logs, environment values, or external network dependency is introduced.
 
+The initial Core expansion passed focused adversarial review and full repository validation and is deployed in the production Compose stack. The review fixed bounded project identifiers, generic audit-write failure logging, and single-flight database probes. Public/local health, Cloudflare-first ordering, container state, migration state, and loopback port exposure were verified. Authenticated browser smoke and database-backed authorization/concurrency integration tests remain explicit follow-up gates.
+
 ## Identity
 
 - Status: Core expansion authorized; this document is the runtime gate for project, access, session, operations, and audit surfaces.

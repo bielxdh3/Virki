@@ -54,7 +54,7 @@ BielOS records minimal local audit logs for internal auth and security operation
 
 Audit logs must not store passwords, session tokens, cookies, raw authorization headers, Cloudflare secrets, raw IP addresses, private paths, or database dumps.
 
-Audit logging is fail-soft in the MVP: if an audit write fails, the application logs a safe server-side warning and keeps the user-facing auth flow working.
+Audit logging is fail-soft in the MVP: if an audit write fails, the application logs only a fixed generic server-side warning and keeps the user-facing auth flow working.
 
 Audit retention defaults to `180` days through `AUDIT_LOG_RETENTION_DAYS`. Cleanup deletes only audit rows older than the retention cutoff by `createdAt` and prints only the deleted row count. It must not print audit metadata, identifiers, headers, cookies, tokens, JWTs, raw IPs, or private values.
 
@@ -128,9 +128,9 @@ Private invitations are frozen with the rest of optional GymForge expansion.
 - Correction-created and correction-revoked audits contain only stable hashed competition, participant, and correction references plus a generic result. They omit the raw audit actor id and all actor ids from metadata; actor attribution stays on the correction row. They never contain raw ids, names, reason, delta, score values, request keys, raw forms, or raw request data.
 - Correction/revocation history is retained. Permanent competition deletion is blocked whenever any correction row exists, and restrictive participant history prevents cascade deletion.
 - Ranking remains deterministic by final score, attendance count, longest streak, latest qualifying check-in, display-name sort, and finally internal participant id only as a non-displayed fallback.
-- The committed additive migration has not been applied to production. Deployment waits for a current verified backup and `prisma migrate deploy`.
+- The committed additive migration was applied to production with `prisma migrate deploy` after a current custom-format PostgreSQL backup was created and verified; the post-deploy migration status is current.
 - After the first correction write, dropping the table or rolling the application back to a pre-Phase-3 commit is unsafe because assignment, reactivation, and `DRAFT` guards live in the new runtime. Recovery requires a forward fix or verified restore.
-- Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and production build pass before commit. Migration deployment and authenticated runtime smoke remain gated on the production backup/deploy phase.
+- Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and production build pass. Local/public health, Cloudflare-first ordering, container state, and loopback exposure were verified after deploy; authenticated runtime smoke remains a manual follow-up because no authenticated browser session was available to the automation.
 
 ## Production Exposure Blockers
 

@@ -51,8 +51,8 @@ Do not invent a new skill unless the user explicitly requests creating one.
 - GymForge is no longer merely reserved: its private-hub MVP includes participant and exercise administration, attendance check-ins and correction, single-set workout creation/editing plus explicit deletion, rankings and streaks, competition lifecycle management, participant assignment, deterministic automatic scoring, and additive competition score correction.
 - The current workout MVP intentionally creates and edits exactly one set per workout. Updates must fail safely when a stored workout unexpectedly has zero or multiple sets, while explicit workout deletion must transactionally remove all dependent sets.
 - GymForge competition score-correction Phases 2 and 3 are complete. Corrections preserve the separate current-state automatic base, use append-only additive/revocation history, and remain private to the existing authenticated hub boundary.
-- GymForge private invitations are the next scoped phase. Invite acceptance remains blocked until Phase 4 is implemented and validated.
-- Future GymForge work must stay scoped and preserve existing Cloudflare Access, BielOS internal auth, CSRF, audit logging, and private hub boundaries.
+- Further GymForge feature expansion is frozen while BielOS Core is the active product path. No GymForge invitation or optional feature phase is next.
+- Preserve existing GymForge behavior and its Cloudflare Access, BielOS internal auth, CSRF, audit logging, and private hub boundaries; integration work is limited to accurate hub registry/navigation behavior unless the user explicitly changes this direction.
 - Do not add GymForge upload or photo proof, public registration, invite acceptance before Phase 4, import/export, unsafe competition deletion, a public API, or broad social feed behavior unless explicitly requested in a scoped phase.
 
 ## Output Rules

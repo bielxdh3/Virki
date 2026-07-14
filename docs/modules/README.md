@@ -4,11 +4,11 @@ This directory contains application and reserved-module planning documents. Biel
 
 ## BielOS Core
 
-- Status: active expansion authorized.
+- Status: initial runtime expansion implemented, validated, and deployed.
 - Existing foundations: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
 - Security and architecture gate: complete in `bielos-core.md`.
-- Next runtime phase: Core project registry and project management.
-- Future Core phases must not be treated as complete until implemented and validated.
+- Implemented surfaces: project registry/lifecycle, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.
+- Next gate: database-backed authorization/concurrency tests and authenticated browser smoke; `SecurityUnlock` runtime remains blocked by its design boundary.
 
 ## Available Applications
 
