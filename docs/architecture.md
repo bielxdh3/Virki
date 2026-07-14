@@ -38,3 +38,5 @@ Cloudflare Tunnel and Cloudflare Access provide the external boundary for the pr
 BielOS Core owns project, access, personal session, safe operations, and gated audit surfaces. GymForge is an available application linked from the hub; its feature expansion is frozen. L-vault, root.ark, and H-vault remain reserved and inert.
 
 The Core authorization and data contract is documented in `docs/modules/bielos-core.md`.
+
+`packages/ui` owns the small typed hub registry. It classifies Core surfaces, available applications, and reserved modules without introducing a plugin runtime or placeholder routes.

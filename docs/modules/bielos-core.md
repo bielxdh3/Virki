@@ -4,6 +4,8 @@
 
 Core project registry, project management, and project access administration are implemented in the private hub at `/core/projects`. Personal session management is implemented at `/core/security`. Read scope follows this document; mutations require Cloudflare Access, BielOS authentication, CSRF, bounded validation, generic errors, and sanitized audits. Access changes use serializable transactions, prevent duplicate rows and role escalation, and retain the last active project owner. Session queries are user-scoped and omit token material; users may revoke only their own other sessions, with an explicit confirmation for the all-other action. Permanent project deletion remains unavailable.
 
+The hub uses a typed application registry that separates Core workspace surfaces, the available GymForge application, and inert reserved modules. Registry links do not weaken the authentication boundary or create reserved-module routes.
+
 ## Identity
 
 - Status: Core expansion authorized; this document is the runtime gate for project, access, session, operations, and audit surfaces.

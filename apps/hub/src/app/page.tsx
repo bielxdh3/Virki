@@ -1,5 +1,9 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import type { BielosLocale } from "@bielos/ui";
+import {
+  hubRegistry,
+  type BielosLocale,
+  type HubRegistryItemId
+} from "@bielos/ui";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../lib/cloudflare-access";
@@ -26,7 +30,7 @@ const copy = {
     systemIdentity: "Identidade do sistema",
     workspace: "Workspace",
     hero:
-      "Workspace pessoal para projetos, ferramentas, arquivos, automação e laboratórios técnicos. Os módulos ficam bloqueados até cada um ter seu próprio desenho de segurança e dados.",
+      "Workspace pessoal para projetos, segurança, operações e aplicações privadas. GymForge está disponível; módulos reservados permanecem inertes.",
     session: "Sessão",
     active: "Ativa",
     overviewTitle: "Sessão, segurança e stack local",
@@ -40,15 +44,21 @@ const copy = {
     quickActions: "Ações rápidas",
     safe: "Seguro",
     viewModules: "Ver módulos",
+    viewProjects: "Abrir projetos",
+    viewSecurity: "Gerenciar sessões",
     viewDeployment: "Ver status do deploy",
-    coreReserved: "Core e áreas reservadas",
+    registryTitle: "Core, aplicações e módulos reservados",
+    coreWorkspace: "Workspace Core",
+    availableApplications: "Aplicações disponíveis",
     sensitive: "Sensível",
     internal: "Interno",
     planned: "Planejado",
-    openFoundation: "Abrir fundação",
+    available: "Disponível",
+    reserved: "Reservado",
+    open: "Abrir",
     reservedModules: "Módulos reservados",
-    futureWork: "Trabalho futuro de módulos ainda não está ativo",
-    noIngestion: "A ingestão de dados privados ainda é específica por módulo e não está habilitada por este shell."
+    futureWork: "Módulos futuros permanecem inertes",
+    noIngestion: "Os módulos reservados não possuem rotas ou ingestão. Aplicações existentes mantêm seus próprios limites privados."
   },
   en: {
     privateHub: "Private Hub",
@@ -66,7 +76,7 @@ const copy = {
     systemIdentity: "System identity",
     workspace: "Workspace",
     hero:
-      "Personal workspace for projects, tools, archives, automation, and technical labs. Modules stay locked until each one has its own security and data design.",
+      "Personal workspace for projects, security, operations, and private applications. GymForge is available; reserved modules remain inert.",
     session: "Session",
     active: "Active",
     overviewTitle: "Session, security, and local stack",
@@ -80,69 +90,67 @@ const copy = {
     quickActions: "Quick Actions",
     safe: "Safe",
     viewModules: "View modules",
+    viewProjects: "Open projects",
+    viewSecurity: "Manage sessions",
     viewDeployment: "View deployment status",
-    coreReserved: "Core and reserved areas",
+    registryTitle: "Core, applications, and reserved modules",
+    coreWorkspace: "Core workspace",
+    availableApplications: "Available applications",
     sensitive: "Sensitive",
     internal: "Internal",
     planned: "Planned",
-    openFoundation: "Open foundation",
+    available: "Available",
+    reserved: "Reserved",
+    open: "Open",
     reservedModules: "Reserved modules",
-    futureWork: "Future module work is not active yet",
-    noIngestion: "Private data ingestion is still module-specific and is not enabled by this shell."
+    futureWork: "Future modules remain inert",
+    noIngestion: "Reserved modules have no routes or ingestion. Existing applications retain their own private boundaries."
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
-function getModuleCards(locale: BielosLocale) {
+function getRegistryDescriptions(locale: BielosLocale): Record<HubRegistryItemId, string> {
   const pt = locale === "pt-BR";
 
-  return [
-    {
-      name: "BielOS Core",
-      shortName: "BC",
-      description: pt
-        ? "Shell central do workspace e placeholder do registro de módulos."
-        : "Core workspace shell and module registry placeholder.",
-      status: pt ? "Shell apenas" : "Shell only",
-      sensitivity: "internal"
-    },
-    {
-      name: "L-vault",
-      shortName: "LV",
-      description: pt
-        ? "Área de vault privado planejada. Armazenamento e ingestão não estão habilitados."
-        : "Planned private vault area. No storage or ingestion is enabled.",
-      status: pt ? "Bloqueado" : "Locked",
-      sensitivity: "sensitive"
-    },
-    {
-      name: "root.ark",
-      shortName: "RA",
-      description: pt
-        ? "Área de arquivo planejada. Documentos e registros não são aceitos."
-        : "Planned archive area. No documents or records are accepted.",
-      status: pt ? "Bloqueado" : "Locked",
-      sensitivity: "sensitive"
-    },
-    {
-      name: "H-vault",
-      shortName: "HV",
-      description: pt
-        ? "Área sensível planejada. Nenhum dado de saúde ou privado existe aqui."
-        : "Planned sensitive vault area. No health or private data exists here.",
-      status: pt ? "Bloqueado" : "Locked",
-      sensitivity: "sensitive"
-    },
-    {
-      name: "GymForge",
-      shortName: "GF",
-      description: pt
-        ? "Fundação de competição de academia com acesso fechado. Tracking e uploads não estão habilitados."
-        : "Gated gym competition foundation. Tracking and uploads are not enabled.",
-      status: pt ? "Fundação" : "Foundation",
-      sensitivity: "internal",
-      href: "/gymforge"
-    }
-  ];
+  return {
+    "bielos-core": pt
+      ? "Workspace privado para projetos, segurança pessoal e operações seguras."
+      : "Private workspace for projects, personal security, and safe operations.",
+    "core-projects": pt
+      ? "Projetos autorizados, ciclo de vida e controle de acesso."
+      : "Authorized projects, lifecycle, and access control.",
+    "core-security": pt
+      ? "Sessões pessoais com revogação segura e escopo por usuário."
+      : "Personal sessions with safe user-scoped revocation.",
+    "core-operations": pt
+      ? "Estado verificável do hub e referências operacionais seguras."
+      : "Verifiable hub state and safe operational references.",
+    gymforge: pt
+      ? "Aplicação privada de academia com presença, treinos, rankings, competições e pontuação."
+      : "Private gym application with attendance, workouts, rankings, competitions, and scoring.",
+    lvault: pt
+      ? "Vault privado reservado, sem rota, armazenamento ou ingestão."
+      : "Reserved private vault with no route, storage, or ingestion.",
+    rootark: pt
+      ? "Compartimentos zero-knowledge reservados; runtime permanece bloqueado."
+      : "Reserved zero-knowledge compartments; runtime remains blocked.",
+    hvault: pt
+      ? "Área sensível reservada, sem dados ou runtime."
+      : "Reserved sensitive area with no data or runtime."
+  };
+}
+
+function getRegistryName(id: HubRegistryItemId, fallback: string, locale: BielosLocale): string {
+  if (locale !== "pt-BR") {
+    return fallback;
+  }
+
+  const names: Partial<Record<HubRegistryItemId, string>> = {
+    "core-projects": "Workspace de projetos",
+    "core-security": "Segurança e sessões",
+    "core-operations": "Operações"
+  };
+
+  return names[id] ?? fallback;
 }
 
 export default async function HubDashboardPage() {
@@ -161,14 +169,31 @@ export default async function HubDashboardPage() {
 
   const locale = await getLocale();
   const t = copy[locale];
-  const moduleCards = getModuleCards(locale);
-  const reservedModules = moduleCards;
+  const registryDescriptions = getRegistryDescriptions(locale);
+  const registryGroups = [
+    {
+      id: "core",
+      title: t.coreWorkspace,
+      items: hubRegistry.filter((item) => item.category === "core")
+    },
+    {
+      id: "application",
+      title: t.availableApplications,
+      items: hubRegistry.filter((item) => item.category === "application")
+    },
+    {
+      id: "reserved",
+      title: t.reservedModules,
+      items: hubRegistry.filter((item) => item.category === "reserved")
+    }
+  ] as const;
+  const reservedModules = hubRegistry.filter((item) => item.category === "reserved");
   const csrfToken = createCsrfToken();
   const deploymentStatus = [
     { label: locale === "pt-BR" ? "Site público" : "Public site", value: locale === "pt-BR" ? "Disponível" : "Available" },
     { label: "Hub", value: t.protected },
     { label: "Tunnel", value: locale === "pt-BR" ? "Gerenciado" : "Managed" },
-    { label: locale === "pt-BR" ? "Dados de módulos" : "Module data", value: locale === "pt-BR" ? "Não montado" : "Not mounted" }
+    { label: "BielOS Core", value: t.active }
   ];
   const securityLayers = [
     {
@@ -193,7 +218,7 @@ export default async function HubDashboardPage() {
     <main className="hub-shell">
       <aside className="os-dock" aria-label={t.navLabel}>
         <div className="dock-identity">
-          <img src="/hub-mark.svg" alt="" />
+          <img src="/hub-mark.svg" alt="" width={64} height={64} />
           <div>
             <strong>BielOS</strong>
             <span>{t.privateHub}</span>
@@ -323,7 +348,8 @@ export default async function HubDashboardPage() {
               <strong className="status-pill">{t.safe}</strong>
             </div>
             <div className="action-stack">
-              <a href="#modules">{t.viewModules}</a>
+              <a href="/core/projects">{t.viewProjects}</a>
+              <a href="/core/security">{t.viewSecurity}</a>
               <a href="#ops">{t.viewDeployment}</a>
               <form action="/api/logout" method="post">
                 <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
@@ -333,36 +359,53 @@ export default async function HubDashboardPage() {
           </article>
         </section>
 
-        <section className="module-window anchor-section" id="modules" aria-label="Module grid">
+        <section className="module-window anchor-section" id="modules" aria-label={t.registryTitle}>
           <div className="window-titlebar">
             <div>
-              <span>Modules</span>
-              <strong>{t.coreReserved}</strong>
+              <span>Registry</span>
+              <strong>{t.registryTitle}</strong>
             </div>
           </div>
 
-          <div className="module-grid">
-            {moduleCards.map((module) => (
-              <article
-                className={`module-card ${
-                  module.sensitivity === "sensitive" ? "is-sensitive" : ""
-                }`}
-                key={module.name}
-              >
-                <div className="module-card-header">
-                  <span className="module-icon">{module.shortName}</span>
-                  <span className="module-class">
-                    {module.sensitivity === "sensitive" ? t.sensitive : t.internal}
-                  </span>
+          <div className="hub-registry-groups">
+            {registryGroups.map((group) => (
+              <section className="hub-registry-group" key={group.id} aria-labelledby={`registry-${group.id}`}>
+                <div className="hub-registry-heading">
+                  <h2 id={`registry-${group.id}`}>{group.title}</h2>
+                  <span>{group.items.length}</span>
                 </div>
-                <h2>{module.name}</h2>
-                <p>{module.description}</p>
-                <div className="module-tags">
-                  <span className="is-reserved">{module.status}</span>
-                  <span>{t.planned}</span>
+
+                <div className="module-grid">
+                  {group.items.map((item) => (
+                    <article
+                      className={`module-card ${
+                        item.sensitivity === "sensitive" ? "is-sensitive" : ""
+                      } ${item.status !== "reserved" ? "is-active" : ""}`}
+                      key={item.id}
+                    >
+                      <div className="module-card-header">
+                        <span className="module-icon">{item.shortName}</span>
+                        <span className="module-class">
+                          {item.sensitivity === "sensitive" ? t.sensitive : t.internal}
+                        </span>
+                      </div>
+                      <h2>{getRegistryName(item.id, item.name, locale)}</h2>
+                      <p>{registryDescriptions[item.id]}</p>
+                      <div className="module-tags">
+                        <span className={item.status === "reserved" ? "is-reserved" : "is-active"}>
+                          {item.status === "active"
+                            ? t.active
+                            : item.status === "available"
+                              ? t.available
+                              : t.reserved}
+                        </span>
+                        <span>{group.title}</span>
+                      </div>
+                      {"href" in item ? <a href={item.href}>{t.open}</a> : null}
+                    </article>
+                  ))}
                 </div>
-                {"href" in module ? <a href={module.href}>{t.openFoundation}</a> : null}
-              </article>
+              </section>
             ))}
           </div>
         </section>

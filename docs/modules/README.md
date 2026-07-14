@@ -14,6 +14,7 @@ This directory contains application and reserved-module planning documents. Biel
 
 - GymForge: available at `/gymforge` behind the existing private-hub boundaries. Implemented capabilities include participant and exercise administration, attendance check-ins and correction, single-set workout entry/edit/delete, ranking/streak views, competition lifecycle and assignment, deterministic current-state scoring, and additive score correction.
 - GymForge expansion is frozen. Private invitations, public registration, import/export, photo proof/uploads, APIs, broad social features, and further scoring work are not active roadmap items.
+- The typed hub registry lists GymForge as an available application linked to `/gymforge`; this is integration only and does not expand GymForge behavior.
 
 ## Reserved Modules
 

@@ -660,6 +660,68 @@ strong {
   padding: 14px;
 }
 
+.hub-registry-groups {
+  display: grid;
+  gap: 18px;
+  padding: 14px;
+}
+
+.hub-registry-group {
+  display: grid;
+  gap: 9px;
+}
+
+.hub-registry-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(121, 142, 160, 0.12);
+}
+
+.hub-registry-heading h2 {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.hub-registry-heading span {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.hub-registry-group .module-grid {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  padding: 0;
+}
+
+.hub-registry-group .module-card {
+  min-height: 210px;
+}
+
+.hub-registry-group .module-card > a {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  padding: 0 11px;
+  border: 1px solid rgba(91, 215, 232, 0.28);
+  border-radius: 6px;
+  background: rgba(13, 30, 37, 0.68);
+  color: #d8f8fb;
+  font-size: 0.74rem;
+  font-weight: 680;
+}
+
+.hub-registry-group .module-card > a:hover,
+.hub-registry-group .module-card > a:focus-visible {
+  border-color: rgba(91, 215, 232, 0.6);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(91, 215, 232, 0.14);
+}
+
 .module-card {
   position: relative;
   min-height: 236px;

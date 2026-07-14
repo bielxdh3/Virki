@@ -1,4 +1,3 @@
-export type ModuleSensitivity = "internal" | "sensitive";
 export {
   DEFAULT_LOCALE,
   LOCALE_COOKIE_NAME,
@@ -8,46 +7,101 @@ export {
 } from "./i18n";
 export type { BielosLocale } from "./i18n";
 
-export type ModuleSummary = {
+export type HubRegistryCategory = "core" | "application" | "reserved";
+export type HubRegistrySensitivity = "internal" | "sensitive";
+export type HubRegistryStatus = "active" | "available" | "reserved";
+export type HubRegistryItemId =
+  | "bielos-core"
+  | "core-projects"
+  | "core-security"
+  | "core-operations"
+  | "gymforge"
+  | "lvault"
+  | "rootark"
+  | "hvault";
+
+export type HubRegistryItem = {
+  id: HubRegistryItemId;
   name: string;
   shortName: string;
-  slug: "lvault" | "rootark" | "hvault" | "gymforge";
-  description: string;
-  status: string;
-  sensitivity: ModuleSensitivity;
+  category: HubRegistryCategory;
+  status: HubRegistryStatus;
+  sensitivity: HubRegistrySensitivity;
+  href?: string;
 };
 
-export const moduleCatalog: ModuleSummary[] = [
+export const hubRegistry = [
   {
-    name: "L-vault",
-    shortName: "LV",
-    slug: "lvault",
-    description: "Reserved space for a future lightweight vault module.",
-    status: "Reserved",
-    sensitivity: "sensitive"
+    id: "bielos-core",
+    name: "BielOS Core",
+    shortName: "BC",
+    category: "core",
+    status: "active",
+    sensitivity: "internal",
+    href: "/core/projects"
   },
   {
-    name: "root.ark",
-    shortName: "RA",
-    slug: "rootark",
-    description: "Reserved space for future archival and root knowledge flows.",
-    status: "Reserved",
-    sensitivity: "sensitive"
+    id: "core-projects",
+    name: "Project Workspace",
+    shortName: "PW",
+    category: "core",
+    status: "active",
+    sensitivity: "internal",
+    href: "/core/projects"
   },
   {
-    name: "H-vault",
-    shortName: "HV",
-    slug: "hvault",
-    description: "Reserved space for a future organized storage module.",
-    status: "Reserved",
-    sensitivity: "internal"
+    id: "core-security",
+    name: "Security & Sessions",
+    shortName: "SS",
+    category: "core",
+    status: "active",
+    sensitivity: "sensitive",
+    href: "/core/security"
   },
   {
+    id: "core-operations",
+    name: "Operations",
+    shortName: "OP",
+    category: "core",
+    status: "active",
+    sensitivity: "internal",
+    href: "/#ops"
+  },
+  {
+    id: "gymforge",
     name: "GymForge",
     shortName: "GF",
-    slug: "gymforge",
-    description: "Reserved space for future training and progression tooling.",
-    status: "Reserved",
+    category: "application",
+    status: "available",
+    sensitivity: "internal",
+    href: "/gymforge"
+  },
+  {
+    id: "lvault",
+    name: "L-vault",
+    shortName: "LV",
+    category: "reserved",
+    status: "reserved",
+    sensitivity: "sensitive"
+  },
+  {
+    id: "rootark",
+    name: "root.ark",
+    shortName: "RA",
+    category: "reserved",
+    status: "reserved",
+    sensitivity: "sensitive"
+  },
+  {
+    id: "hvault",
+    name: "H-vault",
+    shortName: "HV",
+    category: "reserved",
+    status: "reserved",
     sensitivity: "internal"
   }
-];
+] as const satisfies readonly HubRegistryItem[];
+
+export const moduleCatalog = hubRegistry.filter(
+  (item) => item.category === "reserved"
+);
