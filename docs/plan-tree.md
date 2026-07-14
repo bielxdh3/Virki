@@ -47,6 +47,11 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Private hub module shell registry exists.
 - `[DONE]` Module security design template exists.
 - `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
+- `[CURRENT]` BielOS Core expansion is explicitly authorized and is the active product path.
+- `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
+- `[NEXT]` Complete the BielOS Core security and architecture gate before expanding Core runtime workflows.
+- `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
+- `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
 - `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
 - `[BLOCKED]` root.ark implementation also requires a dedicated public zero-knowledge architecture phase.
 - `[DONE]` GymForge MVP foundation exists behind the private hub with an authenticated route and implemented foundation features.
@@ -160,20 +165,25 @@ BielOS is a private personal hub, not a public SaaS.
 - `[LATER]` Safe redacted diagnostics if needed.
 - `[BLOCKED]` Audit log UI is blocked until authorization and retention rules are stronger.
 
-## 11. Future Modules And Remaining Blocked Work
+## 11. Core, Available Applications, And Reserved Modules
 
-Do not implement new modules beyond inert shell registry entries until each module completes `docs/module-security-template.md`. GymForge is the exception: its MVP foundation is implemented, but its future work remains scoped by the blockers below.
+### BielOS Core
 
-- `[DONE]` Consolidated module planning index: `docs/modules/README.md`.
-- `[DONE]` BielOS Core shell registry entry.
-- `[DO NOT IMPLEMENT YET]` BielOS Core module expansion.
-- `[DONE]` L-vault planning document.
-- `[DO NOT IMPLEMENT YET]` L-vault implementation.
-- `[DONE]` root.ark public zero-knowledge planning revision.
-- `[BLOCKED]` root.ark architecture phase before implementation.
-- `[DO NOT IMPLEMENT YET]` root.ark implementation.
-- `[DONE]` H-vault planning document.
-- `[DO NOT IMPLEMENT YET]` H-vault implementation.
+BielOS Core is the private hub platform and workspace, not a reserved module. Its expansion is explicitly authorized, but future Core phases remain incomplete until implemented and validated.
+
+- `[CURRENT]` Rebaseline Core architecture, security, project management, project access, sessions, safe operations, and safe audit visibility.
+- `[DONE]` Existing Core models: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
+- `[NEXT]` Define the Core security, authorization, lifecycle, audit, and operations boundary.
+- `[LATER]` Implement scoped Core project management, project access, personal session management, safe operations visibility, and gated audit visibility.
+- `[BLOCKED]` Keep `SecurityUnlock` runtime changes blocked until its intended semantics are sufficiently defined.
+
+### Available Applications
+
+GymForge is already implemented and available inside the authenticated private hub. Preserve the completed history below; do not continue its optional feature roadmap.
+
+- `[DONE]` Consolidated application and module index: `docs/modules/README.md`.
+- `[DONE]` GymForge is available at `/gymforge` behind Cloudflare Access and BielOS internal authentication.
+- `[BLOCKED]` GymForge expansion is frozen, including private invitations, public registration, import/export, photo proof/uploads, APIs, broad social features, and further scoring work.
 - `[DONE]` GymForge gated competition planning revision.
 - `[DONE]` GymForge MVP architecture document.
 - `[DONE]` GymForge MVP foundation.
@@ -195,8 +205,18 @@ Do not implement new modules beyond inert shell registry entries until each modu
 - `[DONE]` GymForge competition score-correction Phase 2 docs-only design.
 - `[DONE]` GymForge competition score-correction Phase 3 additive model/migration and private-hub implementation.
 - `[DONE]` Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and build pass before commit.
-- `[NEXT]` GymForge private invitation Phase 4; invite acceptance remains blocked until the phase is implemented and validated.
-- `[DO NOT IMPLEMENT YET]` GymForge upload/photo proof, public registration, invite acceptance until Phase 4, import/export, unsafe competition deletion, public API, and broad social feed behavior.
+
+### Reserved Modules
+
+Reserved modules remain planning-only and inert. They are not part of the active Core expansion.
+
+- `[DONE]` L-vault planning document.
+- `[DO NOT IMPLEMENT YET]` L-vault implementation.
+- `[DONE]` root.ark public zero-knowledge planning revision.
+- `[BLOCKED]` root.ark architecture phase before any implementation.
+- `[DO NOT IMPLEMENT YET]` root.ark implementation.
+- `[DONE]` H-vault planning document.
+- `[DO NOT IMPLEMENT YET]` H-vault implementation.
 
 ## 12. Definition Of MVP Complete
 
@@ -214,8 +234,8 @@ BielOS MVP is complete when:
 - `[DONE]` BielOS internal auth works after Cloudflare Access.
 - `[DONE]` Prisma migrations replace production `db push`.
 - `[DONE]` Backup and restore are documented and tested.
-- `[DONE]` Module shell registry exists without private data ingestion.
-- `[BLOCKED]` No new real future modules are implemented prematurely.
+- `[DONE]` Hub application registry exists; private data handling is limited to implemented authenticated surfaces such as GymForge.
+- `[BLOCKED]` Reserved modules remain inert, and GymForge expansion remains frozen while Core is the active path.
 
 ## 13. Recommended Phase Order
 
@@ -257,5 +277,7 @@ BielOS MVP is complete when:
 - `[DONE]` Phase 09.26: GymForge workout editing and deletion.
 - `[DONE]` GymForge competition score-correction Phase 2: docs-only design.
 - `[DONE]` GymForge competition score-correction Phase 3: additive migration, guarded OWNER/ADMIN actions, current-state score integration, private bilingual UI, redacted audit events, and tests.
-- `[NEXT]` GymForge private invitation Phase 4; invite acceptance stays blocked until completion.
-- `[LATER]` Phase 09.26+: other real modules only after module-specific security and data design.
+- `[CURRENT]` Core Phase 0: rebaseline the roadmap around BielOS Core and freeze further GymForge expansion.
+- `[NEXT]` Core Phase 1: define BielOS Core security and data architecture without marking runtime phases complete.
+- `[LATER]` Core project management, project access, `SecurityUnlock` design gate, personal session management, hub registry integration, safe operations visibility, and conditional owner-only audit visibility.
+- `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.

@@ -1,5 +1,23 @@
 # Roadmap
 
+## Current Direction: BielOS Core
+
+BielOS Core expansion is explicitly authorized and is now the active roadmap. Core is the private hub platform and workspace, distinct from applications and reserved modules. The existing `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models are foundations only; no future Core runtime phase is complete merely because those models exist.
+
+The next Core phase is a security and architecture gate covering identity, project visibility and lifecycle, access precedence, session privacy, `SecurityUnlock` semantics, sanitized audit data, and safe operations visibility. Project management, project access, session management, operations, audit visibility, and hub integration remain future scoped phases until implemented and validated.
+
+## Current Application Classification
+
+- BielOS Core: active platform/workspace expansion.
+- GymForge: available integrated private-hub application at `/gymforge`; implemented capabilities are preserved and further feature expansion is frozen.
+- L-vault, root.ark, and H-vault: reserved planning-only modules; runtime remains inert.
+
+GymForge invitations, public registration, import/export, photo proof/uploads, APIs, broad social features, and further scoring work are not active roadmap items.
+
+## Historical Roadmap Record
+
+The entries below preserve prior planning and completed delivery history. Any earlier statement that Core expansion is blocked, GymForge is merely planned, or a new GymForge phase is next is superseded by the current direction above.
+
 ## Phase 1: BielOS Core
 
 - Create the monorepo structure.
@@ -125,4 +143,4 @@ GymForge competition score-correction Phase 3 is `[DONE]`. It adds the additive 
 
 The committed additive migration is not yet applied to production; deployment waits for a current verified backup and `prisma migrate deploy`. After the first correction write, a pre-Phase-3 application rollback is unsafe because assignment, reactivation, and `DRAFT` guards live in the new runtime; recovery requires a forward fix or verified restore. Actor relations use `SET NULL`, while `revokedAt` preserves revocation after revoker-account removal.
 
-GymForge private invitations are `[NEXT]` for Phase 4. Invite acceptance remains blocked until Phase 4 is implemented and validated; upload/photo proof, public registration, import/export, unsafe competition deletion, a public API, and broad social feed behavior remain blocked for separate phases.
+GymForge expansion is now frozen. Private invitations, public registration, import/export, photo proof/uploads, APIs, broad social features, and further scoring work are not active follow-up phases. The existing authenticated GymForge application remains available and its completed delivery history above is preserved.

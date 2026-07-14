@@ -1,6 +1,24 @@
-# Module Planning Index
+# Application And Module Planning Index
 
-This directory contains module planning and design documents. GymForge now has an implemented MVP foundation in the private hub; the other module documents remain planning-only. These documents do not enable private data ingestion, upload, import/export, or encryption/key-management by themselves.
+This directory contains application and reserved-module planning documents. BielOS Core is the private hub platform and workspace, not a module. Core expansion is the active path. GymForge is an available integrated application, while L-vault, root.ark, and H-vault remain reserved and inert.
+
+## BielOS Core
+
+- Status: active expansion authorized.
+- Existing foundations: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
+- Next gate: Core-specific security and architecture design.
+- Future Core phases must not be treated as complete until implemented and validated.
+
+## Available Applications
+
+- GymForge: available at `/gymforge` behind the existing private-hub boundaries. Implemented capabilities include participant and exercise administration, attendance check-ins and correction, single-set workout entry/edit/delete, ranking/streak views, competition lifecycle and assignment, deterministic current-state scoring, and additive score correction.
+- GymForge expansion is frozen. Private invitations, public registration, import/export, photo proof/uploads, APIs, broad social features, and further scoring work are not active roadmap items.
+
+## Reserved Modules
+
+- L-vault: planning document complete; runtime implementation blocked.
+- root.ark: public zero-knowledge planning revised; runtime implementation blocked, with architecture work still required before any future implementation.
+- H-vault: planning document complete; runtime implementation blocked.
 
 ## Module Documents
 
@@ -9,14 +27,6 @@ This directory contains module planning and design documents. GymForge now has a
 - `h-vault.md`: H-vault planning only. Implementation is blocked.
 - `gymforge.md`: GymForge gated social gym competition module plan, updated to reflect the implemented MVP foundation.
 - `gymforge-mvp.md`: GymForge MVP architecture and current implementation boundary.
-
-## Implementation Status
-
-- BielOS Core: shell registry entry only; real expansion is blocked.
-- L-vault: planning document complete; implementation blocked.
-- root.ark: public zero-knowledge compartment planning revised; implementation blocked until a dedicated architecture phase is complete.
-- H-vault: planning document complete; implementation blocked.
-- GymForge: MVP foundation implemented behind the private hub. Current capabilities include participant and exercise administration, attendance check-ins and correction, single-set workout entry/edit/delete, ranking/streak views, competition lifecycle and assignment, deterministic current-state scoring, and additive score correction. Score-correction Phases 2 and 3 are `[DONE]`; the private invitation Phase 4 is `[NEXT]`.
 
 ## Required Gate
 
@@ -44,8 +54,8 @@ For not-yet-implemented modules, the following remain blocked until explicitly d
 
 For root.ark specifically, public exposure, compartment access, capability links, encrypted blob storage, metadata handling, key lifecycle, revocation, and deletion remain blocked until a dedicated architecture phase is complete.
 
-For GymForge specifically, upload/photo proof, public registration, invite acceptance until Phase 4, import/export, unsafe competition deletion, a public API, and broad social feed behavior remain blocked until scoped phases complete their design and implementation checks.
+For GymForge specifically, all further feature expansion is frozen. Existing functionality remains available, but invitations, upload/photo proof, public registration, import/export, a public API, broad social features, and further scoring work are not active phases.
 
 ## Data Safety
 
-No private data ingestion is enabled by the module shell or these planning documents themselves. New module surfaces must wait for validated module design; GymForge additions remain limited by its blockers above.
+Planning documents and inert reserved-module entries do not enable private data ingestion. New module surfaces must wait for explicit authorization and validated module design. Existing GymForge data remains confined to its authenticated application, and Core work must preserve the established Cloudflare Access and BielOS internal authentication boundaries.
