@@ -269,6 +269,8 @@ Remote CI evidence must identify the exact commit SHA and completed workflow res
 
 Authenticated OWNER/MEMBER browser smoke must use an existing safe browser session and disposable identities through Cloudflare Access and BielOS login. Do not request credentials, extract cookies or tokens, reset passwords, or weaken either boundary. If no safe authenticated session is available, preserve the manual checklist in `docs/deployment-verification.md` and report the smoke as incomplete.
 
+The latest Core hardening campaign passed the complete local gate, production image and Compose checks, production restart, local/public health checks, Cloudflare-first hub routing, and loopback port verification. Remote CI evidence was unavailable, and authenticated OWNER/MEMBER browser smoke remains pending because no safe authenticated browser session was available.
+
 Diagnostic reports should summarize pass/fail state and non-sensitive errors only. Do not include raw command logs when they could expose environment values, private identifiers, headers, IPs, cookies, JWTs, tokens, or database URLs.
 
 ## Security Notes

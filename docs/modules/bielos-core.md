@@ -143,4 +143,7 @@ Current automated coverage includes:
 - personal-session read/revoke/revoke-all isolation, current-session preservation, expired/revoked behavior, post-revocation authentication, and cleanup compatibility;
 - owner-only newest-first 50-row audit display with safe legacy fallbacks and no private display columns;
 - successful, failed, synchronous-error, stalled, and single-flight operations probes;
+- persistent login limiting with same-identifier transaction serialization, bounded attempt retention, normalized identifiers, route-level throttling, and successful-bucket clearing;
 - CI execution on Node 22 with one synthetic PostgreSQL service and separate integration/concurrency selections.
+
+The latest complete local gate passed 25 unit tests, 22 database integration tests, 9 concurrency tests, the production build, production image build, and production Compose validation. Production restart, local/public health, Cloudflare-first hub routing, and loopback port checks also passed. The final remote CI result was not independently available, and authenticated OWNER/MEMBER browser smoke remains pending until a safe authenticated browser session is available.

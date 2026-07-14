@@ -113,16 +113,16 @@ Do not seed fake audit data.
 
 See `docs/database.md` for the migration workflow and the remaining disposable-local use of `prisma db push`.
 
-## Current Limitations
+## Current Behavior And Limitations
 
-- No audit log UI exists yet.
-- No export workflow exists yet.
-- No retention policy exists yet.
+- The global `OWNER` has a private, read-only activity view limited to the 50 newest rows and safe allowlisted display fields.
+- Audit retention defaults to 180 days and the cleanup command reports only the deleted row count.
+- Local CLI inspection remains bounded and redacted.
+- No export, arbitrary search, or broad filtering workflow exists.
 - Audit metadata is intentionally minimal.
 - Cloudflare Access JWT validation is optional and depends on private environment configuration.
 
 ## Future Improvements
 
-- Add retention and cleanup policy.
-- Add a private audit viewer after authorization rules are stronger.
-- Add filtering by event type and time range for local inspection.
+- Revisit the retention period only when operational requirements justify a change.
+- Consider narrowly scoped event/time filtering only after its authorization, query-bound, and redaction contract is approved.

@@ -60,6 +60,9 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` BielOS Core adversarial security/static-UI review found no medium/high/critical issue and fixed bounded identifiers, generic audit failure logging, and operations probe accumulation.
 - `[DONE]` Full Core validation, current backup, committed migration deployment, production restart, and unauthenticated smoke checks passed.
 - `[DONE]` Database-backed Core authorization, mutation, access-invariant, session-isolation, audit-bound, operations, and concurrency tests run against disposable migrated PostgreSQL and are integrated into CI.
+- `[DONE]` The Core hardening campaign corrected verification-document drift, serialized concurrent login-limit updates, bounded attempts at five, and replaced auth maintenance error output with fixed non-sensitive messages.
+- `[DONE]` The final Core gate passed unit, database integration, concurrency, build, production image, Compose, restart, health, Cloudflare-ordering, and loopback-exposure checks.
+- `[LATER]` Reconfirm remote CI evidence when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.` for the final hardening SHA.
 - `[NEXT]` Complete the authenticated OWNER/MEMBER browser smoke with existing disposable identities; do not bypass Cloudflare Access or BielOS authentication.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
 - `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
@@ -129,7 +132,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Hub healthcheck uses `/api/health`.
 - `[DONE]` Local production stack starts from `E:\BielOS`.
 - `[DONE]` Local production health checks pass.
-- `[NEXT]` Keep Docker changes limited to real launch blockers.
+- `[LATER]` Make Docker changes only for verified launch blockers.
 
 ## 7. Launch Validation Plan
 
@@ -198,6 +201,9 @@ BielOS Core is the private hub platform and workspace, not a reserved module. It
 - `[DONE]` Complete full validation, backup/migration deployment, production restart, and unauthenticated smoke checks.
 - `[DONE]` Add disposable PostgreSQL integration coverage for Core authorization, mutations, access invariants, concurrency, session isolation, audit visibility, and operations reliability.
 - `[DONE]` Run the Core database integration and concurrency suites in CI with one synthetic PostgreSQL service.
+- `[DONE]` Serialize same-identifier login-limit transactions with a PostgreSQL advisory lock and cover concurrent failures, route-level throttling, normalization, and successful-bucket clearing.
+- `[DONE]` Keep operational auth command failures on fixed command-specific messages rather than arbitrary runtime error text.
+- `[DONE]` Complete the final local hardening gate, production image and Compose checks, production restart, unauthenticated health/Access smoke, and loopback port verification.
 - `[BLOCKED]` Keep `SecurityUnlock` runtime changes blocked until its intended semantics are sufficiently defined.
 
 ### Available Applications
@@ -315,4 +321,5 @@ BielOS MVP is complete when:
 - `[DONE]` Core Phase 12: production restart and unauthenticated health/exposure smoke.
 - `[DONE]` Core Phase 13: final plan-tree and operational status synchronization.
 - `[DONE]` Core hardening follow-up: database-backed authorization, concurrency, session, audit, and operations verification plus CI integration.
+- `[DONE]` Core hardening campaign: correct verification drift, fix the concurrent login limiter, sanitize operational auth errors, run the full local/Docker/production gate, and synchronize status.
 - `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.

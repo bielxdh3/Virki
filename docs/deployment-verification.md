@@ -109,9 +109,11 @@ Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it re
 
 ## Current Verification State And Remaining Limitations
 
-- Login rate limiting is persisted in PostgreSQL and stores only a keyed hash of the normalized identifier plus bounded attempt/window state.
+- Login rate limiting is persisted in PostgreSQL, serializes same-identifier updates with a transaction-scoped advisory lock, caps attempts at five, and stores only a keyed hash of the normalized identifier plus bounded attempt/window state.
 - CSRF protection covers login, logout, Core project lifecycle and access management, personal session management, and existing mutable GymForge flows.
 - A current PostgreSQL backup was created and verified before the committed migrations were deployed with `prisma migrate deploy`; restore was validated against a disposable target.
+- The latest complete local gate, production image build, production Compose validation, production restart, local/public health checks, Cloudflare-first hub routing, and loopback port checks passed.
+- `CI remoto não confirmado.` for the final hardening SHA because authenticated GitHub Actions evidence was unavailable.
 - Authenticated OWNER/MEMBER browser smoke remains incomplete and must use the real Cloudflare Access and BielOS login flow without bypassing either boundary.
 - Origin-side Cloudflare Access JWT validation depends on private environment configuration. Keep it enabled where required; never disable it merely to make a smoke test pass.
 - Host firewall rules for public Linux/VPS deployment remain environment-specific and require manual validation.
