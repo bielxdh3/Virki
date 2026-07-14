@@ -1,7 +1,7 @@
 import { prisma } from "@bielos/database";
 import { cleanupInactiveSessions } from "./index";
 import { writeAuditLog } from "./audit";
-import { getSafeAuthCommandFailureMessage } from "./command-output";
+import { runAuthCommand } from "./command-output";
 
 async function main() {
   const deletedCount = await cleanupInactiveSessions();
@@ -18,11 +18,4 @@ async function main() {
   console.log(`Deleted inactive sessions: ${deletedCount}`);
 }
 
-main()
-  .catch(() => {
-    console.error(getSafeAuthCommandFailureMessage("session-cleanup"));
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+void runAuthCommand("session-cleanup", main, () => prisma.$disconnect());

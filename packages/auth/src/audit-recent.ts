@@ -1,5 +1,5 @@
 import { prisma } from "@bielos/database";
-import { getSafeAuthCommandFailureMessage } from "./command-output";
+import { runAuthCommand } from "./command-output";
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
@@ -50,11 +50,4 @@ function getLimit(): number {
   return Math.min(Math.floor(raw), MAX_LIMIT);
 }
 
-main()
-  .catch(() => {
-    console.error(getSafeAuthCommandFailureMessage("audit-recent"));
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+void runAuthCommand("audit-recent", main, () => prisma.$disconnect());

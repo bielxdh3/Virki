@@ -1,6 +1,6 @@
 import { prisma } from "@bielos/database";
 import { hashAuditEmail, hashPassword, normalizeEmail, writeAuditLog } from "./index";
-import { getSafeAuthCommandFailureMessage } from "./command-output";
+import { runAuthCommand } from "./command-output";
 
 const ownerEmail = process.env.BIELOS_OWNER_EMAIL;
 const ownerPassword = process.env.BIELOS_OWNER_PASSWORD;
@@ -51,11 +51,4 @@ async function main() {
   console.log("OWNER user is ready.");
 }
 
-main()
-  .catch(() => {
-    console.error(getSafeAuthCommandFailureMessage("owner-seed"));
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+void runAuthCommand("owner-seed", main, () => prisma.$disconnect());

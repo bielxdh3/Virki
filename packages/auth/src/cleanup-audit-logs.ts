@@ -1,6 +1,6 @@
 import { prisma } from "@bielos/database";
 import { cleanupExpiredAuditLogs, writeAuditLog } from "./audit";
-import { getSafeAuthCommandFailureMessage } from "./command-output";
+import { runAuthCommand } from "./command-output";
 
 async function main() {
   const result = await cleanupExpiredAuditLogs();
@@ -20,11 +20,4 @@ async function main() {
   console.log(`Deleted expired audit logs: ${result.deletedCount}`);
 }
 
-main()
-  .catch(() => {
-    console.error(getSafeAuthCommandFailureMessage("audit-cleanup"));
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+void runAuthCommand("audit-cleanup", main, () => prisma.$disconnect());
