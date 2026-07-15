@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@bielos/auth/constants";
 
-const PUBLIC_ROUTES = new Set(["/login", "/api/login", "/api/health"]);
+const PUBLIC_ROUTES = new Set(["/login", "/api/login", "/api/logout", "/api/health"]);
 const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml)$/i;
 
 export function proxy(request: NextRequest) {
