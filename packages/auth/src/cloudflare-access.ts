@@ -71,14 +71,48 @@ export async function validateCloudflareAccessJwt(
       required: true,
       status: "valid"
     };
-  } catch {
+  } catch (error) {
     return {
       allowed: false,
       required: true,
       status: "invalid",
-      reason: "invalid-cloudflare-access-jwt"
+      reason: classifyCloudflareAccessJwtError(error)
     };
   }
+}
+
+export function classifyCloudflareAccessJwtError(error: unknown): string {
+  if (!isJoseError(error)) {
+    return "invalid-cloudflare-access-jwt";
+  }
+
+  if (error.code === "ERR_JWT_EXPIRED") {
+    return "expired-cloudflare-access-jwt";
+  }
+
+  if (error.code === "ERR_JWT_CLAIM_VALIDATION_FAILED") {
+    if (error.claim === "aud") {
+      return "invalid-cloudflare-access-audience";
+    }
+
+    if (error.claim === "iss") {
+      return "invalid-cloudflare-access-issuer";
+    }
+
+    if (error.claim === "nbf") {
+      return "inactive-cloudflare-access-jwt";
+    }
+  }
+
+  if (error.code === "ERR_JWS_SIGNATURE_VERIFICATION_FAILED") {
+    return "invalid-cloudflare-access-signature";
+  }
+
+  if (error.code === "ERR_JWKS_NO_MATCHING_KEY") {
+    return "missing-cloudflare-access-signing-key";
+  }
+
+  return "invalid-cloudflare-access-jwt";
 }
 
 export function isCloudflareAccessJwtRequired(
@@ -123,4 +157,8 @@ function getJwks(teamDomain: string): ReturnType<typeof createRemoteJWKSet> {
 function getJwksCache(): Map<string, ReturnType<typeof createRemoteJWKSet>> {
   globalForCloudflareAccess.bielosCloudflareAccessJwks ??= new Map();
   return globalForCloudflareAccess.bielosCloudflareAccessJwks;
+}
+
+function isJoseError(error: unknown): error is { code: string; claim?: string } {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string";
 }
