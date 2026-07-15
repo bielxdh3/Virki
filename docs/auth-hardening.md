@@ -10,17 +10,18 @@ Public paths:
 
 - `/login`
 - `/api/login`
+- `/api/logout`
 - `/api/health`
 - static assets
 - Next.js internal static/image assets
 
-All other hub paths require the `bielos_session` cookie before the request proceeds.
+All other hub paths require the `bielos_session` cookie before the request proceeds. Logout bypasses only this cookie-presence proxy so its route can enforce Cloudflare Access first and then CSRF before any mutation.
 
 The middleware runs in the Next.js middleware runtime and only checks for cookie presence. It does not query Prisma there. Actual session validity is checked in server code through `getSessionByToken`.
 
 ## Logout Validation
 
-`POST /api/logout` reads the session cookie and validates it against the database before revocation.
+`POST /api/logout` first validates the required Cloudflare Access assertion and CSRF token, then reads the session cookie and validates it against the database before revocation. A direct-origin request without the required Access assertion returns HTTP `403` instead of being redirected by the session proxy.
 
 If the cookie is missing, expired, revoked, or invalid, the route does not revoke anything. It still clears the browser cookie and redirects to `/login`.
 
@@ -82,6 +83,6 @@ Cloudflare Access is the outer boundary for `hub.biel.dev.br`, and BielOS intern
 
 - No edge-level or IP-based rate limit in this repository.
 - The dedicated production limiter key is configured privately and the closeout runtime is deployed; the value remains outside Git and operational output.
-- Authenticated production OWNER/MEMBER browser smoke and final remote CI evidence remain pending.
+- Authenticated production OWNER browser smoke remains pending because interactive authentication was not completed. MEMBER smoke is blocked until an existing disposable MEMBER identity is available or creation is explicitly authorized. `CI remoto não confirmado.`
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.

@@ -63,10 +63,12 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` The Core hardening campaign corrected verification-document drift, serialized concurrent login-limit updates, bounded attempts at five, and replaced auth maintenance error output with fixed non-sensitive messages.
 - `[DONE]` The final Core gate passed unit, database integration, concurrency, build, production image, Compose, restart, health, Cloudflare-ordering, and loopback-exposure checks.
 - `[DONE]` Core closeout requires a dedicated production login-limit HMAC key, exercises the real login POST route, covers limiter lifecycle and independent identifiers, bounds advisory-lock waits, and tests complete operational command error boundaries.
-- `[DONE]` The closeout local gate passed 33 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, synthetic Compose, health, Access-ordering, and loopback checks.
+- `[DONE]` The closeout and origin-authentication gate passed 35 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, Compose, health, Access-ordering, direct-origin denial, and loopback checks.
 - `[DONE]` The dedicated limiter key is configured only in the ignored private environment, and the current Core runtime was rebuilt and deployed with current migrations, five healthy/running services, Cloudflare-first routing, origin JWT denial, and loopback-only application ports.
-- `[LATER]` Reconfirm remote CI evidence when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.` for the final hardening SHA.
-- `[NEXT]` Complete authenticated OWNER/MEMBER production browser smoke with existing disposable identities; do not bypass Cloudflare Access or BielOS authentication.
+- `[DONE]` Fix logout origin-authentication ordering so direct requests reach Access validation before session routing, add regression coverage, and deploy `5f66fbb44f03edbdd4ab3ef569b5375e8b7675d5`.
+- `[LATER]` Reconfirm remote CI evidence for the exact deployed runtime and documentation SHA when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.`
+- `[NEXT]` Complete authenticated OWNER production browser smoke; do not bypass Cloudflare Access or BielOS authentication.
+- `[BLOCKED]` Complete authenticated MEMBER production browser smoke after an existing disposable MEMBER identity is available or creation is explicitly authorized.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
 - `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
 - `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
@@ -333,4 +335,5 @@ BielOS MVP is complete when:
 - `[DONE]` Core hardening campaign: correct verification drift, fix the concurrent login limiter, sanitize operational auth errors, run the full local/Docker/production gate, and synchronize status.
 - `[DONE]` Core closeout campaign: enforce dedicated production limiter configuration, add real route/lifecycle coverage, bound lock contention, strengthen command-boundary tests, and complete the local/Docker verification gate.
 - `[DONE]` Core production readiness deployment: configure the private limiter key, deploy current `main`, and verify migrations, services, health, Access ordering, origin denial, and loopback ports.
+- `[DONE]` Core origin-authentication correction: route logout through Access/CSRF enforcement before session handling, run the full gate, redeploy, and verify direct-origin `403`.
 - `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.

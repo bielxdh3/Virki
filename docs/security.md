@@ -67,9 +67,9 @@ See `docs/audit-logs.md`.
 
 CI runs secret scan, lint, typecheck, Prisma validation, Core unit tests, migrated PostgreSQL integration tests, real concurrency tests, build, production image build, and production Compose validation. The Core database suites use one synthetic PostgreSQL service and do not require production secrets.
 
-The current hardening campaign passed the complete local gate, production image and Compose checks, production restart, unauthenticated health/Access checks, and loopback exposure checks. `CI remoto não confirmado.` for the final campaign SHA because authenticated GitHub Actions evidence was unavailable.
+The current hardening campaign passed the complete local gate, production image and Compose checks, production restart, unauthenticated health/Access checks, and loopback exposure checks. `CI remoto não confirmado.` for the consulted runtime and documentation SHAs because authenticated GitHub Actions evidence was unavailable.
 
-The subsequent closeout gate passed 33 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, and synthetic Compose validation. The dedicated limiter key is configured only in the ignored private environment, and the current runtime is deployed with current migrations. All expected services run, public/local health passes, Cloudflare Access remains first, origin JWT enforcement denies direct login without an assertion, and application ports remain loopback-only. Authenticated production browser smoke remains pending because no safe controllable browser session was available.
+The subsequent closeout and origin-authentication gate passed 35 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, and production Compose validation. The dedicated limiter key remains only in the ignored private environment, and runtime `5f66fbb44f03edbdd4ab3ef569b5375e8b7675d5` is deployed with current migrations. All expected services run, public/local health passes, Cloudflare Access remains first, direct-origin login and logout requests without the required assertion return `403`, and application ports remain loopback-only. Authenticated OWNER smoke remains pending; MEMBER smoke is blocked by the absence of a disposable MEMBER identity.
 
 Run locally:
 
