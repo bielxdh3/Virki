@@ -65,7 +65,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Core closeout requires a dedicated production login-limit HMAC key, exercises the real login POST route, covers limiter lifecycle and independent identifiers, bounds advisory-lock waits, and tests complete operational command error boundaries.
 - `[DONE]` The closeout and origin-authentication gate passed 35 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, Compose, health, Access-ordering, direct-origin denial, and loopback checks.
 - `[DONE]` The dedicated limiter key is configured only in the ignored private environment, and the current Core runtime was rebuilt and deployed with current migrations, five healthy/running services, Cloudflare-first routing, origin JWT denial, and loopback-only application ports.
-- `[DONE]` Fix logout origin-authentication ordering so direct requests reach Access validation before session routing, add regression coverage, and deploy `5f66fbb44f03edbdd4ab3ef569b5375e8b7675d5`.
+- `[DONE]` Fix logout origin-authentication ordering in `5f66fbb8640cf907338c5c6c27aa96f002ba0f77`, add regression coverage, and rebuild production; exact image-to-commit provenance remains operationally inferred because the image has no trustworthy revision label.
 - `[LATER]` Reconfirm remote CI evidence for the exact deployed runtime and documentation SHA when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.`
 - `[NEXT]` Complete authenticated OWNER production browser smoke; do not bypass Cloudflare Access or BielOS authentication.
 - `[BLOCKED]` Complete authenticated MEMBER production browser smoke after an existing disposable MEMBER identity is available or creation is explicitly authorized.
