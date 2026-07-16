@@ -6,9 +6,13 @@ const PUBLIC_ROUTES = new Set(["/login", "/api/login", "/api/logout", "/api/heal
 const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml)$/i;
 const CLOUDFLARE_ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
 
-export function proxy(
+export function proxy(request: NextRequest) {
+  return evaluateProxyRequest(request, process.env);
+}
+
+export function evaluateProxyRequest(
   request: NextRequest,
-  env: Readonly<Record<string, string | undefined>> = process.env
+  env: Readonly<Record<string, string | undefined>>
 ) {
   const { pathname } = request.nextUrl;
 
