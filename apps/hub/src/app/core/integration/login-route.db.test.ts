@@ -19,21 +19,25 @@ const invalidCredential = "synthetic-invalid-credential";
 const memberEmail = "rate-limit-test@example.invalid";
 const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
 const originalRateLimitSecret = process.env.BIELOS_RATE_LIMIT_HASH_SECRET;
+const originalHubUrl = process.env.NEXT_PUBLIC_HUB_URL;
 
 before(() => {
   process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "false";
   process.env.BIELOS_RATE_LIMIT_HASH_SECRET = syntheticCredential;
+  process.env.NEXT_PUBLIC_HUB_URL = "https://hub.example.invalid";
 });
 
 beforeEach(async () => {
   process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "false";
   process.env.BIELOS_RATE_LIMIT_HASH_SECRET = syntheticCredential;
+  process.env.NEXT_PUBLIC_HUB_URL = "https://hub.example.invalid";
   await cleanCoreIntegrationTestData();
 });
 
 after(async () => {
   restoreEnvironmentVariable("CLOUDFLARE_ACCESS_JWT_REQUIRED", originalAccessRequired);
   restoreEnvironmentVariable("BIELOS_RATE_LIMIT_HASH_SECRET", originalRateLimitSecret);
+  restoreEnvironmentVariable("NEXT_PUBLIC_HUB_URL", originalHubUrl);
   await cleanCoreIntegrationTestData();
   await disconnectCoreIntegrationTestDatabase();
 });
@@ -150,7 +154,7 @@ test("valid MEMBER login redirects, creates one session, sets a safe cookie, and
   const audits = await readLoginAudits();
 
   assert.equal(response.status, 303);
-  assert.equal(new URL(response.headers.get("location") ?? "http://invalid").pathname, "/");
+  assert.equal(response.headers.get("location"), "https://hub.example.invalid/");
   assert.equal(await prisma.session.count({ where: { userId: user.id } }), 1);
   assert.equal(await prisma.loginRateLimit.count(), 0);
   assert.equal(
@@ -260,6 +264,7 @@ async function readLoginAudits() {
 function assertGenericLoginFailure(response: Response): void {
   assert.equal(response.status, 303);
   const location = new URL(response.headers.get("location") ?? "http://invalid");
+  assert.equal(location.origin, "https://hub.example.invalid");
   assert.equal(location.pathname, "/login");
   assert.equal(location.searchParams.get("error"), "1");
   assert.equal(response.headers.has("set-cookie"), false);

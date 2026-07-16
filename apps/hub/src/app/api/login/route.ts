@@ -11,6 +11,7 @@ import {
 } from "@bielos/auth";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
+import { createHubRedirectUrl } from "../../../lib/hub-redirect";
 
 export const dynamic = "force-dynamic";
 
@@ -64,7 +65,7 @@ export async function POST(request: Request) {
     message: "Login succeeded.",
     metadata: auditMetadata
   });
-  const response = NextResponse.redirect(new URL("/", request.url), { status: 303 });
+  const response = NextResponse.redirect(createHubRedirectUrl("/", request.url), { status: 303 });
   response.cookies.set(
     SESSION_COOKIE_NAME,
     session.token,
@@ -75,7 +76,7 @@ export async function POST(request: Request) {
 }
 
 function redirectToLogin(request: Request, failed: boolean) {
-  const url = new URL("/login", request.url);
+  const url = createHubRedirectUrl("/login", request.url);
 
   if (failed) {
     url.searchParams.set("error", "1");

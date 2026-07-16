@@ -33,6 +33,7 @@ services:
         required: true
     environment:
       NODE_ENV: production
+      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:?NEXT_PUBLIC_HUB_URL must be set in local .env}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
       CLOUDFLARE_ACCESS_JWT_REQUIRED: ${CLOUDFLARE_ACCESS_JWT_REQUIRED:-false}

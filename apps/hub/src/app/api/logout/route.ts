@@ -11,6 +11,7 @@ import {
 } from "@bielos/auth";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
+import { createHubRedirectUrl } from "../../../lib/hub-redirect";
 
 export const dynamic = "force-dynamic";
 
@@ -61,7 +62,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const response = NextResponse.redirect(new URL("/login", request.url), { status: 303 });
+  const response = NextResponse.redirect(createHubRedirectUrl("/login", request.url), { status: 303 });
   response.cookies.set(SESSION_COOKIE_NAME, "", getExpiredSessionCookieOptions());
 
   return response;
