@@ -7,11 +7,22 @@ export type CloudflareAccessJwtStatus =
   | "invalid"
   | "misconfigured";
 
+export type CloudflareAccessJwtReason =
+  | "missing-cloudflare-access-config"
+  | "missing-cloudflare-access-jwt"
+  | "invalid-cloudflare-access-jwt"
+  | "expired-cloudflare-access-jwt"
+  | "invalid-cloudflare-access-audience"
+  | "invalid-cloudflare-access-issuer"
+  | "inactive-cloudflare-access-jwt"
+  | "invalid-cloudflare-access-signature"
+  | "missing-cloudflare-access-signing-key";
+
 export type CloudflareAccessJwtResult = {
   allowed: boolean;
   required: boolean;
   status: CloudflareAccessJwtStatus;
-  reason?: string;
+  reason?: CloudflareAccessJwtReason;
 };
 
 type CloudflareAccessConfig = {
@@ -81,7 +92,7 @@ export async function validateCloudflareAccessJwt(
   }
 }
 
-export function classifyCloudflareAccessJwtError(error: unknown): string {
+export function classifyCloudflareAccessJwtError(error: unknown): CloudflareAccessJwtReason {
   if (!isJoseError(error)) {
     return "invalid-cloudflare-access-jwt";
   }
