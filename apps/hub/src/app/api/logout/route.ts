@@ -29,6 +29,14 @@ export async function POST(request: NextRequest) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
+  let redirectUrl: URL | undefined;
+
+  try {
+    redirectUrl = createHubRedirectUrl("/login", request.url);
+  } catch {
+    redirectUrl = undefined;
+  }
+
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const currentSession = sessionToken ? await getSessionByToken(sessionToken) : null;
 
@@ -62,7 +70,9 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const response = NextResponse.redirect(createHubRedirectUrl("/login", request.url), { status: 303 });
+  const response = redirectUrl
+    ? NextResponse.redirect(redirectUrl, { status: 303 })
+    : new NextResponse("Service unavailable", { status: 503 });
   response.cookies.set(SESSION_COOKIE_NAME, "", getExpiredSessionCookieOptions());
 
   return response;

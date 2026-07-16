@@ -1,6 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyCloudflareAccessJwtError } from "./cloudflare-access";
+import {
+  classifyCloudflareAccessJwtError,
+  validateCloudflareAccessJwt
+} from "./cloudflare-access";
+
+test("covers disabled, missing configuration, and missing JWT outcomes", async () => {
+  assert.deepEqual(
+    await validateCloudflareAccessJwt(new Headers(), {}),
+    { allowed: true, required: false, status: "disabled" }
+  );
+  assert.deepEqual(
+    await validateCloudflareAccessJwt(new Headers(), {
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
+    }),
+    {
+      allowed: false,
+      required: true,
+      status: "misconfigured",
+      reason: "missing-cloudflare-access-config"
+    }
+  );
+  assert.deepEqual(
+    await validateCloudflareAccessJwt(new Headers(), {
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
+      CLOUDFLARE_ACCESS_AUDIENCE: "synthetic-audience",
+      CLOUDFLARE_TEAM_DOMAIN: "https://team.example.invalid"
+    }),
+    {
+      allowed: false,
+      required: true,
+      status: "missing",
+      reason: "missing-cloudflare-access-jwt"
+    }
+  );
+});
 
 test("classifies supported Cloudflare Access JWT failures", () => {
   assert.equal(

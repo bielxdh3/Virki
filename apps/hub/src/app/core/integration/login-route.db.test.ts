@@ -20,6 +20,7 @@ const memberEmail = "rate-limit-test@example.invalid";
 const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
 const originalRateLimitSecret = process.env.BIELOS_RATE_LIMIT_HASH_SECRET;
 const originalHubUrl = process.env.NEXT_PUBLIC_HUB_URL;
+const originalNodeEnv = process.env.NODE_ENV;
 
 before(() => {
   process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "false";
@@ -38,6 +39,7 @@ after(async () => {
   restoreEnvironmentVariable("CLOUDFLARE_ACCESS_JWT_REQUIRED", originalAccessRequired);
   restoreEnvironmentVariable("BIELOS_RATE_LIMIT_HASH_SECRET", originalRateLimitSecret);
   restoreEnvironmentVariable("NEXT_PUBLIC_HUB_URL", originalHubUrl);
+  restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   await cleanCoreIntegrationTestData();
   await disconnectCoreIntegrationTestDatabase();
 });
@@ -165,6 +167,32 @@ test("valid MEMBER login redirects, creates one session, sets a safe cookie, and
   assert.equal(response.headers.get("set-cookie")?.includes("SameSite=lax") ?? false, true);
   assert.equal(audits.filter((audit) => audit.eventType === "AUTH_LOGIN_SUCCESS").length, 1);
   assertSafeAuditRows(audits, [memberEmail, syntheticCredential]);
+});
+
+test("invalid production redirect configuration fails before limiter or session creation", async () => {
+  await createSyntheticMember();
+
+  try {
+    setEnvironmentVariable("NODE_ENV", "production");
+    delete process.env.NEXT_PUBLIC_HUB_URL;
+
+    const response = await POST(createLoginRequest({
+      email: memberEmail,
+      password: syntheticCredential,
+      csrfToken: createCsrfToken()
+    }));
+
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), "Service unavailable");
+    assert.equal(response.headers.get("location"), null);
+    assert.equal(response.headers.has("set-cookie"), false);
+    assert.equal(await prisma.loginRateLimit.count(), 0);
+    assert.equal(await prisma.session.count(), 0);
+    assert.equal((await readLoginAudits()).length, 0);
+  } finally {
+    restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
+    process.env.NEXT_PUBLIC_HUB_URL = "https://hub.example.invalid";
+  }
 });
 
 test("inactive user receives the generic response and records a limiter attempt", async () => {

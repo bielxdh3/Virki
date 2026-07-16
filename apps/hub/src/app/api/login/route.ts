@@ -29,6 +29,16 @@ export async function POST(request: Request) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
+  let successRedirectUrl: URL;
+  let failureRedirectUrl: URL;
+
+  try {
+    successRedirectUrl = createHubRedirectUrl("/", request.url);
+    failureRedirectUrl = createHubRedirectUrl("/login", request.url);
+  } catch {
+    return new NextResponse("Service unavailable", { status: 503 });
+  }
+
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
   const rateLimitIdentifier = normalizeEmail(email);
@@ -52,7 +62,7 @@ export async function POST(request: Request) {
             : "Login failed.",
       metadata: auditMetadata
     });
-    return redirectToLogin(request, true);
+    return redirectToLogin(failureRedirectUrl, true);
   }
 
   const session = await createSession(user.id);
@@ -65,7 +75,7 @@ export async function POST(request: Request) {
     message: "Login succeeded.",
     metadata: auditMetadata
   });
-  const response = NextResponse.redirect(createHubRedirectUrl("/", request.url), { status: 303 });
+  const response = NextResponse.redirect(successRedirectUrl, { status: 303 });
   response.cookies.set(
     SESSION_COOKIE_NAME,
     session.token,
@@ -75,9 +85,7 @@ export async function POST(request: Request) {
   return response;
 }
 
-function redirectToLogin(request: Request, failed: boolean) {
-  const url = createHubRedirectUrl("/login", request.url);
-
+function redirectToLogin(url: URL, failed: boolean) {
   if (failed) {
     url.searchParams.set("error", "1");
   }

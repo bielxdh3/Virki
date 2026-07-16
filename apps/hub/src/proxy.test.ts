@@ -15,8 +15,25 @@ test("logout requests reach origin validation before session routing", () => {
 });
 
 test("protected pages without a session still redirect to login", () => {
-  const response = proxy(new NextRequest("http://hub.example.invalid/core/projects"));
+  const response = proxy(
+    new NextRequest("http://hub:3001/core/projects"),
+    {
+      NODE_ENV: "production",
+      NEXT_PUBLIC_HUB_URL: "https://hub.example.invalid"
+    }
+  );
 
   assert.equal(response.status, 307);
-  assert.equal(response.headers.get("location"), "http://hub.example.invalid/login");
+  assert.equal(response.headers.get("location"), "https://hub.example.invalid/login");
+});
+
+test("protected pages fail closed when production redirect configuration is invalid", () => {
+  const response = proxy(
+    new NextRequest("http://hub:3001/core/projects"),
+    { NODE_ENV: "production" }
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("location"), null);
+  assert.equal(response.headers.get("location")?.includes("hub:3001") ?? false, false);
 });
