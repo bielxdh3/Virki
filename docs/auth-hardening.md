@@ -79,10 +79,16 @@ Login, logout, session revocation, session cleanup, OWNER seed, and Cloudflare A
 
 Cloudflare Access is the outer boundary for `hub.biel.dev.br`, and BielOS internal auth remains the second layer. Optional origin-side Access JWT validation can reject hub requests with HTTP `403` when required and missing or invalid. The hub health endpoint stays available for local and Docker health checks.
 
+Access JWT failures are classified into a narrow fixed set for sanitized audit metadata. Unsupported JOSE errors and malformed values collapse to a generic category; raw JWTs, JOSE messages, audience, issuer, and signing-key details are not logged or rendered. The unauthenticated denial page remains generic, and the classifier does not change allow/deny behavior. These tests run in the normal Core unit and CI path.
+
+A production `inactive` diagnostic was traced to the Windows host clock lagging behind newly issued Access assertions while the time service was stopped. The host time service was restored and synchronized; JWT tolerance, not-before validation, and every Access boundary remained unchanged.
+
+Login success, login failure, logout, and unauthenticated proxy redirects use a shared public-origin contract. Destinations are limited to `/` and `/login`. Production requires an origin-only HTTPS `NEXT_PUBLIC_HUB_URL`; missing or invalid production configuration returns a generic service failure and never falls back to the internal request origin. Login validates both redirect destinations before authentication, rate-limit, session, or login-audit mutation. Logout validates first and still revokes the applicable session and clears the cookie if redirect configuration is unavailable. When origin-side Access validation is required, protected pages reject a missing assertion before session routing; the framework-facing proxy reads the runtime environment directly instead of accepting the framework event as configuration.
+
 ## Remaining Limitations
 
 - No edge-level or IP-based rate limit in this repository.
 - The dedicated production limiter key is configured privately and the closeout runtime is deployed; the value remains outside Git and operational output.
-- Authenticated production OWNER browser smoke remains pending because interactive authentication was not completed. MEMBER smoke is blocked until an existing disposable MEMBER identity is available or creation is explicitly authorized. `CI remoto não confirmado.`
+- Authenticated production OWNER browser smoke passed through Cloudflare Access and BielOS login, including public login/logout redirects and personal-session revocation. MEMBER smoke is blocked until an existing disposable MEMBER identity with a password is available or creation is explicitly authorized. `CI remoto não confirmado.`
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.

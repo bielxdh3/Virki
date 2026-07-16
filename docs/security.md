@@ -67,9 +67,7 @@ See `docs/audit-logs.md`.
 
 CI runs secret scan, lint, typecheck, Prisma validation, Core unit tests, migrated PostgreSQL integration tests, real concurrency tests, build, production image build, and production Compose validation. The Core database suites use one synthetic PostgreSQL service and do not require production secrets.
 
-The current hardening campaign passed the complete local gate, production image and Compose checks, production restart, unauthenticated health/Access checks, and loopback exposure checks. `CI remoto não confirmado.` for the consulted runtime and documentation SHAs because authenticated GitHub Actions evidence was unavailable.
-
-The subsequent closeout and origin-authentication gate passed 35 unit, 47 aggregate database, 35 integration, and 12 concurrency tests plus build, production image, and production Compose validation. The dedicated limiter key remains only in the ignored private environment, and production was rebuilt after runtime fix commit `5f66fbb8640cf907338c5c6c27aa96f002ba0f77` with current migrations. Exact image-to-commit provenance remains operationally inferred because the image has no trustworthy revision label. All expected services run, public/local health passes, Cloudflare Access remains first, direct-origin login and logout requests without the required assertion return `403`, and application ports remain loopback-only. Authenticated OWNER smoke remains pending; MEMBER smoke is blocked by the absence of a disposable MEMBER identity.
+The current redirect-hardening campaign passed 50 unit, 48 aggregate database, 36 integration, and 12 concurrency tests plus secret scan, lint, typecheck, Prisma validation, build, production image, Compose validation, restart, health, Access ordering, direct-origin denial, and loopback exposure checks. The dedicated limiter key remains only in the ignored private environment, production was rebuilt from clean pushed runtime commit `00c29fd79b94338fe39545044e282f430450e5e2`, and migrations are current. Exact image-to-commit provenance remains operationally inferred because the image has no trustworthy revision label. Authenticated OWNER smoke passed; MEMBER smoke is blocked by the absence of a disposable MEMBER identity with a password. `CI remoto não confirmado.`
 
 Run locally:
 
@@ -139,7 +137,7 @@ Private invitations are frozen with the rest of optional GymForge expansion.
 - Ranking remains deterministic by final score, attendance count, longest streak, latest qualifying check-in, display-name sort, and finally internal participant id only as a non-displayed fallback.
 - The committed additive migration was applied to production with `prisma migrate deploy` after a current custom-format PostgreSQL backup was created and verified; the post-deploy migration status is current.
 - After the first correction write, dropping the table or rolling the application back to a pre-Phase-3 commit is unsafe because assignment, reactivation, and `DRAFT` guards live in the new runtime. Recovery requires a forward fix or verified restore.
-- Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and production build pass. Local/public health, Cloudflare-first ordering, container state, and loopback exposure were verified after deploy; authenticated runtime smoke remains a manual follow-up because no authenticated browser session was available to the automation.
+- Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and production build pass. Local/public health, Cloudflare-first ordering, container state, and loopback exposure were verified after deploy. A later authenticated OWNER Core smoke confirmed the existing GymForge shell/navigation behind both authentication layers without changing GymForge behavior.
 
 ## Production Exposure Blockers
 
@@ -169,9 +167,13 @@ Cloudflare Access protects `hub.biel.dev.br` at the edge before requests reach t
 
 BielOS internal authentication protects the hub inside the application after Access has allowed the request.
 
-Phase 05.1 adds optional origin-side Cloudflare Access JWT validation for the hub. It reads the `cf-access-jwt-assertion` header, verifies the token against the Cloudflare Access JWKS endpoint for the configured team domain, checks issuer, audience, and expiration, and rejects the request when validation is required but missing or invalid.
+Phase 05.1 adds optional origin-side Cloudflare Access JWT validation for the hub. It reads the `cf-access-jwt-assertion` header, verifies the token against the Cloudflare Access JWKS endpoint for the configured team domain, checks issuer, audience, signature, expiration, and not-before, and rejects the request when validation is required but missing or invalid.
 
 Denied hub page requests return HTTP `403` with the Access unavailable screen. API login/logout denials also return HTTP `403`.
+
+Access failures are reduced to a typed fixed category before sanitized audit storage. Unsupported JOSE errors, malformed values, and private runtime details collapse to a generic category. Raw JWTs, JOSE messages, audience, issuer, and signing-key identifiers are not logged or displayed, and the unauthenticated denial UI remains generic. Diagnostic tests are included in the normal Core unit and CI path.
+
+Public login/logout redirects accept only the configured origin and literal destinations `/` or `/login`. Production requires origin-only HTTPS configuration and fails with a generic service response when missing or invalid; it never falls back to the internal request origin or trusts forwarded host headers. Login validates redirect configuration before mutable authentication work. Logout preserves server-side revocation and safe cookie clearing even when redirect construction is unavailable. The unauthenticated proxy follows the same origin contract and checks a required Access assertion before protected-route session routing; its framework-facing entry point reads runtime configuration directly.
 
 Enable it only with private local environment values:
 
