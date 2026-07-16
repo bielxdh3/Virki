@@ -27,6 +27,20 @@ test("protected pages without a session still redirect to login", () => {
   assert.equal(response.headers.get("location"), "https://hub.example.invalid/login");
 });
 
+test("protected pages without a required Access assertion fail before session routing", () => {
+  const response = proxy(
+    new NextRequest("http://hub:3001/core/projects"),
+    {
+      NODE_ENV: "production",
+      NEXT_PUBLIC_HUB_URL: "https://hub.example.invalid",
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
+    }
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(response.headers.get("location"), null);
+});
+
 test("protected pages fail closed when production redirect configuration is invalid", () => {
   const response = proxy(
     new NextRequest("http://hub:3001/core/projects"),

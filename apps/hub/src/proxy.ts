@@ -4,6 +4,7 @@ import { createHubRedirectUrl } from "./lib/hub-redirect";
 
 const PUBLIC_ROUTES = new Set(["/login", "/api/login", "/api/logout", "/api/health"]);
 const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml)$/i;
+const CLOUDFLARE_ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
 
 export function proxy(
   request: NextRequest,
@@ -13,6 +14,13 @@ export function proxy(
 
   if (isPublicPath(pathname)) {
     return NextResponse.next();
+  }
+
+  if (
+    env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true" &&
+    !request.headers.get(CLOUDFLARE_ACCESS_JWT_HEADER)
+  ) {
+    return new NextResponse("Forbidden", { status: 403 });
   }
 
   const hasSessionCookie = Boolean(request.cookies.get(SESSION_COOKIE_NAME)?.value);
