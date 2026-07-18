@@ -36,6 +36,26 @@ test("covers disabled, missing configuration, and missing JWT outcomes", async (
   );
 });
 
+test("rejects malformed and invalid JWT-shaped assertions", async () => {
+  const env = {
+    CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
+    CLOUDFLARE_ACCESS_AUDIENCE: "synthetic-audience",
+    CLOUDFLARE_TEAM_DOMAIN: "https://team.example.invalid"
+  };
+
+  for (const token of ["synthetic-malformed", "invalid.header.signature"]) {
+    const result = await validateCloudflareAccessJwt(
+      new Headers({ "cf-access-jwt-assertion": token }),
+      env
+    );
+
+    assert.equal(result.allowed, false);
+    assert.equal(result.required, true);
+    assert.equal(result.status, "invalid");
+    assert.equal(result.reason, "invalid-cloudflare-access-jwt");
+  }
+});
+
 test("classifies supported Cloudflare Access JWT failures", () => {
   assert.equal(
     classifyCloudflareAccessJwtError({ code: "ERR_JWT_EXPIRED" }),

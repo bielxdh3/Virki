@@ -20,11 +20,12 @@ export function evaluateProxyRequest(
     return NextResponse.next();
   }
 
-  if (
-    env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true" &&
-    !request.headers.get(CLOUDFLARE_ACCESS_JWT_HEADER)
-  ) {
-    return new NextResponse("Forbidden", { status: 403 });
+  if (env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true") {
+    if (!request.headers.get(CLOUDFLARE_ACCESS_JWT_HEADER)) {
+      return new NextResponse("Forbidden", { status: 403 });
+    }
+
+    return NextResponse.next();
   }
 
   const hasSessionCookie = Boolean(request.cookies.get(SESSION_COOKIE_NAME)?.value);

@@ -42,6 +42,24 @@ test("protected pages without a required Access assertion fail before session ro
   assert.equal(response.headers.get("location"), null);
 });
 
+test("a present required Access assertion reaches full validation before session routing", () => {
+  const response = evaluateProxyRequest(
+    new NextRequest("http://hub:3001/core/projects", {
+      headers: {
+        "cf-access-jwt-assertion": "synthetic-unverified-value"
+      }
+    }),
+    {
+      NODE_ENV: "production",
+      NEXT_PUBLIC_HUB_URL: "https://hub.example.invalid",
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
+    }
+  );
+
+  assert.equal(response.headers.get("x-middleware-next"), "1");
+  assert.equal(response.headers.get("location"), null);
+});
+
 test("the framework event argument cannot replace the runtime environment", () => {
   const previousValue = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
   process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "true";
