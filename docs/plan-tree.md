@@ -47,7 +47,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Private hub module shell registry exists.
 - `[DONE]` Module security design template exists.
 - `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
-- `[CURRENT]` BielOS Core expansion is explicitly authorized and is the active product path.
+- `[CURRENT]` BielOS Core operational verification is complete; the next product direction requires explicit user selection.
 - `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
 - `[DONE]` BielOS Core security and architecture gate exists at `docs/modules/bielos-core.md`.
 - `[DONE]` Core project registry and project management use the existing `Project` model with bounded authorization, CSRF, archive-only deletion policy, and sanitized audits.
@@ -64,16 +64,16 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Cloudflare Access diagnostic coverage is typed, fixed-category, non-disclosing, and included in the normal unit/CI path by `4705e9df46812967aa86ae780c732d56e17a719a`.
 - `[DONE]` Login success/failure and logout use the configured public hub origin after `e8ad193bca55abab87a16440d879ed534b86c761`; external users are not redirected to an internal Docker origin.
 - `[DONE]` The public redirect boundary is hardened by `d634a454138e7f59aa364a3764efce16a99bf2e3`: destinations are limited to `/` and `/login`, production requires a configured HTTPS origin, invalid production configuration fails closed, and proxy/login/logout regression coverage is in the normal test path.
-- `[DONE]` Protected origin requests without a required Access assertion are denied before session routing by `70f577329f36471876fcc184ef713e25d8b98b1f`; `00c29fd79b94338fe39545044e282f430450e5e2` separates the framework event from runtime environment configuration and covers that deployed invocation shape.
-- `[DONE]` The current Core gate passed 50 unit, 48 aggregate database, 36 integration, and 12 concurrency tests plus secret scan, lint, typecheck, Prisma validation, build, production image, Compose, restart, health, Cloudflare ordering, direct-origin denial, and loopback-exposure checks.
+- `[DONE]` Protected origin requests without a required Access assertion are denied before session routing by `70f577329f36471876fcc184ef713e25d8b98b1f`; `00c29fd79b94338fe39545044e282f430450e5e2` separates the framework event from runtime environment configuration, and `e559152b8f402f07f86c3eb29c56e601cf5bca44` routes present assertions through full JOSE validation before BielOS session routing.
+- `[DONE]` The current Core gate passed 52 unit, 48 aggregate database, 36 integration, and 12 concurrency tests plus secret scan, lint, typecheck, Prisma validation, build, production image, Compose, restart, health, Cloudflare ordering, direct-origin denial, and loopback-exposure checks.
 - `[DONE]` Core closeout requires a dedicated production login-limit HMAC key, exercises the real login POST route, covers limiter lifecycle and independent identifiers, bounds advisory-lock waits, and tests complete operational command error boundaries.
-- `[DONE]` Production was rebuilt from clean pushed runtime commit `00c29fd79b94338fe39545044e282f430450e5e2`; migrations are current and image-to-commit correlation remains operationally inferred because no trustworthy revision label exists.
+- `[DONE]` Production was rebuilt from clean pushed runtime commit `e559152b8f402f07f86c3eb29c56e601cf5bca44`; migrations are current and image-to-commit correlation remains operationally inferred because no trustworthy revision label exists.
 - `[DONE]` The dedicated limiter key is configured only in the ignored private environment, and the current Core runtime was rebuilt and deployed with current migrations, five healthy/running services, Cloudflare-first routing, origin JWT denial, and loopback-only application ports.
 - `[DONE]` Fix logout origin-authentication ordering in `5f66fbb8640cf907338c5c6c27aa96f002ba0f77`, add regression coverage, and rebuild production; exact image-to-commit provenance remains operationally inferred because the image has no trustworthy revision label.
 - `[DONE]` Authenticated OWNER production browser smoke passed through Cloudflare Access first and BielOS login second, including public redirects, project lifecycle, one CSRF denial, personal-session revocation, bounded audit, operations, locale, GymForge integration, reserved-module inactivity, and normal logout.
 - `[LATER]` Reconfirm remote CI evidence for the exact deployed runtime and documentation SHA when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.`
-- `[NEXT]` Obtain explicit authorization to create a disposable MEMBER identity, or provision an existing disposable MEMBER identity with a password, before MEMBER production smoke.
-- `[BLOCKED]` Complete authenticated MEMBER production browser smoke after an existing disposable MEMBER identity is available or creation is explicitly authorized.
+- `[DONE]` Disposable MEMBER identity authorization, temporary private provisioning, authenticated production smoke, and cleanup completed without adding registration or a permanent user-management surface.
+- `[DONE]` Core authenticated production verification completed through Cloudflare Access first and BielOS internal authentication second for OWNER and MEMBER, including project access levels, revocation, IDOR isolation, session isolation, audit restriction, cleanup, and documentation synchronization.
 - `[DONE]` GymForge is an available authenticated application integrated into the private hub at `/gymforge`.
 - `[BLOCKED]` Further GymForge feature expansion is frozen; preserve its implemented functionality without continuing its optional roadmap.
 - `[BLOCKED]` New real module implementations remain blocked until each completes `docs/module-security-template.md` and any required module architecture document.
@@ -341,4 +341,5 @@ BielOS MVP is complete when:
 - `[DONE]` Core closeout campaign: enforce dedicated production limiter configuration, add real route/lifecycle coverage, bound lock contention, strengthen command-boundary tests, and complete the local/Docker verification gate.
 - `[DONE]` Core production readiness deployment: configure the private limiter key, deploy current `main`, and verify migrations, services, health, Access ordering, origin denial, and loopback ports.
 - `[DONE]` Core origin-authentication correction: route logout through Access/CSRF enforcement before session handling, run the full gate, redeploy, and verify direct-origin `403`.
-- `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the active Core roadmap.
+- `[DONE]` Core authenticated production closeout: complete disposable MEMBER VIEWER/EDITOR/revocation, IDOR, session, audit, operations, login/logout, and cleanup verification without adding a provisioning surface.
+- `[BLOCKED]` GymForge optional expansion and all reserved-module runtime work remain outside the completed Core roadmap.

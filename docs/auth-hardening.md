@@ -89,6 +89,6 @@ Login success, login failure, logout, and unauthenticated proxy redirects use a 
 
 - No edge-level or IP-based rate limit in this repository.
 - The dedicated production limiter key is configured privately and the closeout runtime is deployed; the value remains outside Git and operational output.
-- Authenticated production OWNER browser smoke passed through Cloudflare Access and BielOS login, including public login/logout redirects and personal-session revocation. MEMBER smoke is blocked until an existing disposable MEMBER identity with a password is available or creation is explicitly authorized. `CI remoto não confirmado.`
+- Authenticated production OWNER and MEMBER browser smoke passed through Cloudflare Access first and BielOS login second, including public redirects, generic invalid-login recovery, role boundaries, project access revocation, IDOR isolation, personal-session isolation, and logout. Authorization B used one privately provisioned disposable MEMBER and removed its credential, sessions, grants, account, and profiles afterward without adding registration or permanent user management. `CI remoto não confirmado.`
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.
