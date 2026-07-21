@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PUBLIC_SITE_ORIGIN, PUBLIC_SITE_URL, PUBLIC_SITEMAP_URL, publicSiteMetadata } from "./discovery";
+import {
+  PUBLIC_SITE_ORIGIN,
+  PUBLIC_SITE_URL,
+  PUBLIC_SITEMAP_URL,
+  publicCanonicalLink,
+  publicSiteMetadata
+} from "./discovery";
 import robots from "./robots";
 import sitemap from "./sitemap";
 
@@ -24,5 +30,5 @@ test("allows the public root and references only the canonical sitemap", () => {
 
 test("uses the public origin for canonical metadata", () => {
   assert.equal(publicSiteMetadata.metadataBase?.toString(), PUBLIC_SITE_URL);
-  assert.deepEqual(publicSiteMetadata.alternates, { canonical: PUBLIC_SITE_URL });
+  assert.deepEqual(publicCanonicalLink, { rel: "canonical", href: PUBLIC_SITE_URL });
 });

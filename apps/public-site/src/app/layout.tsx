@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { publicSiteMetadata } from "./discovery";
+import { publicCanonicalLink, publicSiteMetadata } from "./discovery";
 import { getLocale } from "./locale";
 import "./globals.css";
 
@@ -14,6 +14,9 @@ export default async function RootLayout({
 
   return (
     <html lang={locale}>
+      <head>
+        <link rel={publicCanonicalLink.rel} href={publicCanonicalLink.href} />
+      </head>
       <body>{children}</body>
     </html>
   );
