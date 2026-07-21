@@ -14,7 +14,7 @@ Authenticated OWNER and MEMBER production smoke is complete through Cloudflare A
 
 ## Identity
 
-- Status: Core expansion authorized; this document is the runtime gate for project, access, session, operations, and audit surfaces.
+- Status: Core is implemented and operationally verified; this document remains the authoritative security and data boundary for project, access, session, operations, audit, and future maintenance.
 - Boundary: Cloudflare Access is the outer private-hub gate and BielOS internal authentication is the second gate. Core authorization never replaces either layer.
 - Global roles: `OWNER`, `ADMIN`, and `MEMBER` come from the active authenticated BielOS user.
 - Inactive users receive no Core access even if a `ProjectAccess` row remains.

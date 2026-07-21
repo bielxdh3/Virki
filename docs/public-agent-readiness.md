@@ -1,0 +1,22 @@
+# Public Agent Readiness
+
+Observed generic scanner result on 2026-07-20: overall 20, Level 0; Discoverability 25 (1/4), Content 0 (0/1), Bot Access Control 100 (2/2), API/Auth/MCP/Skill Discovery 0 (0/8), and Commerce not checked. Scanner scores do not override BielOS capability or privacy boundaries.
+
+| Finding | BielOS reality | Decision | Privacy/security rationale | Future trigger |
+| --- | --- | --- | --- | --- |
+| Sitemap and robots | `biel.dev.br` is a real public site with one canonical public route. | IMPLEMENTED | Publishes only the public landing and does not name the hub, health endpoints, private apps, or reserved modules. | Add another URL only after a real public route is intentionally released. |
+| Link response headers | No external public API catalog or public service-document endpoint exists. | NOT APPLICABLE | `api-catalog` or `service-doc` links would advertise nonexistent services. | Reassess only after a public service catalog exists. |
+| DNS-AID | BielOS exposes no public AI-agent endpoint or agent index. | NOT APPLICABLE | DNS records would falsely advertise an agent service and are not required for the public landing. | Reassess only after an intentionally public agent endpoint is designed. |
+| Markdown for Agents | Conversion could apply to the public landing, but no AI-training Content-Signal policy is selected. | BLOCKED PENDING DECISION | Any rule must be limited to `biel.dev.br` and optionally `www.biel.dev.br`, must exclude the private hub, and must not silently accept a default training policy. | Choose M1: public hosts with training/search/AI-input allowed; M2: public hosts with training disallowed and search/AI-input allowed; or M3: leave disabled. |
+| API catalog | No public external API exists. | NOT APPLICABLE | An empty catalog or private health listing would be misleading and could expose internal boundaries. | Reassess after a supported public API is released. |
+| OAuth/OIDC discovery | BielOS is not an OAuth authorization server; Cloudflare Access is not a BielOS issuer. | NOT APPLICABLE | Fabricated issuer, authorization, token, or JWKS metadata would be false and unsafe. | Reassess only if BielOS intentionally becomes an authorization server. |
+| OAuth Protected Resource Metadata | No OAuth-protected public API resource exists. | NOT APPLICABLE | Publishing metadata would imply a resource server that does not exist. | Reassess with a real public OAuth-protected API. |
+| `auth.md` | No public agent registration or public account registration exists. | NOT APPLICABLE | Public registration remains prohibited and private authentication details must not be advertised. | Reassess only after an approved public agent onboarding design. |
+| MCP Server Card | BielOS exposes no MCP server or transport endpoint. | NOT APPLICABLE | A card would advertise nonexistent protocol support. | Reassess after a real public MCP service is implemented and reviewed. |
+| A2A Agent Card | BielOS exposes no A2A server, transport endpoint, or public agent skill. | NOT APPLICABLE | A card would create a false service contract. | Reassess after a real public A2A service is implemented and reviewed. |
+| Agent Skills index | BielOS publishes no public Agent Skills. Internal `.agents/skills` are repository tooling. | NOT APPLICABLE | Internal operational instructions must not become public service metadata. | Reassess after intentionally publishing supported public skills. |
+| WebMCP | The public landing has no meaningful public transactional workflow. | NOT APPLICABLE | WebMCP must not expose private hub actions. | Reassess after a real public transactional workflow is approved. |
+| Bot Access Control | The supplied scanner observed 2/2 controls. | IMPLEMENTED | Existing bot policy is retained; no scanner-driven policy change is needed. | Reassess after a deliberate bot-access policy change. |
+| Commerce | BielOS is not a commerce site. | NOT APPLICABLE | Commerce metadata would misrepresent the service. | Reassess only if commerce becomes an explicit product capability. |
+
+Markdown for Agents remains disabled pending an explicit Content-Signal policy decision. No custom HTML-to-Markdown converter is planned.

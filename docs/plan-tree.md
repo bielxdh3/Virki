@@ -34,6 +34,12 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Public site production container starts locally.
 - `[DONE]` Local public site health responds at `http://127.0.0.1:3000`.
 - `[DONE]` Live public route smoke test for `https://biel.dev.br` and `https://www.biel.dev.br`.
+- `[DONE]` Public GymForge classification truthfully identifies the available authenticated private application while keeping feature expansion frozen.
+- `[DONE]` Public canonical metadata points only to `https://biel.dev.br/`.
+- `[DONE]` Public `robots.txt` allows the public root and references the canonical sitemap without naming private routes.
+- `[DONE]` Public `sitemap.xml` contains only the canonical public landing URL.
+- `[DONE]` Generic agent-readiness findings are triaged against actual BielOS capabilities without fabricating service discovery metadata.
+- `[LATER]` Markdown for Agents remains disabled pending an explicit public Content-Signal policy decision and safe exclusion of the private hub.
 - `[LATER]` Expand public content only with safe, non-private information.
 
 ## 3. Private Hub Plan
@@ -280,7 +286,7 @@ BielOS MVP is complete when:
 - `[DONE]` Prisma migrations replace production `db push`.
 - `[DONE]` Backup and restore are documented and tested.
 - `[DONE]` Hub application registry exists; private data handling is limited to implemented authenticated surfaces such as GymForge.
-- `[BLOCKED]` Reserved modules remain inert, and GymForge expansion remains frozen while Core is the active path.
+- `[BLOCKED]` Reserved modules remain inert, GymForge expansion remains frozen, and the next product direction requires explicit user selection.
 
 ## 13. Recommended Phase Order
 

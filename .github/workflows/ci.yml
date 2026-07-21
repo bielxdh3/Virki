@@ -58,6 +58,9 @@ jobs:
       - name: Validate Prisma schema
         run: npm run prisma:validate
 
+      - name: Public site discovery tests
+        run: npm run test:public-site
+
       - name: Core unit tests
         run: npm run test:core:unit
 

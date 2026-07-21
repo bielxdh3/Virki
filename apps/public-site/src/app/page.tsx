@@ -26,8 +26,8 @@ const publicProjects = {
     },
     {
       name: "GymForge",
-      description: "Espaço reservado para futuras ferramentas de treino.",
-      status: "Reservado"
+      description: "Aplicação privada disponível no hub autenticado; a expansão de recursos permanece congelada.",
+      status: "Privado"
     }
   ],
   en: [
@@ -53,8 +53,8 @@ const publicProjects = {
     },
     {
       name: "GymForge",
-      description: "Reserved module space for future training tools.",
-      status: "Reserved"
+      description: "Private application available in the authenticated hub; further feature expansion remains frozen.",
+      status: "Private"
     }
   ]
 } satisfies Record<BielosLocale, Array<{ name: string; description: string; status: string }>>;

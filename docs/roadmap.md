@@ -1,8 +1,8 @@
 # Roadmap
 
-## Current Direction: BielOS Core
+## Current Platform State: BielOS Core
 
-BielOS Core expansion is explicitly authorized and is now the active roadmap. Core is the private hub platform and workspace, distinct from applications and reserved modules. The existing `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models are foundations only; no future Core runtime phase is complete merely because those models exist.
+BielOS Core is the implemented and operationally verified private hub platform and workspace, distinct from applications and reserved modules. Its current verification phase is complete; any further product direction requires explicit user selection. The existing `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models remain governed by the established Core security and data boundaries.
 
 The Core security and architecture gate is complete in `docs/modules/bielos-core.md`. Core projects, access, personal sessions, safe operations visibility, and a bounded owner-only audit view are implemented, and the typed hub registry separates Core, available GymForge, and inert reserved modules. Project and session reads revalidate persisted identity state; project access mutations use serializable per-project locking; and the operations panel distinguishes verified local checks, configured architecture, and external manual validation.
 
@@ -18,7 +18,7 @@ Authenticated OWNER and MEMBER production browser smoke is complete through Clou
 
 ## Current Application Classification
 
-- BielOS Core: active platform/workspace expansion.
+- BielOS Core: implemented and operationally verified private platform/workspace; further direction requires explicit user selection.
 - GymForge: available integrated private-hub application at `/gymforge`; implemented capabilities are preserved and further feature expansion is frozen.
 - L-vault, root.ark, and H-vault: reserved planning-only modules; runtime remains inert.
 
@@ -26,7 +26,7 @@ GymForge invitations, public registration, import/export, photo proof/uploads, A
 
 ## Historical Roadmap Record
 
-The entries below preserve prior planning and completed delivery history. Any earlier statement that Core expansion is blocked, GymForge is merely planned, or a new GymForge phase is next is superseded by the current direction above.
+The entries below preserve prior planning and completed delivery history. Any earlier statement that Core expansion is blocked or active, GymForge is merely planned, or a new GymForge phase is next is superseded by the current platform state above.
 
 ## Phase 1: BielOS Core
 

@@ -1,11 +1,9 @@
 import type { Metadata } from "next";
+import { publicSiteMetadata } from "./discovery";
 import { getLocale } from "./locale";
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: "BielOS",
-  description: "A personal operating-system-style project hub."
-};
+export const metadata: Metadata = publicSiteMetadata;
 
 export default async function RootLayout({
   children
