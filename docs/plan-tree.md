@@ -39,7 +39,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Public `robots.txt` allows the public root and references the canonical sitemap without naming private routes.
 - `[DONE]` Public `sitemap.xml` contains only the canonical public landing URL.
 - `[DONE]` Generic agent-readiness findings are triaged against actual BielOS capabilities without fabricating service discovery metadata.
-- `[LATER]` Markdown for Agents remains disabled pending an explicit public Content-Signal policy decision and safe exclusion of the private hub.
+- `[LATER]` Markdown for Agents is unavailable on the current Cloudflare plan; reconsider only after plan support, an explicit public Content-Signal policy decision, and safe exclusion of the private hub.
 - `[LATER]` Expand public content only with safe, non-private information.
 
 ## 3. Private Hub Plan
