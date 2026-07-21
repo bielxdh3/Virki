@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Validate
@@ -49,6 +52,9 @@ jobs:
       - name: Secret scan
         run: npm run secrets:scan
 
+      - name: Production revision tests
+        run: npm run test:production-revision
+
       - name: Lint
         run: npm run lint
 
@@ -74,12 +80,21 @@ jobs:
         run: npm run build
 
       - name: Build production Docker image
-        run: docker build -f infra/Dockerfile.prod .
+        run: docker build --build-arg BIELOS_BUILD_REVISION=${{ github.sha }} --tag bielos-production-ci:${{ github.sha }} -f infra/Dockerfile.prod .
+
+      - name: Verify production Docker revision label
+        run: |
+          observed="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' bielos-production-ci:${{ github.sha }})"
+          if [ "$observed" != "${{ github.sha }}" ]; then
+            echo "Production image revision verification failed."
+            exit 1
+          fi
 
       - name: Validate production Compose config
         env:
           DATABASE_URL: postgresql://bielos_app:local-validation-only@postgres:5432/bielos
           BIELOS_RATE_LIMIT_HASH_SECRET: replace-with-test-secret
+          BIELOS_BUILD_REVISION: 0123456789abcdef0123456789abcdef01234567
           POSTGRES_PASSWORD: local-validation-only
           NEXT_PUBLIC_HUB_URL: https://hub.example.invalid
           CLOUDFLARE_TUNNEL_TOKEN: placeholder

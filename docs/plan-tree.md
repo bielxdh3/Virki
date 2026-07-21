@@ -53,7 +53,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Private hub module shell registry exists.
 - `[DONE]` Module security design template exists.
 - `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
-- `[CURRENT]` BielOS Core operational verification is complete; the next product direction requires explicit user selection.
+- `[CURRENT]` BielOS Core operational verification and deployment revision attestation are complete; the next product direction requires explicit user selection.
 - `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
 - `[DONE]` BielOS Core security and architecture gate exists at `docs/modules/bielos-core.md`.
 - `[DONE]` Core project registry and project management use the existing `Project` model with bounded authorization, CSRF, archive-only deletion policy, and sanitized audits.
@@ -73,9 +73,10 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Protected origin requests without a required Access assertion are denied before session routing by `70f577329f36471876fcc184ef713e25d8b98b1f`; `00c29fd79b94338fe39545044e282f430450e5e2` separates the framework event from runtime environment configuration, and `e559152b8f402f07f86c3eb29c56e601cf5bca44` routes present assertions through full JOSE validation before BielOS session routing.
 - `[DONE]` The current Core gate passed 52 unit, 48 aggregate database, 36 integration, and 12 concurrency tests plus secret scan, lint, typecheck, Prisma validation, build, production image, Compose, restart, health, Cloudflare ordering, direct-origin denial, and loopback-exposure checks.
 - `[DONE]` Core closeout requires a dedicated production login-limit HMAC key, exercises the real login POST route, covers limiter lifecycle and independent identifiers, bounds advisory-lock waits, and tests complete operational command error boundaries.
-- `[DONE]` Production was rebuilt from clean pushed runtime commit `e559152b8f402f07f86c3eb29c56e601cf5bca44`; migrations are current and image-to-commit correlation remains operationally inferred because no trustworthy revision label exists.
+- `[DONE]` Production was rebuilt from clean pushed runtime commit `e559152b8f402f07f86c3eb29c56e601cf5bca44`; at that closeout point image-to-commit correlation was still inferred, a limitation superseded by the current attestation gate.
 - `[DONE]` The dedicated limiter key is configured only in the ignored private environment, and the current Core runtime was rebuilt and deployed with current migrations, five healthy/running services, Cloudflare-first routing, origin JWT denial, and loopback-only application ports.
-- `[DONE]` Fix logout origin-authentication ordering in `5f66fbb8640cf907338c5c6c27aa96f002ba0f77`, add regression coverage, and rebuild production; exact image-to-commit provenance remains operationally inferred because the image has no trustworthy revision label.
+- `[DONE]` Fix logout origin-authentication ordering in `5f66fbb8640cf907338c5c6c27aa96f002ba0f77`, add regression coverage, and rebuild production; the then-inferred image provenance is superseded by the current attestation gate.
+- `[DONE]` Production build provenance uses a clean-source wrapper, exact full Git revision, immutable `org.opencontainers.image.revision` label, deterministic local verifier, and CI label equality gate without exposing revision data publicly.
 - `[DONE]` Authenticated OWNER production browser smoke passed through Cloudflare Access first and BielOS login second, including public redirects, project lifecycle, one CSRF denial, personal-session revocation, bounded audit, operations, locale, GymForge integration, reserved-module inactivity, and normal logout.
 - `[LATER]` Reconfirm remote CI evidence for the exact deployed runtime and documentation SHA when authenticated GitHub Actions metadata is available; `CI remoto não confirmado.`
 - `[DONE]` Disposable MEMBER identity authorization, temporary private provisioning, authenticated production smoke, and cleanup completed without adding registration or a permanent user-management surface.
@@ -287,6 +288,7 @@ BielOS MVP is complete when:
 - `[DONE]` Backup and restore are documented and tested.
 - `[DONE]` Hub application registry exists; private data handling is limited to implemented authenticated surfaces such as GymForge.
 - `[BLOCKED]` Reserved modules remain inert, GymForge expansion remains frozen, and the next product direction requires explicit user selection.
+- `[BLOCKED]` AIP remains a separate repository; any future BielOS integration requires an explicitly authorized contract phase and must not import AIP implementation code directly.
 
 ## 13. Recommended Phase Order
 

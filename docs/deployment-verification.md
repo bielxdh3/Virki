@@ -4,6 +4,8 @@ Use this checklist for the first production launch and later smoke tests. Do not
 
 ## Before Start
 
+- Run `git fetch origin` and confirm the active branch is `main`.
+- Confirm local `HEAD` equals `origin/main` and the tracked, staged, and non-ignored untracked worktree is clean. `start:prod` and `restart:prod` fail closed otherwise.
 - Confirm the private `.env` file exists locally in the repository root.
 - Confirm the private `.env` defines these names without printing their values:
   - `DATABASE_URL`
@@ -30,6 +32,7 @@ Inspect status and local health:
 npm run status:prod
 npm run status:ports
 npm run health:local
+npm run revision:prod
 ```
 
 - Confirm `npm run status:ports` shows loopback bindings only:
@@ -38,6 +41,7 @@ npm run health:local
 - Confirm `postgres`, `public-site`, `hub`, `cloudflared`, and `session-cleanup` are running.
 - Confirm `session-cleanup` has no published ports.
 - Confirm `cloudflared` has no published ports.
+- Confirm `npm run revision:prod` reports `match` for `public-site`, `hub`, and `session-cleanup` against the current full Git revision.
 - Confirm `npm run health:local` checks:
   - `http://127.0.0.1:3000`
   - `http://127.0.0.1:3001/api/health`
@@ -117,7 +121,7 @@ Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it re
 - The latest complete gate passed 52 unit, 48 aggregate database, 36 integration, and 12 concurrency tests plus secret scan, lint, typecheck, Prisma validation, build, production image build, production Compose validation, production restart, local/public health checks, Cloudflare-first hub routing, and loopback port checks.
 - Diagnostic commit `4705e9df46812967aa86ae780c732d56e17a719a` supplies typed non-disclosing Access categories in the normal test path. Redirect correction commit `e8ad193bca55abab87a16440d879ed534b86c761` routes login success/failure and logout to the configured public origin. Hardening commit `d634a454138e7f59aa364a3764efce16a99bf2e3` limits destinations, requires HTTPS in production, removes production fallback, validates login configuration before mutable auth work, preserves logout cookie clearing, and makes proxy misconfiguration fail with a generic `503`.
 - Protected-origin commit `70f577329f36471876fcc184ef713e25d8b98b1f` adds early denial for missing required Access assertions. Runtime correction commit `00c29fd79b94338fe39545044e282f430450e5e2` separates the framework event from environment injection and adds a regression test for the deployed invocation shape.
-- Production was rebuilt from clean pushed runtime commit `e559152b8f402f07f86c3eb29c56e601cf5bca44`. Because the image has no trustworthy revision label, image-to-commit correlation is operationally inferred rather than machine-attested.
+- Production revision attestation uses the immutable OCI label `org.opencontainers.image.revision`. The production wrapper requires clean pushed `main` source, CI verifies exact label equality, and local verification fails when any required BielOS-built service is absent or differs. The revision is not exposed by public HTML, discovery metadata, health routes, login responses, headers, audit logs, or user-facing errors.
 - `CI remoto não confirmado.` GitHub CLI authentication was unavailable for exact workflow evidence.
 - The dedicated limiter key is configured only in the ignored private environment. The current runtime was rebuilt and deployed without schema changes; migrations remain current and all expected services are healthy or running.
 - Local/public health, Cloudflare-first routing, direct-origin login, logout, and protected-page `403`, public login/logout redirects, and loopback-only port checks passed. This is a local Windows/Docker Desktop deployment through Cloudflare Tunnel, so public Linux/VPS host-firewall validation is not applicable.

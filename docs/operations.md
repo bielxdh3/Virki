@@ -36,6 +36,16 @@ Restart BielOS:
 npm run restart:prod
 ```
 
+Before `start:prod` or `restart:prod`, run `git fetch origin`. The production wrapper fails closed unless the active branch is `main`, tracked/staged/untracked source is clean, and local `HEAD` exactly equals `origin/main`. It does not pull, reset, clean, or change branches.
+
+Verify that all running BielOS-built services use the current revision:
+
+```bash
+npm run revision:prod
+```
+
+The verifier checks only `org.opencontainers.image.revision` on `public-site`, `hub`, and `session-cleanup`. It emits fixed match/missing/malformed/mismatch categories and never prints container IDs, image IDs, raw inspect data, environment values, or an unexpected label value.
+
 Show container status:
 
 ```bash
@@ -275,7 +285,7 @@ Authenticated OWNER/MEMBER browser smoke must use an existing safe browser sessi
 
 The redirect-hardening campaign reviewed commits `4705e9df46812967aa86ae780c732d56e17a719a`, `e8ad193bca55abab87a16440d879ed534b86c761`, `d634a454138e7f59aa364a3764efce16a99bf2e3`, `70f577329f36471876fcc184ef713e25d8b98b1f`, `00c29fd79b94338fe39545044e282f430450e5e2`, and `e559152b8f402f07f86c3eb29c56e601cf5bca44`. Access diagnostics are typed and non-disclosing in the normal unit path. Login, logout, and proxy redirects use the configured public origin, allow only `/` and `/login`, require HTTPS in production, and fail closed without an internal-origin fallback. Missing required assertions are denied early; present assertions reach full JOSE validation before BielOS session routing. The deployed proxy wrapper keeps the framework event separate from runtime environment configuration.
 
-The current campaign passed 52 unit, 48 aggregate database, 36 integration, and 12 concurrency tests plus secret scan, lint, typecheck, Prisma validation, build, production image, and Compose validation. Disposable database resources were removed. Production was rebuilt from clean pushed runtime commit `e559152b8f402f07f86c3eb29c56e601cf5bca44` with current migrations and the durable PostgreSQL volume preserved. Five expected services are healthy or running; local/public health, Cloudflare-first routing, direct-origin login/logout/protected-route denial, public redirects, and loopback-only application ports pass. The image has no trustworthy revision label, so exact image-to-commit correlation remains operationally inferred.
+The Core gate includes secret scan, lint, typecheck, Prisma validation, public discovery, unit, database integration and concurrency tests, build, production image, and Compose validation. Production builds now require a clean pushed `main` revision and store the exact full SHA in the immutable OCI image label. The local verifier requires the running `public-site`, `hub`, and `session-cleanup` labels to match that intended revision. This attestation remains local operational and CI evidence; no public application surface exposes the private repository revision.
 
 Authenticated OWNER and MEMBER production smoke passed through Cloudflare Access first and BielOS login second. MEMBER Authorization B used exactly one synthetic identity through a private temporary mechanism. Baseline denial, VIEWER/EDITOR visibility, global-role mutation denial, revocation, Project A/B IDOR isolation, own-session isolation, owner-audit denial, sanitized operations, one generic invalid login followed by successful login, and logout passed. The account credential, sessions, grants, profiles, and temporary mechanism were removed, synthetic projects were archived, and no registration or permanent user-management surface was added. Existing GymForge behavior remained frozen and reserved modules remained inert. `CI remoto não confirmado.`
 

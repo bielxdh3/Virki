@@ -9,7 +9,7 @@ This directory contains application and reserved-module planning documents. Biel
 - Security and architecture gate: complete in `bielos-core.md`.
 - Implemented surfaces: project registry/lifecycle, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.
 - Completed verification: database-backed integration/concurrency validation and authenticated OWNER/MEMBER production smoke.
-- Maintenance boundary: `SecurityUnlock` runtime remains blocked by its design boundary, and the next product direction requires explicit user selection.
+- Maintenance boundary: operational verification and deployment revision attestation are complete, `SecurityUnlock` runtime remains blocked by its design boundary, and the next product direction requires explicit user selection.
 
 ## Available Applications
 

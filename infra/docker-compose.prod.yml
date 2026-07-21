@@ -1,8 +1,12 @@
+x-bielos-build: &bielos-build
+  context: ..
+  dockerfile: infra/Dockerfile.prod
+  args:
+    BIELOS_BUILD_REVISION: ${BIELOS_BUILD_REVISION:-}
+
 services:
   public-site:
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile.prod
+    build: *bielos-build
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:?NEXT_PUBLIC_HUB_URL must be set in local .env}
@@ -22,9 +26,7 @@ services:
       retries: 3
 
   hub:
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile.prod
+    build: *bielos-build
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,9 +57,7 @@ services:
       retries: 3
 
   session-cleanup:
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile.prod
+    build: *bielos-build
     restart: unless-stopped
     depends_on:
       postgres:

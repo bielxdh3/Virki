@@ -18,10 +18,10 @@ The development compose file runs `npm run dev`. It is intended only for local d
 Production:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
+npm run start:prod
 ```
 
-The production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands.
+The production wrapper requires `main`, a clean tracked/staged/untracked worktree, and local `HEAD` equal to `origin/main`. It supplies the exact full Git SHA only to the Docker build, then the production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands. Fetch `origin` explicitly before the build; the wrapper never pulls, resets, cleans, or changes branches.
 
 Production Compose also starts a `session-cleanup` worker. It has no published ports, depends on PostgreSQL health, uses the same private database environment as the hub, removes expired or revoked sessions every hour by default, and applies audit log retention cleanup.
 
@@ -37,7 +37,7 @@ These bindings preserve local health checks while avoiding exposure on all host 
 Run the production compose path:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml up --build
+npm run start:prod
 ```
 
 Then validate the basic behavior:
@@ -92,9 +92,23 @@ When `NODE_ENV=production`, the cookie is also marked `Secure`. That means brows
 
 GitHub Actions validates the repository on pushes and pull requests to `main`.
 
-The CI job installs dependencies with `npm ci`, audits the lockfile, runs the local secret scan, runs lint, typechecks all workspaces, validates the Prisma schema, builds both Next.js apps, and builds the production Docker image.
+The CI job installs dependencies with `npm ci`, audits the lockfile, runs the local secret scan and production revision tests, runs lint, typechecks all workspaces, validates the Prisma schema, builds both Next.js apps, and builds the production Docker image with the exact workflow commit. CI inspects `org.opencontainers.image.revision` and fails unless it exactly equals that commit.
 
 The secret scan is a private-repository MVP guardrail for obvious committed secrets. It does not require real Cloudflare, database, or owner credentials and must not be configured with real secret values.
+
+## Production Revision Attestation
+
+`infra/Dockerfile.prod` requires a lowercase 40-character `BIELOS_BUILD_REVISION` build argument and stores it only in the final image label `org.opencontainers.image.revision`. Missing, short, malformed, or non-lowercase revisions fail the build. Git metadata is not copied into the image, and the revision is not added to runtime environment variables, application responses, health data, headers, audit logs, or public metadata.
+
+Use only the safe wrapper for production builds:
+
+```bash
+git fetch origin
+npm run start:prod
+npm run revision:prod
+```
+
+`npm run restart:prod` applies the same clean-source gate and rebuilds/recreates the BielOS services without changing database migrations. `npm run revision:prod` inspects only the revision label for `public-site`, `hub`, and `session-cleanup`; it fails when a service or label is absent, malformed, or different from the current Git revision and never prints an unexpected observed value.
 
 ## Database Migrations
 

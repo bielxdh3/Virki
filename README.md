@@ -95,11 +95,12 @@ npm run start:prod
 npm run stop:prod
 npm run restart:prod
 npm run status:prod
+npm run revision:prod
 npm run logs:prod
 npm run health:local
 ```
 
-See `docs/operations.md` for beginner-friendly start, stop, status, logs, health check, and troubleshooting steps.
+Production start and restart require a clean `main` whose full revision matches `origin/main`; they attach that revision to the built images for local verification. See `docs/operations.md` for start, stop, status, revision, logs, health check, and troubleshooting steps.
 
 ## Security Baseline
 

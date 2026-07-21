@@ -4,6 +4,10 @@ WORKDIR /app
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
+ARG BIELOS_BUILD_REVISION
+
+RUN node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1] ?? "")) process.exit(1)' "$BIELOS_BUILD_REVISION"
+
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
 COPY apps/hub/package*.json ./apps/hub/
@@ -27,6 +31,10 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+
+ARG BIELOS_BUILD_REVISION
+
+LABEL org.opencontainers.image.revision="${BIELOS_BUILD_REVISION}"
 
 COPY --from=build /app ./
 
