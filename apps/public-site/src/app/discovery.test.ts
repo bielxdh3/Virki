@@ -24,5 +24,5 @@ test("allows the public root and references only the canonical sitemap", () => {
 
 test("uses the public origin for canonical metadata", () => {
   assert.equal(publicSiteMetadata.metadataBase?.toString(), PUBLIC_SITE_URL);
-  assert.deepEqual(publicSiteMetadata.alternates, { canonical: "/" });
+  assert.deepEqual(publicSiteMetadata.alternates, { canonical: PUBLIC_SITE_URL });
 });
