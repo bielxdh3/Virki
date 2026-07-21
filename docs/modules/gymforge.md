@@ -32,8 +32,8 @@ GymForge is intended as a gated social gym competition app for Gabriel and invit
 - Implemented: attendance check-ins and admin correction, streak/ranking views, workout notes and one-set exercise logging, admin participant and exercise catalog management, competition lifecycle and participant assignment, deterministic current-state scoring, additive score correction, and safe deletion for non-ACTIVE competitions with zero assignments and no correction history.
 - Workout creation/editing intentionally supports exactly one set. An update fails safely before mutation if the stored workout unexpectedly has zero or multiple sets; explicit deletion transactionally removes all dependent sets.
 - Competition score-correction Phase 2 design and Phase 3 implementation are `[DONE]`.
-- Private invitations are `[NEXT]` for Phase 4; invite acceptance remains unavailable until that phase is implemented and validated.
-- Blocked until scoped or implemented: upload/photo proof, public registration, invite acceptance until Phase 4, import/export, unsafe competition deletion, a public API, and broad social feed behavior.
+- Further expansion is frozen; private invitations are not an active phase, and invite acceptance remains unavailable.
+- Blocked until explicitly unfrozen and scoped: private invitations and invite acceptance, upload/photo proof, public registration, import/export, unsafe competition deletion, a public API, and broad social feed behavior.
 
 ## Storage Model
 
@@ -178,7 +178,7 @@ Phase 2 design and Phase 3 private-hub implementation are complete. The followin
 
 Competition score-correction Phases 2 and 3 are `[DONE]`.
 
-GymForge private invitations are `[NEXT]` for Phase 4; invite acceptance remains blocked until that phase is implemented and validated. Upload/photo proof, public registration, import/export, unsafe competition deletion, a public API, and broad social visibility remain blocked.
+GymForge expansion is frozen. Private invitations and invite acceptance are not active phases. Upload/photo proof, public registration, import/export, unsafe competition deletion, a public API, and broad social visibility remain blocked.
 
 ## Validation Checklist
 

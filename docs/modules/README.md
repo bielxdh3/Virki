@@ -1,14 +1,15 @@
 # Application And Module Planning Index
 
-This directory contains application and reserved-module planning documents. BielOS Core is the private hub platform and workspace, not a module. Core expansion is the active path. GymForge is an available integrated application, while L-vault, root.ark, and H-vault remain reserved and inert.
+This directory contains application and reserved-module planning documents. BielOS Core is the implemented and operationally verified private platform/workspace, not a module. No next product direction is selected. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
 
 ## BielOS Core
 
-- Status: initial runtime expansion implemented, validated, and deployed.
+- Status: implemented, validated, deployed, and operationally verified.
 - Existing foundations: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
 - Security and architecture gate: complete in `bielos-core.md`.
 - Implemented surfaces: project registry/lifecycle, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.
-- Next gate: database-backed authorization/concurrency tests and authenticated browser smoke; `SecurityUnlock` runtime remains blocked by its design boundary.
+- Completed verification: database-backed integration/concurrency validation and authenticated OWNER/MEMBER production smoke.
+- Maintenance boundary: `SecurityUnlock` runtime remains blocked by its design boundary, and the next product direction requires explicit user selection.
 
 ## Available Applications
 

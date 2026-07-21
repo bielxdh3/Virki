@@ -8,8 +8,8 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 - Implemented foundation: authenticated private hub route, participant/exercise administration, attendance check-ins and correction, fixed `America/Sao_Paulo` dates, single-set workout entry/edit/delete, ranking/streak views, competition lifecycle and assignment, deterministic current-state scoring, additive score correction, and safe deletion for non-ACTIVE competitions with zero assignments and no correction history.
 - `[DONE]`: competition score-correction Phase 2 design and Phase 3 implementation.
-- `[NEXT]`: private invitations in Phase 4; invite acceptance remains unavailable until that phase is implemented and validated.
-- Blocked until scoped or implemented: upload/photo proof, public registration, invite acceptance until Phase 4, import/export, unsafe competition deletion, a public API, and broad social feed behavior.
+- Further expansion is frozen; private invitations are not an active phase, and invite acceptance remains unavailable.
+- Blocked until explicitly unfrozen and scoped: private invitations and invite acceptance, upload/photo proof, public registration, import/export, unsafe competition deletion, a public API, and broad social feed behavior.
 - Included in the MVP boundary: participant accounts, admin participant management, admin exercise catalog, attendance check-ins, streaks, workout notes, exercise logs, simple group ranking, and competition metadata.
 - Future but planned: photo proof for check-ins.
 - Excluded from MVP: body metrics, health records, public registration, public profiles, open internet access, imports, exports, file upload, broad social feed, payments, and third-party integrations.

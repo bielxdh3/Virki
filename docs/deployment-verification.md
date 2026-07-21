@@ -88,7 +88,7 @@ Use only existing disposable test identities. Do not reset a real user's passwor
 | Disposable `MEMBER` | `/core/projects` | Open lists and direct URLs for granted, public, and ungranted restricted projects | Only public or explicitly granted projects appear; restricted direct URLs fail without description/status leakage | OWNER removes the disposable grant afterward |
 | Disposable `MEMBER` | `/core/projects` and `/core/security` | Attempt admin controls/audit access and inspect sessions | Project mutation/access controls and owner audit are unavailable; only the member's sessions appear | Sign out |
 
-Authenticated OWNER smoke has been executed through the real Cloudflare Access and BielOS login flow. MEMBER rows remain blocked until an existing disposable MEMBER identity with a password is available or creation is explicitly authorized.
+Authenticated OWNER and MEMBER smoke has been executed through the real Cloudflare Access and BielOS login flow. Disposable MEMBER credentials, sessions, grants, account state, and browser profiles were removed after verification.
 
 ## Safe Diagnostics
 
