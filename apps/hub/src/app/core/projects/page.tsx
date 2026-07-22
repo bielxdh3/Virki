@@ -8,13 +8,9 @@ import { getCurrentSession } from "../../../lib/auth";
 import { getLocale } from "../../locale";
 import { LanguageSelector } from "../../language-selector";
 import { isCoreAdministrator } from "../authorization";
-import {
-  archiveCoreProject,
-  createCoreProject,
-  revokeCoreProjectAccess,
-  setCoreProjectAccess,
-  updateCoreProject
-} from "./actions";
+import { createCoreProject } from "./actions";
+import { getCoreProjectDetailPath } from "./detail-policy";
+import { CoreProjectAdminControls } from "./project-admin-controls";
 import {
   CORE_PROJECT_READ_LIMIT,
   listCoreProjectsForPrincipal
@@ -87,7 +83,8 @@ const copy = {
     accessLimit: "Até 100 acessos exibidos por projeto.",
     archiveDetails: "Área de arquivamento",
     slugHint: "Letras minúsculas, números e hífens simples.",
-    limitNote: "Lista limitada aos 100 projetos mais recentes."
+    limitNote: "Lista limitada aos 100 projetos mais recentes.",
+    openProject: "Abrir projeto"
   },
   en: {
     privateHub: "Private Hub",
@@ -151,7 +148,8 @@ const copy = {
     accessLimit: "Up to 100 access rows are shown per project.",
     archiveDetails: "Archive area",
     slugHint: "Lowercase letters, numbers, and single hyphens.",
-    limitNote: "List limited to the 100 most recently updated projects."
+    limitNote: "List limited to the 100 most recently updated projects.",
+    openProject: "Open project"
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
@@ -408,147 +406,20 @@ export default async function CoreProjectsPage() {
                         </div>
                       </dl>
 
+                      <a className="button-ghost core-project-open" href={getCoreProjectDetailPath(project.id) ?? "/core/projects"}>
+                        {t.openProject}
+                      </a>
+
                       {archived ? <p className="core-project-archived-note">{t.archivedNote}</p> : null}
                     </div>
 
                     {isAdministrator && !archived ? (
-                      <div className="core-project-actions" aria-label={`${t.actions}: ${project.name}`}>
-                        <details className="admin-drawer core-project-drawer">
-                          <summary>{t.editDetails}</summary>
-                          <form className="compact-form core-project-form" action={updateCoreProject}>
-                            <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                            <input type="hidden" name="projectId" value={project.id} />
-                            <label>
-                              <span>{t.name}</span>
-                              <input name="name" required minLength={2} maxLength={80} defaultValue={project.name} />
-                            </label>
-                            <label>
-                              <span>{t.slug}</span>
-                              <input
-                                name="slug"
-                                required
-                                minLength={3}
-                                maxLength={64}
-                                pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-                                defaultValue={project.slug}
-                              />
-                            </label>
-                            <label className="core-project-description-field">
-                              <span>{t.description} ({t.optional})</span>
-                              <textarea name="description" maxLength={500} rows={3} defaultValue={project.description ?? ""} />
-                            </label>
-                            <label>
-                              <span>{t.visibility}</span>
-                              <select name="visibility" defaultValue={project.visibility}>
-                                {visibilityValues.map((value) => (
-                                  <option key={value} value={value}>{getVisibilityLabel(value, t)}</option>
-                                ))}
-                              </select>
-                            </label>
-                            <label>
-                              <span>{t.status}</span>
-                              <select name="status" defaultValue={project.status}>
-                                {statusValues.map((value) => (
-                                  <option key={value} value={value}>{getStatusLabel(value, t)}</option>
-                                ))}
-                              </select>
-                            </label>
-                            <div className="button-row core-project-form-actions">
-                              <button className="button-primary" type="submit">{t.save}</button>
-                            </div>
-                          </form>
-                        </details>
-
-                        <details className="admin-drawer core-project-drawer core-project-access-drawer">
-                          <summary>{t.accessDetails}</summary>
-                          <div className="core-project-access-panel">
-                            <form className="compact-form core-project-access-form" action={setCoreProjectAccess}>
-                              <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                              <input type="hidden" name="projectId" value={project.id} />
-                              <label>
-                                <span>{t.selectUser}</span>
-                                <select name="userId" required defaultValue="">
-                                  <option value="" disabled>{t.selectUser}</option>
-                                  {activeUsers
-                                    .filter((user) =>
-                                      session.user.role === "OWNER" ||
-                                      !project.accesses.some(
-                                        (access) =>
-                                          access.user.id === user.id && access.accessLevel === "OWNER"
-                                      )
-                                    )
-                                    .map((user) => (
-                                      <option key={user.id} value={user.id}>
-                                        {user.displayName ? `${user.displayName} - ` : ""}
-                                        {user.email} ({user.role})
-                                      </option>
-                                    ))}
-                                </select>
-                              </label>
-                              <label>
-                                <span>{t.accessLevel}</span>
-                                <select name="accessLevel" defaultValue="VIEWER">
-                                  <option value="VIEWER">{t.viewer}</option>
-                                  <option value="EDITOR">{t.editor}</option>
-                                  {session.user.role === "OWNER" ? (
-                                    <option value="OWNER">{t.owner}</option>
-                                  ) : null}
-                                </select>
-                              </label>
-                              <div className="button-row core-project-form-actions">
-                                <button className="button-primary" type="submit">{t.applyAccess}</button>
-                              </div>
-                            </form>
-
-                            <div className="core-project-access-list" aria-label={t.currentAccess}>
-                              <div className="core-project-access-heading">
-                                <strong>{t.currentAccess}</strong>
-                                <span>{project.accesses.length} / 100</span>
-                              </div>
-                              {project.accesses.length === 0 ? (
-                                <p className="core-project-access-empty">{t.noAccess}</p>
-                              ) : (
-                                project.accesses.map((access) => (
-                                  <div className="core-project-access-row" key={access.user.id}>
-                                    <div>
-                                      <strong>{access.user.displayName ?? access.user.email}</strong>
-                                      <span>
-                                        {access.user.displayName ? `${access.user.email} / ` : ""}
-                                        {getAccessLabel(access.accessLevel, project.visibility, false, t)} / {access.user.isActive ? t.activeUser : t.inactiveUser}
-                                      </span>
-                                    </div>
-                                    {session.user.role === "OWNER" || access.accessLevel !== "OWNER" ? (
-                                      <form action={revokeCoreProjectAccess}>
-                                        <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                                        <input type="hidden" name="projectId" value={project.id} />
-                                        <input type="hidden" name="userId" value={access.user.id} />
-                                        <button className="button-danger" type="submit">{t.revokeAccess}</button>
-                                      </form>
-                                    ) : null}
-                                  </div>
-                                ))
-                              )}
-                              <small>{t.accessLimit}</small>
-                            </div>
-                          </div>
-                        </details>
-
-                        <details className="admin-drawer core-project-drawer core-project-archive-drawer">
-                          <summary>{t.archiveDetails}</summary>
-                          <form className="core-project-archive-form" action={archiveCoreProject}>
-                            <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                            <input type="hidden" name="projectId" value={project.id} />
-                            <p>{t.noDelete}</p>
-                            <label className="checkbox-line">
-                              <input type="checkbox" name="confirmArchive" value="yes" required />
-                              <span>{t.archiveConfirm}</span>
-                            </label>
-                            <div className="button-row">
-                              <button className="button-danger" type="submit">{t.archiveProject}</button>
-                            </div>
-                          </form>
-                        </details>
-                      </div>
+                      <CoreProjectAdminControls
+                        project={project}
+                        activeUsers={activeUsers}
+                        actorRole={session.user.role}
+                        copy={t}
+                      />
                     ) : null}
                   </article>
                 );

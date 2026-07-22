@@ -13,6 +13,7 @@ import { isCoreAdministrator } from "../authorization";
 import {
   type CoreProjectFields
 } from "./validation";
+import { getCoreProjectDetailPath } from "./detail-policy";
 import {
   archiveCoreProjectRecord,
   createCoreProjectRecord,
@@ -66,8 +67,18 @@ async function requireCoreAdministrator(formData: FormData, source: string) {
   return session;
 }
 
-function revalidateCoreProjects() {
+function getProjectResultPath(formData: FormData, projectId: string): string {
+  if (readFormString(formData, "returnTo") === "detail") {
+    return getCoreProjectDetailPath(projectId) ?? CORE_PROJECTS_PATH;
+  }
+
+  return CORE_PROJECTS_PATH;
+}
+
+function revalidateCoreProjects(projectId?: string) {
   revalidatePath(CORE_PROJECTS_PATH);
+  const detailPath = projectId ? getCoreProjectDetailPath(projectId) : null;
+  if (detailPath) revalidatePath(detailPath);
   revalidatePath("/");
 }
 
@@ -87,30 +98,32 @@ export async function createCoreProject(formData: FormData) {
 export async function updateCoreProject(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-update");
   const projectId = readFormString(formData, "projectId").trim();
+  const resultPath = getProjectResultPath(formData, projectId);
 
   try {
     await updateCoreProjectRecord(session.user, projectId, readProjectFields(formData));
   } catch {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-update`);
+    redirect(`${resultPath}?error=project-update`);
   }
 
-  revalidateCoreProjects();
-  redirect(`${CORE_PROJECTS_PATH}?status=updated`);
+  revalidateCoreProjects(projectId);
+  redirect(`${resultPath}?status=updated`);
 }
 
 export async function archiveCoreProject(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-archive");
   const projectId = readFormString(formData, "projectId").trim();
   const confirmed = readFormString(formData, "confirmArchive") === "yes";
+  const resultPath = getProjectResultPath(formData, projectId);
 
   try {
     await archiveCoreProjectRecord(session.user, projectId, confirmed);
   } catch {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-archive`);
+    redirect(`${resultPath}?error=project-archive`);
   }
 
-  revalidateCoreProjects();
-  redirect(`${CORE_PROJECTS_PATH}?status=archived`);
+  revalidateCoreProjects(projectId);
+  redirect(`${resultPath}?status=archived`);
 }
 
 export async function setCoreProjectAccess(formData: FormData) {
@@ -118,6 +131,7 @@ export async function setCoreProjectAccess(formData: FormData) {
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
   const accessLevel = readFormString(formData, "accessLevel");
+  const resultPath = getProjectResultPath(formData, projectId);
 
   let result: Awaited<ReturnType<typeof setCoreProjectAccessRecord>>;
   try {
@@ -128,24 +142,25 @@ export async function setCoreProjectAccess(formData: FormData) {
       accessLevel
     );
   } catch {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-access`);
+    redirect(`${resultPath}?error=project-access`);
   }
 
-  revalidateCoreProjects();
-  redirect(`${CORE_PROJECTS_PATH}?status=access-${result.kind}`);
+  revalidateCoreProjects(projectId);
+  redirect(`${resultPath}?status=access-${result.kind}`);
 }
 
 export async function revokeCoreProjectAccess(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-access-revoke");
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
+  const resultPath = getProjectResultPath(formData, projectId);
 
   try {
     await revokeCoreProjectAccessRecord(session.user, projectId, userId);
   } catch {
-    redirect(`${CORE_PROJECTS_PATH}?error=project-access`);
+    redirect(`${resultPath}?error=project-access`);
   }
 
-  revalidateCoreProjects();
-  redirect(`${CORE_PROJECTS_PATH}?status=access-revoked`);
+  revalidateCoreProjects(projectId);
+  redirect(`${resultPath}?status=access-revoked`);
 }

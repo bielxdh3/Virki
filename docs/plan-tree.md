@@ -53,7 +53,9 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Private hub module shell registry exists.
 - `[DONE]` Module security design template exists.
 - `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
-- `[CURRENT]` BielOS Core operational verification and deployment revision attestation are complete; the next product direction requires explicit user selection.
+- `[DONE]` BielOS Core operational verification and deployment revision attestation are complete.
+- `[DONE]` BielOS Core project detail workspace adds a private authorization-aware route for existing projects, reuses current administration controls, preserves archived read-only behavior, and requires no schema change.
+- `[CURRENT]` The selected Core project detail workspace phase is complete; no subsequent product phase is selected.
 - `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
 - `[DONE]` BielOS Core security and architecture gate exists at `docs/modules/bielos-core.md`.
 - `[DONE]` Core project registry and project management use the existing `Project` model with bounded authorization, CSRF, archive-only deletion policy, and sanitized audits.
@@ -287,7 +289,7 @@ BielOS MVP is complete when:
 - `[DONE]` Prisma migrations replace production `db push`.
 - `[DONE]` Backup and restore are documented and tested.
 - `[DONE]` Hub application registry exists; private data handling is limited to implemented authenticated surfaces such as GymForge.
-- `[BLOCKED]` Reserved modules remain inert, GymForge expansion remains frozen, and the next product direction requires explicit user selection.
+- `[BLOCKED]` Reserved modules remain inert and GymForge expansion remains frozen unless a later phase is explicitly selected.
 - `[BLOCKED]` AIP remains a separate repository; any future BielOS integration requires an explicitly authorized contract phase and must not import AIP implementation code directly.
 
 ## 13. Recommended Phase Order

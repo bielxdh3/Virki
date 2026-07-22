@@ -1,15 +1,19 @@
 # Application And Module Planning Index
 
-This directory contains application and reserved-module planning documents. BielOS Core is the implemented and operationally verified private platform/workspace, not a module. No next product direction is selected. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
+This directory contains application and reserved-module planning documents. BielOS Core is the implemented and operationally verified private platform/workspace, not a module. The selected Core project detail workspace is complete; no subsequent product direction is selected. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
 
 ## BielOS Core
 
 - Status: implemented, validated, deployed, and operationally verified.
 - Existing foundations: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
 - Security and architecture gate: complete in `bielos-core.md`.
-- Implemented surfaces: project registry/lifecycle, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.
+- Implemented surfaces: project registry/lifecycle, authorization-aware project detail workspace, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.
 - Completed verification: database-backed integration/concurrency validation and authenticated OWNER/MEMBER production smoke.
-- Maintenance boundary: operational verification and deployment revision attestation are complete, `SecurityUnlock` runtime remains blocked by its design boundary, and the next product direction requires explicit user selection.
+- Maintenance boundary: operational verification, deployment revision attestation, and the selected project detail workspace are complete; `SecurityUnlock` runtime remains blocked by its design boundary, and any subsequent product direction requires explicit user selection.
+
+## Hub And Application Boundary
+
+BielOS owns hub navigation, registry, identity/security boundaries, and Core policy. Future applications may be embedded, separately deployed, locally external, or remotely external only through an explicitly designed contract that preserves independent operation, explicit authentication and authorization, least privilege, failure isolation, privacy classification, version compatibility, and user approval where required. Redirect origin is not authentication, and sharing the BielOS database is not the default integration model. No external integration is implemented by this direction.
 
 ## Available Applications
 

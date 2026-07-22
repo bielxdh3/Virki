@@ -8,6 +8,8 @@ import {
 import { isValidCoreResourceId } from "./validation";
 
 export const CORE_PROJECT_READ_LIMIT = 100;
+export const CORE_PROJECT_ACCESS_READ_LIMIT = 100;
+export const CORE_PROJECT_ADMIN_USER_LIMIT = 200;
 
 const safeProjectFields = {
   id: true,
@@ -71,6 +73,106 @@ export async function findCoreProjectForPrincipal(
     },
     select: safeProjectFields
   });
+}
+
+export async function findCoreProjectDetailForPrincipal(
+  principal: CoreProjectPrincipal,
+  projectId: string
+) {
+  const persistedPrincipal = await getPersistedPrincipal(principal);
+
+  if (!isValidCoreResourceId(projectId) || !persistedPrincipal) {
+    return null;
+  }
+
+  const administrator = isCoreAdministrator(persistedPrincipal.role);
+  const where = {
+    AND: [{ id: projectId }, getCoreProjectReadScope(persistedPrincipal)]
+  };
+
+  if (administrator) {
+    const [project, activeUsers] = await Promise.all([
+      prisma.project.findFirst({
+        where,
+        select: {
+          ...safeProjectFields,
+          accesses: {
+            select: {
+              accessLevel: true,
+              user: {
+                select: {
+                  id: true,
+                  email: true,
+                  displayName: true,
+                  role: true,
+                  isActive: true
+                }
+              }
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: CORE_PROJECT_ACCESS_READ_LIMIT
+          }
+        }
+      }),
+      prisma.user.findMany({
+        where: { isActive: true },
+        select: { id: true, email: true, displayName: true, role: true },
+        orderBy: [{ email: "asc" }, { id: "asc" }],
+        take: CORE_PROJECT_ADMIN_USER_LIMIT
+      })
+    ]);
+
+    if (!project) {
+      return null;
+    }
+
+    return {
+      ...project,
+      administrator: true as const,
+      effectiveAccess:
+        persistedPrincipal.role === "OWNER" ? "GLOBAL_OWNER" as const : "GLOBAL_ADMIN" as const,
+      activeUsers
+    };
+  }
+
+  const project = await prisma.project.findFirst({
+    where,
+    select: {
+      ...safeProjectFields,
+      accesses: {
+        where: { userId: persistedPrincipal.id },
+        select: { accessLevel: true },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: 1
+      }
+    }
+  });
+
+  if (!project) {
+    return null;
+  }
+
+  const effectiveAccess =
+    project.accesses[0]?.accessLevel ??
+    (project.visibility === "PUBLIC" ? "AUTHENTICATED" : null);
+
+  if (!effectiveAccess) {
+    return null;
+  }
+
+  return {
+    id: project.id,
+    name: project.name,
+    slug: project.slug,
+    description: project.description,
+    visibility: project.visibility,
+    status: project.status,
+    updatedAt: project.updatedAt,
+    administrator: false as const,
+    effectiveAccess,
+    accesses: [],
+    activeUsers: []
+  };
 }
 
 async function getPersistedPrincipal(

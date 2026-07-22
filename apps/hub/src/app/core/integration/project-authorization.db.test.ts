@@ -4,9 +4,12 @@ import { after, before, test } from "node:test";
 import { prisma } from "@bielos/database";
 
 import {
+  CORE_PROJECT_ACCESS_READ_LIMIT,
+  findCoreProjectDetailForPrincipal,
   findCoreProjectForPrincipal,
   listCoreProjectsForPrincipal
 } from "../projects/read-service";
+import { getCoreProjectDetailPath } from "../projects/detail-policy";
 import {
   cleanCoreIntegrationTestData,
   disconnectCoreIntegrationTestDatabase
@@ -48,6 +51,17 @@ test("OWNER and ADMIN can read every Core project lifecycle and visibility", asy
       await findCoreProjectForPrincipal(principal, "missing-project-id"),
       null
     );
+
+    const detail = await findCoreProjectDetailForPrincipal(
+      principal,
+      data.sensitiveRestricted.id
+    );
+    assert.ok(detail?.administrator);
+    assert.equal(detail.description, "restricted sensitive description");
+    assert.equal(
+      detail.effectiveAccess,
+      principal.role === "OWNER" ? "GLOBAL_OWNER" : "GLOBAL_ADMIN"
+    );
   }
 });
 
@@ -68,6 +82,39 @@ test("MEMBER reads public and explicitly granted projects across documented stat
   assert.equal(serialized.includes("owner@example.invalid"), false);
   assert.equal(serialized.includes("admin@example.invalid"), false);
   assert.equal(serialized.includes("member-b@example.invalid"), false);
+
+  for (const project of [
+    data.publicActive,
+    data.internalGranted,
+    data.internalArchived,
+    data.sensitiveGranted
+  ]) {
+    const detail = await findCoreProjectDetailForPrincipal(data.memberA, project.id);
+    assert.ok(detail && !detail.administrator);
+    assert.equal(detail.id, project.id);
+    assert.deepEqual(detail.accesses, []);
+    assert.deepEqual(detail.activeUsers, []);
+    assert.equal(JSON.stringify(detail).includes("@example.invalid"), false);
+  }
+
+  const visibleLinks = projects.map((project) => getCoreProjectDetailPath(project.id));
+  assert.equal(visibleLinks.includes(getCoreProjectDetailPath(data.internalRestricted.id)), false);
+  assert.equal(visibleLinks.includes(getCoreProjectDetailPath(data.sensitiveRestricted.id)), false);
+
+  const publicDetail = await findCoreProjectDetailForPrincipal(data.memberB, data.publicActive.id);
+  assert.equal(publicDetail?.effectiveAccess, "AUTHENTICATED");
+  assert.equal(
+    (await findCoreProjectDetailForPrincipal(data.memberA, data.internalGranted.id))?.effectiveAccess,
+    "VIEWER"
+  );
+  assert.equal(
+    (await findCoreProjectDetailForPrincipal(data.memberA, data.sensitiveGranted.id))?.effectiveAccess,
+    "EDITOR"
+  );
+  assert.equal(
+    (await findCoreProjectDetailForPrincipal(data.memberA, data.internalArchived.id))?.status,
+    "ARCHIVED"
+  );
 });
 
 test("ungranted and inactive MEMBER principals cannot retrieve restricted data", async () => {
@@ -83,6 +130,10 @@ test("ungranted and inactive MEMBER principals cannot retrieve restricted data",
       await findCoreProjectForPrincipal(data.memberB, hiddenProject.id),
       null
     );
+    assert.equal(
+      await findCoreProjectDetailForPrincipal(data.memberB, hiddenProject.id),
+      null
+    );
   }
 
   assert.equal(
@@ -91,6 +142,18 @@ test("ungranted and inactive MEMBER principals cannot retrieve restricted data",
   );
   assert.equal(
     await findCoreProjectForPrincipal(data.memberB, "missing-project-id"),
+    null
+  );
+  assert.equal(
+    await findCoreProjectDetailForPrincipal(data.memberB, "x".repeat(129)),
+    null
+  );
+  assert.equal(
+    await findCoreProjectDetailForPrincipal(data.memberB, "missing-project-id"),
+    null
+  );
+  assert.equal(
+    await findCoreProjectDetailForPrincipal(data.inactiveMember, data.publicActive.id),
     null
   );
 
@@ -113,6 +176,43 @@ test("crafted or stale principal roles cannot widen project reads", async () => 
   assert.equal(
     await findCoreProjectForPrincipal(invalidRole, data.internalRestricted.id),
     null
+  );
+  assert.equal(
+    await findCoreProjectDetailForPrincipal(forgedOwner, data.sensitiveRestricted.id),
+    null
+  );
+  assert.equal(
+    await findCoreProjectDetailForPrincipal(invalidRole, data.internalRestricted.id),
+    null
+  );
+});
+
+test("administrator project detail access rows are deterministic and bounded", async () => {
+  const extraUsers = Array.from({ length: CORE_PROJECT_ACCESS_READ_LIMIT + 5 }, (_, index) => ({
+    email: `bounded-${String(index).padStart(3, "0")}@example.invalid`,
+    role: "MEMBER" as const,
+    isActive: true
+  }));
+  await prisma.user.createMany({ data: extraUsers });
+  const users = await prisma.user.findMany({
+    where: { email: { startsWith: "bounded-" } },
+    select: { id: true },
+    orderBy: { email: "asc" }
+  });
+  await prisma.projectAccess.createMany({
+    data: users.map((user) => ({
+      projectId: data.publicActive.id,
+      userId: user.id,
+      accessLevel: "VIEWER"
+    }))
+  });
+
+  const detail = await findCoreProjectDetailForPrincipal(data.owner, data.publicActive.id);
+  assert.ok(detail?.administrator);
+  assert.equal(detail.accesses.length, CORE_PROJECT_ACCESS_READ_LIMIT);
+  assert.equal(
+    detail.accesses.every((access) => access.user.email.endsWith("@example.invalid")),
+    true
   );
 });
 
