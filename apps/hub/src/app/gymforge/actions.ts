@@ -4,9 +4,15 @@ import { validateCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { hashAuditIdentifier, writeAuditLog } from "@bielos/auth";
 import { prisma, type Prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
+import {
+  isCloudflareAccessAllowed,
+  validateHubCloudflareAccess
+} from "../../lib/cloudflare-access";
 import { formatGymForgeAttendanceDate, getGymForgeAttendanceEffectiveDate } from "./dates";
+import { requireGymForgeMutationAccess } from "./mutation-access";
 
 const PARTICIPANT_ROLES = ["ADMIN", "PARTICIPANT"] as const;
 const PARTICIPANT_STATUSES = ["INVITED", "ACTIVE", "DISABLED", "ARCHIVED"] as const;
@@ -161,7 +167,16 @@ function parseRequiredDate(value: string): ParsedRequiredDate {
   return parseOptionalDate(value) ?? "invalid";
 }
 
-async function requireGymForgeAdmin(formData: FormData) {
+async function requireGymForgeAccess(source: string) {
+  await requireGymForgeMutationAccess(await headers(), source, {
+    validateAccess: validateHubCloudflareAccess,
+    isAccessAllowed: isCloudflareAccessAllowed,
+    deny: forbidden
+  });
+}
+
+async function requireGymForgeAdmin(formData: FormData, source: string) {
+  await requireGymForgeAccess(source);
   const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {
@@ -182,7 +197,7 @@ async function requireGymForgeAdmin(formData: FormData) {
 }
 
 export async function createGymForgeParticipant(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-participant-create");
   const displayName = readFormString(formData, "displayName");
   const role = readFormString(formData, "role");
   const status = readFormString(formData, "status");
@@ -222,7 +237,7 @@ export async function createGymForgeParticipant(formData: FormData) {
 }
 
 export async function changeGymForgeParticipantStatus(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-participant-status");
   const participantId = readFormString(formData, "participantId");
   const status = readFormString(formData, "status");
 
@@ -286,7 +301,7 @@ export async function changeGymForgeParticipantStatus(formData: FormData) {
 }
 
 export async function createGymForgeExercise(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-exercise-create");
   const name = readFormString(formData, "name");
   const category = readFormString(formData, "category");
   const description = readFormString(formData, "description");
@@ -327,7 +342,7 @@ export async function createGymForgeExercise(formData: FormData) {
 }
 
 export async function changeGymForgeExerciseStatus(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-exercise-status");
   const exerciseId = readFormString(formData, "exerciseId");
   const action = readFormString(formData, "action");
 
@@ -362,7 +377,7 @@ export async function changeGymForgeExerciseStatus(formData: FormData) {
 }
 
 export async function createGymForgeCompetition(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-competition-create");
   const name = readFormString(formData, "name");
   const description = readFormString(formData, "description");
   const status = readFormString(formData, "status");
@@ -436,7 +451,7 @@ export async function createGymForgeCompetition(formData: FormData) {
 }
 
 export async function updateGymForgeCompetitionAssignments(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-competition-assignments");
   const competitionId = readFormString(formData, "competitionId");
   const selectedParticipantIds = formData
     .getAll("participantId")
@@ -535,7 +550,7 @@ export async function updateGymForgeCompetitionAssignments(formData: FormData) {
 }
 
 export async function createGymForgeCompetitionScoreCorrection(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-score-correction-create");
   const competitionId = readFormString(formData, "competitionId");
   const participantId = readFormString(formData, "participantId");
   const pointsDelta = parseScoreCorrectionDelta(readFormString(formData, "pointsDelta"));
@@ -682,7 +697,7 @@ export async function createGymForgeCompetitionScoreCorrection(formData: FormDat
 }
 
 export async function revokeGymForgeCompetitionScoreCorrection(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-score-correction-revoke");
   const correctionId = readFormString(formData, "correctionId");
 
   if (!correctionId) {
@@ -758,7 +773,7 @@ export async function revokeGymForgeCompetitionScoreCorrection(formData: FormDat
 }
 
 export async function updateGymForgeCompetition(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-competition-update");
   const competitionId = readFormString(formData, "competitionId");
   const name = readFormString(formData, "name");
   const description = readFormString(formData, "description");
@@ -877,7 +892,7 @@ export async function updateGymForgeCompetition(formData: FormData) {
 }
 
 export async function archiveGymForgeCompetition(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-competition-archive");
   const competitionId = readFormString(formData, "competitionId");
 
   if (!competitionId) {
@@ -915,7 +930,7 @@ export async function archiveGymForgeCompetition(formData: FormData) {
 }
 
 export async function deleteGymForgeCompetition(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-competition-delete");
   const competitionId = readFormString(formData, "competitionId");
   const confirmed = readFormString(formData, "confirmDelete") === "true";
 
@@ -963,6 +978,7 @@ export async function deleteGymForgeCompetition(formData: FormData) {
 }
 
 export async function createGymForgeAttendanceCheckIn(formData: FormData) {
+  await requireGymForgeAccess("gymforge-attendance-check-in");
   const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {
@@ -1038,7 +1054,7 @@ export async function createGymForgeAttendanceCheckIn(formData: FormData) {
 }
 
 export async function createGymForgeAdminAttendanceCorrection(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-attendance-correction-create");
   const participantId = readFormString(formData, "participantId");
   const effectiveDate = parseRequiredDate(readFormString(formData, "effectiveDate"));
 
@@ -1109,7 +1125,7 @@ export async function createGymForgeAdminAttendanceCorrection(formData: FormData
 }
 
 export async function removeGymForgeAdminAttendanceCorrection(formData: FormData) {
-  const session = await requireGymForgeAdmin(formData);
+  const session = await requireGymForgeAdmin(formData, "gymforge-attendance-correction-remove");
   const attendanceId = readFormString(formData, "attendanceId");
 
   if (!attendanceId) {
@@ -1158,6 +1174,7 @@ export async function removeGymForgeAdminAttendanceCorrection(formData: FormData
 }
 
 export async function createGymForgeWorkout(formData: FormData) {
+  await requireGymForgeAccess("gymforge-workout-create");
   const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {
@@ -1247,6 +1264,7 @@ export async function createGymForgeWorkout(formData: FormData) {
 }
 
 export async function updateGymForgeWorkout(formData: FormData) {
+  await requireGymForgeAccess("gymforge-workout-update");
   const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {
@@ -1365,6 +1383,7 @@ export async function updateGymForgeWorkout(formData: FormData) {
 }
 
 export async function deleteGymForgeWorkout(formData: FormData) {
+  await requireGymForgeAccess("gymforge-workout-delete");
   const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {

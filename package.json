@@ -21,7 +21,7 @@
     "test:core:concurrency": "node scripts/run-core-db-tests.mjs --suite concurrency",
     "test:core-projects": "tsx --test apps/hub/src/app/core/projects/validation.test.ts",
     "test:gymforge-scoring": "tsx --test apps/hub/src/app/gymforge/scoring.test.ts",
-    "test:production-revision": "node --test scripts/production-revision.test.mjs",
+    "test:production-revision": "node --test scripts/production-revision.test.mjs scripts/production-compose.test.mjs",
     "lint": "eslint . --max-warnings=0",
     "secrets:scan": "node scripts/secret-scan.mjs",
     "start:prod": "node scripts/production-compose.mjs up",
