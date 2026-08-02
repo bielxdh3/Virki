@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import {
   authenticateUserWithRateLimit,
   createAuditRequestMetadata,
@@ -64,7 +63,11 @@ export async function POST(request: Request) {
 
   let ceremony;
   try {
-    ceremony = await startLoginCeremony(user.id, (await cookies()).get(DEVICE_COOKIE_NAME)?.value, "pt-BR");
+    ceremony = await startLoginCeremony(
+      user.id,
+      readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME),
+      "pt-BR"
+    );
   } catch {
     await writeAuditLog({
       eventType: "AUTH_LOGIN_FAILURE",
@@ -90,8 +93,7 @@ export async function POST(request: Request) {
   verifyUrl.searchParams.set("ceremony", ceremony.ceremonyId);
   verifyUrl.searchParams.set("factor", ceremony.factor.toLowerCase());
   const response = NextResponse.redirect(verifyUrl, { status: 303 });
-  const cookieStore = await cookies();
-  if (cookieStore.get(DEVICE_COOKIE_NAME)?.value !== ceremony.deviceToken) {
+  if (readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME) !== ceremony.deviceToken) {
     response.cookies.set(DEVICE_COOKIE_NAME, ceremony.deviceToken, {
       httpOnly: true,
       sameSite: "lax",
@@ -115,4 +117,20 @@ function redirectToLogin(url: URL, failed: boolean) {
 function getFormString(formData: FormData, key: string): string {
   const value = formData.get(key);
   return typeof value === "string" ? value : "";
+}
+
+function readCookie(header: string | null, name: string): string | undefined {
+  if (!header) {
+    return undefined;
+  }
+
+  for (const pair of header.split(";")) {
+    const separator = pair.indexOf("=");
+    if (separator < 0 || pair.slice(0, separator).trim() !== name) {
+      continue;
+    }
+    return pair.slice(separator + 1).trim();
+  }
+
+  return undefined;
 }
