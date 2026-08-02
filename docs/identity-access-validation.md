@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` and the final validated implementation is `f6bee5f08405b7db9410af8ae553b59cf16e6553` on `main`; this closeout document is published on the same branch. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, disposable backup/restore, restricted-role validation, and remote runtime validation are green; durable production changes remain gated by human operations.
+The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` and the final validated implementation is `66908a4113f5bfa23e3c0b98a903067cd60193c2` on `main` and `origin/main`; this closeout document is published on the same SHA. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, disposable backup/restore, restricted-role validation, and remote runtime validation are green; durable production changes remain gated by human operations.
 
 ## Dependency order and task status
 
@@ -15,7 +15,7 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 7. Email/TOTP second factor, encrypted TOTP, recovery codes, device challenges, trusted devices, and ordinary recovery — completed; DB runtime unvalidated locally.
 8. Separate administrative credential and session-bound `SecurityElevation` — completed; DB runtime unvalidated locally.
 9. UI, audit, notifications, operations state, and opaque UI references — completed.
-10. Adversarial validation, rollout, and publication — validation green; security workbench and durable rollout remain external gates.
+10. Adversarial validation, rollout, and publication — source/remote validation green; the Codex Security contract report is complete with one Low/P3 finding, while native workbench indexing and durable rollout remain external gates.
 
 ## Surfaces and safety state
 
@@ -54,8 +54,8 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 - Image, runtime, and Compose validation: passed in remote CI, including loopback-only ports, public-site health, hub health, direct-origin hub denial, intake-disabled response, revision label, and Compose validation; local Docker remained unavailable.
 - Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped.
 - Exact post-remediation remote CI for validation commit `223528948a7732b9b1f5f6ea148759c0497439e6`: run `30736308059` passed both independent jobs, including 37 Core integration tests, concurrency tests, production image revision verification, and Compose validation.
-- Exact final-SHA CI for `f6bee5f08405b7db9410af8ae553b59cf16e6553`: run `30738391579` passed both independent jobs (`Audit dependency lockfile` and `Validate`), including backup/restore, restricted-role validation, runtime smoke, image revision verification, and Compose validation.
-- Codex Security diff scan: not completed because the available workbench required a persisted setup UI opt-out; no scanner verdict is claimed.
+- Exact final-SHA CI for `66908a4113f5bfa23e3c0b98a903067cd60193c2`: run `30738647448` completed successfully with both independent jobs (`Audit dependency lockfile` and `Validate`); the final SHA is the current local and remote `origin/main` head.
+- Codex Security diff scan: scan `68209414-195e-47e5-bd45-88bd257f1d48` reviewed `b70b42400a6234483bd353d1bbdad8f964d679ba...66908a4113f5bfa23e3c0b98a903067cd60193c2` with complete coverage. The sealed contract report contains one high-confidence Low/P3 information-disclosure finding (`CWE-200`) for the public intake catalog exposing an internal `ModuleCatalog.id`; two other candidates were validated and suppressed/ignored. The report was generated locally from the completed scan artifacts because the native workbench became terminal before indexing; no Critical, High, or Medium finding was reported.
 
 ## Migrations
 
