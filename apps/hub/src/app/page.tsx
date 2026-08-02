@@ -424,6 +424,7 @@ export default async function HubDashboardPage() {
               <strong className="status-pill">{t.safe}</strong>
             </div>
             <div className="action-stack">
+              <a href="/core/modules">{t.viewModules}</a>
               <a href="/core/projects">{t.viewProjects}</a>
               <a href="/core/security">{t.viewSecurity}</a>
               {session.user.role === "OWNER" ? <a href="/core/applications">{t.reviewApplications}</a> : null}

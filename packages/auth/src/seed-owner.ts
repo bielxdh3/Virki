@@ -1,4 +1,4 @@
-import { prisma } from "@bielos/database";
+import { prisma, seedInitialModuleCatalog } from "@bielos/database";
 import { hashAuditEmail, hashPassword, normalizeEmail, writeAuditLog } from "./index";
 import { runAuthCommand } from "./command-output";
 
@@ -26,15 +26,23 @@ async function main() {
     update: {
       passwordHash,
       role: "OWNER",
-      isActive: true
+      isActive: true,
+      emailNormalized: email,
+      accountStatus: "ACTIVE",
+      emailVerifiedAt: new Date()
     },
     create: {
       email,
+      emailNormalized: email,
       passwordHash,
       role: "OWNER",
-      isActive: true
+      isActive: true,
+      accountStatus: "ACTIVE",
+      emailVerifiedAt: new Date()
     }
   });
+
+  await seedInitialModuleCatalog(prisma);
 
   await writeAuditLog({
     eventType: existingOwner ? "OWNER_SEED_UPDATED" : "OWNER_SEED_CREATED",
