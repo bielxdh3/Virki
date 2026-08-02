@@ -49,7 +49,7 @@ try {
   await waitForDatabase();
 
   const port = readPublishedPort();
-  const sourceUrl = `postgresql://${databaseUser}:${databasePassword}@127.0.0.1:${port}/${databaseName}`;
+  const sourceUrl = buildDatabaseUrl(port, databaseName);
   await migrate(sourceUrl);
   sourceClient = new PrismaClient({ datasources: { db: { url: sourceUrl } } });
 
@@ -91,7 +91,7 @@ try {
     restoreDatabaseName
   ], dump);
 
-  const restoredUrl = `postgresql://${databaseUser}:${databasePassword}@127.0.0.1:${port}/${restoreDatabaseName}`;
+  const restoredUrl = buildDatabaseUrl(port, restoreDatabaseName);
   restoredClient = new PrismaClient({ datasources: { db: { url: restoredUrl } } });
   await restoredClient.$connect();
   assert.deepEqual(await readMigrations(restoredClient), expectedMigrations);
@@ -210,6 +210,15 @@ function readPublishedPort() {
     throw new Error("Disposable PostgreSQL port was not loopback-bound.");
   }
   return match[1];
+}
+
+function buildDatabaseUrl(port, database) {
+  const url = new URL("postgresql://127.0.0.1");
+  url.username = databaseUser;
+  url.password = databasePassword;
+  url.port = port;
+  url.pathname = `/${database}`;
+  return url.toString();
 }
 
 function runDocker(args) {
