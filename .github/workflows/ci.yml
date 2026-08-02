@@ -118,4 +118,6 @@ jobs:
           CLOUDFLARE_ACCESS_AUDIENCE: ci-test-audience
           CLOUDFLARE_TEAM_DOMAIN: team.example.invalid
           CLOUDFLARE_TUNNEL_TOKEN: placeholder
-        run: docker compose -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml config --no-env-resolution --quiet
+        run: |
+          cp .env.example .env
+          docker compose -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml config --no-env-resolution --quiet
