@@ -54,36 +54,48 @@ export function createDatabaseIntakeRepository(
         }
 
         const verificationToken = randomBytes(32).toString("base64url");
-        const application = await transaction.accountApplication.create({
-          data: {
-            emailNormalized: input.emailNormalized,
-            displayName: input.displayName,
-            abuseIdentifierHash: input.abuseIdentifierHash
-          },
-          select: { id: true }
-        });
+        const applicationId = randomBytes(16).toString("hex");
+        await transaction.$executeRaw`
+          INSERT INTO "AccountApplication" (
+            "id", "emailNormalized", "displayName", "abuseIdentifierHash", "updatedAt"
+          ) VALUES (
+            ${applicationId},
+            ${input.emailNormalized},
+            ${input.displayName},
+            ${input.abuseIdentifierHash},
+            ${now}
+          )
+        `;
 
-        await transaction.applicationModuleDecision.createMany({
-          data: newModules.map((module) => ({
-            dedupeKey: createRequestKey(input.emailNormalized, module.id, now),
-            applicationId: application.id,
-            moduleId: module.id,
-            reason: input.modules.find((requested) => requested.key === module.key)!.reason
-          }))
-        });
+        for (const module of newModules) {
+          await transaction.$executeRaw`
+            INSERT INTO "ApplicationModuleDecision" (
+              "id", "dedupeKey", "applicationId", "moduleId", "reason", "updatedAt"
+            ) VALUES (
+              ${randomBytes(16).toString("hex")},
+              ${createRequestKey(input.emailNormalized, module.id, now)},
+              ${applicationId},
+              ${module.id},
+              ${input.modules.find((requested) => requested.key === module.key)!.reason},
+              ${now}
+            )
+          `;
+        }
 
-        await transaction.applicationEmailVerification.create({
-          data: {
-            applicationId: application.id,
-            tokenHash: hashToken(verificationToken),
-            expiresAt: new Date(now.getTime() + VERIFICATION_TTL_MS),
-            updatedAt: now
-          },
-          select: { id: true }
-        });
+        await transaction.$executeRaw`
+          INSERT INTO "ApplicationEmailVerification" (
+            "id", "applicationId", "tokenHash", "expiresAt", "updatedAt"
+          ) VALUES (
+            ${randomBytes(16).toString("hex")},
+            ${applicationId},
+            ${hashToken(verificationToken)},
+            ${new Date(now.getTime() + VERIFICATION_TTL_MS)},
+            ${now}
+          )
+        `;
 
         await enqueueEmailMessageForClient(transaction, {
-          idempotencyKey: `application-verification:${application.id}`,
+          idempotencyKey: `application-verification:${applicationId}`,
           kind: "APPLICATION_EMAIL_VERIFICATION",
           recipientEmail: input.emailNormalized,
           locale: input.locale,
