@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The campaign started from `677c9622029e4a2e63d5fb10ce79eed7a5b3b157` and is published on `main`. The implementation is complete in source and disabled by default for production. Dependency remediation and CI audit separation are complete locally; full closeout still requires remote CI plus Docker/PostgreSQL and backup/restore validation.
+The campaign started from `677c9622029e4a2e63d5fb10ce79eed7a5b3b157` and is published on `main`. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, and remote validation are green; backup/restore evidence remains a separate operational gate before production data changes.
 
 ## Dependency order and task status
 
@@ -47,10 +47,11 @@ The campaign started from `677c9622029e4a2e63d5fb10ce79eed7a5b3b157` and is publ
 - `npm run build`: public site and hub passed, including login verification, recovery, account security, and administrative security routes.
 - CI now runs dependency audit and application validation as independent jobs, so an audit failure cannot skip the remaining validation gates.
 - `git diff --check`: passed before publication.
-- Core DB integration/concurrency suite: blocked before execution because the local Docker API was unavailable.
+- Core DB integration/concurrency suite: passed in remote CI; local execution was blocked because the Docker API was unavailable.
 - Backup/restore evidence: not available; no production database was accessed or modified.
-- Image and Compose runtime validation: not available locally because Docker was unavailable.
-- Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped. The remediation commit and final remote run must be recorded after publication.
+- Image and Compose runtime validation: passed in remote CI; not available locally because Docker was unavailable.
+- Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped.
+- Exact post-remediation remote CI for validation commit `223528948a7732b9b1f5f6ea148759c0497439e6`: run `30736308059` passed both independent jobs, including 37 Core integration tests, concurrency tests, production image revision verification, and Compose validation.
 
 ## Migrations
 
