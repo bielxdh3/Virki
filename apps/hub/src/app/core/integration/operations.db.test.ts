@@ -19,6 +19,9 @@ test("operations snapshot verifies a bounded query on disposable PostgreSQL", as
   assert.deepEqual(snapshot, {
     hubRequest: "verified",
     authenticatedSession: "verified",
-    database: "verified"
+    database: "verified",
+    emailTransport: "configured",
+    intake: "disabled",
+    emailWorker: "not-checked"
   });
 });
