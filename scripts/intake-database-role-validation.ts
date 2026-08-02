@@ -99,7 +99,7 @@ async function main(): Promise<void> {
     modules: [{ key: publicKey, reason: "Disposable role validation" }]
   });
 
-  const application = await admin.accountApplication.findUniqueOrThrow({
+  const application = await admin.accountApplication.findFirstOrThrow({
     where: { emailNormalized: email },
     select: { id: true }
   });
