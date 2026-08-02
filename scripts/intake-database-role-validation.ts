@@ -136,7 +136,7 @@ async function main(): Promise<void> {
     );
   } finally {
     await restricted.$disconnect();
-    await admin.$executeRawUnsafe(`DROP ROLE IF EXISTS "${roleName}"`);
+    await removeRole();
     await admin.$disconnect();
   }
 }
@@ -147,7 +147,7 @@ void main().catch((error: unknown) => {
 });
 
 async function recreateRole(): Promise<void> {
-  await admin.$executeRawUnsafe(`DROP ROLE IF EXISTS "${roleName}"`);
+  await removeRole();
   await admin.$executeRawUnsafe(`CREATE ROLE "${roleName}" LOGIN PASSWORD '${rolePassword}'`);
   await admin.$executeRawUnsafe(`GRANT USAGE ON SCHEMA public TO "${roleName}"`);
   await admin.$executeRawUnsafe(
@@ -186,6 +186,19 @@ async function recreateRole(): Promise<void> {
   await admin.$executeRawUnsafe(
     `GRANT EXECUTE ON FUNCTION "bielos_intake_activate_application"(TEXT, TEXT, TEXT, TIMESTAMP(3)) TO "${roleName}"`
   );
+}
+
+async function removeRole(): Promise<void> {
+  await admin.$executeRawUnsafe(`
+    DO $cleanup$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN
+        EXECUTE 'DROP OWNED BY "${roleName}"';
+        EXECUTE 'DROP ROLE "${roleName}"';
+      END IF;
+    END
+    $cleanup$
+  `);
 }
 
 async function expectDenied(label: string, action: () => Promise<unknown>): Promise<void> {
