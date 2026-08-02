@@ -1,8 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import {
-  createRequestKey,
-  isPublicRequestableModule
-} from "@bielos/database";
+import { createRequestKey } from "@bielos/database";
 import { hashPassword } from "@bielos/auth";
 import { enqueueEmailMessageForClient } from "@bielos/auth/email";
 import type { PrismaClient } from "@bielos/database";
@@ -10,17 +7,20 @@ import type { IntakeRepository, IntakeSubmission, PublicIntakeModule } from "./h
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 
+type IntakeCatalogRow = {
+  id: string;
+  key: string;
+  name: string;
+  runtimeAvailability: "AVAILABLE" | "UNAVAILABLE" | "INERT";
+};
+
 export function createDatabaseIntakeRepository(
   client: PrismaClient,
   publicOrigin: string
 ): IntakeRepository {
   return {
     async listPublicModules(): Promise<PublicIntakeModule[]> {
-      const modules = await client.moduleCatalog.findMany({
-        where: { visibility: "PUBLIC", requestable: true },
-        select: { key: true, name: true, runtimeAvailability: true },
-        orderBy: { name: "asc" }
-      });
+      const modules = await listPublicCatalog(client);
       return modules.map((module) => ({ ...module }));
     },
     async submitApplication(input: IntakeSubmission): Promise<void> {
@@ -32,20 +32,8 @@ export function createDatabaseIntakeRepository(
         `;
 
         const requestedKeys = input.modules.map((module) => module.key);
-        const catalog = await transaction.moduleCatalog.findMany({
-          where: {
-            key: { in: requestedKeys },
-            visibility: "PUBLIC",
-            requestable: true
-          },
-          select: {
-            id: true,
-            key: true,
-            visibility: true,
-            requestable: true
-          }
-        });
-        const publicModules = catalog.filter(isPublicRequestableModule);
+        const catalog = await listPublicCatalog(transaction);
+        const publicModules = catalog.filter((module) => requestedKeys.includes(module.key));
         if (publicModules.length === 0) {
           return;
         }
@@ -78,7 +66,8 @@ export function createDatabaseIntakeRepository(
                 reason: input.modules.find((requested) => requested.key === module.key)!.reason
               }))
             }
-          }
+          },
+          select: { id: true }
         });
 
         await transaction.applicationEmailVerification.create({
@@ -87,7 +76,8 @@ export function createDatabaseIntakeRepository(
             tokenHash: hashToken(verificationToken),
             expiresAt: new Date(now.getTime() + VERIFICATION_TTL_MS),
             updatedAt: now
-          }
+          },
+          select: { id: true }
         });
 
         await enqueueEmailMessageForClient(transaction, {
@@ -131,66 +121,30 @@ export function createDatabaseIntakeRepository(
     async activateApplication(token: string, password: string): Promise<void> {
       const now = new Date();
       const passwordHash = await hashPassword(password);
-      await client.$transaction(async (transaction) => {
-        const activation = await transaction.accountActivation.findFirst({
-          where: { tokenHash: hashToken(token), consumedAt: null, expiresAt: { gt: now } },
-          select: {
-            id: true,
-            application: {
-              select: {
-                id: true,
-                emailNormalized: true,
-                displayName: true,
-                status: true,
-                moduleDecisions: {
-                  where: { status: "APPROVED" },
-                  select: { moduleId: true, accessDurationKind: true, accessExpiresAt: true }
-                }
-              }
-            }
-          }
-        });
-        if (
-          !activation ||
-          !["APPROVED", "PARTIALLY_APPROVED"].includes(activation.application.status)
-        ) {
-          throw new Error("Activation rejected.");
-        }
-
-        const user = await transaction.user.create({
-          data: {
-            email: activation.application.emailNormalized,
-            emailNormalized: activation.application.emailNormalized,
-            displayName: activation.application.displayName,
-            passwordHash,
-            accountStatus: "ACTIVE",
-            emailVerifiedAt: now
-          },
-          select: { id: true }
-        });
-
-        if (activation.application.moduleDecisions.length > 0) {
-          await transaction.moduleAccessGrant.createMany({
-            data: activation.application.moduleDecisions.map((decision) => ({
-              userId: user.id,
-              moduleId: decision.moduleId,
-              accessDurationKind: decision.accessDurationKind,
-              expiresAt: decision.accessExpiresAt
-            }))
-          });
-        }
-
-        await transaction.accountActivation.updateMany({
-          where: { id: activation.id, consumedAt: null },
-          data: { consumedAt: now, updatedAt: now }
-        });
-        await transaction.accountApplication.update({
-          where: { id: activation.application.id },
-          data: { status: "ACTIVATED", activatedUserId: user.id, updatedAt: now }
-        });
-      });
+      const userId = randomBytes(16).toString("hex");
+      const [result] = await client.$queryRaw<Array<{ activated: boolean }>>`
+        SELECT "bielos_intake_activate_application"(
+          ${hashToken(token)},
+          ${userId},
+          ${passwordHash},
+          CAST(${now} AS timestamp(3))
+        ) AS "activated"
+      `;
+      if (!result?.activated) {
+        throw new Error("Activation rejected.");
+      }
     }
   };
+}
+
+async function listPublicCatalog(
+  client: Pick<PrismaClient, "$queryRaw">
+): Promise<IntakeCatalogRow[]> {
+  return client.$queryRaw<IntakeCatalogRow[]>`
+    SELECT "id", "key", "name", "runtimeAvailability"
+    FROM "IntakePublicModuleCatalog"
+    ORDER BY "name" ASC
+  `;
 }
 
 function hashToken(token: string): string {

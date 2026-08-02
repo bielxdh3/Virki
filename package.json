@@ -19,6 +19,8 @@
     "test:core:db:integration": "node scripts/run-core-db-tests.mjs --suite integration",
     "test:core:db:smoke": "node scripts/run-core-db-tests.mjs --suite smoke",
     "test:core:concurrency": "node scripts/run-core-db-tests.mjs --suite concurrency",
+    "test:intake:db-role": "tsx scripts/intake-database-role-validation.ts",
+    "test:backup:restore": "node scripts/backup-restore-validation.mjs",
     "test:core-projects": "tsx --test apps/hub/src/app/core/projects/validation.test.ts",
     "test:gymforge-scoring": "tsx --test apps/hub/src/app/gymforge/scoring.test.ts",
     "test:production-revision": "node --test scripts/production-revision.test.mjs scripts/production-compose.test.mjs",

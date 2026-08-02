@@ -90,6 +90,12 @@ jobs:
       - name: Core database integration tests
         run: npm run test:core:db:integration
 
+      - name: Intake database role validation
+        run: npm run test:intake:db-role
+
+      - name: Backup and restore validation
+        run: npm run test:backup:restore
+
       - name: Core concurrency tests
         run: npm run test:core:concurrency
 

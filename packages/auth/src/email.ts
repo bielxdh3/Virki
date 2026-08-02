@@ -108,7 +108,8 @@ export function enqueueEmailMessageForClient(
       payload: storedPayload as Prisma.InputJsonValue,
       availableAt: now,
       updatedAt: now
-    }
+    },
+    select: { id: true }
   });
 }
 
