@@ -26,6 +26,8 @@ Use these skills by task type:
   `.agents/skills/bielos-phase-review/SKILL.md`
 - Security, authentication, CSRF, sessions, Cloudflare, Docker exposure, secrets, audit logs, or production hardening:
   `.agents/skills/bielos-security-review/SKILL.md`
+- BielOS identity, public intake, account lifecycle, module access, 2FA, recovery, or critical-operation elevation:
+  `.agents/skills/bielos-core-identity-implementation/SKILL.md`
 - Making the repository public, sharing repository access, publication safety, or sanitized public release:
   `.agents/skills/bielos-publication-check/SKILL.md`
 
