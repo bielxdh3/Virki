@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createRequestKey } from "@bielos/database";
 import { hashPassword } from "@bielos/auth";
-import { enqueueEmailMessageForClient } from "@bielos/auth/email";
+import { enqueueEmailMessageForIntakeClient } from "@bielos/auth/email";
 import type { PrismaClient } from "@bielos/database";
 import type { IntakeRepository, IntakeSubmission, PublicIntakeModule } from "./handler";
 
@@ -94,7 +94,7 @@ export function createDatabaseIntakeRepository(
           )
         `;
 
-        await enqueueEmailMessageForClient(transaction, {
+        await enqueueEmailMessageForIntakeClient(transaction, {
           idempotencyKey: `application-verification:${applicationId}`,
           kind: "APPLICATION_EMAIL_VERIFICATION",
           recipientEmail: input.emailNormalized,

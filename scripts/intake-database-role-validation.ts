@@ -179,10 +179,10 @@ async function recreateRole(): Promise<void> {
     `GRANT UPDATE ("consumedAt", "updatedAt") ON "ApplicationEmailVerification" TO "${roleName}"`
   );
   await admin.$executeRawUnsafe(
-    `GRANT INSERT ("id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload", "availableAt", "updatedAt") ON "EmailOutboxMessage" TO "${roleName}"`
+    `GRANT EXECUTE ON FUNCTION "bielos_intake_activate_application"(TEXT, TEXT, TEXT, TIMESTAMP(3)) TO "${roleName}"`
   );
   await admin.$executeRawUnsafe(
-    `GRANT EXECUTE ON FUNCTION "bielos_intake_activate_application"(TEXT, TEXT, TEXT, TIMESTAMP(3)) TO "${roleName}"`
+    `GRANT EXECUTE ON FUNCTION "bielos_intake_enqueue_email_message"(TEXT, TEXT, TEXT, JSONB, TIMESTAMP(3)) TO "${roleName}"`
   );
 }
 

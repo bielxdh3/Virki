@@ -101,3 +101,41 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION "bielos_intake_activate_application"(TEXT, TEXT, TEXT, TIMESTAMP(3)) FROM PUBLIC;
+
+CREATE FUNCTION "bielos_intake_enqueue_email_message"(
+  "idempotencyKey" TEXT,
+  "recipientEmail" TEXT,
+  "locale" TEXT,
+  "payload" JSONB,
+  "availableAt" TIMESTAMP(3)
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  INSERT INTO "EmailOutboxMessage" (
+    "id",
+    "idempotencyKey",
+    "kind",
+    "recipientEmail",
+    "locale",
+    "payload",
+    "availableAt",
+    "updatedAt"
+  ) VALUES (
+    substr(md5(random()::TEXT || clock_timestamp()::TEXT || "idempotencyKey"), 1, 25),
+    "idempotencyKey",
+    'APPLICATION_EMAIL_VERIFICATION',
+    "recipientEmail",
+    "locale",
+    "payload",
+    "availableAt",
+    "availableAt"
+  )
+  ON CONFLICT ("idempotencyKey") DO NOTHING;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION "bielos_intake_enqueue_email_message"(TEXT, TEXT, TEXT, JSONB, TIMESTAMP(3)) FROM PUBLIC;

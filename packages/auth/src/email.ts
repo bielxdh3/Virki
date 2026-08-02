@@ -24,6 +24,15 @@ const MAX_EMAIL_ATTEMPTS = 5;
 
 export type EmailLocale = "pt-BR" | "en";
 
+type EmailMessageInput = {
+  idempotencyKey: string;
+  kind: EmailMessageKind;
+  recipientEmail: string;
+  locale: EmailLocale;
+  payload?: EmailPayload;
+  now?: Date;
+};
+
 export type EmailTransportMessage = {
   to: string;
   subject: string;
@@ -79,50 +88,59 @@ export function getEmailTransportStatus(
 }
 
 export function enqueueEmailMessageForClient(
-  client: Pick<Prisma.TransactionClient, "$executeRaw">,
-  input: {
-  idempotencyKey: string;
-  kind: EmailMessageKind;
-  recipientEmail: string;
-  locale: EmailLocale;
-  payload?: EmailPayload;
-  now?: Date;
-  }
+  client: Pick<Prisma.TransactionClient, "emailOutboxMessage">,
+  input: EmailMessageInput
 ) {
+  const message = prepareEmailMessage(input);
+  return client.emailOutboxMessage.upsert({
+    where: { idempotencyKey: input.idempotencyKey },
+    update: {},
+    create: {
+      idempotencyKey: input.idempotencyKey,
+      kind: input.kind,
+      recipientEmail: message.recipientEmail,
+      locale: input.locale,
+      payload: message.storedPayload as Prisma.InputJsonValue,
+      availableAt: message.now,
+      updatedAt: message.now
+    }
+  });
+}
+
+export function enqueueEmailMessageForIntakeClient(
+  client: Pick<Prisma.TransactionClient, "$executeRaw">,
+  input: EmailMessageInput
+) {
+  if (input.kind !== "APPLICATION_EMAIL_VERIFICATION") {
+    throw new Error("Invalid intake email message.");
+  }
+  const message = prepareEmailMessage(input);
+  return client.$executeRaw`
+    SELECT "bielos_intake_enqueue_email_message"(
+      ${input.idempotencyKey},
+      ${message.recipientEmail},
+      ${input.locale},
+      CAST(${JSON.stringify(message.storedPayload)} AS JSONB),
+      CAST(${message.now} AS timestamp(3))
+    )
+  `;
+}
+
+export function enqueueEmailMessage(input: EmailMessageInput) {
+  return enqueueEmailMessageForClient(prisma, input);
+}
+
+function prepareEmailMessage(input: EmailMessageInput) {
   const recipientEmail = normalizeEmail(input.recipientEmail);
   if (!recipientEmail || !input.idempotencyKey.trim()) {
     throw new Error("Invalid email message.");
   }
 
-  const storedPayload = protectEmailPayload(input.payload ?? {}, process.env);
-  const now = input.now ?? new Date();
-
-  return client.$executeRaw`
-    INSERT INTO "EmailOutboxMessage" (
-      "id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload", "availableAt", "updatedAt"
-    ) VALUES (
-      ${randomBytes(16).toString("hex")},
-      ${input.idempotencyKey},
-      ${input.kind}::"EmailMessageKind",
-      ${recipientEmail},
-      ${input.locale},
-      CAST(${JSON.stringify(storedPayload)} AS JSONB),
-      ${now},
-      ${now}
-    )
-    ON CONFLICT ("idempotencyKey") DO NOTHING
-  `;
-}
-
-export function enqueueEmailMessage(input: {
-  idempotencyKey: string;
-  kind: EmailMessageKind;
-  recipientEmail: string;
-  locale: EmailLocale;
-  payload?: EmailPayload;
-  now?: Date;
-}) {
-  return enqueueEmailMessageForClient(prisma, input);
+  return {
+    recipientEmail,
+    storedPayload: protectEmailPayload(input.payload ?? {}, process.env),
+    now: input.now ?? new Date()
+  };
 }
 
 export async function claimNextEmailMessage(now = new Date()) {
