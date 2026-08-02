@@ -14,7 +14,7 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  activation RECORD;
+  activation_row RECORD;
   decision RECORD;
 BEGIN
   SELECT
@@ -23,7 +23,7 @@ BEGIN
     application."emailNormalized",
     application."displayName",
     application."status"
-  INTO activation
+  INTO activation_row
   FROM "AccountActivation" AS activation
   JOIN "AccountApplication" AS application
     ON application."id" = activation."applicationId"
@@ -32,7 +32,7 @@ BEGIN
     AND activation."expiresAt" > p_now_at
   FOR UPDATE OF activation, application;
 
-  IF NOT FOUND OR activation."status" NOT IN ('APPROVED', 'PARTIALLY_APPROVED') THEN
+  IF NOT FOUND OR activation_row."status" NOT IN ('APPROVED', 'PARTIALLY_APPROVED') THEN
     RETURN false;
   END IF;
 
@@ -41,9 +41,9 @@ BEGIN
     "accountStatus", "emailVerifiedAt", "createdAt", "updatedAt"
   ) VALUES (
     p_user_id,
-    activation."emailNormalized",
-    activation."emailNormalized",
-    activation."displayName",
+    activation_row."emailNormalized",
+    activation_row."emailNormalized",
+    activation_row."displayName",
     p_password_hash,
     'ACTIVE',
     p_now_at,
@@ -54,7 +54,7 @@ BEGIN
   FOR decision IN
     SELECT "moduleId", "accessDurationKind", "accessExpiresAt"
     FROM "ApplicationModuleDecision"
-    WHERE "applicationId" = activation."applicationId"
+    WHERE "applicationId" = activation_row."applicationId"
       AND "status" = 'APPROVED'
   LOOP
     INSERT INTO "ModuleAccessGrant" (
@@ -72,11 +72,11 @@ BEGIN
 
   UPDATE "AccountActivation"
   SET "consumedAt" = p_now_at, "updatedAt" = p_now_at
-  WHERE "id" = activation."activationId" AND "consumedAt" IS NULL;
+  WHERE "id" = activation_row."activationId" AND "consumedAt" IS NULL;
 
   UPDATE "AccountApplication"
   SET "status" = 'ACTIVATED', "activatedUserId" = p_user_id, "updatedAt" = p_now_at
-  WHERE "id" = activation."applicationId";
+  WHERE "id" = activation_row."applicationId";
 
   RETURN true;
 END;
