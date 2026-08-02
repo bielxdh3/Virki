@@ -113,6 +113,11 @@ jobs:
             exit 1
           fi
 
+      - name: Production runtime smoke
+        env:
+          BIELOS_RUNTIME_IMAGE: bielos-production-ci:${{ github.sha }}
+        run: npm run test:production:runtime
+
       - name: Validate production Compose config
         env:
           DATABASE_URL: postgresql://bielos_app:local-validation-only@postgres:5432/bielos
