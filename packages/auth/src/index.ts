@@ -16,6 +16,7 @@ export {
   type AuditMetadata,
   type AuditResult
 } from "./audit";
+export * from "./email";
 
 const SESSION_TOKEN_BYTES = 32;
 const DUMMY_PASSWORD_HASH =
