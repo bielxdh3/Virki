@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` and finalized at `196bc42a58232223317ddc793d02ac7b098a9ee1` on `main`. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, and remote validation are green; backup/restore and restricted-role evidence remain separate operational gates before production data changes.
+The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` and the final validated implementation is `f6bee5f08405b7db9410af8ae553b59cf16e6553` on `main`; this closeout document is published on the same branch. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, disposable backup/restore, restricted-role validation, and remote runtime validation are green; durable production changes remain gated by human operations.
 
 ## Dependency order and task status
 
@@ -15,7 +15,7 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 7. Email/TOTP second factor, encrypted TOTP, recovery codes, device challenges, trusted devices, and ordinary recovery — completed; DB runtime unvalidated locally.
 8. Separate administrative credential and session-bound `SecurityElevation` — completed; DB runtime unvalidated locally.
 9. UI, audit, notifications, operations state, and opaque UI references — completed.
-10. Adversarial validation, rollout, and publication — partial/blocking external validation only.
+10. Adversarial validation, rollout, and publication — validation green; security workbench and durable rollout remain external gates.
 
 ## Surfaces and safety state
 
@@ -49,18 +49,19 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 - CI now runs dependency audit and application validation as independent jobs, so an audit failure cannot skip the remaining validation gates.
 - `git diff --check`: passed before publication.
 - Core DB integration/concurrency suite: passed in remote CI; local execution was blocked because the Docker API was unavailable.
-- Backup/restore evidence: not available; no production database was accessed or modified.
-- Restricted intake database-role evidence: not available; no durable role or grant was provisioned.
-- Image and Compose runtime validation: passed in remote CI; not available locally because Docker was unavailable.
+- Backup/restore evidence: passed in remote CI using a custom-format dump and a separate disposable restore database; no production database was accessed or modified.
+- Restricted intake database-role evidence: passed in remote CI with direct access denied to User, Session, projects, catalog tables, outbox data, administrative/security tables, audit logs, and GymForge tables; public catalog, intake writes, activation, and the narrow verification enqueue capability passed.
+- Image, runtime, and Compose validation: passed in remote CI, including loopback-only ports, public-site health, hub health, direct-origin hub denial, intake-disabled response, revision label, and Compose validation; local Docker remained unavailable.
 - Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped.
 - Exact post-remediation remote CI for validation commit `223528948a7732b9b1f5f6ea148759c0497439e6`: run `30736308059` passed both independent jobs, including 37 Core integration tests, concurrency tests, production image revision verification, and Compose validation.
-- Exact final-SHA CI for `196bc42a58232223317ddc793d02ac7b098a9ee1`: run `30736466608` passed both independent jobs (`Audit dependency lockfile` and `Validate`).
+- Exact final-SHA CI for `f6bee5f08405b7db9410af8ae553b59cf16e6553`: run `30738391579` passed both independent jobs (`Audit dependency lockfile` and `Validate`), including backup/restore, restricted-role validation, runtime smoke, image revision verification, and Compose validation.
+- Codex Security diff scan: not completed because the available workbench required a persisted setup UI opt-out; no scanner verdict is claimed.
 
 ## Migrations
 
-`20260801090000_identity_access_foundation`, `20260801100000_add_intake_dedupe_controls`, `20260801110000_add_partial_application_state`, `20260801120000_account_security_verification`, `20260801130000_administrative_elevation`, and `20260801140000_security_ui_keys` are additive. Down-migrations and destructive rollback are not assumed safe; take and verify a backup before deployment.
+`20260801090000_identity_access_foundation`, `20260801100000_add_intake_dedupe_controls`, `20260801110000_add_partial_application_state`, `20260801120000_account_security_verification`, `20260801130000_administrative_elevation`, `20260801140000_security_ui_keys`, `20260802090000_restrict_intake_database_access`, and `20260802100000_fix_intake_security_functions` are additive. Down-migrations and destructive rollback are not assumed safe; take and verify a backup before deployment.
 
-No durable production migration was run. Migration deployment remains pending the backup/restore and restricted-role gates.
+No durable production migration was run. Migration deployment remains pending human role provisioning, verified operational backup policy, and authorized production smoke.
 
 ## Human enablement steps
 
