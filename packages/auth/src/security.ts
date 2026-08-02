@@ -377,4 +377,3 @@ function safeEqual(left: string, right: string): boolean {
 }
 
 function isCeremonyId(value: string): boolean { return /^[A-Za-z0-9_-]{24,100}$/.test(value); }
-function isDatabaseId(value: string): boolean { return /^[A-Za-z0-9_-]{8,80}$/.test(value); }

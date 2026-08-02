@@ -1,8 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   createRequestKey,
-  isPublicRequestableModule,
-  type InitialModuleCatalogEntry
+  isPublicRequestableModule
 } from "@bielos/database";
 import { hashPassword } from "@bielos/auth";
 import { enqueueEmailMessageForClient } from "@bielos/auth/email";
