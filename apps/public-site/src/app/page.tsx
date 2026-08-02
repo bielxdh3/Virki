@@ -67,6 +67,7 @@ const copy = {
     description:
       "Um hub pessoal em estilo sistema operacional para projetos, ferramentas, arquivos, automação e laboratórios técnicos.",
     enterHub: "Entrar no hub",
+    apply: "Solicitar acesso",
     projectsLabel: "Projetos públicos",
     footerStatus: "Status geral: disponível",
     footerSurface: "Superfície pública apenas",
@@ -79,6 +80,7 @@ const copy = {
     description:
       "A personal operating-system-style hub for projects, tools, archives, automation, and technical labs.",
     enterHub: "Enter hub",
+    apply: "Request access",
     projectsLabel: "Public projects",
     footerStatus: "Generic status: available",
     footerSurface: "Public surface only",
@@ -118,9 +120,10 @@ export default async function PublicLandingPage() {
           <p className="eyebrow">biel.dev.br</p>
           <h1>BielOS</h1>
           <p className="description">{t.description}</p>
-          <a className="enter-button" href={hubUrl}>
-            {t.enterHub}
-          </a>
+          <div className="public-actions">
+            <a className="enter-button" href={hubUrl}>{t.enterHub}</a>
+            <a className="secondary-button" href="/apply">{t.apply}</a>
+          </div>
         </section>
 
         <section className="project-grid" aria-label={t.projectsLabel}>

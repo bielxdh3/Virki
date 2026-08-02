@@ -78,14 +78,17 @@ export function getEmailTransportStatus(
   return { state: "configured" };
 }
 
-export async function enqueueEmailMessage(input: {
+export function enqueueEmailMessageForClient(
+  client: Pick<Prisma.TransactionClient, "emailOutboxMessage">,
+  input: {
   idempotencyKey: string;
   kind: EmailMessageKind;
   recipientEmail: string;
   locale: EmailLocale;
   payload?: EmailPayload;
   now?: Date;
-}) {
+  }
+) {
   const recipientEmail = normalizeEmail(input.recipientEmail);
   if (!recipientEmail || !input.idempotencyKey.trim()) {
     throw new Error("Invalid email message.");
@@ -94,7 +97,7 @@ export async function enqueueEmailMessage(input: {
   const storedPayload = protectEmailPayload(input.payload ?? {}, process.env);
   const now = input.now ?? new Date();
 
-  return prisma.emailOutboxMessage.upsert({
+  return client.emailOutboxMessage.upsert({
     where: { idempotencyKey: input.idempotencyKey },
     update: {},
     create: {
@@ -107,6 +110,17 @@ export async function enqueueEmailMessage(input: {
       updatedAt: now
     }
   });
+}
+
+export function enqueueEmailMessage(input: {
+  idempotencyKey: string;
+  kind: EmailMessageKind;
+  recipientEmail: string;
+  locale: EmailLocale;
+  payload?: EmailPayload;
+  now?: Date;
+}) {
+  return enqueueEmailMessageForClient(prisma, input);
 }
 
 export async function claimNextEmailMessage(now = new Date()) {

@@ -10,6 +10,7 @@ services:
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:?NEXT_PUBLIC_HUB_URL must be set in local .env}
+      NEXT_PUBLIC_INTAKE_URL: ${NEXT_PUBLIC_INTAKE_URL:-}
     ports:
       - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
     command: npm run start --workspace @bielos/public-site
@@ -55,6 +56,25 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  intake:
+    build: *bielos-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: true
+    environment:
+      NODE_ENV: production
+      INTAKE_PORT: 3002
+      PUBLIC_SITE_ORIGIN: ${PUBLIC_SITE_ORIGIN:?PUBLIC_SITE_ORIGIN must be set in local .env}
+      BIELOS_INTAKE_ENABLED: "false"
+      BIELOS_INTAKE_DATABASE_URL: ${BIELOS_INTAKE_DATABASE_URL:-}
+      BIELOS_INTAKE_ABUSE_SECRET: ${BIELOS_INTAKE_ABUSE_SECRET:-}
+      BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
+      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:-}
+    command: npm run start --workspace @bielos/intake
 
   session-cleanup:
     build: *bielos-build

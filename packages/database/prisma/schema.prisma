@@ -346,6 +346,7 @@ model AuditLog {
 model AccountApplication {
   id                  String                    @id @default(cuid())
   emailNormalized     String
+  abuseIdentifierHash String?
   displayName         String?
   status              AccountApplicationStatus @default(PENDING_EMAIL)
   reviewedByUserId    String?
@@ -413,6 +414,7 @@ model ModuleCatalog {
 
 model ApplicationModuleDecision {
   id                  String                          @id @default(cuid())
+  dedupeKey           String                          @unique
   applicationId       String
   moduleId            String
   reason              String

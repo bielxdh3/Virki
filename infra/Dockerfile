@@ -5,6 +5,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
 COPY apps/hub/package*.json ./apps/hub/
+COPY apps/intake/package*.json ./apps/intake/
 COPY packages/ui/package*.json ./packages/ui/
 COPY packages/auth/package*.json ./packages/auth/
 COPY packages/config/package*.json ./packages/config/

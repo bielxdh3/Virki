@@ -226,6 +226,107 @@ h1 {
   text-decoration: none;
 }
 
+.public-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  margin-top: 30px;
+  padding: 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.apply-panel {
+  max-width: 760px;
+  margin: 24px auto;
+  padding: clamp(24px, 5vw, 56px);
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.apply-unavailable,
+.apply-form p[role="status"] {
+  margin: 18px 0 0;
+  color: var(--amber);
+}
+
+.apply-form {
+  display: grid;
+  gap: 18px;
+  margin-top: 28px;
+}
+
+.apply-form label,
+.apply-form legend {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.apply-form input,
+.apply-form textarea,
+.apply-form button {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0e141b;
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+.apply-form textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
+.apply-form fieldset {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--line);
+  padding: 16px;
+}
+
+.apply-module {
+  display: grid;
+  gap: 8px;
+}
+
+.apply-module > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.apply-module > span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.apply-form button {
+  background: #d9fbff;
+  color: #071116;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.apply-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .project-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
