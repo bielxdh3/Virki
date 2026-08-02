@@ -90,12 +90,18 @@ test("snapshot remains safe and renderable when the database probe fails", async
   assert.deepEqual(snapshot, {
     hubRequest: "verified",
     authenticatedSession: "verified",
-    database: "unknown"
+    database: "unknown",
+    emailTransport: "unavailable",
+    intake: "disabled",
+    emailWorker: "not-checked"
   });
   assert.equal(JSON.stringify(snapshot).includes(privateDetail), false);
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "authenticatedSession",
     "database",
-    "hubRequest"
+    "emailTransport",
+    "emailWorker",
+    "hubRequest",
+    "intake"
   ]);
 });

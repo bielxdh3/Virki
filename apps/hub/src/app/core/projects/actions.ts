@@ -19,6 +19,7 @@ import {
   createCoreProjectRecord,
   updateCoreProjectRecord
 } from "./mutation-service";
+import { requireSecurityElevation } from "@bielos/auth/administration";
 import {
   revokeCoreProjectAccessRecord,
   setCoreProjectAccessRecord
@@ -112,6 +113,7 @@ export async function updateCoreProject(formData: FormData) {
 
 export async function archiveCoreProject(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-archive");
+  try { await requireSecurityElevation(session.user.id, session.id, "CORE_PROJECT_ARCHIVE"); } catch { redirect("/core/projects?error=elevation"); }
   const projectId = readFormString(formData, "projectId").trim();
   const confirmed = readFormString(formData, "confirmArchive") === "yes";
   const resultPath = getProjectResultPath(formData, projectId);
@@ -128,6 +130,7 @@ export async function archiveCoreProject(formData: FormData) {
 
 export async function setCoreProjectAccess(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-access-set");
+  try { await requireSecurityElevation(session.user.id, session.id, "PROJECT_OWNER_ACCESS_CHANGE"); } catch { redirect("/core/projects?error=elevation"); }
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
   const accessLevel = readFormString(formData, "accessLevel");
@@ -151,6 +154,7 @@ export async function setCoreProjectAccess(formData: FormData) {
 
 export async function revokeCoreProjectAccess(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-access-revoke");
+  try { await requireSecurityElevation(session.user.id, session.id, "PROJECT_OWNER_ACCESS_CHANGE"); } catch { redirect("/core/projects?error=elevation"); }
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
   const resultPath = getProjectResultPath(formData, projectId);

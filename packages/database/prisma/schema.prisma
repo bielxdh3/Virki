@@ -284,6 +284,7 @@ model ProjectAccess {
 
 model Session {
   id        String    @id @default(cuid())
+  sessionKey String   @unique @default(cuid())
   userId    String
   tokenHash String    @unique
   expiresAt DateTime
@@ -632,6 +633,7 @@ model DeviceChallenge {
 
 model TrustedDevice {
   id           String              @id @default(cuid())
+  deviceKey    String              @unique @default(cuid())
   userId       String
   deviceIdHash String
   label        String?

@@ -290,6 +290,7 @@ export async function createSession(userId: string): Promise<CreatedSession> {
   await prisma.session.create({
     data: {
       userId,
+      sessionKey: randomBytes(24).toString("base64url"),
       tokenHash,
       expiresAt
     }

@@ -7,7 +7,7 @@ import {
   timingSafeEqual
 } from "node:crypto";
 import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
-import { getSessionExpiresAt, generateSessionToken, hashSessionToken } from "./index";
+import { getSessionExpiresAt, generateSessionToken, hashSessionToken, hashAuditIdentifier, writeAuditLog } from "./index";
 import { prisma, type Prisma } from "@bielos/database";
 
 export const DEVICE_COOKIE_NAME = "bielos_device";
@@ -105,7 +105,7 @@ export async function startTotpEnrollment(userId: string, email: string): Promis
 
 export async function confirmTotpEnrollment(userId: string, code: string, now = new Date()): Promise<string[]> {
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
-  return prisma.$transaction(async (transaction) => {
+  const recoveryCodes = await prisma.$transaction(async (transaction) => {
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "PENDING") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -117,6 +117,8 @@ export async function confirmTotpEnrollment(userId: string, code: string, now = 
     await transaction.user.update({ where: { id: userId }, data: { secondFactorMethod: "TOTP" } });
     return recoveryCodes;
   });
+  await writeAuditLog({ eventType: "SECOND_FACTOR_ENROLLED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP second factor enrolled." });
+  return recoveryCodes;
 }
 
 export async function disableTotp(userId: string): Promise<void> {
@@ -125,6 +127,12 @@ export async function disableTotp(userId: string): Promise<void> {
     await transaction.user.update({ where: { id: userId }, data: { secondFactorMethod: "EMAIL" } });
     await transaction.recoveryCode.deleteMany({ where: { userId } });
   });
+  await writeAuditLog({ eventType: "SECOND_FACTOR_DISABLED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP second factor disabled." });
+}
+
+export async function getAccountSecurityState(userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { secondFactorMethod: true, emailVerifiedAt: true, totpFactor: { select: { status: true, confirmedAt: true } }, _count: { select: { recoveryCodes: true, trustedDevices: true } } } });
+  return user ? { secondFactorMethod: user.secondFactorMethod, emailVerified: Boolean(user.emailVerifiedAt), totpStatus: user.totpFactor?.status ?? "NOT_CONFIGURED", totpConfirmedAt: user.totpFactor?.confirmedAt ?? null, recoveryCodeCount: user._count.recoveryCodes, trustedDeviceCount: user._count.trustedDevices } : null;
 }
 
 export async function regenerateRecoveryCodes(userId: string): Promise<string[]> {
@@ -135,6 +143,7 @@ export async function regenerateRecoveryCodes(userId: string): Promise<string[]>
     await transaction.recoveryCode.deleteMany({ where: { userId } });
     await transaction.recoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId, codeHash: hashRecoveryCode(value) })) });
   });
+  await writeAuditLog({ eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS", actorUserId: userId, resource: "identity.recovery", message: "Recovery codes regenerated." });
   return recoveryCodes;
 }
 
@@ -186,14 +195,16 @@ export async function startLoginCeremony(
 export async function verifyLoginEmailCode(ceremonyId: string, code: string, now = new Date()): Promise<{ requiresTotp: boolean; session: CreatedLoginSession | null }> {
   if (!isCeremonyId(ceremonyId) || !/^\d{6}$/.test(code)) throw new SecurityMutationError();
   try {
-    return await prisma.$transaction(async (transaction) => {
+    const result = await prisma.$transaction(async (transaction) => {
       const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, codeHash: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { isActive: true } } } });
       if (!challenge || !challenge.user.isActive || challenge.status !== "PENDING" || challenge.consumedAt || challenge.expiresAt <= now || !safeEqual(hashSecurityCode(code), challenge.codeHash)) throw new SecurityMutationError();
       await transaction.deviceChallenge.updateMany({ where: { id: challenge.id, status: "PENDING", consumedAt: null }, data: { status: "VERIFIED" } });
-      await transaction.trustedDevice.upsert({ where: { userId_deviceIdHash: { userId: challenge.userId, deviceIdHash: challenge.deviceIdHash } }, update: { status: "TRUSTED", revokedAt: null, lastSeenAt: now }, create: { userId: challenge.userId, deviceIdHash: challenge.deviceIdHash, status: "TRUSTED", lastSeenAt: now } });
+      await transaction.trustedDevice.upsert({ where: { userId_deviceIdHash: { userId: challenge.userId, deviceIdHash: challenge.deviceIdHash } }, update: { status: "TRUSTED", revokedAt: null, lastSeenAt: now }, create: { deviceKey: randomBytes(24).toString("base64url"), userId: challenge.userId, deviceIdHash: challenge.deviceIdHash, status: "TRUSTED", lastSeenAt: now } });
       if (challenge.requiresTotp) return { requiresTotp: true, session: null };
       return { requiresTotp: false, session: await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, now) };
     }, { isolationLevel: "Serializable" });
+    await writeAuditLog({ eventType: "DEVICE_VERIFIED", result: "SUCCESS", resource: "identity.device", message: "Login security ceremony verified.", metadata: { ceremonyRef: hashAuditIdentifier(ceremonyId) } });
+    return result;
   } catch {
     throw new SecurityMutationError();
   }
@@ -202,7 +213,7 @@ export async function verifyLoginEmailCode(ceremonyId: string, code: string, now
 export async function verifyLoginTotpCode(ceremonyId: string, code: string, now = new Date()): Promise<CreatedLoginSession> {
   if (!isCeremonyId(ceremonyId)) throw new SecurityMutationError();
   try {
-    return await prisma.$transaction(async (transaction) => {
+    const result = await prisma.$transaction(async (transaction) => {
       const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { isActive: true, totpFactor: { select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } } } } } });
       if (!challenge || !challenge.requiresTotp || !challenge.user.isActive || !["PENDING", "VERIFIED"].includes(challenge.status) || challenge.consumedAt || challenge.expiresAt <= now || challenge.user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
       const factor = challenge.user.totpFactor;
@@ -212,18 +223,21 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, now 
       if (claimed.count !== 1) throw new SecurityMutationError();
       return consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, now);
     }, { isolationLevel: "Serializable" });
+    await writeAuditLog({ eventType: "DEVICE_VERIFIED", result: "SUCCESS", resource: "identity.2fa", message: "TOTP login verification succeeded.", metadata: { ceremonyRef: hashAuditIdentifier(ceremonyId) } });
+    return result;
   } catch {
     throw new SecurityMutationError();
   }
 }
 
 export async function listTrustedDevices(userId: string) {
-  return prisma.trustedDevice.findMany({ where: { userId, status: "TRUSTED" }, orderBy: { lastSeenAt: "desc" }, take: 25, select: { id: true, label: true, lastSeenAt: true, createdAt: true } });
+  return prisma.trustedDevice.findMany({ where: { userId, status: "TRUSTED" }, orderBy: { lastSeenAt: "desc" }, take: 25, select: { deviceKey: true, label: true, lastSeenAt: true, createdAt: true } });
 }
 
-export async function revokeTrustedDevice(userId: string, deviceId: string): Promise<void> {
-  if (!isDatabaseId(deviceId)) throw new SecurityMutationError();
-  await prisma.trustedDevice.updateMany({ where: { id: deviceId, userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: new Date() } });
+export async function revokeTrustedDevice(userId: string, deviceKey: string): Promise<void> {
+  if (!isCeremonyId(deviceKey)) throw new SecurityMutationError();
+  await prisma.trustedDevice.updateMany({ where: { deviceKey, userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: new Date() } });
+  await writeAuditLog({ eventType: "TRUSTED_DEVICE_REVOKED", result: "SUCCESS", actorUserId: userId, resource: "identity.device", message: "Trusted device revoked.", metadata: { deviceRef: hashAuditIdentifier(deviceKey) } });
 }
 
 export async function requestAccountRecovery(email: string, locale: EmailLocale, now = new Date()): Promise<void> {
@@ -237,8 +251,9 @@ export async function requestAccountRecovery(email: string, locale: EmailLocale,
     await prisma.$transaction(async (transaction) => {
       await transaction.accountRecoveryRequest.updateMany({ where: { userId: user.id, status: "PENDING" }, data: { status: "EXPIRED" } });
       await transaction.accountRecoveryRequest.create({ data: { requestKey, userId: user.id, emailChallengeHash: hashSecurityCode(code), expiresAt: new Date(now.getTime() + RECOVERY_REQUEST_TTL_MS) } });
-      await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery:${requestKey}`, kind: "ACCOUNT_RECOVERY", recipientEmail: user.email, locale, payload: { publicValues: { displayName: user.displayName ?? "", actionUrl: `/recover?request=${requestKey}` }, protectedValues: { code } } });
+      await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery:${requestKey}`, kind: "ACCOUNT_RECOVERY", recipientEmail: user.email, locale, payload: { publicValues: { displayName: user.displayName ?? "" }, protectedValues: { code, actionUrl: `/recover?request=${requestKey}` } } });
     });
+    await writeAuditLog({ eventType: "ACCOUNT_RECOVERY_REQUESTED", result: "SUCCESS", actorUserId: user.id, resource: "identity.recovery", message: "Account recovery requested." });
   } catch {
     throw new SecurityMutationError();
   }
@@ -252,6 +267,7 @@ export async function verifyAccountRecoveryEmail(requestKey: string, code: strin
     return transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, status: "PENDING", emailVerifiedAt: null }, data: { emailVerifiedAt: now } });
   });
   if (result.count !== 1) throw new SecurityMutationError();
+  await writeAuditLog({ eventType: "ACCOUNT_RECOVERY_EMAIL_VERIFIED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery email verified.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
 }
 
 export async function listPendingAccountRecoveries(actor: { id: string; role: string }) {
@@ -273,6 +289,7 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
     return transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, status: "PENDING", emailVerifiedAt: { not: null } }, data: { status: "APPROVED", reviewedByUserId: actor.id, approvedAt: now } });
   });
   if (result.count !== 1) throw new SecurityMutationError();
+  await writeAuditLog({ eventType: "ACCOUNT_RECOVERY_APPROVED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.recovery", message: "Account recovery approved.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
 }
 
 export async function consumeApprovedAccountRecovery(requestKey: string, newPasswordHash: string, now = new Date()): Promise<void> {
@@ -285,6 +302,7 @@ export async function consumeApprovedAccountRecovery(requestKey: string, newPass
     return transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "CONSUMED", consumedAt: now } });
   });
   if (result.count !== 1) throw new SecurityMutationError();
+  await writeAuditLog({ eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery consumed.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
 }
 
 async function consumeChallengeAndCreateSession(transaction: Prisma.TransactionClient, challengeId: string, userId: string, now: Date): Promise<CreatedLoginSession> {
@@ -292,7 +310,7 @@ async function consumeChallengeAndCreateSession(transaction: Prisma.TransactionC
   if (consumed.count !== 1) throw new SecurityMutationError();
   const token = generateSessionToken();
   const expiresAt = getSessionExpiresAt(now);
-  await transaction.session.create({ data: { userId, tokenHash: hashSessionToken(token), expiresAt } });
+  await transaction.session.create({ data: { sessionKey: randomBytes(24).toString("base64url"), userId, tokenHash: hashSessionToken(token), expiresAt } });
   return { token, expiresAt };
 }
 

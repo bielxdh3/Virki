@@ -58,6 +58,12 @@ const copy = {
     externalRoutes: "Respostas dos domínios externos",
     migrationState: "Estado de migrações",
     honestStatus: "Sem telemetria simulada",
+    emailTransport: "Transporte de e-mail",
+    intakeState: "Intake público",
+    workerState: "Worker de e-mail",
+    unavailable: "Indisponível",
+    disabled: "Desabilitado",
+    notChecked: "Não verificado",
     twoLayers: "Duas camadas",
     quickActions: "Ações rápidas",
     safe: "Seguro",
@@ -122,6 +128,12 @@ const copy = {
     externalRoutes: "External domain responses",
     migrationState: "Migration state",
     honestStatus: "No simulated telemetry",
+    emailTransport: "Email transport",
+    intakeState: "Public intake",
+    workerState: "Email worker",
+    unavailable: "Unavailable",
+    disabled: "Disabled",
+    notChecked: "Not checked",
     twoLayers: "Two layers",
     quickActions: "Quick Actions",
     safe: "Safe",
@@ -384,6 +396,14 @@ export default async function HubDashboardPage() {
                       <strong>{t.configured}</strong>
                     </div>
                   ))}
+                </div>
+              </section>
+              <section>
+                <h3>{t.operations}</h3>
+                <div className="status-list">
+                  <div><span>{t.emailTransport}</span><strong>{operationsSnapshot.emailTransport === "configured" ? t.configured : t.unavailable}</strong></div>
+                  <div><span>{t.intakeState}</span><strong>{operationsSnapshot.intake === "enabled" ? t.configured : t.disabled}</strong></div>
+                  <div><span>{t.workerState}</span><strong>{t.notChecked}</strong></div>
                 </div>
               </section>
               <section>

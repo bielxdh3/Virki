@@ -1,4 +1,4 @@
-import { type AuthenticatedUser } from "@bielos/auth";
+import { hashAuditIdentifier, type AuthenticatedUser, writeAuditLog } from "@bielos/auth";
 import { requireSecurityElevation } from "@bielos/auth/administration";
 import { createRequestKey, isAccessGrantActive, prisma, type Prisma } from "@bielos/database";
 
@@ -96,6 +96,7 @@ export async function createModuleAccessRequest(
         }
       });
     }, { isolationLevel: "Serializable" });
+    await writeAuditLog({ eventType: "MODULE_ACCESS_REQUESTED", result: "SUCCESS", actorUserId: principal.id, resource: "identity.module", message: "Module access requested.", metadata: { moduleRef: hashAuditIdentifier(moduleKey) } });
   } catch {
     throw new ModuleAccessMutationError();
   }
@@ -135,6 +136,7 @@ export async function createFeaturePermissionRequest(
         data: { requestKey: createRequestKey(principal.id, permission.id, now), userId: principal.id, permissionId: permission.id, reason: reason.trim() || null }
       });
     }, { isolationLevel: "Serializable" });
+    await writeAuditLog({ eventType: "FEATURE_PERMISSION_REQUESTED", result: "SUCCESS", actorUserId: principal.id, resource: "identity.permission", message: "Feature permission requested.", metadata: { moduleRef: hashAuditIdentifier(moduleKey), permissionRef: hashAuditIdentifier(permissionKey) } });
   } catch {
     throw new ModuleAccessMutationError();
   }
@@ -168,6 +170,7 @@ export async function reviewModuleAccessRequest(input: {
         });
       }
     }, { isolationLevel: "Serializable" });
+    await writeAuditLog({ eventType: "MODULE_ACCESS_REVIEWED", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.module", message: "Module access request reviewed.", metadata: { requestRef: hashAuditIdentifier(input.requestKey), decision: input.approve } });
   } catch {
     throw new ModuleAccessMutationError();
   }
@@ -233,6 +236,7 @@ export async function reviewFeaturePermissionRequest(input: {
         });
       }
     }, { isolationLevel: "Serializable" });
+    await writeAuditLog({ eventType: "FEATURE_PERMISSION_REVIEWED", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.permission", message: "Feature permission request reviewed.", metadata: { requestRef: hashAuditIdentifier(input.requestKey), decision: input.approve } });
   } catch {
     throw new ModuleAccessMutationError();
   }
@@ -240,6 +244,7 @@ export async function reviewFeaturePermissionRequest(input: {
 
 export async function expireModuleAccessGrants(now = new Date()): Promise<number> {
   const result = await prisma.moduleAccessGrant.updateMany({ where: { status: "ACTIVE", accessDurationKind: "TEMPORARY", expiresAt: { lte: now } }, data: { status: "EXPIRED" } });
+  if (result.count > 0) await writeAuditLog({ eventType: "MODULE_ACCESS_EXPIRED", result: "INFO", resource: "identity.module", message: "Temporary module access expired.", metadata: { count: result.count } });
   return result.count;
 }
 

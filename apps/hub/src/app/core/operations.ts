@@ -1,4 +1,5 @@
 import { prisma } from "@bielos/database";
+import { getEmailTransportStatus } from "@bielos/auth/email";
 
 export type CoreLiveCheckState = "verified" | "unknown";
 
@@ -61,6 +62,9 @@ export async function getCoreOperationsSnapshot(): Promise<{
   hubRequest: "verified";
   authenticatedSession: "verified";
   database: CoreLiveCheckState;
+  emailTransport: "configured" | "unavailable";
+  intake: "enabled" | "disabled";
+  emailWorker: "not-checked";
 }>;
 export async function getCoreOperationsSnapshot(
   databaseProbe: () => Promise<unknown>,
@@ -69,16 +73,27 @@ export async function getCoreOperationsSnapshot(
   hubRequest: "verified";
   authenticatedSession: "verified";
   database: CoreLiveCheckState;
+  emailTransport: "configured" | "unavailable";
+  intake: "enabled" | "disabled";
+  emailWorker: "not-checked";
 }>;
 export async function getCoreOperationsSnapshot(
   databaseProbe = runDatabaseProbe,
   timeoutMs = DATABASE_PROBE_TIMEOUT_MS
 ) {
   const database = await resolveBoundedCoreProbe(databaseProbe, timeoutMs);
+  const emailTransport = getEmailTransportStatus().state;
+  const intake = process.env.BIELOS_INTAKE_ENABLED === "true" &&
+    Boolean(process.env.BIELOS_INTAKE_DATABASE_URL?.trim()) &&
+    Boolean(process.env.BIELOS_INTAKE_ABUSE_SECRET?.trim()) &&
+    emailTransport === "configured" ? "enabled" as const : "disabled" as const;
 
   return {
     hubRequest: "verified",
     authenticatedSession: "verified",
-    database
+    database,
+    emailTransport: emailTransport === "configured" ? "configured" : "unavailable",
+    intake,
+    emailWorker: "not-checked"
   };
 }

@@ -250,6 +250,7 @@ export default async function CoreSecurityPage() {
           <p className="eyebrow">{t.eyebrow}</p>
           <h1>{t.title}</h1>
           <p>{t.intro}</p>
+          <p><a className="button-ghost" href="/core/security/account">Account security / Segurança da conta</a> {isOwner ? <a className="button-ghost" href="/core/security/admin">Administrative security / Segurança administrativa</a> : null}</p>
         </header>
 
         <section className="core-session-section anchor-section" id="sessions" aria-labelledby="core-session-heading">
@@ -271,7 +272,7 @@ export default async function CoreSecurityPage() {
                 const isCurrent = item.isCurrent;
 
                 return (
-                  <article className={`core-session-row${isCurrent ? " is-current" : ""}`} key={item.id}>
+                  <article className={`core-session-row${isCurrent ? " is-current" : ""}`} key={item.sessionKey}>
                     <div className="core-session-state">
                       <span className={`status-pill${isCurrent ? " is-active" : ""}`}>
                         {isCurrent ? t.current : t.other}
@@ -293,7 +294,7 @@ export default async function CoreSecurityPage() {
                       ) : (
                         <form action={revokeCoreSession}>
                           <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                          <input type="hidden" name="sessionId" value={item.id} />
+                          <input type="hidden" name="sessionKey" value={item.sessionKey} />
                           <button className="button-danger" type="submit">{t.revoke}</button>
                         </form>
                       )}

@@ -66,3 +66,9 @@ Schema rollback is additive-only: code can be rolled back before dependent write
 | Elevation | separate admin password, email factor, versioned scope/session binding, immediate revoke, no legacy-row authority |
 | Operations | truthful safe status only; no secrets, raw provider errors, or private catalog leakage |
 | Validation | focused and real transaction tests, secret scan, lint, typecheck, Prisma validation, build, Compose/image, backup/restore, diff and clean-tree checks |
+
+## Current implementation notes
+
+- Migrations are additive through `20260801140000_security_ui_keys`; production intake remains disabled until the real gates are satisfied.
+- Account security, recovery, trusted devices, module access, owner review, administrative elevation, and truthful operations status are implemented behind Cloudflare, CSRF, session, and feature boundaries.
+- Docker/PostgreSQL was unavailable in this environment, so migration deployment, restricted-role enforcement, contention suites, backup/restore, Compose/image validation, and production smoke remain manual gates.

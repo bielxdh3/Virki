@@ -11,6 +11,7 @@ type CoreSessionPrincipal = {
 
 export type CoreSessionDisplay = {
   id: string;
+  sessionKey: string;
   createdAt: Date;
   expiresAt: Date;
   isCurrent: boolean;
@@ -50,6 +51,7 @@ export async function listCoreSessionsForPrincipal(
     },
     select: {
       id: true,
+      sessionKey: true,
       createdAt: true,
       expiresAt: true
     }
@@ -68,6 +70,7 @@ export async function listCoreSessionsForPrincipal(
     },
     select: {
       id: true,
+      sessionKey: true,
       createdAt: true,
       expiresAt: true
     },
@@ -79,7 +82,10 @@ export async function listCoreSessionsForPrincipal(
   );
 
   return sessions.map((session) => ({
-    ...session,
+    id: session.id,
+    sessionKey: session.sessionKey,
+    createdAt: session.createdAt,
+    expiresAt: session.expiresAt,
     isCurrent: session.id === currentSessionId
   }));
 }
@@ -87,12 +93,12 @@ export async function listCoreSessionsForPrincipal(
 export async function revokeCoreSessionRecord(
   principal: CoreSessionPrincipal,
   currentSessionId: string,
-  targetSessionId: string,
+  targetSessionKey: string,
   now = new Date()
 ) {
   if (
     !isValidSessionResourceId(principal.id) ||
-    !canRevokeOtherSession(currentSessionId, targetSessionId)
+    !canRevokeOtherSession(currentSessionId, targetSessionKey)
   ) {
     throw new CoreSessionMutationError();
   }
@@ -108,7 +114,7 @@ export async function revokeCoreSessionRecord(
 
       const result = await transaction.session.updateMany({
         where: {
-          id: targetSessionId,
+          sessionKey: targetSessionKey,
           userId: principal.id,
           revokedAt: null,
           expiresAt: { gt: now }
@@ -132,7 +138,7 @@ export async function revokeCoreSessionRecord(
     message: "Personal session revoked.",
     metadata: {
       scope: "single-other",
-      sessionRef: hashAuditIdentifier(targetSessionId)
+      sessionRef: hashAuditIdentifier(targetSessionKey)
     }
   });
 
