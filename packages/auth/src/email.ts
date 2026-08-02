@@ -79,7 +79,7 @@ export function getEmailTransportStatus(
 }
 
 export function enqueueEmailMessageForClient(
-  client: Pick<Prisma.TransactionClient, "emailOutboxMessage">,
+  client: Pick<Prisma.TransactionClient, "$executeRaw">,
   input: {
   idempotencyKey: string;
   kind: EmailMessageKind;
@@ -97,20 +97,21 @@ export function enqueueEmailMessageForClient(
   const storedPayload = protectEmailPayload(input.payload ?? {}, process.env);
   const now = input.now ?? new Date();
 
-  return client.emailOutboxMessage.upsert({
-    where: { idempotencyKey: input.idempotencyKey },
-    update: {},
-    create: {
-      idempotencyKey: input.idempotencyKey,
-      kind: input.kind,
-      recipientEmail,
-      locale: input.locale,
-      payload: storedPayload as Prisma.InputJsonValue,
-      availableAt: now,
-      updatedAt: now
-    },
-    select: { id: true }
-  });
+  return client.$executeRaw`
+    INSERT INTO "EmailOutboxMessage" (
+      "id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload", "availableAt", "updatedAt"
+    ) VALUES (
+      ${randomBytes(16).toString("hex")},
+      ${input.idempotencyKey},
+      ${input.kind}::"EmailMessageKind",
+      ${recipientEmail},
+      ${input.locale},
+      CAST(${JSON.stringify(storedPayload)} AS JSONB),
+      ${now},
+      ${now}
+    )
+    ON CONFLICT ("idempotencyKey") DO NOTHING
+  `;
 }
 
 export function enqueueEmailMessage(input: {

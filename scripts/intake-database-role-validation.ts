@@ -68,7 +68,8 @@ async function main(): Promise<void> {
     "GymForgeCompetition",
     "GymForgeCompetitionAssignment",
     "GymForgeCompetitionScoreCorrection",
-    "ModuleCatalog"
+    "ModuleCatalog",
+    "EmailOutboxMessage"
   ]) {
     await expectDenied(`SELECT ${table}`, () =>
       restricted.$queryRawUnsafe(`SELECT 1 FROM "${table}" LIMIT 1`)
@@ -176,9 +177,6 @@ async function recreateRole(): Promise<void> {
   );
   await admin.$executeRawUnsafe(
     `GRANT UPDATE ("consumedAt", "updatedAt") ON "ApplicationEmailVerification" TO "${roleName}"`
-  );
-  await admin.$executeRawUnsafe(
-    `GRANT SELECT ("id", "idempotencyKey") ON "EmailOutboxMessage" TO "${roleName}"`
   );
   await admin.$executeRawUnsafe(
     `GRANT INSERT ("id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload", "availableAt", "updatedAt") ON "EmailOutboxMessage" TO "${roleName}"`
