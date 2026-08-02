@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
-  hashPassword,
-  SESSION_COOKIE_NAME
+  hashPassword
 } from "@bielos/auth";
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
+import { DEVICE_COOKIE_NAME } from "@bielos/auth/security";
 import { prisma } from "@bielos/database";
 
 import { POST } from "../../api/login/route";
@@ -140,7 +140,7 @@ test("missing credentials use the unknown bucket without raw form storage", asyn
   assertSafeAuditRows(audits, [syntheticCredential]);
 });
 
-test("valid MEMBER login redirects, creates one session, sets a safe cookie, and clears the bucket", async () => {
+test("valid MEMBER login starts email verification, sets a device cookie, and clears the bucket", async () => {
   const user = await createSyntheticMember();
   await POST(createLoginRequest({
     email: memberEmail,
@@ -156,11 +156,15 @@ test("valid MEMBER login redirects, creates one session, sets a safe cookie, and
   const audits = await readLoginAudits();
 
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), "https://hub.example.invalid/");
-  assert.equal(await prisma.session.count({ where: { userId: user.id } }), 1);
+  const location = new URL(response.headers.get("location") ?? "http://invalid");
+  assert.equal(location.origin, "https://hub.example.invalid");
+  assert.equal(location.pathname, "/login/verify");
+  assert.match(location.searchParams.get("ceremony") ?? "", /^[A-Za-z0-9_-]{32,}$/);
+  assert.equal(location.searchParams.get("factor"), "email");
+  assert.equal(await prisma.session.count({ where: { userId: user.id } }), 0);
   assert.equal(await prisma.loginRateLimit.count(), 0);
   assert.equal(
-    response.headers.get("set-cookie")?.startsWith(`${SESSION_COOKIE_NAME}=`) ?? false,
+    response.headers.get("set-cookie")?.startsWith(`${DEVICE_COOKIE_NAME}=`) ?? false,
     true
   );
   assert.equal(response.headers.get("set-cookie")?.includes("HttpOnly") ?? false, true);
