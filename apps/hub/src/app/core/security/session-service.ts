@@ -11,7 +11,6 @@ type CoreSessionPrincipal = {
 
 export type CoreSessionDisplay = {
   id: string;
-  sessionKey: string;
   createdAt: Date;
   expiresAt: Date;
   isCurrent: boolean;
@@ -51,7 +50,6 @@ export async function listCoreSessionsForPrincipal(
     },
     select: {
       id: true,
-      sessionKey: true,
       createdAt: true,
       expiresAt: true
     }
@@ -70,7 +68,6 @@ export async function listCoreSessionsForPrincipal(
     },
     select: {
       id: true,
-      sessionKey: true,
       createdAt: true,
       expiresAt: true
     },
@@ -83,7 +80,6 @@ export async function listCoreSessionsForPrincipal(
 
   return sessions.map((session) => ({
     id: session.id,
-    sessionKey: session.sessionKey,
     createdAt: session.createdAt,
     expiresAt: session.expiresAt,
     isCurrent: session.id === currentSessionId
@@ -93,12 +89,12 @@ export async function listCoreSessionsForPrincipal(
 export async function revokeCoreSessionRecord(
   principal: CoreSessionPrincipal,
   currentSessionId: string,
-  targetSessionKey: string,
+  targetSessionId: string,
   now = new Date()
 ) {
   if (
     !isValidSessionResourceId(principal.id) ||
-    !canRevokeOtherSession(currentSessionId, targetSessionKey)
+    !canRevokeOtherSession(currentSessionId, targetSessionId)
   ) {
     throw new CoreSessionMutationError();
   }
@@ -114,7 +110,7 @@ export async function revokeCoreSessionRecord(
 
       const result = await transaction.session.updateMany({
         where: {
-          sessionKey: targetSessionKey,
+          id: targetSessionId,
           userId: principal.id,
           revokedAt: null,
           expiresAt: { gt: now }
@@ -134,11 +130,11 @@ export async function revokeCoreSessionRecord(
     eventType: "AUTH_SESSION_REVOKED",
     result: "SUCCESS",
     actorUserId: principal.id,
-    resource: "session",
+      resource: "session",
     message: "Personal session revoked.",
     metadata: {
       scope: "single-other",
-      sessionRef: hashAuditIdentifier(targetSessionKey)
+      sessionRef: hashAuditIdentifier(targetSessionId)
     }
   });
 

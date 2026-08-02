@@ -272,7 +272,7 @@ export default async function CoreSecurityPage() {
                 const isCurrent = item.isCurrent;
 
                 return (
-                  <article className={`core-session-row${isCurrent ? " is-current" : ""}`} key={item.sessionKey}>
+                  <article className={`core-session-row${isCurrent ? " is-current" : ""}`} key={item.id}>
                     <div className="core-session-state">
                       <span className={`status-pill${isCurrent ? " is-active" : ""}`}>
                         {isCurrent ? t.current : t.other}
@@ -294,7 +294,7 @@ export default async function CoreSecurityPage() {
                       ) : (
                         <form action={revokeCoreSession}>
                           <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
-                          <input type="hidden" name="sessionKey" value={item.sessionKey} />
+                          <input type="hidden" name="sessionId" value={item.id} />
                           <button className="button-danger" type="submit">{t.revoke}</button>
                         </form>
                       )}

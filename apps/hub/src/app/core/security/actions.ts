@@ -55,7 +55,7 @@ function revalidateCoreSecurity() {
 
 export async function revokeCoreSession(formData: FormData) {
   const session = await requireCoreSessionMutation(formData, "core-session-revoke");
-  const targetSessionId = readFormString(formData, "sessionKey");
+  const targetSessionId = readFormString(formData, "sessionId");
 
   if (!canRevokeOtherSession(session.id, targetSessionId)) {
     redirect(`${CORE_SECURITY_PATH}?error=session`);
