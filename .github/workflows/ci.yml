@@ -12,6 +12,26 @@ permissions:
   contents: read
 
 jobs:
+  audit:
+    name: Audit dependency lockfile
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependency lockfile
+        run: npm audit --package-lock-only --audit-level=moderate
+
   validate:
     name: Validate
     runs-on: ubuntu-latest
@@ -45,9 +65,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Audit dependency lockfile
-        run: npm audit --package-lock-only --audit-level=moderate
 
       - name: Secret scan
         run: npm run secrets:scan
@@ -97,5 +114,8 @@ jobs:
           BIELOS_BUILD_REVISION: 0123456789abcdef0123456789abcdef01234567
           POSTGRES_PASSWORD: local-validation-only
           NEXT_PUBLIC_HUB_URL: https://hub.example.invalid
+          PUBLIC_SITE_ORIGIN: https://www.example.invalid
+          CLOUDFLARE_ACCESS_AUDIENCE: ci-test-audience
+          CLOUDFLARE_TEAM_DOMAIN: team.example.invalid
           CLOUDFLARE_TUNNEL_TOKEN: placeholder
         run: docker compose -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml config --no-env-resolution --quiet

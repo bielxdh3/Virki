@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The campaign started from `677c9622029e4a2e63d5fb10ce79eed7a5b3b157` and is published on `main`. The implementation is complete in source and disabled by default for production. The campaign is blocked from a full green closeout by unavailable local Docker/PostgreSQL and a remote lockfile audit failure on the pre-existing `sharp` dependency.
+The campaign started from `677c9622029e4a2e63d5fb10ce79eed7a5b3b157` and is published on `main`. The implementation is complete in source and disabled by default for production. Dependency remediation and CI audit separation are complete locally; full closeout still requires remote CI plus Docker/PostgreSQL and backup/restore validation.
 
 ## Dependency order and task status
 
@@ -42,12 +42,15 @@ The campaign started from `677c9622029e4a2e63d5fb10ce79eed7a5b3b157` and is publ
 - `npm run typecheck`: passed for hub, intake, public-site, auth, and database.
 - `npm run prisma:validate`: passed.
 - `npm run secrets:scan`: passed.
+- Node 22.20.0 `npm ci` with the committed lockfile: passed, including Prisma client generation.
+- `npm audit --package-lock-only --audit-level=moderate`: passed with 0 vulnerabilities after upgrading Next.js and remediating brace-expansion, PostCSS, and sharp.
 - `npm run build`: public site and hub passed, including login verification, recovery, account security, and administrative security routes.
+- CI now runs dependency audit and application validation as independent jobs, so an audit failure cannot skip the remaining validation gates.
 - `git diff --check`: passed before publication.
 - Core DB integration/concurrency suite: blocked before execution because the local Docker API was unavailable.
 - Backup/restore evidence: not available; no production database was accessed or modified.
 - Image and Compose runtime validation: not available locally because Docker was unavailable.
-- Exact remote CI for `d62e4bb0dcba05116ac7320b7f9555c4abe56f76`: run `30733166826` failed at `Audit dependency lockfile` on the existing high-severity `sharp` advisory; all later CI steps were skipped. No unrelated dependency upgrade was made.
+- Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped. The remediation commit and final remote run must be recorded after publication.
 
 ## Migrations
 
@@ -60,5 +63,5 @@ The campaign started from `677c9622029e4a2e63d5fb10ce79eed7a5b3b157` and is publ
 3. Select and configure a real email adapter, outbox encryption key, TOTP encryption key, abuse secret, public origin, and intake URL; keep test transport out of production.
 4. Configure the owner’s second factor, separate administrative password, and offline administrative recovery codes through a human ceremony.
 5. Configure public routing to the isolated intake service without host exposure, validate loopback-only origins, and run an authorized production smoke.
-6. Resolve or formally accept the existing `sharp` audit finding before treating remote CI as green; do not use a breaking unrelated upgrade without review.
+6. Confirm the post-remediation remote audit is green; do not use a breaking unrelated upgrade without review.
 7. Only after all gates pass, change the explicit production feature flag and re-run the exact smoke and rollback checks.
