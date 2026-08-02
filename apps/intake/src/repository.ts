@@ -58,16 +58,18 @@ export function createDatabaseIntakeRepository(
           data: {
             emailNormalized: input.emailNormalized,
             displayName: input.displayName,
-            abuseIdentifierHash: input.abuseIdentifierHash,
-            moduleDecisions: {
-              create: newModules.map((module) => ({
-                dedupeKey: createRequestKey(input.emailNormalized, module.id, now),
-                moduleId: module.id,
-                reason: input.modules.find((requested) => requested.key === module.key)!.reason
-              }))
-            }
+            abuseIdentifierHash: input.abuseIdentifierHash
           },
           select: { id: true }
+        });
+
+        await transaction.applicationModuleDecision.createMany({
+          data: newModules.map((module) => ({
+            dedupeKey: createRequestKey(input.emailNormalized, module.id, now),
+            applicationId: application.id,
+            moduleId: module.id,
+            reason: input.modules.find((requested) => requested.key === module.key)!.reason
+          }))
         });
 
         await transaction.applicationEmailVerification.create({
