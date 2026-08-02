@@ -4,6 +4,7 @@ import {
   isPublicRequestableModule,
   type InitialModuleCatalogEntry
 } from "@bielos/database";
+import { hashPassword } from "@bielos/auth";
 import { enqueueEmailMessageForClient } from "@bielos/auth/email";
 import type { PrismaClient } from "@bielos/database";
 import type { IntakeRepository, IntakeSubmission, PublicIntakeModule } from "./handler";
@@ -102,6 +103,91 @@ export function createDatabaseIntakeRepository(
               actionUrl: `${publicOrigin}/apply/verify?token=${verificationToken}`
             }
           }
+        });
+      });
+    },
+    async verifyApplicationEmail(token: string): Promise<void> {
+      const now = new Date();
+      await client.$transaction(async (transaction) => {
+        const verification = await transaction.applicationEmailVerification.findFirst({
+          where: { tokenHash: hashToken(token), consumedAt: null, expiresAt: { gt: now } },
+          select: { id: true, applicationId: true }
+        });
+        if (!verification) {
+          throw new Error("Verification rejected.");
+        }
+        const updated = await transaction.applicationEmailVerification.updateMany({
+          where: { id: verification.id, consumedAt: null },
+          data: { consumedAt: now, updatedAt: now }
+        });
+        if (updated.count !== 1) {
+          throw new Error("Verification rejected.");
+        }
+        await transaction.accountApplication.updateMany({
+          where: { id: verification.applicationId, status: "PENDING_EMAIL" },
+          data: { status: "EMAIL_VERIFIED", updatedAt: now }
+        });
+      });
+    },
+    async activateApplication(token: string, password: string): Promise<void> {
+      const now = new Date();
+      const passwordHash = await hashPassword(password);
+      await client.$transaction(async (transaction) => {
+        const activation = await transaction.accountActivation.findFirst({
+          where: { tokenHash: hashToken(token), consumedAt: null, expiresAt: { gt: now } },
+          select: {
+            id: true,
+            application: {
+              select: {
+                id: true,
+                emailNormalized: true,
+                displayName: true,
+                status: true,
+                moduleDecisions: {
+                  where: { status: "APPROVED" },
+                  select: { moduleId: true, accessDurationKind: true, accessExpiresAt: true }
+                }
+              }
+            }
+          }
+        });
+        if (
+          !activation ||
+          !["APPROVED", "PARTIALLY_APPROVED"].includes(activation.application.status)
+        ) {
+          throw new Error("Activation rejected.");
+        }
+
+        const user = await transaction.user.create({
+          data: {
+            email: activation.application.emailNormalized,
+            emailNormalized: activation.application.emailNormalized,
+            displayName: activation.application.displayName,
+            passwordHash,
+            accountStatus: "ACTIVE",
+            emailVerifiedAt: now
+          },
+          select: { id: true }
+        });
+
+        if (activation.application.moduleDecisions.length > 0) {
+          await transaction.moduleAccessGrant.createMany({
+            data: activation.application.moduleDecisions.map((decision) => ({
+              userId: user.id,
+              moduleId: decision.moduleId,
+              accessDurationKind: decision.accessDurationKind,
+              expiresAt: decision.accessExpiresAt
+            }))
+          });
+        }
+
+        await transaction.accountActivation.updateMany({
+          where: { id: activation.id, consumedAt: null },
+          data: { consumedAt: now, updatedAt: now }
+        });
+        await transaction.accountApplication.update({
+          where: { id: activation.application.id },
+          data: { status: "ACTIVATED", activatedUserId: user.id, updatedAt: now }
         });
       });
     }

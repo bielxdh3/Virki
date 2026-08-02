@@ -63,6 +63,7 @@ const copy = {
     safe: "Seguro",
     viewModules: "Ver módulos",
     viewProjects: "Abrir projetos",
+    reviewApplications: "Revisar solicitacoes",
     viewSecurity: "Gerenciar sessões",
     viewDeployment: "Ver status do deploy",
     registryTitle: "Core, aplicações e módulos reservados",
@@ -126,6 +127,7 @@ const copy = {
     safe: "Safe",
     viewModules: "View modules",
     viewProjects: "Open projects",
+    reviewApplications: "Review applications",
     viewSecurity: "Manage sessions",
     viewDeployment: "View deployment status",
     registryTitle: "Core, applications, and reserved modules",
@@ -424,6 +426,7 @@ export default async function HubDashboardPage() {
             <div className="action-stack">
               <a href="/core/projects">{t.viewProjects}</a>
               <a href="/core/security">{t.viewSecurity}</a>
+              {session.user.role === "OWNER" ? <a href="/core/applications">{t.reviewApplications}</a> : null}
               <a href="#ops">{t.viewDeployment}</a>
               <form action="/api/logout" method="post">
                 <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />

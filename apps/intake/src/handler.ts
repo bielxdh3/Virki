@@ -24,6 +24,8 @@ export type IntakeSubmission = {
 export type IntakeRepository = {
   listPublicModules(): Promise<PublicIntakeModule[]>;
   submitApplication(input: IntakeSubmission): Promise<void>;
+  verifyApplicationEmail(token: string): Promise<void>;
+  activateApplication(token: string, password: string): Promise<void>;
 };
 
 export type IntakeConfig = {
@@ -50,8 +52,13 @@ export function createIntakeHandler(
     }
 
     if (request.url !== "/api/apply" || request.method !== "POST") {
-      respond(response, 404, { error: "not-found" });
-      return;
+      if (
+        (request.url !== "/api/apply/verify" && request.url !== "/api/apply/activate") ||
+        request.method !== "POST"
+      ) {
+        respond(response, 404, { error: "not-found" });
+        return;
+      }
     }
 
     if (!config.enabled || !config.abuseSecret) {
@@ -79,6 +86,38 @@ export function createIntakeHandler(
     }
 
     const submission = parseSubmission(body, config.abuseSecret);
+    if (request.url === "/api/apply/verify") {
+      const token = readToken(body);
+      if (!token) {
+        respond(response, 400, { accepted: false });
+        return;
+      }
+      try {
+        await repository.verifyApplicationEmail(token);
+      } catch {
+        respond(response, 400, { accepted: false });
+        return;
+      }
+      respond(response, 202, { accepted: true });
+      return;
+    }
+
+    if (request.url === "/api/apply/activate") {
+      const activation = parseActivation(body);
+      if (!activation) {
+        respond(response, 400, { accepted: false });
+        return;
+      }
+      try {
+        await repository.activateApplication(activation.token, activation.password);
+      } catch {
+        respond(response, 400, { accepted: false });
+        return;
+      }
+      respond(response, 202, { accepted: true });
+      return;
+    }
+
     if (!submission) {
       respond(response, 400, { accepted: false });
       return;
@@ -93,6 +132,27 @@ export function createIntakeHandler(
 
     respond(response, 202, { accepted: true });
   };
+}
+
+function readToken(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const token = (value as Record<string, unknown>).token;
+  return typeof token === "string" && /^[A-Za-z0-9_-]{32,256}$/.test(token) ? token : null;
+}
+
+function parseActivation(value: unknown): { token: string; password: string } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const token = readToken(value);
+  const password = record.password;
+  if (!token || typeof password !== "string" || password.length < 12 || password.length > 128) {
+    return null;
+  }
+  return { token, password };
 }
 
 export function parseSubmission(value: unknown, abuseSecret: string): IntakeSubmission | null {

@@ -22,6 +22,12 @@ const repository = client
       },
       async submitApplication() {
         throw new Error("Intake database is unavailable.");
+      },
+      async verifyApplicationEmail() {
+        throw new Error("Intake database is unavailable.");
+      },
+      async activateApplication() {
+        throw new Error("Intake database is unavailable.");
       }
     };
 

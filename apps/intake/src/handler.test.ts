@@ -29,7 +29,9 @@ function response() {
 test("rejects malformed, wrong-origin, and wrong-content-type intake requests", async () => {
   const repository: IntakeRepository = {
     async listPublicModules() { return []; },
-    async submitApplication() { throw new Error("not expected"); }
+    async submitApplication() { throw new Error("not expected"); },
+    async verifyApplicationEmail() { throw new Error("not expected"); },
+    async activateApplication() { throw new Error("not expected"); }
   };
   const handler = createIntakeHandler(repository, {
     enabled: true,
