@@ -5,6 +5,7 @@ import {
   type AuthenticatedUser
 } from "@bielos/auth";
 import { enqueueEmailMessageForClient } from "@bielos/auth/email";
+import { requireSecurityElevation } from "@bielos/auth/administration";
 import { prisma, type Prisma } from "@bielos/database";
 
 const ACTIVATION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -54,6 +55,7 @@ export async function listPendingApplications(actor: ApplicationPrincipal) {
 
 export async function reviewApplicationModule(input: {
   actor: ApplicationPrincipal;
+  sessionId: string;
   applicationId: string;
   moduleDecisionId: string;
   decision: ApplicationDecision;
@@ -62,6 +64,7 @@ export async function reviewApplicationModule(input: {
   accessDurationKind: "PERMANENT" | "TEMPORARY";
   accessExpiresAt: Date | null;
 }) {
+  await requireSecurityElevation(input.actor.id, input.sessionId, "ACCOUNT_APPLICATION_REVIEW");
   if (
     !isId(input.applicationId) ||
     !isId(input.moduleDecisionId) ||
@@ -186,8 +189,10 @@ export async function reviewApplicationModule(input: {
 
 export async function reissueApplicationActivation(
   actor: ApplicationPrincipal,
+  sessionId: string,
   applicationId: string
 ): Promise<void> {
+  await requireSecurityElevation(actor.id, sessionId, "ACCOUNT_ACTIVATION_REISSUE");
   if (!isId(applicationId)) {
     throw new ApplicationMutationError();
   }

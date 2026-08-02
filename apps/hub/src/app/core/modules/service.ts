@@ -1,4 +1,5 @@
 import { type AuthenticatedUser } from "@bielos/auth";
+import { requireSecurityElevation } from "@bielos/auth/administration";
 import { createRequestKey, isAccessGrantActive, prisma, type Prisma } from "@bielos/database";
 
 const REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -141,11 +142,13 @@ export async function createFeaturePermissionRequest(
 
 export async function reviewModuleAccessRequest(input: {
   actor: Principal;
+  sessionId: string;
   requestKey: string;
   approve: boolean;
   accessDurationKind: "PERMANENT" | "TEMPORARY";
   expiresAt: Date | null;
 }): Promise<void> {
+  await requireSecurityElevation(input.actor.id, input.sessionId, "MODULE_ACCESS_CHANGE");
   if (!isOwner(input.actor) || !isRequestKey(input.requestKey) || (input.accessDurationKind === "TEMPORARY" && !input.expiresAt) || (input.accessDurationKind === "PERMANENT" && input.expiresAt)) {
     throw new ModuleAccessMutationError();
   }
@@ -204,10 +207,12 @@ export async function listPendingFeaturePermissionRequests(actor: Principal) {
 
 export async function reviewFeaturePermissionRequest(input: {
   actor: Principal;
+  sessionId: string;
   requestKey: string;
   approve: boolean;
   expiresAt: Date | null;
 }): Promise<void> {
+  await requireSecurityElevation(input.actor.id, input.sessionId, "FEATURE_PERMISSION_CHANGE");
   if (!isOwner(input.actor) || !isRequestKey(input.requestKey) || (input.expiresAt !== null && Number.isNaN(input.expiresAt.getTime()))) {
     throw new ModuleAccessMutationError();
   }

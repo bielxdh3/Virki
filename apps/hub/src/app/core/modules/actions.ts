@@ -27,7 +27,7 @@ export async function reviewCoreModuleRequest(formData: FormData) {
   if (session.user.role !== "OWNER") forbidden();
   const duration = read(formData, "accessDurationKind");
   const expires = read(formData, "expiresAt");
-  try { await reviewModuleAccessRequest({ actor: session.user, requestKey: read(formData, "requestKey"), approve: read(formData, "decision") === "APPROVED", accessDurationKind: duration === "TEMPORARY" ? "TEMPORARY" : "PERMANENT", expiresAt: duration === "TEMPORARY" && expires ? new Date(expires) : null }); } catch { redirect(`${MODULES_PATH}?error=review`); }
+  try { await reviewModuleAccessRequest({ actor: session.user, sessionId: session.id, requestKey: read(formData, "requestKey"), approve: read(formData, "decision") === "APPROVED", accessDurationKind: duration === "TEMPORARY" ? "TEMPORARY" : "PERMANENT", expiresAt: duration === "TEMPORARY" && expires ? new Date(expires) : null }); } catch { redirect(`${MODULES_PATH}?error=review`); }
   revalidatePath(MODULES_PATH); redirect(`${MODULES_PATH}?status=reviewed`);
 }
 
@@ -35,7 +35,7 @@ export async function reviewCoreFeaturePermissionRequest(formData: FormData) {
   const session = await requireMutation(formData, "core-feature-review");
   if (session.user.role !== "OWNER") forbidden();
   const expires = read(formData, "expiresAt");
-  try { await reviewFeaturePermissionRequest({ actor: session.user, requestKey: read(formData, "requestKey"), approve: read(formData, "decision") === "APPROVED", expiresAt: expires ? new Date(expires) : null }); } catch { redirect(`${MODULES_PATH}?error=review`); }
+  try { await reviewFeaturePermissionRequest({ actor: session.user, sessionId: session.id, requestKey: read(formData, "requestKey"), approve: read(formData, "decision") === "APPROVED", expiresAt: expires ? new Date(expires) : null }); } catch { redirect(`${MODULES_PATH}?error=review`); }
   revalidatePath(MODULES_PATH); redirect(`${MODULES_PATH}?status=reviewed`);
 }
 

@@ -696,6 +696,7 @@ model AdministrativeRecoveryCode {
 
 model SecurityElevation {
   id                    String                  @id @default(cuid())
+  requestKey            String                  @unique
   userId                String
   sessionId             String
   protocolVersion       Int

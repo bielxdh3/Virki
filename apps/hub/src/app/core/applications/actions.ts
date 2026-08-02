@@ -21,6 +21,7 @@ export async function reviewCoreApplication(formData: FormData) {
   try {
     await reviewApplicationModule({
       actor: session.user,
+      sessionId: session.id,
       applicationId,
       moduleDecisionId,
       decision: decision === "APPROVED" ? "APPROVED" : "REJECTED",
@@ -41,7 +42,7 @@ export async function reviewCoreApplication(formData: FormData) {
 export async function reissueCoreApplicationActivation(formData: FormData) {
   const session = await requireOwner(formData, "core-application-activation-reissue");
   try {
-    await reissueApplicationActivation(session.user, read(formData, "applicationId"));
+    await reissueApplicationActivation(session.user, session.id, read(formData, "applicationId"));
   } catch {
     redirect(`${APPLICATIONS_PATH}?error=reissue`);
   }
