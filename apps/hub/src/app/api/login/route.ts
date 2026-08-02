@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import {
   authenticateUserWithRateLimit,
   createAuditRequestMetadata,
-  createSession,
-  getSessionCookieOptions,
   hashAuditEmail,
   normalizeEmail,
-  SESSION_COOKIE_NAME,
   writeAuditLog
 } from "@bielos/auth";
+import { DEVICE_COOKIE_NAME, startLoginCeremony } from "@bielos/auth/security";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { createHubRedirectUrl } from "../../../lib/hub-redirect";
@@ -29,11 +28,9 @@ export async function POST(request: Request) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  let successRedirectUrl: URL;
   let failureRedirectUrl: URL;
 
   try {
-    successRedirectUrl = createHubRedirectUrl("/", request.url);
     failureRedirectUrl = createHubRedirectUrl("/login", request.url);
   } catch {
     return new NextResponse("Service unavailable", { status: 503 });
@@ -65,22 +62,44 @@ export async function POST(request: Request) {
     return redirectToLogin(failureRedirectUrl, true);
   }
 
-  const session = await createSession(user.id);
+  let ceremony;
+  try {
+    ceremony = await startLoginCeremony(user.id, (await cookies()).get(DEVICE_COOKIE_NAME)?.value, "pt-BR");
+  } catch {
+    await writeAuditLog({
+      eventType: "AUTH_LOGIN_FAILURE",
+      result: "FAILURE",
+      actorUserId: user.id,
+      actorEmailHash: hashAuditEmail(user.email),
+      resource: "hub",
+      message: "Security verification unavailable.",
+      metadata: auditMetadata
+    });
+    return redirectToLogin(failureRedirectUrl, true);
+  }
   await writeAuditLog({
     eventType: "AUTH_LOGIN_SUCCESS",
-    result: "SUCCESS",
+    result: "INFO",
     actorUserId: user.id,
     actorEmailHash: hashAuditEmail(user.email),
     resource: "hub",
-    message: "Login succeeded.",
+    message: "Password accepted; security verification pending.",
     metadata: auditMetadata
   });
-  const response = NextResponse.redirect(successRedirectUrl, { status: 303 });
-  response.cookies.set(
-    SESSION_COOKIE_NAME,
-    session.token,
-    getSessionCookieOptions(session.expiresAt)
-  );
+  const verifyUrl = createHubRedirectUrl("/login/verify", request.url);
+  verifyUrl.searchParams.set("ceremony", ceremony.ceremonyId);
+  verifyUrl.searchParams.set("factor", ceremony.factor.toLowerCase());
+  const response = NextResponse.redirect(verifyUrl, { status: 303 });
+  const cookieStore = await cookies();
+  if (cookieStore.get(DEVICE_COOKIE_NAME)?.value !== ceremony.deviceToken) {
+    response.cookies.set(DEVICE_COOKIE_NAME, ceremony.deviceToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 180 * 24 * 60 * 60
+    });
+  }
 
   return response;
 }

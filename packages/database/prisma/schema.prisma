@@ -145,6 +145,11 @@ enum SecurityFactorStatus {
   REVOKED
 }
 
+enum SecondFactorMethod {
+  EMAIL
+  TOTP
+}
+
 enum DeviceChallengeStatus {
   PENDING
   VERIFIED
@@ -215,6 +220,7 @@ model User {
   isActive     Boolean  @default(true)
   accountStatus AccountStatus @default(ACTIVE)
   emailVerifiedAt DateTime?
+  secondFactorMethod SecondFactorMethod @default(EMAIL)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -583,6 +589,7 @@ model TotpFactor {
   userId           String               @unique
   secretCiphertext String
   keyVersion       Int
+  lastUsedStep     Int?
   status           SecurityFactorStatus @default(PENDING)
   confirmedAt      DateTime?
   createdAt        DateTime             @default(now())
@@ -610,6 +617,7 @@ model DeviceChallenge {
   ceremonyId   String
   deviceIdHash String
   codeHash     String
+  requiresTotp Boolean                @default(false)
   status       DeviceChallengeStatus @default(PENDING)
   expiresAt    DateTime
   consumedAt   DateTime?
@@ -641,8 +649,10 @@ model TrustedDevice {
 
 model AccountRecoveryRequest {
   id                  String                @id @default(cuid())
+  requestKey          String                @unique
   userId              String
   emailChallengeHash  String
+  emailVerifiedAt     DateTime?
   status              RecoveryRequestStatus @default(PENDING)
   expiresAt           DateTime
   reviewedByUserId    String?

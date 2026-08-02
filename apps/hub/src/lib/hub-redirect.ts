@@ -1,4 +1,4 @@
-export type HubRedirectPath = "/" | "/login";
+export type HubRedirectPath = "/" | "/login" | "/login/verify";
 
 const INVALID_CONFIGURATION_MESSAGE = "Invalid hub redirect configuration.";
 const INVALID_DESTINATION_MESSAGE = "Invalid hub redirect destination.";
@@ -81,7 +81,7 @@ function parseLocalRequestOrigin(requestUrl: string): string {
 }
 
 function assertHubRedirectPath(pathname: HubRedirectPath): void {
-  if (pathname !== "/" && pathname !== "/login") {
+  if (pathname !== "/" && pathname !== "/login" && pathname !== "/login/verify") {
     throw new Error(INVALID_DESTINATION_MESSAGE);
   }
 }
