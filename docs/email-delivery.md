@@ -16,7 +16,7 @@ Production is intentionally unavailable until a real SMTP adapter and encrypted 
 
 The selected production provider is Brevo SMTP. Keep `BIELOS_INTAKE_ENABLED=false` until the Brevo account, sender-domain authentication, credentials, backup, migrations, owner ceremonies, routing, and final smoke gates are complete.
 
-Use a dedicated sender such as `notifications@notify.biel.dev.br` and configure the private environment with:
+The authenticated Brevo sending domain is `biel.dev.br`; the branded subdomain is `notify.biel.dev.br`, and the configured sender is `no-reply@biel.dev.br`. Configure the private environment with:
 
 ```text
 BIELOS_EMAIL_TRANSPORT=smtp
@@ -25,19 +25,19 @@ BIELOS_EMAIL_SMTP_PORT=587
 BIELOS_EMAIL_SMTP_SECURE=false
 BIELOS_EMAIL_SMTP_USER=<Brevo SMTP login, local secret only>
 BIELOS_EMAIL_SMTP_PASSWORD=<Brevo SMTP key, local secret only>
-BIELOS_EMAIL_FROM=notifications@notify.biel.dev.br
+BIELOS_EMAIL_FROM=no-reply@biel.dev.br
 ```
 
 Do not put credentials in Git, chat, logs, or documentation.
 
 ### DNS record worksheet
 
-Create these only after the Brevo account is created and `notify.biel.dev.br` is added as the authenticated sender domain. Do not invent the Brevo-specific DKIM selector/value: Brevo may provide one TXT record or two CNAME records, and the exact values are account-specific.
+The operator-confirmed Brevo state is: `biel.dev.br` is authenticated, `notify.biel.dev.br` is active as the branded subdomain, and `no-reply@biel.dev.br` is configured as the sender. Keep the records below as the deployment reference and verify them against the Brevo dashboard and DNS provider before changing anything. Do not invent the Brevo-specific DKIM selector/value: Brevo may provide one TXT record or two CNAME records, and the exact values are account-specific.
 
 | Name | Type | Prepared value | Gate |
 | --- | --- | --- | --- |
-| `notify.biel.dev.br` | TXT | `v=spf1 include:spf.brevo.com mx ~all` | Merge with any existing SPF; publish only one SPF record. |
-| `<Brevo DKIM selector/name>` | TXT or CNAME | `<exact value copied from Brevo>` | Required after Brevo domain verification. |
-| `_dmarc.notify.biel.dev.br` | TXT | `v=DMARC1; p=none; rua=mailto:rua@dmarc.brevo.com` | Start with monitoring; tighten policy after observing reports. |
+| `biel.dev.br` | TXT | `v=spf1 include:spf.brevo.com mx ~all` | Merge with any existing SPF; publish only one SPF record. |
+| `<Brevo DKIM selector/name>.biel.dev.br` | TXT or CNAME | `<exact value copied from Brevo>` | Use the exact record shown by Brevo. |
+| `_dmarc.biel.dev.br` | TXT | `v=DMARC1; p=none; rua=mailto:rua@dmarc.brevo.com` | Start with monitoring; tighten policy after observing reports. |
 
 Brevo's current authentication flow provides the exact domain-verification, DKIM, and DMARC values in the account dashboard. SPF is shown here as the prepared Brevo authorization record; merge it with existing senders instead of creating a second SPF record.

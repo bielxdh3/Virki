@@ -26,7 +26,7 @@ test("production email is unavailable without a real transport or outbox key", (
       BIELOS_EMAIL_SMTP_HOST: "smtp-relay.brevo.com",
       BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
       BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
-      BIELOS_EMAIL_FROM: "notifications@notify.biel.dev.br"
+      BIELOS_EMAIL_FROM: "no-reply@biel.dev.br"
     }),
     { state: "configured" }
   );
@@ -40,7 +40,7 @@ test("SMTP configuration is fail-closed without contacting the provider", () => 
     BIELOS_EMAIL_SMTP_SECURE: "false",
     BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
     BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
-    BIELOS_EMAIL_FROM: "notifications@notify.biel.dev.br"
+    BIELOS_EMAIL_FROM: "no-reply@biel.dev.br"
   };
 
   assert.equal(isSmtpEmailTransportConfigured(configured), true);
