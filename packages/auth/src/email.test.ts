@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createServer } from "node:net";
 import test from "node:test";
 import {
   createDeterministicTestTransport,
+  createSmtpEmailTransport,
   decryptEmailPayload,
   getEmailTransportStatus,
   isSmtpEmailTransportConfigured,
@@ -56,6 +59,37 @@ test("SMTP configuration is fail-closed without contacting the provider", () => 
     isSmtpEmailTransportConfigured({ ...configured, BIELOS_EMAIL_SMTP_SECURE: "sometimes" }),
     false
   );
+});
+
+test("SMTP delivery failures are redacted without contacting an external provider", async () => {
+  const server = createServer((socket) => socket.destroy());
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const transport = createSmtpEmailTransport({
+      BIELOS_EMAIL_SMTP_HOST: "127.0.0.1",
+      BIELOS_EMAIL_SMTP_PORT: String(address.port),
+      BIELOS_EMAIL_SMTP_SECURE: "false",
+      BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
+      BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
+      BIELOS_EMAIL_FROM: "no-reply@biel.dev.br"
+    });
+
+    await assert.rejects(
+      () => transport.send({ to: "owner@example.invalid", subject: "Test", text: "Test" }),
+      (error: unknown) => {
+        assert.equal(error instanceof Error ? error.message : error, "SMTP email delivery failed.");
+        return true;
+      }
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 });
 
 test("protected email values are encrypted at rest and reconstruct only in memory", () => {
