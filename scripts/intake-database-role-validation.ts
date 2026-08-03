@@ -89,6 +89,12 @@ async function main(): Promise<void> {
   const publicModules = await repository.listPublicModules();
   assert.equal(publicModules.some((module) => module.key === publicKey), true);
   assert.equal(publicModules.some((module) => module.key === privateKey), false);
+  assert.deepEqual(Object.keys(publicModules[0] ?? {}).sort(), [
+    "key",
+    "name",
+    "runtimeAvailability"
+  ]);
+  assert.equal(JSON.stringify(publicModules).includes('"id"'), false);
 
   const email = `role-validation-${Date.now()}@example.invalid`;
   await repository.submitApplication({

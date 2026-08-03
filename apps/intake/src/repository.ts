@@ -21,7 +21,11 @@ export function createDatabaseIntakeRepository(
   return {
     async listPublicModules(): Promise<PublicIntakeModule[]> {
       const modules = await listPublicCatalog(client);
-      return modules.map((module) => ({ ...module }));
+      return modules.map(({ key, name, runtimeAvailability }) => ({
+        key,
+        name,
+        runtimeAvailability
+      }));
     },
     async submitApplication(input: IntakeSubmission): Promise<void> {
       const now = new Date();
