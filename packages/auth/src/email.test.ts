@@ -4,6 +4,7 @@ import {
   createDeterministicTestTransport,
   decryptEmailPayload,
   getEmailTransportStatus,
+  isSmtpEmailTransportConfigured,
   protectEmailPayload,
   renderEmailMessage
 } from "./email";
@@ -21,9 +22,39 @@ test("production email is unavailable without a real transport or outbox key", (
     getEmailTransportStatus({
       NODE_ENV: "production",
       BIELOS_EMAIL_TRANSPORT: "smtp",
-      BIELOS_EMAIL_OUTBOX_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      BIELOS_EMAIL_OUTBOX_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
+      BIELOS_EMAIL_SMTP_HOST: "smtp-relay.brevo.com",
+      BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
+      BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
+      BIELOS_EMAIL_FROM: "notifications@notify.biel.dev.br"
     }),
-    { state: "unavailable", reason: "adapter-unavailable" }
+    { state: "configured" }
+  );
+});
+
+test("SMTP configuration is fail-closed without contacting the provider", () => {
+  const configured = {
+    NODE_ENV: "production",
+    BIELOS_EMAIL_SMTP_HOST: "smtp-relay.brevo.com",
+    BIELOS_EMAIL_SMTP_PORT: "587",
+    BIELOS_EMAIL_SMTP_SECURE: "false",
+    BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
+    BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
+    BIELOS_EMAIL_FROM: "notifications@notify.biel.dev.br"
+  };
+
+  assert.equal(isSmtpEmailTransportConfigured(configured), true);
+  assert.equal(
+    isSmtpEmailTransportConfigured({ ...configured, BIELOS_EMAIL_FROM: "invalid" }),
+    false
+  );
+  assert.equal(
+    isSmtpEmailTransportConfigured({ ...configured, BIELOS_EMAIL_SMTP_PORT: "70000" }),
+    false
+  );
+  assert.equal(
+    isSmtpEmailTransportConfigured({ ...configured, BIELOS_EMAIL_SMTP_SECURE: "sometimes" }),
+    false
   );
 });
 

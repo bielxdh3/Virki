@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { prisma, type Prisma } from "@bielos/database";
+import { isSmtpEmailTransportConfigured } from "./email-smtp";
 
 export type EmailMessageKind =
   | "APPLICATION_EMAIL_VERIFICATION"
@@ -77,7 +78,14 @@ export function getEmailTransportStatus(
       return { state: "unavailable", reason: "outbox-key-missing" };
     }
 
-    return { state: "unavailable", reason: "adapter-unavailable" };
+    if (
+      env.BIELOS_EMAIL_TRANSPORT.trim().toLowerCase() !== "smtp" ||
+      !isSmtpEmailTransportConfigured(env)
+    ) {
+      return { state: "unavailable", reason: "adapter-unavailable" };
+    }
+
+    return { state: "configured" };
   }
 
   if (!getOutboxKey(env)) {
@@ -237,6 +245,8 @@ export function createDeterministicTestTransport() {
     } satisfies EmailTransport
   };
 }
+
+export { createSmtpEmailTransport, isSmtpEmailTransportConfigured } from "./email-smtp";
 
 export function renderEmailMessage(
   kind: EmailMessageKind,
