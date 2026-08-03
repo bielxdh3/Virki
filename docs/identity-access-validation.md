@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` and the final validated implementation is `66908a4113f5bfa23e3c0b98a903067cd60193c2` on `main`; this closeout document is published in the subsequent closeout commit on `origin/main`. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, disposable backup/restore, restricted-role validation, and remote runtime validation are green; durable production changes remain gated by human operations.
+The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` and the final validated implementation is `66908a4113f5bfa23e3c0b98a903067cd60193c2` on `main`; this closeout document is published afterward in documentation-only commits on `origin/main`. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, disposable backup/restore, restricted-role validation, and remote runtime validation are green; durable production changes remain gated by human operations.
 
 ## Dependency order and task status
 
@@ -54,8 +54,7 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 - Image, runtime, and Compose validation: passed in remote CI, including loopback-only ports, public-site health, hub health, direct-origin hub denial, intake-disabled response, revision label, and Compose validation; local Docker remained unavailable.
 - Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped.
 - Exact post-remediation remote CI for validation commit `223528948a7732b9b1f5f6ea148759c0497439e6`: run `30736308059` passed both independent jobs, including 37 Core integration tests, concurrency tests, production image revision verification, and Compose validation.
-- Exact final-SHA CI for `66908a4113f5bfa23e3c0b98a903067cd60193c2`: run `30738647448` completed successfully with both independent jobs (`Audit dependency lockfile` and `Validate`); the final SHA is the current local and remote `origin/main` head.
-- Exact closeout-publication CI for `8f450de2e54d1ab0db81fa40d86029edb72bfd4a`: run `30770588879` completed successfully with both independent jobs (`Audit dependency lockfile` and `Validate`); it contains documentation only after the validated implementation SHA above.
+- Exact final-SHA CI for `66908a4113f5bfa23e3c0b98a903067cd60193c2`: run `30738647448` completed successfully with both independent jobs (`Audit dependency lockfile` and `Validate`); later commits only synchronize closeout documentation.
 - Codex Security diff scan: scan `68209414-195e-47e5-bd45-88bd257f1d48` reviewed `b70b42400a6234483bd353d1bbdad8f964d679ba...66908a4113f5bfa23e3c0b98a903067cd60193c2` with complete coverage. The sealed contract report contains one high-confidence Low/P3 information-disclosure finding (`CWE-200`) for the public intake catalog exposing an internal `ModuleCatalog.id`; two other candidates were validated and suppressed/ignored. The report was generated locally from the completed scan artifacts because the native workbench became terminal before indexing; no Critical, High, or Medium finding was reported.
 
 ## Migrations
