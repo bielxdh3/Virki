@@ -63,6 +63,14 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 
 No durable production migration was run. Migration deployment remains pending human role provisioning, verified operational backup policy, and authorized production smoke.
 
+## Public catalog disclosure hotfix
+
+- The Low/P3 `ModuleCatalog.id` disclosure (CWE-200) was fixed in implementation commit `d5e01c5e6f23538a32591dece35402142d9004e0` (`fix: remove internal module id from public catalog`).
+- The public response now uses an explicit allowlisted projection containing only `key`, `name`, and `runtimeAvailability`; internal `id` remains available to repository logic for deduplication and module-decision persistence.
+- The behavioral regression exercises the real handler-to-intake-repository catalog path, proves serialized `id` absence, preserves private-module exclusion and internal-ID submission/activation behavior in the database-role validation, and proves disabled or misconfigured intake remains fail-closed.
+- Exact final CI for the fixing SHA: GitHub Actions run `30778813575` passed both `Validate` and `Audit dependency lockfile`.
+- Intake remains disabled, email remains unconfigured, and no durable production migration occurred.
+
 ## Human enablement steps
 
 1. Provision and verify restricted intake database credentials and grants; confirm the intake role cannot read private Core tables.
