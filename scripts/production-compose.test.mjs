@@ -53,3 +53,28 @@ test("Production email worker has no published host port", () => {
   assert.match(worker, /DATABASE_URL:\s*\$\{DATABASE_URL:\?/u);
   assert.doesNotMatch(worker, /BIELOS_INTAKE_DATABASE_URL:/u);
 });
+
+test("Production long-running services keep recovery policy and private boundaries", () => {
+  for (const service of [
+    "public-site",
+    "hub",
+    "intake",
+    "session-cleanup",
+    "email-worker",
+    "postgres"
+  ]) {
+    assert.match(
+      serviceBlock(productionCompose, service),
+      /restart:\s*unless-stopped/u,
+      `${service} must restart unless stopped`
+    );
+  }
+
+  const intake = serviceBlock(productionCompose, "intake");
+  assert.doesNotMatch(intake, /ports:/u);
+  assert.match(intake, /BIELOS_INTAKE_ENABLED:\s*\$\{BIELOS_INTAKE_ENABLED:-false\}/u);
+
+  const hub = serviceBlock(productionCompose, "hub");
+  assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
+  assert.match(hub, /DATABASE_URL:\s*\$\{DATABASE_URL:\?/u);
+});
