@@ -111,6 +111,24 @@ test("email-factor browsers establish the grant only after valid email verificat
   assert.equal(await rememberedGrant(user.id, deviceToken) !== null, true);
 });
 
+test("trusted-device rows without a remembered grant fail closed after migration", async () => {
+  const user = await createUser("migrated-row@example.invalid", "EMAIL");
+  const deviceToken = createDeviceToken();
+  await prisma.trustedDevice.create({
+    data: {
+      userId: user.id,
+      deviceIdHash: hashDeviceToken(deviceToken),
+      status: "TRUSTED"
+    }
+  });
+
+  const response = await login(createLoginRequest(user.email, syntheticCredential, deviceToken));
+
+  assert.equal(getLocation(response).searchParams.get("factor"), "email");
+  assert.equal(getCookieValueOrNull(response, "bielos_session"), null);
+  assert.equal((await rememberedGrant(user.id, deviceToken))?.rememberedUntil ?? null, null);
+});
+
 test("failed, expired, and replayed ceremonies establish no remembered trust", async () => {
   const user = await createUser("ceremony-failure@example.invalid", "TOTP");
   const deviceToken = createDeviceToken();
