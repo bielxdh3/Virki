@@ -5,6 +5,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../..
 import { getCurrentSession } from "../../../lib/auth";
 import { getLocale } from "../../locale";
 import { LanguageSelector } from "../../language-selector";
+import { CoreShell } from "../shell";
 import { requestCoreFeaturePermission, requestCoreModule, reviewCoreFeaturePermissionRequest, reviewCoreModuleRequest } from "./actions";
 import { listPendingFeaturePermissionRequests, listPendingModuleRequests, listVisibleModules } from "./service";
 
@@ -22,7 +23,7 @@ export default async function CoreModulesPage() {
   const csrfToken = createCsrfToken();
 
   return (
-    <main className="hub-shell"><section className="hub-workspace core-projects-workspace">
+    <CoreShell variant="standalone" locale={locale} role={session.user.role} activePath="/core/modules"><div className="core-projects-workspace">
       <header className="top-statusbar"><a href="/">{portuguese ? "Voltar ao hub" : "Back to hub"}</a><LanguageSelector locale={locale} label={portuguese ? "Idioma" : "Language"} /></header>
       <section className="identity-panel"><p className="eyebrow">BielOS Core</p><h1>{portuguese ? "Catálogo de módulos" : "Module catalog"}</h1><p>{portuguese ? "Acesso e runtime são estados separados." : "Access and runtime are separate states."}</p></section>
       <section className="core-project-list" aria-label="Module catalog">
@@ -40,6 +41,6 @@ export default async function CoreModulesPage() {
         {pendingModuleRequests.map((request) => <form action={reviewCoreModuleRequest} method="post" key={request.requestKey}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} /><input type="hidden" name="requestKey" value={request.requestKey} /><strong>{request.module.name}</strong><span>{request.user.emailNormalized}</span><p>{request.reason}</p><label>Decision<select name="decision"><option value="APPROVED">Approve</option><option value="REJECTED">Reject</option></select></label><label>Duration<select name="accessDurationKind"><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Temporary</option></select></label><label>Expires at<input type="datetime-local" name="expiresAt" /></label><button type="submit">{portuguese ? "Salvar" : "Save"}</button></form>)}
         {pendingFeatureRequests.map((request) => <form action={reviewCoreFeaturePermissionRequest} method="post" key={request.requestKey}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} /><input type="hidden" name="requestKey" value={request.requestKey} /><strong>{request.permission.module.name}: {request.permission.label}</strong><span>{request.user.emailNormalized}</span><p>{request.reason}</p><label>Decision<select name="decision"><option value="APPROVED">Approve</option><option value="REJECTED">Reject</option></select></label><label>Expires at<input type="datetime-local" name="expiresAt" /></label><button type="submit">{portuguese ? "Salvar" : "Save"}</button></form>)}
       </section> : null}
-    </section></main>
+    </div></CoreShell>
   );
 }

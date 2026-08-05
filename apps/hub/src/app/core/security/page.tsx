@@ -10,6 +10,7 @@ import {
 } from "../../../lib/cloudflare-access";
 import { LanguageSelector } from "../../language-selector";
 import { getLocale } from "../../locale";
+import { CoreShell } from "../shell";
 import { revokeAllOtherCoreSessions, revokeCoreSession } from "./actions";
 import {
   type SafeAuditResource,
@@ -196,44 +197,15 @@ export default async function CoreSecurityPage() {
   const otherSessionCount = sessions.filter((item) => !item.isCurrent).length;
 
   return (
-    <main className="hub-shell core-security-shell">
-      <aside className="os-dock" aria-label={t.navLabel}>
-        <div className="dock-identity">
-          <img src="/hub-mark.svg" alt="" width={64} height={64} />
-          <div>
-            <strong>BielOS</strong>
-            <span>{t.privateHub}</span>
-          </div>
-        </div>
-
-        <nav className="dock-nav" aria-label={t.primary}>
-          <a href="/" aria-label={t.backHub}>
-            <span aria-hidden="true">01</span>
-            <strong>Hub</strong>
-          </a>
-          <a href="/core/projects" aria-label={t.projects}>
-            <span aria-hidden="true">02</span>
-            <strong>{t.projects}</strong>
-          </a>
-          <a href="#sessions" aria-label={t.security}>
-            <span aria-hidden="true">03</span>
-            <strong>{t.security}</strong>
-          </a>
-          {isOwner ? (
-            <a href="#audit" aria-label={t.auditActivity}>
-              <span aria-hidden="true">04</span>
-              <strong>{t.auditActivity}</strong>
-            </a>
-          ) : null}
-        </nav>
-
-        <div className="dock-footer">
-          <span>{t.activeSessions}</span>
-          <strong>{sessions.length} / {CORE_SESSION_LIST_LIMIT}</strong>
-        </div>
-      </aside>
-
-      <section className="hub-workspace core-security-workspace">
+    <CoreShell
+      variant="docked"
+      locale={locale}
+      role={session.user.role}
+      activePath="/core/security"
+      className="core-security-shell"
+      footer={<><span>{t.activeSessions}</span><strong>{sessions.length} / {CORE_SESSION_LIST_LIMIT}</strong></>}
+    >
+      <div className="core-security-workspace">
         <header className="top-statusbar">
           <div className="statusbar-left">
             <span className="status-dot" aria-hidden="true" />
@@ -250,7 +222,6 @@ export default async function CoreSecurityPage() {
           <p className="eyebrow">{t.eyebrow}</p>
           <h1>{t.title}</h1>
           <p>{t.intro}</p>
-          <p><a className="button-ghost" href="/core/security/account">Account security / Segurança da conta</a> {isOwner ? <a className="button-ghost" href="/core/security/admin">Administrative security / Segurança administrativa</a> : null}</p>
         </header>
 
         <section className="core-session-section anchor-section" id="sessions" aria-labelledby="core-session-heading">
@@ -385,7 +356,7 @@ export default async function CoreSecurityPage() {
             <p className="core-project-limit-note">{t.newestAudit}</p>
           </section>
         ) : null}
-      </section>
-    </main>
+      </div>
+    </CoreShell>
   );
 }

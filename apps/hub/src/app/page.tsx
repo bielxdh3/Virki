@@ -274,7 +274,7 @@ export default async function HubDashboardPage() {
   ];
 
   return (
-    <main className="hub-shell">
+    <main className="hub-shell hub-shell--docked">
       <aside className="os-dock" aria-label={t.navLabel}>
         <div className="dock-identity">
           <img src="/hub-mark.svg" alt="" width={64} height={64} />

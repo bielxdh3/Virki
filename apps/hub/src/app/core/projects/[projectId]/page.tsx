@@ -150,7 +150,7 @@ export default async function CoreProjectDetailPage({
   const archived = project.status === "ARCHIVED";
 
   return (
-    <main className={`hub-shell core-project-detail-shell${archived ? " is-archived" : ""}`}>
+    <main className={`hub-shell hub-shell--docked core-project-detail-shell${archived ? " is-archived" : ""}`}>
       <aside className="os-dock" aria-label={t.navLabel}>
         <div className="dock-identity">
           <img src="/hub-mark.svg" alt="" width={64} height={64} />

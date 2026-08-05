@@ -9,7 +9,7 @@ The normal password is only the first login factor. Login creates no session unt
 - TOTP codes accept the adjacent clock window but a matched step cannot be used twice while active.
 - Recovery codes are random, hashed, one-use values. Regeneration deletes all previous codes and the plaintext list is returned only once.
 - A new opaque device cookie is verified by email before a trusted-device row is created. No fingerprint, IP, or user-agent is used for device identity.
-- Trusted devices and sessions are listed and revoked only within the current user scope; UI references are opaque keys.
+- Trusted devices and sessions are listed and revoked only within the current user scope; UI references are opaque keys. The trusted-device screen has an explicit empty state and shows only a safe label plus available timestamps; raw device keys remain internal form values.
 
 ## Ordinary recovery
 

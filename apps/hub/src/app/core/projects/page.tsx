@@ -7,6 +7,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../..
 import { getCurrentSession } from "../../../lib/auth";
 import { getLocale } from "../../locale";
 import { LanguageSelector } from "../../language-selector";
+import { CoreShell } from "../shell";
 import { isCoreAdministrator } from "../authorization";
 import { createCoreProject } from "./actions";
 import { getCoreProjectDetailPath } from "./detail-policy";
@@ -233,40 +234,15 @@ export default async function CoreProjectsPage() {
     : [];
 
   return (
-    <main className="hub-shell core-projects-shell">
-      <aside className="os-dock" aria-label={t.navLabel}>
-        <div className="dock-identity">
-          <img src="/hub-mark.svg" alt="" width={64} height={64} />
-          <div>
-            <strong>BielOS</strong>
-            <span>{t.privateHub}</span>
-          </div>
-        </div>
-
-        <nav className="dock-nav" aria-label={t.primary}>
-          <a href="/" aria-label={t.returnHub}>
-            <span aria-hidden="true">01</span>
-            <strong>Hub</strong>
-          </a>
-          <a href="#projects" aria-label={t.projects}>
-            <span aria-hidden="true">02</span>
-            <strong>{t.projects}</strong>
-          </a>
-          {isAdministrator ? (
-            <a href="#administration" aria-label={t.adminTools}>
-              <span aria-hidden="true">03</span>
-              <strong>{t.adminTools}</strong>
-            </a>
-          ) : null}
-        </nav>
-
-        <div className="dock-footer">
-          <span>{t.projects}</span>
-          <strong>{projects.length} / {PROJECT_LIMIT}</strong>
-        </div>
-      </aside>
-
-      <section className="hub-workspace core-projects-workspace">
+    <CoreShell
+      variant="docked"
+      locale={locale}
+      role={session.user.role}
+      activePath="/core/projects"
+      className="core-projects-shell"
+      footer={<><span>{t.projects}</span><strong>{projects.length} / {PROJECT_LIMIT}</strong></>}
+    >
+      <div className="core-projects-workspace">
         <header className="top-statusbar">
           <div className="statusbar-left">
             <span className="status-dot" aria-hidden="true" />
@@ -428,7 +404,7 @@ export default async function CoreProjectsPage() {
           )}
           <p className="core-project-limit-note">{t.limitNote}</p>
         </section>
-      </section>
-    </main>
+      </div>
+    </CoreShell>
   );
 }

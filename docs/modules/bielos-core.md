@@ -6,6 +6,8 @@ Core project registry, project management, and project access administration are
 
 The hub uses a typed application registry that separates Core workspace surfaces, the available GymForge application, and inert reserved modules. Registry links do not weaken the authentication boundary or create reserved-module routes.
 
+Core pages declare either a docked shell or a standalone full-width shell. Shared Core navigation is role-aware for presentation only: server-side route authorization remains authoritative, and trusted-device screens show only safe labels and timestamps.
+
 The hub operations panel separates request-time checks, configured architecture, and external manual validation. It verifies only the current hub render, authenticated session, and a timeout-bounded minimal database query. Container health, public routes, Cloudflare ordering, ports, and migration state remain manual checks; no Docker socket, raw logs, environment values, or external network dependency is introduced.
 
 The Core hardening gate passed focused adversarial review and full repository validation and is deployed in the production Compose stack. Migrated disposable PostgreSQL tests cover project authorization and mutations, access authority and races, session isolation and revocation, owner-only bounded audit display, and operations probes. Cloudflare Access diagnostics use typed non-disclosing categories in the normal test path. Login, logout, and proxy redirects use only the configured public hub origin; production requires HTTPS and fails closed instead of falling back to an internal request origin. Public/local health, Cloudflare-first ordering, direct-origin denial, container state, and loopback exposure were verified after restart.

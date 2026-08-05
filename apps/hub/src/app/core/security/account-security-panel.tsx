@@ -1,7 +1,9 @@
 "use client";
 
 import { useActionState } from "react";
+import type { BielosLocale } from "@bielos/ui";
 import { confirmTotpEnrollmentAction, disableTotpAction, regenerateRecoveryCodesAction, revokeTrustedDeviceAction, startTotpEnrollmentAction, type SecurityActionState } from "./account-actions";
+import { getTrustedDeviceCopy, getTrustedDeviceDisplay } from "./trusted-device-view";
 
 const initialState: SecurityActionState = { status: "idle" };
 const CSRF_FIELD = "csrfToken";
@@ -20,6 +22,7 @@ export function AccountSecurityPanel({ csrfToken, totpActive, recoveryCodeCount 
   </section>;
 }
 
-export function TrustedDeviceList({ csrfToken, devices }: { csrfToken: string; devices: Array<{ deviceKey: string; label: string | null; lastSeenAt: Date; createdAt: Date }> }) {
-  return <section className="panel" aria-labelledby="trusted-devices-heading"><h2 id="trusted-devices-heading">Trusted devices</h2>{devices.length === 0 ? <p>No trusted devices.</p> : <ul>{devices.map((device) => <li key={device.deviceKey}><span>{device.label ?? "Trusted device"}</span><form action={revokeTrustedDeviceAction}><input type="hidden" name={CSRF_FIELD} value={csrfToken} /><input type="hidden" name="deviceKey" value={device.deviceKey} /><button type="submit">Revoke</button></form></li>)}</ul>}</section>;
+export function TrustedDeviceList({ csrfToken, devices, locale }: { csrfToken: string; devices: Array<{ deviceKey: string; label: string | null; lastSeenAt: Date; createdAt: Date }>; locale: BielosLocale }) {
+  const copy = getTrustedDeviceCopy(locale);
+  return <section className="panel trusted-device-panel" aria-labelledby="trusted-devices-heading"><h2 id="trusted-devices-heading">{copy.title}</h2>{devices.length === 0 ? <p className="trusted-device-empty">{copy.empty}</p> : <ul className="trusted-device-list">{devices.map((device) => { const display = getTrustedDeviceDisplay(device, locale); return <li key={device.deviceKey} className="trusted-device-row"><div><strong>{display.label}</strong><dl><div><dt>{copy.lastSeen}</dt><dd><time dateTime={device.lastSeenAt.toISOString()}>{display.lastSeen}</time></dd></div><div><dt>{copy.created}</dt><dd><time dateTime={device.createdAt.toISOString()}>{display.created}</time></dd></div></dl></div><form action={revokeTrustedDeviceAction}><input type="hidden" name={CSRF_FIELD} value={csrfToken} /><input type="hidden" name="deviceKey" value={device.deviceKey} /><button type="submit">{copy.revoke}</button></form></li>; })}</ul>}</section>;
 }
