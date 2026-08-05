@@ -23,7 +23,7 @@ npm run start:prod
 
 The production wrapper requires `main`, a clean tracked/staged/untracked worktree, and local `HEAD` equal to `origin/main`. It supplies the exact full Git SHA only to the Docker build, then the production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands. Fetch `origin` explicitly before the build; the wrapper never pulls, resets, cleans, or changes branches.
 
-Production Compose also starts a `session-cleanup` worker. It has no published ports, depends on PostgreSQL health, uses the same private database environment as the hub, removes expired or revoked sessions every hour by default, and applies audit log retention cleanup.
+Production Compose also starts the isolated `intake`, `session-cleanup`, and `email-worker` services. Intake has no host-published port, receives only the restricted intake database URL, and defaults to disabled; it never receives the private Core `DATABASE_URL`. The workers have no published ports, depend on PostgreSQL health, and use the same private database environment as the hub. `session-cleanup` removes expired or revoked sessions every hour by default and applies audit log retention cleanup; `email-worker` polls the durable email outbox with bounded retries and the configured provider-neutral SMTP adapter.
 
 Production host-published debug ports are also bound to loopback only:
 
@@ -117,7 +117,7 @@ npm run start:prod
 npm run revision:prod
 ```
 
-`npm run restart:prod` applies the same clean-source gate and rebuilds/recreates the BielOS services without changing database migrations. `npm run revision:prod` inspects only the revision label for `public-site`, `hub`, and `session-cleanup`; it fails when a service or label is absent, malformed, or different from the current Git revision and never prints an unexpected observed value.
+`npm run restart:prod` applies the same clean-source gate and rebuilds/recreates the BielOS services without changing database migrations. `npm run revision:prod` inspects only the revision label for `public-site`, `hub`, `intake`, `session-cleanup`, and `email-worker`; it fails when a service or label is absent, malformed, or different from the current Git revision and never prints an unexpected observed value.
 
 ## Database Migrations
 

@@ -2,7 +2,13 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 export const REVISION_LABEL = "org.opencontainers.image.revision";
-export const PRODUCTION_SERVICES = ["public-site", "hub", "session-cleanup"];
+export const PRODUCTION_SERVICES = [
+  "public-site",
+  "hub",
+  "intake",
+  "session-cleanup",
+  "email-worker",
+];
 
 const ERROR_MESSAGES = Object.freeze({
   REVISION_MISSING: "Revision is required.",

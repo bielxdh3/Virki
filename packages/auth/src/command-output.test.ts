@@ -10,6 +10,7 @@ import {
 const expectedMessages: Record<AuthCommandName, string> = {
   "audit-cleanup": "Audit log cleanup failed.",
   "audit-recent": "Recent audit log inspection failed.",
+  "email-worker": "Email worker failed.",
   "owner-seed": "OWNER seed failed.",
   "session-cleanup": "Inactive session cleanup failed."
 };

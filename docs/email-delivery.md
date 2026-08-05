@@ -10,6 +10,10 @@ type EmailTransport = {
 
 Outbox payloads keep public template values separate from encrypted protected values. Raw links, codes, passwords, secrets, and bearer material are never stored as plaintext, logged, or included in audit metadata. Delivery success is authoritative only after the adapter resolves; a failed attempt never becomes `SENT`.
 
+## Production outbox worker
+
+Production Compose runs `email-worker` without published ports. It polls the durable outbox every five seconds, uses the existing atomic claim and bounded retry state, and loads the configured SMTP adapter from the private environment. `SIGTERM` and `SIGINT` stop polling and allow the current bounded delivery attempt to finish. The worker emits only the fixed safe command-failure message and never logs credentials, payloads, codes, or provider responses.
+
 Production is intentionally unavailable until a real SMTP adapter and encrypted outbox key are configured. `BIELOS_EMAIL_TRANSPORT=smtp` selects the provider-neutral Nodemailer adapter; the adapter requires certificate-validated TLS/STARTTLS, bounded connection/greeting/socket timeouts, and redacts provider errors. It never logs SMTP credentials. `BIELOS_EMAIL_OUTBOX_KEY` must be a 32-byte key encoded as hex or base64url. The deterministic transport is test-only and must never be treated as production readiness.
 
 ## Brevo preparation

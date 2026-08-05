@@ -44,7 +44,7 @@ Verify that all running BielOS-built services use the current revision:
 npm run revision:prod
 ```
 
-The verifier checks only `org.opencontainers.image.revision` on `public-site`, `hub`, and `session-cleanup`. It emits fixed match/missing/malformed/mismatch categories and never prints container IDs, image IDs, raw inspect data, environment values, or an unexpected label value.
+The verifier checks only `org.opencontainers.image.revision` on the BielOS-built `public-site`, `hub`, `intake`, `session-cleanup`, and `email-worker` services. It emits fixed match/missing/malformed/mismatch categories and never prints container IDs, image IDs, raw inspect data, environment values, or an unexpected label value.
 
 Show container status:
 
@@ -92,7 +92,9 @@ The hub health endpoint returns only minimal liveness status. It does not requir
 
 - `public-site`: the public BielOS site for `biel.dev.br`.
 - `hub`: the private BielOS hub for `hub.biel.dev.br`.
+- `intake`: the isolated public application service; it receives only the restricted intake database URL and remains disabled until rollout gates pass.
 - `session-cleanup`: the production worker that periodically removes expired or revoked hub sessions.
+- `email-worker`: the private worker that delivers the durable email outbox through the configured SMTP adapter.
 - `postgres`: the PostgreSQL database used by the hub.
 - `cloudflared`: the Cloudflare Tunnel connector that exposes BielOS through Cloudflare without opening router ports.
 
@@ -193,7 +195,7 @@ If a login or logout POST returns HTTP `403` while the page itself loads normall
 
 ### Session Cleanup
 
-Production Compose starts a `session-cleanup` worker with no published ports. It uses the same private database configuration as the hub and runs `npm run sessions:cleanup --workspace @bielos/auth` every hour by default.
+Production Compose starts `session-cleanup` and `email-worker` workers with no published ports. They use the same private database configuration as the hub; `session-cleanup` runs `npm run sessions:cleanup --workspace @bielos/auth` every hour by default, while `email-worker` polls the durable outbox with bounded retries.
 
 To change the interval, set this non-secret value in the private local `.env` file:
 
@@ -285,7 +287,7 @@ Authenticated OWNER/MEMBER browser smoke must use an existing safe browser sessi
 
 The redirect-hardening campaign reviewed commits `4705e9df46812967aa86ae780c732d56e17a719a`, `e8ad193bca55abab87a16440d879ed534b86c761`, `d634a454138e7f59aa364a3764efce16a99bf2e3`, `70f577329f36471876fcc184ef713e25d8b98b1f`, `00c29fd79b94338fe39545044e282f430450e5e2`, and `e559152b8f402f07f86c3eb29c56e601cf5bca44`. Access diagnostics are typed and non-disclosing in the normal unit path. Login, logout, and proxy redirects use the configured public origin, allow only `/` and `/login`, require HTTPS in production, and fail closed without an internal-origin fallback. Missing required assertions are denied early; present assertions reach full JOSE validation before BielOS session routing. The deployed proxy wrapper keeps the framework event separate from runtime environment configuration.
 
-The Core gate includes secret scan, lint, typecheck, Prisma validation, public discovery, unit, database integration and concurrency tests, build, production image, and Compose validation. Production builds now require a clean pushed `main` revision and store the exact full SHA in the immutable OCI image label. The local verifier requires the running `public-site`, `hub`, and `session-cleanup` labels to match that intended revision. This attestation remains local operational and CI evidence; no public application surface exposes the private repository revision.
+The Core gate includes secret scan, lint, typecheck, Prisma validation, public discovery, unit, database integration and concurrency tests, build, production image, and Compose validation. Production builds now require a clean pushed `main` revision and store the exact full SHA in the immutable OCI image label. The local verifier requires the running BielOS-built service labels to match that intended revision. This attestation remains local operational and CI evidence; no public application surface exposes the private repository revision.
 
 Authenticated OWNER and MEMBER production smoke passed through Cloudflare Access first and BielOS login second. MEMBER Authorization B used exactly one synthetic identity through a private temporary mechanism. Baseline denial, VIEWER/EDITOR visibility, global-role mutation denial, revocation, Project A/B IDOR isolation, own-session isolation, owner-audit denial, sanitized operations, one generic invalid login followed by successful login, and logout passed. The account credential, sessions, grants, profiles, and temporary mechanism were removed, synthetic projects were archived, and no registration or permanent user-management surface was added. Existing GymForge behavior remained frozen and reserved modules remained inert. `CI remoto não confirmado.`
 

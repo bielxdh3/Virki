@@ -9,6 +9,18 @@ const productionCompose = readFileSync(
   path.join(repositoryRoot, "infra", "docker-compose.prod.yml"),
   "utf8"
 );
+const developmentCompose = readFileSync(
+  path.join(repositoryRoot, "infra", "docker-compose.yml"),
+  "utf8"
+);
+
+function serviceBlock(compose, service) {
+  const match = compose.match(
+    new RegExp(`\\n  ${service}:\\n([\\s\\S]*?)(?=\\n  [a-z0-9-]+:\\n|\\nvolumes:|$)`, "u")
+  );
+  assert.ok(match, `Missing Compose service: ${service}`);
+  return match[1];
+}
 
 test("production Compose requires complete Cloudflare Access configuration and enables JWT validation", () => {
   assert.match(productionCompose, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
@@ -21,4 +33,23 @@ test("production Compose requires complete Cloudflare Access configuration and e
     /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u
   );
   assert.doesNotMatch(productionCompose, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
+});
+
+test("Compose keeps Intake restricted and fail-closed", () => {
+  for (const compose of [developmentCompose, productionCompose]) {
+    const intake = serviceBlock(compose, "intake");
+    assert.doesNotMatch(intake, /env_file:/u);
+    assert.match(intake, /BIELOS_INTAKE_ENABLED:\s*\$\{BIELOS_INTAKE_ENABLED:-false\}/u);
+    assert.match(intake, /BIELOS_INTAKE_DATABASE_URL:/u);
+    assert.doesNotMatch(intake, /(?:^|\n)\s+DATABASE_URL:/u);
+  }
+});
+
+test("Production email worker has no published host port", () => {
+  const worker = serviceBlock(productionCompose, "email-worker");
+  assert.doesNotMatch(worker, /env_file:/u);
+  assert.match(worker, /command:\s*npm run email:worker/u);
+  assert.doesNotMatch(worker, /ports:/u);
+  assert.match(worker, /DATABASE_URL:\s*\$\{DATABASE_URL:\?/u);
+  assert.doesNotMatch(worker, /BIELOS_INTAKE_DATABASE_URL:/u);
 });

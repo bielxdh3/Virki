@@ -38,10 +38,12 @@ npm run revision:prod
 - Confirm `npm run status:ports` shows loopback bindings only:
   - `127.0.0.1:3000->3000`
   - `127.0.0.1:3001->3001`
-- Confirm `postgres`, `public-site`, `hub`, `cloudflared`, and `session-cleanup` are running.
+- Confirm `postgres`, `public-site`, `hub`, `cloudflared`, `session-cleanup`, and `email-worker` are running.
+- Confirm `intake` is running without a host-published port and remains disabled: `GET /api/catalog` returns `503` and `POST /api/apply` cannot create an application or queue an email.
 - Confirm `session-cleanup` has no published ports.
+- Confirm `email-worker` has no published ports.
 - Confirm `cloudflared` has no published ports.
-- Confirm `npm run revision:prod` reports `match` for `public-site`, `hub`, and `session-cleanup` against the current full Git revision.
+- Confirm `npm run revision:prod` reports `match` for `public-site`, `hub`, `intake`, `session-cleanup`, and `email-worker` against the current full Git revision.
 - Confirm `npm run health:local` checks:
   - `http://127.0.0.1:3000`
   - `http://127.0.0.1:3001/api/health`
@@ -93,6 +95,10 @@ Use only existing disposable test identities. Do not reset a real user's passwor
 | Disposable `MEMBER` | `/core/projects` and `/core/security` | Attempt admin controls/audit access and inspect sessions | Project mutation/access controls and owner audit are unavailable; only the member's sessions appear | Sign out |
 
 Authenticated OWNER and MEMBER smoke has been executed through the real Cloudflare Access and BielOS login flow. Disposable MEMBER credentials, sessions, grants, account state, and browser profiles were removed after verification.
+
+## Intake Rollout Status
+
+The Core browser smoke above does not validate public intake. No valid end-to-end application submission, email verification, owner review, activation, or production email delivery smoke has been completed. An invalid `/api/apply` request returning HTTP `400` is only a rejection test and is not rollout evidence. Keep `BIELOS_INTAKE_ENABLED=false` until the owner ceremonies, database/backup gates, routing checks, and one explicitly authorized production smoke are complete.
 
 ## Safe Diagnostics
 

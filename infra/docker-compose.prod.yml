@@ -62,18 +62,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - path: ../.env
-        required: true
     environment:
       NODE_ENV: production
       INTAKE_PORT: 3002
       PUBLIC_SITE_ORIGIN: ${PUBLIC_SITE_ORIGIN:?PUBLIC_SITE_ORIGIN must be set in local .env}
-      BIELOS_INTAKE_ENABLED: "false"
+      BIELOS_INTAKE_ENABLED: ${BIELOS_INTAKE_ENABLED:-false}
       BIELOS_INTAKE_DATABASE_URL: ${BIELOS_INTAKE_DATABASE_URL:-}
       BIELOS_INTAKE_ABUSE_SECRET: ${BIELOS_INTAKE_ABUSE_SECRET:-}
       BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
       BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:-}
+      BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
+      BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
+      BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}
+      BIELOS_EMAIL_SMTP_USER: ${BIELOS_EMAIL_SMTP_USER:-}
+      BIELOS_EMAIL_SMTP_PASSWORD: ${BIELOS_EMAIL_SMTP_PASSWORD:-}
+      BIELOS_EMAIL_FROM: ${BIELOS_EMAIL_FROM:-}
+      BIELOS_EMAIL_REPLY_TO: ${BIELOS_EMAIL_REPLY_TO:-}
     command: npm run start --workspace @bielos/intake
 
   session-cleanup:
@@ -96,6 +100,26 @@ services:
         "-c",
         "while true; do npm run sessions:cleanup --workspace @bielos/auth && npm run audit:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"
       ]
+
+  email-worker:
+    build: *bielos-build
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
+      BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
+      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:-}
+      BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
+      BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
+      BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}
+      BIELOS_EMAIL_SMTP_USER: ${BIELOS_EMAIL_SMTP_USER:-}
+      BIELOS_EMAIL_SMTP_PASSWORD: ${BIELOS_EMAIL_SMTP_PASSWORD:-}
+      BIELOS_EMAIL_FROM: ${BIELOS_EMAIL_FROM:-}
+      BIELOS_EMAIL_REPLY_TO: ${BIELOS_EMAIL_REPLY_TO:-}
+    command: npm run email:worker --workspace @bielos/auth
 
   postgres:
     image: postgres:17-alpine

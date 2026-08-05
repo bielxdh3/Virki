@@ -17,6 +17,7 @@
   "scripts": {
     "audit:recent": "tsx src/audit-recent.ts",
     "audit:cleanup": "tsx src/cleanup-audit-logs.ts",
+    "email:worker": "tsx src/email-worker.ts",
     "sessions:cleanup": "tsx src/cleanup-sessions.ts",
     "seed:owner": "tsx src/seed-owner.ts",
     "typecheck": "tsc --noEmit"

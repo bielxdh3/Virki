@@ -26,9 +26,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - path: ../.env
-        required: true
     environment:
       NODE_ENV: development
       INTAKE_PORT: 3002
@@ -36,7 +33,15 @@ services:
       BIELOS_INTAKE_ENABLED: ${BIELOS_INTAKE_ENABLED:-false}
       BIELOS_INTAKE_DATABASE_URL: ${BIELOS_INTAKE_DATABASE_URL:-}
       BIELOS_INTAKE_ABUSE_SECRET: ${BIELOS_INTAKE_ABUSE_SECRET:-}
+      BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
       BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:-}
+      BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
+      BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
+      BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}
+      BIELOS_EMAIL_SMTP_USER: ${BIELOS_EMAIL_SMTP_USER:-}
+      BIELOS_EMAIL_SMTP_PASSWORD: ${BIELOS_EMAIL_SMTP_PASSWORD:-}
+      BIELOS_EMAIL_FROM: ${BIELOS_EMAIL_FROM:-}
+      BIELOS_EMAIL_REPLY_TO: ${BIELOS_EMAIL_REPLY_TO:-}
     ports:
       - "127.0.0.1:${INTAKE_PORT:-3002}:3002"
     command: npm run dev --workspace @bielos/intake

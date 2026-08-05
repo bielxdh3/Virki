@@ -43,4 +43,4 @@ The Core authorization and data contract is documented in `docs/modules/bielos-c
 
 The Core operations panel performs only local, bounded application checks. It does not inspect Docker, read raw logs or environment values, or make external requests while rendering. Deployment and edge status remain separate manual validation.
 
-The production Compose stack runs the public site, private hub, PostgreSQL, Cloudflare Tunnel, and session-cleanup worker. App ports remain published only on `127.0.0.1`; Cloudflare Access remains the first hub boundary and BielOS authentication remains the second.
+The production Compose stack runs the public site, private hub, isolated Intake, PostgreSQL, Cloudflare Tunnel, session-cleanup worker, and email worker. Intake receives only its restricted database URL; the private Core `DATABASE_URL` is not passed to it. App ports remain published only on `127.0.0.1`; Cloudflare Access remains the first hub boundary and BielOS authentication remains the second.

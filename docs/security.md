@@ -45,7 +45,7 @@ The schema stores session tokens as hashes and includes a separate security unlo
 
 `Session.ipHash` and `Session.userAgent` were removed because they were unused and misleading. AuditLog is the intended path for minimal security event context, and it stores only sanitized metadata such as hashed user agent values.
 
-Production Compose runs a small `session-cleanup` worker that periodically deletes expired or revoked sessions. The worker uses the same private database environment as the hub, publishes no ports, and logs only the number of inactive sessions removed.
+Production Compose runs `session-cleanup` and `email-worker` workers without published ports. `session-cleanup` periodically deletes expired or revoked sessions using the hub's private database environment; `email-worker` delivers the encrypted outbox through the configured SMTP adapter and never logs credentials or protected payloads.
 
 Login rate limiting stores only a keyed hash of the normalized submitted login identifier, attempt count, window timestamps, and expiration timestamp. Login transactions for the same identifier are serialized with a PostgreSQL transaction-scoped advisory lock, retained attempts are capped at five, advisory-lock waits are limited to five seconds, and the authentication transaction is limited to 15 seconds. Password verification remains inside that boundary to preserve the strict concurrent verification cap; distinct identifiers use independent locks. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed for login when configuration, locking, or database access is unavailable while returning the same generic login failure to the browser.
 
@@ -155,6 +155,7 @@ Before exposing BielOS beyond a local trusted network:
 - Keep the private `.env` file outside Git.
 - On public Linux servers or VPS hosts, also block inbound access to ports `3000` and `3001` with the host firewall.
 - Keep the production `session-cleanup` worker enabled so expired or revoked sessions do not accumulate indefinitely.
+- Keep the production `email-worker` on the private network only; it must not publish a host port or receive the restricted Intake database role.
 - Repeat disposable backup/restore validation after meaningful schema or procedure changes.
 - Keep persistent login rate limiting enabled before multi-user or broader private use.
 - Preserve explicit CSRF protection on every current and future mutable hub route.

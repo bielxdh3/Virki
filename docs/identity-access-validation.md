@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` and the final validated implementation is `66908a4113f5bfa23e3c0b98a903067cd60193c2` on `main`; this closeout document is published afterward in documentation-only commits on `origin/main`. The implementation is complete in source and disabled by default for production. Dependency remediation, CI audit separation, disposable backup/restore, restricted-role validation, and remote runtime validation are green; durable production changes remain gated by human operations.
+The source implementation is complete for the requested identity/access surfaces, but this safe-rollout closeout is not complete. Intake remains fail-closed by default, the SMTP adapter and private email worker are wired in source, and the final current-SHA CI, production database evidence, owner ceremonies, deployment/migration state, Cloudflare routing, and authorized application smoke remain pending. Earlier SHA and CI references below are historical evidence and do not close the current rollout.
 
 ## Dependency order and task status
 
@@ -15,12 +15,12 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 7. Email/TOTP second factor, encrypted TOTP, recovery codes, device challenges, trusted devices, and ordinary recovery — completed; DB runtime unvalidated locally.
 8. Separate administrative credential and session-bound `SecurityElevation` — completed; DB runtime unvalidated locally.
 9. UI, audit, notifications, operations state, and opaque UI references — completed.
-10. Adversarial validation, rollout, and publication — source/remote validation green; the Codex Security contract report is complete with one Low/P3 finding, while native workbench indexing and durable rollout remain external gates.
+10. Adversarial validation and publication — source validation exists; final-SHA CI, durable rollout, and the authorized application smoke remain external gates.
 
 ## Surfaces and safety state
 
 - Public intake is isolated in `apps/intake`, with a restricted Prisma client and no public-site database import. Private/unlisted modules do not enter public responses. Missing feature flags, abuse secret, restricted database URL, or email transport keep intake unavailable.
-- `/apply` builds and renders an unavailable state unless `NEXT_PUBLIC_INTAKE_URL` is configured. Production Compose forces `BIELOS_INTAKE_ENABLED=false`; no production provider or automatic enablement was added.
+- `/apply` builds and renders an unavailable state unless `NEXT_PUBLIC_INTAKE_URL` is configured. Production Compose defaults `BIELOS_INTAKE_ENABLED=false`; enablement requires the private production environment value after all rollout gates pass.
 - Applications move through pending email, verified, review, partial/approved/rejected, and one-time activation states. Activation creates the user and grants atomically; delivery failure does not authorize activation.
 - The catalog distinguishes visibility, runtime availability, and entitlement. GymForge is available; AIP and root.ark are unavailable; L-vault and H-vault remain private/inert.
 - Module and feature requests are independently rate-limited for 24 hours. Owner review uses opaque request keys and active scoped elevation. Temporary grants fail closed after expiry.
@@ -33,35 +33,35 @@ The validation closeout started from `b70b42400a6234483bd353d1bbdad8f964d679ba` 
 
 ## Evidence
 
-- Focused/core unit suite: 67 passing.
+- Focused/core unit suite: 71 passing.
 - Public-site discovery: 3 passing.
 - GymForge scoring: 8 passing.
 - Core project validation: 5 passing.
-- Production revision/Compose source tests: 10 passing.
+- Production revision/Compose source tests: 12 passing.
 - `npm run lint`: passed.
 - `npm run typecheck`: passed for hub, intake, public-site, auth, and database.
 - `npm run prisma:validate`: passed.
 - `npm run secrets:scan`: passed.
-- Node 22.20.0 `npm ci` with the committed lockfile: passed, including Prisma client generation.
-- `npm audit --package-lock-only --audit-level=moderate`: passed with 0 vulnerabilities after upgrading Next.js and remediating brace-expansion, PostCSS, and sharp.
-- Fixed dependency versions are Next.js `16.2.12`, PostCSS `8.5.18`, sharp `0.35.0`, and brace-expansion `5.0.9`; both Next applications resolve the same Next.js version.
+- `npm ci --ignore-scripts` with the committed lockfile: passed locally under Node `24.14.1`; the repository CI Node 22 runtime remains the remote gate.
+- `npm audit --package-lock-only --audit-level=moderate`: passed with 0 vulnerabilities after pinning PostCSS `8.5.25` while retaining the existing Next.js `16.2.12` override.
+- Fixed dependency versions are Next.js `16.2.12`, PostCSS `8.5.25`, sharp `0.35.0`, and brace-expansion `5.0.9`; both Next applications resolve the same Next.js version.
 - `npm run build`: public site and hub passed, including login verification, recovery, account security, and administrative security routes.
 - CI now runs dependency audit and application validation as independent jobs, so an audit failure cannot skip the remaining validation gates.
 - `git diff --check`: passed before publication.
-- Core DB integration/concurrency suite: passed in remote CI; local execution was blocked because the Docker API was unavailable.
-- Backup/restore evidence: passed in remote CI using a custom-format dump and a separate disposable restore database; no production database was accessed or modified.
-- Restricted intake database-role evidence: passed in remote CI with direct access denied to User, Session, projects, catalog tables, outbox data, administrative/security tables, audit logs, and GymForge tables; public catalog, intake writes, activation, and the narrow verification enqueue capability passed.
-- Image, runtime, and Compose validation: passed in remote CI, including loopback-only ports, public-site health, hub health, direct-origin hub denial, intake-disabled response, revision label, and Compose validation; local Docker remained unavailable.
+- Core DB suite: 49 passing locally in disposable PostgreSQL, including integration and concurrency cases.
+- Backup/restore evidence: passed locally using a custom-format dump and a separate disposable restore database; no production database was accessed or modified.
+- Restricted intake database-role evidence: passed locally with direct access denied to private Core, outbox, administrative/security, audit, and GymForge data; public catalog, intake writes, activation, and the narrow verification enqueue capability passed.
+- Production Compose config validation: passed locally. Production image build, image revision-label verification, and runtime smoke remain to be run against the final committed SHA.
 - Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped.
 - Exact post-remediation remote CI for validation commit `223528948a7732b9b1f5f6ea148759c0497439e6`: run `30736308059` passed both independent jobs, including 37 Core integration tests, concurrency tests, production image revision verification, and Compose validation.
-- Exact final-SHA CI for `66908a4113f5bfa23e3c0b98a903067cd60193c2`: run `30738647448` completed successfully with both independent jobs (`Audit dependency lockfile` and `Validate`); later commits only synchronize closeout documentation.
+- Exact final-SHA CI for the current closeout commit: not confirmed. Historical CI runs do not close a newer SHA.
 - Codex Security diff scan: scan `68209414-195e-47e5-bd45-88bd257f1d48` reviewed `b70b42400a6234483bd353d1bbdad8f964d679ba...66908a4113f5bfa23e3c0b98a903067cd60193c2` with complete coverage. The sealed contract report contains one high-confidence Low/P3 information-disclosure finding (`CWE-200`) for the public intake catalog exposing an internal `ModuleCatalog.id`; two other candidates were validated and suppressed/ignored. The report was generated locally from the completed scan artifacts because the native workbench became terminal before indexing; no Critical, High, or Medium finding was reported.
 
 ## Migrations
 
 `20260801090000_identity_access_foundation`, `20260801100000_add_intake_dedupe_controls`, `20260801110000_add_partial_application_state`, `20260801120000_account_security_verification`, `20260801130000_administrative_elevation`, `20260801140000_security_ui_keys`, `20260802090000_restrict_intake_database_access`, and `20260802100000_fix_intake_security_functions` are additive. Down-migrations and destructive rollback are not assumed safe; take and verify a backup before deployment.
 
-No durable production migration was run. Migration deployment remains pending human role provisioning, verified operational backup policy, and authorized production smoke.
+No durable production migration, owner security ceremony, or authorized production application smoke is claimed for this closeout. Migration deployment remains pending human role provisioning, verified operational backup policy, and explicit authorization.
 
 ## Public catalog disclosure hotfix
 
@@ -69,7 +69,7 @@ No durable production migration was run. Migration deployment remains pending hu
 - The public response now uses an explicit allowlisted projection containing only `key`, `name`, and `runtimeAvailability`; internal `id` remains available to repository logic for deduplication and module-decision persistence.
 - The behavioral regression exercises the real handler-to-intake-repository catalog path, proves serialized `id` absence, preserves private-module exclusion and internal-ID submission/activation behavior in the database-role validation, and proves disabled or misconfigured intake remains fail-closed.
 - Exact final CI for the fixing SHA: GitHub Actions run `30778813575` passed both `Validate` and `Audit dependency lockfile`.
-- Intake remains disabled, email remains unconfigured, and no durable production migration occurred.
+- Intake remains disabled in the local production environment, and no durable production migration occurred.
 
 ## Human enablement steps
 
@@ -79,4 +79,4 @@ No durable production migration was run. Migration deployment remains pending hu
 4. Configure the owner’s second factor, separate administrative password, and offline administrative recovery codes through a human ceremony.
 5. Configure public routing to the isolated intake service without host exposure, validate loopback-only origins, and run an authorized production smoke.
 6. Confirm the post-remediation remote audit is green; do not use a breaking unrelated upgrade without review.
-7. Only after all gates pass, change the explicit production feature flag and re-run the exact smoke and rollback checks.
+7. Only after all gates pass, set the private production feature flag temporarily for the explicitly authorized smoke, then restore `BIELOS_INTAKE_ENABLED=false` and re-run rollback checks.
