@@ -88,6 +88,14 @@ Do not commit real Access audience values, team identifiers if treated as privat
 
 This validation does not replace Cloudflare Access at the edge and does not replace BielOS internal login. It is an additional origin-side check.
 
+## Access Session And BielOS Logout
+
+Configure the private Hub Access application with a seven-day policy session duration in the Cloudflare dashboard. This is a manual operator setting; the repository does not call the Cloudflare API or claim that the dashboard value is active.
+
+Ordinary `POST /api/logout` revokes only the current BielOS session and clears only the `bielos_session` cookie. It preserves the remembered-device cookie and does not redirect to `/cdn-cgi/access/logout`, clear `CF_Authorization`, or intentionally log the browser out of Cloudflare Access. Explicit Cloudflare Access logout remains a separate operator/user action.
+
+The BielOS remembered-browser grant is server-side, revocable, and limited to seven absolute days. It still requires the password and never grants administrative elevation. Trusted-browser grants are invalidated by device revocation, password recovery/change, recovery completion, TOTP changes, account blocking/deactivation, or a confirmed revoke-all security action.
+
 The hub exposes `GET /api/health` for Docker and local liveness checks. It returns only minimal JSON status and intentionally does not require Cloudflare Access JWT validation. Do not add environment values, database URLs, Cloudflare configuration, user/session data, token/header/cookie data, or other private operational details to this endpoint.
 
 ## Validation Checklist

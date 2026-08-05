@@ -125,6 +125,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Session tokens are stored hashed at rest.
 - `[DONE]` Production session cookies are HttpOnly, SameSite=Lax, and Secure.
 - `[DONE]` Logout revokes the session and clears the cookie.
+- `[DONE]` A fully verified browser may use a revocable, password-required remembered-browser grant for seven absolute days; ordinary logout preserves it, while security resets and revoke-all actions invalidate it.
 - `[DONE]` CSRF protection covers:
   - login and logout
   - Core project lifecycle and project access mutations

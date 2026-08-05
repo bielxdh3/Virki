@@ -69,6 +69,6 @@ Schema rollback is additive-only: code can be rolled back before dependent write
 
 ## Current implementation notes
 
-- Migrations are additive through `20260801140000_security_ui_keys`; production intake remains disabled until the real gates are satisfied.
+- Migrations are additive through `20260805120000_add_remembered_browser_grant`; production intake remains disabled until the real gates are satisfied. The remembered-browser migration adds nullable grant timestamps so existing trusted-device rows fail closed without remembered-login authority.
 - Account security, recovery, trusted devices, module access, owner review, administrative elevation, and truthful operations status are implemented behind Cloudflare, CSRF, session, and feature boundaries.
 - Docker/PostgreSQL was unavailable in this environment, so migration deployment, restricted-role enforcement, contention suites, backup/restore, Compose/image validation, and production smoke remain manual gates.

@@ -31,7 +31,15 @@ Use this checklist in the Cloudflare dashboard. Do not commit dashboard exports,
 - Authenticate through Cloudflare Access.
 - Confirm BielOS internal login still appears after Access.
 - Log in with the seeded OWNER user.
-- Confirm logout clears the BielOS session.
+- Confirm ordinary BielOS logout clears only the BielOS session and returns to `/login`.
+
+## Private Hub Policy Session
+
+- Set the self-hosted `hub.biel.dev.br` Access application policy session duration to **7 days**.
+- Save the dashboard configuration manually; do not export or commit the policy.
+- Confirm that ordinary BielOS logout does not invoke Cloudflare Access logout.
+- Test explicit Cloudflare Access logout separately; it is not the same operation as BielOS logout.
+- Do not add a broad Bypass policy to make public content available from the private Hub.
 
 ## Required Security Posture
 
@@ -40,3 +48,5 @@ Cloudflare Access is required for `hub.biel.dev.br`, but it is not a replacement
 BielOS internal authentication is required, but it is not a replacement for Cloudflare Access.
 
 Both layers are required for the private hub.
+
+The seven-day Cloudflare Access session is an outer-boundary setting. BielOS remembered-browser login is a separate server-authoritative seven-day grant and never replaces Access, the password, or administrative elevation.

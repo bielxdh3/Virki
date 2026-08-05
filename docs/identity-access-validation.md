@@ -25,6 +25,7 @@ The source implementation is complete for the requested identity/access surfaces
 - The catalog distinguishes visibility, runtime availability, and entitlement. GymForge is available; AIP and root.ark are unavailable; L-vault and H-vault remain private/inert.
 - Module and feature requests are independently rate-limited for 24 hours. Owner review uses opaque request keys and active scoped elevation. Temporary grants fail closed after expiry.
 - Login creates no session before the email/device ceremony. TOTP secrets are encrypted under `BIELOS_TOTP_ENCRYPTION_KEY`; recovery codes are hashed and one-use; trusted devices are user-scoped and revocable.
+- A fully verified trusted browser may create a new ordinary session with the password alone for one absolute seven-day server-side grant; ordinary logout preserves that grant, while expiry, revocation, recovery, password reset, TOTP changes, account state changes, and revoke-all security actions fail closed.
 - Ordinary recovery uses generic responses, verified email, owner approval, password replacement, and session revocation. Administrative recovery is separate and uses an offline administrative recovery code.
 - Administrative credentials are independent from the normal password. `SecurityElevation` protocol version is `1`, bound to owner, session, scope, and explicit timed/manual duration. Legacy `SecurityUnlock` rows grant nothing.
 - Critical scopes include application review, activation reissue, module/feature access, account state/recovery approval, global roles, catalog changes, administrative credentials/recovery codes, project-owner access, and Core project archive.
@@ -59,7 +60,7 @@ The source implementation is complete for the requested identity/access surfaces
 
 ## Migrations
 
-`20260801090000_identity_access_foundation`, `20260801100000_add_intake_dedupe_controls`, `20260801110000_add_partial_application_state`, `20260801120000_account_security_verification`, `20260801130000_administrative_elevation`, `20260801140000_security_ui_keys`, `20260802090000_restrict_intake_database_access`, and `20260802100000_fix_intake_security_functions` are additive. Down-migrations and destructive rollback are not assumed safe; take and verify a backup before deployment.
+`20260801090000_identity_access_foundation`, `20260801100000_add_intake_dedupe_controls`, `20260801110000_add_partial_application_state`, `20260801120000_account_security_verification`, `20260801130000_administrative_elevation`, `20260801140000_security_ui_keys`, `20260802090000_restrict_intake_database_access`, `20260802100000_fix_intake_security_functions`, and `20260805120000_add_remembered_browser_grant` are additive. The remembered-browser migration defaults existing rows to no active grant through nullable timestamps. Down-migrations and destructive rollback are not assumed safe; take and verify a backup before deployment.
 
 No durable production migration, owner security ceremony, or authorized production application smoke is claimed for this closeout. Migration deployment remains pending human role provisioning, verified operational backup policy, and explicit authorization.
 

@@ -4,6 +4,8 @@ import {
   createAuditRequestMetadata,
   hashAuditEmail,
   normalizeEmail,
+  getSessionCookieOptions,
+  SESSION_COOKIE_NAME,
   writeAuditLog
 } from "@bielos/auth";
 import { DEVICE_COOKIE_NAME, startLoginCeremony } from "@bielos/auth/security";
@@ -80,6 +82,22 @@ export async function POST(request: Request) {
     });
     return redirectToLogin(failureRedirectUrl, true);
   }
+
+  if (ceremony.kind === "SESSION") {
+    await writeAuditLog({
+      eventType: "AUTH_LOGIN_SUCCESS",
+      result: "SUCCESS",
+      actorUserId: user.id,
+      actorEmailHash: hashAuditEmail(user.email),
+      resource: "hub",
+      message: "Remembered-browser login succeeded.",
+      metadata: { ...auditMetadata, rememberedBrowser: true }
+    });
+    const response = NextResponse.redirect(createHubRedirectUrl("/", request.url), { status: 303 });
+    response.cookies.set(SESSION_COOKIE_NAME, ceremony.session.token, getSessionCookieOptions(ceremony.session.expiresAt));
+    return response;
+  }
+
   await writeAuditLog({
     eventType: "AUTH_LOGIN_SUCCESS",
     result: "INFO",

@@ -639,6 +639,8 @@ model TrustedDevice {
   label        String?
   status       TrustedDeviceStatus @default(TRUSTED)
   lastSeenAt   DateTime            @default(now())
+  rememberedUntil DateTime?
+  strongVerifiedAt DateTime?
   revokedAt    DateTime?
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
@@ -647,6 +649,7 @@ model TrustedDevice {
 
   @@unique([userId, deviceIdHash])
   @@index([userId, status])
+  @@index([rememberedUntil])
 }
 
 model AccountRecoveryRequest {

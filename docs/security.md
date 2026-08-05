@@ -22,6 +22,7 @@ Current layers:
 - Persistent login rate limiting using privacy-safe identifier hashes.
 - Cloudflare Access as an outer boundary for the private hub.
 - Security unlock flow for sensitive modules.
+- A separate server-authoritative remembered-browser grant limited to seven absolute days; it never replaces the password, Cloudflare Access, CSRF, ordinary authorization, or administrative elevation.
 
 ## CSRF Protection
 
@@ -187,5 +188,9 @@ Keep `CLOUDFLARE_ACCESS_JWT_REQUIRED=false` for local development that does not 
 No raw JWTs, raw headers, Cloudflare tokens, or Access secrets should be logged or stored. This origin check does not replace BielOS internal authentication; both layers are still required for the hub.
 
 The hub health endpoint, `GET /api/health`, is intentionally excluded from Cloudflare Access JWT validation so Docker and local health checks remain stable. It must stay limited to minimal liveness status and must not expose environment values, database URLs, Cloudflare configuration, user/session data, tokens, headers, cookies, or private operational data.
+
+## Remembered-browser contract
+
+A fully verified browser may retain a revocable remembered-browser grant for seven absolute days. Ordinary BielOS logout revokes only the current BielOS session and clears only its session cookie; it preserves the device cookie and does not log out of Cloudflare Access. The password remains mandatory on the next login. Expiry, device revocation, password change/reset, account recovery, TOTP changes, account blocking/deactivation, and confirmed revoke-all security actions fail closed by clearing remembered trust. The grant cannot authorize `OWNER` operations or create a `SecurityElevation`.
 
 Cloudflare Tunnel running inside Docker must route to Docker service names, not host ports. Host-published `127.0.0.1` ports are for local debugging and health checks only.

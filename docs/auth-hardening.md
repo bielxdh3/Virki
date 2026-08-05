@@ -25,6 +25,8 @@ The middleware runs in the Next.js middleware runtime and only checks for cookie
 
 If the cookie is missing, expired, revoked, or invalid, the route does not revoke anything. It still clears the browser cookie and redirects to `/login`.
 
+Ordinary logout intentionally preserves `bielos_device` and any valid server-side seven-day remembered-browser grant. It does not clear `CF_Authorization` or redirect to Cloudflare Access logout; Cloudflare Access remains the separate outer boundary.
+
 ## Rate Limit Strategy
 
 Login uses a persistent database-backed limiter in `packages/auth`.

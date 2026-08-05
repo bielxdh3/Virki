@@ -2,7 +2,7 @@
 
 BielOS Phase 02 adds internal application authentication for the private hub.
 
-Cloudflare Access is still planned as an external boundary later. This phase only implements the internal session layer used by `apps/hub`.
+Cloudflare Access protects the private Hub as the external boundary, and this document describes the internal session layer used by `apps/hub` behind it.
 
 ## Architecture
 
@@ -11,6 +11,7 @@ Cloudflare Access is still planned as an external boundary later. This phase onl
 - The hub reads and writes the session cookie through Next.js route handlers and server components.
 - Middleware protects private hub routes by default before the request reaches route handlers or pages.
 - The public site does not use or expose authentication details.
+- Trusted-device verification and a bounded server-side remembered-browser grant are separate from ordinary sessions.
 
 ## Password Hashing
 
@@ -44,6 +45,10 @@ Cookie settings:
 - Path `/`
 - Explicit expiration matching the database session expiration
 
+## Remembered-browser behavior
+
+After a new or known browser completes the required email/TOTP ceremony, its trusted-device row may carry a server-side remembered-browser grant for seven absolute days. A password is still required after logout. A valid grant can create a new ordinary session without repeating email or TOTP; expiry, revocation, account recovery, password reset, TOTP changes, account blocking/deactivation, and revoke-all security actions invalidate it. Administrative elevation is never remembered by this mechanism.
+
 ## Seed Flow
 
 The first OWNER user is created locally with:
@@ -65,7 +70,4 @@ The seed command upserts the OWNER user and hashes the password with Argon2id. N
 - OAuth
 - Email password reset
 - Magic links
-- Cloudflare Access integration
 - Module-level sensitive unlocks
-- Audit logs
-- Persistent distributed rate limiting

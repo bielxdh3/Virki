@@ -1,4 +1,5 @@
 import { hashAuditIdentifier, writeAuditLog } from "@bielos/auth";
+import { invalidateRememberedLoginGrants, revokeLoginChallenges } from "@bielos/auth/security";
 import { prisma, type Prisma } from "@bielos/database";
 
 import { canRevokeOtherSession } from "./session-policy";
@@ -175,6 +176,9 @@ export async function revokeAllOtherCoreSessionRecords(
         },
         data: { revokedAt: now }
       });
+
+      await invalidateRememberedLoginGrants(transaction, principal.id);
+      await revokeLoginChallenges(transaction, principal.id);
 
       return result.count;
     });

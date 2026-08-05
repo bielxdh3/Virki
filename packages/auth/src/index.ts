@@ -81,6 +81,7 @@ type AuthenticationUserRecord = {
   passwordHash: string | null;
   role: string;
   isActive: boolean;
+  accountStatus: string;
 };
 
 export function normalizeEmail(email: string): string {
@@ -263,7 +264,7 @@ async function authenticateUserFromLookup(
 ): Promise<AuthenticatedUser | null> {
   const user = await lookup();
 
-  if (!user?.isActive || !user.passwordHash) {
+  if (!user?.isActive || user.accountStatus !== "ACTIVE" || !user.passwordHash) {
     await verifyPassword(DUMMY_PASSWORD_HASH, password);
     return null;
   }
@@ -310,13 +311,20 @@ export async function getSessionByToken(token: string): Promise<AuthenticatedSes
           email: true,
           displayName: true,
           role: true,
-          isActive: true
+          isActive: true,
+          accountStatus: true
         }
       }
     }
   });
 
-  if (!session || session.revokedAt || session.expiresAt <= new Date() || !session.user.isActive) {
+  if (
+    !session ||
+    session.revokedAt ||
+    session.expiresAt <= new Date() ||
+    !session.user.isActive ||
+    session.user.accountStatus !== "ACTIVE"
+  ) {
     return null;
   }
 
@@ -471,7 +479,8 @@ function findAuthenticationUser(
       displayName: true,
       passwordHash: true,
       role: true,
-      isActive: true
+      isActive: true,
+      accountStatus: true
     }
   });
 }
