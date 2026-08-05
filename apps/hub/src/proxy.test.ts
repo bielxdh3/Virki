@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
+
+import { handlePageShow } from "./app/session-history-guard";
 import { evaluateProxyRequest, proxy } from "./proxy";
 
 test("logout requests reach origin validation before session routing", () => {
@@ -40,6 +42,7 @@ test("protected pages without a required Access assertion fail before session ro
 
   assert.equal(response.status, 403);
   assert.equal(response.headers.get("location"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
 test("a present required Access assertion reaches full validation before session routing", () => {
@@ -58,6 +61,7 @@ test("a present required Access assertion reaches full validation before session
 
   assert.equal(response.headers.get("x-middleware-next"), "1");
   assert.equal(response.headers.get("location"), null);
+  assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate");
 });
 
 test("the framework event argument cannot replace the runtime environment", () => {
@@ -94,4 +98,24 @@ test("protected pages fail closed when production redirect configuration is inva
   assert.equal(response.status, 503);
   assert.equal(response.headers.get("location"), null);
   assert.equal(response.headers.get("location")?.includes("hub:3001") ?? false, false);
+});
+
+test("reloads a page restored from the browser back-forward cache", () => {
+  let reloads = 0;
+
+  handlePageShow({ persisted: true }, () => {
+    reloads += 1;
+  });
+
+  assert.equal(reloads, 1);
+});
+
+test("does not reload a normally loaded page", () => {
+  let reloads = 0;
+
+  handlePageShow({ persisted: false }, () => {
+    reloads += 1;
+  });
+
+  assert.equal(reloads, 0);
 });

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { getLocale } from "./locale";
 import "./globals.css";
+import { SessionHistoryGuard } from "./session-history-guard";
 
 export const metadata: Metadata = {
   title: "BielOS Hub",
@@ -16,7 +17,10 @@ export default async function RootLayout({
 
   return (
     <html lang={locale}>
-      <body>{children}</body>
+      <body>
+        <SessionHistoryGuard />
+        {children}
+      </body>
     </html>
   );
 }
