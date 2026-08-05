@@ -81,7 +81,7 @@ test("new TOTP browsers verify email first, and only completed TOTP establishes 
   const emailResult = await verifyLoginEmailCode(start.ceremonyId, emailCode, now);
   assert.equal(emailResult.requiresTotp, true);
   assert.equal(emailResult.session, null);
-  assert.equal(await rememberedGrant(user.id, deviceToken), null);
+  assert.equal((await rememberedGrant(user.id, deviceToken))?.rememberedUntil ?? null, null);
 
   const session = await verifyLoginTotpCode(
     start.ceremonyId,
@@ -101,7 +101,7 @@ test("email-factor browsers establish the grant only after valid email verificat
   const start = asCeremony(await startLoginCeremony(user.id, deviceToken, "pt-BR", now));
 
   assert.equal(start.factor, "EMAIL");
-  assert.equal(await rememberedGrant(user.id, deviceToken), null);
+  assert.equal((await rememberedGrant(user.id, deviceToken))?.rememberedUntil ?? null, null);
   await assert.rejects(verifyLoginEmailCode(start.ceremonyId, "000000", now));
   assert.equal(await rememberedGrant(user.id, deviceToken), null);
 
@@ -131,7 +131,7 @@ test("failed, expired, and replayed ceremonies establish no remembered trust", a
   assert.equal(emailResult.requiresTotp, true);
   await assert.rejects(verifyLoginEmailCode(replayed.ceremonyId, code, now));
   await assert.rejects(verifyLoginTotpCode(replayed.ceremonyId, "000000", now));
-  assert.equal(await rememberedGrant(user.id, deviceToken), null);
+  assert.equal((await rememberedGrant(user.id, deviceToken))?.rememberedUntil ?? null, null);
 });
 
 test("ordinary logout revokes the session, clears only its cookie, and preserves the remembered browser", async () => {
