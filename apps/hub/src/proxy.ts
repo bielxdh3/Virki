@@ -2,7 +2,14 @@ import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@bielos/auth/constants";
 import { createHubRedirectUrl } from "./lib/hub-redirect";
 
-const PUBLIC_ROUTES = new Set(["/login", "/api/login", "/api/logout", "/api/health"]);
+const PUBLIC_ROUTES = new Set([
+  "/login",
+  "/api/login",
+  "/login/verify",
+  "/api/login/verify",
+  "/api/logout",
+  "/api/health"
+]);
 const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml)$/i;
 const CLOUDFLARE_ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
 const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";

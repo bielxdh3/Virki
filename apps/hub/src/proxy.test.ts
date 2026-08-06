@@ -30,6 +30,18 @@ test("protected pages without a session still redirect to login", () => {
   assert.equal(response.headers.get("location"), "https://hub.example.invalid/login");
 });
 
+test("login verification routes are reachable before a session exists", () => {
+  for (const pathname of ["/login/verify", "/api/login/verify"]) {
+    const response = evaluateProxyRequest(
+      new NextRequest(`http://hub:3001${pathname}`),
+      { NODE_ENV: "production", NEXT_PUBLIC_HUB_URL: "https://hub.example.invalid" }
+    );
+
+    assert.equal(response.headers.get("x-middleware-next"), "1");
+    assert.equal(response.headers.get("location"), null);
+  }
+});
+
 test("protected pages without a required Access assertion fail before session routing", () => {
   const response = evaluateProxyRequest(
     new NextRequest("http://hub:3001/core/projects"),

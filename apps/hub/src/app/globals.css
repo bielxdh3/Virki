@@ -1,21 +1,31 @@
 :root {
   color-scheme: dark;
-  --background: #07090d;
-  --background-raised: #0b1117;
-  --surface: #101820;
-  --surface-raised: #151f29;
-  --surface-soft: #1a2530;
-  --line: #26313f;
+  --background: #05070a;
+  --background-raised: #0a0e13;
+  --surface: #0e151c;
+  --surface-raised: #131b24;
+  --surface-soft: #182029;
+  --line: #232c37;
   --line-strong: #3a4859;
   --text: #f0f6f7;
-  --muted: #92a2b3;
+  --muted: #8a97a7;
   --muted-strong: #bdcbd8;
   --cyan: #5bd7e8;
   --green: #74dda1;
   --amber: #e8b15b;
   --red: #ee7474;
-  --shadow: rgba(0, 0, 0, 0.34);
-  --shadow-soft: rgba(0, 0, 0, 0.24);
+  --shadow: rgba(0, 0, 0, 0.4);
+  --shadow-soft: rgba(0, 0, 0, 0.26);
+  --glow-cyan: rgba(91, 215, 232, 0.45);
+  --glow-cyan-soft: rgba(91, 215, 232, 0.16);
+  --radius-lg: 10px;
+  --radius: 7px;
+  --radius-sm: 5px;
+  --font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  --font-mono:
+    ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 * {
@@ -26,11 +36,23 @@ html,
 body {
   min-height: 100%;
   margin: 0;
-  background: var(--background);
   color: var(--text);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+}
+
+body {
+  background:
+    radial-gradient(1100px 620px at 14% -8%, rgba(91, 215, 232, 0.05), transparent 60%),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.012) 0,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    var(--background);
+  background-attachment: fixed;
 }
 
 html {
@@ -113,7 +135,8 @@ strong {
   gap: 18px;
   padding: 18px 14px;
   border-right: 1px solid var(--line);
-  background: #0a0f15;
+  background: linear-gradient(180deg, var(--background-raised), var(--background) 70%);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02);
 }
 
 .dock-identity {
@@ -247,8 +270,9 @@ strong {
   margin-bottom: 18px;
   padding: 0 14px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #0d131a;
+  border-radius: var(--radius);
+  background: var(--background-raised);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .top-actions {
@@ -280,6 +304,17 @@ strong {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 4px rgba(116, 221, 161, 0.1);
+  animation: status-pulse 2.8s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgba(116, 221, 161, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(116, 221, 161, 0.18);
+  }
 }
 
 .icon-command,
@@ -296,21 +331,25 @@ strong {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 0 12px;
+  padding: 0 13px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--surface-soft);
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 60%);
   color: var(--text);
   cursor: pointer;
   font-size: 0.78rem;
   font-weight: 720;
+  letter-spacing: 0.005em;
   line-height: 1;
   text-decoration: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
   transition:
     border-color 150ms ease,
     background 150ms ease,
     color 150ms ease,
-    box-shadow 150ms ease;
+    box-shadow 150ms ease,
+    transform 100ms ease;
 }
 
 .icon-command:hover,
@@ -320,7 +359,20 @@ strong {
 .language-selector button:hover {
   border-color: var(--cyan);
   background: #202d38;
-  box-shadow: 0 0 0 1px rgba(91, 215, 232, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 0 0 1px var(--glow-cyan-soft),
+    0 0 18px -6px var(--glow-cyan);
+}
+
+.icon-command:active,
+.row-actions button:active,
+.compact-form button:active,
+.login-form button:active,
+.language-selector button:active,
+.action-stack button:active,
+.action-stack a:active {
+  transform: translateY(1px);
 }
 
 .language-selector {
@@ -357,10 +409,34 @@ strong {
 .module-window,
 .reserved-strip,
 .login-window {
+  position: relative;
+  overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #101820;
-  box-shadow: 0 12px 36px var(--shadow-soft);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 16px 40px var(--shadow-soft);
+}
+
+/* Signature: every console surface reads like an instrument panel —
+   a thin luminous edge along the top, like a status LED strip. */
+.identity-panel::before,
+.panel::before,
+.module-window::before,
+.reserved-strip::before,
+.login-window::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(91, 215, 232, 0.55) 18%,
+    rgba(91, 215, 232, 0.18) 46%,
+    transparent 78%
+  );
 }
 
 .anchor-section {
@@ -387,9 +463,10 @@ strong {
 .eyebrow {
   margin: 0;
   color: var(--cyan);
-  font-size: 0.76rem;
-  font-weight: 900;
-  letter-spacing: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -484,8 +561,10 @@ strong {
 
 .panel-title span {
   color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 900;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
@@ -575,8 +654,10 @@ strong {
 .detail-list dt,
 .status-list span {
   color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 800;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
@@ -728,8 +809,10 @@ strong {
 
 .window-titlebar span {
   color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 900;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
@@ -808,17 +891,33 @@ strong {
 
 .module-card {
   position: relative;
+  overflow: hidden;
   min-height: 236px;
   display: flex;
   flex-direction: column;
   gap: 14px;
   padding: 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--surface-raised);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
   transition:
     border-color 150ms ease,
-    background 150ms ease;
+    background 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.module-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(139, 151, 167, 0.4) 50%, transparent);
+}
+
+.module-card:hover {
+  transform: translateY(-1px);
 }
 
 .module-card.is-active {
@@ -826,9 +925,17 @@ strong {
   background: #16231d;
 }
 
+.module-card.is-active::before {
+  background: linear-gradient(90deg, transparent, rgba(116, 221, 161, 0.65) 50%, transparent);
+}
+
 .module-card.is-sensitive {
   border-color: rgba(232, 177, 91, 0.7);
   background: #1d1a15;
+}
+
+.module-card.is-sensitive::before {
+  background: linear-gradient(90deg, transparent, rgba(232, 177, 91, 0.65) 50%, transparent);
 }
 
 .module-card-header {
@@ -1558,13 +1665,32 @@ strong {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: #07090d;
+  background:
+    radial-gradient(720px 420px at 50% 8%, rgba(91, 215, 232, 0.07), transparent 65%),
+    var(--background);
 }
 
 .login-window {
   width: min(100%, 460px);
-  padding: 22px;
-  background: #101820;
+  padding: 26px;
+  animation: login-rise 420ms ease both;
+}
+
+@keyframes login-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-window {
+    animation: none;
+  }
 }
 
 .login-brand {
@@ -1737,6 +1863,14 @@ strong {
   .language-selector button,
   .module-card {
     transition: none;
+  }
+
+  .status-dot {
+    animation: none;
+  }
+
+  .module-card:hover {
+    transform: none;
   }
 }
 
