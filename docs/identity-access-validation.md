@@ -72,6 +72,21 @@ No durable production migration, owner security ceremony, or authorized producti
 - Exact final CI for the fixing SHA: GitHub Actions run `30778813575` passed both `Validate` and `Audit dependency lockfile`.
 - Intake remains disabled in the local production environment, and no durable production migration occurred.
 
+## Local revalidation — 2026-08-11
+
+- Supported runtime: Node `v22.20.0`, npm `11.11.0`; the earlier `uv_os_get_passwd returned ENOMEM` under Node `v24.14.1` is classified as an unsupported-runtime/environment failure.
+- `npm ci` and `npm audit --package-lock-only --audit-level=moderate`: passed with 0 vulnerabilities after the narrow `nanoid` `3.3.16` → `3.3.17` override; no broad dependency upgrade was performed.
+- Docker Desktop was recovered locally; Docker Engine `29.6.2` served only loopback-bound disposable PostgreSQL validation.
+- `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run test:production-revision` (13/13), `npm run test:public-site` (3/3), and `git diff --check`: passed.
+- `npm run test:core:unit`: passed, 77/77 under Node 22.20.0.
+- `npm run test:core:db:integration`: passed, 53/53 against a Docker-managed disposable PostgreSQL database.
+- `npm run test:core:concurrency`: passed, 12/12 against a Docker-managed disposable PostgreSQL database.
+- `npm run test:intake:db-role`: passed after applying the 14 additive migrations to a loopback-only disposable database; the restricted role remained unable to read or mutate private Core tables.
+- `npm run test:backup:restore`: passed (`exit=0`) with a disposable PostgreSQL dump, restore, migration, and representative-data check.
+- `npm run build`: passed for public-site and hub. A local production image built with synthetic revision `0123456789abcdef0123456789abcdef01234567`, its OCI revision label matched, production runtime smoke passed, and production Compose config validation passed with placeholders.
+- Public Intake remains fail-closed; no runtime code, schema, migration, CI, production configuration, deployment, or production database was changed.
+- Exact current-SHA remote CI remains unconfirmed. Production migration and backup authorization, owner security ceremonies, Cloudflare routing, and authorized production application smoke remain external gates.
+
 ## Human enablement steps
 
 1. Provision and verify restricted intake database credentials and grants; confirm the intake role cannot read private Core tables.

@@ -14,9 +14,13 @@ The Core hardening gate passed focused adversarial review and full repository va
 
 Authenticated OWNER and MEMBER production smoke is complete through Cloudflare Access first and BielOS login second. The explicitly authorized disposable MEMBER verified baseline denial, VIEWER and EDITOR reads, the global MEMBER mutation boundary, revocation, Project A/B IDOR isolation, own-session isolation, owner-audit denial, sanitized operations, generic invalid login recovery, and logout. Its private temporary provisioning mechanism, account credential, sessions, grants, and browser profiles were removed; no registration or permanent user-management surface was added.
 
+## Identity/access rollout status
+
+Identity/access source surfaces are implemented behind the existing Cloudflare Access-first, BielOS authentication, CSRF, session/scoped-elevation, least-privilege authorization, and audit boundaries. This records source readiness only: the selected Core identity/access rollout-readiness phase will validate the surfaces against disposable PostgreSQL/Compose and complete documented human/operational gates; no current-SHA CI, production database, deployment/migration, Cloudflare-routing, or authorized-application-smoke evidence is claimed here. Public registration and live Intake remain disabled by default, no production mutation is part of this phase, `SecurityUnlock` runtime remains blocked, and none of the existing boundaries may be weakened.
+
 ## Identity
 
-- Status: Core is implemented and operationally verified; this document remains the authoritative security and data boundary for project, access, session, operations, audit, and future maintenance.
+- Status: Existing Core project/access/session/operations/audit surfaces are implemented and operationally verified; identity/access source surfaces are implemented but rollout-readiness remains open. This document remains the authoritative security and data boundary for project, access, session, operations, audit, and future maintenance.
 - Boundary: Cloudflare Access is the outer private-hub gate and BielOS internal authentication is the second gate. Core authorization never replaces either layer.
 - Global roles: `OWNER`, `ADMIN`, and `MEMBER` come from the active authenticated BielOS user.
 - Inactive users receive no Core access even if a `ProjectAccess` row remains.

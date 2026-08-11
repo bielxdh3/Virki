@@ -101,7 +101,10 @@ try {
 async function assertStatus(url, expectedStatus) {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
-      const response = await fetch(url, { redirect: "manual" });
+      const response = await fetch(url, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(5_000)
+      });
       if (response.status === expectedStatus) {
         response.body?.cancel();
         return;

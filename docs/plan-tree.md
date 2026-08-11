@@ -54,8 +54,10 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Module security design template exists.
 - `[DONE]` Consolidated module planning index exists at `docs/modules/README.md`.
 - `[DONE]` BielOS Core operational verification and deployment revision attestation are complete.
+- `[DONE]` BielOS Core project-detail and identity/access source surfaces are implemented behind the existing Cloudflare Access-first, BielOS internal-auth, CSRF, session/elevation, authorization, and audit boundaries; identity/access rollout and production enablement remain gated.
 - `[DONE]` BielOS Core project detail workspace adds a private authorization-aware route for existing projects, reuses current administration controls, preserves archived read-only behavior, and requires no schema change.
-- `[CURRENT]` The selected Core project detail workspace phase is complete; no subsequent product phase is selected.
+- `[DONE]` Core roadmap rebaseline synchronizes current identity/access source truth and selects one bounded rollout-readiness phase; this planning-only phase performs no runtime implementation or production mutation.
+- `[NEXT]` Core identity/access rollout-readiness: validate implemented source surfaces against disposable PostgreSQL/Compose and complete documented human/operational gates; keep public Intake disabled pending explicit authorization.
 - `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
 - `[DONE]` BielOS Core security and architecture gate exists at `docs/modules/bielos-core.md`.
 - `[DONE]` Core project registry and project management use the existing `Project` model with bounded authorization, CSRF, archive-only deletion policy, and sanitized audits.

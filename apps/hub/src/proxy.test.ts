@@ -57,7 +57,7 @@ test("protected pages without a required Access assertion fail before session ro
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
-test("a present required Access assertion reaches full validation before session routing", () => {
+test("a present required Access assertion passes the early gate before session routing", () => {
   const response = evaluateProxyRequest(
     new NextRequest("http://hub:3001/core/projects", {
       headers: {
