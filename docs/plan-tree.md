@@ -58,6 +58,8 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` BielOS Core project detail workspace adds a private authorization-aware route for existing projects, reuses current administration controls, preserves archived read-only behavior, and requires no schema change.
 - `[DONE]` Core roadmap rebaseline synchronizes current identity/access source truth and selects one bounded rollout-readiness phase; this planning-only phase performs no runtime implementation or production mutation.
 - `[NEXT]` Core identity/access rollout-readiness: validate implemented source surfaces against disposable PostgreSQL/Compose and complete documented human/operational gates; keep public Intake disabled pending explicit authorization.
+- `[DONE]` Accepted local quality correction includes the existing public-application UI regression in `test:public-site`; GymForge is documented as implemented with expansion frozen, while L-vault, root.ark, and H-vault remain inert reserved boundaries.
+- `[BLOCKED]` Final local parity is blocked by Node `v24.14.1` versus the declared `>=22.13.0 <23` range and unavailable Docker/PostgreSQL; browser, owner-ceremony, Cloudflare-routing, migration/backup-authorization, and production-smoke gates remain pending.
 - `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
 - `[DONE]` BielOS Core security and architecture gate exists at `docs/modules/bielos-core.md`.
 - `[DONE]` Core project registry and project management use the existing `Project` model with bounded authorization, CSRF, archive-only deletion policy, and sanitized audits.

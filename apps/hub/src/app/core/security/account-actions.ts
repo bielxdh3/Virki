@@ -1,7 +1,7 @@
 "use server";
 
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
-import { confirmTotpEnrollment, disableTotp, getAccountSecurityState, listTrustedDevices, regenerateRecoveryCodes, revokeTrustedDevice, startTotpEnrollment } from "@bielos/auth/security";
+import { confirmTotpEnrollment, disableTotp, listTrustedDevices, regenerateRecoveryCodes, revokeTrustedDevice, startTotpEnrollment } from "@bielos/auth/security";
 import { headers } from "next/headers";
 import { forbidden } from "next/navigation";
 import { getCurrentSession } from "../../../lib/auth";
@@ -37,10 +37,6 @@ export async function revokeTrustedDeviceAction(formData: FormData): Promise<voi
 export async function loadTrustedDevices() {
   const session = await getCurrentSession();
   return session ? listTrustedDevices(session.user.id) : [];
-}
-
-export async function loadAccountSecurityState(userId: string) {
-  return getAccountSecurityState(userId);
 }
 
 async function requireAccountMutation(formData: FormData, source: string) {

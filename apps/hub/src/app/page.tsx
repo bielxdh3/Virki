@@ -36,7 +36,6 @@ const copy = {
     active: "Ativa",
     overviewTitle: "Sessão, segurança e stack local",
     coreOnly: "Core apenas",
-    unlocked: "Desbloqueada",
     identity: "Identidade",
     role: "Papel",
     operations: "Operações",
@@ -106,7 +105,6 @@ const copy = {
     active: "Active",
     overviewTitle: "Session, security, and local stack",
     coreOnly: "Core only",
-    unlocked: "Unlocked",
     identity: "Identity",
     role: "Role",
     operations: "Operations",
@@ -351,7 +349,7 @@ export default async function HubDashboardPage() {
           <article className="panel session-panel">
             <div className="panel-title">
               <span>{t.session}</span>
-              <strong className="status-pill is-active">{t.unlocked}</strong>
+              <strong className="status-pill is-active">{t.active}</strong>
             </div>
             <div className="session-avatar" aria-hidden="true">
               {session.user.email.slice(0, 2).toUpperCase()}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import type { BielosLocale } from "@bielos/ui";
 
 type ApplyCopy = {
@@ -85,13 +85,16 @@ export function ApplyForm({
             </label>
             <span>{module.available ? copy.runtimeAvailable : copy.runtimeUnavailable}</span>
             {selected[module.key] && (
-              <textarea
-                required
-                maxLength={1000}
-                placeholder={copy.reason}
-                value={reasons[module.key] ?? ""}
-                onChange={(event) => setReasons((current) => ({ ...current, [module.key]: event.target.value }))}
-              />
+              <>
+                <label htmlFor={`reason-${module.key}`}>{copy.reason}</label>
+                <textarea
+                  id={`reason-${module.key}`}
+                  required
+                  maxLength={1000}
+                  value={reasons[module.key] ?? ""}
+                  onChange={(event) => setReasons((current) => ({ ...current, [module.key]: event.target.value }))}
+                />
+              </>
             )}
           </div>
         ))}

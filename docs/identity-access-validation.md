@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The source implementation is complete for the requested identity/access surfaces, but this safe-rollout closeout is not complete. Intake remains fail-closed by default, the SMTP adapter and private email worker are wired in source, and the final current-SHA CI, production database evidence, owner ceremonies, deployment/migration state, Cloudflare routing, and authorized application smoke remain pending. Earlier SHA and CI references below are historical evidence and do not close the current rollout.
+The source implementation is complete for the requested identity/access surfaces, but this safe-rollout closeout is not complete. Intake remains fail-closed by default, the SMTP adapter and private email worker are wired in source, and production database evidence, owner ceremonies, deployment/migration state, Cloudflare routing, and authorized application smoke remain pending. Current-SHA CI for HEAD `2bb8696f7162b883d85381f2e2910f052b6ed9ce` is recorded below as CI evidence only; earlier SHA and CI references remain historical evidence.
 
 ## Dependency order and task status
 
@@ -55,7 +55,7 @@ The source implementation is complete for the requested identity/access surfaces
 - Production Compose config validation: passed locally. Production image build, image revision-label verification, and runtime smoke remain to be run against the final committed SHA.
 - Exact pre-remediation remote CI for `b70b42400a6234483bd353d1bbdad8f964d679ba`: run `30733244283` failed at `Audit dependency lockfile`; the audit and validation jobs were previously coupled, so later steps were skipped.
 - Exact post-remediation remote CI for validation commit `223528948a7732b9b1f5f6ea148759c0497439e6`: run `30736308059` passed both independent jobs, including 37 Core integration tests, concurrency tests, production image revision verification, and Compose validation.
-- Exact final-SHA CI for the current closeout commit: not confirmed. Historical CI runs do not close a newer SHA.
+- Current-SHA CI is recorded in the 2026-08-12 local revalidation section below; earlier CI runs remain historical evidence for their respective SHAs.
 - Codex Security diff scan: scan `68209414-195e-47e5-bd45-88bd257f1d48` reviewed `b70b42400a6234483bd353d1bbdad8f964d679ba...66908a4113f5bfa23e3c0b98a903067cd60193c2` with complete coverage. The sealed contract report contains one high-confidence Low/P3 information-disclosure finding (`CWE-200`) for the public intake catalog exposing an internal `ModuleCatalog.id`; two other candidates were validated and suppressed/ignored. The report was generated locally from the completed scan artifacts because the native workbench became terminal before indexing; no Critical, High, or Medium finding was reported.
 
 ## Migrations
@@ -85,7 +85,36 @@ No durable production migration, owner security ceremony, or authorized producti
 - `npm run test:backup:restore`: passed (`exit=0`) with a disposable PostgreSQL dump, restore, migration, and representative-data check.
 - `npm run build`: passed for public-site and hub. A local production image built with synthetic revision `0123456789abcdef0123456789abcdef01234567`, its OCI revision label matched, production runtime smoke passed, and production Compose config validation passed with placeholders.
 - Public Intake remains fail-closed; no runtime code, schema, migration, CI, production configuration, deployment, or production database was changed.
-- Exact current-SHA remote CI remains unconfirmed. Production migration and backup authorization, owner security ceremonies, Cloudflare routing, and authorized production application smoke remain external gates.
+- Production migration and backup authorization, owner security ceremonies, Cloudflare routing, and authorized production application smoke remain external gates.
+
+## Current local revalidation — 2026-08-12
+
+| Gate | Status | Evidence |
+| --- | --- | --- |
+| `npm run secrets:scan` | locally_verified | Passed. |
+| `npm run lint` | locally_verified | Passed. |
+| `npm run typecheck` | locally_verified | Passed. |
+| `npm run prisma:validate` | locally_verified | Passed. |
+| `npm run test:core:unit` | locally_verified | Passed, 77/77. |
+| `npm run test:public-site` | locally_verified | Passed, 3/3. |
+| `npm run test:production-revision` | locally_verified | Passed, 13/13. |
+| `npm run build` | locally_verified | Passed for public-site and hub. |
+| Docker/PostgreSQL-dependent local gates | blocked | Docker API unavailable and `CORE_TEST_DATABASE_URL` is missing; database integration, concurrency, intake database-role, backup/restore, and Docker image/Compose gates were not run. No control was weakened. |
+| Current-SHA remote CI | automated_ready | GitHub Actions run `31550088933` for HEAD `2bb8696f7162b883d85381f2e2910f052b6ed9ce` completed successfully for both `Validate` and `Audit dependency lockfile`. |
+| Production migration and backup authorization | production_authorization_pending | Requires authorized production operation and current backup/restore evidence. |
+| Owner security ceremonies | manual_gate_pending | Owner factors and offline recovery acknowledgement require the documented human ceremony. |
+| Cloudflare routing | manual_gate_pending | Production routing remains unchanged and requires separate authorized validation. |
+| Authorized production application smoke | production_authorization_pending | No production smoke action is claimed for this revalidation. |
+
+This revalidation records readiness evidence only. Public registration and live Intake remain disabled; no production enablement, migration, routing change, or production mutation is claimed.
+
+## Final campaign status boundary — 2026-08-13
+
+- Accepted local corrections include the existing public-application UI regression in the `test:public-site` script and the synchronized GymForge/reserved-module status copy; this documentation sync adds no runtime behavior.
+- Fresh local validation observed Node `v24.14.1`, outside the declared `>=22.13.0 <23` range. An earlier tsx-based public-site, Core unit, and GymForge attempt failed before test discovery with `uv_os_get_passwd` `ENOMEM`; a subsequent direct rerun under the same Node `v24.14.1` environment passed `test:public-site` 4/4, `test:core:unit` 77/77, and `test:gymforge-scoring` 8/8. Node 24 remains outside the declared parity range.
+- Docker/PostgreSQL-dependent integration, concurrency, restricted Intake-role, backup/restore, image, and runtime checks remain blocked because the Docker daemon is unavailable and `CORE_TEST_DATABASE_URL` is absent.
+- Current-SHA CI run `31550088933` is retained as campaign evidence for HEAD `2bb8696f7162b883d85381f2e2910f052b6ed9ce`; it was not independently queried during this documentation sync and does not establish production readiness.
+- Browser/manual Cloudflare, owner security ceremony, production migration/backup authorization, routing, and authorized application-smoke gates remain pending. Cloudflare Access stays first, BielOS internal authentication second, public registration stays disabled, and live Intake stays disabled by default.
 
 ## Human enablement steps
 

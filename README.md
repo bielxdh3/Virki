@@ -79,7 +79,7 @@ Current foundations include:
 - [x] secret scanning, linting, type checking, tests, and builds;
 - [x] audit and session-maintenance tooling.
 
-The reserved project modules exist as integration boundaries and navigation targets. They must not be described as fully integrated applications until that work is implemented and reviewed.
+L-vault, root.ark, and H-vault remain reserved project boundaries and navigation targets. They must not be described as fully integrated applications until their designs are implemented and reviewed. GymForge is an implemented private-hub application; further expansion remains frozen.
 
 ## Architecture
 
@@ -112,7 +112,7 @@ BielOS/
 │   ├── lvault/               Reserved L-vault boundary
 │   ├── rootark/              Reserved Root.ark boundary
 │   ├── hvault/               Reserved H-vault boundary
-│   └── gymforge/             Reserved GymForge boundary
+│   └── gymforge/             Implemented private GymForge boundary
 ├── infra/                    Docker and production infrastructure
 ├── scripts/                  Validation and operational tooling
 ├── docs/                     Architecture, auth, operations, and production docs
@@ -255,7 +255,7 @@ BielOS uses defense in depth rather than treating any single layer as sufficient
 - [ ] Define explicit contracts for independent project modules
 - [ ] Integrate Root.ark only after a separate architecture and security review
 - [ ] Integrate L-vault without weakening its local-data boundary
-- [ ] Add H-vault and GymForge through isolated module contracts
+- [ ] Add H-vault through an isolated module contract; preserve GymForge's implemented private-hub behavior and expansion freeze
 - [ ] Strengthen backup, restore, and disaster-recovery evidence
 - [ ] Keep the public site intentionally minimal while the private system grows
 

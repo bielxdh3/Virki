@@ -13,7 +13,7 @@
     "build": "npm run build --workspace @bielos/public-site && npm run build --workspace @bielos/hub",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test:core": "npm run test:core:unit && npm run test:core:db",
-    "test:public-site": "tsx --test apps/public-site/src/app/discovery.test.ts",
+    "test:public-site": "tsx --test apps/public-site/src/app/discovery.test.ts apps/public-site/src/app/apply/application-ui.test.tsx",
     "test:core:unit": "tsx --test scripts/core-test-database-safety.test.mjs packages/database/src/identity-access.test.ts packages/auth/src/email.test.ts packages/auth/src/security.test.ts packages/auth/src/administration.test.ts apps/intake/src/handler.test.ts packages/auth/src/cloudflare-access.test.ts packages/auth/src/command-output.test.ts packages/auth/src/rate-limit-config.test.ts packages/auth/src/session-cookie.test.ts apps/hub/src/proxy.test.ts apps/hub/src/lib/hub-redirect.test.ts apps/hub/src/app/api/logout/route.test.ts apps/hub/src/app/core/projects/validation.test.ts apps/hub/src/app/core/projects/access-policy.test.ts apps/hub/src/app/core/projects/detail-policy.test.ts apps/hub/src/app/core/security/session-policy.test.ts apps/hub/src/app/core/security/audit-view.test.ts apps/hub/src/app/core/operations.test.ts apps/hub/src/app/core/modules/service.test.ts apps/hub/src/app/core/core-ui.test.ts",
     "test:core:db": "node scripts/run-core-db-tests.mjs --suite all",
     "test:core:db:integration": "node scripts/run-core-db-tests.mjs --suite integration",
