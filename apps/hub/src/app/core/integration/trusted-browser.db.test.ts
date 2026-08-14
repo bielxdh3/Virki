@@ -43,6 +43,10 @@ const originalHubUrl = process.env.NEXT_PUBLIC_HUB_URL;
 const originalNodeEnv = process.env.NODE_ENV;
 let passwordHash: string;
 
+function currentTestNow(): Date {
+  return new Date(Date.now() - 60 * 1000);
+}
+
 before(async () => {
   process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "false";
   process.env.BIELOS_RATE_LIMIT_HASH_SECRET = syntheticCredential;
@@ -71,7 +75,7 @@ after(async () => {
 test("new TOTP browsers verify email first, and only completed TOTP establishes a seven-day grant", async () => {
   const user = await createUser("new-totp@example.invalid", "TOTP");
   const deviceToken = createDeviceToken();
-  const now = new Date("2026-08-05T12:00:00.000Z");
+  const now = currentTestNow();
 
   const start = asCeremony(await startLoginCeremony(user.id, deviceToken, "pt-BR", now));
   assert.equal(start.factor, "EMAIL");
@@ -97,7 +101,7 @@ test("new TOTP browsers verify email first, and only completed TOTP establishes 
 test("email-factor browsers establish the grant only after valid email verification", async () => {
   const user = await createUser("email-factor@example.invalid", "EMAIL");
   const deviceToken = createDeviceToken();
-  const now = new Date("2026-08-05T12:00:00.000Z");
+  const now = currentTestNow();
   const start = asCeremony(await startLoginCeremony(user.id, deviceToken, "pt-BR", now));
 
   assert.equal(start.factor, "EMAIL");
@@ -350,8 +354,9 @@ test("confirmed revoke-all sessions invalidates remembered trust but single-sess
 
 test("remembered login never creates or satisfies administrative elevation", async () => {
   const user = await createUser("admin-boundary@example.invalid", "EMAIL", "OWNER");
-  const device = await createTrustedDevice(user.id, createDeviceToken(), new Date("2026-08-12T12:00:00.000Z"));
-  const start = await startLoginCeremony(user.id, device.deviceToken, "pt-BR", new Date("2026-08-05T12:00:00.000Z"));
+  const now = currentTestNow();
+  const device = await createTrustedDevice(user.id, createDeviceToken(), new Date(now.getTime() + REMEMBERED_BROWSER_TTL_MS));
+  const start = await startLoginCeremony(user.id, device.deviceToken, "pt-BR", now);
 
   assert.equal(start.kind, "SESSION");
   assert.equal(await prisma.securityElevation.count({ where: { userId: user.id } }), 0);
@@ -363,7 +368,8 @@ test("remembered login never creates or satisfies administrative elevation", asy
 test("remembered login audits contain no raw bearer values or factors", async () => {
   const user = await createUser("audit-boundary@example.invalid", "EMAIL");
   const deviceToken = createDeviceToken();
-  await createTrustedDevice(user.id, deviceToken, new Date("2026-08-12T12:00:00.000Z"));
+  const now = currentTestNow();
+  await createTrustedDevice(user.id, deviceToken, new Date(now.getTime() + REMEMBERED_BROWSER_TTL_MS));
   const response = await login(createLoginRequest(user.email, syntheticCredential, deviceToken));
   const sessionToken = getCookieValue(response, "bielos_session");
   const audits = await prisma.auditLog.findMany({ select: { eventType: true, message: true, metadata: true, actorEmailHash: true } });
