@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The source implementation is complete for the requested identity/access surfaces, but this safe-rollout closeout is not complete. Intake remains fail-closed by default, the SMTP adapter and private email worker are wired in source, and production database evidence, owner ceremonies, deployment/migration state, Cloudflare routing, and authorized application smoke remain pending. Current baseline is `b007ff24177129c623ad45c3ce1900cba93b1376`, matching local and `origin/main`; exact current-SHA CI failed at Core database integration as recorded below. Earlier SHA and CI references remain historical evidence.
+The source implementation is complete for the requested identity/access surfaces. `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`: local/runtime/CI/Cloudflare technical evidence is complete, while OWNER administrative credential setup, offline administrative recovery-code acknowledgement, and the authenticated OWNER/MEMBER browser ceremony remain pending. Public registration and live Intake stay disabled. Current baseline is `33f540a4b396aa8a55fa65ad9f950b0c36712aae`, matching local and `origin/main`; exact GitHub Actions run `31821995102` passed both `Validate` and `Audit dependency lockfile`.
 
 ## Dependency order and task status
 
@@ -62,7 +62,7 @@ The source implementation is complete for the requested identity/access surfaces
 
 `20260801090000_identity_access_foundation`, `20260801100000_add_intake_dedupe_controls`, `20260801110000_add_partial_application_state`, `20260801120000_account_security_verification`, `20260801130000_administrative_elevation`, `20260801140000_security_ui_keys`, `20260802090000_restrict_intake_database_access`, `20260802100000_fix_intake_security_functions`, and `20260805120000_add_remembered_browser_grant` are additive. The remembered-browser migration defaults existing rows to no active grant through nullable timestamps. Down-migrations and destructive rollback are not assumed safe; take and verify a backup before deployment.
 
-No durable production migration, owner security ceremony, or authorized production application smoke is claimed for this closeout. Migration deployment remains pending human role provisioning, verified operational backup policy, and explicit authorization.
+Technical/runtime/CI/Cloudflare closeout evidence is complete for the local production Compose deployment and exact SHA. The documented OWNER administrative credential setup, offline administrative recovery-code acknowledgement, and authenticated OWNER/MEMBER browser ceremony remain pending; no final enablement claim is made.
 
 ## Public catalog disclosure hotfix
 
@@ -108,20 +108,15 @@ No durable production migration, owner security ceremony, or authorized producti
 
 This revalidation records readiness evidence only. Public registration and live Intake remain disabled; no production enablement, migration, routing change, or production mutation is claimed.
 
-## Final campaign status boundary — 2026-08-13
+## Final campaign status boundary — 2026-08-14
 
-- Current baseline is `b007ff24177129c623ad45c3ce1900cba93b1376`, matching local and `origin/main`. Exact current-SHA CI run `31716933173` failed at Core database integration: 50 tests passed and 3 stale remembered-browser fixture tests failed because hardcoded dates had expired; downstream DB-role, backup/restore, concurrency, build, image, runtime, and Compose steps were skipped.
-- The local test-only current-relative remembered-browser fixture correction is present but has not been remotely rerun because push is unauthorized. CI action maintenance was corrected locally from checkout/setup-node v4 to v7 while retaining Node `22.20.0`.
-- An earlier baseline/static run used Node `v24.14.1`, outside the declared `>=22.13.0 <23` range; final source/test validation was rerun under verified Node `v22.20.0`: secrets scan, lint, typecheck, Prisma validation, public-site `4/4`, Core unit `77/77`, GymForge scoring `8/8`, and production-revision `13/13` passed locally.
-- Restarting Docker Desktop restored Docker Engine `29.6.2`; disposable Core database integration passed `53/53`, Core concurrency passed `12/12`, restricted Intake database-role validation passed after 14 committed migrations against loopback-only disposable PostgreSQL, backup/restore validation exited 0 with disposable dump/restore, and npm audit reported 0 vulnerabilities. Durable production migration/backup, production stack smoke, Cloudflare live routing, owner ceremony, authenticated live smoke, and any additional remote-CI result remain pending; no production enablement is claimed.
+- Current baseline is `33f540a4b396aa8a55fa65ad9f950b0c36712aae`, matching local and `origin/main`. Exact GitHub Actions run `31821995102` passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation.
+- Docker Desktop restart restored Engine `29.6.2`. Real local production Compose is up with public-site, hub, intake, postgres, cloudflared, session-cleanup, and email-worker; health-local passed, all five built-service revisions matched the exact SHA, host application ports are loopback-only, direct local hub access without an Access assertion returned `403`, local hub health returned `200`, public site returned `200`, and disabled Intake `/api/catalog` returned `503`.
+- The current ignored custom-format PostgreSQL backup was verified; disposable restore succeeded with 14 migration rows, and migrate status/deploy/status showed no pending migrations. Disposable Core DB integration passed `53/53`, concurrency `12/12`, restricted Intake database-role validation passed after 14 committed migrations, backup/restore exited 0, secrets scan, Prisma validation, production revision `13/13`, npm audit, and `git diff --check` passed.
+- Live ingress returned public site `200`, `www` `200`, and hub `302` to the Cloudflare Access login; cloudflared registered four tunnel connections with connectivity prechecks passing. Owner state has one active OWNER, one ACTIVE TOTP factor, ten unused normal recovery codes, zero active administrative credentials, zero administrative recovery codes, and zero active elevations.
+- `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`: the only remaining action is for the OWNER to complete the documented administrative credential setup, acknowledge offline administrative recovery codes, and perform the authorized authenticated OWNER/MEMBER browser ceremony. Do not claim final completion or invent credentials or smoke results.
 - Cloudflare Access stays first, BielOS internal authentication second, loopback-only ports remain required, public registration and live Intake stay disabled, GymForge expansion remains frozen, `SecurityUnlock` runtime remains blocked, reserved modules remain inert, and AIP remains separate.
 
 ## Human enablement steps
 
-1. Provision and verify restricted intake database credentials and grants; confirm the intake role cannot read private Core tables.
-2. Deploy migrations against a backup, verify restore, then run DB integration and concurrency suites with PostgreSQL.
-3. Select and configure a real email adapter, outbox encryption key, TOTP encryption key, abuse secret, public origin, and intake URL; keep test transport out of production.
-4. Configure the owner’s second factor, separate administrative password, and offline administrative recovery codes through a human ceremony.
-5. Configure public routing to the isolated intake service without host exposure, validate loopback-only origins, and run an authorized production smoke.
-6. Confirm the post-remediation remote audit is green; do not use a breaking unrelated upgrade without review.
-7. Only after all gates pass, set the private production feature flag temporarily for the explicitly authorized smoke, then restore `BIELOS_INTAKE_ENABLED=false` and re-run rollback checks.
+1. The OWNER must complete the documented administrative credential setup, acknowledge the offline administrative recovery codes, and perform the authorized authenticated OWNER/MEMBER browser ceremony; keep `BIELOS_INTAKE_ENABLED=false` and public registration disabled until that action is complete.

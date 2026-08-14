@@ -1,8 +1,8 @@
 # BielOS Identity and Access Campaign
 
-Status: `[CURRENT]` — implementation is disabled by default until the production gates are real.
+Status: `[CURRENT]` — `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`; implementation remains disabled by default pending the documented OWNER human ceremony.
 
-Baseline: `b007ff24177129c623ad45c3ce1900cba93b1376` (local and `origin/main`). Exact current-SHA CI run `31716933173` failed at Core database integration after 50 tests passed and 3 stale remembered-browser fixture tests failed; the local test-only fixture correction is present but has not been remotely rerun because push is unauthorized.
+Baseline: `33f540a4b396aa8a55fa65ad9f950b0c36712aae` (local and `origin/main`). Exact GitHub Actions run `31821995102` for this SHA passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation.
 
 ## Binding boundaries
 
@@ -12,7 +12,7 @@ Baseline: `b007ff24177129c623ad45c3ce1900cba93b1376` (local and `origin/main`). 
 - GymForge remains available and feature-frozen. AIP remains separate. root.ark, L-vault, and H-vault remain non-runtime surfaces.
 - BielOS Core is not a requestable module. Catalog visibility, runtime availability, and entitlement are separate facts.
 - Only global `OWNER` manages accounts, global access, module grants, participants, and critical permissions.
-- Public applications, email-dependent behavior, and production intake remain disabled until their exact enablement gates are satisfied.
+- Public registration and live Intake remain disabled pending the documented OWNER administrative credential setup, offline administrative recovery-code acknowledgement, and authenticated OWNER/MEMBER browser ceremony.
 
 ## Data flows and trust boundaries
 
@@ -71,4 +71,4 @@ Schema rollback is additive-only: code can be rolled back before dependent write
 
 - Migrations are additive through `20260805120000_add_remembered_browser_grant`; production intake remains disabled until the real gates are satisfied. The remembered-browser migration adds nullable grant timestamps so existing trusted-device rows fail closed without remembered-login authority.
 - Account security, recovery, trusted devices, module access, owner review, administrative elevation, and truthful operations status are implemented behind Cloudflare, CSRF, session, and feature boundaries.
-- An earlier baseline/static run used Node `v24.14.1`, outside the declared `>=22.13.0 <23` range. Final source/test validation was rerun under verified Node `v22.20.0`: secrets, lint, typecheck, Prisma, public-site `4/4`, Core unit `77/77`, GymForge scoring `8/8`, production-revision `13/13`, and npm audit with 0 vulnerabilities passed locally. Restarting Docker Desktop restored Docker Engine `29.6.2`; disposable Core database integration passed `53/53`, Core concurrency passed `12/12`, restricted Intake database-role validation passed after 14 committed migrations against loopback-only disposable PostgreSQL, and backup/restore validation exited 0 with disposable dump/restore. Durable production migration/backup, production stack smoke, Cloudflare live routing, OWNER ceremony, and authenticated live smoke remain pending. Public registration and live Intake remain disabled; Cloudflare Access stays first, BielOS internal authentication second; GymForge expansion is frozen, reserved modules are inert, and AIP remains separate.
+- `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`: Docker Engine `29.6.2`, local production Compose, exact-SHA CI, database migrations/backup/restore, runtime health, loopback ports, Cloudflare ingress, and technical validation are complete. The only remaining action is for the OWNER to complete administrative credential setup, acknowledge offline administrative recovery codes, and perform the authorized authenticated OWNER/MEMBER browser ceremony; keep public registration and live Intake disabled until then. Cloudflare Access stays first, BielOS internal authentication second; GymForge expansion is frozen, reserved modules are inert, and AIP remains separate.
