@@ -101,7 +101,9 @@ When `NODE_ENV=production`, the cookie is also marked `Secure`. That means brows
 
 GitHub Actions validates the repository on pushes and pull requests to `main`.
 
-The CI job installs dependencies with `npm ci`, audits the lockfile, runs the local secret scan and production revision tests, runs lint, typechecks all workspaces, validates the Prisma schema, builds both Next.js apps, and builds the production Docker image with the exact workflow commit. CI inspects `org.opencontainers.image.revision` and fails unless it exactly equals that commit.
+CI has separate fail-closed dependency gates. The tooling gate consumes structured `npm audit --package-lock-only --json` output and accepts only the exact temporary GHSA-ggr8-5vv4-36mx path through `deepmerge-ts` 7.1.5, `@prisma/config` 6.19.3, and Prisma 6.19.3, including exact advisory metadata, paths, versions, severity, and vulnerability counts. Any drift or second advisory fails; a clean audit emits the exception-removal signal. It does not infer production reachability from the full development tree.
+
+The production gate first installs a clean tree with `npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit`, then audits that actual tree and fails on any vulnerability or on Prisma CLI/config/deepmerge reachability while requiring `@prisma/client`. The production Docker build uses the same clean production-dependencies stage, then adds only the build-selected `tsx`/esbuild and musl Argon2 runtime closures plus generated Prisma client output; it never copies the full build `node_modules`. After the exact `org.opencontainers.image.revision` check, CI asserts that image boundary before the existing runtime and Compose gates. The GHSA remains tooling-only technical debt; human OWNER/MEMBER smoke remains a separate pending gate.
 
 The secret scan is a private-repository MVP guardrail for obvious committed secrets. It does not require real Cloudflare, database, or owner credentials and must not be configured with real secret values.
 

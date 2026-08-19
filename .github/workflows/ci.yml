@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  audit:
-    name: Audit dependency lockfile
+  tooling-policy:
+    name: Audit Prisma tooling policy
     runs-on: ubuntu-latest
 
     steps:
@@ -29,8 +29,31 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependency lockfile
-        run: npm audit --package-lock-only --audit-level=moderate
+      - name: Audit Prisma tooling policy
+        run: node scripts/tooling-audit-policy.mjs
+
+      - name: Test Prisma tooling policy
+        run: node --test scripts/tooling-audit-policy.test.mjs
+
+  production-audit:
+    name: Audit production dependency tree
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Install production dependencies only
+        run: npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit
+
+      - name: Audit production dependency tree
+        run: node scripts/production-dependency-audit.mjs
 
   validate:
     name: Validate
@@ -112,6 +135,11 @@ jobs:
             echo "Production image revision verification failed."
             exit 1
           fi
+
+      - name: Assert production image dependency boundary
+        env:
+          BIELOS_RUNTIME_IMAGE: bielos-production-ci:${{ github.sha }}
+        run: node scripts/production-image-assertion.mjs
 
       - name: Production runtime smoke
         env:

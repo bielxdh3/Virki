@@ -10,6 +10,8 @@ The latest human smoke confirmed OWNER administrative credential setup, offline 
 
 The bounded resume checklist is only: acquire `PROJECT_OWNER_ACCESS_CHANGE`; grant/change/revoke disposable Project A MEMBER access and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE`; archive and verify read-only behavior; verify MEMBER admin/audit/session restrictions; and perform normal logout. Keep public registration and live Intake disabled, Cloudflare Access before BielOS authentication, GymForge expansion frozen, reserved modules inert, `SecurityUnlock` blocked, and AIP separate.
 
+The dependency audit exception is tooling-only technical debt. The production dependency gate uses a clean `npm ci --omit=dev --omit=peer --omit=optional` tree and must remain green with Prisma CLI, `@prisma/config`, and `deepmerge-ts` absent while `@prisma/client` and its generated client remain available. The full tooling gate accepts only the exact GHSA-ggr8-5vv4-36mx path through Prisma `6.19.3`, `@prisma/config` `6.19.3`, and `deepmerge-ts` `7.1.5`; any advisory, path, count, version, severity, or metadata drift fails closed, and a clean audit signals removal of the exception. This does not claim the GHSA is globally fixed or complete human OWNER/MEMBER smoke.
+
 ## Binding boundaries
 
 - `biel.dev.br` is public; `hub.biel.dev.br` remains private.
