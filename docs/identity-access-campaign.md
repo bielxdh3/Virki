@@ -1,8 +1,14 @@
 # BielOS Identity and Access Campaign
 
-Status: `[CURRENT]` — `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`; implementation remains disabled by default pending the documented OWNER human ceremony.
+Status: `[CURRENT]` — `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`; implementation remains disabled by default pending repeat human smoke for the affected project and audit flows.
 
-Baseline: `33f540a4b396aa8a55fa65ad9f950b0c36712aae` (local and `origin/main`). Exact GitHub Actions run `31821995102` for this SHA passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation.
+Historical technical evidence includes exact GitHub Actions run `31821995102` for `33f540a4b396aa8a55fa65ad9f950b0c36712aae`, which passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation. The current local `HEAD` is the pre-existing `afb74455573179b9cd915d2076032af9fae23a4b`; the worktree is uncommitted, `origin/main` currently resolves to that same SHA, and no push or new remote CI run was authorized or performed.
+
+## Post-closeout live-smoke repair — 2026-08-18
+
+The latest human smoke confirmed OWNER administrative credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation. It also confirmed the former UI scope-availability defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke, while repetitive `ACCESS_JWT_VALID` events made the OWNER audit view low-signal. Phase 1/2 source corrections address those defects locally and local validation is complete under unsupported Node `24.14.1`; current human smoke must be repeated after this uncommitted patch. Do not claim `BIELOS_CLOSEOUT_COMPLETE` or current authenticated OWNER/MEMBER browser smoke.
+
+The bounded resume checklist is only: acquire `PROJECT_OWNER_ACCESS_CHANGE`; grant/change/revoke disposable Project A MEMBER access and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE`; archive and verify read-only behavior; verify MEMBER admin/audit/session restrictions; and perform normal logout. Keep public registration and live Intake disabled, Cloudflare Access before BielOS authentication, GymForge expansion frozen, reserved modules inert, `SecurityUnlock` blocked, and AIP separate.
 
 ## Binding boundaries
 
@@ -12,7 +18,7 @@ Baseline: `33f540a4b396aa8a55fa65ad9f950b0c36712aae` (local and `origin/main`). 
 - GymForge remains available and feature-frozen. AIP remains separate. root.ark, L-vault, and H-vault remain non-runtime surfaces.
 - BielOS Core is not a requestable module. Catalog visibility, runtime availability, and entitlement are separate facts.
 - Only global `OWNER` manages accounts, global access, module grants, participants, and critical permissions.
-- Public registration and live Intake remain disabled pending the documented OWNER administrative credential setup, offline administrative recovery-code acknowledgement, and authenticated OWNER/MEMBER browser ceremony.
+- Public registration and live Intake remain disabled pending repeat of the affected authenticated OWNER/MEMBER browser ceremony after this repair.
 
 ## Data flows and trust boundaries
 
@@ -71,4 +77,4 @@ Schema rollback is additive-only: code can be rolled back before dependent write
 
 - Migrations are additive through `20260805120000_add_remembered_browser_grant`; production intake remains disabled until the real gates are satisfied. The remembered-browser migration adds nullable grant timestamps so existing trusted-device rows fail closed without remembered-login authority.
 - Account security, recovery, trusted devices, module access, owner review, administrative elevation, and truthful operations status are implemented behind Cloudflare, CSRF, session, and feature boundaries.
-- `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`: Docker Engine `29.6.2`, local production Compose, exact-SHA CI, database migrations/backup/restore, runtime health, loopback ports, Cloudflare ingress, and technical validation are complete. The only remaining action is for the OWNER to complete administrative credential setup, acknowledge offline administrative recovery codes, and perform the authorized authenticated OWNER/MEMBER browser ceremony; keep public registration and live Intake disabled until then. Cloudflare Access stays first, BielOS internal authentication second; GymForge expansion is frozen, reserved modules are inert, and AIP remains separate.
+- `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: the Phase 1/2 implementation and listed local validation are complete under unsupported Node `24.14.1`; repeat only the affected scope, project, audit, restriction, and logout flows. Historical technical/runtime/CI evidence remains historical; no new SHA, deployment, push, or remote CI result is claimed. Cloudflare Access stays first, BielOS internal authentication second; loopback-only ports remain required, public registration and live Intake stay disabled, GymForge expansion is frozen, reserved modules are inert, and AIP remains separate.

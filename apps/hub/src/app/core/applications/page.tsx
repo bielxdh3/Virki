@@ -86,7 +86,7 @@ export default async function CoreApplicationsPage() {
   const csrfToken = createCsrfToken();
 
   return (
-    <CoreShell variant="standalone" locale={locale} role={session.user.role} activePath="/core/applications"><div className="core-projects-workspace">
+    <CoreShell variant="docked" locale={locale} role={session.user.role} activePath="/core/applications"><div className="core-projects-workspace">
         <header className="top-statusbar">
           <a href="/">{t.back}</a>
           <LanguageSelector locale={locale} label={t.language} />

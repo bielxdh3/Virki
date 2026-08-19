@@ -35,7 +35,11 @@ function CoreNavigation({ locale, role, activePath, layout }: CoreNavigationProp
   return (
     <nav className={`dock-nav core-navigation core-navigation--${layout}`} aria-label={getCoreNavigationLabel(locale)}>
       {items.map((item, index) => (
-        <a key={item.id} href={item.href} aria-current={activePath === item.href ? "page" : undefined}>
+        <a
+          key={item.id}
+          href={item.href}
+          aria-current={item.kind === "route" && activePath === item.activePath ? "page" : undefined}
+        >
           <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
           <strong>{item.label}</strong>
         </a>

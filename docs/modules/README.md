@@ -1,15 +1,15 @@
 # Application And Module Planning Index
 
-This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The Core project-detail phase is complete, and the bounded Core identity/access rollout-readiness phase is the selected next phase; rollout and production enablement remain gated. The private hub remains behind Cloudflare Access first and BielOS internal authentication second, with existing CSRF, session/elevation, authorization, and audit boundaries preserved. Public registration and live Intake remain disabled by default. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
+This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The current post-smoke repair is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE` in an uncommitted worktree; local validation passed under unsupported Node `24.14.1`, and affected OWNER/MEMBER project, audit, restriction, and logout smoke must be repeated under the existing layered boundaries. Public registration and live Intake remain disabled. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
 
 ## BielOS Core
 
-- Status: existing Core project-detail and platform surfaces are implemented, validated, deployed, and operationally verified; identity/access source surfaces are implemented, while rollout-readiness and production enablement remain gated.
+- Status: existing Core project-detail and platform surfaces are implemented; historical technical/runtime evidence is retained, while the uncommitted post-smoke repair has complete local validation under unsupported Node `24.14.1` and only the bounded affected human ceremony remains. Repeat validation under Node `>=22.13.0 <23` before release.
 - Existing foundations: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
 - Security and architecture gate: complete in `bielos-core.md`.
 - Implemented surfaces: project registry/lifecycle, authorization-aware project detail workspace, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.
-- Completed verification: database-backed integration/concurrency validation and authenticated OWNER/MEMBER production smoke.
-- Maintenance boundary: operational verification, deployment revision attestation, and the selected project-detail phase are complete; Core identity/access rollout-readiness is the selected next phase and remains a validation/ceremony gate, not an implementation or deployment phase. `SecurityUnlock` runtime remains blocked by its design boundary.
+- Completed verification: historical database-backed integration/concurrency validation and historical authenticated OWNER/MEMBER production smoke; current authenticated smoke is not claimed.
+- Maintenance boundary: no deployment or publication is authorized in the current uncommitted repair; `SecurityUnlock` runtime remains blocked by its design boundary.
 
 ## Hub And Application Boundary
 

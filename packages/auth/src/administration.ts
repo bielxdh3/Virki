@@ -3,22 +3,12 @@ import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
 import { generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode } from "./security";
 import { hashAuditIdentifier, hashPassword, verifyPassword, writeAuditLog } from "./index";
 import { prisma, type Prisma } from "@bielos/database";
+import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
+
+export { ELEVATION_SCOPES, ELEVATION_SCOPE_ACTIONS, UI_ELEVATION_SCOPES } from "./elevation-scopes";
+export type { ElevationScope } from "./elevation-scopes";
 
 export const ELEVATION_PROTOCOL_VERSION = 1;
-export const ELEVATION_SCOPES = [
-  "ACCOUNT_APPLICATION_REVIEW",
-  "ACCOUNT_ACTIVATION_REISSUE",
-  "MODULE_ACCESS_CHANGE",
-  "FEATURE_PERMISSION_CHANGE",
-  "ACCOUNT_STATE_CHANGE",
-  "GLOBAL_ROLE_CHANGE",
-  "MODULE_CATALOG_CHANGE",
-  "ADMIN_CREDENTIAL_CHANGE",
-  "ADMIN_RECOVERY_REGENERATE",
-  "PROJECT_OWNER_ACCESS_CHANGE",
-  "CORE_PROJECT_ARCHIVE"
-] as const;
-export type ElevationScope = (typeof ELEVATION_SCOPES)[number];
 export type ElevationDuration = { kind: "TIMED"; minutes: 15 | 60 | 240 | 1440 } | { kind: "MANUAL"; confirmed: boolean };
 
 const ADMIN_MIN_PASSWORD_LENGTH = 16;

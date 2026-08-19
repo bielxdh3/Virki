@@ -2,7 +2,9 @@
 
 ## Scope and status
 
-The source implementation is complete for the requested identity/access surfaces. `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`: local/runtime/CI/Cloudflare technical evidence is complete, while OWNER administrative credential setup, offline administrative recovery-code acknowledgement, and the authenticated OWNER/MEMBER browser ceremony remain pending. Public registration and live Intake stay disabled. Current baseline is `33f540a4b396aa8a55fa65ad9f950b0c36712aae`, matching local and `origin/main`; exact GitHub Actions run `31821995102` passed both `Validate` and `Audit dependency lockfile`.
+The source implementation is complete for the requested identity/access surfaces, and the current status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: Phase 1/2 fixes are uncommitted and locally validated, while the affected project/audit/restriction/logout human smoke must be repeated. The latest human smoke confirmed OWNER credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation, but the former UI scope defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke and `ACCESS_JWT_VALID` reduced audit signal. Public registration and live Intake stay disabled. Current local `HEAD` is the pre-existing `afb74455573179b9cd915d2076032af9fae23a4b`; the worktree is uncommitted, `origin/main` remains that SHA, and no push, new remote CI run, or deployment was authorized or performed. Run evidence from `31821995102` for `33f540a4b396aa8a55fa65ad9f950b0c36712aae` remains historical.
+
+Local patch validation completed under Node `24.14.1`: `npm run secrets:scan`, `npm run lint`, `npm run typecheck --workspaces --if-present`, `npm run prisma:validate`, `npm run test:core` (79 unit + 66 database), `npm run test:core:concurrency` (12), `npm run test:public-site` (4), `npm run test:gymforge-scoring` (8), `npm run test:production-revision` (13), and `npm run build`. The declared engine is Node `>=22.13.0 <23`; Node 22 was unavailable, so the evidence is unsupported-runtime local evidence and must be repeated under Node 22 before release.
 
 ## Dependency order and task status
 
@@ -32,7 +34,7 @@ The source implementation is complete for the requested identity/access surfaces
 - UI exposes PT-BR/English paths, safe statuses, and only opaque references. Audit metadata is bounded and hashed; no codes, secrets, passwords, raw bearer values, IPs, user agents, or provider errors are written.
 - Operations reports only database probe state, email configured/unavailable, intake enabled/disabled, and worker not-checked. No queues, environment values, or provider identifiers are exposed.
 
-## Evidence
+## Historical Evidence
 
 - Focused/core unit suite: 71 passing.
 - Public-site discovery: 3 passing.
@@ -62,7 +64,7 @@ The source implementation is complete for the requested identity/access surfaces
 
 `20260801090000_identity_access_foundation`, `20260801100000_add_intake_dedupe_controls`, `20260801110000_add_partial_application_state`, `20260801120000_account_security_verification`, `20260801130000_administrative_elevation`, `20260801140000_security_ui_keys`, `20260802090000_restrict_intake_database_access`, `20260802100000_fix_intake_security_functions`, and `20260805120000_add_remembered_browser_grant` are additive. The remembered-browser migration defaults existing rows to no active grant through nullable timestamps. Down-migrations and destructive rollback are not assumed safe; take and verify a backup before deployment.
 
-Technical/runtime/CI/Cloudflare closeout evidence is complete for the local production Compose deployment and exact SHA. The documented OWNER administrative credential setup, offline administrative recovery-code acknowledgement, and authenticated OWNER/MEMBER browser ceremony remain pending; no final enablement claim is made.
+Historical technical/runtime/CI/Cloudflare evidence is retained for its exact published SHA. Local implementation and validation are complete under the stated runtime limitation; the affected human smoke remains pending. No final enablement, current authenticated OWNER/MEMBER smoke, new deployment, or new remote CI result is claimed.
 
 ## Public catalog disclosure hotfix
 
@@ -99,7 +101,7 @@ Technical/runtime/CI/Cloudflare closeout evidence is complete for the local prod
 | `npm run test:public-site` | locally_verified | Passed, 3/3. |
 | `npm run test:production-revision` | locally_verified | Passed, 13/13. |
 | `npm run build` | locally_verified | Passed for public-site and hub. |
-| Docker/PostgreSQL-dependent local gates | blocked | Docker API unavailable and `CORE_TEST_DATABASE_URL` is missing; database integration, concurrency, intake database-role, backup/restore, and Docker image/Compose gates were not run. No control was weakened. |
+| Docker/PostgreSQL-dependent local gates | passed | Later local evidence passed under Node `24.14.1`: Core database `66`, concurrency `12`, and the listed backup/role/build gates; repeat under Node 22 before release. |
 | Historical CI evidence | historical | GitHub Actions run `31550088933` for HEAD `2bb8696f7162b883d85381f2e2910f052b6ed9ce` completed successfully for both `Validate` and `Audit dependency lockfile`; it is not current-SHA evidence. |
 | Production migration and backup authorization | production_authorization_pending | Requires authorized production operation and current backup/restore evidence. |
 | Owner security ceremonies | manual_gate_pending | Owner factors and offline recovery acknowledgement require the documented human ceremony. |
@@ -108,15 +110,15 @@ Technical/runtime/CI/Cloudflare closeout evidence is complete for the local prod
 
 This revalidation records readiness evidence only. Public registration and live Intake remain disabled; no production enablement, migration, routing change, or production mutation is claimed.
 
-## Final campaign status boundary — 2026-08-14
+## Historical final campaign status boundary — 2026-08-14
 
-- Current baseline is `33f540a4b396aa8a55fa65ad9f950b0c36712aae`, matching local and `origin/main`. Exact GitHub Actions run `31821995102` passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation.
+- Historical baseline `33f540a4b396aa8a55fa65ad9f950b0c36712aae` matched local and `origin/main` at that time. Exact GitHub Actions run `31821995102` passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation; this is not current worktree evidence.
 - Docker Desktop restart restored Engine `29.6.2`. Real local production Compose is up with public-site, hub, intake, postgres, cloudflared, session-cleanup, and email-worker; health-local passed, all five built-service revisions matched the exact SHA, host application ports are loopback-only, direct local hub access without an Access assertion returned `403`, local hub health returned `200`, public site returned `200`, and disabled Intake `/api/catalog` returned `503`.
 - The current ignored custom-format PostgreSQL backup was verified; disposable restore succeeded with 14 migration rows, and migrate status/deploy/status showed no pending migrations. Disposable Core DB integration passed `53/53`, concurrency `12/12`, restricted Intake database-role validation passed after 14 committed migrations, backup/restore exited 0, secrets scan, Prisma validation, production revision `13/13`, npm audit, and `git diff --check` passed.
 - Live ingress returned public site `200`, `www` `200`, and hub `302` to the Cloudflare Access login; cloudflared registered four tunnel connections with connectivity prechecks passing. Owner state has one active OWNER, one ACTIVE TOTP factor, ten unused normal recovery codes, zero active administrative credentials, zero administrative recovery codes, and zero active elevations.
-- `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`: the only remaining action is for the OWNER to complete the documented administrative credential setup, acknowledge offline administrative recovery codes, and perform the authorized authenticated OWNER/MEMBER browser ceremony. Do not claim final completion or invent credentials or smoke results.
+- Historical closeout status was `BIELOS_CLOSEOUT_TECHNICALLY_COMPLETE_MANUAL_HUMAN_ACTION_PENDING`; the current status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE` and the affected human smoke must be repeated. Do not claim `BIELOS_CLOSEOUT_COMPLETE` or invent credentials or smoke results.
 - Cloudflare Access stays first, BielOS internal authentication second, loopback-only ports remain required, public registration and live Intake stay disabled, GymForge expansion remains frozen, `SecurityUnlock` runtime remains blocked, reserved modules remain inert, and AIP remains separate.
 
 ## Human enablement steps
 
-1. The OWNER must complete the documented administrative credential setup, acknowledge the offline administrative recovery codes, and perform the authorized authenticated OWNER/MEMBER browser ceremony; keep `BIELOS_INTAKE_ENABLED=false` and public registration disabled until that action is complete.
+1. Repeat only the affected post-smoke flows after this patch: acquire `PROJECT_OWNER_ACCESS_CHANGE`; grant/change/revoke disposable Project A MEMBER access and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE`; archive and verify read-only behavior; verify MEMBER admin/audit/session restrictions; then perform normal logout. Keep `BIELOS_INTAKE_ENABLED=false` and public registration disabled.

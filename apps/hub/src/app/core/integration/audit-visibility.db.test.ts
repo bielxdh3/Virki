@@ -126,6 +126,50 @@ test("audit display is newest-first, bounded, and excludes private columns", asy
   assert.equal(serialized.includes("actorUserId"), false);
 });
 
+test("default activity omits access success noise while OWNER infrastructure filter exposes only access events", async () => {
+  const baseTime = new Date();
+  await prisma.auditLog.createMany({
+    data: [
+      {
+        eventType: "ACCESS_JWT_VALID",
+        actorUserId: owner.id,
+        result: "SUCCESS",
+        resource: "hub",
+        createdAt: new Date(baseTime.getTime() + 3_000)
+      },
+      {
+        eventType: "ACCESS_JWT_INVALID",
+        actorUserId: null,
+        result: "FAILURE",
+        resource: "hub",
+        createdAt: new Date(baseTime.getTime() + 2_000)
+      },
+      {
+        eventType: "CORE_PROJECT_CREATED",
+        actorUserId: owner.id,
+        result: "SUCCESS",
+        resource: "core.project",
+        createdAt: new Date(baseTime.getTime() + 1_000)
+      }
+    ]
+  });
+
+  const activity = await listCoreAuditActivity(owner);
+  assert.deepEqual(activity.map((item) => item.eventType), [
+    "ACCESS_JWT_INVALID",
+    "CORE_PROJECT_CREATED"
+  ]);
+
+  const infrastructure = await listCoreAuditActivity(owner, "infrastructure");
+  assert.deepEqual(infrastructure.map((item) => item.eventType), [
+    "ACCESS_JWT_VALID",
+    "ACCESS_JWT_INVALID"
+  ]);
+  assert.deepEqual(await listCoreAuditActivity(owner, "untrusted-filter"), [
+    ...activity
+  ]);
+});
+
 function createUser(email: string, role: "OWNER" | "ADMIN" | "MEMBER") {
   return prisma.user.create({
     data: { email, role, isActive: true },

@@ -5,6 +5,9 @@ import {
   getSafeAuditEventType,
   getSafeAuditResource,
   getSafeAuditResult,
+  CORE_INFRASTRUCTURE_AUDIT_EVENT_TYPES,
+  normalizeCoreAuditFilter,
+  type CoreAuditFilter,
   type SafeAuditActorState,
   type SafeAuditResource,
   type SafeAuditResult
@@ -26,7 +29,8 @@ export type CoreAuditDisplay = {
 };
 
 export async function listCoreAuditActivity(
-  principal: CoreAuditPrincipal
+  principal: CoreAuditPrincipal,
+  requestedFilter: CoreAuditFilter | string = "activity"
 ): Promise<CoreAuditDisplay[]> {
   if (!isValidAuditPrincipal(principal)) {
     return [];
@@ -41,6 +45,8 @@ export async function listCoreAuditActivity(
     return [];
   }
 
+  const filter = normalizeCoreAuditFilter(requestedFilter);
+
   const logs = await prisma.auditLog.findMany({
     select: {
       eventType: true,
@@ -49,6 +55,9 @@ export async function listCoreAuditActivity(
       actorUserId: true,
       createdAt: true
     },
+    where: filter === "infrastructure"
+      ? { eventType: { in: [...CORE_INFRASTRUCTURE_AUDIT_EVENT_TYPES] } }
+      : { NOT: { eventType: "ACCESS_JWT_VALID", result: "SUCCESS" } },
     orderBy: { createdAt: "desc" },
     take: CORE_AUDIT_DISPLAY_LIMIT
   });
@@ -56,7 +65,7 @@ export async function listCoreAuditActivity(
   return logs.map((log) => ({
     eventType: getSafeAuditEventType(log.eventType),
     result: getSafeAuditResult(log.result),
-    resource: getSafeAuditResource(log.resource),
+      resource: getSafeAuditResource(log.resource, log.eventType),
     actorState: getSafeAuditActorState(log.actorUserId),
     createdAt: log.createdAt
   }));

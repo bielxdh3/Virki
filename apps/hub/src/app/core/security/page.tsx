@@ -16,6 +16,7 @@ import {
   type SafeAuditResource,
   type SafeAuditResult
 } from "./audit-view";
+import { normalizeCoreAuditFilter, type CoreAuditFilter } from "./audit-view";
 import {
   CORE_AUDIT_DISPLAY_LIMIT,
   listCoreAuditActivity
@@ -56,8 +57,11 @@ const copy = {
     revokeAll: "Revogar todas as outras",
     noOthers: "Não há outras sessões ativas.",
     auditActivity: "Atividade de auditoria",
+    auditFilter: "Filtro de auditoria",
+    activityFilter: "Atividade relevante",
+    infrastructureFilter: "Infraestrutura e limite de acesso",
     ownerOnly: "Somente OWNER",
-    newestAudit: "50 eventos mais recentes dentro da retenção ativa.",
+    newestAudit: "Até 50 eventos mais recentes dentro da retenção ativa.",
     event: "Evento",
     result: "Resultado",
     resource: "Categoria",
@@ -71,10 +75,12 @@ const copy = {
     resultInfo: "Informação",
     resultOther: "Outro",
     resourceHub: "Hub",
+    resourceAccess: "Limite de acesso",
     resourceSession: "Sessão",
     resourceProject: "Projeto",
     resourceProjectAccess: "Acesso de projeto",
     resourceApplication: "Aplicação",
+    resourceSecurity: "Segurança",
     resourceSystem: "Sistema",
     resourceOther: "Outro"
   },
@@ -106,8 +112,11 @@ const copy = {
     revokeAll: "Revoke all other sessions",
     noOthers: "There are no other active sessions.",
     auditActivity: "Audit activity",
+    auditFilter: "Audit filter",
+    activityFilter: "Relevant activity",
+    infrastructureFilter: "Infrastructure and access boundary",
     ownerOnly: "OWNER only",
-    newestAudit: "50 newest events within active retention.",
+    newestAudit: "Up to 50 newest events within active retention.",
     event: "Event",
     result: "Result",
     resource: "Category",
@@ -121,10 +130,12 @@ const copy = {
     resultInfo: "Information",
     resultOther: "Other",
     resourceHub: "Hub",
+    resourceAccess: "Access boundary",
     resourceSession: "Session",
     resourceProject: "Project",
     resourceProjectAccess: "Project access",
     resourceApplication: "Application",
+    resourceSecurity: "Security",
     resourceSystem: "System",
     resourceOther: "Other"
   }
@@ -158,6 +169,8 @@ function getAuditResourceLabel(resource: SafeAuditResource, locale: BielosLocale
   switch (resource) {
     case "hub":
       return t.resourceHub;
+    case "access":
+      return t.resourceAccess;
     case "session":
       return t.resourceSession;
     case "project":
@@ -166,6 +179,8 @@ function getAuditResourceLabel(resource: SafeAuditResource, locale: BielosLocale
       return t.resourceProjectAccess;
     case "application":
       return t.resourceApplication;
+    case "security":
+      return t.resourceSecurity;
     case "system":
       return t.resourceSystem;
     default:
@@ -173,7 +188,11 @@ function getAuditResourceLabel(resource: SafeAuditResource, locale: BielosLocale
   }
 }
 
-export default async function CoreSecurityPage() {
+export default async function CoreSecurityPage({
+  searchParams
+}: {
+  searchParams?: Promise<{ audit?: string }>;
+}) {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "core-security");
 
@@ -189,11 +208,13 @@ export default async function CoreSecurityPage() {
 
   const locale = await getLocale();
   const t = copy[locale];
+  const params = await searchParams;
+  const auditFilter: CoreAuditFilter = normalizeCoreAuditFilter(params?.audit);
   const csrfToken = createCsrfToken();
   const now = new Date();
   const isOwner = session.user.role === "OWNER";
   const sessions = await listCoreSessionsForPrincipal(session.user, session.id, now);
-  const auditLogs = isOwner ? await listCoreAuditActivity(session.user) : [];
+  const auditLogs = isOwner ? await listCoreAuditActivity(session.user, auditFilter) : [];
   const otherSessionCount = sessions.filter((item) => !item.isCurrent).length;
 
   return (
@@ -308,6 +329,17 @@ export default async function CoreSecurityPage() {
               </div>
               <span>{auditLogs.length} / {CORE_AUDIT_DISPLAY_LIMIT}</span>
             </div>
+
+            <form className="compact-form core-audit-filter" method="get" action="/core/security#audit">
+              <label>
+                <span>{t.auditFilter}</span>
+                <select name="audit" defaultValue={auditFilter}>
+                  <option value="activity">{t.activityFilter}</option>
+                  <option value="infrastructure">{t.infrastructureFilter}</option>
+                </select>
+              </label>
+              <button className="button-ghost" type="submit">{t.auditActivity}</button>
+            </form>
 
             {auditLogs.length === 0 ? (
               <div className="core-project-empty core-audit-empty">

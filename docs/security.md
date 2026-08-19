@@ -2,6 +2,8 @@
 
 Security is a first-class requirement for BielOS.
 
+Current post-smoke status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`. Phase 1/2 changes remain uncommitted at the pre-existing local `HEAD`; local validation passed under unsupported Node `24.14.1`, while the latest human smoke found the former project-elevation scope availability defect and low-signal successful Access audit noise. The affected human smoke must be repeated; no current authenticated OWNER/MEMBER smoke or final closeout claim is made.
+
 ## Current MVP Rules
 
 - Do not commit real secrets.
@@ -68,7 +70,7 @@ See `docs/audit-logs.md`.
 
 CI runs secret scan, lint, typecheck, Prisma validation, Core unit tests, migrated PostgreSQL integration tests, real concurrency tests, build, production image build, and production Compose validation. The Core database suites use one synthetic PostgreSQL service and do not require production secrets.
 
-The current redirect-hardening campaign passed 52 unit, 48 aggregate database, 36 integration, and 12 concurrency tests plus secret scan, lint, typecheck, Prisma validation, build, production image, Compose validation, restart, health, Access ordering, direct-origin denial, and loopback exposure checks. The dedicated limiter key remains only in the ignored private environment, production was rebuilt from clean pushed runtime commit `e559152b8f402f07f86c3eb29c56e601cf5bca44`, and migrations are current. Exact image-to-commit provenance remains operationally inferred because the image has no trustworthy revision label. Authenticated OWNER and MEMBER smoke passed. Authorization B used exactly one temporary disposable MEMBER; baseline denial, VIEWER/EDITOR visibility, global-role mutation denial, revocation, IDOR isolation, own-session isolation, owner-audit denial, sanitized operations, invalid-login recovery, and logout were verified before account, credential, sessions, grants, and profiles were removed. No registration or permanent provisioning surface was added. `CI remoto não confirmado.`
+Historical validation passed the listed technical gates and historical OWNER/MEMBER smoke; those results do not establish current readiness for this uncommitted repair. The latest human smoke found the project-scope and audit-signal defects described above, so repeat only the affected flows after validation. No registration or permanent provisioning surface was added. `CI remoto não confirmado.`
 
 Run locally:
 
@@ -138,7 +140,7 @@ Private invitations are frozen with the rest of optional GymForge expansion.
 - Ranking remains deterministic by final score, attendance count, longest streak, latest qualifying check-in, display-name sort, and finally internal participant id only as a non-displayed fallback.
 - The committed additive migration was applied to production with `prisma migrate deploy` after a current custom-format PostgreSQL backup was created and verified; the post-deploy migration status is current.
 - After the first correction write, dropping the table or rolling the application back to a pre-Phase-3 commit is unsafe because assignment, reactivation, and `DRAFT` guards live in the new runtime. Recovery requires a forward fix or verified restore.
-- Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and production build pass. Local/public health, Cloudflare-first ordering, container state, and loopback exposure were verified after deploy. A later authenticated OWNER Core smoke confirmed the existing GymForge shell/navigation behind both authentication layers without changing GymForge behavior.
+- Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and production build pass as historical evidence. Historical local/public health, Cloudflare-first ordering, container state, loopback exposure, and authenticated OWNER Core GymForge shell checks do not establish current post-smoke readiness.
 
 ## Production Exposure Blockers
 

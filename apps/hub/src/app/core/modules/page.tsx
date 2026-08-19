@@ -62,7 +62,7 @@ export default async function CoreModulesPage() {
   const csrfToken = createCsrfToken();
 
   return (
-    <CoreShell variant="standalone" locale={locale} role={session.user.role} activePath="/core/modules"><div className="core-projects-workspace">
+    <CoreShell variant="docked" locale={locale} role={session.user.role} activePath="/core/modules"><div className="core-projects-workspace">
       <header className="top-statusbar"><a href="/">{portuguese ? "Voltar ao hub" : "Back to hub"}</a><LanguageSelector locale={locale} label={portuguese ? "Idioma" : "Language"} /></header>
       <section className="identity-panel"><p className="eyebrow">BielOS Core</p><h1>{portuguese ? "Catálogo de módulos" : "Module catalog"}</h1><p>{portuguese ? "Acesso e runtime são estados separados." : "Access and runtime are separate states."}</p></section>
       <section className="core-project-list" aria-label={t.catalogLabel}>

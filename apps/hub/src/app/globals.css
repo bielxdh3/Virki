@@ -1312,6 +1312,98 @@ strong {
   grid-column: 1 / -1;
 }
 
+.admin-security-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-security-stage,
+.admin-security-active {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-security-form {
+  padding: 0;
+}
+
+.admin-security-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted-strong);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.admin-security-field input,
+.admin-security-field select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid rgba(121, 142, 160, 0.18);
+  border-radius: 6px;
+  background: #090e14;
+  color: var(--text);
+  padding: 0 9px;
+}
+
+.admin-security-password-control {
+  display: flex;
+  gap: 7px;
+}
+
+.admin-security-password-control input {
+  min-width: 0;
+  flex: 1;
+}
+
+.admin-security-password-control button {
+  grid-column: auto;
+  flex: 0 0 auto;
+}
+
+.admin-security-manual-confirm {
+  grid-column: 1 / -1;
+  align-self: end;
+  min-height: 34px;
+}
+
+.admin-security-feedback {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(121, 142, 160, 0.2);
+  border-radius: 6px;
+  background: rgba(12, 18, 24, 0.5);
+}
+
+.admin-security-feedback.is-ok {
+  border-color: rgba(116, 221, 161, 0.38);
+  color: #c8f5dc;
+}
+
+.admin-security-feedback.is-error {
+  border-color: rgba(238, 116, 116, 0.42);
+  color: #ffd6d6;
+}
+
+.admin-security-elevation-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-security-elevation-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px;
+  border: 1px solid rgba(121, 142, 160, 0.14);
+  border-radius: 6px;
+  background: rgba(12, 18, 24, 0.36);
+}
+
 .score-correction-form {
   border-bottom: 1px solid rgba(121, 142, 160, 0.12);
 }

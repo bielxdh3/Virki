@@ -2,6 +2,8 @@
 
 Phase 02.1 hardens the internal hub authentication layer without adding module unlocks, OAuth, public registration, Cloudflare credentials, or real secrets.
 
+Current post-smoke status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: Phase 1/2 fixes are locally validated under unsupported Node `24.14.1`, while only the affected project-scope, audit, MEMBER-restriction, and logout flows remain for human resume. No current authenticated OWNER/MEMBER smoke or final closeout claim is made.
+
 ## Middleware Protection
 
 `apps/hub/src/proxy.ts` protects hub routes by default. In Next.js 16 this proxy file is the supported replacement for the older middleware file convention.
@@ -91,6 +93,6 @@ Login success, login failure, logout, and unauthenticated proxy redirects use a 
 
 - No edge-level or IP-based rate limit in this repository.
 - The dedicated production limiter key is configured privately and the closeout runtime is deployed; the value remains outside Git and operational output.
-- Authenticated production OWNER and MEMBER browser smoke passed through Cloudflare Access first and BielOS login second, including public redirects, generic invalid-login recovery, role boundaries, project access revocation, IDOR isolation, personal-session isolation, and logout. Authorization B used one privately provisioned disposable MEMBER and removed its credential, sessions, grants, account, and profiles afterward without adding registration or permanent user management. `CI remoto não confirmado.`
+- Historical authenticated production OWNER and MEMBER browser smoke passed through Cloudflare Access first and BielOS login second. It is not current evidence for the uncommitted post-smoke repair: the latest human smoke found the project-scope and audit-signal defects, and only the affected flows must be repeated. No registration or permanent user management was added. `CI remoto não confirmado.`
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.

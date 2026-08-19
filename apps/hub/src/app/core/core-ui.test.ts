@@ -36,6 +36,7 @@ test("Core navigation is localized, fixed, and role-aware", () => {
 
   assert.deepEqual(member.map((item) => item.href), [
     "/",
+    "/#ops",
     "/core/projects",
     "/core/security",
     "/core/security/account",
@@ -43,8 +44,10 @@ test("Core navigation is localized, fixed, and role-aware", () => {
   ]);
   assert.deepEqual(owner.map((item) => item.href), [
     "/",
+    "/#ops",
     "/core/projects",
     "/core/security",
+    "/core/security#audit",
     "/core/security/account",
     "/core/modules",
     "/core/security/admin",
@@ -53,6 +56,9 @@ test("Core navigation is localized, fixed, and role-aware", () => {
   assert.equal(member.some((item) => item.href === "/core/security/admin"), false);
   assert.equal(member.some((item) => item.href === "/core/applications"), false);
   assert.equal(owner.find((item) => item.href === "/core/security/admin")?.label, "Administrative security");
+  assert.equal(owner.find((item) => item.href === "/#ops")?.kind, "section");
+  assert.equal(owner.find((item) => item.href === "/core/security#audit")?.kind, "section");
+  assert.equal(owner.find((item) => item.href === "/core/security#audit")?.activePath, "/core/security");
   assert.equal(member.find((item) => item.href === "/core/security/admin"), undefined);
   assert.equal(member.find((item) => item.href === "/core/security/account")?.label, "Segurança da conta");
   assert.ok([...member, ...owner].every((item) => item.href.startsWith("/")));
