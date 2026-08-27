@@ -1,3 +1,4 @@
+import React from "react";
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 
 import {
@@ -34,6 +35,7 @@ export type CoreProjectAdminCopy = {
   accessDetails: string;
   selectUser: string;
   accessLevel: string;
+  ownerHelp: string;
   applyAccess: string;
   currentAccess: string;
   noAccess: string;
@@ -194,6 +196,7 @@ export function CoreProjectAdminControls({
                 <option value="EDITOR">{copy.editor}</option>
                 {actorRole === "OWNER" ? <option value="OWNER">{copy.owner}</option> : null}
               </select>
+              <small>{copy.ownerHelp}</small>
             </label>
             <div className="button-row core-project-form-actions">
               <button className="button-primary" type="submit">{copy.applyAccess}</button>

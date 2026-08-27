@@ -118,10 +118,10 @@ export async function updateCoreProject(formData: FormData) {
 
 export async function archiveCoreProject(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-archive");
-  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.archive); } catch { redirect("/core/projects?error=elevation"); }
   const projectId = readFormString(formData, "projectId").trim();
-  const confirmed = readFormString(formData, "confirmArchive") === "yes";
   const resultPath = getProjectResultPath(formData, projectId);
+  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.archive); } catch { redirect(`${resultPath}?error=elevation`); }
+  const confirmed = readFormString(formData, "confirmArchive") === "yes";
 
   try {
     await archiveCoreProjectRecord(session.user, projectId, confirmed);
@@ -135,11 +135,11 @@ export async function archiveCoreProject(formData: FormData) {
 
 export async function setCoreProjectAccess(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-access-set");
-  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.access); } catch { redirect("/core/projects?error=elevation"); }
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
   const accessLevel = readFormString(formData, "accessLevel");
   const resultPath = getProjectResultPath(formData, projectId);
+  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.access); } catch { redirect(`${resultPath}?error=elevation`); }
 
   let result: Awaited<ReturnType<typeof setCoreProjectAccessRecord>>;
   try {
@@ -159,10 +159,10 @@ export async function setCoreProjectAccess(formData: FormData) {
 
 export async function revokeCoreProjectAccess(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-access-revoke");
-  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.access); } catch { redirect("/core/projects?error=elevation"); }
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
   const resultPath = getProjectResultPath(formData, projectId);
+  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.access); } catch { redirect(`${resultPath}?error=elevation`); }
 
   try {
     await revokeCoreProjectAccessRecord(session.user, projectId, userId);

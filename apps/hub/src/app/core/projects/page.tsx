@@ -11,6 +11,10 @@ import { CoreShell } from "../shell";
 import { isCoreAdministrator } from "../authorization";
 import { createCoreProject } from "./actions";
 import { getCoreProjectDetailPath } from "./detail-policy";
+import {
+  getCoreProjectActionFeedback,
+  getCoreProjectFeedbackMessage
+} from "./feedback";
 import { CoreProjectAdminControls } from "./project-admin-controls";
 import {
   CORE_PROJECT_READ_LIMIT,
@@ -66,15 +70,16 @@ const copy = {
     paused: "Pausado",
     viewer: "Visualizador",
     editor: "Editor",
-    owner: "Responsável",
+    owner: "Responsável do projeto (OWNER)",
     administrator: "Administrador",
     authenticated: "Usuário autenticado",
     actions: "Ações administrativas",
     editDetails: "Editar metadados",
-    accessDetails: "Gerenciar acesso",
+    accessDetails: "Gerenciar acesso e responsável",
     grantAccess: "Conceder ou alterar acesso",
     selectUser: "Selecionar usuário",
-    accessLevel: "Nível de acesso",
+    accessLevel: "Nível de acesso no projeto",
+    ownerHelp: "OWNER define o responsável deste projeto; não altera o papel global do usuário.",
     applyAccess: "Aplicar acesso",
     currentAccess: "Acessos atuais",
     noAccess: "Nenhum acesso explícito adicional.",
@@ -85,7 +90,20 @@ const copy = {
     archiveDetails: "Área de arquivamento",
     slugHint: "Letras minúsculas, números e hífens simples.",
     limitNote: "Lista limitada aos 100 projetos mais recentes.",
-    openProject: "Abrir projeto"
+    openProject: "Abrir projeto",
+    actionError: "Não foi possível concluir a ação.",
+    feedbackCreated: "Projeto criado.",
+    feedbackUpdated: "Projeto atualizado.",
+    feedbackArchived: "Projeto arquivado.",
+    feedbackAccessGranted: "Acesso concedido. A lista abaixo mostra o estado persistido.",
+    feedbackAccessChanged: "Acesso alterado. A lista abaixo mostra o estado persistido.",
+    feedbackAccessUnchanged: "Nenhuma alteração foi necessária; o estado persistido já correspondia ao pedido.",
+    feedbackAccessRevoked: "Acesso revogado. A lista abaixo mostra o estado persistido.",
+    feedbackElevation: "Acesso não alterado: a elevação administrativa necessária está ausente ou expirada.",
+    feedbackProjectCreate: "Projeto não criado: a operação foi rejeitada.",
+    feedbackProjectUpdate: "Projeto não atualizado: a operação foi rejeitada.",
+    feedbackProjectArchive: "Projeto não arquivado: a operação foi rejeitada.",
+    feedbackProjectAccess: "Acesso não alterado: a operação foi rejeitada pelas regras do projeto."
   },
   en: {
     privateHub: "Private Hub",
@@ -131,15 +149,16 @@ const copy = {
     paused: "Paused",
     viewer: "Viewer",
     editor: "Editor",
-    owner: "Owner",
+    owner: "Project owner (OWNER)",
     administrator: "Administrator",
     authenticated: "Authenticated user",
     actions: "Administrative actions",
     editDetails: "Edit metadata",
-    accessDetails: "Manage access",
+    accessDetails: "Manage access and project owner",
     grantAccess: "Grant or change access",
     selectUser: "Select user",
-    accessLevel: "Access level",
+    accessLevel: "Project access level",
+    ownerHelp: "OWNER defines this project's responsible owner; it does not change the user's global role.",
     applyAccess: "Apply access",
     currentAccess: "Current access",
     noAccess: "No additional explicit access.",
@@ -150,7 +169,20 @@ const copy = {
     archiveDetails: "Archive area",
     slugHint: "Lowercase letters, numbers, and single hyphens.",
     limitNote: "List limited to the 100 most recently updated projects.",
-    openProject: "Open project"
+    openProject: "Open project",
+    actionError: "The action could not be completed.",
+    feedbackCreated: "Project created.",
+    feedbackUpdated: "Project updated.",
+    feedbackArchived: "Project archived.",
+    feedbackAccessGranted: "Access granted. The list below shows the persisted state.",
+    feedbackAccessChanged: "Access changed. The list below shows the persisted state.",
+    feedbackAccessUnchanged: "No change was needed; the persisted state already matched the request.",
+    feedbackAccessRevoked: "Access revoked. The list below shows the persisted state.",
+    feedbackElevation: "Access was not changed: the required administrative elevation is missing or expired.",
+    feedbackProjectCreate: "Project was not created: the operation was rejected.",
+    feedbackProjectUpdate: "Project was not updated: the operation was rejected.",
+    feedbackProjectArchive: "Project was not archived: the operation was rejected.",
+    feedbackProjectAccess: "Access was not changed: the project rules rejected the operation."
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
@@ -205,7 +237,11 @@ function formatUpdatedAt(value: Date, locale: BielosLocale): string {
   }).format(value);
 }
 
-export default async function CoreProjectsPage() {
+export default async function CoreProjectsPage({
+  searchParams
+}: {
+  searchParams?: Promise<{ status?: string; error?: string }>;
+}) {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "core-projects");
 
@@ -219,8 +255,10 @@ export default async function CoreProjectsPage() {
     redirect("/login");
   }
 
+  const params = await searchParams;
   const locale = await getLocale();
   const t = copy[locale];
+  const feedback = getCoreProjectActionFeedback(params);
   const isAdministrator = isCoreAdministrator(session.user.role);
   const csrfToken = createCsrfToken();
   const projects = await listCoreProjectsForPrincipal(session.user);
@@ -256,6 +294,15 @@ export default async function CoreProjectsPage() {
             <LanguageSelector locale={locale} label={t.language} returnTo="/core/projects" />
           </div>
         </header>
+
+        {feedback ? (
+          <p
+            className={`core-project-feedback is-${feedback.kind}`}
+            role={feedback.kind === "error" ? "alert" : "status"}
+          >
+            {getCoreProjectFeedbackMessage(feedback, t)}
+          </p>
+        ) : null}
 
         <header className="core-projects-intro">
           <div>

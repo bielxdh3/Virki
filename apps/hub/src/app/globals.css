@@ -2099,6 +2099,24 @@ strong {
   outline-offset: 2px;
 }
 
+.core-project-feedback {
+  margin: 16px 0 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(121, 142, 160, 0.2);
+  border-radius: 6px;
+  background: rgba(12, 18, 24, 0.5);
+}
+
+.core-project-feedback.is-success {
+  border-color: rgba(116, 221, 161, 0.38);
+  color: #c8f5dc;
+}
+
+.core-project-feedback.is-error {
+  border-color: rgba(238, 116, 116, 0.42);
+  color: #ffd6d6;
+}
+
 .core-admin-strip {
   display: grid;
   grid-template-columns: minmax(210px, 0.34fr) minmax(320px, 1fr);

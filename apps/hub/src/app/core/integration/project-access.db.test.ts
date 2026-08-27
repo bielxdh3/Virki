@@ -8,6 +8,7 @@ import {
   revokeCoreProjectAccessRecord,
   setCoreProjectAccessRecord
 } from "../projects/access-service";
+import { findCoreProjectDetailForPrincipal } from "../projects/read-service";
 import {
   cleanCoreIntegrationTestData,
   disconnectCoreIntegrationTestDatabase
@@ -75,6 +76,33 @@ test("OWNER grants, changes, and repeats access without duplicate rows", async (
       "member-a@example.invalid"
     ]);
   }
+});
+
+test("OWNER assignment is visible in a fresh persisted project read", async () => {
+  const project = await createProject("owner-read-back", owner.id);
+
+  const result = await setCoreProjectAccessRecord(owner, project.id, member.id, "OWNER");
+  assert.equal(result.kind, "granted");
+
+  const persisted = await prisma.projectAccess.findUniqueOrThrow({
+    where: { userId_projectId: { userId: member.id, projectId: project.id } },
+    select: { accessLevel: true }
+  });
+  assert.equal(persisted.accessLevel, "OWNER");
+
+  const detail = await findCoreProjectDetailForPrincipal(owner, project.id);
+  assert.ok(detail?.administrator);
+  assert.equal(
+    detail.accesses.find((access) => access.user.id === member.id)?.accessLevel,
+    "OWNER"
+  );
+
+  const refreshedDetail = await findCoreProjectDetailForPrincipal(owner, project.id);
+  assert.ok(refreshedDetail?.administrator);
+  assert.equal(
+    refreshedDetail.accesses.find((access) => access.user.id === member.id)?.accessLevel,
+    "OWNER"
+  );
 });
 
 test("global roles govern access administration independently of project access", async () => {

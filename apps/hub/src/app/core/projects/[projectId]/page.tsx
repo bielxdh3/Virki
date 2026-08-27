@@ -14,6 +14,10 @@ import {
   CORE_PROJECT_DETAIL_COPY,
   getCoreProjectDetailPath
 } from "../detail-policy";
+import {
+  getCoreProjectActionFeedback,
+  getCoreProjectFeedbackMessage
+} from "../feedback";
 import { CoreProjectAdminControls, type CoreProjectAdminCopy } from "../project-admin-controls";
 import { findCoreProjectDetailForPrincipal } from "../read-service";
 
@@ -40,11 +44,12 @@ const adminCopy = {
     paused: "Pausado",
     viewer: "Visualizador",
     editor: "Editor",
-    owner: "Responsável",
+    owner: "Responsável do projeto (OWNER)",
     editDetails: "Editar metadados",
-    accessDetails: "Gerenciar acesso",
+    accessDetails: "Gerenciar acesso e responsável",
     selectUser: "Selecionar usuário",
-    accessLevel: "Nível de acesso",
+    accessLevel: "Nível de acesso no projeto",
+    ownerHelp: "OWNER define o responsável deste projeto; não altera o papel global do usuário.",
     applyAccess: "Aplicar acesso",
     currentAccess: "Acessos atuais",
     noAccess: "Nenhum acesso explícito adicional.",
@@ -74,11 +79,12 @@ const adminCopy = {
     paused: "Paused",
     viewer: "Viewer",
     editor: "Editor",
-    owner: "Owner",
+    owner: "Project owner (OWNER)",
     editDetails: "Edit metadata",
-    accessDetails: "Manage access",
+    accessDetails: "Manage access and project owner",
     selectUser: "Select user",
-    accessLevel: "Access level",
+    accessLevel: "Project access level",
+    ownerHelp: "OWNER defines this project's responsible owner; it does not change the user's global role.",
     applyAccess: "Apply access",
     currentAccess: "Current access",
     noAccess: "No additional explicit access.",
@@ -126,9 +132,11 @@ function formatUpdatedAt(value: Date, locale: BielosLocale): string {
 }
 
 export default async function CoreProjectDetailPage({
-  params
+  params,
+  searchParams
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams?: Promise<{ status?: string; error?: string }>;
 }) {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "core-project-detail");
@@ -144,6 +152,7 @@ export default async function CoreProjectDetailPage({
   const project = await findCoreProjectDetailForPrincipal(session.user, projectId);
   if (!project) notFound();
 
+  const feedback = getCoreProjectActionFeedback(await searchParams);
   const locale = await getLocale();
   const t = CORE_PROJECT_DETAIL_COPY[locale];
   const detailPath = getCoreProjectDetailPath(project.id) ?? "/core/projects";
@@ -186,6 +195,15 @@ export default async function CoreProjectDetailPage({
             <LanguageSelector locale={locale} label={t.language} returnTo={detailPath} />
           </div>
         </header>
+
+        {feedback ? (
+          <p
+            className={`core-project-feedback is-${feedback.kind}`}
+            role={feedback.kind === "error" ? "alert" : "status"}
+          >
+            {getCoreProjectFeedbackMessage(feedback, t)}
+          </p>
+        ) : null}
 
         <section className="core-project-detail-card anchor-section" id="project" aria-labelledby="project-title">
           <header className="core-project-detail-header">
