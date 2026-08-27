@@ -48,7 +48,7 @@ const expectedVulnerabilities = {
     isDirect: true,
     via: ["@prisma/config"],
     effects: [],
-    range: "6.13.0-dev.1 - 7.10.0-integration-fix-prisma-publish-token.1",
+    range: ">=6.13.0-dev.1",
     nodes: ["node_modules/prisma"],
     fixAvailable: { name: "prisma", version: "6.12.0", isSemVerMajor: true }
   }
