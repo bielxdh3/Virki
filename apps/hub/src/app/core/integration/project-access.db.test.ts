@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, beforeEach, test } from "node:test";
 
+import { hashSessionToken } from "@bielos/auth";
 import { prisma } from "@bielos/database";
 
 import {
@@ -9,6 +10,10 @@ import {
   setCoreProjectAccessRecord
 } from "../projects/access-service";
 import { findCoreProjectDetailForPrincipal } from "../projects/read-service";
+import {
+  CoreProjectAccessActionError,
+  executeCoreProjectAccessAction
+} from "../projects/project-access-action";
 import {
   cleanCoreIntegrationTestData,
   disconnectCoreIntegrationTestDatabase
@@ -80,9 +85,11 @@ test("OWNER grants, changes, and repeats access without duplicate rows", async (
 
 test("OWNER assignment is visible in a fresh persisted project read", async () => {
   const project = await createProject("owner-read-back", owner.id);
+  const session = await createElevationSession(owner.id, new Date(Date.now() + 60_000));
+  const formData = createAccessForm(project.id, member.id, "OWNER");
 
-  const result = await setCoreProjectAccessRecord(owner, project.id, member.id, "OWNER");
-  assert.equal(result.kind, "granted");
+  const result = await executeCoreProjectAccessAction(formData, owner, session.id);
+  assert.equal(result.result.kind, "granted");
 
   const persisted = await prisma.projectAccess.findUniqueOrThrow({
     where: { userId_projectId: { userId: member.id, projectId: project.id } },
@@ -102,6 +109,29 @@ test("OWNER assignment is visible in a fresh persisted project read", async () =
   assert.equal(
     refreshedDetail.accesses.find((access) => access.user.id === member.id)?.accessLevel,
     "OWNER"
+  );
+});
+
+test("the browser access action rejects missing and expired elevation without mutation", async () => {
+  const project = await createProject("elevation-required", owner.id);
+  const session = await createElevationSession(owner.id, new Date(Date.now() - 60_000));
+  const formData = createAccessForm(project.id, member.id, "OWNER");
+
+  await assert.rejects(
+    executeCoreProjectAccessAction(formData, owner, session.id),
+    (error) => error instanceof CoreProjectAccessActionError && error.stage === "elevation"
+  );
+
+  await prisma.securityElevation.deleteMany({ where: { sessionId: session.id } });
+
+  await assert.rejects(
+    executeCoreProjectAccessAction(formData, owner, session.id),
+    (error) => error instanceof CoreProjectAccessActionError && error.stage === "elevation"
+  );
+
+  assert.equal(
+    await prisma.projectAccess.count({ where: { projectId: project.id, userId: member.id } }),
+    0
   );
 });
 
@@ -259,6 +289,40 @@ function createUser(
     data: { email, role, isActive },
     select: { id: true, role: true }
   });
+}
+
+function createAccessForm(projectId: string, userId: string, accessLevel: string): FormData {
+  const formData = new FormData();
+  formData.set("projectId", projectId);
+  formData.set("userId", userId);
+  formData.set("accessLevel", accessLevel);
+  return formData;
+}
+
+async function createElevationSession(userId: string, expiresAt: Date) {
+  const session = await prisma.session.create({
+    data: {
+      userId,
+      tokenHash: hashSessionToken(`test-session-${userId}-${Date.now()}`),
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000)
+    },
+    select: { id: true }
+  });
+
+  await prisma.securityElevation.create({
+    data: {
+      requestKey: `test-elevation-${userId}-${Date.now()}`,
+      userId,
+      sessionId: session.id,
+      protocolVersion: 1,
+      scope: "PROJECT_OWNER_ACCESS_CHANGE",
+      challengeHash: "test-challenge-hash",
+      status: "ACTIVE",
+      expiresAt
+    }
+  });
+
+  return session;
 }
 
 async function createProject(

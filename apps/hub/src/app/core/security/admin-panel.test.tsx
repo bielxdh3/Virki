@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
 import { AdminSecurityPanel, getFeedbackForStage } from "./admin-panel";
+import { getInitialElevationScope } from "./admin/elevation-scope";
 
 test("administrative security UI exposes only implemented scopes and safe password controls", () => {
   const markup = renderToStaticMarkup(createElement(AdminSecurityPanel, {
@@ -13,12 +14,22 @@ test("administrative security UI exposes only implemented scopes and safe passwo
 
   assert.match(markup, /value="PROJECT_OWNER_ACCESS_CHANGE"/);
   assert.match(markup, /value="CORE_PROJECT_ARCHIVE"/);
+  assert.match(markup, /id="admin-elevation-form"/);
+  assert.match(markup, /<option value="ACCOUNT_APPLICATION_REVIEW" selected="">/);
   assert.doesNotMatch(markup, /value="GLOBAL_ROLE_CHANGE"/);
   assert.doesNotMatch(markup, /value="MODULE_CATALOG_CHANGE"/);
   assert.match(markup, /aria-label="Show Normal password"/);
   assert.match(markup, /aria-label="Show Administrative password"/);
   assert.match(markup, /name="minutes"/);
   assert.match(markup, /Manual until revoked/);
+
+  const projectAccessMarkup = renderToStaticMarkup(createElement(AdminSecurityPanel, {
+    csrfToken: "csrf-token",
+    credentialConfigured: true,
+    activeElevations: [],
+    initialElevationScope: "PROJECT_OWNER_ACCESS_CHANGE"
+  }));
+  assert.match(projectAccessMarkup, /<option value="PROJECT_OWNER_ACCESS_CHANGE" selected="">/);
 });
 
 test("administrative feedback follows the submitted stage", () => {
@@ -31,4 +42,10 @@ test("administrative feedback follows the submitted stage", () => {
 
   assert.equal(feedback?.stage, "elevation");
   assert.equal(feedback?.state.status, "error");
+});
+
+test("project links select only allowlisted elevation scopes", () => {
+  assert.equal(getInitialElevationScope("PROJECT_OWNER_ACCESS_CHANGE"), "PROJECT_OWNER_ACCESS_CHANGE");
+  assert.equal(getInitialElevationScope("GLOBAL_ROLE_CHANGE"), "ACCOUNT_APPLICATION_REVIEW");
+  assert.equal(getInitialElevationScope(undefined), "ACCOUNT_APPLICATION_REVIEW");
 });

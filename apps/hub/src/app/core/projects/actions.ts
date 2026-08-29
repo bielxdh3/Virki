@@ -1,15 +1,9 @@
 "use server";
 
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
-import { revalidatePath } from "next/cache";
-import { headers } from "next/headers";
-import { forbidden, redirect } from "next/navigation";
-import { getCurrentSession } from "../../../lib/auth";
-import {
-  isCloudflareAccessAllowed,
-  validateHubCloudflareAccess
-} from "../../../lib/cloudflare-access";
+import { redirect } from "next/navigation";
 import { isCoreAdministrator } from "../authorization";
+import { requireSecurityElevation } from "@bielos/auth/administration";
 import {
   type CoreProjectFields
 } from "./validation";
@@ -19,17 +13,22 @@ import {
   createCoreProjectRecord,
   updateCoreProjectRecord
 } from "./mutation-service";
-import { requireSecurityElevation } from "@bielos/auth/administration";
-import type { ElevationScope } from "@bielos/auth/elevation-scopes";
 import {
   revokeCoreProjectAccessRecord,
   setCoreProjectAccessRecord
 } from "./access-service";
+import {
+  CORE_PROJECT_ACCESS_ELEVATION_SCOPE,
+  CoreProjectAccessActionError,
+  executeCoreProjectAccessAction
+} from "./project-access-action";
+import type { ElevationScope } from "@bielos/auth/elevation-scopes";
+import { actionRuntime } from "./action-runtime";
 
 const CORE_PROJECTS_PATH = "/core/projects";
 const CORE_PROJECT_ELEVATION_SCOPES = {
   archive: "CORE_PROJECT_ARCHIVE",
-  access: "PROJECT_OWNER_ACCESS_CHANGE"
+  access: CORE_PROJECT_ACCESS_ELEVATION_SCOPE
 } as const satisfies Record<"archive" | "access", ElevationScope>;
 
 function readFormString(formData: FormData, key: string): string {
@@ -48,26 +47,30 @@ function readProjectFields(formData: FormData): CoreProjectFields {
 }
 
 async function requireCoreAdministrator(formData: FormData, source: string) {
-  const accessResult = await validateHubCloudflareAccess(await headers(), source);
+  const accessResult = await actionRuntime.validateAccess(await actionRuntime.getRequestHeaders(), source);
 
-  if (!isCloudflareAccessAllowed(accessResult)) {
-    forbidden();
+  if (!actionRuntime.accessAllowed(accessResult)) {
+    actionRuntime.deny();
+    throw new Error("action denied");
   }
 
   const csrfResult = validateCsrfToken(readFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {
-    forbidden();
+    actionRuntime.deny();
+    throw new Error("action denied");
   }
 
-  const session = await getCurrentSession();
+  const session = await actionRuntime.getSession();
 
   if (!session) {
-    redirect("/login");
+    actionRuntime.go("/login");
+    throw new Error("action redirect did not terminate");
   }
 
   if (!isCoreAdministrator(session.user.role)) {
-    forbidden();
+    actionRuntime.deny();
+    throw new Error("action denied");
   }
 
   return session;
@@ -82,10 +85,10 @@ function getProjectResultPath(formData: FormData, projectId: string): string {
 }
 
 function revalidateCoreProjects(projectId?: string) {
-  revalidatePath(CORE_PROJECTS_PATH);
+  actionRuntime.revalidate(CORE_PROJECTS_PATH);
   const detailPath = projectId ? getCoreProjectDetailPath(projectId) : null;
-  if (detailPath) revalidatePath(detailPath);
-  revalidatePath("/");
+  if (detailPath) actionRuntime.revalidate(detailPath);
+  actionRuntime.revalidate("/");
 }
 
 export async function createCoreProject(formData: FormData) {
@@ -136,25 +139,27 @@ export async function archiveCoreProject(formData: FormData) {
 export async function setCoreProjectAccess(formData: FormData) {
   const session = await requireCoreAdministrator(formData, "core-project-access-set");
   const projectId = readFormString(formData, "projectId").trim();
-  const userId = readFormString(formData, "userId").trim();
-  const accessLevel = readFormString(formData, "accessLevel");
   const resultPath = getProjectResultPath(formData, projectId);
-  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.access); } catch { redirect(`${resultPath}?error=elevation`); }
 
   let result: Awaited<ReturnType<typeof setCoreProjectAccessRecord>>;
   try {
-    result = await setCoreProjectAccessRecord(
+    result = (await executeCoreProjectAccessAction(
+      formData,
       session.user,
-      projectId,
-      userId,
-      accessLevel
-    );
-  } catch {
-    redirect(`${resultPath}?error=project-access`);
+      session.id
+    )).result;
+  } catch (error) {
+    if (error instanceof CoreProjectAccessActionError && error.stage === "elevation") {
+      actionRuntime.go(`${resultPath}?error=elevation`);
+      throw new Error("action redirect did not terminate", { cause: error });
+    }
+
+    actionRuntime.go(`${resultPath}?error=project-access`);
+    throw new Error("action redirect did not terminate", { cause: error });
   }
 
   revalidateCoreProjects(projectId);
-  redirect(`${resultPath}?status=access-${result.kind}`);
+  actionRuntime.go(`${resultPath}?status=access-${result.kind}`);
 }
 
 export async function revokeCoreProjectAccess(formData: FormData) {

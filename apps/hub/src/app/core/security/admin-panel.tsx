@@ -79,7 +79,8 @@ function activeElevationLabel(scope: string, manualUntilRevoked: boolean, expire
 export function AdminSecurityPanel({
   csrfToken,
   credentialConfigured,
-  activeElevations
+  activeElevations,
+  initialElevationScope
 }: {
   csrfToken: string;
   credentialConfigured: boolean;
@@ -89,6 +90,7 @@ export function AdminSecurityPanel({
     manualUntilRevoked: boolean;
     expiresAt: Date;
   }>;
+  initialElevationScope?: ElevationScope;
 }) {
   const [setup, startSetup] = useActionState(startAdminSetupAction, initialState);
   const [setupComplete, completeSetup] = useActionState(completeAdminSetupAction, initialState);
@@ -132,11 +134,11 @@ export function AdminSecurityPanel({
         </div>
       ) : (
         <div className="admin-security-stage">
-          <form className="compact-form admin-security-form" action={submitElevation}>
+          <form id="admin-elevation-form" className="compact-form admin-security-form" action={submitElevation}>
             <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
             <PasswordField id="elevation-normal-password" name="normalPassword" label="Normal password" autoComplete="current-password" />
             <PasswordField id="elevation-administrative-password" name="administrativePassword" label="Administrative password" autoComplete="current-password" />
-            <label className="admin-security-field" htmlFor="elevation-scope"><span>Scope</span><select id="elevation-scope" name="scope" defaultValue={UI_ELEVATION_SCOPES[0]}>{UI_ELEVATION_SCOPES.map((scope) => <option key={scope} value={scope}>{ELEVATION_SCOPE_ACTIONS[scope].label}</option>)}</select></label>
+            <label className="admin-security-field" htmlFor="elevation-scope"><span>Scope</span><select id="elevation-scope" name="scope" defaultValue={initialElevationScope ?? UI_ELEVATION_SCOPES[0]}>{UI_ELEVATION_SCOPES.map((scope) => <option key={scope} value={scope}>{ELEVATION_SCOPE_ACTIONS[scope].label}</option>)}</select></label>
             <label className="admin-security-field" htmlFor="elevation-duration"><span>Duration</span><select id="elevation-duration" name="duration" value={duration} onChange={(event) => setDuration(event.target.value as "TIMED" | "MANUAL")}><option value="TIMED">Timed</option><option value="MANUAL">Manual until revoked</option></select></label>
             {duration === "TIMED" ? (
               <label className="admin-security-field" htmlFor="elevation-minutes"><span>Minutes</span><select id="elevation-minutes" name="minutes" defaultValue="15"><option value="15">15</option><option value="60">60</option><option value="240">240</option><option value="1440">1440</option></select></label>

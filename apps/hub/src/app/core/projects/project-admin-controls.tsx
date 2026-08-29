@@ -36,6 +36,8 @@ export type CoreProjectAdminCopy = {
   selectUser: string;
   accessLevel: string;
   ownerHelp: string;
+  accessElevationHelp: string;
+  accessElevationLink: string;
   applyAccess: string;
   currentAccess: string;
   noAccess: string;
@@ -166,6 +168,9 @@ export function CoreProjectAdminControls({
       <details className="admin-drawer core-project-drawer core-project-access-drawer">
         <summary>{copy.accessDetails}</summary>
         <div className="core-project-access-panel">
+          <p className="core-project-access-elevation-help">
+            {copy.accessElevationHelp} <a href="/core/security/admin?scope=PROJECT_OWNER_ACCESS_CHANGE#admin-elevation-form">{copy.accessElevationLink}</a>
+          </p>
           <form className="compact-form core-project-access-form" action={setCoreProjectAccess}>
             <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
             <input type="hidden" name="projectId" value={project.id} />
