@@ -7,7 +7,7 @@
       "isDirect": false,
       "via": ["deepmerge-ts"],
       "effects": ["prisma"],
-      "range": ">=6.13.0-dev.1",
+      "range": "6.13.0-dev.1 - 8.1.0-dev.4",
       "nodes": ["node_modules/@prisma/config"],
       "fixAvailable": { "name": "prisma", "version": "6.12.0", "isSemVerMajor": true }
     },
@@ -37,7 +37,7 @@
       "isDirect": true,
       "via": ["@prisma/config"],
       "effects": [],
-      "range": ">=6.13.0-dev.1",
+      "range": "6.13.0-dev.1 - 8.1.0-dev.4",
       "nodes": ["node_modules/prisma"],
       "fixAvailable": { "name": "prisma", "version": "6.12.0", "isSemVerMajor": true }
     }
