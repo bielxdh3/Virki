@@ -53,3 +53,17 @@ Every implementation phase that modifies UI/UX must use the `ui-ux-pro-max` skil
 The canonical detailed migration plan is `docs/ui-ux-prompt-arena-roadmap.md`. Older roadmap language about independently redesigning or polishing the BielOS Hub is superseded where it conflicts with that plan.
 
 Reason: the user explicitly chose the Prompt Arena / Claude-derived interface as the BielOS visual and interaction baseline and wants the existing BielOS design direction replaced rather than incrementally polished.
+
+## 0008: Minimal-First Information Density Is Mandatory
+
+Every future BielOS UI/UX surface must show only the information required for the user's current decision or action by default.
+
+Long instructional paragraphs, repeated labels, duplicated status copy, implementation terminology, permission explanations, and secondary metadata must not be permanently exposed when the same workflow can be understood from concise labels, hierarchy, state, and placement. Secondary explanation belongs behind contextual help, disclosure, tooltip, expandable detail, or a dedicated secondary surface when it is genuinely needed.
+
+Administrative and project-access screens must be especially strict: one clear action flow, aligned controls, obvious current state, concise feedback, and no wall of text competing with the primary task. Security requirements remain fully enforced server-side; simplifying the interface must never mean weakening authorization, elevation, confirmation, or audit boundaries.
+
+Alignment, spacing, visual grouping, and progressive disclosure are acceptance criteria, not cosmetic polish. A screen that is technically complete but visually noisy, misaligned, redundant, or non-intuitive fails UI/UX acceptance.
+
+This rule applies to all future Prompt Arena parity work and must be evaluated with `ui-ux-pro-max` during implementation and Biel 3 independent review.
+
+Reason: the user explicitly rejected the current project-access presentation because it exposed too much explanatory information at once and was visually misaligned. BielOS should feel self-explanatory through structure, not through persistent instruction text.
