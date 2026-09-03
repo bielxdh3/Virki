@@ -252,6 +252,7 @@ BielOS uses defense in depth rather than treating any single layer as sufficient
 
 - [ ] **UI/UX rebaseline (current design direction): replace the existing BielOS visual target with Prompt Arena parity.** The canonical plan is [docs/ui-ux-prompt-arena-roadmap.md](docs/ui-ux-prompt-arena-roadmap.md); future UI/UX implementation must use `ui-ux-pro-max` and must not silently omit applicable Prompt Arena UI/UX features.
 - [ ] **Minimal-first information density:** every migrated surface must show only what is necessary for the current action by default; remove persistent instructional walls, redundant labels/status copy, avoidable implementation terminology, and secondary metadata from the primary flow. Use hierarchy, alignment, concise feedback, and progressive disclosure instead. A noisy, misaligned, redundant, or non-intuitive screen fails UI/UX acceptance even if technically functional.
+- [ ] **Intuition-first text compression:** compress every visible string as far as clarity permits. The entire site should be understandable through structure, placement, grouping, state, and familiar controls before relying on explanatory text. Compact navigation labels, progressive disclosure, and removal of decorative numbering are mandatory where applicable. See [docs/ui-ux-intuition-first.md](docs/ui-ux-intuition-first.md).
 - [ ] Port Prompt Arena shell/navigation, semantic tokens, typography, appearance controls, component patterns, accessibility, reduced motion, and responsive behavior before doing independent BielOS visual polish.
 - [ ] Migrate every current Hub surface, including Core, projects, access administration, security/elevation, sessions/audit, login, application/identity surfaces, operations, module registry, and the existing frozen GymForge surfaces, to the same parity system.
 - [ ] Mature operational health, audit, and recovery surfaces
@@ -265,6 +266,7 @@ BielOS uses defense in depth rather than treating any single layer as sufficient
 ## Documentation
 
 - [UI/UX Prompt Arena parity roadmap](docs/ui-ux-prompt-arena-roadmap.md)
+- [UI/UX intuition-first compression rule](docs/ui-ux-intuition-first.md)
 - [Authentication](docs/auth.md)
 - [Production deployment](docs/production.md)
 - [Operations](docs/operations.md)
