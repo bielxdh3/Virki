@@ -67,3 +67,17 @@ Alignment, spacing, visual grouping, and progressive disclosure are acceptance c
 This rule applies to all future Prompt Arena parity work and must be evaluated with `ui-ux-pro-max` during implementation and Biel 3 independent review.
 
 Reason: the user explicitly rejected the current project-access presentation because it exposed too much explanatory information at once and was visually misaligned. BielOS should feel self-explanatory through structure, not through persistent instruction text.
+
+## 0009: Intuition-First UI and Extreme Text Compression
+
+BielOS UI must be understandable primarily through structure, placement, grouping, state, iconography, and familiar interaction patterns. Visible text is a fallback for ambiguity, not the default mechanism for teaching the interface.
+
+Every visible string must be challenged. If meaning survives by removing it, shortening it, replacing it with a familiar compact concept, or moving it behind progressive disclosure, the more compressed option is preferred.
+
+Navigation is included. Long destination names such as `Seção de operações`, `Segurança pessoal`, `Seção de auditoria`, `Segurança da conta`, `Catálogo de módulos`, `Segurança administrativa`, and `Solicitações de conta` are not the future target. Prefer compact concepts such as `Ops`, `Pessoal`, `Audit`, `Conta`, `Módulos`, `Admin`, and `Pedidos` when context keeps them unambiguous. Decorative numeric prefixes should disappear unless they carry real product meaning.
+
+Prompt Arena remains canonical for visual language and interaction systems, but literal Prompt Arena text density is not a parity requirement. Where a Prompt Arena pattern uses persistent secondary descriptions, BielOS must first test whether placement, state, iconography, a shorter label, tooltip, disclosure, drawer, or dedicated detail surface can communicate the same information with less visible copy.
+
+The canonical compression contract is `docs/ui-ux-intuition-first.md`. Where it conflicts with a text-heavy interpretation of `docs/ui-ux-prompt-arena-roadmap.md`, the intuition-first rule wins while accessibility and security-critical disclosure remain mandatory.
+
+Reason: the user wants the entire site compressed as far as practical and based on intuition. The current numbered, sentence-like navigation and explanatory administrative surfaces require too much reading for ordinary use.
