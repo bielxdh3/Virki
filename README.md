@@ -250,7 +250,9 @@ BielOS uses defense in depth rather than treating any single layer as sufficient
 
 ## Roadmap
 
-- [ ] Expand the private core dashboard and project management views
+- [ ] **UI/UX rebaseline (current design direction): replace the existing BielOS visual target with Prompt Arena parity.** The canonical plan is [docs/ui-ux-prompt-arena-roadmap.md](docs/ui-ux-prompt-arena-roadmap.md); future UI/UX implementation must use `ui-ux-pro-max` and must not silently omit applicable Prompt Arena UI/UX features.
+- [ ] Port Prompt Arena shell/navigation, semantic tokens, typography, appearance controls, component patterns, accessibility, reduced motion, and responsive behavior before doing independent BielOS visual polish.
+- [ ] Migrate every current Hub surface, including Core, projects, access administration, security/elevation, sessions/audit, login, application/identity surfaces, operations, module registry, and the existing frozen GymForge surfaces, to the same parity system.
 - [ ] Mature operational health, audit, and recovery surfaces
 - [ ] Define explicit contracts for independent project modules
 - [ ] Integrate Root.ark only after a separate architecture and security review
@@ -261,6 +263,7 @@ BielOS uses defense in depth rather than treating any single layer as sufficient
 
 ## Documentation
 
+- [UI/UX Prompt Arena parity roadmap](docs/ui-ux-prompt-arena-roadmap.md)
 - [Authentication](docs/auth.md)
 - [Production deployment](docs/production.md)
 - [Operations](docs/operations.md)
