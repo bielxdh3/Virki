@@ -18,7 +18,7 @@ const expectedVulnerabilities = {
     isDirect: false,
     via: ["deepmerge-ts"],
     effects: ["prisma"],
-    range: ">=6.13.0-dev.1",
+    range: "6.13.0-dev.1 - 8.1.0-dev.4",
     nodes: ["node_modules/@prisma/config"],
     fixAvailable: { name: "prisma", version: "6.12.0", isSemVerMajor: true }
   },
@@ -34,10 +34,7 @@ const expectedVulnerabilities = {
       url: "https://github.com/advisories/GHSA-ggr8-5vv4-36mx",
       severity: "high",
       cwe: ["CWE-674"],
-      cvss: {
-        score: 8.2,
-        vectorString: "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N"
-      },
+      cvss: { score: 0, vectorString: null },
       range: "<8.0.0"
     }],
     effects: ["@prisma/config"],
@@ -51,7 +48,7 @@ const expectedVulnerabilities = {
     isDirect: true,
     via: ["@prisma/config"],
     effects: [],
-    range: ">=6.13.0-dev.1",
+    range: "6.13.0-dev.1 - 8.1.0-dev.4",
     nodes: ["node_modules/prisma"],
     fixAvailable: { name: "prisma", version: "6.12.0", isSemVerMajor: true }
   }
