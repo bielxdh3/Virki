@@ -81,8 +81,18 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const audit = process.env.BIELOS_TOOLING_AUDIT_JSON
     ? JSON.parse(readFileSync(process.env.BIELOS_TOOLING_AUDIT_JSON, "utf8"))
     : runAudit();
-  const result = evaluateToolingAudit(audit, { versions: readCurrentVersions() });
-  console.log(JSON.stringify(result, null, 2));
+  const versions = readCurrentVersions();
+  const result = evaluateToolingAudit(audit, { versions });
+  const output = result.ok ? result : {
+    ...result,
+    observed: {
+      auditReportVersion: audit?.auditReportVersion ?? null,
+      vulnerabilities: audit?.vulnerabilities ?? null,
+      counts: audit?.metadata?.vulnerabilities ?? null,
+      versions
+    }
+  };
+  console.log(JSON.stringify(output, null, 2));
   if (!result.ok) process.exitCode = 1;
 }
 
