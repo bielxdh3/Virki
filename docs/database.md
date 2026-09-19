@@ -10,11 +10,9 @@ Phase 07.0 adds committed Prisma migrations. Production and durable local databa
 npm run prisma:migrate:deploy
 ```
 
-When the production Docker stack is running, run migrations inside the `hub` container so the command uses the same private database environment as the hub:
+The production runtime image intentionally omits the Prisma CLI. Do not run migrations inside the `hub` container. When a release includes migration files, run `prisma migrate deploy` from a separate tooling-capable operator environment with the production `DATABASE_URL` supplied privately, after the current backup is verified. This release adds no migration files, so no migration command is required.
 
-```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:migrate:deploy
-```
+The operator environment must use the checked-out release source and Prisma version from the lockfile; never replace migration deployment with `prisma db push`.
 
 Use this before seeding the OWNER user on a new durable database.
 

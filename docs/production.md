@@ -46,7 +46,7 @@ Then validate the basic behavior:
 - Confirm the hub health endpoint returns minimal status data on `http://127.0.0.1:3001/api/health`.
 - Confirm the hub redirects unauthenticated users from `http://127.0.0.1:3001` to `/login` when Access JWT validation is disabled for local development.
 - Confirm `npm run status:ports` shows `127.0.0.1` port bindings, not `0.0.0.0`.
-- Run `npm run prisma:migrate:deploy` and `npm run seed:owner` with a private `.env` file configured.
+- If the release contains new migration files, run `prisma migrate deploy` from a separate tooling-capable operator environment with the private production `DATABASE_URL` after verifying a current backup. The production runtime image does not contain the Prisma CLI. This release contains no new migration files.
 - Confirm login works with the seeded OWNER account.
 
 ## Do Not Expose `next dev`
@@ -123,13 +123,13 @@ npm run revision:prod
 
 ## Database Migrations
 
-Production database updates use committed Prisma migrations:
+Production database updates use committed Prisma migrations from a separate tooling-capable operator environment:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:migrate:deploy
+npm run prisma:migrate:deploy
 ```
 
-`prisma db push` is only for disposable local databases. Do not use it for private, durable, or non-discardable production data.
+Supply the private production `DATABASE_URL` to that operator environment. Do not execute this inside the `hub` runtime container; it intentionally omits the Prisma CLI. `prisma db push` is only for disposable local databases. Do not use it for private, durable, or non-discardable production data.
 
 ## Database Backups
 
