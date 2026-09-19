@@ -79,7 +79,7 @@ npm run health:local
 
 Use `docs/deployment-verification.md` for the first production launch checklist and live Cloudflare smoke test.
 
-The 2026-09-18 direct campaign is locally complete for the current operations scope in an uncommitted worktree at `4be92f85a3573feb184da2bf770d0497a22f6a6a`, equal to `origin/main` before the changes. Do not start or restart production from this worktree. Runtime-sensitive checks were repeated with Node `22.20.0`; Docker/PostgreSQL, backup/restore, runtime smoke, exact-SHA CI, and authenticated Cloudflare/human checks remain external gates.
+The 2026-09-18 direct campaign is committed and pushed at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI run `35419329768` passed. No migration files were added. Do not start or restart production from this machine until Docker is available and the private production environment is verified; no remote deployment control path is configured in this repository. Authenticated Cloudflare/human checks remain external gates.
 
 The health check verifies:
 
@@ -295,7 +295,7 @@ The redirect-hardening campaign reviewed commits `4705e9df46812967aa86ae780c732d
 
 The Core gate includes secret scan, lint, typecheck, Prisma validation, public discovery, unit, database integration and concurrency tests, build, production image, and Compose validation. Production builds now require a clean pushed `main` revision and store the exact full SHA in the immutable OCI image label. The local verifier requires the running BielOS-built service labels to match that intended revision. This attestation remains local operational and CI evidence; no public application surface exposes the private repository revision.
 
-Historical OWNER and MEMBER production smoke passed through Cloudflare Access first and BielOS login second. It is not current evidence for this uncommitted repair: the latest human smoke found the project-scope and audit-signal defects, so only the affected flows must be repeated. Existing GymForge behavior remains frozen and reserved modules remain inert. `CI remoto não confirmado.`
+Historical OWNER and MEMBER production smoke passed through Cloudflare Access first and BielOS login second. It is not current evidence for the published repair, so only the affected flows must be repeated. Existing GymForge behavior remains frozen and reserved modules remain inert. Exact-SHA CI run `35419329768` passed.
 
 This deployment runs on local Windows with Docker Desktop and Cloudflare Tunnel. Public Linux/VPS host-firewall validation is not applicable to the current environment; application listeners remain bound to loopback and the tunnel remains the ingress path. A future migration to a public Linux/VPS host must add host-firewall rules that block direct inbound application-port access.
 

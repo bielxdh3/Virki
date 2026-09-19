@@ -2,13 +2,13 @@
 
 ## Master Finish Everything campaign — current local truth (2026-09-18)
 
-The direct Codex campaign is locally implementation-complete for its authorized scope. Local `main` and `origin/main` are both `4be92f85a3573feb184da2bf770d0497a22f6a6a`; the worktree is intentionally uncommitted and contains preserved WIP plus campaign changes. Prompt Arena parity, Core identity/access/recovery/audit maturation, current Hub surfaces, and approved platform capabilities are complete locally. The remaining gates are authenticated human visual/interaction smoke, supported-runtime/CI evidence for this uncommitted state, and environment-backed Docker/PostgreSQL/backup/runtime checks. No publication, deployment, migration, Cloudflare/DNS mutation, or production data action was performed.
+The direct Codex campaign is implementation-complete for its authorized scope and published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; `main` and `origin/main` match and exact-SHA CI run `35419329768` passed. Prompt Arena parity, Core identity/access/recovery/audit maturation, current Hub surfaces, and approved platform capabilities are complete. Remaining gates are production environment deployment/restart, authenticated human visual/interaction smoke, and live Cloudflare checks.
 
 Use [master-finish-everything-ledger.md](master-finish-everything-ledger.md) as the current disposition ledger. GymForge expansion and reserved modules remain frozen by approved product boundaries; `SecurityUnlock` remains non-authoritative and blocked. The next user-only gate is explicit publication authorization after the human smoke and external environment gates are satisfied.
 
 ## Current Platform State: BielOS Core
 
-BielOS Core is the private hub platform and workspace, distinct from applications and reserved modules. Its project-detail and identity/access source surfaces are implemented behind the existing Cloudflare Access-first, BielOS internal-auth, CSRF, session/elevation, authorization, and audit boundaries. The current local campaign is uncommitted at `4be92f85a3573feb184da2bf770d0497a22f6a6a`; validation was repeated with Node `22.20.0` where runtime-sensitive, while Docker/PostgreSQL-backed gates and authenticated browser smoke remain environment/human gates. Public registration and live Intake remain disabled.
+BielOS Core is the private hub platform and workspace, distinct from applications and reserved modules. Its project-detail and identity/access source surfaces are implemented behind the existing Cloudflare Access-first, BielOS internal-auth, CSRF, session/elevation, authorization, and audit boundaries. The current campaign is published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; Docker-backed production deployment and authenticated browser smoke remain environment/human gates. Public registration and live Intake remain disabled.
 
 Core identity/access surfaces include the accepted shell/navigation and trusted-device states plus the corresponding source implementation. The historical technical closeout for `33f540a4b396aa8a55fa65ad9f950b0c36712aae` and run `31821995102` remains dated evidence. The latest human smoke confirmed OWNER credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation, but the former UI scope defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke and `ACCESS_JWT_VALID` reduced audit signal. Phase 1/2 repairs are present locally; affected human smoke must be repeated, and no current authenticated OWNER/MEMBER smoke or final closeout claim is made.
 
@@ -30,7 +30,7 @@ BielOS is the hub, registry, navigation surface, identity/security boundary, and
 
 ## Current Application Classification
 
-- BielOS Core: implemented private platform/workspace with project-detail, identity/access, recovery, audit, capability, and operations surfaces behind the existing layered boundaries; the direct campaign remains uncommitted, runtime-sensitive validation passes with Node `22.20.0`, and human/environment/CI gates remain open. No unapproved deployment.
+- BielOS Core: implemented private platform/workspace with project-detail, identity/access, recovery, audit, capability, and operations surfaces behind the existing layered boundaries; published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe` with exact-SHA CI passed. Production and human/environment gates remain open.
 - GymForge: available integrated private-hub application at `/gymforge`; implemented capabilities are preserved and further feature expansion is frozen.
 - L-vault, root.ark, and H-vault: reserved planning-only modules; runtime remains inert.
 

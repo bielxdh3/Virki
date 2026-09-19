@@ -2,7 +2,7 @@
 
 ## Current master-campaign status — 2026-09-18
 
-The direct Codex campaign is complete locally for the authorized Core scope. Local `main` and `origin/main` are `4be92f85a3573feb184da2bf770d0497a22f6a6a`; the worktree is uncommitted and no publication, deployment, migration, Cloudflare/DNS mutation, or production data action was performed. The shared Prompt Arena shell, project participant authority, administrative recovery, retained-history audit surface, capability cards, and Core operations routes are implemented locally. Supported Node 22 evidence exists for runtime-sensitive checks; Docker/PostgreSQL-backed validation, authenticated browser smoke, and exact-SHA CI remain external gates.
+The direct Codex campaign is published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI run `35419329768` passed. No migration files were added. The shared Prompt Arena shell, project participant authority, administrative recovery, retained-history audit surface, capability cards, and Core operations routes are implemented. Docker-backed production validation and authenticated browser smoke remain external gates.
 
 Routine global-OWNER project participant/access changes use the normal authenticated session plus Cloudflare Access, CSRF, server authorization, transaction invariants, and sanitized audit logging; the separate elevation ceremony remains for higher-risk actions such as project archive. `SecurityUnlock` remains non-authoritative and blocked. See [master-finish-everything-ledger.md](../master-finish-everything-ledger.md) for current dispositions.
 
@@ -22,7 +22,7 @@ Historical authenticated OWNER and MEMBER production smoke completed through Clo
 
 ## Identity/access rollout status
 
-Identity/access source surfaces remain behind the existing Cloudflare Access-first, BielOS authentication, CSRF, session/scoped-elevation, least-privilege authorization, and audit boundaries. The current worktree is uncommitted at `4be92f85a3573feb184da2bf770d0497a22f6a6a`; no push, new remote CI result, or deployment is claimed. Local implementation is complete for the current Core scope; authenticated human smoke, exact-SHA CI, and environment-backed runtime evidence remain open. Public registration and live Intake remain disabled, loopback-only ports remain required, `SecurityUnlock` runtime remains blocked, and none of the existing boundaries may be weakened.
+Identity/access source surfaces remain behind the existing Cloudflare Access-first, BielOS authentication, CSRF, session/scoped-elevation, least-privilege authorization, and audit boundaries. The published commit is `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI passed. Production runtime and authenticated human smoke remain open. Public registration and live Intake remain disabled, loopback-only ports remain required, `SecurityUnlock` runtime remains blocked, and none of the existing boundaries may be weakened.
 
 ## Identity
 
