@@ -5,7 +5,7 @@ This ledger records the current local direct-Codex campaign. It is evidence of l
 ## Execution
 
 - Mode: direct Codex; Dual Codex unavailable; no substitute agent or worktree.
-- Published state: `main` and `origin/main` at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI run `35419329768` passed. No migration files were added; production deployment and authenticated human smoke remain pending external gates.
+- Published state: `main` and `origin/main` at `a9f867f6d06eeae71e00f5fae910978382260468`; exact-SHA CI run `35419764845` passed. No migration files were added; the local production stack is converged and authenticated human smoke remains pending.
 - Prompt Arena source: `6501e8541c13993adef267a291f84686e42c684d`; planning baseline: `7a3842795192eaa887cedf7b233664e8b53b1940`.
 - Required skills: PONYTAIL, BielOS phase review, BielOS security review, BielOS Core identity implementation, `ui-ux-pro-max`, and memory lifecycle.
 - Final adversarial correction pass: removed residual decorative navigation number nodes, synchronized audit pagination and OWNER-access smoke guidance, changed audit export to a CSRF-protected POST action, and revalidated the current UI/build path (`npm run test:core:unit` 95/95).

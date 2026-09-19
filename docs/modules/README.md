@@ -1,6 +1,6 @@
 # Application And Module Planning Index
 
-This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The 2026-09-18 direct campaign is published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI passed. Authenticated human smoke and environment-backed production evidence remain external gates. Public registration and live Intake remain disabled. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
+This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The 2026-09-18 direct campaign is published at `a9f867f6d06eeae71e00f5fae910978382260468`; exact-SHA CI passed. The local production stack is converged; authenticated human smoke remains external. Public registration and live Intake remain disabled. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
 
 ## BielOS Core
 
@@ -9,7 +9,7 @@ This directory contains application and reserved-module planning documents. Biel
 - Security and architecture gate: complete in `bielos-core.md`.
 - Implemented surfaces: project registry/lifecycle, authorization-aware project detail workspace, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.
 - Completed verification: historical database-backed integration/concurrency validation and historical authenticated OWNER/MEMBER production smoke; current authenticated smoke is not claimed.
-- Maintenance boundary: production deployment remains pending external environment verification; `SecurityUnlock` runtime remains blocked by its design boundary.
+- Maintenance boundary: the local production deployment is verified; authenticated human smoke remains pending. `SecurityUnlock` runtime remains blocked by its design boundary.
 
 ## Hub And Application Boundary
 

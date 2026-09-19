@@ -2,7 +2,7 @@
 
 Security is a first-class requirement for BielOS.
 
-The 2026-09-18 direct campaign is published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI run `35419329768` passed. Docker-backed production deployment, Cloudflare, and authenticated human smoke remain external gates.
+The 2026-09-18 direct campaign is published at `a9f867f6d06eeae71e00f5fae910978382260468`; exact-SHA CI run `35419764845` passed. The local production stack and Cloudflare Access ordering are verified; authenticated human smoke remains external.
 
 ## Current MVP Rules
 
@@ -70,7 +70,7 @@ See `docs/audit-logs.md`.
 
 CI runs secret scan, lint, typecheck, Prisma validation, Core unit tests, migrated PostgreSQL integration tests, real concurrency tests, build, production image build, and production Compose validation. The Core database suites use one synthetic PostgreSQL service and do not require production secrets.
 
-Historical validation passed the listed technical gates and historical OWNER/MEMBER smoke; those results do not establish current live-environment readiness for the published repair. Repeat only the affected flows after deployment. No registration or permanent provisioning surface was added. Exact-SHA CI run `35419329768` passed.
+Historical validation passed the listed technical gates and historical OWNER/MEMBER smoke; those results do not establish current authenticated human readiness for the published repair. Repeat only the affected flows. No registration or permanent provisioning surface was added. Exact-SHA CI run `35419764845` passed.
 
 Run locally:
 

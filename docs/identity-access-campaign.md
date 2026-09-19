@@ -4,12 +4,12 @@ Status: `[CURRENT LOCAL CAMPAIGN]` — prior closeout evidence is historical; th
 
 ## Current direct campaign snapshot — 2026-09-18
 
-- Local and remote `main` are at published commit `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI run `35419329768` passed. No migration files were added; production deploy/restart remains pending on the unavailable Docker/private environment.
+- Local and remote `main` are at published commit `a9f867f6d06eeae71e00f5fae910978382260468`; exact-SHA CI run `35419764845` passed. No migration files were added; the local production stack was rebuilt/restarted and verified healthy.
 - The worktree intentionally preserves inherited security/GymForge WIP alongside the campaign changes. Runtime-sensitive local validation was repeated with Node `22.20.0`; Docker/PostgreSQL-dependent gates remain environment-blocked.
 - Current runtime dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`; the production dependency audit is clean after omitting development dependencies. The accepted Prisma/deepmerge advisory remains tooling-only and is enforced by the exact tooling policy gate.
 - Current local evidence includes `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run test:core:unit` (95/95), `npm run test:public-site` (4/4), `npm run test:gymforge-scoring` (8/8), `npm run test:production-revision` (13/13), and `npm run build`; fresh authenticated human smoke and exact-SHA CI are not claimed.
 
-Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35419329768` for `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`, which passed all configured jobs.
+Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35419764845` for `a9f867f6d06eeae71e00f5fae910978382260468`, which passed all configured jobs.
 
 ## Post-closeout live-smoke repair — 2026-08-18
 

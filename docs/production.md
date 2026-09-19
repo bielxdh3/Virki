@@ -195,6 +195,6 @@ The same worker runs audit log retention cleanup with `AUDIT_LOG_RETENTION_DAYS`
 
 ## Current local campaign state
 
-The Core UI/capability/audit/recovery changes are published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe` and exact-SHA CI run `35419329768` passed. No schema migration was added. Production deployment/restart and live migration application remain pending because the local Docker daemon is unavailable and this repository does not contain a remote deployment control path; fresh authenticated human smoke is also pending.
+The Core UI/capability/audit/recovery changes are published at `a9f867f6d06eeae71e00f5fae910978382260468` and exact-SHA CI run `35419764845` passed. No schema migration was added. The local production Compose stack was rebuilt/restarted at this revision and its health/revision/loopback checks passed; fresh authenticated human smoke remains pending.
 
 The current local dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`. The production-tree audit is clean after omitting development dependencies; the accepted Prisma/deepmerge advisory remains constrained to the exact Prisma tooling path and is not a production dependency claim.

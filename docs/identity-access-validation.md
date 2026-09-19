@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The source implementation is complete for the current identity/access surfaces. The 2026-09-18 direct campaign is published at `7cf1b94ca5a980aa7b386df3144854f45a6ee3fe`; exact-SHA CI run `35419329768` passed. Authenticated human smoke and environment-backed runtime evidence remain external gates. Public registration and live Intake stay disabled. Historical smoke and CI claims below retain their original dates and SHAs.
+The source implementation is complete for the current identity/access surfaces. The 2026-09-18 direct campaign is published at `a9f867f6d06eeae71e00f5fae910978382260468`; exact-SHA CI run `35419764845` passed. Authenticated human smoke remains external. Public registration and live Intake stay disabled. Historical smoke and CI claims below retain their original dates and SHAs.
 
 Local patch validation for the earlier snapshot completed under Node `24.14.1`; that evidence is historical and unsupported for release.
 
