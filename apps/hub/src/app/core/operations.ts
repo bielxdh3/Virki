@@ -3,6 +3,15 @@ import { getEmailTransportStatus } from "@bielos/auth/email";
 
 export type CoreLiveCheckState = "verified" | "unknown";
 
+export type CoreOperationsSnapshot = {
+  hubRequest: "verified";
+  authenticatedSession: "verified";
+  database: CoreLiveCheckState;
+  emailTransport: "configured" | "unavailable";
+  intake: "enabled" | "disabled";
+  emailWorker: "not-checked";
+};
+
 const DATABASE_PROBE_TIMEOUT_MS = 800;
 
 export function createSingleFlightProbe(
@@ -58,25 +67,11 @@ const runDatabaseProbe = createSingleFlightProbe(async () => {
   await prisma.$queryRaw`SELECT 1`;
 });
 
-export async function getCoreOperationsSnapshot(): Promise<{
-  hubRequest: "verified";
-  authenticatedSession: "verified";
-  database: CoreLiveCheckState;
-  emailTransport: "configured" | "unavailable";
-  intake: "enabled" | "disabled";
-  emailWorker: "not-checked";
-}>;
+export async function getCoreOperationsSnapshot(): Promise<CoreOperationsSnapshot>;
 export async function getCoreOperationsSnapshot(
   databaseProbe: () => Promise<unknown>,
   timeoutMs?: number
-): Promise<{
-  hubRequest: "verified";
-  authenticatedSession: "verified";
-  database: CoreLiveCheckState;
-  emailTransport: "configured" | "unavailable";
-  intake: "enabled" | "disabled";
-  emailWorker: "not-checked";
-}>;
+): Promise<CoreOperationsSnapshot>;
 export async function getCoreOperationsSnapshot(
   databaseProbe = runDatabaseProbe,
   timeoutMs = DATABASE_PROBE_TIMEOUT_MS

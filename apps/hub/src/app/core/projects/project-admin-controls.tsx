@@ -28,6 +28,7 @@ export type CoreProjectAdminCopy = {
   reserved: string;
   active: string;
   paused: string;
+  unavailable?: string;
   viewer: string;
   editor: string;
   owner: string;
@@ -78,7 +79,7 @@ const visibilityValues = ["PUBLIC", "INTERNAL", "SENSITIVE"] as const;
 const statusValues = ["PLANNED", "RESERVED", "ACTIVE", "PAUSED"] as const;
 
 function visibilityLabel(value: string, copy: CoreProjectAdminCopy): string {
-  return ({ PUBLIC: copy.public, INTERNAL: copy.internal, SENSITIVE: copy.sensitive })[value] ?? value;
+  return ({ PUBLIC: copy.public, INTERNAL: copy.internal, SENSITIVE: copy.sensitive })[value] ?? copy.unavailable ?? copy.internal;
 }
 
 function statusLabel(value: string, copy: CoreProjectAdminCopy): string {
@@ -87,11 +88,11 @@ function statusLabel(value: string, copy: CoreProjectAdminCopy): string {
     RESERVED: copy.reserved,
     ACTIVE: copy.active,
     PAUSED: copy.paused
-  })[value] ?? value;
+  })[value] ?? copy.unavailable ?? copy.internal;
 }
 
 function accessLabel(value: string, copy: CoreProjectAdminCopy): string {
-  return ({ VIEWER: copy.viewer, EDITOR: copy.editor, OWNER: copy.owner })[value] ?? value;
+  return ({ VIEWER: copy.viewer, EDITOR: copy.editor, OWNER: copy.owner })[value] ?? copy.unavailable ?? copy.viewer;
 }
 
 export function CoreProjectAdminControls({
@@ -168,9 +169,11 @@ export function CoreProjectAdminControls({
       <details className="admin-drawer core-project-drawer core-project-access-drawer">
         <summary>{copy.accessDetails}</summary>
         <div className="core-project-access-panel">
-          <p className="core-project-access-elevation-help">
-            {copy.accessElevationHelp} <a href="/core/security/admin?scope=PROJECT_OWNER_ACCESS_CHANGE#admin-elevation-form">{copy.accessElevationLink}</a>
-          </p>
+          {actorRole !== "OWNER" ? (
+            <p className="core-project-access-elevation-help">
+              {copy.accessElevationHelp} <a href="/core/security/admin?action=project-access#admin-elevation-form">{copy.accessElevationLink}</a>
+            </p>
+          ) : null}
           <form className="compact-form core-project-access-form" action={setCoreProjectAccess}>
             <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
             <input type="hidden" name="projectId" value={project.id} />
@@ -189,7 +192,7 @@ export function CoreProjectAdminControls({
                   .map((user) => (
                     <option key={user.id} value={user.id}>
                       {user.displayName ? `${user.displayName} - ` : ""}
-                      {user.email} ({user.role})
+                      {user.email}
                     </option>
                   ))}
               </select>

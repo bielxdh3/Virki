@@ -23,32 +23,32 @@ const copy = {
   "pt-BR": {
     label: "Navegação BielOS Core",
     hub: "Hub",
-    operations: "Seção de operações",
+    operations: "Ops",
     projects: "Projetos",
-    security: "Segurança pessoal",
-    audit: "Seção de auditoria",
-    accountSecurity: "Segurança da conta",
-    modules: "Catálogo de módulos",
-    administrativeSecurity: "Segurança administrativa",
-    applications: "Solicitações de conta"
+    security: "Pessoal",
+    audit: "Audit",
+    accountSecurity: "Conta",
+    modules: "Módulos",
+    administrativeSecurity: "Admin",
+    applications: "Pedidos"
   },
   en: {
     label: "BielOS Core navigation",
     hub: "Hub",
-    operations: "Operations section",
+    operations: "Ops",
     projects: "Projects",
-    security: "Personal security",
-    audit: "Audit activity section",
-    accountSecurity: "Account security",
-    modules: "Module catalog",
-    administrativeSecurity: "Administrative security",
-    applications: "Account applications"
+    security: "Personal",
+    audit: "Audit",
+    accountSecurity: "Account",
+    modules: "Modules",
+    administrativeSecurity: "Admin",
+    applications: "Requests"
   }
 } satisfies Record<BielosLocale, Record<string, string>>;
 
 const definitions = [
   { id: "hub", href: "/", copyKey: "hub", kind: "route", activePath: "/", ownerOnly: false },
-  { id: "operations", href: "/#ops", copyKey: "operations", kind: "section", activePath: "/", ownerOnly: false },
+  { id: "operations", href: "/core/health", copyKey: "operations", kind: "route", activePath: "/core/health", ownerOnly: false },
   { id: "projects", href: "/core/projects", copyKey: "projects", kind: "route", activePath: "/core/projects", ownerOnly: false },
   { id: "security", href: "/core/security", copyKey: "security", kind: "route", activePath: "/core/security", ownerOnly: false },
   { id: "audit", href: "/core/security#audit", copyKey: "audit", kind: "section", activePath: "/core/security", ownerOnly: true },

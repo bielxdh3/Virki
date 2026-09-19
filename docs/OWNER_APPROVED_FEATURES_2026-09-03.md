@@ -2,7 +2,7 @@
 
 This document records product decisions approved by the repository owner on 2026-09-03.
 
-It is a planning record only. An item appearing here does **not** mean it is implemented, validated, deployed, or allowed to bypass BielOS security/review gates. Existing UIX and roadmap status remain unchanged until implementation evidence exists.
+It began as a planning record. The disposition below is the current local implementation evidence; it does not mean the work is deployed or allowed to bypass BielOS security/review gates.
 
 ## Approved features
 
@@ -28,3 +28,16 @@ It is a planning record only. An item appearing here does **not** mean it is imp
 - Minimal-first and intuition-first information density remain mandatory.
 - Default surfaces should show only what is necessary for the current action; secondary detail stays behind progressive disclosure.
 - GymForge expansion remains frozen unless separately approved.
+
+## Current local dispositions
+
+| Issue | Disposition | Evidence / limitation |
+| --- | --- | --- |
+| #8 Universal Command Palette | COMPLETE (local) | `apps/hub/src/app/core/command-palette.tsx` plus `/api/core/command`; navigation/search is session- and role-authorized, bounded, and route-only. |
+| #9 Project Health Cards | COMPLETE (local) | `/core/health` consumes the Core operations snapshot and shows source/freshness; unprovided module data stays unavailable. |
+| #10 Unified Activity Inbox | FROZEN_BY_APPROVED_BOUNDARY | `/core/activity` exists, but remains empty until an independent module declares an authorized `events.read` provider. |
+| #11 Automation Recipes | BLOCKED_WITH_EXACT_PREREQUISITE | `/core/automation` exposes a bounded recipe; execution requires a declared capability provider and scheduler boundary. |
+| #12 Module Capability Contract v1 | COMPLETE (local) | `packages/types/src/capabilities.ts` and validation tests define bounded manifests/envelopes, explicit authz/audit semantics, duplicate rejection, and declared-version negotiation. |
+| #13 Recovery Center | COMPLETE (local) | `/core/recovery` shows freshness/provenance and does not infer recoverability from backup existence. |
+
+These dispositions are local only: publication, CI convergence, authenticated visual acceptance, and production execution remain separate gates.

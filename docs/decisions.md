@@ -68,6 +68,14 @@ This rule applies to all future Prompt Arena parity work and must be evaluated w
 
 Reason: the user explicitly rejected the current project-access presentation because it exposed too much explanatory information at once and was visually misaligned. BielOS should feel self-explanatory through structure, not through persistent instruction text.
 
+## 0010: Module Capability Contract v1
+
+Independent modules may expose only versioned, bounded capability manifests and typed envelopes. Each declaration carries classification, authentication, authorization, audit, timeout/retry, idempotency, freshness, schema, and deprecation semantics; Core negotiates only declared non-deprecated versions. Core health, recovery, activity, and automation surfaces consume declared capabilities only; they must show source/freshness and must never infer recoverability or discover arbitrary internal endpoints. Arena-domain functionality and protected Root.ark/L-vault/H-vault data stay outside this contract.
+
+## 0011: Routine OWNER project access authority
+
+Global OWNER authority covers routine project participant/access changes. ADMIN keeps the existing scoped administrative-elevation ceremony. Higher-risk actions such as project archival remain elevated. This is an authorization distinction, not a UI-only shortcut, and every mutation remains behind Cloudflare Access, session checks, CSRF, transaction rules, and sanitized audit logging.
+
 ## 0009: Intuition-First UI and Extreme Text Compression
 
 BielOS UI must be understandable primarily through structure, placement, grouping, state, iconography, and familiar interaction patterns. Visible text is a fallback for ambiguity, not the default mechanism for teaching the interface.

@@ -89,7 +89,7 @@ Recommended values:
 - `CLOUDFLARE_ACCESS_AUDIENCE`
 - `CLOUDFLARE_TEAM_DOMAIN`
 
-`BIELOS_RATE_LIMIT_HASH_SECRET` is a private stable secret used to HMAC login rate limit identifiers. Do not commit, log, paste, or share a real value. Rotating it clears the practical continuity of existing rate limit buckets, which is acceptable.
+`BIELOS_RATE_LIMIT_HASH_SECRET` is a private stable secret used to HMAC login, verification, and recovery rate limit identifiers. Do not commit, log, paste, or share a real value. Rotating it clears the practical continuity of existing rate limit buckets, which is acceptable.
 
 ## Cookie Security
 
@@ -192,3 +192,9 @@ The same worker runs audit log retention cleanup with `AUDIT_LOG_RETENTION_DAYS`
 - Restore validation is manual and must be repeated for future backup procedure changes.
 - No TLS termination configured in this repository.
 - Secret scanning and linting are basic MVP checks and should be expanded as the repository matures.
+
+## Current local campaign state
+
+The current local branch contains uncommitted Core UI/capability/audit/recovery changes and preserved security WIP. It has not been published, deployed, migrated against production, or validated by a fresh authenticated human smoke. Historical SHA/CI/runtime statements above remain historical evidence only; use the exact local `git` and validation output for any new claim.
+
+The current local dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`. The production-tree audit is clean after omitting development dependencies; the accepted Prisma/deepmerge advisory remains constrained to the exact Prisma tooling path and is not a production dependency claim.

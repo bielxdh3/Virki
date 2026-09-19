@@ -8,7 +8,6 @@ import {
   type CoreProjectAdminCopy
 } from "./project-admin-controls";
 import {
-  CORE_PROJECT_ACCESS_ELEVATION_SCOPE,
   CoreProjectAccessActionError,
   executeCoreProjectAccessAction,
   readCoreProjectAccessForm
@@ -34,13 +33,13 @@ const copy: CoreProjectAdminCopy = {
   paused: "Paused",
   viewer: "Viewer",
   editor: "Editor",
-  owner: "Project owner (OWNER)",
+  owner: "Project owner",
   editDetails: "Edit metadata",
   accessDetails: "Manage access and project owner",
   selectUser: "Select user",
   accessLevel: "Project access level",
-  ownerHelp: "OWNER defines this project's responsible owner.",
-  accessElevationHelp: "Before applying or revoking access, activate PROJECT_OWNER_ACCESS_CHANGE, verify the emailed code, and return here.",
+  ownerHelp: "Defines this project's responsible owner.",
+  accessElevationHelp: "Before applying or revoking access, confirm the operation in Administrative security and return here.",
   accessElevationLink: "Open Administrative security",
   applyAccess: "Apply access",
   currentAccess: "Current access",
@@ -93,10 +92,9 @@ test("global OWNER access form submits the selected project OWNER level", () => 
   assert.match(accessForm, /name="userId"/);
   assert.match(accessForm, /value="member-id"/);
   assert.match(accessForm, /name="accessLevel"/);
-  assert.match(accessForm, /<option value="OWNER">Project owner \(OWNER\)<\/option>/);
-  assert.match(accessForm, /OWNER defines this project(?:'|&#x27;)s responsible owner/);
-  assert.match(markup, /Before applying or revoking access, activate PROJECT_OWNER_ACCESS_CHANGE/);
-  assert.match(markup, /href="\/core\/security\/admin\?scope=PROJECT_OWNER_ACCESS_CHANGE#admin-elevation-form">Open Administrative security<\/a>/);
+  assert.match(accessForm, /<option value="OWNER">Project owner<\/option>/);
+  assert.match(accessForm, /Defines this project(?:'|&#x27;)s responsible owner/);
+  assert.doesNotMatch(markup, /PROJECT_OWNER_ACCESS_CHANGE/);
 });
 
 test("global ADMIN access form cannot submit a project OWNER level", () => {
@@ -141,23 +139,22 @@ test("the browser access form passes its canonical member and role to the guarde
     accessLevel: "OWNER"
   });
   assert.deepEqual(calls, [
-    ["owner-id", "session-id", CORE_PROJECT_ACCESS_ELEVATION_SCOPE],
     [{ id: "owner-id", role: "OWNER" }, "project-id", "member-id", "OWNER"]
   ]);
 });
 
-test("missing or expired elevation rejects before mutation and rejected targets cannot report success", async () => {
+test("ADMIN still requires elevation while rejected targets cannot report success", async () => {
   let mutationCalls = 0;
 
   await assert.rejects(
-    executeCoreProjectAccessAction(accessFormData(), { id: "owner-id", role: "OWNER" }, "session-id", {
+    executeCoreProjectAccessAction(accessFormData({ accessLevel: "VIEWER" }), { id: "admin-id", role: "ADMIN" }, "session-id", {
       requireElevation: async () => { throw new Error("elevation unavailable"); },
       setAccess: async () => {
         mutationCalls += 1;
         return { kind: "granted", accessId: "access-id" };
       }
     }),
-    (error) => error instanceof CoreProjectAccessActionError && error.stage === "elevation"
+      (error) => error instanceof CoreProjectAccessActionError && error.stage === "elevation"
   );
   assert.equal(mutationCalls, 0);
 
@@ -165,7 +162,7 @@ test("missing or expired elevation rejects before mutation and rejected targets 
 
   for (const rejection of ["expired elevation", "nonexistent target", "unauthorized actor", "last active owner"]) {
     await assert.rejects(
-      executeCoreProjectAccessAction(accessFormData(), { id: "owner-id", role: "OWNER" }, "session-id", {
+      executeCoreProjectAccessAction(accessFormData({ accessLevel: "VIEWER" }), { id: "owner-id", role: "OWNER" }, "session-id", {
         requireElevation: async () => {},
         setAccess: async () => { throw new Error(rejection); }
       }),

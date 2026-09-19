@@ -67,18 +67,6 @@ test("the server action consumes the browser form, persists access, and redirect
     },
     select: { id: true }
   });
-  await prisma.securityElevation.create({
-    data: {
-      requestKey: "wrapper-elevation-request-key-1234567890123456",
-      userId: owner.id,
-      sessionId: dbSession.id,
-      protocolVersion: 1,
-      scope: "PROJECT_OWNER_ACCESS_CHANGE",
-      challengeHash: "wrapper-challenge-hash",
-      status: "ACTIVE",
-      expiresAt: new Date(Date.now() + 60_000)
-    }
-  });
   session = { id: dbSession.id, user: owner };
 
   const formData = new FormData();

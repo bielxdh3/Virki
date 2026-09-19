@@ -1,10 +1,10 @@
 # Application And Module Planning Index
 
-This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The current post-smoke repair is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE` in an uncommitted worktree; local validation passed under unsupported Node `24.14.1`, and affected OWNER/MEMBER project, audit, restriction, and logout smoke must be repeated under the existing layered boundaries. Public registration and live Intake remain disabled. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
+This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The 2026-09-18 direct campaign is locally implementation-complete for the current Core scope in an uncommitted worktree at `4be92f85a3573feb184da2bf770d0497a22f6a6a`; authenticated human smoke, exact-SHA CI, and environment-backed Docker/PostgreSQL/backup/runtime evidence remain external gates. Public registration and live Intake remain disabled. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
 
 ## BielOS Core
 
-- Status: existing Core project-detail and platform surfaces are implemented; historical technical/runtime evidence is retained, while the uncommitted post-smoke repair has complete local validation under unsupported Node `24.14.1` and only the bounded affected human ceremony remains. Repeat validation under Node `>=22.13.0 <23` before release.
+- Status: existing Core project-detail, participant-access, recovery, audit, capability, operations, and platform surfaces are implemented locally. Runtime-sensitive checks were repeated with Node `22.20.0`; environment-backed Docker/PostgreSQL, exact-SHA CI, and authenticated human smoke remain release gates.
 - Existing foundations: `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog`.
 - Security and architecture gate: complete in `bielos-core.md`.
 - Implemented surfaces: project registry/lifecycle, authorization-aware project detail workspace, project access, personal sessions, safe operations visibility, owner-only audit activity, and typed application registry integration.

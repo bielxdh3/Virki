@@ -4,10 +4,13 @@ import test from "node:test";
 import {
   getSafeAuditActorState,
   getSafeAuditEventType,
+  getSafeAuditCategory,
+  getSafeAuditEventLabel,
   getSafeAuditResource,
   getSafeAuditResult,
   normalizeCoreAuditFilter
 } from "./audit-view";
+import { parseAuditDate } from "./audit-service";
 
 test("allows known event types and replaces unknown values", () => {
   assert.equal(getSafeAuditEventType("CORE_PROJECT_CREATED"), "CORE_PROJECT_CREATED");
@@ -33,7 +36,24 @@ test("reduces actors and resources to safe categories", () => {
   assert.equal(getSafeAuditResource("hub", "ACCESS_JWT_VALID"), "access");
   assert.equal(getSafeAuditResource("identity.elevation"), "security");
   assert.equal(getSafeAuditResource("identity.application"), "application");
+  assert.equal(getSafeAuditResource("identity.module"), "application");
   assert.equal(getSafeAuditResource("core.project-access"), "project-access");
   assert.equal(getSafeAuditResource("gymforge.workout"), "application");
   assert.equal(getSafeAuditResource("private/resource/value"), "other");
+});
+
+test("maps technical events to compact investigation labels", () => {
+  assert.equal(getSafeAuditCategory("CORE_PROJECT_ACCESS_GRANTED", "core.project-access"), "access");
+  assert.equal(getSafeAuditCategory("AUTH_SESSION_CLEANUP", "session"), "auth");
+  assert.equal(getSafeAuditCategory("MODULE_ACCESS_REQUESTED", "identity.module"), "module");
+  assert.equal(getSafeAuditCategory("unknown", "system"), "system");
+  assert.equal(getSafeAuditEventLabel("AUTH_SESSION_CLEANUP"), "Limpeza de sessões");
+  assert.equal(getSafeAuditEventLabel("untrusted event"), "Outro evento");
+});
+
+test("audit time filters accept bounded UTC dates and reject malformed values", () => {
+  assert.equal(parseAuditDate("2026-09-18")?.toISOString(), "2026-09-18T00:00:00.000Z");
+  assert.equal(parseAuditDate("2026-09-18", true)?.toISOString(), "2026-09-18T23:59:59.999Z");
+  assert.equal(parseAuditDate("2026-02-30"), undefined);
+  assert.equal(parseAuditDate("2026-09-18T00:00"), undefined);
 });

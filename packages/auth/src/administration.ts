@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
 import { generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode } from "./security";
-import { hashAuditIdentifier, hashPassword, verifyPassword, writeAuditLog } from "./index";
+import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashPassword, verifyPassword, writeAuditLog } from "./index";
 import { prisma, type Prisma } from "@bielos/database";
 import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
 
@@ -159,6 +159,12 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
   const now = input.now ?? new Date();
   if (input.actor.role !== "OWNER") throw new AdministrationMutationError();
   assertAdminPassword(input.newPassword);
+  const attempts = await prisma.$transaction(async (transaction) => {
+    const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `admin-recovery-user:${input.actor.id}`, now);
+    const codeAttempt = await consumeRateLimitAttemptInTransaction(transaction, `admin-recovery-code:${input.actor.id}`, now);
+    return { accountAllowed: accountAttempt.allowed, codeAllowed: codeAttempt.allowed };
+  });
+  if (!attempts.accountAllowed || !attempts.codeAllowed) throw new AdministrationMutationError();
   const owner = await prisma.user.findUnique({ where: { id: input.actor.id }, select: { emailVerifiedAt: true, passwordHash: true, role: true, isActive: true } });
   if (!owner?.isActive || owner.role !== "OWNER" || !owner.emailVerifiedAt || !owner.passwordHash || !await verifyPassword(owner.passwordHash, input.normalPassword)) throw new AdministrationMutationError();
   const passwordHash = await hashPassword(input.newPassword);

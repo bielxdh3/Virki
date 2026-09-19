@@ -24,8 +24,10 @@ export default async function CoreModulesPage() {
     request: "Solicitar",
     requestPermission: "Solicitar permissão",
     granted: "Concedida",
-    requestable: "Solicitável",
     grantedOnly: "Somente concedido",
+    available: "Disponível",
+    unavailable: "Indisponível",
+    inert: "Inerte",
     administration: "Administração de solicitações",
     noPending: "Nenhuma solicitação pendente.",
     decision: "Decisão",
@@ -43,8 +45,10 @@ export default async function CoreModulesPage() {
     request: "Request",
     requestPermission: "Request permission",
     granted: "Granted",
-    requestable: "Requestable",
     grantedOnly: "Granted only",
+    available: "Available",
+    unavailable: "Unavailable",
+    inert: "Inert",
     administration: "Request administration",
     noPending: "No pending requests.",
     decision: "Decision",
@@ -60,6 +64,9 @@ export default async function CoreModulesPage() {
   const pendingModuleRequests = session.user.role === "OWNER" ? await listPendingModuleRequests(session.user) : [];
   const pendingFeatureRequests = session.user.role === "OWNER" ? await listPendingFeaturePermissionRequests(session.user) : [];
   const csrfToken = createCsrfToken();
+  const runtimeLabel = (value: string) => portuguese
+    ? ({ AVAILABLE: t.available, UNAVAILABLE: t.unavailable, INERT: t.inert } as Record<string, string>)[value] ?? t.unavailable
+    : ({ AVAILABLE: t.available, UNAVAILABLE: t.unavailable, INERT: t.inert } as Record<string, string>)[value] ?? t.unavailable;
 
   return (
     <CoreShell variant="docked" locale={locale} role={session.user.role} activePath="/core/modules"><div className="core-projects-workspace">
@@ -69,9 +76,9 @@ export default async function CoreModulesPage() {
         {modules.map((module) => {
           const grant = module.accessGrants[0];
           const granted = grant?.status === "ACTIVE" && (grant.accessDurationKind === "PERMANENT" || (grant.expiresAt && grant.expiresAt > new Date()));
-          return <article className="core-project-card" key={module.key}><div className="core-project-card-main"><span className="core-project-slug">{module.runtimeAvailability}</span><h2>{module.name}</h2><p>{granted ? t.granted : module.requestable ? t.requestable : t.grantedOnly}</p>
-            {!granted && module.visibility === "PUBLIC" && module.requestable ? <form action={requestCoreModule} method="post"><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} /><input type="hidden" name="moduleKey" value={module.key} /><label>{t.requestReason}<textarea required name="reason" maxLength={1000} /></label><button type="submit">{t.request}</button></form> : null}
-            {module.featurePermissions.map((permission) => <form action={requestCoreFeaturePermission} method="post" key={permission.key}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} /><input type="hidden" name="moduleKey" value={module.key} /><input type="hidden" name="permissionKey" value={permission.key} /><strong>{permission.label}</strong>{permission.grants[0] ? <span>{t.granted}</span> : <><label>{t.optionalReason}<input name="reason" maxLength={1000} /></label><button type="submit">{t.requestPermission}</button></>}</form>)}
+          return <article className="core-project-card" key={module.key}><div className="core-project-card-main"><span className="core-project-slug">{runtimeLabel(module.runtimeAvailability)}</span><h2>{module.name}</h2><p>{granted ? t.granted : runtimeLabel(module.runtimeAvailability)}</p>
+            {!granted && module.visibility === "PUBLIC" && module.requestable ? <details className="module-request-drawer"><summary>{t.request}</summary><form action={requestCoreModule} method="post"><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} /><input type="hidden" name="moduleKey" value={module.key} /><label>{t.requestReason}<textarea required name="reason" maxLength={1000} /></label><button type="submit">{t.request}</button></form></details> : null}
+            {module.featurePermissions.map((permission) => <div className="module-permission-row" key={permission.key}><strong>{permission.label}</strong>{permission.grants[0] ? <span>{t.granted}</span> : <details className="module-request-drawer"><summary>{t.requestPermission}</summary><form action={requestCoreFeaturePermission} method="post"><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} /><input type="hidden" name="moduleKey" value={module.key} /><input type="hidden" name="permissionKey" value={permission.key} /><label>{t.optionalReason}<input name="reason" maxLength={1000} /></label><button type="submit">{t.requestPermission}</button></form></details>}</div>)}
           </div></article>;
         })}
       </section>

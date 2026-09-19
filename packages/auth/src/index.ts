@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import { prisma, type Prisma } from "@bielos/database";
 import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
-import { createLoginRateLimitIdentifierHash } from "./rate-limit-config";
+import { createLoginRateLimitIdentifierHash, createRateLimitIdentifierHash } from "./rate-limit-config";
 
 export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
 export {
@@ -65,6 +65,10 @@ export type LoginRateLimitResult = {
   allowed: boolean;
   retryAfterSeconds?: number;
   failureMode?: "limiter-unavailable";
+};
+
+export type RateLimitAttemptResult = {
+  allowed: boolean;
 };
 
 export type LoginAuthenticationResult =
@@ -138,6 +142,75 @@ export async function recordFailedLogin(identifier: string, now = new Date()): P
     await lockLoginRateLimitIdentifier(transaction, identifierHash);
     await recordFailedLoginEntry(transaction, identifierHash, now);
   });
+}
+
+export async function lockRateLimitIdentifierInTransaction(
+  transaction: Prisma.TransactionClient,
+  identifier: string
+): Promise<void> {
+  await lockLoginRateLimitIdentifier(transaction, hashRateLimitIdentifier(identifier));
+}
+
+export async function consumeRateLimitAttemptInTransaction(
+  transaction: Prisma.TransactionClient,
+  identifier: string,
+  now = new Date()
+): Promise<RateLimitAttemptResult> {
+  const identifierHash = hashRateLimitIdentifier(identifier);
+  await lockLoginRateLimitIdentifier(transaction, identifierHash);
+
+  const existing = await transaction.loginRateLimit.findUnique({
+    where: { identifierHash },
+    select: {
+      attempts: true,
+      windowStartedAt: true,
+      blockedUntil: true
+    }
+  });
+  const expiresAt = new Date(now.getTime() + LOGIN_RATE_LIMIT_RETENTION_MS);
+
+  if (!existing || isRateLimitWindowExpired(existing.windowStartedAt, now)) {
+    if (!existing) {
+      await transaction.loginRateLimit.create({
+        data: {
+          identifierHash,
+          attempts: 1,
+          windowStartedAt: now,
+          blockedUntil: null,
+          expiresAt
+        }
+      });
+    } else {
+      await transaction.loginRateLimit.update({
+        where: { identifierHash },
+        data: {
+          attempts: 1,
+          windowStartedAt: now,
+          blockedUntil: null,
+          expiresAt
+        }
+      });
+    }
+    return { allowed: true };
+  }
+
+  if (isLoginRateLimitBlocked(existing, now)) {
+    return { allowed: false };
+  }
+
+  const attempts = Math.min(existing.attempts + 1, LOGIN_RATE_LIMIT_MAX_ATTEMPTS);
+  await transaction.loginRateLimit.update({
+    where: { identifierHash },
+    data: {
+      attempts,
+      blockedUntil:
+        attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+          ? getRateLimitWindowResetAt(existing.windowStartedAt)
+          : null,
+      expiresAt
+    }
+  });
+  return { allowed: true };
 }
 
 export async function clearLoginRateLimit(identifier: string): Promise<void> {
@@ -487,6 +560,10 @@ function findAuthenticationUser(
 
 function hashLoginRateLimitIdentifier(identifier: string): string {
   return createLoginRateLimitIdentifierHash(normalizeRateLimitIdentifier(identifier));
+}
+
+function hashRateLimitIdentifier(identifier: string): string {
+  return createRateLimitIdentifierHash(identifier);
 }
 
 function normalizeRateLimitIdentifier(identifier: string): string {

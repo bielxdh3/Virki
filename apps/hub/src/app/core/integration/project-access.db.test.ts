@@ -85,7 +85,7 @@ test("OWNER grants, changes, and repeats access without duplicate rows", async (
 
 test("OWNER assignment is visible in a fresh persisted project read", async () => {
   const project = await createProject("owner-read-back", owner.id);
-  const session = await createElevationSession(owner.id, new Date(Date.now() + 60_000));
+  const session = await createSession(owner.id);
   const formData = createAccessForm(project.id, member.id, "OWNER");
 
   const result = await executeCoreProjectAccessAction(formData, owner, session.id);
@@ -112,20 +112,20 @@ test("OWNER assignment is visible in a fresh persisted project read", async () =
   );
 });
 
-test("the browser access action rejects missing and expired elevation without mutation", async () => {
+test("ADMIN browser access action rejects missing and expired elevation without mutation", async () => {
   const project = await createProject("elevation-required", owner.id);
-  const session = await createElevationSession(owner.id, new Date(Date.now() - 60_000));
-  const formData = createAccessForm(project.id, member.id, "OWNER");
+  const session = await createElevationSession(admin.id, new Date(Date.now() - 60_000));
+  const formData = createAccessForm(project.id, member.id, "VIEWER");
 
   await assert.rejects(
-    executeCoreProjectAccessAction(formData, owner, session.id),
+    executeCoreProjectAccessAction(formData, admin, session.id),
     (error) => error instanceof CoreProjectAccessActionError && error.stage === "elevation"
   );
 
   await prisma.securityElevation.deleteMany({ where: { sessionId: session.id } });
 
   await assert.rejects(
-    executeCoreProjectAccessAction(formData, owner, session.id),
+    executeCoreProjectAccessAction(formData, admin, session.id),
     (error) => error instanceof CoreProjectAccessActionError && error.stage === "elevation"
   );
 
@@ -299,7 +299,7 @@ function createAccessForm(projectId: string, userId: string, accessLevel: string
   return formData;
 }
 
-async function createElevationSession(userId: string, expiresAt: Date) {
+async function createSession(userId: string) {
   const session = await prisma.session.create({
     data: {
       userId,
@@ -309,6 +309,11 @@ async function createElevationSession(userId: string, expiresAt: Date) {
     select: { id: true }
   });
 
+  return session;
+}
+
+async function createElevationSession(userId: string, expiresAt: Date) {
+  const session = await createSession(userId);
   await prisma.securityElevation.create({
     data: {
       requestKey: `test-elevation-${userId}-${Date.now()}`,

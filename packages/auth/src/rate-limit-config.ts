@@ -27,8 +27,15 @@ export function createLoginRateLimitIdentifierHash(
   normalizedIdentifier: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
+  return createRateLimitIdentifierHash(normalizedIdentifier, env);
+}
+
+export function createRateLimitIdentifierHash(
+  identifier: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
   return createHmac("sha256", resolveLoginRateLimitHashKey(env))
-    .update(normalizedIdentifier, "utf8")
+    .update(identifier, "utf8")
     .digest("hex");
 }
 

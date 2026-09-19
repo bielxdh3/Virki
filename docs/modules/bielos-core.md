@@ -1,5 +1,11 @@
 # BielOS Core Security And Data Design
 
+## Current master-campaign status — 2026-09-18
+
+The direct Codex campaign is complete locally for the authorized Core scope. Local `main` and `origin/main` are `4be92f85a3573feb184da2bf770d0497a22f6a6a`; the worktree is uncommitted and no publication, deployment, migration, Cloudflare/DNS mutation, or production data action was performed. The shared Prompt Arena shell, project participant authority, administrative recovery, retained-history audit surface, capability cards, and Core operations routes are implemented locally. Supported Node 22 evidence exists for runtime-sensitive checks; Docker/PostgreSQL-backed validation, authenticated browser smoke, and exact-SHA CI remain external gates.
+
+Routine global-OWNER project participant/access changes use the normal authenticated session plus Cloudflare Access, CSRF, server authorization, transaction invariants, and sanitized audit logging; the separate elevation ceremony remains for higher-risk actions such as project archive. `SecurityUnlock` remains non-authoritative and blocked. See [master-finish-everything-ledger.md](../master-finish-everything-ledger.md) for current dispositions.
+
 ## Implementation Status
 
 Core project registry, project management, and project access administration are implemented in the private hub at `/core/projects`. Each authorized project also has a focused private detail workspace at `/core/projects/[projectId]`; direct reads apply the same persisted-principal authorization scope in the database query, members receive only their effective access summary, and administrator-only access rows remain bounded. Personal session management and the owner-only audit activity view are implemented at `/core/security`. Read scope follows this document; mutations require Cloudflare Access, BielOS authentication, CSRF, bounded validation, generic errors, and sanitized audits. Access changes use serializable transactions, prevent duplicate rows and role escalation, and retain the last active project owner. Session queries are user-scoped and omit token material; users may revoke only their own other sessions, with an explicit confirmation for the all-other action. Permanent project deletion remains unavailable.
@@ -16,7 +22,7 @@ Historical authenticated OWNER and MEMBER production smoke completed through Clo
 
 ## Identity/access rollout status
 
-Identity/access source surfaces remain behind the existing Cloudflare Access-first, BielOS authentication, CSRF, session/scoped-elevation, least-privilege authorization, and audit boundaries. Current local work is uncommitted at `afb74455573179b9cd915d2076032af9fae23a4b`; `origin/main` remains the same pre-existing SHA, and no push, new remote CI result, or deployment is claimed. Phase 3 status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: local validation completed under unsupported Node `24.14.1`, and only the affected human smoke remains. Public registration and live Intake remain disabled, loopback-only ports remain required, `SecurityUnlock` runtime remains blocked, and none of the existing boundaries may be weakened.
+Identity/access source surfaces remain behind the existing Cloudflare Access-first, BielOS authentication, CSRF, session/scoped-elevation, least-privilege authorization, and audit boundaries. The current worktree is uncommitted at `4be92f85a3573feb184da2bf770d0497a22f6a6a`; no push, new remote CI result, or deployment is claimed. Local implementation is complete for the current Core scope; authenticated human smoke, exact-SHA CI, and environment-backed runtime evidence remain open. Public registration and live Intake remain disabled, loopback-only ports remain required, `SecurityUnlock` runtime remains blocked, and none of the existing boundaries may be weakened.
 
 ## Identity
 
@@ -100,7 +106,7 @@ Core event types are allowlisted for project create/update/archive, access grant
 
 Audit metadata may contain only bounded enum values, aggregate counts, generic action scope, and stable hashed resource references. It must not contain names, slugs, descriptions, emails, raw identifiers, form values, request bodies, passwords, secrets, cookies, tokens, token hashes, JWTs, headers, IPs, environment values, database URLs, logs, or unrestricted free text.
 
-The viewer exposes only allowlisted event type, allowlisted result, safe resource category, creation time, and generic actor state (`user` or `system`). Unknown stored values collapse to generic categories. It does not select or render raw metadata, arbitrary messages, emails, or raw identifiers. Queries are newest-first and limited to 50 rows. Existing audit retention remains authoritative.
+The viewer exposes only allowlisted event type, allowlisted result, safe category/resource labels, creation time, generic actor state (`user` or `system`), bounded safe detail fields, retention range, and stable cursor pagination. Unknown stored values collapse to generic categories. It does not select or render raw metadata, arbitrary messages, emails, or raw identifiers. Queries are newest-first, bounded to 50 rows per page, filterable by safe fields, and exportable only through the bounded OWNER-only sanitized route. Existing audit retention remains authoritative.
 
 ## Safe Operations Visibility
 
@@ -149,7 +155,7 @@ Current automated coverage includes:
 - create/edit/archive validation, authority, retained access history, generic failures, and sanitized audits;
 - access grant/change/revoke authority, last-owner retention, cross-project isolation, duplicate rows, and six real concurrent races;
 - personal-session read/revoke/revoke-all isolation, current-session preservation, expired/revoked behavior, post-revocation authentication, and cleanup compatibility;
-- owner-only newest-first 50-row audit display with safe legacy fallbacks and no private display columns;
+  - owner-only newest-first retained-history audit display with stable cursors, safe filters/details/export bounds, legacy fallbacks, and no private display columns;
 - successful, failed, synchronous-error, stalled, and single-flight operations probes;
 - persistent login limiting with a required dedicated production key, same-identifier transaction serialization, a five-second database lock timeout, bounded attempt retention, normalized identifiers, real route-level throttling, and successful-bucket clearing;
 - login-route Access/CSRF denial, generic failures, session/cookie success, inactive/configuration failure, sanitized audits, and concurrent request behavior;
@@ -157,4 +163,4 @@ Current automated coverage includes:
 - fixed operational command failure output across operation and disconnect errors;
 - CI execution on Node 22 with one synthetic PostgreSQL service and separate integration/concurrency selections.
 
-Historical Core gate records cover unit, database integration and concurrency tests, secret scan, lint, typecheck, Prisma validation, production build, production image build, and production Compose validation. Historical public/local health, Cloudflare-first routing, direct-origin denial, public redirects, loopback checks, and OWNER/MEMBER smoke remain dated evidence; current local validation is complete under unsupported Node `24.14.1`, but current human-smoke completion is not claimed until the affected scope/project/audit/restriction/logout flows are repeated.
+Historical Core gate records cover unit, database integration and concurrency tests, secret scan, lint, typecheck, Prisma validation, production build, production image build, and production Compose validation. Historical public/local health, Cloudflare-first routing, direct-origin denial, public redirects, loopback checks, and OWNER/MEMBER smoke remain dated evidence; current runtime-sensitive checks were repeated with Node `22.20.0`, while current authenticated human smoke and environment-backed gates remain open.

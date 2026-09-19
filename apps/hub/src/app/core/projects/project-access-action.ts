@@ -1,5 +1,4 @@
 import { requireSecurityElevation } from "@bielos/auth/administration";
-
 import type { CoreProjectPrincipal } from "../authorization";
 import {
   isCoreProjectAccessLevel,
@@ -46,7 +45,7 @@ export async function executeCoreProjectAccessAction(
   actor: CoreProjectPrincipal,
   sessionId: string,
   dependencies: {
-    requireElevation?: typeof requireSecurityElevation;
+    requireElevation?: (userId: string, sessionId: string) => Promise<void>;
     setAccess?: typeof setCoreProjectAccessRecord;
   } = {}
 ) {
@@ -56,14 +55,16 @@ export async function executeCoreProjectAccessAction(
     throw new CoreProjectAccessActionError("input");
   }
 
-  try {
-    await (dependencies.requireElevation ?? requireSecurityElevation)(
-      actor.id,
-      sessionId,
-      CORE_PROJECT_ACCESS_ELEVATION_SCOPE
-    );
-  } catch {
-    throw new CoreProjectAccessActionError("elevation");
+  // Global OWNER authority covers routine project participant/access changes.
+  // ADMIN keeps the existing elevation ceremony for non-owner access changes.
+  if (actor.role !== "OWNER") {
+    try {
+      await (dependencies.requireElevation ?? (async (userId, currentSessionId) =>
+        requireSecurityElevation(userId, currentSessionId, CORE_PROJECT_ACCESS_ELEVATION_SCOPE)
+      ))(actor.id, sessionId);
+    } catch {
+      throw new CoreProjectAccessActionError("elevation");
+    }
   }
 
   try {

@@ -2,4 +2,4 @@
 
 Reserved folder for the future root.ark module.
 
-TODO: Connect this module to BielOS Core after archival scope, access rules, and storage boundaries are defined.
+Status: FROZEN_BY_APPROVED_BOUNDARY. Do not connect this reserved module to BielOS Core until a separate architecture/security review defines archival scope, access rules, storage boundaries, and a declared Capability Contract v1 provider.

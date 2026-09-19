@@ -167,7 +167,9 @@ export async function revokeCoreProjectAccess(formData: FormData) {
   const projectId = readFormString(formData, "projectId").trim();
   const userId = readFormString(formData, "userId").trim();
   const resultPath = getProjectResultPath(formData, projectId);
-  try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.access); } catch { redirect(`${resultPath}?error=elevation`); }
+  if (session.user.role !== "OWNER") {
+    try { await requireSecurityElevation(session.user.id, session.id, CORE_PROJECT_ELEVATION_SCOPES.access); } catch { redirect(`${resultPath}?error=elevation`); }
+  }
 
   try {
     await revokeCoreProjectAccessRecord(session.user, projectId, userId);

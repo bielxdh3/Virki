@@ -250,18 +250,18 @@ BielOS uses defense in depth rather than treating any single layer as sufficient
 
 ## Roadmap
 
-- [ ] **UI/UX rebaseline (current design direction): replace the existing BielOS visual target with Prompt Arena parity.** The canonical plan is [docs/ui-ux-prompt-arena-roadmap.md](docs/ui-ux-prompt-arena-roadmap.md); future UI/UX implementation must use `ui-ux-pro-max` and must not silently omit applicable Prompt Arena UI/UX features.
-- [ ] **Minimal-first information density:** every migrated surface must show only what is necessary for the current action by default; remove persistent instructional walls, redundant labels/status copy, avoidable implementation terminology, and secondary metadata from the primary flow. Use hierarchy, alignment, concise feedback, and progressive disclosure instead. A noisy, misaligned, redundant, or non-intuitive screen fails UI/UX acceptance even if technically functional.
-- [ ] **Intuition-first text compression:** compress every visible string as far as clarity permits. The entire site should be understandable through structure, placement, grouping, state, and familiar controls before relying on explanatory text. Compact navigation labels, progressive disclosure, and removal of decorative numbering are mandatory where applicable. See [docs/ui-ux-intuition-first.md](docs/ui-ux-intuition-first.md).
-- [ ] Port Prompt Arena shell/navigation, semantic tokens, typography, appearance controls, component patterns, accessibility, reduced motion, and responsive behavior before doing independent BielOS visual polish.
-- [ ] Migrate every current Hub surface, including Core, projects, access administration, security/elevation, sessions/audit, login, application/identity surfaces, operations, module registry, and the existing frozen GymForge surfaces, to the same parity system.
-- [ ] Mature operational health, audit, and recovery surfaces
-- [ ] Define explicit contracts for independent project modules
+- [x] **UI/UX rebaseline:** Prompt Arena parity source lock, semantic shell tokens, appearance controls, compact navigation, accessibility hooks, reduced motion, and responsive mapping are implemented locally. Evidence: [parity matrix](docs/ui-ux-prompt-arena-parity.md).
+- [x] **Minimal-first information density:** Core administration, module requests, health, recovery, activity, automation, and audit surfaces use compact labels and progressive disclosure; human visual acceptance remains a separate gate.
+- [x] **Intuition-first text compression:** compact navigation and removal of decorative numbering are implemented. See [docs/ui-ux-intuition-first.md](docs/ui-ux-intuition-first.md).
+- [x] Port Prompt Arena shell/navigation, semantic tokens, typography, appearance controls, component patterns, accessibility, reduced motion, and responsive behavior locally before independent polish.
+- [x] Migrate the current Hub surfaces to the shared parity system through the shell/token/component mapping while preserving legacy route/security boundaries; authenticated visual acceptance is still pending.
+- [x] Mature operational health, audit, and recovery surfaces with bounded capability contracts, pagination, filters, safe detail, and export.
+- [x] Define explicit contracts for independent project modules (Capability Contract v1).
 - [ ] Integrate Root.ark only after a separate architecture and security review
 - [ ] Integrate L-vault without weakening its local-data boundary
 - [ ] Add H-vault through an isolated module contract; preserve GymForge's implemented private-hub behavior and expansion freeze
-- [ ] Strengthen backup, restore, and disaster-recovery evidence
-- [ ] Keep the public site intentionally minimal while the private system grows
+- [x] Strengthen backup, restore, and disaster-recovery evidence through the documented disposable PostgreSQL backup/restore validation contract; repeat validation remains a release gate after meaningful procedure or schema changes.
+- [x] Keep the public site intentionally minimal while the private system grows; the public-site suite covers canonical routes and keeps private data out of the surface.
 
 ## Documentation
 

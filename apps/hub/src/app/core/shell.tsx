@@ -1,6 +1,8 @@
 import React, { type ReactNode } from "react";
 import type { BielosLocale } from "@bielos/ui";
 import { getCoreNavigationItems, getCoreNavigationLabel } from "./navigation";
+import { AppearanceControls } from "../appearance-controls";
+import { CommandPalette } from "./command-palette";
 
 export type CoreShellVariant = "docked" | "standalone";
 
@@ -34,13 +36,12 @@ function CoreNavigation({ locale, role, activePath, layout }: CoreNavigationProp
 
   return (
     <nav className={`dock-nav core-navigation core-navigation--${layout}`} aria-label={getCoreNavigationLabel(locale)}>
-      {items.map((item, index) => (
+      {items.map((item) => (
         <a
           key={item.id}
           href={item.href}
           aria-current={item.kind === "route" && activePath === item.activePath ? "page" : undefined}
         >
-          <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
           <strong>{item.label}</strong>
         </a>
       ))}
@@ -50,9 +51,11 @@ function CoreNavigation({ locale, role, activePath, layout }: CoreNavigationProp
 
 export function CoreShell({ children, locale, role, variant, activePath, className, footer }: CoreShellProps) {
   const shellClassName = getCoreShellClassName(variant, className);
+  const skipLabel = locale === "pt-BR" ? "Ir para o conteúdo" : "Skip to content";
 
   return (
     <main className={shellClassName}>
+      <a className="skip-link" href="#main-content">{skipLabel}</a>
       {variant === "docked" ? (
         <aside className="os-dock">
           <div className="dock-identity">
@@ -70,7 +73,10 @@ export function CoreShell({ children, locale, role, variant, activePath, classNa
           <CoreNavigation locale={locale} role={role} activePath={activePath} layout="standalone" />
         </div>
       )}
-      <section className="hub-workspace">{children}</section>
+      <section className="hub-workspace" id="main-content">
+        <div className="shell-tools"><CommandPalette locale={locale} role={role} /><AppearanceControls locale={locale} /></div>
+        {children}
+      </section>
     </main>
   );
 }

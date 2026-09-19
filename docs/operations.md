@@ -79,7 +79,7 @@ npm run health:local
 
 Use `docs/deployment-verification.md` for the first production launch checklist and live Cloudflare smoke test.
 
-Current post-smoke status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: local Phase 1/2 changes are uncommitted at pre-existing `HEAD` `afb74455573179b9cd915d2076032af9fae23a4b`; `origin/main` remains that SHA, and no push, new remote CI result, or deployment is claimed. Do not start or restart production from this worktree. Repeat only the affected human project-scope, audit, MEMBER restriction, and logout flows; local validation passed under unsupported Node `24.14.1` and must be repeated under Node 22 before release.
+The 2026-09-18 direct campaign is locally complete for the current operations scope in an uncommitted worktree at `4be92f85a3573feb184da2bf770d0497a22f6a6a`, equal to `origin/main` before the changes. Do not start or restart production from this worktree. Runtime-sensitive checks were repeated with Node `22.20.0`; Docker/PostgreSQL, backup/restore, runtime smoke, exact-SHA CI, and authenticated Cloudflare/human checks remain external gates.
 
 The health check verifies:
 
@@ -206,6 +206,10 @@ SESSION_CLEANUP_INTERVAL_SECONDS=3600
 ```
 
 The cleanup log prints only the number of inactive sessions removed. It must not print session tokens, cookies, raw IPs, JWTs, or Cloudflare values.
+
+### Core health, activity, automation, and recovery
+
+Authenticated Core exposes `/core/health`, `/core/activity`, `/core/automation`, and `/core/recovery`. These pages are read-only capability consumers. Health and recovery cards show source and freshness; `unknown` and `unavailable` are not treated as success. Activity stays empty until a module declares an authorized `events.read` provider. Automation recipes remain blocked until a declared provider and bounded scheduler exist. No protected module data is copied into Core.
 
 ### Audit Log Cleanup
 

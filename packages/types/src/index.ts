@@ -9,3 +9,5 @@ export type BielOsProject = {
   visibility: ProjectVisibility;
   status: ProjectStatus;
 };
+
+export * from "./capabilities";

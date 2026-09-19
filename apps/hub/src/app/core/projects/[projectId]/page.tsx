@@ -9,6 +9,7 @@ import {
 } from "../../../../lib/cloudflare-access";
 import { LanguageSelector } from "../../../language-selector";
 import { getLocale } from "../../../locale";
+import { CoreShell } from "../../shell";
 import {
   canShowCoreProjectMutationControls,
   CORE_PROJECT_DETAIL_COPY,
@@ -42,15 +43,16 @@ const adminCopy = {
     reserved: "Reservado",
     active: "Ativo",
     paused: "Pausado",
+    unavailable: "Indisponível",
     viewer: "Visualizador",
     editor: "Editor",
-    owner: "Responsável do projeto (OWNER)",
+    owner: "Responsável do projeto",
     editDetails: "Editar metadados",
     accessDetails: "Gerenciar acesso e responsável",
     selectUser: "Selecionar usuário",
     accessLevel: "Nível de acesso no projeto",
-    ownerHelp: "OWNER define o responsável deste projeto; não altera o papel global do usuário.",
-    accessElevationHelp: "Antes de aplicar ou revogar acesso, ative a elevação PROJECT_OWNER_ACCESS_CHANGE, verifique o código enviado por email e volte aqui.",
+    ownerHelp: "Define o responsável deste projeto; não altera o papel global do usuário.",
+    accessElevationHelp: "Antes de aplicar ou revogar acesso, confirme a operação na Segurança administrativa e volte aqui.",
     accessElevationLink: "Abrir Segurança administrativa",
     applyAccess: "Aplicar acesso",
     currentAccess: "Acessos atuais",
@@ -79,15 +81,16 @@ const adminCopy = {
     reserved: "Reserved",
     active: "Active",
     paused: "Paused",
+    unavailable: "Unavailable",
     viewer: "Viewer",
     editor: "Editor",
-    owner: "Project owner (OWNER)",
+    owner: "Project owner",
     editDetails: "Edit metadata",
     accessDetails: "Manage access and project owner",
     selectUser: "Select user",
     accessLevel: "Project access level",
-    ownerHelp: "OWNER defines this project's responsible owner; it does not change the user's global role.",
-    accessElevationHelp: "Before applying or revoking access, activate PROJECT_OWNER_ACCESS_CHANGE, verify the emailed code, and return here.",
+    ownerHelp: "Defines this project's responsible owner; it does not change the user's global role.",
+    accessElevationHelp: "Before applying or revoking access, confirm the operation in Administrative security and return here.",
     accessElevationLink: "Open Administrative security",
     applyAccess: "Apply access",
     currentAccess: "Current access",
@@ -102,7 +105,7 @@ const adminCopy = {
 
 function visibilityLabel(value: string, locale: BielosLocale): string {
   const t = CORE_PROJECT_DETAIL_COPY[locale];
-  return ({ PUBLIC: t.public, INTERNAL: t.internal, SENSITIVE: t.sensitive })[value] ?? value;
+  return ({ PUBLIC: t.public, INTERNAL: t.internal, SENSITIVE: t.sensitive })[value] ?? t.unavailable;
 }
 
 function statusLabel(value: string, locale: BielosLocale): string {
@@ -113,7 +116,7 @@ function statusLabel(value: string, locale: BielosLocale): string {
     ACTIVE: t.active,
     PAUSED: t.paused,
     ARCHIVED: t.archivedStatus
-  })[value] ?? value;
+  })[value] ?? t.unavailable;
 }
 
 function accessLabel(value: string, locale: BielosLocale): string {
@@ -125,7 +128,7 @@ function accessLabel(value: string, locale: BielosLocale): string {
     GLOBAL_OWNER: t.globalOwner,
     GLOBAL_ADMIN: t.globalAdmin,
     AUTHENTICATED: t.authenticated
-  })[value] ?? value;
+  })[value] ?? t.unavailable;
 }
 
 function formatUpdatedAt(value: Date, locale: BielosLocale): string {
@@ -163,30 +166,15 @@ export default async function CoreProjectDetailPage({
   const archived = project.status === "ARCHIVED";
 
   return (
-    <main className={`hub-shell hub-shell--docked core-project-detail-shell${archived ? " is-archived" : ""}`}>
-      <aside className="os-dock" aria-label={t.navLabel}>
-        <div className="dock-identity">
-          <img src="/hub-mark.svg" alt="" width={64} height={64} />
-          <div>
-            <strong>BielOS</strong>
-            <span>{t.privateHub}</span>
-          </div>
-        </div>
-        <nav className="dock-nav" aria-label={t.primary}>
-          <a href="/" aria-label={t.returnHub}><span aria-hidden="true">01</span><strong>Hub</strong></a>
-          <a href="/core/projects" aria-label={t.returnProjects}><span aria-hidden="true">02</span><strong>{t.projects}</strong></a>
-          <a href="#project" aria-label={project.name}><span aria-hidden="true">03</span><strong>{project.name}</strong></a>
-          {canShowCoreProjectMutationControls(project.administrator, project.status) ? (
-            <a href="#administration" aria-label={t.administration}><span aria-hidden="true">04</span><strong>{t.administration}</strong></a>
-          ) : null}
-        </nav>
-        <div className="dock-footer">
-          <span>{t.access}</span>
-          <strong>{accessLabel(project.effectiveAccess, locale)}</strong>
-        </div>
-      </aside>
-
-      <section className="hub-workspace core-project-detail-workspace">
+    <CoreShell
+      variant="docked"
+      locale={locale}
+      role={session.user.role}
+      activePath="/core/projects"
+      className={`core-project-detail-shell${archived ? " is-archived" : ""}`}
+      footer={<><span>{t.access}</span><strong>{accessLabel(project.effectiveAccess, locale)}</strong></>}
+    >
+      <div className="core-project-detail-workspace">
         <header className="top-statusbar">
           <div className="statusbar-left">
             <span className="status-dot" aria-hidden="true" />
@@ -244,7 +232,7 @@ export default async function CoreProjectDetailPage({
         {project.administrator && canShowCoreProjectMutationControls(true, project.status) ? (
           <section className="core-project-detail-admin anchor-section" id="administration" aria-labelledby="project-admin-title">
             <div className="section-heading">
-              <div><p className="eyebrow">OWNER / ADMIN</p><h2 id="project-admin-title">{t.administration}</h2></div>
+              <div><p className="eyebrow">{t.administration}</p><h2 id="project-admin-title">{t.administration}</h2></div>
             </div>
             <CoreProjectAdminControls
               project={project}
@@ -255,7 +243,7 @@ export default async function CoreProjectDetailPage({
             />
           </section>
         ) : null}
-      </section>
-    </main>
+      </div>
+    </CoreShell>
   );
 }

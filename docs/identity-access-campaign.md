@@ -1,14 +1,23 @@
 # BielOS Identity and Access Campaign
 
-Status: `[CURRENT]` — `BIELOS_FINAL_TECHNICAL_CLOSEOUT_READY_FOR_HUMAN_SMOKE`; machine-executable closeout is complete and only the real human OWNER/MEMBER browser smoke remains.
+Status: `[CURRENT LOCAL CAMPAIGN]` — prior closeout evidence is historical; this local campaign is not published and requires fresh validation of the changed UI, OWNER participant-access authority, audit depth, recovery presentation, and supported-runtime/production gates before any production claim.
 
-Historical technical evidence includes exact GitHub Actions run `31821995102` for `33f540a4b396aa8a55fa65ad9f950b0c36712aae`, which passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation. The current publication state is `main == origin/main == 76a9a7b59ba7dc9a4c594be986d47ffcb71b60ce`, clean and 0/0, with exact-SHA CI run `32263676937` fully green and the local production stack rebuilt at that revision.
+## Current direct campaign snapshot — 2026-09-18
+
+- Local `main` is at `4be92f85a3573feb184da2bf770d0497a22f6a6`, equal to `origin/main` before the uncommitted campaign changes; no commit, push, merge, deploy, migration, or production mutation was performed.
+- The worktree intentionally preserves inherited security/GymForge WIP alongside the campaign changes. Runtime-sensitive local validation was repeated with Node `22.20.0`; Docker/PostgreSQL-dependent gates remain environment-blocked.
+- Current runtime dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`; the production dependency audit is clean after omitting development dependencies. The accepted Prisma/deepmerge advisory remains tooling-only and is enforced by the exact tooling policy gate.
+- Current local evidence includes `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run test:core:unit` (95/95), `npm run test:public-site` (4/4), `npm run test:gymforge-scoring` (8/8), `npm run test:production-revision` (13/13), and `npm run build`; fresh authenticated human smoke and exact-SHA CI are not claimed.
+
+Historical technical evidence includes exact GitHub Actions run `31821995102` for `33f540a4b396aa8a55fa65ad9f950b0c36712aae`, which passed `Validate` and `Audit dependency lockfile`, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation. The later historical publication state and run `32263676937` are retained below as historical evidence only; they are not current-SHA evidence for this uncommitted campaign.
 
 ## Post-closeout live-smoke repair — 2026-08-18
 
 The latest human smoke confirmed OWNER administrative credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation. It also confirmed the former UI scope-availability defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke, while repetitive `ACCESS_JWT_VALID` events made the OWNER audit view low-signal. The machine corrections are now committed and pushed at `76a9a7b59ba7dc9a4c594be986d47ffcb71b60ce`; exact-SHA CI run `32263676937` is green, the local production stack was rebuilt at that SHA, and only the real human smoke remains. Do not claim current authenticated OWNER/MEMBER browser smoke.
 
-The bounded resume checklist is only: acquire `PROJECT_OWNER_ACCESS_CHANGE`; grant/change/revoke disposable Project A MEMBER access and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE`; archive and verify read-only behavior; verify MEMBER admin/audit/session restrictions; and perform normal logout. Keep public registration and live Intake disabled, Cloudflare Access before BielOS authentication, GymForge expansion frozen, reserved modules inert, `SecurityUnlock` blocked, and AIP separate.
+The current uncommitted local campaign adds routine global-OWNER project participant/access changes without elevation, keeps ADMIN elevation and higher-risk archive elevation, adds administrative credential recovery with one-time offline codes, and matures the owner audit surface with retained-history cursor pagination, safe taxonomy/filtering, detail disclosure, retention visibility, and bounded sanitized export. These changes have local unit/type evidence only until a new authorized publication and human smoke.
+
+The bounded resume checklist is only: as OWNER, grant/change/revoke disposable Project A MEMBER access without elevation and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE` only for the archive flow and verify read-only behavior; verify MEMBER admin/audit/session restrictions; and perform normal logout. Keep public registration and live Intake disabled, Cloudflare Access before BielOS authentication, GymForge expansion frozen, reserved modules inert, `SecurityUnlock` blocked, and AIP separate.
 
 The dependency audit exception is tooling-only technical debt. The production dependency gate uses a clean `npm ci --omit=dev --omit=peer --omit=optional` tree and must remain green with Prisma CLI, `@prisma/config`, and `deepmerge-ts` absent while `@prisma/client` and its generated client remain available. The full tooling gate accepts only the exact GHSA-ggr8-5vv4-36mx path through Prisma `6.19.3`, `@prisma/config` `6.19.3`, and `deepmerge-ts` `7.1.5`; any advisory, path, count, version, severity, or metadata drift fails closed, and a clean audit signals removal of the exception. This does not claim the GHSA is globally fixed or complete human OWNER/MEMBER smoke.
 
@@ -29,7 +38,7 @@ The dependency audit exception is tooling-only technical debt. The production de
 3. Private browser → Cloudflare Access → hub → BielOS session → server authorization → Prisma transaction.
 4. Owner review → per-module decisions → pending activation → one-time activation → active user and explicit grants.
 5. Authenticated user → module catalog/request services → persisted grant/request state; runtime routing remains independent.
-6. Owner critical action → normal authorization + CSRF + separate admin credential + email factor → versioned session-bound `SecurityUnlock` elevation → guarded transaction.
+6. Owner critical action → normal authorization + CSRF + separate admin credential + email factor → versioned session-bound `SecurityElevation` → guarded transaction; legacy `SecurityUnlock` rows remain non-authoritative.
 
 ## Lifecycle states
 

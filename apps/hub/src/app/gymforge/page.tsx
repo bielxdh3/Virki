@@ -8,6 +8,7 @@ import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getLocale } from "../locale";
 import { LanguageSelector } from "../language-selector";
+import { CoreShell } from "../core/shell";
 import {
   archiveGymForgeCompetition,
   changeGymForgeExerciseStatus,
@@ -85,6 +86,18 @@ const copy = {
     endsAt: "Fim",
     dateRange: "Período",
     scoringRule: "Regra de pontuação",
+    draft: "Rascunho",
+    activeState: "Ativa",
+    ended: "Encerrada",
+    archivedStatus: "Arquivada",
+    invited: "Convidado",
+    disabled: "Desativado",
+    participantRole: "Participante",
+    adminRole: "Administrador",
+    checkInSource: "Check-in",
+    correctionSourceLabel: "Correção administrativa",
+    bodyweight: "Peso corporal",
+    otherUnit: "Outra unidade",
     createCompetition: "Criar competição",
     lifecycle: "Ciclo de vida",
     updateCompetition: "Atualizar competição",
@@ -92,7 +105,7 @@ const copy = {
     deleteCompetition: "Excluir competição",
     dangerZone: "Zona de risco",
     dangerZoneText:
-      "Exclusão permanente só é permitida para competições não ACTIVE, sem participantes atribuídos e sem histórico de correções.",
+      "Exclusão permanente só é permitida para competições não ativas, sem participantes atribuídos e sem histórico de correções.",
     correctionDeleteHint: "Exclusão bloqueada: esta competição possui histórico de correções.",
     confirmDelete: "Confirmo exclusão permanente",
     saveChanges: "Salvar alterações",
@@ -151,7 +164,7 @@ const copy = {
     notCheckedIn: "Sem check-in",
     eligibility: "Elegibilidade",
     activeParticipant: "Participante ativo",
-    requiresParticipant: "Requer vínculo com participante ACTIVE",
+    requiresParticipant: "Requer vínculo com participante ativo",
     streakCount: "Contagem de sequência",
     included: "Incluído",
     checkIn: "Check-in",
@@ -244,6 +257,18 @@ const copy = {
     endsAt: "Ends at",
     dateRange: "Date range",
     scoringRule: "Scoring rule",
+    draft: "Draft",
+    activeState: "Active",
+    ended: "Ended",
+    archivedStatus: "Archived",
+    invited: "Invited",
+    disabled: "Disabled",
+    participantRole: "Participant",
+    adminRole: "Administrator",
+    checkInSource: "Check-in",
+    correctionSourceLabel: "Admin correction",
+    bodyweight: "Bodyweight",
+    otherUnit: "Other unit",
     createCompetition: "Create competition",
     lifecycle: "Lifecycle",
     updateCompetition: "Update competition",
@@ -251,7 +276,7 @@ const copy = {
     deleteCompetition: "Delete competition",
     dangerZone: "Danger zone",
     dangerZoneText:
-      "Permanent deletion is only allowed for non-ACTIVE competitions with no assigned participants and no correction history.",
+      "Permanent deletion is only allowed for competitions that are not active, with no assigned participants and no correction history.",
     correctionDeleteHint: "Deletion blocked: this competition has correction history.",
     confirmDelete: "I confirm permanent deletion",
     saveChanges: "Save changes",
@@ -310,7 +335,7 @@ const copy = {
     notCheckedIn: "Not checked in",
     eligibility: "Eligibility",
     activeParticipant: "Active participant",
-    requiresParticipant: "Requires ACTIVE participant link",
+    requiresParticipant: "Requires an active participant link",
     streakCount: "Streak count",
     included: "Included",
     checkIn: "Check in",
@@ -405,6 +430,26 @@ const COMPETITION_SCORING_RULE_LABELS = {
   }
 } satisfies Record<BielosLocale, Record<CompetitionScoringRule, string>>;
 
+function competitionStatusLabel(value: string, locale: BielosLocale): string {
+  const t = copy[locale];
+  return ({ DRAFT: t.draft, ACTIVE: t.activeState, ENDED: t.ended, ARCHIVED: t.archivedStatus } as Record<string, string>)[value] ?? t.unavailable;
+}
+
+function participantStatusLabel(value: string, locale: BielosLocale): string {
+  const t = copy[locale];
+  return ({ INVITED: t.invited, ACTIVE: t.activeState, DISABLED: t.disabled, ARCHIVED: t.archivedStatus } as Record<string, string>)[value] ?? t.unavailable;
+}
+
+function participantRoleLabel(value: string, locale: BielosLocale): string {
+  const t = copy[locale];
+  return ({ PARTICIPANT: t.participantRole, ADMIN: t.adminRole } as Record<string, string>)[value] ?? t.unavailable;
+}
+
+function attendanceSourceLabel(value: string | null, locale: BielosLocale): string {
+  const t = copy[locale];
+  return value === "ADMIN_CORRECTION" ? t.correctionSourceLabel : value === "CHECK_IN" || !value ? t.checkInSource : t.correctionSourceLabel;
+}
+
 function isHubAdmin(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
 }
@@ -453,13 +498,26 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
   const locale = await getLocale();
   const t = copy[locale];
   const isAdmin = isHubAdmin(session.user.role);
+  const viewerParticipant = await prisma.gymForgeParticipant.findUnique({
+    where: { userId: session.user.id },
+    select: {
+      id: true,
+      displayName: true,
+      status: true,
+      role: true
+    }
+  });
+
+  if (!isAdmin && viewerParticipant?.status !== "ACTIVE") {
+    forbidden();
+  }
+
   const todayAnchor = getGymForgeAttendanceEffectiveDate();
   const [
     participantsCount,
     activeParticipantsCount,
     exerciseCatalogCount,
     competitionsCount,
-    viewerParticipant,
     viewerAttendanceCount,
     viewerTodayAttendance,
     viewerWorkouts,
@@ -475,15 +533,6 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
     prisma.gymForgeParticipant.count({ where: { status: "ACTIVE" } }),
     prisma.gymForgeExercise.count({ where: { isActive: true } }),
     prisma.gymForgeCompetition.count(),
-    prisma.gymForgeParticipant.findUnique({
-      where: { userId: session.user.id },
-      select: {
-        id: true,
-        displayName: true,
-        status: true,
-        role: true
-      }
-    }),
     prisma.gymForgeParticipant
       .findUnique({
         where: { userId: session.user.id },
@@ -750,38 +799,13 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
     });
 
   return (
-    <main className="hub-shell">
-      <aside className="os-dock" aria-label={t.navLabel}>
-        <div className="dock-identity">
-          <img src="/hub-mark.svg" alt="" width={64} height={64} />
-          <div>
-            <strong>BielOS</strong>
-            <span>{t.privateHub}</span>
-          </div>
-        </div>
-
-        <nav className="dock-nav" aria-label={t.primary}>
-          <a href="/" aria-label={t.returnHub}>
-            <span aria-hidden="true">01</span>
-            <strong>Hub</strong>
-          </a>
-          <a href="#foundation" aria-label={t.foundation}>
-            <span aria-hidden="true">02</span>
-            <strong>{t.foundation}</strong>
-          </a>
-          <a href="#status" aria-label={t.status}>
-            <span aria-hidden="true">03</span>
-            <strong>{t.status}</strong>
-          </a>
-        </nav>
-
-        <div className="dock-footer">
-          <span>{t.module}</span>
-          <strong>{t.foundation}</strong>
-        </div>
-      </aside>
-
-      <section className="hub-workspace">
+    <CoreShell
+      variant="docked"
+      locale={locale}
+      role={session.user.role}
+      className="gymforge-shell"
+      footer={<><span>{t.module}</span><strong>{t.foundation}</strong></>}
+    >
         <header className="top-statusbar">
           <div className="statusbar-left">
             <span className="status-dot" aria-hidden="true" />
@@ -829,11 +853,11 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
               </div>
               <div>
                 <dt>{t.status}</dt>
-                <dd>{viewerParticipant?.status ?? t.unavailable}</dd>
+                <dd>{viewerParticipant ? participantStatusLabel(viewerParticipant.status, locale) : t.unavailable}</dd>
               </div>
               <div>
                 <dt>{t.role}</dt>
-                <dd>{viewerParticipant?.role ?? t.unavailable}</dd>
+                <dd>{viewerParticipant ? participantRoleLabel(viewerParticipant.role, locale) : t.unavailable}</dd>
               </div>
               <div>
                 <dt>{t.attendance}</dt>
@@ -887,10 +911,10 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                   <label>
                     {t.status}
                     <select name="status" defaultValue="DRAFT" aria-label={t.status}>
-                      <option value="DRAFT">Draft</option>
-                      <option value="ACTIVE">Active</option>
-                      <option value="ENDED">Ended</option>
-                      <option value="ARCHIVED">Archived</option>
+                      <option value="DRAFT">{t.draft}</option>
+                      <option value="ACTIVE">{t.activeState}</option>
+                      <option value="ENDED">{t.ended}</option>
+                      <option value="ARCHIVED">{t.archivedStatus}</option>
                     </select>
                   </label>
                   <label>
@@ -937,7 +961,7 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
               });
               const scoringRuleLabel = isCompetitionScoringRule(competition.scoringRule)
                 ? COMPETITION_SCORING_RULE_LABELS[locale][competition.scoringRule]
-                : competition.scoringRule;
+                : t.unavailable;
               const dateRangeLabel = `${competition.startsAt ? formatDateKey(competition.startsAt) : t.unavailable} - ${
                 competition.endsAt ? formatDateKey(competition.endsAt) : t.unavailable
               }`;
@@ -946,7 +970,7 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                 <article className="competition-card" key={competition.id}>
                   <div className="competition-card-header">
                     <div className="competition-titleline">
-                      <span className={`status-pill status-${competition.status.toLowerCase()}`}>{competition.status}</span>
+                      <span className={`status-pill status-${competition.status.toLowerCase()}`}>{competitionStatusLabel(competition.status, locale)}</span>
                       <h3>{competition.name}</h3>
                     </div>
                     <div className="competition-count">
@@ -1018,9 +1042,9 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                               aria-label={t.status}
                               defaultValue={competition.status === "ARCHIVED" ? "DRAFT" : competition.status}
                             >
-                              <option value="DRAFT">Draft</option>
-                              <option value="ACTIVE">Active</option>
-                              <option value="ENDED">Ended</option>
+                              <option value="DRAFT">{t.draft}</option>
+                              <option value="ACTIVE">{t.activeState}</option>
+                              <option value="ENDED">{t.ended}</option>
                             </select>
                           </label>
                           <label>
@@ -1416,8 +1440,8 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                     <div>
                       <span>{attendance.participant.displayName}</span>
                       <strong>
-                        {formatDateKey(attendance.effectiveDate)} / {attendance.participant.status} /{" "}
-                        {attendance.source || t.correctionSource}
+                        {formatDateKey(attendance.effectiveDate)} / {participantStatusLabel(attendance.participant.status, locale)} /{" "}
+                        {attendanceSourceLabel(attendance.source, locale)}
                       </strong>
                     </div>
                     <form className="row-actions button-row" action={removeGymForgeAdminAttendanceCorrection}>
@@ -1485,8 +1509,8 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                     <select name="unit" defaultValue="KG" aria-label={t.unit}>
                       <option value="KG">kg</option>
                       <option value="LB">lb</option>
-                      <option value="BODYWEIGHT">bodyweight</option>
-                      <option value="OTHER">other</option>
+                      <option value="BODYWEIGHT">{t.bodyweight}</option>
+                      <option value="OTHER">{t.otherUnit}</option>
                     </select>
                   </label>
                   <label>
@@ -1568,8 +1592,8 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                             <select name="unit" defaultValue={workout.sets[0]?.unit ?? "KG"} aria-label={t.unit}>
                               <option value="KG">kg</option>
                               <option value="LB">lb</option>
-                              <option value="BODYWEIGHT">bodyweight</option>
-                              <option value="OTHER">other</option>
+                              <option value="BODYWEIGHT">{t.bodyweight}</option>
+                              <option value="OTHER">{t.otherUnit}</option>
                             </select>
                           </label>
                           <label>
@@ -1645,17 +1669,17 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                   <label>
                     {t.role}
                     <select name="role" defaultValue="PARTICIPANT" aria-label={t.role}>
-                      <option value="PARTICIPANT">Participant</option>
-                      <option value="ADMIN">Admin</option>
+                      <option value="PARTICIPANT">{t.participantRole}</option>
+                      <option value="ADMIN">{t.adminRole}</option>
                     </select>
                   </label>
                   <label>
                     {t.status}
                     <select name="status" defaultValue="INVITED" aria-label={t.status}>
-                      <option value="INVITED">Invited</option>
-                      <option value="ACTIVE">Active</option>
-                      <option value="DISABLED">Disabled</option>
-                      <option value="ARCHIVED">Archived</option>
+                      <option value="INVITED">{t.invited}</option>
+                      <option value="ACTIVE">{t.activeState}</option>
+                      <option value="DISABLED">{t.disabled}</option>
+                      <option value="ARCHIVED">{t.archivedStatus}</option>
                     </select>
                   </label>
                   <button className="button-primary" type="submit">{t.createParticipant}</button>
@@ -1667,7 +1691,7 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                   <div className="management-row" key={participant.id}>
                     <div>
                       <span>{participant.displayName}</span>
-                      <strong>{participant.role} / {participant.status}</strong>
+                      <strong>{participantRoleLabel(participant.role, locale)} / {participantStatusLabel(participant.status, locale)}</strong>
                     </div>
                     <form className="row-actions button-row" action={changeGymForgeParticipantStatus}>
                       <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
@@ -1747,7 +1771,7 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
                       <span>{exercise.name}</span>
                       <strong>
                         {exercise.category ?? t.uncategorized} /{" "}
-                        {exercise.archivedAt ? "ARCHIVED" : exercise.isActive ? "ACTIVE" : "INACTIVE"}
+                        {exercise.archivedAt ? t.archivedStatus : exercise.isActive ? t.activeState : t.inactive}
                       </strong>
                     </div>
                     <form className="row-actions button-row" action={changeGymForgeExerciseStatus}>
@@ -1806,7 +1830,6 @@ export default async function GymForgePage({ searchParams }: GymForgePageProps) 
             <p>{t.limitations}</p>
           </div>
         </section>
-      </section>
-    </main>
+    </CoreShell>
   );
 }

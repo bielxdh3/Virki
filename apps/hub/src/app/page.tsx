@@ -10,6 +10,8 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../lib/c
 import { getCurrentSession } from "../lib/auth";
 import { getLocale } from "./locale";
 import { LanguageSelector } from "./language-selector";
+import { AppearanceControls } from "./appearance-controls";
+import { CommandPalette } from "./core/command-palette";
 import { getCoreOperationsSnapshot } from "./core/operations";
 
 export const dynamic = "force-dynamic";
@@ -38,6 +40,9 @@ const copy = {
     coreOnly: "Core apenas",
     identity: "Identidade",
     role: "Papel",
+    ownerRole: "Proprietário",
+    adminRole: "Administrador",
+    memberRole: "Membro",
     operations: "Operações",
     localStack: "Stack local",
     liveChecks: "Verificações nesta requisição",
@@ -107,6 +112,9 @@ const copy = {
     coreOnly: "Core only",
     identity: "Identity",
     role: "Role",
+    ownerRole: "Owner",
+    adminRole: "Administrator",
+    memberRole: "Member",
     operations: "Operations",
     localStack: "Local stack",
     liveChecks: "Checks in this request",
@@ -200,6 +208,11 @@ function getRegistryName(id: HubRegistryItemId, fallback: string, locale: Bielos
   return names[id] ?? fallback;
 }
 
+function getGlobalRoleLabel(role: string, locale: BielosLocale): string {
+  const t = copy[locale];
+  return ({ OWNER: t.ownerRole, ADMIN: t.adminRole, MEMBER: t.memberRole } as Record<string, string>)[role] ?? t.memberRole;
+}
+
 export default async function HubDashboardPage() {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "hub-dashboard");
@@ -273,6 +286,7 @@ export default async function HubDashboardPage() {
 
   return (
     <main className="hub-shell hub-shell--docked">
+      <a className="skip-link" href="#main-content">{locale === "pt-BR" ? "Ir para o conteúdo" : "Skip to content"}</a>
       <aside className="os-dock" aria-label={t.navLabel}>
         <div className="dock-identity">
           <img src="/hub-mark.svg" alt="" width={64} height={64} />
@@ -284,19 +298,15 @@ export default async function HubDashboardPage() {
 
         <nav className="dock-nav" aria-label={t.primary}>
           <a href="#overview" aria-label={t.overview}>
-            <span aria-hidden="true">01</span>
             <strong>{t.overview}</strong>
           </a>
           <a href="#modules" aria-label={t.modules}>
-            <span aria-hidden="true">02</span>
             <strong>{t.modules}</strong>
           </a>
           <a href="#security" aria-label={t.security}>
-            <span aria-hidden="true">03</span>
             <strong>{t.security}</strong>
           </a>
           <a href="#ops" aria-label={t.ops}>
-            <span aria-hidden="true">04</span>
             <strong>{t.ops}</strong>
           </a>
         </nav>
@@ -307,7 +317,8 @@ export default async function HubDashboardPage() {
         </div>
       </aside>
 
-      <section className="hub-workspace">
+      <section className="hub-workspace" id="main-content">
+        <div className="shell-tools"><CommandPalette locale={locale} role={session.user.role} /><AppearanceControls locale={locale} /></div>
         <header className="top-statusbar">
           <div className="statusbar-left">
             <span className="status-dot" aria-hidden="true" />
@@ -361,7 +372,7 @@ export default async function HubDashboardPage() {
               </div>
               <div>
                 <dt>{t.role}</dt>
-                <dd>{session.user.role}</dd>
+                <dd>{getGlobalRoleLabel(session.user.role, locale)}</dd>
               </div>
             </dl>
           </article>
@@ -446,7 +457,7 @@ export default async function HubDashboardPage() {
               <a href="/core/projects">{t.viewProjects}</a>
               <a href="/core/security">{t.viewSecurity}</a>
               {session.user.role === "OWNER" ? <a href="/core/applications">{t.reviewApplications}</a> : null}
-              <a href="#ops">{t.viewDeployment}</a>
+              <a href="/core/health">{t.viewDeployment}</a>
               <form action="/api/logout" method="post">
                 <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                 <button type="submit">{t.logout}</button>

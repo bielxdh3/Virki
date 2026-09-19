@@ -115,14 +115,15 @@ See `docs/database.md` for the migration workflow and the remaining disposable-l
 
 ## Current Behavior And Limitations
 
-- The global `OWNER` has a private, read-only activity view limited to the 50 newest rows and safe allowlisted display fields.
-- Audit retention defaults to 180 days and the cleanup command reports only the deleted row count.
-- Local CLI inspection remains bounded and redacted.
-- No export, arbitrary search, or broad filtering workflow exists.
-- Audit metadata is intentionally minimal.
-- Cloudflare Access JWT validation is optional and depends on private environment configuration.
+- The global `OWNER` has a private, read-only view with stable `(createdAt,id)` cursor pagination across the retained history. Each page is bounded to 50 rows.
+- Filters are constrained to activity/infrastructure, time range, safe taxonomy category, result, actor kind, resource kind, event code, and bounded event/resource search. Unknown values fail closed to empty/default filters.
+- Rows show human labels first. Technical event codes and category details are behind disclosure. No actor email, identifier, message, metadata, or private payload is exposed in the screen.
+- Retention visibility shows the configured bounded retention window and oldest/newest retained timestamps. The cleanup worker still reports only a deleted-row count.
+- OWNER-only export is a CSRF-protected sanitized CSV action bounded to 500 rows and records an `AUDIT_LOG_EXPORTED` event. Export contains timestamp, safe category, human event label, result, safe resource, and user/system actor state only.
+- Local CLI inspection remains bounded and redacted. Cloudflare Access JWT validation is optional and depends on private environment configuration.
 
-## Future Improvements
+## Remaining boundaries
 
 - Revisit the retention period only when operational requirements justify a change.
-- Consider narrowly scoped event/time filtering only after its authorization, query-bound, and redaction contract is approved.
+- Module-owned event detail remains in the owning module; Core does not copy module logs into the inbox or audit surface.
+- Human authenticated visual acceptance is still required for layout, narrow-width behavior, and export interaction.

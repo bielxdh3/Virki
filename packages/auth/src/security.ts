@@ -7,13 +7,22 @@ import {
   timingSafeEqual
 } from "node:crypto";
 import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
-import { getSessionExpiresAt, generateSessionToken, hashSessionToken, hashAuditIdentifier, writeAuditLog } from "./index";
+import {
+  consumeRateLimitAttemptInTransaction,
+  generateSessionToken,
+  getSessionExpiresAt,
+  hashAuditIdentifier,
+  hashSessionToken,
+  lockRateLimitIdentifierInTransaction,
+  writeAuditLog
+} from "./index";
 import { prisma, type Prisma } from "@bielos/database";
 
 export const DEVICE_COOKIE_NAME = "bielos_device";
 export const SECURITY_CEREMONY_TTL_MS = 10 * 60 * 1000;
 export const DEVICE_TRUST_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 export const REMEMBERED_BROWSER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const RECOVERY_REQUEST_COOLDOWN_MS = 60 * 1000;
 
 const TOTP_KEY_VERSION = 1;
 const TOTP_STEP_SECONDS = 30;
@@ -225,15 +234,20 @@ export async function verifyLoginEmailCode(ceremonyId: string, code: string, now
     const result = await prisma.$transaction(async (transaction) => {
       const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, codeHash: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } } } });
       const requiresTotpNow = challenge?.user.secondFactorMethod === "TOTP" && challenge.user.totpFactor?.status === "ACTIVE";
-      if (!challenge || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.requiresTotp !== requiresTotpNow || challenge.status !== "PENDING" || challenge.consumedAt || challenge.expiresAt <= now || !safeEqual(hashSecurityCode(code), challenge.codeHash)) throw new SecurityMutationError();
+      if (!challenge || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.requiresTotp !== requiresTotpNow || challenge.status !== "PENDING" || challenge.consumedAt || challenge.expiresAt <= now) throw new SecurityMutationError();
+      const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
+      const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
+      if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
+      if (!safeEqual(hashSecurityCode(code), challenge.codeHash)) return { kind: "INVALID" as const };
       const verified = await transaction.deviceChallenge.updateMany({ where: { id: challenge.id, status: "PENDING", consumedAt: null }, data: { status: "VERIFIED" } });
       if (verified.count !== 1) throw new SecurityMutationError();
       await transaction.trustedDevice.upsert({ where: { userId_deviceIdHash: { userId: challenge.userId, deviceIdHash: challenge.deviceIdHash } }, update: { status: "TRUSTED", revokedAt: null, lastSeenAt: now, rememberedUntil: null, strongVerifiedAt: null }, create: { deviceKey: randomBytes(24).toString("base64url"), userId: challenge.userId, deviceIdHash: challenge.deviceIdHash, status: "TRUSTED", lastSeenAt: now } });
-      if (challenge.requiresTotp) return { requiresTotp: true, session: null };
-      return { requiresTotp: false, session: await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now) };
+      if (challenge.requiresTotp) return { kind: "SUCCESS" as const, value: { requiresTotp: true, session: null } };
+      return { kind: "SUCCESS" as const, value: { requiresTotp: false, session: await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now) } };
     }, { isolationLevel: "Serializable" });
+    if (result.kind !== "SUCCESS") throw new SecurityMutationError();
     await writeAuditLog({ eventType: "DEVICE_VERIFIED", result: "SUCCESS", resource: "identity.device", message: "Login security ceremony verified.", metadata: { ceremonyRef: hashAuditIdentifier(ceremonyId) } });
-    return result;
+    return result.value;
   } catch {
     throw new SecurityMutationError();
   }
@@ -245,15 +259,19 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, now 
     const result = await prisma.$transaction(async (transaction) => {
       const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { isActive: true, accountStatus: true, totpFactor: { select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } } } } } });
       if (!challenge || !challenge.requiresTotp || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || !["PENDING", "VERIFIED"].includes(challenge.status) || challenge.consumedAt || challenge.expiresAt <= now || challenge.user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
+      const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
+      const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
+      if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
       const factor = challenge.user.totpFactor;
       const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
-      if (step === null) throw new SecurityMutationError();
+      if (step === null) return { kind: "INVALID" as const };
       const claimed = await transaction.totpFactor.updateMany({ where: { id: factor.id, status: "ACTIVE", OR: [{ lastUsedStep: null }, { lastUsedStep: { not: step } }] }, data: { lastUsedStep: step } });
       if (claimed.count !== 1) throw new SecurityMutationError();
-      return consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now);
+      return { kind: "SUCCESS" as const, value: await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now) };
     }, { isolationLevel: "Serializable" });
+    if (result.kind !== "SUCCESS") throw new SecurityMutationError();
     await writeAuditLog({ eventType: "DEVICE_VERIFIED", result: "SUCCESS", resource: "identity.2fa", message: "TOTP login verification succeeded.", metadata: { ceremonyRef: hashAuditIdentifier(ceremonyId) } });
-    return result;
+    return result.value;
   } catch {
     throw new SecurityMutationError();
   }
@@ -279,14 +297,22 @@ export async function requestAccountRecovery(email: string, locale: EmailLocale,
   if (!/^\S+@\S+$/.test(normalizedEmail)) return;
   const user = await prisma.user.findUnique({ where: { emailNormalized: normalizedEmail }, select: { id: true, email: true, displayName: true, isActive: true, accountStatus: true, emailVerifiedAt: true } });
   if (!user?.isActive || user.accountStatus !== "ACTIVE" || !user.emailVerifiedAt) return;
-  const requestKey = randomBytes(24).toString("base64url");
-  const code = generateNumericCode();
   try {
-    await prisma.$transaction(async (transaction) => {
+    const requested = await prisma.$transaction(async (transaction) => {
+      const rateLimitIdentifier = `account-recovery:${normalizedEmail}`;
+      await lockRateLimitIdentifierInTransaction(transaction, rateLimitIdentifier);
+      const latestRequest = await transaction.accountRecoveryRequest.findFirst({ where: { userId: user.id }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
+      if (latestRequest && latestRequest.createdAt.getTime() + RECOVERY_REQUEST_COOLDOWN_MS > now.getTime()) return false;
+      const attempt = await consumeRateLimitAttemptInTransaction(transaction, rateLimitIdentifier, now);
+      if (!attempt.allowed) return false;
+      const requestKey = randomBytes(24).toString("base64url");
+      const code = generateNumericCode();
       await transaction.accountRecoveryRequest.updateMany({ where: { userId: user.id, status: "PENDING" }, data: { status: "EXPIRED" } });
       await transaction.accountRecoveryRequest.create({ data: { requestKey, userId: user.id, emailChallengeHash: hashSecurityCode(code), expiresAt: new Date(now.getTime() + RECOVERY_REQUEST_TTL_MS) } });
       await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery:${requestKey}`, kind: "ACCOUNT_RECOVERY", recipientEmail: user.email, locale, payload: { publicValues: { displayName: user.displayName ?? "" }, protectedValues: { code, actionUrl: `/recover?request=${requestKey}` } } });
-    });
+      return true;
+    }, { isolationLevel: "Serializable" });
+    if (!requested) return;
     await writeAuditLog({ eventType: "ACCOUNT_RECOVERY_REQUESTED", result: "SUCCESS", actorUserId: user.id, resource: "identity.recovery", message: "Account recovery requested." });
   } catch {
     throw new SecurityMutationError();
@@ -295,13 +321,23 @@ export async function requestAccountRecovery(email: string, locale: EmailLocale,
 
 export async function verifyAccountRecoveryEmail(requestKey: string, code: string, now = new Date()): Promise<void> {
   if (!isCeremonyId(requestKey) || !/^\d{6}$/.test(code)) throw new SecurityMutationError();
-  const result = await prisma.$transaction(async (transaction) => {
-    const request = await transaction.accountRecoveryRequest.findUnique({ where: { requestKey }, select: { id: true, emailChallengeHash: true, status: true, expiresAt: true } });
-    if (!request || request.status !== "PENDING" || request.expiresAt <= now || !safeEqual(hashSecurityCode(code), request.emailChallengeHash)) throw new SecurityMutationError();
-    return transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, status: "PENDING", emailVerifiedAt: null }, data: { emailVerifiedAt: now } });
-  });
-  if (result.count !== 1) throw new SecurityMutationError();
-  await writeAuditLog({ eventType: "ACCOUNT_RECOVERY_EMAIL_VERIFIED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery email verified.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
+  try {
+    const result = await prisma.$transaction(async (transaction) => {
+      const request = await transaction.accountRecoveryRequest.findUnique({ where: { requestKey }, select: { id: true, userId: true, emailChallengeHash: true, status: true, expiresAt: true } });
+      if (!request || request.status !== "PENDING" || request.expiresAt <= now) throw new SecurityMutationError();
+      const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-verification-user:${request.userId}`, now);
+      const requestAttempt = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-verification:${request.id}`, now);
+      if (!accountAttempt.allowed || !requestAttempt.allowed) return { kind: "REJECTED" as const };
+      if (!safeEqual(hashSecurityCode(code), request.emailChallengeHash)) return { kind: "INVALID" as const };
+      const verified = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, status: "PENDING", emailVerifiedAt: null }, data: { emailVerifiedAt: now } });
+      if (verified.count !== 1) throw new SecurityMutationError();
+      return { kind: "SUCCESS" as const };
+    });
+    if (result.kind !== "SUCCESS") throw new SecurityMutationError();
+    await writeAuditLog({ eventType: "ACCOUNT_RECOVERY_EMAIL_VERIFIED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery email verified.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
+  } catch {
+    throw new SecurityMutationError();
+  }
 }
 
 export async function listPendingAccountRecoveries(actor: { id: string; role: string }) {

@@ -2,9 +2,11 @@
 
 ## Scope and status
 
-The source implementation is complete for the requested identity/access surfaces, and the current status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: Phase 1/2 fixes are uncommitted and locally validated, while the affected project/audit/restriction/logout human smoke must be repeated. The latest human smoke confirmed OWNER credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation, but the former UI scope defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke and `ACCESS_JWT_VALID` reduced audit signal. Public registration and live Intake stay disabled. Current local `HEAD` is the pre-existing `afb74455573179b9cd915d2076032af9fae23a4b`; the worktree is uncommitted, `origin/main` remains that SHA, and no push, new remote CI run, or deployment was authorized or performed. Run evidence from `31821995102` for `33f540a4b396aa8a55fa65ad9f950b0c36712aae` remains historical.
+The source implementation is complete for the current identity/access surfaces. The 2026-09-18 direct campaign is locally complete for its authorized scope at uncommitted local `main`/`origin/main` `4be92f85a3573feb184da2bf770d0497a22f6a6a`; authenticated human smoke, exact-SHA CI, and environment-backed runtime evidence remain external gates. Public registration and live Intake stay disabled. Historical smoke and CI claims below retain their original dates and SHAs and are not current-SHA evidence.
 
-Local patch validation completed under Node `24.14.1`: `npm run secrets:scan`, `npm run lint`, `npm run typecheck --workspaces --if-present`, `npm run prisma:validate`, `npm run test:core` (79 unit + 66 database), `npm run test:core:concurrency` (12), `npm run test:public-site` (4), `npm run test:gymforge-scoring` (8), `npm run test:production-revision` (13), and `npm run build`. The declared engine is Node `>=22.13.0 <23`; Node 22 was unavailable, so the evidence is unsupported-runtime local evidence and must be repeated under Node 22 before release.
+Local patch validation for the earlier snapshot completed under Node `24.14.1`; that evidence is historical and unsupported for release.
+
+The current direct campaign supersedes that opening snapshot locally: Next.js is `16.3.5`, sharp is `0.35.4`, Nodemailer is `10.0.10`, the production dependency tree is audit-clean, and Node `22.20.0` runtime-sensitive checks pass. Docker/PostgreSQL/backup/runtime checks, exact-SHA CI, Cloudflare, and authenticated human smoke remain open. Historical sections below retain their original SHA and runtime claims.
 
 ## Dependency order and task status
 
@@ -121,4 +123,4 @@ This revalidation records readiness evidence only. Public registration and live 
 
 ## Human enablement steps
 
-1. Repeat only the affected post-smoke flows after this patch: acquire `PROJECT_OWNER_ACCESS_CHANGE`; grant/change/revoke disposable Project A MEMBER access and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE`; archive and verify read-only behavior; verify MEMBER admin/audit/session restrictions; then perform normal logout. Keep `BIELOS_INTAKE_ENABLED=false` and public registration disabled.
+1. Repeat only the affected post-smoke flows after this patch: as OWNER, grant/change/revoke disposable Project A MEMBER access without elevation and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE` only for the archive flow; archive and verify read-only behavior; verify MEMBER admin/audit/session restrictions; then perform normal logout. Keep `BIELOS_INTAKE_ENABLED=false` and public registration disabled.

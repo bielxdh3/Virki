@@ -39,6 +39,7 @@ export async function listPendingApplications(actor: ApplicationPrincipal) {
         select: {
           id: true,
           moduleId: true,
+          module: { select: { key: true, name: true } },
           reason: true,
           status: true,
           internalReason: true,

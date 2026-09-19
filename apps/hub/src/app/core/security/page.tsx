@@ -13,13 +13,16 @@ import { getLocale } from "../../locale";
 import { CoreShell } from "../shell";
 import { revokeAllOtherCoreSessions, revokeCoreSession } from "./actions";
 import {
+  getSafeAuditCategory,
+  getSafeAuditEventLabel,
   type SafeAuditResource,
   type SafeAuditResult
 } from "./audit-view";
 import { normalizeCoreAuditFilter, type CoreAuditFilter } from "./audit-view";
 import {
-  CORE_AUDIT_DISPLAY_LIMIT,
-  listCoreAuditActivity
+  CORE_AUDIT_RETENTION_DAYS,
+  listCoreAuditActivityPage,
+  parseAuditDate
 } from "./audit-service";
 import {
   CORE_SESSION_LIST_LIMIT,
@@ -60,8 +63,23 @@ const copy = {
     auditFilter: "Filtro de auditoria",
     activityFilter: "Atividade relevante",
     infrastructureFilter: "Infraestrutura e limite de acesso",
-    ownerOnly: "Somente OWNER",
-    newestAudit: "Até 50 eventos mais recentes dentro da retenção ativa.",
+    ownerOnly: "Auditoria restrita",
+    newestAudit: "Histórico retido com paginação segura.",
+    range: "eventos",
+    oldest: "Mais antigo",
+    newest: "Mais recente",
+    next: "Mais antigos",
+    first: "Início",
+    export: "Exportar intervalo",
+    search: "Buscar evento",
+    from: "De",
+    to: "Até",
+    retention: "Retenção",
+    category: "Categoria",
+    resultFilter: "Resultado",
+    actorFilter: "Ator",
+    resourceFilter: "Recurso",
+    all: "Todos",
     event: "Evento",
     result: "Resultado",
     resource: "Categoria",
@@ -115,8 +133,23 @@ const copy = {
     auditFilter: "Audit filter",
     activityFilter: "Relevant activity",
     infrastructureFilter: "Infrastructure and access boundary",
-    ownerOnly: "OWNER only",
-    newestAudit: "Up to 50 newest events within active retention.",
+    ownerOnly: "Restricted audit",
+    newestAudit: "Retained history with safe pagination.",
+    range: "events",
+    oldest: "Oldest",
+    newest: "Newest",
+    next: "Older",
+    first: "Start",
+    export: "Export interval",
+    search: "Search event",
+    from: "From",
+    to: "To",
+    retention: "Retention",
+    category: "Category",
+    resultFilter: "Result",
+    actorFilter: "Actor",
+    resourceFilter: "Resource",
+    all: "All",
     event: "Event",
     result: "Result",
     resource: "Category",
@@ -188,10 +221,17 @@ function getAuditResourceLabel(resource: SafeAuditResource, locale: BielosLocale
   }
 }
 
+function getAuditCategoryLabel(category: ReturnType<typeof getSafeAuditCategory>, locale: BielosLocale): string {
+  const labels = locale === "pt-BR"
+    ? { auth: "Auth", account: "Conta", access: "Acesso", project: "Projeto", admin: "Admin", session: "Sessão", system: "Sistema", ops: "Ops", module: "Módulo", other: "Outro" }
+    : { auth: "Auth", account: "Account", access: "Access", project: "Project", admin: "Admin", session: "Session", system: "System", ops: "Ops", module: "Module", other: "Other" };
+  return labels[category];
+}
+
 export default async function CoreSecurityPage({
   searchParams
 }: {
-  searchParams?: Promise<{ audit?: string }>;
+  searchParams?: Promise<{ audit?: string; before?: string; category?: string; result?: string; actor?: string; resource?: string; event?: string; search?: string; from?: string; to?: string }>;
 }) {
   const requestHeaders = await headers();
   const accessResult = await validateHubCloudflareAccess(requestHeaders, "core-security");
@@ -210,11 +250,36 @@ export default async function CoreSecurityPage({
   const t = copy[locale];
   const params = await searchParams;
   const auditFilter: CoreAuditFilter = normalizeCoreAuditFilter(params?.audit);
+  const from = parseAuditDate(params?.from);
+  const to = parseAuditDate(params?.to, true);
   const csrfToken = createCsrfToken();
   const now = new Date();
   const isOwner = session.user.role === "OWNER";
   const sessions = await listCoreSessionsForPrincipal(session.user, session.id, now);
-  const auditLogs = isOwner ? await listCoreAuditActivity(session.user, auditFilter) : [];
+  const auditPage = isOwner ? await listCoreAuditActivityPage(session.user, {
+    requestedFilter: auditFilter,
+    cursor: params?.before,
+    category: params?.category,
+    result: params?.result,
+    actor: params?.actor,
+    resource: params?.resource,
+    event: params?.event,
+    search: params?.search,
+    from,
+    to
+  }) : { items: [], nextCursor: null, total: 0, oldestAt: null, newestAt: null };
+  const auditQuery = new URLSearchParams({
+    audit: auditFilter,
+    ...(params?.category ? { category: params.category } : {}),
+    ...(params?.result ? { result: params.result } : {}),
+    ...(params?.actor ? { actor: params.actor } : {}),
+    ...(params?.resource ? { resource: params.resource } : {}),
+    ...(params?.event ? { event: params.event } : {}),
+    ...(params?.search ? { search: params.search } : {}),
+    ...(params?.from ? { from: params.from } : {}),
+    ...(params?.to ? { to: params.to } : {})
+  });
+  const nextHref = auditPage.nextCursor ? `/core/security?${new URLSearchParams({ ...Object.fromEntries(auditQuery), before: auditPage.nextCursor }).toString()}#audit` : null;
   const otherSessionCount = sessions.filter((item) => !item.isCurrent).length;
 
   return (
@@ -327,7 +392,7 @@ export default async function CoreSecurityPage({
                 <p className="eyebrow">{t.ownerOnly}</p>
                 <h2 id="core-audit-heading">{t.auditActivity}</h2>
               </div>
-              <span>{auditLogs.length} / {CORE_AUDIT_DISPLAY_LIMIT}</span>
+              <span>{auditPage.total} {t.range}</span>
             </div>
 
             <form className="compact-form core-audit-filter" method="get" action="/core/security#audit">
@@ -338,24 +403,45 @@ export default async function CoreSecurityPage({
                   <option value="infrastructure">{t.infrastructureFilter}</option>
                 </select>
               </label>
+              <label><span>{t.category}</span><select name="category" defaultValue={params?.category ?? ""}><option value="">{t.all}</option>{["auth", "account", "access", "project", "admin", "session", "system", "ops", "module", "other"].map((value) => <option key={value} value={value}>{getAuditCategoryLabel(value as ReturnType<typeof getSafeAuditCategory>, locale)}</option>)}</select></label>
+              <label><span>{t.resultFilter}</span><select name="result" defaultValue={params?.result ?? ""}><option value="">{t.all}</option><option value="SUCCESS">{t.resultSuccess}</option><option value="FAILURE">{t.resultFailure}</option><option value="INFO">{t.resultInfo}</option></select></label>
+              <label><span>{t.actorFilter}</span><select name="actor" defaultValue={params?.actor ?? ""}><option value="">{t.all}</option><option value="user">{t.actorUser}</option><option value="system">{t.actorSystem}</option></select></label>
+              <label><span>{t.resourceFilter}</span><select name="resource" defaultValue={params?.resource ?? ""}><option value="">{t.all}</option>{["hub", "access", "session", "project", "project-access", "application", "security", "system", "other"].map((value) => <option key={value} value={value}>{getAuditResourceLabel(value as SafeAuditResource, locale)}</option>)}</select></label>
+              <label><span>{t.event}</span><input name="event" maxLength={80} pattern="[A-Z0-9_]{1,80}" defaultValue={params?.event ?? ""} /></label>
+              <label><span>{t.search}</span><input name="search" maxLength={80} defaultValue={params?.search ?? ""} /></label>
+              <label><span>{t.from}</span><input type="date" name="from" defaultValue={params?.from ?? ""} /></label>
+              <label><span>{t.to}</span><input type="date" name="to" defaultValue={params?.to ?? ""} /></label>
               <button className="button-ghost" type="submit">{t.auditActivity}</button>
             </form>
+            <form className="compact-form core-audit-export-form" action="/api/core/audit/export" method="post">
+              <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
+              <input type="hidden" name="audit" value={auditFilter} />
+              <input type="hidden" name="category" value={params?.category ?? ""} />
+              <input type="hidden" name="result" value={params?.result ?? ""} />
+              <input type="hidden" name="actor" value={params?.actor ?? ""} />
+              <input type="hidden" name="resource" value={params?.resource ?? ""} />
+              <input type="hidden" name="event" value={params?.event ?? ""} />
+              <input type="hidden" name="search" value={params?.search ?? ""} />
+              <input type="hidden" name="from" value={params?.from ?? ""} />
+              <input type="hidden" name="to" value={params?.to ?? ""} />
+              <button className="button-ghost" type="submit">{t.export}</button>
+            </form>
 
-            {auditLogs.length === 0 ? (
+            {auditPage.items.length === 0 ? (
               <div className="core-project-empty core-audit-empty">
                 <strong>{t.auditEmpty}</strong>
               </div>
             ) : (
               <div className="core-audit-list">
-                {auditLogs.map((item, index) => {
+                {auditPage.items.map((item) => {
                   return (
                     <article
                       className="core-audit-row"
-                      key={`${item.createdAt.toISOString()}-${index}`}
+                      key={item.id}
                     >
                       <div className="core-audit-event">
-                        <span>{t.event}</span>
-                        <code>{item.eventType}</code>
+                        <span>{getAuditCategoryLabel(item.category, locale)}</span>
+                        <strong>{getSafeAuditEventLabel(item.eventType, locale)}</strong>
                       </div>
                       <dl>
                         <div>
@@ -379,13 +465,15 @@ export default async function CoreSecurityPage({
                           <dd>{formatSessionTime(item.createdAt, locale)}</dd>
                         </div>
                       </dl>
+                      <details className="core-audit-detail"><summary>{locale === "pt-BR" ? "Detalhes" : "Details"}</summary><div><span>{t.event}</span><code>{item.eventType}</code></div><div><span>{t.category}</span><strong>{getAuditCategoryLabel(item.category, locale)}</strong></div></details>
                     </article>
                   );
                 })}
               </div>
             )}
 
-            <p className="core-project-limit-note">{t.newestAudit}</p>
+            <p className="core-project-limit-note">{t.newestAudit} · {t.retention}: {CORE_AUDIT_RETENTION_DAYS} {locale === "pt-BR" ? "dias" : "days"}</p>
+            <div className="core-audit-range"><span>{auditPage.oldestAt ? `${t.oldest}: ${formatSessionTime(auditPage.oldestAt, locale)}` : ""}</span><span>{auditPage.newestAt ? `${t.newest}: ${formatSessionTime(auditPage.newestAt, locale)}` : ""}</span>{nextHref ? <a className="button-secondary" href={nextHref}>{t.next}</a> : null}</div>
           </section>
         ) : null}
       </div>

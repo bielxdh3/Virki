@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
 import { CoreShell, getCoreShellClassName } from "./shell";
 import { getCoreNavigationItems } from "./navigation";
+import { rankPaletteEntries } from "./command-palette";
 import { getTrustedDeviceCopy, getTrustedDeviceDisplay } from "./security/trusted-device-view";
 
 test("Core shell renders an explicit docked or standalone contract", () => {
@@ -23,6 +24,7 @@ test("Core shell renders an explicit docked or standalone contract", () => {
   assert.match(docked, /hub-shell--docked/);
   assert.match(docked, /os-dock/);
   assert.match(docked, /hub-workspace/);
+  assert.doesNotMatch(docked, /aria-hidden="true">0[1-9]/);
   assert.match(standalone, /hub-shell--standalone/);
   assert.doesNotMatch(standalone, /os-dock/);
   assert.match(standalone, /hub-workspace/);
@@ -36,7 +38,7 @@ test("Core navigation is localized, fixed, and role-aware", () => {
 
   assert.deepEqual(member.map((item) => item.href), [
     "/",
-    "/#ops",
+    "/core/health",
     "/core/projects",
     "/core/security",
     "/core/security/account",
@@ -44,7 +46,7 @@ test("Core navigation is localized, fixed, and role-aware", () => {
   ]);
   assert.deepEqual(owner.map((item) => item.href), [
     "/",
-    "/#ops",
+    "/core/health",
     "/core/projects",
     "/core/security",
     "/core/security#audit",
@@ -55,13 +57,30 @@ test("Core navigation is localized, fixed, and role-aware", () => {
   ]);
   assert.equal(member.some((item) => item.href === "/core/security/admin"), false);
   assert.equal(member.some((item) => item.href === "/core/applications"), false);
-  assert.equal(owner.find((item) => item.href === "/core/security/admin")?.label, "Administrative security");
-  assert.equal(owner.find((item) => item.href === "/#ops")?.kind, "section");
+  assert.equal(owner.find((item) => item.href === "/core/security/admin")?.label, "Admin");
+  assert.equal(owner.find((item) => item.href === "/core/health")?.kind, "route");
   assert.equal(owner.find((item) => item.href === "/core/security#audit")?.kind, "section");
   assert.equal(owner.find((item) => item.href === "/core/security#audit")?.activePath, "/core/security");
   assert.equal(member.find((item) => item.href === "/core/security/admin"), undefined);
-  assert.equal(member.find((item) => item.href === "/core/security/account")?.label, "Segurança da conta");
+  assert.equal(member.find((item) => item.href === "/core/security/account")?.label, "Conta");
   assert.ok([...member, ...owner].every((item) => item.href.startsWith("/")));
+});
+
+test("command palette ranks relevant matches and local recency without telemetry", () => {
+  const entries = [
+    { label: "Projetos", hint: "Acesso", href: "/core/projects" },
+    { label: "Saúde", hint: "Estado", href: "/core/health" },
+    { label: "Auditoria", hint: "Histórico", href: "/core/security#audit" }
+  ];
+
+  assert.deepEqual(
+    rankPaletteEntries(entries, "saú", ["/core/projects\u0000Projetos"], "pt-BR").map((entry) => entry.href),
+    ["/core/health"]
+  );
+  assert.deepEqual(
+    rankPaletteEntries(entries, "", ["/core/projects\u0000Projetos"], "pt-BR").map((entry) => entry.href),
+    ["/core/projects", "/core/health", "/core/security#audit"]
+  );
 });
 
 test("trusted-device copy and display omit device identifiers", () => {

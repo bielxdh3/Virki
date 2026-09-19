@@ -2,9 +2,9 @@
 
 ## Decision
 
-The current BielOS UI/UX direction is no longer the target. It remains in the repository only as the current implementation until a dedicated migration mission replaces it.
+The current BielOS UI/UX direction is no longer the target. The local campaign has replaced the shared Hub shell, tokens, appearance contract, navigation, and corresponding Core surfaces with the Prompt Arena interaction language; the prior CSS remains only where an unchanged legacy surface still needs a safe incremental mapping.
 
-The new canonical UI/UX target is the Prompt Arena interface from `bielxdh3/Prompt-Arena`, using the current Prompt Arena `main` snapshot observed at tree/commit `7a3842795192eaa887cedf7b233664e8b53b1940` as the planning baseline.
+The new canonical UI/UX target is the Prompt Arena interface from `bielxdh3/Prompt-Arena`, using the current Prompt Arena `main` snapshot observed for this campaign at commit `6501e8541c13993adef267a291f84686e42c684d`; the earlier `7a3842795192eaa887cedf7b233664e8b53b1940` remains the planning baseline.
 
 This is a **port/parity requirement, not an inspiration brief**. Future BielOS UI/UX work must reproduce the Prompt Arena visual language, interaction language, accessibility behavior, appearance controls, layout system, responsive behavior, and reusable UI patterns as faithfully as the BielOS web architecture permits.
 
@@ -325,7 +325,7 @@ Match Prompt Arena's restrained motion model:
 
 ## Migration roadmap
 
-### UIX-0 — Source lock and parity matrix — CURRENT
+### UIX-0 — Source lock and parity matrix — COMPLETE (local)
 
 Planning-only.
 
@@ -337,7 +337,7 @@ Planning-only.
 
 Acceptance: no Prompt Arena UI/UX feature is silently omitted from the migration matrix.
 
-### UIX-1 — Shell, tokens, typography, and appearance foundation — NEXT
+### UIX-1 — Shell, tokens, typography, and appearance foundation — COMPLETE (local; human visual gate remains)
 
 - Replace the current BielOS visual shell with the Prompt Arena shell language.
 - Port semantic tokens, typography, sidebar/workspace/topbar, panel primitives, focus behavior, skip link, and appearance state hooks.
@@ -345,14 +345,14 @@ Acceptance: no Prompt Arena UI/UX feature is silently omitted from the migration
 
 Acceptance: authenticated Core shell reads visually and interactively as the Prompt Arena design system while preserving BielOS routes and security.
 
-### UIX-2 — Core component parity — NEXT
+### UIX-2 — Core component parity — COMPLETE (local shared mapping; human visual gate remains)
 
 - Port Prompt Arena patterns for buttons, status chips, panels, cards, forms, fields, toggles, rows, empty/loading/error states, tables, long-text blocks, notices, diagnostics, and selected states.
 - Remove obsolete BielOS-specific styling patterns once each affected surface reaches parity.
 
 Acceptance: shared Core primitives no longer depend on the discarded BielOS visual language.
 
-### UIX-3 — Surface-by-surface BielOS migration — NEXT
+### UIX-3 — Surface-by-surface BielOS migration — COMPLETE (local shared mapping; human visual gate remains)
 
 Migrate every current private-hub surface, including at minimum:
 
@@ -374,7 +374,7 @@ No currently implemented workflow may become visually orphaned.
 
 Acceptance: every current BielOS screen uses the Prompt Arena parity system and all existing behavior remains reachable.
 
-### UIX-4 — Responsive, accessibility, and interaction parity — NEXT
+### UIX-4 — Responsive, accessibility, and interaction parity — COMPLETE LOCALLY; human validation remains
 
 - Validate keyboard navigation and focus-visible behavior.
 - Validate skip link and semantic current-page navigation.
@@ -386,7 +386,7 @@ Acceptance: every current BielOS screen uses the Prompt Arena parity system and 
 
 Acceptance: parity survives normal responsive and accessibility paths, not only a desktop screenshot.
 
-### UIX-5 — Human visual acceptance — NEXT
+### UIX-5 — Human visual acceptance — AWAITING_HUMAN_VALIDATION
 
 - Conduct authenticated visual smoke across all representative Hub surfaces.
 - Compare against Prompt Arena source behavior and the parity matrix.

@@ -11,7 +11,7 @@ const nextConfig = {
   },
   outputFileTracingRoot: workspaceRoot,
   serverExternalPackages: ["@node-rs/argon2", "@prisma/client"],
-  transpilePackages: ["@bielos/ui", "@bielos/auth", "@bielos/database"],
+  transpilePackages: ["@bielos/ui", "@bielos/types", "@bielos/auth", "@bielos/database"],
   webpack: (config, { isServer }) => {
     if (isServer) {
       config.externals = [

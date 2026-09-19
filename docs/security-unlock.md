@@ -60,3 +60,7 @@ No unlock data is shown in operations or audit activity views. A future requeste
 ## Implementation Gate
 
 Runtime stays blocked until the unresolved decisions above are approved and any required additive schema migration has a current backup, reviewed SQL, rollback limitations, authorization tests, and a complete deploy plan. No Core phase may treat an existing `APPROVED` row as authority before that protocol exists.
+
+## Campaign verification
+
+The current local campaign found no runtime path that treats a legacy `SecurityUnlock` row as authority. Administrative elevation uses the separate versioned, session-bound ceremony in `packages/auth/src/administration.ts`; routine OWNER project participant/access changes do not invoke that ceremony, while higher-risk administrative operations still do. `SecurityUnlock` therefore remains explicitly `FROZEN_BY_APPROVED_BOUNDARY` rather than being activated by inference.

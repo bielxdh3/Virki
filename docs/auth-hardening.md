@@ -2,7 +2,7 @@
 
 Phase 02.1 hardens the internal hub authentication layer without adding module unlocks, OAuth, public registration, Cloudflare credentials, or real secrets.
 
-Current post-smoke status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: Phase 1/2 fixes are locally validated under unsupported Node `24.14.1`, while only the affected project-scope, audit, MEMBER-restriction, and logout flows remain for human resume. No current authenticated OWNER/MEMBER smoke or final closeout claim is made.
+The 2026-09-18 direct campaign is locally complete for the current authentication/security scope in an uncommitted worktree at `4be92f85a3573feb184da2bf770d0497a22f6a6a`. Runtime-sensitive checks were repeated with Node `22.20.0`; Docker/PostgreSQL-backed gates, exact-SHA CI, Cloudflare, and authenticated human smoke remain external gates. No current production or human-smoke claim is made.
 
 ## Middleware Protection
 
@@ -45,11 +45,13 @@ Current behavior:
 - Fails closed when the limiter cannot be checked, returning the same generic login failure to the browser.
 - Returns the same generic login error to avoid revealing whether the email or password was wrong.
 
+The same durable limiter also protects the separate security ceremonies with HMAC-prefixed keys: login and recovery email/TOTP verification is bounded to five attempts per ceremony/request and per user, while account recovery allows at most one new email per minute and five requests per fifteen minutes per normalized address. Failed verification and recovery-limit decisions remain generic, and no raw ceremony, user, or email identifier is stored.
+
 This keeps the limiter durable across hub restarts and shared by hub instances that use the same database and hash key. Password verification intentionally remains inside the locked transaction because moving it outside would allow more than five same-identifier verifications under concurrency. Database tests show bounded same-identifier completion, distinct-identifier independence, and fail-closed lock timeout. The accepted cost is holding one pool connection during Argon2 verification; the private Access boundary and current single hub replica keep this proportionate. Edge/IP controls remain future work.
 
-Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private value. It is used only to HMAC login rate limit identifiers and must not be committed, logged, or shared. Production never derives this key from `DATABASE_URL` and never uses the synthetic development/test fallback. Missing production configuration fails closed with the generic login response. Rotating the key creates new buckets because no raw identifier exists to migrate; existing hashed buckets expire through normal retention.
+Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private value. It HMACs login, verification, and recovery limiter identifiers and must not be committed, logged, or shared. Production never derives this key from `DATABASE_URL` and never uses the synthetic development/test fallback. Missing production configuration fails closed with the generic security response. Rotating the key creates new buckets because no raw identifier exists to migrate; existing hashed buckets expire through normal retention.
 
-Authentication prunes expired limiter rows with an indexed `expiresAt` delete before processing. Per-request cleanup remains appropriate for the current small private-hub volume and guarantees stale rows do not persist indefinitely; moving it into maintenance would add coordination without a reproduced operational benefit.
+Login authentication prunes expired limiter rows with an indexed `expiresAt` delete before processing, and the `session-cleanup` worker repeats that cleanup for verification and recovery buckets. The indexed retention path keeps stale security limiter rows bounded without storing raw identifiers.
 
 Real PostgreSQL route tests invoke `POST /api/login` with actual requests, forms, CSRF validation, limiter rows, redirects, session creation, response-cookie attributes, and sanitized audits. They cover required Access denial, missing/invalid CSRF, invalid and rate-limited credentials, missing fields, normalized success, inactive users, unavailable production configuration, and concurrent requests.
 

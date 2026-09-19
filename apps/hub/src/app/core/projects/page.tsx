@@ -68,9 +68,10 @@ const copy = {
     reserved: "Reservado",
     active: "Ativo",
     paused: "Pausado",
+    unavailable: "Indisponível",
     viewer: "Visualizador",
     editor: "Editor",
-    owner: "Responsável do projeto (OWNER)",
+    owner: "Responsável do projeto",
     administrator: "Administrador",
     authenticated: "Usuário autenticado",
     actions: "Ações administrativas",
@@ -79,8 +80,8 @@ const copy = {
     grantAccess: "Conceder ou alterar acesso",
     selectUser: "Selecionar usuário",
     accessLevel: "Nível de acesso no projeto",
-    ownerHelp: "OWNER define o responsável deste projeto; não altera o papel global do usuário.",
-    accessElevationHelp: "Antes de aplicar ou revogar acesso, ative a elevação PROJECT_OWNER_ACCESS_CHANGE, verifique o código enviado por email e volte aqui.",
+    ownerHelp: "Define o responsável deste projeto; não altera o papel global do usuário.",
+    accessElevationHelp: "Antes de aplicar ou revogar acesso, confirme a operação na Segurança administrativa e volte aqui.",
     accessElevationLink: "Abrir Segurança administrativa",
     applyAccess: "Aplicar acesso",
     currentAccess: "Acessos atuais",
@@ -149,9 +150,10 @@ const copy = {
     reserved: "Reserved",
     active: "Active",
     paused: "Paused",
+    unavailable: "Unavailable",
     viewer: "Viewer",
     editor: "Editor",
-    owner: "Project owner (OWNER)",
+    owner: "Project owner",
     administrator: "Administrator",
     authenticated: "Authenticated user",
     actions: "Administrative actions",
@@ -160,8 +162,8 @@ const copy = {
     grantAccess: "Grant or change access",
     selectUser: "Select user",
     accessLevel: "Project access level",
-    ownerHelp: "OWNER defines this project's responsible owner; it does not change the user's global role.",
-    accessElevationHelp: "Before applying or revoking access, activate PROJECT_OWNER_ACCESS_CHANGE, verify the emailed code, and return here.",
+    ownerHelp: "Defines this project's responsible owner; it does not change the user's global role.",
+    accessElevationHelp: "Before applying or revoking access, confirm the operation in Administrative security and return here.",
     accessElevationLink: "Open Administrative security",
     applyAccess: "Apply access",
     currentAccess: "Current access",
@@ -200,7 +202,7 @@ function getVisibilityLabel(value: string, t: (typeof copy)[BielosLocale]): stri
     SENSITIVE: t.sensitive
   };
 
-  return labels[value] ?? value;
+  return labels[value] ?? t.unavailable;
 }
 
 function getStatusLabel(value: string, t: (typeof copy)[BielosLocale]): string {
@@ -212,7 +214,7 @@ function getStatusLabel(value: string, t: (typeof copy)[BielosLocale]): string {
     ARCHIVED: t.archived
   };
 
-  return labels[value] ?? value;
+  return labels[value] ?? t.unavailable;
 }
 
 function getAccessLabel(
@@ -231,7 +233,7 @@ function getAccessLabel(
     OWNER: t.owner
   };
 
-  return accessLevel ? (labels[accessLevel] ?? accessLevel) : visibility === "PUBLIC" ? t.authenticated : t.viewer;
+  return accessLevel ? (labels[accessLevel] ?? t.unavailable) : visibility === "PUBLIC" ? t.authenticated : t.viewer;
 }
 
 function formatUpdatedAt(value: Date, locale: BielosLocale): string {
@@ -327,7 +329,7 @@ export default async function CoreProjectsPage({
                 <p className="eyebrow">{t.adminTools}</p>
                 <h2 id="core-admin-heading">{t.createProject}</h2>
               </div>
-              <span className="status-pill is-guarded">OWNER / ADMIN</span>
+              <span className="status-pill is-guarded">{t.adminTools}</span>
             </div>
             <details className="admin-drawer core-project-drawer">
               <summary>{t.createSummary}</summary>

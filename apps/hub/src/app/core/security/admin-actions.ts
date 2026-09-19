@@ -1,6 +1,6 @@
 "use server";
 
-import { startAdministrativeCredentialSetup, completeAdministrativeCredentialSetup, revokeSecurityElevation, startSecurityElevation, verifySecurityElevation, type ElevationScope } from "@bielos/auth/administration";
+import { completeAdministrativeCredentialSetup, recoverAdministrativeCredential, revokeSecurityElevation, startAdministrativeCredentialSetup, startSecurityElevation, verifySecurityElevation, type ElevationScope } from "@bielos/auth/administration";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { headers } from "next/headers";
 import { forbidden } from "next/navigation";
@@ -17,6 +17,23 @@ export async function startAdminSetupAction(_state: AdminActionState, formData: 
 export async function completeAdminSetupAction(_state: AdminActionState, formData: FormData): Promise<AdminActionState> {
   const session = await requireOwnerMutation(formData, "admin-setup-complete");
   try { return { status: "ok", recoveryCodes: await completeAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, requestKey: read(formData, "requestKey"), code: read(formData, "code"), newPassword: read(formData, "newPassword") }) }; } catch { return { status: "error" }; }
+}
+
+export async function recoverAdminCredentialAction(_state: AdminActionState, formData: FormData): Promise<AdminActionState> {
+  const session = await requireOwnerMutation(formData, "admin-recovery");
+  try {
+    return {
+      status: "ok",
+      recoveryCodes: await recoverAdministrativeCredential({
+        actor: session.user,
+        normalPassword: read(formData, "normalPassword"),
+        recoveryCode: read(formData, "recoveryCode"),
+        newPassword: read(formData, "newPassword")
+      })
+    };
+  } catch {
+    return { status: "error" };
+  }
 }
 
 export async function startElevationAction(_state: AdminActionState, formData: FormData): Promise<AdminActionState> {

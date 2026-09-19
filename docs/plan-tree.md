@@ -59,7 +59,7 @@ BielOS is a private personal hub, not a public SaaS.
 - `[DONE]` Core roadmap rebaseline synchronizes current identity/access source truth and selects one bounded rollout-readiness phase; this planning-only phase performs no runtime implementation or production mutation.
 - `[CURRENT]` Post-smoke repair readiness: Phase 1/2 scope, navigation, audit, and project-boundary corrections are locally validated; repeat only the affected OWNER/MEMBER human smoke under the existing boundaries, and keep public Intake disabled.
 - `[DONE]` Accepted local quality correction includes the existing public-application UI regression in `test:public-site`; GymForge is documented as implemented with expansion frozen, while L-vault, root.ark, and H-vault remain inert reserved boundaries.
-- `[CURRENT]` `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`: Phase 1/2 corrections remain uncommitted at pre-existing `HEAD` `afb74455573179b9cd915d2076032af9fae23a4b`; `origin/main` remains that SHA, no push/new remote CI/deployment was authorized or performed, local validation passed under unsupported Node `24.14.1`, and only affected human smoke remains. Repeat local validation under Node `>=22.13.0 <23` before release.
+- `[CURRENT]` Master Finish Everything campaign is locally complete for the authorized Core scope in an uncommitted worktree at `4be92f85a3573feb184da2bf770d0497a22f6a6`; runtime-sensitive checks pass with Node `22.20.0`, while Docker/PostgreSQL/backup/runtime, exact-SHA CI, Cloudflare, and authenticated human smoke remain external gates. No publication or production mutation was performed.
 - `[HISTORICAL]` Technical closeout for `33f540a4b396aa8a55fa65ad9f950b0c36712aae` and GitHub Actions run `31821995102` passed Validate and Audit dependency lockfile, including Core DB integration, Intake role, backup/restore, concurrency, build, production image revision, runtime smoke, and Compose validation.
 - `[DONE]` The existing Core data foundation includes `Project`, `ProjectAccess`, `Session`, `SecurityUnlock`, and `AuditLog` models.
 - `[DONE]` BielOS Core security and architecture gate exists at `docs/modules/bielos-core.md`.
@@ -221,7 +221,7 @@ BielOS Core is the private hub platform and workspace, not a reserved module. It
 - `[DONE]` Personal session management is implemented at `/core/security` with user-scoped revocation.
 - `[DONE]` Core workspace and available applications are integrated in the typed hub registry.
 - `[DONE]` Safe operations visibility uses a bounded database probe and honest unknown/manual states.
-- `[DONE]` Owner-only audit visibility is implemented with a 50-row newest-first bound and safe display categories.
+- `[DONE]` Owner-only audit visibility is implemented with bounded retained-history cursor pagination, safe display categories, filters, detail disclosure, retention range, and sanitized export.
 - `[DONE]` Complete the BielOS Core adversarial security/static-UI review and resolve all confirmed findings; authenticated visual smoke remains a follow-up.
 - `[DONE]` Complete full validation, backup/migration deployment, production restart, and unauthenticated smoke checks.
 - `[DONE]` Add disposable PostgreSQL integration coverage for Core authorization, mutations, access invariants, concurrency, session isolation, audit visibility, and operations reliability.

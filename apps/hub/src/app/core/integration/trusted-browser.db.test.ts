@@ -16,9 +16,12 @@ import {
   hashDeviceToken,
   invalidateRememberedLoginGrantsForUser,
   REMEMBERED_BROWSER_TTL_MS,
+  RECOVERY_REQUEST_COOLDOWN_MS,
+  requestAccountRecovery,
   revokeTrustedDevice,
   startLoginCeremony,
   startTotpEnrollment,
+  verifyAccountRecoveryEmail,
   verifyLoginEmailCode,
   verifyLoginTotpCode
 } from "@bielos/auth/security";
@@ -328,6 +331,95 @@ test("TOTP enrollment, replacement, and disable invalidate remembered trust", as
   assert.equal((await rememberedGrant(user.id, device.deviceToken))?.rememberedUntil ?? null, null);
 });
 
+test("login verification attempts are bounded per user and ceremony", async () => {
+  const user = await createUser("verification-throttle@example.invalid", "EMAIL");
+  const now = currentTestNow();
+  const start = asCeremony(await startLoginCeremony(user.id, createDeviceToken(), "pt-BR", now));
+  const validCode = await latestEmailCode("NEW_DEVICE_VERIFICATION");
+  const invalidCode = validCode === "000000" ? "000001" : "000000";
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await assert.rejects(verifyLoginEmailCode(start.ceremonyId, invalidCode, now));
+  }
+  await assert.rejects(verifyLoginEmailCode(start.ceremonyId, validCode, now));
+
+  const buckets = await prisma.loginRateLimit.findMany({ select: { attempts: true } });
+  assert.equal(buckets.length, 2);
+  assert.equal(buckets.every((bucket) => bucket.attempts === 5), true);
+  assert.equal(await prisma.session.count({ where: { userId: user.id } }), 0);
+});
+
+test("TOTP verification shares the bounded ceremony and user attempt limits", async () => {
+  const user = await createUser("totp-verification-throttle@example.invalid", "TOTP");
+  const now = currentTestNow();
+  const deviceToken = createDeviceToken();
+  await createTrustedDevice(user.id, deviceToken, new Date(1));
+  const start = asCeremony(await startLoginCeremony(user.id, deviceToken, "pt-BR", now));
+  assert.equal(start.factor, "TOTP");
+  const validCode = createTotpCode(syntheticTotpSecret, now);
+  const invalidCode = validCode === "000000" ? "000001" : "000000";
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await assert.rejects(verifyLoginTotpCode(start.ceremonyId, invalidCode, now));
+  }
+  await assert.rejects(verifyLoginTotpCode(start.ceremonyId, validCode, now));
+  assert.equal(await prisma.session.count({ where: { userId: user.id } }), 0);
+});
+
+test("account recovery issuance has a cooldown and bounded request bucket", async () => {
+  const user = await createUser("recovery-throttle@example.invalid", "EMAIL");
+  const firstNow = new Date();
+
+  await requestAccountRecovery(user.email, "pt-BR", firstNow);
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { kind: "ACCOUNT_RECOVERY" } }), 1);
+
+  await requestAccountRecovery(
+    user.email,
+    "pt-BR",
+    new Date(firstNow.getTime() + RECOVERY_REQUEST_COOLDOWN_MS - 1)
+  );
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { kind: "ACCOUNT_RECOVERY" } }), 1);
+
+  for (let request = 1; request <= 4; request += 1) {
+    await requestAccountRecovery(
+      user.email,
+      "pt-BR",
+      new Date(firstNow.getTime() + request * (RECOVERY_REQUEST_COOLDOWN_MS + 1_000))
+    );
+  }
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { kind: "ACCOUNT_RECOVERY" } }), 5);
+
+  await requestAccountRecovery(
+    user.email,
+    "pt-BR",
+    new Date(firstNow.getTime() + 5 * (RECOVERY_REQUEST_COOLDOWN_MS + 1_000))
+  );
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { kind: "ACCOUNT_RECOVERY" } }), 5);
+});
+
+test("account recovery email verification is bounded per user and request", async () => {
+  const user = await createUser("recovery-verification-throttle@example.invalid", "EMAIL");
+  const now = new Date();
+  await requestAccountRecovery(user.email, "pt-BR", now);
+  const request = await prisma.accountRecoveryRequest.findFirst({
+    where: { userId: user.id },
+    orderBy: { createdAt: "desc" },
+    select: { requestKey: true }
+  });
+  assert.notEqual(request, null);
+  const validCode = await latestRecoveryCode();
+  const invalidCode = validCode === "000000" ? "000001" : "000000";
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await assert.rejects(verifyAccountRecoveryEmail(request!.requestKey, invalidCode, now));
+  }
+  await assert.rejects(verifyAccountRecoveryEmail(request!.requestKey, validCode, now));
+  assert.equal(
+    (await prisma.accountRecoveryRequest.findUnique({ where: { requestKey: request!.requestKey }, select: { emailVerifiedAt: true } }))?.emailVerifiedAt,
+    null
+  );
+});
+
 test("account deactivation and the exported account-state hook fail closed", async () => {
   const user = await createUser("account-state@example.invalid", "EMAIL");
   const device = await createTrustedDevice(user.id, createDeviceToken(), new Date("2026-08-12T12:00:00.000Z"));
@@ -498,6 +590,14 @@ async function rememberedGrant(userId: string, deviceToken: string) {
 
 async function latestEmailCode(kind: "NEW_DEVICE_VERIFICATION" | "EMAIL_TWO_FACTOR"): Promise<string> {
   const message = await prisma.emailOutboxMessage.findFirst({ where: { kind }, orderBy: { createdAt: "desc" }, select: { payload: true } });
+  assert.notEqual(message, null);
+  const payload = decryptEmailPayload(message!.payload);
+  assert.equal(typeof payload.code, "string");
+  return payload.code;
+}
+
+async function latestRecoveryCode(): Promise<string> {
+  const message = await prisma.emailOutboxMessage.findFirst({ where: { kind: "ACCOUNT_RECOVERY" }, orderBy: { createdAt: "desc" }, select: { payload: true } });
   assert.notEqual(message, null);
   const payload = decryptEmailPayload(message!.payload);
   assert.equal(typeof payload.code, "string");

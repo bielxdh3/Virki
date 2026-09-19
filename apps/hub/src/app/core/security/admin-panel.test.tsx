@@ -37,7 +37,8 @@ test("administrative feedback follows the submitted stage", () => {
     setup: { status: "idle" },
     "setup-complete": { status: "idle" },
     elevation: { status: "error" },
-    "elevation-complete": { status: "ok" }
+    "elevation-complete": { status: "ok" },
+    recovery: { status: "idle" }
   });
 
   assert.equal(feedback?.stage, "elevation");
@@ -46,6 +47,8 @@ test("administrative feedback follows the submitted stage", () => {
 
 test("project links select only allowlisted elevation scopes", () => {
   assert.equal(getInitialElevationScope("PROJECT_OWNER_ACCESS_CHANGE"), "PROJECT_OWNER_ACCESS_CHANGE");
+  assert.equal(getInitialElevationScope("project-access"), "PROJECT_OWNER_ACCESS_CHANGE");
+  assert.equal(getInitialElevationScope("project-archive"), "CORE_PROJECT_ARCHIVE");
   assert.equal(getInitialElevationScope("GLOBAL_ROLE_CHANGE"), "ACCOUNT_APPLICATION_REVIEW");
   assert.equal(getInitialElevationScope(undefined), "ACCOUNT_APPLICATION_REVIEW");
 });

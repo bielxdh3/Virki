@@ -68,6 +68,16 @@ const copy = {
   }
 } as const;
 
+function applicationStatusLabel(value: string, locale: keyof typeof copy): string {
+  const t = copy[locale];
+  return ({ EMAIL_VERIFIED: t.verified, IN_REVIEW: t.pending, PARTIALLY_APPROVED: t.partial, APPROVED: t.approved, REJECTED: t.rejected } as Record<string, string>)[value] ?? t.pending;
+}
+
+function decisionStatusLabel(value: string, locale: keyof typeof copy): string {
+  const t = copy[locale];
+  return ({ REQUESTED: t.pending, APPROVED: t.approved, REJECTED: t.rejected, BLOCKED: t.rejected } as Record<string, string>)[value] ?? t.pending;
+}
+
 export default async function CoreApplicationsPage() {
   const access = await validateHubCloudflareAccess(await headers(), "core-applications");
   if (!isCloudflareAccessAllowed(access)) {
@@ -105,7 +115,7 @@ export default async function CoreApplicationsPage() {
                 <div className="core-project-card-main">
                   <div className="core-project-title-row">
                     <div>
-                      <span className="core-project-slug">{application.status}</span>
+                      <span className="core-project-slug">{applicationStatusLabel(application.status, locale)}</span>
                       <h2>{application.displayName || application.emailNormalized}</h2>
                       <p>{application.emailNormalized}</p>
                     </div>
@@ -116,7 +126,8 @@ export default async function CoreApplicationsPage() {
                         <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
                         <input type="hidden" name="applicationId" value={application.id} />
                         <input type="hidden" name="moduleDecisionId" value={decision.id} />
-                        <strong>{decision.moduleId}</strong>
+                        <strong>{decision.module.name}</strong>
+                        <span>{decisionStatusLabel(decision.status, locale)}</span>
                         <span>{t.reason}: {decision.reason}</span>
                         <label>{t.decision}<select name="decision" defaultValue={decision.status === "APPROVED" ? "APPROVED" : "REJECTED"}><option value="APPROVED">{t.approve}</option><option value="REJECTED">{t.reject}</option></select></label>
                         <label>{t.internalReason}<textarea name="internalReason" maxLength={1000} defaultValue={decision.internalReason ?? ""} /></label>

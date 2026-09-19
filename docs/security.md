@@ -2,7 +2,7 @@
 
 Security is a first-class requirement for BielOS.
 
-Current post-smoke status is `BIELOS_POST_SMOKE_REPAIR_LOCALLY_COMPLETE_AWAITING_HUMAN_SMOKE`. Phase 1/2 changes remain uncommitted at the pre-existing local `HEAD`; local validation passed under unsupported Node `24.14.1`, while the latest human smoke found the former project-elevation scope availability defect and low-signal successful Access audit noise. The affected human smoke must be repeated; no current authenticated OWNER/MEMBER smoke or final closeout claim is made.
+The 2026-09-18 direct campaign is locally complete for the current security scope in an uncommitted worktree at `4be92f85a3573feb184da2bf770d0497a22f6a6a`. Runtime-sensitive checks were repeated with Node `22.20.0`; Docker/PostgreSQL-backed gates, exact-SHA CI, Cloudflare, and authenticated human smoke remain external gates. No current production or human-smoke claim is made.
 
 ## Current MVP Rules
 
@@ -21,9 +21,9 @@ Current layers:
 - Application session management.
 - Password or passphrase verification using strong hashing.
 - Session token hashing at rest.
-- Persistent login rate limiting using privacy-safe identifier hashes.
+- Persistent login, verification, and recovery rate limiting using privacy-safe HMAC identifier hashes.
 - Cloudflare Access as an outer boundary for the private hub.
-- Security unlock flow for sensitive modules.
+- Reserved `SecurityUnlock` schema remains non-authoritative; administrative elevation uses its separate versioned protocol and no legacy unlock row grants access.
 - A separate server-authoritative remembered-browser grant limited to seven absolute days; it never replaces the password, Cloudflare Access, CSRF, ordinary authorization, or administrative elevation.
 
 ## CSRF Protection
@@ -50,9 +50,9 @@ The schema stores session tokens as hashes and includes a separate security unlo
 
 Production Compose runs `session-cleanup` and `email-worker` workers without published ports. `session-cleanup` periodically deletes expired or revoked sessions using the hub's private database environment; `email-worker` delivers the encrypted outbox through the configured SMTP adapter and never logs credentials or protected payloads.
 
-Login rate limiting stores only a keyed hash of the normalized submitted login identifier, attempt count, window timestamps, and expiration timestamp. Login transactions for the same identifier are serialized with a PostgreSQL transaction-scoped advisory lock, retained attempts are capped at five, advisory-lock waits are limited to five seconds, and the authentication transaction is limited to 15 seconds. Password verification remains inside that boundary to preserve the strict concurrent verification cap; distinct identifiers use independent locks. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed for login when configuration, locking, or database access is unavailable while returning the same generic login failure to the browser.
+Rate limiting stores only a keyed hash of the normalized login identifier or an HMAC-prefixed security-ceremony/recovery identifier, attempt count, window timestamps, and expiration timestamp. Same-identifier transactions are serialized with a PostgreSQL transaction-scoped advisory lock, retained attempts are capped at five, and advisory-lock waits are limited to five seconds. Password verification remains inside the login boundary to preserve the strict concurrent verification cap; login verification uses separate per-user and per-ceremony buckets, recovery email verification uses per-user and per-request buckets, and recovery issuance uses a one-minute cooldown plus the five-attempt window. It must not store raw email addresses, raw IP addresses, raw user agents, passwords, tokens, cookies, JWTs, or Cloudflare values. The limiter fails closed when configuration, locking, or database access is unavailable while returning generic browser responses.
 
-Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private secret for HMAC hashing login rate limit identifiers. Production does not derive it from `DATABASE_URL` or use the synthetic development/test fallback. Missing or empty production configuration fails closed with the generic login response. Do not commit, log, paste, or share a real value. Rotating this secret creates new buckets; old hashed buckets expire through normal retention and cannot be migrated because raw identifiers are not stored.
+Production requires `BIELOS_RATE_LIMIT_HASH_SECRET` in the private `.env` file as a stable private secret for HMAC hashing login, verification, and recovery limiter identifiers. Production does not derive it from `DATABASE_URL` or use the synthetic development/test fallback. Missing or empty production configuration fails closed with generic security responses. Do not commit, log, paste, or share a real value. Rotating this secret creates new buckets; old hashed buckets expire through normal retention and cannot be migrated because raw identifiers are not stored.
 
 ## Audit Logging
 
@@ -111,7 +111,7 @@ Further GymForge expansion is frozen. Upload/photo proof, public registration, i
 - Every mutation rechecks server-side authorization, validates CSRF, validates bounded allowlisted values, and returns generic failures without confirming hidden resources.
 - Core audits contain only allowlisted event types, enum values, aggregate counts, and stable hashed resource references. They exclude names, slugs, descriptions, emails, raw identifiers, raw forms, secrets, cookies, tokens, token hashes, JWTs, headers, IPs, environment values, database URLs, logs, and unrestricted free text.
 - Personal session management at `/core/security` selects only active-session identifiers, safe timestamps, and current-session state; revoked and expired rows are excluded. Users cannot inspect another user's sessions, current-session revocation is excluded from this surface, all-other revocation requires explicit confirmation, and administrators receive no broad session-spying capability.
-- The audit activity view at `/core/security` is read-only and visible only to the global `OWNER`. It selects at most 50 newest rows and renders only allowlisted event/result values, safe resource categories, timestamps, and generic user/system actor state; unknown values collapse to generic labels, and raw metadata, messages, emails, and identifiers are not selected for the view.
+- The audit activity view at `/core/security` is read-only and visible only to the global `OWNER`. It exposes stable cursor pagination across retained history, with each page bounded to 50 rows, and renders only allowlisted event/result values, safe resource categories, timestamps, and generic user/system actor state; unknown values collapse to generic labels, and raw metadata, messages, emails, and identifiers are not selected for the view.
 - Operations UI reports only the current request/session and a timeout-bounded minimal database check as verified. Configured architecture and external/manual deployment checks are labeled separately. It does not access the Docker socket, raw logs, environment values, private Cloudflare identifiers, or external network services during page rendering; unknown state stays explicit.
 - Core database tests run only against explicitly disposable test identities on allowlisted local/CI hosts, apply committed migrations, use synthetic fixtures, and remove their local Compose project even after failure.
 - `SecurityUnlock` runtime behavior remains blocked by the completed design-only gate in `docs/security-unlock.md` because challenge issuance, approval, consumption, denial, recovery, and rate-limit semantics are not sufficiently defined. It can only become an additional scoped gate, never a replacement for existing access boundaries.
@@ -160,7 +160,7 @@ Before exposing BielOS beyond a local trusted network:
 - Keep the production `session-cleanup` worker enabled so expired or revoked sessions do not accumulate indefinitely.
 - Keep the production `email-worker` on the private network only; it must not publish a host port or receive the restricted Intake database role.
 - Repeat disposable backup/restore validation after meaningful schema or procedure changes.
-- Keep persistent login rate limiting enabled before multi-user or broader private use.
+- Keep persistent login, verification, and recovery rate limiting enabled before multi-user or broader private use.
 - Preserve explicit CSRF protection on every current and future mutable hub route.
 
 Cloudflare Access and BielOS internal authentication are separate layers. Access is not a replacement for internal auth, and internal auth is not a replacement for Access. Both are required for the private hub.
