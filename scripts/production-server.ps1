@@ -106,7 +106,8 @@ function Assert-Revisions {
       Stop-Safely "Service $service is not running exactly once."
     }
 
-    $observed = (Invoke-DockerCapture @('inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.revision"}}', $containers[0])).ToString().Trim().ToLowerInvariant()
+    $inspection = @(Invoke-DockerCapture @('inspect', $containers[0]) | ConvertFrom-Json)
+    $observed = ([string]$inspection[0].Config.Labels.'org.opencontainers.image.revision').Trim().ToLowerInvariant()
     if ($observed -ne $revision) {
       Stop-Safely "Service $service revision does not match the accepted source."
     }
