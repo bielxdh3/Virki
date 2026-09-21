@@ -73,7 +73,7 @@ function ensureRemoteLayout() {
     "$root='C:\\BielOS'",
     "New-Item -ItemType Directory -Force -Path $root,(Join-Path $root '.deploy-tmp') | Out-Null",
     "$marker=Join-Path $root '.bielos-production-host'",
-    "if(Test-Path -LiteralPath $marker){$lines=Get-Content -LiteralPath $marker -Raw; if($lines -notmatch '(?m)^role=production$' -or $lines -notmatch '(?m)^path=C:\\\\BielOS$' -or $lines -notmatch ('(?m)^hostname=' + [regex]::Escape([Environment]::MachineName) + '$')){throw 'Production-host identity marker mismatch.'}} else {Set-Content -LiteralPath $marker -Value @('role=production','protocol=1',('hostname=' + [Environment]::MachineName),'path=C:\\BielOS') -Encoding ascii}",
+    "if(Test-Path -LiteralPath $marker){$lines=@(Get-Content -LiteralPath $marker); if($lines -notcontains 'role=production' -or $lines -notcontains 'protocol=1' -or $lines -notcontains 'path=C:\\BielOS' -or $lines -notcontains ('hostname=' + [Environment]::MachineName)){throw 'Production-host identity marker mismatch.'}} else {Set-Content -LiteralPath $marker -Value @('role=production','protocol=1',('hostname=' + [Environment]::MachineName),'path=C:\\BielOS') -Encoding ascii}",
     "Write-Output ('ENV_MISSING=' + (-not (Test-Path -LiteralPath (Join-Path $root '.env'))))",
   ].join(";"));
 }
