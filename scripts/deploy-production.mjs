@@ -101,7 +101,7 @@ function installArchive(revision) {
 }
 
 export async function deployProduction({ action = "restart" } = {}) {
-  if (!["restart", "core-up"].includes(action)) {
+  if (!["install", "restart", "core-up"].includes(action)) {
     throw new ProductionRevisionError("ARGUMENT_INVALID");
   }
 
@@ -118,6 +118,9 @@ export async function deployProduction({ action = "restart" } = {}) {
       copyFileToRemote(archivePath, remoteArchivePath),
     );
     await guardedStage("source install", () => installArchive(source.revision));
+    if (action === "install") {
+      return { status: 0, lines: [`remote source staged at ${source.revision}`] };
+    }
     return runRemoteProductionCommand([action]);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
