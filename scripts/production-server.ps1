@@ -184,7 +184,13 @@ switch ($Action) {
     New-Item -ItemType Directory -Force -Path $backupDirectory | Out-Null
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
     $backupPath = Join-Path $backupDirectory ("bielos-$stamp.dump")
-    $command = 'docker compose --project-name bielos-prod --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T postgres sh -c ''pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges'' > "' + $backupPath + '"'
+    $composeConfig = @(docker compose --project-name bielos-prod --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml config --format json | ConvertFrom-Json)[0]
+    $databaseUser = [string]$composeConfig.services.postgres.environment.POSTGRES_USER
+    $databaseName = [string]$composeConfig.services.postgres.environment.POSTGRES_DB
+    if ($databaseUser -notmatch '^[A-Za-z0-9_]+$' -or $databaseName -notmatch '^[A-Za-z0-9_]+$') {
+      Stop-Safely 'Remote PostgreSQL identifiers are invalid.'
+    }
+    $command = 'docker compose --project-name bielos-prod --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T postgres pg_dump -U ' + $databaseUser + ' -d ' + $databaseName + ' --format=custom --no-owner --no-privileges > "' + $backupPath + '"'
     cmd.exe /d /s /c $command | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or (Get-Item -LiteralPath $backupPath).Length -le 0) {
       Stop-Safely 'Remote PostgreSQL backup failed.'
