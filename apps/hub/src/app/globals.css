@@ -91,7 +91,8 @@ body {
 
 a { color: inherit; text-decoration: none; }
 button, input { font: inherit; }
-h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
+h1, h2, h3, p, dt, dd { overflow-wrap: anywhere; }
+span, strong { overflow-wrap: normal; }
 
 
 /* === SHELL LAYOUT ============================================== */
@@ -104,7 +105,7 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
   background: var(--background);
 }
 
-.hub-shell--docked     { grid-template-columns: 190px minmax(0, 1fr); }
+.hub-shell--docked     { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); }
 .hub-shell--standalone { grid-template-columns: minmax(0, 1fr); }
 
 .core-standalone-navigation {
@@ -119,6 +120,7 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
 .os-dock {
   position: sticky;
   top: 0;
+  min-width: 0;
   min-height: 100svh;
   min-height: 100dvh;
   display: flex;
@@ -147,6 +149,12 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
 
 .dock-identity strong { font-size: 0.9rem; }
 
+.dock-identity > div,
+.dock-nav,
+.dock-nav a,
+.dock-nav strong,
+.dock-footer { min-width: 0; }
+
 .dock-identity span,
 .dock-footer span {
   color: var(--muted);
@@ -172,6 +180,18 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
 }
 
 .dock-nav strong { font-size: 0.84rem; }
+
+.dock-nav a,
+.dock-nav strong {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.dock-nav strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* Dock active states */
 .hub-shell:not(:has(.anchor-section:target)) .dock-nav:not(.core-navigation) a:first-child,
@@ -231,9 +251,19 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
   padding: 20px clamp(16px, 3vw, 32px) 36px;
 }
 
+.shell-tools {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.shell-tools > * { min-width: 0; }
+
 .top-statusbar {
   min-height: 54px;
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
@@ -246,7 +276,9 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
 }
 
 .top-actions {
+  min-width: 0;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
@@ -489,12 +521,15 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
 
 /* Language selector layout */
 .language-selector {
+  min-width: 0;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
 
 .language-selector label {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -504,6 +539,7 @@ h1, h2, h3, p, dt, dd, span, strong { overflow-wrap: anywhere; }
 }
 
 .language-selector select { min-height: 42px; padding: 0 10px; }
+.language-selector select { max-width: 100%; }
 .language-selector button { min-height: 42px; padding: 0 12px; }
 
 
@@ -2641,8 +2677,9 @@ html:root[data-reduced-motion="true"] { --motion-scale-effective: 0; }
 
 html:root,
 html:root body { background: var(--color-canvas); color: var(--color-text); }
-html:root .hub-shell { grid-template-columns: 254px minmax(0, 1fr); background: var(--color-canvas); color: var(--color-text); font-family: var(--font-ui); font-size: calc(16px * var(--font-scale)); }
-html:root .os-dock { gap: 46px; padding: 30px 18px 20px; background: color-mix(in srgb, var(--color-surface) 92%, transparent); border-right-color: var(--color-border); }
+html:root .hub-shell { background: var(--color-canvas); color: var(--color-text); font-family: var(--font-ui); font-size: calc(16px * var(--font-scale)); }
+html:root .hub-shell--docked { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); }
+html:root .os-dock { min-width: 0; gap: 46px; padding: 30px 18px 20px; background: color-mix(in srgb, var(--color-surface) 92%, transparent); border-right-color: var(--color-border); }
 html:root .hub-workspace { max-width: 1440px; width: 100%; margin: 0 auto; padding: 28px clamp(18px, 4vw, 52px) 48px; }
 html:root .dock-nav a { min-height: 44px; border-radius: var(--radius-md, var(--radius)); color: var(--color-text-muted); }
 html:root .dock-nav a:hover,
@@ -2747,7 +2784,7 @@ html:root .core-audit-range .button-secondary { margin-left: auto; min-height: 4
 html:root[data-reduced-motion="true"] * { animation-duration: 0.01ms; animation-iteration-count: 1; scroll-behavior: auto; transition-duration: 0.01ms; }
 
 @media (max-width: 880px) {
-  html:root .hub-shell { grid-template-columns: 1fr; }
+  html:root .hub-shell--docked { grid-template-columns: 1fr; }
   html:root .os-dock { position: relative; min-height: auto; gap: 14px; padding: 18px; }
   html:root .core-navigation { display: flex; flex-wrap: wrap; gap: 6px; }
   html:root .core-navigation a { flex: 1 1 140px; }
