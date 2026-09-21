@@ -48,6 +48,8 @@ function sshRunnerArgs(action, expectedRevision) {
     "-NoLogo",
     "-NoProfile",
     "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
     "-File",
     remoteRunner,
     "-Action",
