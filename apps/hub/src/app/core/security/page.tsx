@@ -15,6 +15,7 @@ import { revokeAllOtherCoreSessions, revokeCoreSession } from "./actions";
 import {
   getSafeAuditCategory,
   getSafeAuditEventLabel,
+  getAuditRangeLabel,
   type SafeAuditResource,
   type SafeAuditResult
 } from "./audit-view";
@@ -267,7 +268,7 @@ export default async function CoreSecurityPage({
     search: params?.search,
     from,
     to
-  }) : { items: [], nextCursor: null, total: 0, oldestAt: null, newestAt: null };
+  }) : { items: [], nextCursor: null, start: 0, end: 0, total: 0, oldestAt: null, newestAt: null };
   const auditQuery = new URLSearchParams({
     audit: auditFilter,
     ...(params?.category ? { category: params.category } : {}),
@@ -473,7 +474,7 @@ export default async function CoreSecurityPage({
             )}
 
             <p className="core-project-limit-note">{t.newestAudit} · {t.retention}: {CORE_AUDIT_RETENTION_DAYS} {locale === "pt-BR" ? "dias" : "days"}</p>
-            <div className="core-audit-range"><span>{auditPage.oldestAt ? `${t.oldest}: ${formatSessionTime(auditPage.oldestAt, locale)}` : ""}</span><span>{auditPage.newestAt ? `${t.newest}: ${formatSessionTime(auditPage.newestAt, locale)}` : ""}</span>{nextHref ? <a className="button-secondary" href={nextHref}>{t.next}</a> : null}</div>
+            <div className="core-audit-range"><span>{getAuditRangeLabel(auditPage.start, auditPage.end, auditPage.total, locale)}</span><span>{auditPage.oldestAt ? `${t.oldest}: ${formatSessionTime(auditPage.oldestAt, locale)}` : ""}</span><span>{auditPage.newestAt ? `${t.newest}: ${formatSessionTime(auditPage.newestAt, locale)}` : ""}</span>{nextHref ? <a className="button-secondary" href={nextHref}>{t.next}</a> : null}</div>
           </section>
         ) : null}
       </div>

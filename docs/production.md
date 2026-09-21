@@ -1,6 +1,6 @@
 # Production
 
-Production is permanently hosted on the canonical Windows server at `192.168.2.67` through the trusted `servidor` OpenSSH alias (port 22). The development PC is not a production host.
+Production is permanently hosted on the canonical remote Windows server through the trusted `servidor` OpenSSH alias (port 22). The development PC is not a production host.
 
 ## Development vs Production Compose
 
@@ -201,5 +201,7 @@ The same worker runs audit log retention cleanup with `AUDIT_LOG_RETENTION_DAYS`
 ## Current production host state
 
 The canonical production state is the remote `C:\BielOS` deployment. The development PC may retain its existing Docker volume as recovery data, but its BielOS production services must be stopped after remote acceptance and must not be restarted as production.
+
+The current accepted remote revision is `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`. Exact-SHA CI run `35630592690` passed all configured jobs, and the remote stack was rebuilt/restarted from that revision. Remote health, revision labels, loopback bindings, Cloudflare Tunnel process, disabled Intake state, and deManage preservation were verified after deployment. Authenticated human visual/behavior smoke remains the only open acceptance gate for the UI hotfix.
 
 The current local dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`. The production-tree audit is clean after omitting development dependencies; the accepted Prisma/deepmerge advisory remains constrained to the exact Prisma tooling path and is not a production dependency claim.

@@ -4,7 +4,7 @@
 
 The current BielOS UI/UX direction is no longer the target. The local campaign has replaced the shared Hub shell, tokens, appearance contract, navigation, and corresponding Core surfaces with the Prompt Arena interaction language; the prior CSS remains only where an unchanged legacy surface still needs a safe incremental mapping.
 
-The new canonical UI/UX target is the Prompt Arena interface from `bielxdh3/Prompt-Arena`, using the current Prompt Arena `main` snapshot observed for this campaign at commit `6501e8541c13993adef267a291f84686e42c684d`; the earlier `7a3842795192eaa887cedf7b233664e8b53b1940` remains the planning baseline.
+The new canonical UI/UX target is the Prompt Arena interface from `bielxdh3/Prompt-Arena`, using implementation snapshot `6501e8541c13993adef267a291f84686e42c684d`; the current upstream `main` was rechecked at `28ca8178817c726ef3990ae311edf5a53d28ce0c` and contains no UI source changes relative to that snapshot. The earlier `7a3842795192eaa887cedf7b233664e8b53b1940` remains the planning baseline.
 
 This is a **port/parity requirement, not an inspiration brief**. Future BielOS UI/UX work must reproduce the Prompt Arena visual language, interaction language, accessibility behavior, appearance controls, layout system, responsive behavior, and reusable UI patterns as faithfully as the BielOS web architecture permits.
 

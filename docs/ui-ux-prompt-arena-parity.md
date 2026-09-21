@@ -1,6 +1,6 @@
 # Prompt Arena parity evidence
 
-Campaign snapshot: `bielxdh3/Prompt-Arena` `main` at `6501e8541c13993adef267a291f84686e42c684d` (planning baseline `7a3842795192eaa887cedf7b233664e8b53b1940`).
+Parity implementation snapshot: `bielxdh3/Prompt-Arena` at `6501e8541c13993adef267a291f84686e42c684d` (planning baseline `7a3842795192eaa887cedf7b233664e8b53b1940`). Upstream `main` was rechecked at `28ca8178817c726ef3990ae311edf5a53d28ce0c`; its ten-commit delta contains no UI source changes, so the pinned parity mapping remains valid.
 
 This is the implementation ledger for the current local parity pass. It maps the Prompt Arena interaction system to BielOS without importing Arena-domain data or commands.
 

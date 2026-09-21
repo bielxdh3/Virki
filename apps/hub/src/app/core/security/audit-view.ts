@@ -85,6 +85,11 @@ export type SafeAuditResource =
   | "system"
   | "other";
 
+export function getAuditRangeLabel(start: number, end: number, total: number, locale: "pt-BR" | "en"): string {
+  if (start <= 0 || end <= 0 || total <= 0) return locale === "pt-BR" ? "0 eventos" : "0 events";
+  return `${start}–${end} ${locale === "pt-BR" ? "de" : "of"} ${total}`;
+}
+
 export function getSafeAuditEventType(eventType: string): SafeAuditEventType {
   return SAFE_AUDIT_EVENT_TYPES.has(eventType as AuditEventType)
     ? eventType as AuditEventType

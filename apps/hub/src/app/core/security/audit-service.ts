@@ -54,6 +54,8 @@ export type CoreAuditPageOptions = {
 export type CoreAuditPage = {
   items: CoreAuditPageItem[];
   nextCursor: string | null;
+  start: number;
+  end: number;
   total: number;
   oldestAt: Date | null;
   newestAt: Date | null;
@@ -92,7 +94,7 @@ export async function listCoreAuditActivityPage(
   options: CoreAuditPageOptions = {}
 ): Promise<CoreAuditPage> {
   if (!await isPersistedOwner(principal)) {
-    return { items: [], nextCursor: null, total: 0, oldestAt: null, newestAt: null };
+    return { items: [], nextCursor: null, start: 0, end: 0, total: 0, oldestAt: null, newestAt: null };
   }
 
   const where = buildAuditWhere(options);
@@ -104,7 +106,7 @@ export async function listCoreAuditActivityPage(
     ];
   }
 
-  const [logs, total, oldest, newest] = await Promise.all([
+  const [logs, total, oldest, newest, preceding] = await Promise.all([
     prisma.auditLog.findMany({
       select: { id: true, eventType: true, result: true, resource: true, actorUserId: true, createdAt: true },
       where,
@@ -113,12 +115,23 @@ export async function listCoreAuditActivityPage(
     }),
     prisma.auditLog.count({ where: buildAuditWhere(options) }),
     prisma.auditLog.findFirst({ where: buildAuditWhere(options), orderBy: { createdAt: "asc" }, select: { createdAt: true } }),
-    prisma.auditLog.findFirst({ where: buildAuditWhere(options), orderBy: { createdAt: "desc" }, select: { createdAt: true } })
+    prisma.auditLog.findFirst({ where: buildAuditWhere(options), orderBy: { createdAt: "desc" }, select: { createdAt: true } }),
+    cursor
+      ? prisma.auditLog.count({
+        where: {
+          AND: [
+            buildAuditWhere(options),
+            { OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] }
+          ]
+        }
+      })
+      : 0
   ]);
 
   const hasNext = logs.length > CORE_AUDIT_DISPLAY_LIMIT;
   const visible = hasNext ? logs.slice(0, CORE_AUDIT_DISPLAY_LIMIT) : logs;
   const last = visible.at(-1);
+  const start = visible.length > 0 ? preceding + 1 : 0;
   return {
     items: visible.map((log) => ({
       id: log.id,
@@ -131,6 +144,8 @@ export async function listCoreAuditActivityPage(
       createdAt: log.createdAt
     })),
     nextCursor: hasNext && last ? encodeCursor({ id: last.id, createdAt: last.createdAt }) : null,
+    start,
+    end: visible.length > 0 ? start + visible.length - 1 : 0,
     total,
     oldestAt: oldest?.createdAt ?? null,
     newestAt: newest?.createdAt ?? null

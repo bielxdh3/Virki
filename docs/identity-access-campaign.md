@@ -4,16 +4,16 @@ Status: `[CURRENT LOCAL CAMPAIGN]` — prior closeout evidence is historical; th
 
 ## Current direct campaign snapshot — 2026-09-18
 
-- Local and remote `main` are at published commit `a9f867f6d06eeae71e00f5fae910978382260468`; exact-SHA CI run `35419764845` passed. No migration files were added; the local production stack was rebuilt/restarted and verified healthy.
+- Local and remote `main` are at accepted commit `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`; exact-SHA CI run `35630592690` passed. No migration files were added; the canonical remote production stack was rebuilt/restarted and verified healthy.
 - The worktree intentionally preserves inherited security/GymForge WIP alongside the campaign changes. Runtime-sensitive local validation was repeated with Node `22.20.0`; Docker/PostgreSQL-dependent gates remain environment-blocked.
 - Current runtime dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`; the production dependency audit is clean after omitting development dependencies. The accepted Prisma/deepmerge advisory remains tooling-only and is enforced by the exact tooling policy gate.
 - Current local evidence includes `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run test:core:unit` (95/95), `npm run test:public-site` (4/4), `npm run test:gymforge-scoring` (8/8), `npm run test:production-revision` (13/13), and `npm run build`; fresh authenticated human smoke and exact-SHA CI are not claimed.
 
-Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35419764845` for `a9f867f6d06eeae71e00f5fae910978382260468`, which passed all configured jobs.
+Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35630592690` for `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`, which passed all configured jobs.
 
 ## Post-closeout live-smoke repair — 2026-08-18
 
-The latest human smoke confirmed OWNER administrative credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation. It also confirmed the former UI scope-availability defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke, while repetitive `ACCESS_JWT_VALID` events made the OWNER audit view low-signal. The machine corrections are now committed and pushed at `76a9a7b59ba7dc9a4c594be986d47ffcb71b60ce`; exact-SHA CI run `32263676937` is green, the local production stack was rebuilt at that SHA, and only the real human smoke remains. Do not claim current authenticated OWNER/MEMBER browser smoke.
+The latest historical human smoke confirmed OWNER administrative credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation. It also confirmed the former UI scope-availability defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke, while repetitive `ACCESS_JWT_VALID` events made the OWNER audit view low-signal. Those machine corrections were committed at `76a9a7b59ba7dc9a4c594be986d47ffcb71b60ce`; exact-SHA CI run `32263676937` was green, and the canonical remote stack was rebuilt at that historical SHA. Do not claim current authenticated OWNER/MEMBER browser smoke.
 
 The published campaign adds routine global-OWNER project participant/access changes without elevation, keeps ADMIN elevation and higher-risk archive elevation, adds administrative credential recovery with one-time offline codes, and matures the owner audit surface with retained-history cursor pagination, safe taxonomy/filtering, detail disclosure, retention visibility, and bounded sanitized export. Exact-SHA CI passed; authenticated human smoke and live production evidence remain pending.
 

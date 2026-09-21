@@ -6,6 +6,7 @@ import {
   getSafeAuditEventType,
   getSafeAuditCategory,
   getSafeAuditEventLabel,
+  getAuditRangeLabel,
   getSafeAuditResource,
   getSafeAuditResult,
   normalizeCoreAuditFilter
@@ -56,4 +57,10 @@ test("audit time filters accept bounded UTC dates and reject malformed values", 
   assert.equal(parseAuditDate("2026-09-18", true)?.toISOString(), "2026-09-18T23:59:59.999Z");
   assert.equal(parseAuditDate("2026-02-30"), undefined);
   assert.equal(parseAuditDate("2026-09-18T00:00"), undefined);
+});
+
+test("audit range labels expose the bounded page window and retained total", () => {
+  assert.equal(getAuditRangeLabel(1, 50, 125, "pt-BR"), "1–50 de 125");
+  assert.equal(getAuditRangeLabel(51, 100, 125, "en"), "51–100 of 125");
+  assert.equal(getAuditRangeLabel(0, 0, 0, "pt-BR"), "0 eventos");
 });
