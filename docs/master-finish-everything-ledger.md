@@ -5,7 +5,7 @@ This ledger records the direct-Codex campaign and its current remote convergence
 ## Execution
 
 - Mode: direct Codex; Dual Codex unavailable; no substitute agent or worktree.
-- Published state: `main` and `origin/main` at `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`; exact-SHA CI run `35630592690` passed. The canonical remote production stack is converged at that revision; authenticated human visual/behavior smoke remains pending.
+- Published state: `main` and `origin/main` at `06073a7db6284293eeedd2ba8e6eaca82e5af973`; exact-SHA CI run `35633568823` passed. The canonical remote production stack is converged at that revision; authenticated human visual/behavior smoke remains pending.
 - Prompt Arena source used for the parity implementation: `6501e8541c13993adef267a291f84686e42c684d`; current upstream `main` was rechecked at `28ca8178817c726ef3990ae311edf5a53d28ce0c` and contains no UI source changes relative to the pinned implementation snapshot; planning baseline: `7a3842795192eaa887cedf7b233664e8b53b1940`.
 - Required skills: PONYTAIL, BielOS phase review, BielOS security review, BielOS Core identity implementation, `ui-ux-pro-max`, and memory lifecycle.
 - Final adversarial correction pass: removed residual decorative navigation number nodes, synchronized audit pagination and OWNER-access smoke guidance, changed audit export to a CSRF-protected POST action, stabilized the responsive shell, and made the retained audit page range explicit. Revalidated the current UI/build path (`npm run test:core:unit` 97/97).

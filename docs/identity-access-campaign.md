@@ -1,15 +1,15 @@
 # BielOS Identity and Access Campaign
 
-Status: `[CURRENT LOCAL CAMPAIGN]` — prior closeout evidence is historical; this local campaign is not published and requires fresh validation of the changed UI, OWNER participant-access authority, audit depth, recovery presentation, and supported-runtime/production gates before any production claim.
+Status: `[CURRENT PUBLISHED CAMPAIGN]` — implementation and remote deployment are complete; authenticated human visual/behavior acceptance remains external.
 
 ## Current direct campaign snapshot — 2026-09-18
 
-- Local and remote `main` are at accepted commit `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`; exact-SHA CI run `35630592690` passed. No migration files were added; the canonical remote production stack was rebuilt/restarted and verified healthy.
+- Local and remote `main` are at accepted commit `06073a7db6284293eeedd2ba8e6eaca82e5af973`; exact-SHA CI run `35633568823` passed. No migration files were added; the canonical remote production stack was rebuilt/restarted and verified healthy.
 - The worktree intentionally preserves inherited security/GymForge WIP alongside the campaign changes. Runtime-sensitive local validation was repeated with Node `22.20.0`; Docker/PostgreSQL-dependent gates remain environment-blocked.
 - Current runtime dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`; the production dependency audit is clean after omitting development dependencies. The accepted Prisma/deepmerge advisory remains tooling-only and is enforced by the exact tooling policy gate.
-- Current local evidence includes `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run test:core:unit` (95/95), `npm run test:public-site` (4/4), `npm run test:gymforge-scoring` (8/8), `npm run test:production-revision` (13/13), and `npm run build`; fresh authenticated human smoke and exact-SHA CI are not claimed.
+- Current local evidence includes `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run test:core:unit` (97/97), `npm run test:public-site` (4/4), `npm run test:gymforge-scoring` (8/8), `npm run test:production-revision` (17/17), and `npm run build`; exact-SHA CI and remote runtime gates are complete, while authenticated human smoke remains external.
 
-Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35630592690` for `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`, which passed all configured jobs.
+Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35633568823` for `06073a7db6284293eeedd2ba8e6eaca82e5af973`, which passed all configured jobs.
 
 ## Post-closeout live-smoke repair — 2026-08-18
 

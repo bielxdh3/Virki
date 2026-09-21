@@ -2,7 +2,7 @@
 
 ## Current accepted state (2026-09-21)
 
-The canonical remote production host is converged at `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`. Exact-SHA CI run `35630592690` passed all jobs. Post-deploy SSH preflight remained stable, remote image labels matched, both loopback health endpoints returned `200`, public ingress returned `200`, the hub ingress returned `302` to Cloudflare Access, Intake remained disabled, and deManage remained isolated. No schema migration was required for this release. Authenticated human visual/behavior smoke is still pending.
+The canonical remote production host is converged at `06073a7db6284293eeedd2ba8e6eaca82e5af973`. Exact-SHA CI run `35633568823` passed all jobs. Post-deploy SSH preflight remained stable, remote image labels matched, both loopback health endpoints returned `200`, public ingress returned `200`, the hub ingress returned `302` to Cloudflare Access, Intake remained disabled, and deManage remained isolated. No schema migration was required for this release. Authenticated human visual/behavior smoke is still pending.
 
 Use this checklist for the first production launch and later smoke tests. Do not paste `.env` contents, Cloudflare tokens, JWTs, cookies, database URLs with passwords, private keys, or raw logs into issues or docs.
 
@@ -125,10 +125,10 @@ Cloudflare Tunnel does not depend on host-published ports. In Docker mode, it re
 
 ## Current Verification State And Remaining Limitations
 
-The accepted campaign changes were committed and pushed as `ba1c80a05b76d8fc7539dcd90a47f8fa187ffd76`; `main` and `origin/main` match. Exact-SHA CI run `35630592690` passed all jobs. The canonical remote production Compose stack was rebuilt/restarted at that revision, all services converged healthy, and no migration files were added.
+The accepted campaign changes were committed and pushed as `06073a7db6284293eeedd2ba8e6eaca82e5af973`; `main` and `origin/main` match. Exact-SHA CI run `35633568823` passed all jobs. The canonical remote production Compose stack was rebuilt/restarted at that revision, all services converged healthy, and no migration files were added.
 
 The local and remote engineering gates are exhausted for the scoped roadmap. The remaining gate is an authenticated human visual/interaction smoke. Keep Cloudflare Access first, BielOS internal authentication second, public registration and live Intake disabled, GymForge expansion frozen, reserved modules inert, `SecurityUnlock` blocked, and AIP separate. Do not claim authenticated browser smoke completion from source or machine checks alone.
 
 Validation was repeated with the declared Node 22 runtime through `npx --yes node@22.20.0` where the command is runtime-sensitive; the host default remains Node `24.14.1`. The supported-runtime unit, public-site, GymForge scoring, production revision, lint/typecheck/Prisma/build checks pass. Docker-backed database, backup/restore, runtime-image, and intake-role checks remain blocked by the unavailable Docker daemon, missing runtime image, or missing `CORE_TEST_DATABASE_URL`; these are exact environment prerequisites, not code failures. The production dependency tree audit passes after omitting development dependencies; the remaining raw `npm audit` finding is the accepted Prisma tooling-only `deepmerge-ts` advisory documented in `docs/production.md`.
 
-The exact pushed commit is covered by completed GitHub Actions run `35630592690`, including database, backup/restore, Docker image, runtime, and Compose validation. Remote health, loopback ports, direct-origin denial, public ingress, Intake state, deManage preservation, and Cloudflare Access ordering were verified; authenticated human smoke remains pending.
+The exact pushed commit is covered by completed GitHub Actions run `35633568823`, including database, backup/restore, Docker image, runtime, and Compose validation. Remote health, loopback ports, direct-origin denial, public ingress, Intake state, deManage preservation, and Cloudflare Access ordering were verified; authenticated human smoke remains pending.
