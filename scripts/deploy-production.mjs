@@ -14,7 +14,7 @@ import {
 import { runRemoteProductionCommand } from "./production-remote.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const tempRoot = path.join(repositoryRoot, ".bielos-mission-tmp");
+const tempRoot = path.join(repositoryRoot, ".bielos-mission-tmp", "deploy");
 const archivePath = path.join(tempRoot, "production-source.zip");
 const remoteArchivePath = "C:/BielOS/.deploy-tmp/production-source.zip";
 const remoteEnvPath = "C:/BielOS/.env";
