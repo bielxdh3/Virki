@@ -144,16 +144,6 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  try {
-    const result = runRevisionVerification(process.argv.slice(2));
-    for (const line of result.lines) console.log(line);
-    if (!result.ok) process.exitCode = 1;
-  } catch (error) {
-    const message =
-      error instanceof ProductionRevisionError
-        ? error.message
-        : "Revision verification failed.";
-    console.error(message);
-    process.exitCode = 1;
-  }
+  console.error("Revision verification must target the canonical remote server.");
+  process.exitCode = 1;
 }

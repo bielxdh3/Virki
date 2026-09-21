@@ -1,6 +1,6 @@
 # Production
 
-Phase 02.2 adds a production deployment foundation. Phase 03.1 documents the confirmed Docker-based remote deployment path through Cloudflare Tunnel and Cloudflare Access.
+Production is permanently hosted on the canonical Windows server at `192.168.2.67` through the trusted `servidor` OpenSSH alias (port 22). The development PC is not a production host.
 
 ## Development vs Production Compose
 
@@ -15,13 +15,13 @@ The development compose file runs `npm run dev`. It is intended only for local d
 - `127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000`
 - `127.0.0.1:${HUB_PORT:-3001}:3001`
 
-Production:
+Production (remote server only):
 
 ```bash
 npm run start:prod
 ```
 
-The production wrapper requires `main`, a clean tracked/staged/untracked worktree, and local `HEAD` equal to `origin/main`. It supplies the exact full Git SHA only to the Docker build, then the production compose file builds with `infra/Dockerfile.prod` and starts the Next.js apps with production `next start` commands. Fetch `origin` explicitly before the build; the wrapper never pulls, resets, cleans, or changes branches.
+Run `npm run preflight:prod` before any migration or deployment. The normal `*:prod` commands connect only to the remote server with non-interactive SSH, trusted host-key checking, repeated stability probes, and remote Docker checks. `npm run deploy:prod` transfers an exact clean `main` archive over SCP; the server-side runner requires its production-host marker, exact source-state marker, and full Git SHA before building. Fetch `origin` explicitly before deployment; the wrapper never pulls, resets, cleans, changes branches, or starts local production.
 
 Production Compose also starts the isolated `intake`, `session-cleanup`, and `email-worker` services. Intake has no host-published port, receives only the restricted intake database URL, and defaults to disabled; it never receives the private Core `DATABASE_URL`. The workers have no published ports, depend on PostgreSQL health, and use the same private database environment as the hub. `session-cleanup` removes expired or revoked sessions every hour by default and applies audit log retention cleanup; `email-worker` polls the durable email outbox with bounded retries and the configured provider-neutral SMTP adapter.
 
@@ -32,22 +32,27 @@ Production host-published debug ports are also bound to loopback only:
 
 These bindings preserve local health checks while avoiding exposure on all host interfaces. Cloudflare Tunnel does not use these host-published ports when it runs inside Docker.
 
-## Simple Production Validation
+## Remote Production Validation
 
-Run the production compose path:
+Run the remote deployment path:
 
 ```bash
-npm run start:prod
+npm run preflight:prod
+npm run deploy:prod
+npm run health:prod
+npm run revision:prod
+npm run status:ports
 ```
 
 Then validate the basic behavior:
 
-- Confirm the public site loads on `http://127.0.0.1:3000`.
-- Confirm the hub health endpoint returns minimal status data on `http://127.0.0.1:3001/api/health`.
-- Confirm the hub redirects unauthenticated users from `http://127.0.0.1:3001` to `/login` when Access JWT validation is disabled for local development.
-- Confirm `npm run status:ports` shows `127.0.0.1` port bindings, not `0.0.0.0`.
+- Confirm the remote public site and hub health checks pass.
+- Confirm `npm run status:ports` shows `127.0.0.1` bindings, never `0.0.0.0`.
+- Confirm `hub.biel.dev.br` still reaches Cloudflare Access before BielOS internal authentication.
 - If the release contains new migration files, run `prisma migrate deploy` from a separate tooling-capable operator environment with the private production `DATABASE_URL` after verifying a current backup. The production runtime image does not contain the Prisma CLI. This release contains no new migration files.
-- Confirm login works with the seeded OWNER account.
+- Confirm login works with the seeded OWNER account through the live Access boundary.
+
+Local `npm run health:local` remains disposable validation only and must not be used to start or accept BielOS production traffic.
 
 ## Do Not Expose `next dev`
 
@@ -111,7 +116,7 @@ The secret scan is a private-repository MVP guardrail for obvious committed secr
 
 `infra/Dockerfile.prod` requires a lowercase 40-character `BIELOS_BUILD_REVISION` build argument and stores it only in the final image label `org.opencontainers.image.revision`. Missing, short, malformed, or non-lowercase revisions fail the build. Git metadata is not copied into the image, and the revision is not added to runtime environment variables, application responses, health data, headers, audit logs, or public metadata.
 
-Use only the safe wrapper for production builds:
+Use only the safe remote wrapper for production builds:
 
 ```bash
 git fetch origin
@@ -119,7 +124,7 @@ npm run start:prod
 npm run revision:prod
 ```
 
-`npm run restart:prod` applies the same clean-source gate and rebuilds/recreates the BielOS services without changing database migrations. `npm run revision:prod` inspects only the revision label for `public-site`, `hub`, `intake`, `session-cleanup`, and `email-worker`; it fails when a service or label is absent, malformed, or different from the current Git revision and never prints an unexpected observed value.
+`npm run restart:prod` applies the same clean-source and SSH gates, then rebuilds/recreates the remote BielOS services without changing database migrations. `npm run revision:prod` verifies remote labels for `public-site`, `hub`, `intake`, `session-cleanup`, and `email-worker` against the accepted exact revision and never prints an unexpected observed value.
 
 ## Database Migrations
 
@@ -143,10 +148,10 @@ Cloudflare Tunnel and Cloudflare Access are prepared through templates and docum
 
 Do not add Cloudflare account IDs, tunnel IDs, tokens, or Access policies to Git. Configure those later through private environment variables and external Cloudflare configuration.
 
-Remote exposure must use the production compose file plus the Cloudflare compose override:
+Remote exposure must use the production compose file plus the Cloudflare compose override on `C:\BielOS`:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml up --build
+npm run start:prod
 ```
 
 When `cloudflared` runs inside Docker, Cloudflare public hostname routes must use Docker service names:
@@ -193,8 +198,8 @@ The same worker runs audit log retention cleanup with `AUDIT_LOG_RETENTION_DAYS`
 - No TLS termination configured in this repository.
 - Secret scanning and linting are basic MVP checks and should be expanded as the repository matures.
 
-## Current local campaign state
+## Current production host state
 
-The Core UI/capability/audit/recovery changes are published at `a9f867f6d06eeae71e00f5fae910978382260468` and exact-SHA CI run `35419764845` passed. No schema migration was added. The local production Compose stack was rebuilt/restarted at this revision and its health/revision/loopback checks passed; fresh authenticated human smoke remains pending.
+The canonical production state is the remote `C:\BielOS` deployment. The development PC may retain its existing Docker volume as recovery data, but its BielOS production services must be stopped after remote acceptance and must not be restarted as production.
 
 The current local dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`. The production-tree audit is clean after omitting development dependencies; the accepted Prisma/deepmerge advisory remains constrained to the exact Prisma tooling path and is not a production dependency claim.

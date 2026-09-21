@@ -4,7 +4,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   inspectProductionSource,
   normalizeRevision,
@@ -21,8 +20,6 @@ import {
 } from "./verify-production-revision.mjs";
 
 const validRevision = "0123456789abcdef0123456789abcdef01234567";
-const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-
 function expectCode(callback, code) {
   assert.throws(callback, (error) => {
     assert.ok(error instanceof ProductionRevisionError);
@@ -69,43 +66,8 @@ test("production command and verifier parsers enforce bounded allowlists", () =>
   expectCode(() => parseVerifierArguments(["--revision", validRevision]), "ARGUMENT_INVALID");
 });
 
-test("production wrapper supplies only the validated revision and preserves Docker exit status", () => {
-  let dockerCall;
-  const execute = (command, args, options = {}) => {
-    if (command === "git") {
-      const joined = args.join(" ");
-      if (joined === "rev-parse --show-toplevel") {
-        return { status: 0, stdout: `${repositoryRoot}\n` };
-      }
-      if (joined === "branch --show-current") {
-        return { status: 0, stdout: "main\n" };
-      }
-      if (joined.startsWith("diff ")) return { status: 0, stdout: "" };
-      if (joined === "ls-files --others --exclude-standard") {
-        return { status: 0, stdout: "" };
-      }
-      if (joined === "rev-parse --verify HEAD") {
-        return { status: 0, stdout: `${validRevision}\n` };
-      }
-      if (joined === "rev-parse --verify refs/remotes/origin/main") {
-        return { status: 0, stdout: `${validRevision}\n` };
-      }
-    }
-
-    if (command === "docker") {
-      dockerCall = { args, options };
-      return { status: 23, stdout: "untrusted output" };
-    }
-
-    return { status: 1, stdout: "" };
-  };
-
-  const result = runProductionCommand(["up"], execute);
-  assert.equal(result.status, 23);
-  assert.deepEqual(result.lines, ["Docker command failed."]);
-  assert.ok(dockerCall.args.includes("--build"));
-  assert.equal(dockerCall.options.env.BIELOS_BUILD_REVISION, validRevision);
-  assert.equal(result.lines.join("\n").includes("untrusted output"), false);
+test("legacy local production wrapper refuses to run on the development PC", () => {
+  expectCode(() => runProductionCommand(["up"]), "REMOTE_REQUIRED");
 });
 
 function git(cwd, ...args) {

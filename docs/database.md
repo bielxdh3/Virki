@@ -4,7 +4,7 @@ BielOS uses Prisma with PostgreSQL.
 
 ## Migration Workflow
 
-Phase 07.0 adds committed Prisma migrations. Production and durable local databases should use:
+Phase 07.0 adds committed Prisma migrations. The remote production database should use:
 
 ```bash
 npm run prisma:migrate:deploy
@@ -52,11 +52,14 @@ Backups are private operational artifacts. Never commit backup files, database d
 
 The repository ignores `infra/backups/*` while keeping `infra/backups/.gitkeep`, so local backup files can be written there without being tracked by Git. A location outside the repository is also acceptable.
 
-Create a compressed custom-format PostgreSQL backup from the running production Compose stack:
+Create a compressed custom-format PostgreSQL backup from the running remote production Compose stack through the guarded server runner. Do not run a local production Compose command:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' > infra/backups/bielos-YYYYMMDD-HHMMSS.dump
+npm run preflight:prod
+npm run backup:prod
 ```
+
+The remote backup remains on the server outside Git. One-time migration may transfer a verified local custom-format dump over the same trusted SCP path; never print its contents.
 
 Rules:
 

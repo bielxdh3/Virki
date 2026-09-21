@@ -2,11 +2,12 @@
 
 Use this checklist for the first production launch and later smoke tests. Do not paste `.env` contents, Cloudflare tokens, JWTs, cookies, database URLs with passwords, private keys, or raw logs into issues or docs.
 
-## Before Start
+## Before Remote Start
 
+- Run `npm run preflight:prod` and require eight stable SSH probes, trusted host-key checking, remote Docker, Compose, and disk checks.
 - Run `git fetch origin` and confirm the active branch is `main`.
-- Confirm local `HEAD` equals `origin/main` and the tracked, staged, and non-ignored untracked worktree is clean. `start:prod` and `restart:prod` fail closed otherwise.
-- Confirm the private `.env` file exists locally in the repository root.
+- Confirm local `HEAD` equals `origin/main` and the tracked, staged, and non-ignored untracked worktree is clean. `deploy:prod`, `start:prod`, and `restart:prod` fail closed otherwise.
+- Confirm the private `.env` file exists on the canonical server at `C:\BielOS`; never print it.
 - Confirm the private `.env` defines these names without printing their values:
   - `DATABASE_URL`
   - `BIELOS_RATE_LIMIT_HASH_SECRET`
@@ -18,21 +19,22 @@ Use this checklist for the first production launch and later smoke tests. Do not
   - `BIELOS_OWNER_PASSWORD`
 - Confirm no real `.env`, tunnel token, credentials JSON, Cloudflare account ID, Cloudflare secret, database dump, or backup archive is committed.
 
-## Start And Local Smoke Test
+## Start And Remote Smoke Test
 
-Start the production stack with the Cloudflare override:
+Deploy and start the remote production stack with the Cloudflare override:
 
 ```bash
-npm run start:prod
+npm run deploy:prod
+npm run health:prod
+npm run revision:prod
+npm run status:ports
 ```
 
-Inspect status and local health:
+Inspect remote status:
 
 ```bash
 npm run status:prod
 npm run status:ports
-npm run health:local
-npm run revision:prod
 ```
 
 - Confirm `npm run status:ports` shows loopback bindings only:
@@ -44,11 +46,10 @@ npm run revision:prod
 - Confirm `email-worker` has no published ports.
 - Confirm `cloudflared` has no published ports.
 - Confirm `npm run revision:prod` reports `match` for `public-site`, `hub`, `intake`, `session-cleanup`, and `email-worker` against the current full Git revision.
-- Confirm `npm run health:local` checks:
+- Confirm `npm run health:prod` checks the remote loopback endpoints:
   - `http://127.0.0.1:3000`
   - `http://127.0.0.1:3001/api/health`
-- Confirm `http://127.0.0.1:3001/login` reaches the hub login only when `CLOUDFLARE_ACCESS_JWT_REQUIRED=false` for local development.
-- If `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`, direct local hub page requests without a valid Access assertion should return HTTP `403`; `GET /api/health` should still return minimal health data.
+- Confirm the remote loopback hub page remains behind the configured Access boundary; direct origin page requests without a valid Access assertion should return HTTP `403`, while `GET /api/health` remains minimal.
 
 ## Cloudflare Smoke Test
 
@@ -102,15 +103,15 @@ The Core browser smoke above does not validate public intake. No valid end-to-en
 
 ## Safe Diagnostics
 
-- Use `npm run logs:prod` only for local inspection. Summarize service status or non-sensitive errors; do not copy secrets, tokens, cookies, JWTs, raw headers, raw IPs, or database URLs.
+- Use `npm run logs:prod` only for sanitized remote availability. Do not copy secrets, tokens, cookies, JWTs, raw headers, raw IPs, database URLs, or raw operational logs.
 - If `biel.dev.br` returns `502`, confirm `cloudflared` is running and the Cloudflare public hostname routes use Docker service names.
 - If `hub.biel.dev.br` skips Cloudflare Access, stop and fix the Cloudflare Access application policy before using the hub remotely.
-- If local health fails, confirm `hub` healthcheck uses `/api/health`, not `/login`.
-- If login fails after a database reset, apply migrations and seed the OWNER user from private local values.
+- If remote health fails, confirm `hub` healthcheck uses `/api/health`, not `/login`.
+- If login fails after a database restore, apply reviewed migrations and seed the OWNER user from private server values.
 
 ## Rollback
 
-Stop the production stack safely:
+Stop the remote production stack safely:
 
 ```bash
 npm run stop:prod

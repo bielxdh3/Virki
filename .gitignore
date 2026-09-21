@@ -27,6 +27,7 @@ backups/
 infra/backups/*
 !infra/backups/
 !infra/backups/.gitkeep
+.bielos-mission-tmp/
 infra/cloudflare/*.json
 infra/cloudflare/cert.pem
 

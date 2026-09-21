@@ -57,6 +57,15 @@ Do not invent a new skill unless the user explicitly requests creating one.
 - Preserve existing GymForge behavior and its Cloudflare Access, BielOS internal auth, CSRF, audit logging, and private hub boundaries; integration work is limited to accurate hub registry/navigation behavior unless the user explicitly changes this direction.
 - Do not add GymForge upload or photo proof, public registration, invite acceptance before Phase 4, import/export, unsafe competition deletion, a public API, or broad social feed behavior unless explicitly requested in a scoped phase.
 
+## Permanent production host rule
+
+- BielOS real production runs only on the canonical remote Windows server through the trusted `servidor` SSH alias (Windows OpenSSH, port 22); the development PC is never a production host.
+- Before modifying, publishing, migrating, or deploying BielOS, run `npm run preflight:prod`. If SSH is unstable or unavailable, stop without beginning modification work and never fall back to WSL port 2222 or another machine.
+- Normal `*:prod` commands target the remote server. Never bring up the real BielOS production Compose stack on this PC; local use is limited to builds, tests, and disposable validation.
+- The server uses its own canonical `C:\BielOS` boundary and production-host marker. deManage remains a separate Compose project, directory, network, volume, and service set and must not be touched.
+- Production ingress remains Cloudflare Tunnel, Cloudflare Access, then BielOS internal authentication. Host-published app ports stay loopback-only, and secrets remain private and uncommitted.
+- Future production deployments target only the server unless the owner explicitly changes this decision.
+
 ## Output Rules
 
 Keep output minimal.

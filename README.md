@@ -182,31 +182,34 @@ Read [docs/auth.md](docs/auth.md) for the authentication architecture and curren
 Development
 └─ next dev · local ports · local iteration
 
-Production-style
-└─ built images · committed migrations · revision checks
+Production (remote server only)
+└─ SSH preflight · exact archive · built images · revision checks
    └─ Cloudflare Tunnel + Access
       └─ BielOS internal authentication
 ```
 
 > [!WARNING]
-> `infra/docker-compose.yml` runs development services and must not be exposed as a production deployment. Use the production files and documented access boundary for production-style operation.
+> `infra/docker-compose.yml` runs development services and must not be exposed as a production deployment. The development PC must never start the real BielOS production Compose stack; use the guarded remote commands below.
 
 ## Operations
 
 | Command | Purpose |
 |---|---|
-| `npm run start:prod` | Validate and start the local production stack |
-| `npm run stop:prod` | Stop production services |
-| `npm run restart:prod` | Validate and restart production services |
-| `npm run status:prod` | Show service status |
-| `npm run revision:prod` | Verify the deployed source revision |
-| `npm run logs:prod` | Follow recent production logs |
-| `npm run health:local` | Run local health checks |
+| `npm run preflight:prod` | Verify the canonical SSH/Docker production host |
+| `npm run deploy:prod` | Transfer and deploy the exact clean `main` revision remotely |
+| `npm run start:prod` | Start remote production |
+| `npm run stop:prod` | Stop remote production without deleting volumes |
+| `npm run restart:prod` | Rebuild and restart remote production |
+| `npm run status:prod` | Show remote service status |
+| `npm run revision:prod` | Verify remote image revision labels |
+| `npm run health:prod` | Check remote loopback health endpoints |
+| `npm run logs:prod` | Report sanitized remote log availability |
+| `npm run health:local` | Run disposable local health checks only |
 | `npm run audit:recent` | Inspect recent audit activity |
 | `npm run audit:cleanup` | Apply audit-retention cleanup |
 | `npm run sessions:cleanup` | Remove expired sessions |
 
-Production start and restart require a clean `main` whose full revision matches `origin/main`. The revision is attached to built images so the running stack can be tied back to source.
+Production commands require a clean `main` whose full revision matches `origin/main`, and each remote mutation repeats the SSH preflight. The revision is attached to built images so the running stack can be tied back to source.
 
 Read [docs/operations.md](docs/operations.md) and [docs/production.md](docs/production.md) before operating the production-style stack.
 

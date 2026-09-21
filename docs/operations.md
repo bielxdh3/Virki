@@ -1,14 +1,14 @@
 # Operations
 
-This guide is for running BielOS locally in production mode without memorizing Docker commands.
+This guide is for operating the canonical BielOS production host through the trusted `servidor` SSH path. The development PC is never a BielOS production host.
 
 ## Before Starting
 
-Make sure Docker Desktop is running.
+Make sure the trusted Windows OpenSSH path to the production server is available. Do not start the real production Compose stack on the development PC.
 
 For local Node.js commands, use Node `22.13.0` or newer within Node 22. The lint tooling added in Phase 05.2 depends on packages that do not support early Node 22 releases.
 
-Make sure the private `.env` file exists in the repository root. This file must stay local. Never commit it.
+The private `.env` file is authoritative on the production server. It may exist locally for development and migration, but must stay uncommitted.
 
 The `.env` file contains private values such as:
 
@@ -18,25 +18,32 @@ The `.env` file contains private values such as:
 
 ## Commands
 
-Start BielOS in production mode:
+Run the required remote SSH/Docker preflight:
+
+```bash
+npm run preflight:prod
+```
+
+Deploy the exact clean `main` revision to the server:
+
+```bash
+npm run deploy:prod
+```
+
+Start or restart remote BielOS production:
 
 ```bash
 npm run start:prod
+npm run restart:prod
 ```
 
-Stop BielOS:
+Stop remote BielOS production without deleting persistent volumes:
 
 ```bash
 npm run stop:prod
 ```
 
-Restart BielOS:
-
-```bash
-npm run restart:prod
-```
-
-Before `start:prod` or `restart:prod`, run `git fetch origin`. The production wrapper fails closed unless the active branch is `main`, tracked/staged/untracked source is clean, and local `HEAD` exactly equals `origin/main`. It does not pull, reset, clean, or change branches.
+Before `deploy:prod`, `start:prod`, or `restart:prod`, run `git fetch origin`. The wrapper fails closed unless the active branch is `main`, tracked/staged/untracked source is clean, and local `HEAD` exactly equals `origin/main`. It does not pull, reset, clean, or change branches. Every remote action repeats the SSH preflight.
 
 Verify that all running BielOS-built services use the current revision:
 
@@ -46,47 +53,32 @@ npm run revision:prod
 
 The verifier checks only `org.opencontainers.image.revision` on the BielOS-built `public-site`, `hub`, `intake`, `session-cleanup`, and `email-worker` services. It emits fixed match/missing/malformed/mismatch categories and never prints container IDs, image IDs, raw inspect data, environment values, or an unexpected label value.
 
-Show container status:
+Show remote container status, loopback bindings, health, revision, or sanitized log availability:
 
 ```bash
 npm run status:prod
-```
-
-Show published port bindings:
-
-```bash
 npm run status:ports
-```
-
-Development and production app ports should show loopback bindings only:
-
-```text
-127.0.0.1:3000->3000
-127.0.0.1:3001->3001
-```
-
-Show useful logs:
-
-```bash
+npm run health:prod
+npm run revision:prod
 npm run logs:prod
 ```
 
-Run local health checks:
+Run local health checks only for disposable development validation:
 
 ```bash
 npm run health:local
 ```
 
-Use `docs/deployment-verification.md` for the first production launch checklist and live Cloudflare smoke test.
+Use `docs/deployment-verification.md` for the remote production acceptance checklist and live Cloudflare smoke test.
 
-The 2026-09-18 direct campaign is committed and pushed at `a9f867f6d06eeae71e00f5fae910978382260468`; exact-SHA CI run `35419764845` passed. No migration files were added. The local production stack was rebuilt/restarted and verified healthy at this revision; authenticated human checks remain external gates.
+The canonical production directory is `C:\BielOS`, isolated from deManage. The server-side runner requires the production-host marker, clean exact-archive source markers, and exact image revision labels before it starts or restarts the real stack.
 
 The health check verifies:
 
 - `http://127.0.0.1:3000`
 - `http://127.0.0.1:3001/api/health`
 
-These addresses are for local debugging only. They are not the remote ingress path.
+These addresses are checked on the remote server over SSH. They are not the public ingress path.
 
 The hub health endpoint returns only minimal liveness status. It does not require Cloudflare Access JWT validation, so local Docker health checks keep working when `CLOUDFLARE_ACCESS_JWT_REQUIRED=true`.
 
@@ -116,15 +108,15 @@ The expected remote flow is:
 
 ## Troubleshooting
 
-### Docker Is Not Running
+### Remote Docker Is Not Running
 
-Open Docker Desktop and wait until it says Docker is running. Then run:
+Run the guarded server preflight:
 
 ```bash
-npm run status:prod
+npm run preflight:prod
 ```
 
-If Docker is still unavailable, restart Docker Desktop.
+If remote Docker is still unavailable, stop and repair the server outside this deployment flow. Do not start a local production stack as a fallback.
 
 ### `biel.dev.br` Shows 502
 
@@ -180,18 +172,14 @@ Do not expose port `3001` directly to the internet. Direct access to port `3001`
 Confirm the OWNER user was seeded:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run seed:owner
+npm run seed:owner
 ```
 
-If the database was recreated, apply committed migrations first:
-
-```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml exec -T hub npm run prisma:migrate:deploy
-```
+If the database was recreated, apply reviewed committed migrations from a separate tooling-capable operator environment against the private remote `DATABASE_URL`; never run them inside the runtime container or against the local production volume.
 
 Then seed the OWNER user again.
 
-Confirm the email and password are the values in your private local `.env` file.
+Confirm the email and password are the values in the private server `.env` file.
 
 If a login or logout POST returns HTTP `403` while the page itself loads normally, reload the form and try again. Hub POST routes require a short-lived CSRF token, and tokens generated before a hub restart may no longer validate.
 
@@ -199,7 +187,7 @@ If a login or logout POST returns HTTP `403` while the page itself loads normall
 
 Production Compose starts `session-cleanup` and `email-worker` workers with no published ports. They use the same private database configuration as the hub; `session-cleanup` runs `npm run sessions:cleanup --workspace @bielos/auth` every hour by default, while `email-worker` polls the durable outbox with bounded retries.
 
-To change the interval, set this non-secret value in the private local `.env` file:
+To change the interval, set this non-secret value in the private server `.env` file:
 
 ```bash
 SESSION_CLEANUP_INTERVAL_SECONDS=3600

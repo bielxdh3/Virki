@@ -21,6 +21,7 @@ const ERROR_MESSAGES = Object.freeze({
   SOURCE_BRANCH_MISMATCH: "Active branch is not main.",
   SOURCE_REMOTE_MISMATCH: "Local and origin revisions do not match.",
   ARGUMENT_INVALID: "Production command arguments are invalid.",
+  REMOTE_REQUIRED: "Production commands must target the canonical remote server.",
 });
 
 export class ProductionRevisionError extends Error {

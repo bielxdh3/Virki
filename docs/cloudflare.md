@@ -54,15 +54,15 @@ Never commit:
 
 ## Compose Usage
 
-After `infra/docker-compose.prod.yml` is configured and working, start Cloudflare through the override:
+After the remote source and private server `.env` are configured, start Cloudflare through the guarded remote command:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml up --build
+npm run start:prod
 ```
 
 The `cloudflared` service exposes no local ports. It connects outbound to Cloudflare using `TUNNEL_TOKEN`, mapped from the private `CLOUDFLARE_TUNNEL_TOKEN` value in `.env`.
 
-The tunnel token must only be stored in the private local `.env` file. Never commit it, print it into logs, or paste it into repository documentation.
+The tunnel token must only be stored in the private server `.env` file. Never commit it, print it into logs, or paste it into repository documentation.
 
 ## Origin JWT Validation
 
