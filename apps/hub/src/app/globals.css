@@ -111,6 +111,22 @@ span, strong { overflow-wrap: normal; }
 .hub-shell--docked     { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); }
 .hub-shell--standalone { grid-template-columns: minmax(0, 1fr); }
 
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 12px;
+  z-index: 100;
+  padding: 10px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--background-raised);
+  color: var(--text);
+}
+
+.skip-link:focus {
+  top: 12px;
+}
+
 .core-standalone-navigation {
   width: 100%;
   max-width: 1440px;
