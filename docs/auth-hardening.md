@@ -2,7 +2,7 @@
 
 Phase 02.1 hardens the internal hub authentication layer without adding module unlocks, OAuth, public registration, Cloudflare credentials, or real secrets.
 
-The accepted remote deployment is `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; exact-SHA CI run `35673141210` passed. The remote production stack is converged; authenticated human smoke remains external.
+The accepted remote deployment is `40ce2ea447a91394cd0aac18102ce597c71763a5`; exact-SHA CI run `35674204253` passed. The remote production stack is converged; authenticated human smoke remains external.
 
 ## Middleware Protection
 
@@ -95,6 +95,6 @@ Login success, login failure, logout, and unauthenticated proxy redirects use a 
 
 - No edge-level or IP-based rate limit in this repository.
 - The dedicated production limiter key is configured privately and the closeout runtime is deployed; the value remains outside Git and operational output.
-- Historical authenticated production OWNER and MEMBER browser smoke passed through Cloudflare Access first and BielOS login second. It is not current evidence for the published repair; only the affected flows must be repeated in the live environment. No registration or permanent user management was added. The current exact-SHA CI run `35673141210` passed for revision `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`.
+- Historical authenticated production OWNER and MEMBER browser smoke passed through Cloudflare Access first and BielOS login second. It is not current evidence for the published repair; only the affected flows must be repeated in the live environment. No registration or permanent user management was added. The current exact-SHA CI run `35674204253` passed for revision `40ce2ea447a91394cd0aac18102ce597c71763a5`.
 - No module-level sensitive unlock.
 - No public registration, OAuth, email reset, or magic links.

@@ -1,6 +1,6 @@
 # Application And Module Planning Index
 
-This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The accepted remote deployment is `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; exact-SHA CI run `35673141210` passed. The remote production stack is converged; authenticated human smoke remains external. Public registration and live Intake remain disabled. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
+This directory contains application and reserved-module planning documents. BielOS Core is the private platform/workspace, not a module. The accepted remote deployment is `40ce2ea447a91394cd0aac18102ce597c71763a5`; exact-SHA CI run `35674204253` passed. The remote production stack is converged; authenticated human smoke remains external. Public registration and live Intake remain disabled. GymForge remains available with expansion frozen, while L-vault, root.ark, and H-vault remain reserved and inert.
 
 ## BielOS Core
 

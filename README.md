@@ -253,7 +253,7 @@ BielOS uses defense in depth rather than treating any single layer as sufficient
 
 ## Roadmap
 
-The current accepted remote production revision is `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; exact-SHA CI run `35673141210` passed. Production is remote-only through `servidor`; the remaining release gate is authenticated human visual/behavior smoke for the shell repair. The browser geometry suite covers seven viewports and six appearance combinations.
+The current accepted remote production revision is `40ce2ea447a91394cd0aac18102ce597c71763a5`; exact-SHA CI run `35674204253` passed. Production is remote-only through `servidor`; the remaining release gate is authenticated human visual/behavior smoke for the shell repair. The browser geometry suite covers seven viewports and six appearance combinations.
 
 - [x] **UI/UX rebaseline:** Prompt Arena parity source lock, semantic shell tokens, appearance controls, compact navigation, accessibility hooks, reduced motion, and responsive mapping are implemented locally. Evidence: [parity matrix](docs/ui-ux-prompt-arena-parity.md).
 - [x] **Minimal-first information density:** Core administration, module requests, health, recovery, activity, automation, and audit surfaces use compact labels and progressive disclosure; human visual acceptance remains a separate gate.
