@@ -147,14 +147,17 @@ function prismaCliPath() {
 }
 
 function runSql(sql) {
-  const result = spawnSync("docker", ["exec", "-i", containerName, "psql", "-U", databaseUser, "-d", databaseName, "-At", "-v", "ON_ERROR_STOP=1"], {
+  const result = spawnSync("docker", ["exec", "-i", containerName, "psql", "-U", databaseUser, "-d", databaseName, "-At", "-v", "VERBOSITY=sqlstate", "-v", "ON_ERROR_STOP=1"], {
     input: sql,
     encoding: "utf8",
     windowsHide: true,
     timeout: 120_000,
     maxBuffer: 10 * 1024 * 1024,
   });
-  if (result.error || result.status !== 0) throw new Error("Disposable migration validation SQL failed.");
+  if (result.error || result.status !== 0) {
+    const sqlState = result.stderr?.toString().match(/ERROR:\s*([0-9A-Z]{5}):/u)?.[1];
+    throw new Error(sqlState ? `Disposable migration validation SQL failed (SQLSTATE ${sqlState}).` : "Disposable migration validation SQL failed.");
+  }
   return result.stdout.trim();
 }
 
@@ -170,14 +173,14 @@ INSERT INTO "AdministrativeCredential" ("id", "userId", "passwordHash", "status"
 INSERT INTO "AdministrativeRecoveryCode" ("id", "userId", "codeHash") VALUES ('validation-admin-recovery', 'validation-admin', 'legacy-admin-recovery-hash');
 INSERT INTO "Session" ("id", "userId", "tokenHash", "expiresAt", "createdAt", "updatedAt") VALUES ('validation-session', 'validation-admin', 'legacy-session-token-hash', CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "DeviceChallenge" ("id", "userId", "ceremonyId", "deviceIdHash", "codeHash", "expiresAt") VALUES ('validation-challenge', 'validation-admin', 'validation-ceremony', 'legacy-device-hash', 'legacy-challenge-hash', CURRENT_TIMESTAMP + INTERVAL '10 minutes');
-INSERT INTO "TrustedDevice" ("id", "userId", "deviceIdHash", "label", "status", "rememberedUntil", "strongVerifiedAt") VALUES ('validation-device', 'validation-admin', 'legacy-device-hash', 'Validation device', 'TRUSTED'::"TrustedDeviceStatus", CURRENT_TIMESTAMP + INTERVAL '30 days', CURRENT_TIMESTAMP);
-INSERT INTO "SecurityElevation" ("id", "requestKey", "userId", "sessionId", "protocolVersion", "scope", "challengeHash", "status", "expiresAt") VALUES ('validation-elevation', 'validation-elevation-key', 'validation-admin', 'validation-session', 1, 'ACCOUNT_STATE_CHANGE', 'legacy-challenge-hash', 'ACTIVE'::"SecurityElevationStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes');
+INSERT INTO "TrustedDevice" ("id", "userId", "deviceIdHash", "label", "status", "rememberedUntil", "strongVerifiedAt", "createdAt", "updatedAt") VALUES ('validation-device', 'validation-admin', 'legacy-device-hash', 'Validation device', 'TRUSTED'::"TrustedDeviceStatus", CURRENT_TIMESTAMP + INTERVAL '30 days', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "SecurityElevation" ("id", "requestKey", "userId", "sessionId", "protocolVersion", "scope", "challengeHash", "status", "expiresAt", "createdAt", "updatedAt") VALUES ('validation-elevation', 'validation-elevation-key', 'validation-admin', 'validation-session', 1, 'ACCOUNT_STATE_CHANGE', 'legacy-challenge-hash', 'ACTIVE'::"SecurityElevationStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "AuditLog" ("id", "eventType", "actorUserId", "result", "resource", "message", "metadata") VALUES
   ('validation-auth-audit', 'AUTH_LOGIN_SUCCESS', 'validation-admin', 'SUCCESS', 'auth.session', 'Authentication succeeded.', '{"test":true}'::jsonb),
   ('validation-legacy-audit', 'MODULE_ACCESS_GRANTED', 'validation-admin', 'SUCCESS', 'legacy.module', 'Legacy event.', '{"test":true}'::jsonb);
-INSERT INTO "EmailOutboxMessage" ("id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload") VALUES
-  ('validation-auth-email', 'validation-auth-email-key', 'PASSWORD_CHANGED'::"EmailMessageKind", 'admin@validation.invalid', 'en', '{"test":true}'::jsonb),
-  ('validation-legacy-email', 'validation-legacy-email-key', 'APPLICATION_EMAIL_VERIFICATION'::"EmailMessageKind", 'user@validation.invalid', 'en', '{"test":true}'::jsonb);
+INSERT INTO "EmailOutboxMessage" ("id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload", "createdAt", "updatedAt") VALUES
+  ('validation-auth-email', 'validation-auth-email-key', 'PASSWORD_CHANGED'::"EmailMessageKind", 'admin@validation.invalid', 'en', '{"test":true}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-legacy-email', 'validation-legacy-email-key', 'APPLICATION_EMAIL_VERIFICATION'::"EmailMessageKind", 'user@validation.invalid', 'en', '{"test":true}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "EmailDeliveryAttempt" ("id", "messageId", "attempt", "status") VALUES ('validation-legacy-email-attempt', 'validation-legacy-email', 1, 'FAILED'::"DeliveryAttemptStatus");
 COMMIT;
 `;
