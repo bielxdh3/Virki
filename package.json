@@ -22,6 +22,7 @@
     "test:intake:db-role": "tsx scripts/intake-database-role-validation.ts",
     "test:backup:restore": "node scripts/backup-restore-validation.mjs",
     "test:production:runtime": "node scripts/production-runtime-smoke.mjs",
+    "test:layout-geometry": "node --test scripts/layout-geometry.test.mjs",
     "test:core-projects": "tsx --test apps/hub/src/app/core/projects/validation.test.ts",
     "test:gymforge-scoring": "tsx --test apps/hub/src/app/gymforge/scoring.test.ts",
     "test:production-revision": "node --test scripts/production-revision.test.mjs scripts/production-compose.test.mjs scripts/production-remote.test.mjs",
@@ -52,6 +53,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
     "@types/node": "22.20.0",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",

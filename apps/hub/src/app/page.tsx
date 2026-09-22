@@ -476,7 +476,7 @@ export default async function HubDashboardPage() {
 
           <div className="hub-registry-groups">
             {registryGroups.map((group) => (
-              <section className="hub-registry-group" key={group.id} aria-labelledby={`registry-${group.id}`}>
+              <section className={`hub-registry-group hub-registry-group--${Math.min(group.items.length, 3)}`} key={group.id} aria-labelledby={`registry-${group.id}`}>
                 <div className="hub-registry-heading">
                   <h2 id={`registry-${group.id}`}>{group.title}</h2>
                   <span>{group.items.length}</span>
