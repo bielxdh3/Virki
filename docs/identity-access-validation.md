@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The source implementation is complete for the current identity/access surfaces. The accepted remote deployment is `06073a7db6284293eeedd2ba8e6eaca82e5af973`; exact-SHA CI run `35633568823` passed. Authenticated human smoke remains external. Public registration and live Intake stay disabled. Historical smoke and CI claims below retain their original dates and SHAs.
+The source implementation is complete for the current identity/access surfaces. The accepted remote deployment is `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`; exact-SHA CI run `35670363749` passed. Authenticated human smoke remains external. Public registration and live Intake stay disabled. Historical smoke and CI claims below retain their original dates and SHAs.
 
 Local patch validation for the earlier snapshot completed under Node `24.14.1`; that evidence is historical and unsupported for release.
 

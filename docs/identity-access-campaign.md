@@ -4,18 +4,18 @@ Status: `[CURRENT PUBLISHED CAMPAIGN]` — implementation and remote deployment 
 
 ## Current direct campaign snapshot — 2026-09-18
 
-- Local and remote `main` are at accepted commit `06073a7db6284293eeedd2ba8e6eaca82e5af973`; exact-SHA CI run `35633568823` passed. No migration files were added; the canonical remote production stack was rebuilt/restarted and verified healthy.
+- Local and remote `main` are at accepted commit `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`; exact-SHA CI run `35670363749` passed. No migration files were added; the canonical remote production stack was rebuilt/restarted and verified healthy.
 - The worktree intentionally preserves inherited security/GymForge WIP alongside the campaign changes. Runtime-sensitive local validation was repeated with Node `22.20.0`; Docker/PostgreSQL-dependent gates remain environment-blocked.
 - Current runtime dependency baseline is Next.js `16.3.5`, sharp `0.35.4`, and Nodemailer `10.0.10`; the production dependency audit is clean after omitting development dependencies. The accepted Prisma/deepmerge advisory remains tooling-only and is enforced by the exact tooling policy gate.
 - Current local evidence includes `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run test:core:unit` (97/97), `npm run test:public-site` (4/4), `npm run test:gymforge-scoring` (8/8), `npm run test:production-revision` (17/17), and `npm run build`; exact-SHA CI and remote runtime gates are complete, while authenticated human smoke remains external.
 
-Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35633568823` for `06073a7db6284293eeedd2ba8e6eaca82e5af973`, which passed all configured jobs.
+Historical technical evidence is retained below. Current exact-SHA evidence is GitHub Actions run `35670363749` for `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`, which passed all configured jobs.
 
 ## Post-closeout live-smoke repair — 2026-08-18
 
 The latest historical human smoke confirmed OWNER administrative credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation. It also confirmed the former UI scope-availability defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke, while repetitive `ACCESS_JWT_VALID` events made the OWNER audit view low-signal. Those machine corrections were committed at `76a9a7b59ba7dc9a4c594be986d47ffcb71b60ce`; exact-SHA CI run `32263676937` was green, and the canonical remote stack was rebuilt at that historical SHA. Do not claim current authenticated OWNER/MEMBER browser smoke.
 
-The published campaign adds routine global-OWNER project participant/access changes without elevation, keeps ADMIN elevation and higher-risk archive elevation, adds administrative credential recovery with one-time offline codes, and matures the owner audit surface with retained-history cursor pagination, safe taxonomy/filtering, detail disclosure, retention visibility, and bounded sanitized export. Exact-SHA CI passed; authenticated human smoke and live production evidence remain pending.
+The published campaign adds routine global-OWNER project participant/access changes without elevation, keeps ADMIN elevation and higher-risk archive elevation, adds administrative credential recovery with one-time offline codes, and matures the owner audit surface with retained-history cursor pagination, safe taxonomy/filtering, detail disclosure, retention visibility, and bounded sanitized export. It also adds deterministic browser geometry coverage for the responsive shell and dashboard surfaces. Exact-SHA CI passed; authenticated human smoke and live production evidence remain pending.
 
 The bounded resume checklist is only: as OWNER, grant/change/revoke disposable Project A MEMBER access without elevation and verify Project B denial/no leak plus last-owner protection; acquire `CORE_PROJECT_ARCHIVE` only for the archive flow and verify read-only behavior; verify MEMBER admin/audit/session restrictions; and perform normal logout. Keep public registration and live Intake disabled, Cloudflare Access before BielOS authentication, GymForge expansion frozen, reserved modules inert, `SecurityUnlock` blocked, and AIP separate.
 

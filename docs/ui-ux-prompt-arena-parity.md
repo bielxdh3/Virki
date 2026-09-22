@@ -17,7 +17,7 @@ This is the implementation ledger for the current local parity pass. It maps the
 | Compact navigation and skip link | Short labels, route-aware active state, skip-to-content | COMPLETE | `core/navigation.ts`, `core/shell.tsx`, `page.tsx` |
 | Command palette interaction | Ctrl/Cmd+K searchable authorized route palette with bounded local relevance/recency | COMPLETE | `core/command-palette.tsx`, `core-ui.test.ts` |
 | Panels, cards, status chips, forms, disclosure, contained evidence | Shared semantic CSS and Core capability/audit surfaces with source/observation timestamps | COMPLETE | `globals.css`, Core routes, `core/capabilities.ts` |
-| Responsive 320px intent, wrapped controls, bounded wide evidence | Responsive shell/grid and overflow-safe text rules | COMPLETE | `globals.css` |
+| Responsive 320px intent, wrapped controls, bounded wide evidence | Deterministic shell/dashboard/registry tracks, overflow-safe text rules, and browser geometry assertions across 1920/1440/1280/1024/768/390/320px plus six appearance combinations | COMPLETE LOCALLY; AWAITING_HUMAN_VALIDATION | `globals.css`, `scripts/layout-geometry.test.mjs`, `.github/workflows/ci.yml` |
 | Tauri/Arena benchmark execution, model providers, desktop bridge | BielOS has no equivalent and must not import Arena-domain functionality | NOT_APPLICABLE | Approved boundary in `docs/decisions.md` |
 | Human visual/interaction acceptance in an authenticated browser | Requires owner-controlled Cloudflare/session smoke | AWAITING_HUMAN_VALIDATION | `docs/deployment-verification.md` |
 
