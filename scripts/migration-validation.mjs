@@ -139,7 +139,14 @@ function deployMigrations(schemaPath, databaseUrl) {
     timeout: 120_000,
     maxBuffer: 10 * 1024 * 1024,
   });
-  if (result.error || result.status !== 0) throw new Error("Disposable production migration validation failed.");
+  if (result.error || result.status !== 0) {
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    const sqlState = output.match(/database error code:\s*([0-9A-Z]{5})/iu)?.[1]
+      ?? output.match(/SQLSTATE[\s:]+([0-9A-Z]{5})/iu)?.[1];
+    const prismaCode = output.match(/\bP\d{4}\b/u)?.[0];
+    const processCode = result.error && "code" in result.error && typeof result.error.code === "string" ? result.error.code : undefined;
+    throw new Error(`Disposable production migration validation failed (${sqlState ?? prismaCode ?? processCode ?? "unknown"}).`);
+  }
 }
 
 function prismaCliPath() {
