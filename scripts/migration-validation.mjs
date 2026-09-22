@@ -155,8 +155,16 @@ function runSql(sql) {
     maxBuffer: 10 * 1024 * 1024,
   });
   if (result.error || result.status !== 0) {
-    const sqlState = result.stderr?.toString().match(/ERROR:\s*([0-9A-Z]{5}):/u)?.[1];
-    throw new Error(sqlState ? `Disposable migration validation SQL failed (SQLSTATE ${sqlState}).` : "Disposable migration validation SQL failed.");
+    const diagnostic = `${result.stdout?.toString() ?? ""}\n${result.stderr?.toString() ?? ""}`;
+    const sqlState = diagnostic.match(/ERROR:\s*([0-9A-Z]{5}):/u)?.[1];
+    const category = /null value|not-null constraint/iu.test(diagnostic) ? "missing-required-fixture-field"
+      : /foreign key/iu.test(diagnostic) ? "fixture-foreign-key"
+        : /duplicate key|unique constraint/iu.test(diagnostic) ? "fixture-unique-key"
+          : /invalid input value for enum/iu.test(diagnostic) ? "fixture-enum-value"
+            : /does not exist/iu.test(diagnostic) ? "missing-schema-object"
+              : result.error && "code" in result.error && typeof result.error.code === "string" ? result.error.code
+                : "database-rejected-fixture";
+    throw new Error(`Disposable migration validation SQL failed (${sqlState ?? category}).`);
   }
   return result.stdout.trim();
 }
@@ -171,9 +179,9 @@ INSERT INTO "TotpFactor" ("id", "userId", "secretCiphertext", "keyVersion", "sta
 INSERT INTO "RecoveryCode" ("id", "userId", "codeHash") VALUES ('validation-recovery', 'validation-admin', 'legacy-recovery-code-hash');
 INSERT INTO "AdministrativeCredential" ("id", "userId", "passwordHash", "status", "createdAt", "updatedAt") VALUES ('validation-admin-credential', 'validation-admin', 'legacy-admin-credential-hash', 'ACTIVE'::"AdministrativeCredentialStatus", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "AdministrativeRecoveryCode" ("id", "userId", "codeHash") VALUES ('validation-admin-recovery', 'validation-admin', 'legacy-admin-recovery-hash');
-INSERT INTO "Session" ("id", "userId", "tokenHash", "expiresAt", "createdAt", "updatedAt") VALUES ('validation-session', 'validation-admin', 'legacy-session-token-hash', CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "Session" ("id", "sessionKey", "userId", "tokenHash", "expiresAt", "createdAt", "updatedAt") VALUES ('validation-session', 'validation-session-key', 'validation-admin', 'legacy-session-token-hash', CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "DeviceChallenge" ("id", "userId", "ceremonyId", "deviceIdHash", "codeHash", "expiresAt") VALUES ('validation-challenge', 'validation-admin', 'validation-ceremony', 'legacy-device-hash', 'legacy-challenge-hash', CURRENT_TIMESTAMP + INTERVAL '10 minutes');
-INSERT INTO "TrustedDevice" ("id", "userId", "deviceIdHash", "label", "status", "rememberedUntil", "strongVerifiedAt", "createdAt", "updatedAt") VALUES ('validation-device', 'validation-admin', 'legacy-device-hash', 'Validation device', 'TRUSTED'::"TrustedDeviceStatus", CURRENT_TIMESTAMP + INTERVAL '30 days', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "TrustedDevice" ("id", "deviceKey", "userId", "deviceIdHash", "label", "status", "rememberedUntil", "strongVerifiedAt", "createdAt", "updatedAt") VALUES ('validation-device', 'validation-device-key', 'validation-admin', 'legacy-device-hash', 'Validation device', 'TRUSTED'::"TrustedDeviceStatus", CURRENT_TIMESTAMP + INTERVAL '30 days', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "SecurityElevation" ("id", "requestKey", "userId", "sessionId", "protocolVersion", "scope", "challengeHash", "status", "expiresAt", "createdAt", "updatedAt") VALUES ('validation-elevation', 'validation-elevation-key', 'validation-admin', 'validation-session', 1, 'ACCOUNT_STATE_CHANGE', 'legacy-challenge-hash', 'ACTIVE'::"SecurityElevationStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "AuditLog" ("id", "eventType", "actorUserId", "result", "resource", "message", "metadata") VALUES
   ('validation-auth-audit', 'AUTH_LOGIN_SUCCESS', 'validation-admin', 'SUCCESS', 'auth.session', 'Authentication succeeded.', '{"test":true}'::jsonb),
