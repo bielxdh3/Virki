@@ -34,7 +34,7 @@ GymForge is a gated social gym competition app for Gabriel and invited or admin-
 
 ## Admin Role
 
-- Admins currently manage participant records; private invitations are next in Phase 4, while invite creation and acceptance remain unavailable until that phase is complete.
+- Admins currently manage participant records; private invitations and invite acceptance remain frozen by the approved GymForge boundary and are not the next phase.
 - Admins may disable or archive participants.
 - Admins may manage exercise catalog entries.
 - Admins may create and manage competitions or challenges.

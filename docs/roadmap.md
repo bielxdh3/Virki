@@ -1,16 +1,16 @@
 # Roadmap
 
-Current accepted remote state: `main` and `origin/main` are at `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`, exact-SHA CI run `35670363749` passed, and the canonical remote production stack is healthy at that revision. The remaining user-only gate is authenticated human visual/behavior smoke for the responsive shell repair; production is remote-only. Browser geometry coverage now runs across seven viewports and six appearance combinations.
+Current accepted remote state: `main` and `origin/main` are at `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`, exact-SHA CI run `35673141210` passed, and the canonical remote production stack is healthy at that revision. The remaining user-only gate is authenticated human visual/behavior smoke for the responsive shell repair; production is remote-only. Browser geometry coverage now runs across seven viewports and six appearance combinations.
 
 ## Master Finish Everything campaign — current local truth (2026-09-21)
 
-The direct Codex campaign is implementation-complete for its authorized scope and published at `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`; `main` and `origin/main` match and exact-SHA CI run `35670363749` passed. Prompt Arena parity, Core identity/access/recovery/audit maturation, current Hub surfaces, approved platform capabilities, and the critical responsive layout rebuild are complete locally. Remaining gate is authenticated human visual/interaction smoke.
+The direct Codex campaign is implementation-complete for its authorized scope and published at `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; `main` and `origin/main` match and exact-SHA CI run `35673141210` passed. Prompt Arena parity, Core identity/access/recovery/audit maturation, current Hub surfaces, approved platform capabilities, and the critical responsive layout rebuild are complete locally. Remaining gate is authenticated human visual/interaction smoke.
 
 Use [master-finish-everything-ledger.md](master-finish-everything-ledger.md) as the current disposition ledger. GymForge expansion and reserved modules remain frozen by approved product boundaries; `SecurityUnlock` remains non-authoritative and blocked. Publication and remote deployment are already authorized and complete; the remaining user-only gate is authenticated human smoke.
 
 ## Current Platform State: BielOS Core
 
-BielOS Core is the private hub platform and workspace, distinct from applications and reserved modules. Its project-detail and identity/access source surfaces are implemented behind the existing Cloudflare Access-first, BielOS internal-auth, CSRF, session/elevation, authorization, and audit boundaries. The current campaign is published at `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`; the remote production stack is converged and authenticated browser smoke remains the human gate. Public registration and live Intake remain disabled.
+BielOS Core is the private hub platform and workspace, distinct from applications and reserved modules. Its project-detail and identity/access source surfaces are implemented behind the existing Cloudflare Access-first, BielOS internal-auth, CSRF, session/elevation, authorization, and audit boundaries. The current campaign is published at `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; the remote production stack is converged and authenticated browser smoke remains the human gate. Public registration and live Intake remain disabled.
 
 Core identity/access surfaces include the accepted shell/navigation and trusted-device states plus the corresponding source implementation. The historical technical closeout for `33f540a4b396aa8a55fa65ad9f950b0c36712aae` and run `31821995102` remains dated evidence. The latest human smoke confirmed OWNER credential setup, offline recovery-code acknowledgement, and normal timed/manual elevation, but the former UI scope defect blocked `PROJECT_OWNER_ACCESS_CHANGE` and `CORE_PROJECT_ARCHIVE` project smoke and `ACCESS_JWT_VALID` reduced audit signal. The Phase 1/2 repairs and responsive layout rebuild are now deployed at the accepted remote revision; affected human smoke must be repeated, and no current authenticated OWNER/MEMBER smoke or final closeout claim is made.
 
@@ -32,7 +32,7 @@ BielOS is the hub, registry, navigation surface, identity/security boundary, and
 
 ## Current Application Classification
 
-- BielOS Core: implemented private platform/workspace with project-detail, identity/access, recovery, audit, capability, and operations surfaces behind the existing layered boundaries; published at `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274` with exact-SHA CI passed. Authenticated human smoke remains open.
+- BielOS Core: implemented private platform/workspace with project-detail, identity/access, recovery, audit, capability, and operations surfaces behind the existing layered boundaries; published at `0c1fc27cff56f3ad0065ff4099c310d7b929d24e` with exact-SHA CI passed. Authenticated human smoke remains open.
 - GymForge: available integrated private-hub application at `/gymforge`; implemented capabilities are preserved and further feature expansion is frozen.
 - L-vault, root.ark, and H-vault: reserved planning-only modules; runtime remains inert.
 

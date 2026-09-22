@@ -2,7 +2,7 @@
 
 ## Current master-campaign status — 2026-09-21
 
-The direct Codex campaign is published at `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`; exact-SHA CI run `35670363749` passed. No migration files were added. The shared Prompt Arena shell, project participant authority, administrative recovery, retained-history audit surface, capability cards, Core operations routes, and responsive layout geometry coverage are implemented. The remote production stack is converged; authenticated browser smoke remains external.
+The direct Codex campaign is published at `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; exact-SHA CI run `35673141210` passed. No migration files were added. The shared Prompt Arena shell, project participant authority, administrative recovery, retained-history audit surface, capability cards, Core operations routes, and responsive layout geometry coverage are implemented. The remote production stack is converged; authenticated browser smoke remains external.
 
 Routine global-OWNER project participant/access changes use the normal authenticated session plus Cloudflare Access, CSRF, server authorization, transaction invariants, and sanitized audit logging; the separate elevation ceremony remains for higher-risk actions such as project archive. `SecurityUnlock` remains non-authoritative and blocked. See [master-finish-everything-ledger.md](../master-finish-everything-ledger.md) for current dispositions.
 
@@ -22,7 +22,7 @@ Historical authenticated OWNER and MEMBER production smoke completed through Clo
 
 ## Identity/access rollout status
 
-Identity/access source surfaces remain behind the existing Cloudflare Access-first, BielOS authentication, CSRF, session/scoped-elevation, least-privilege authorization, and audit boundaries. The published commit is `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`; exact-SHA CI run `35670363749` passed. The remote production runtime is converged; authenticated human smoke remains open. Public registration and live Intake remain disabled, loopback-only ports remain required, `SecurityUnlock` runtime remains blocked, and none of the existing boundaries may be weakened.
+Identity/access source surfaces remain behind the existing Cloudflare Access-first, BielOS authentication, CSRF, session/scoped-elevation, least-privilege authorization, and audit boundaries. The published commit is `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; exact-SHA CI run `35673141210` passed. The remote production runtime is converged; authenticated human smoke remains open. Public registration and live Intake remain disabled, loopback-only ports remain required, `SecurityUnlock` runtime remains blocked, and none of the existing boundaries may be weakened.
 
 ## Identity
 

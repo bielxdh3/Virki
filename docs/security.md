@@ -2,7 +2,7 @@
 
 Security is a first-class requirement for BielOS.
 
-The accepted remote deployment is `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`; exact-SHA CI run `35670363749` passed. The remote production stack and Cloudflare Access ordering are verified; authenticated human smoke remains external.
+The accepted remote deployment is `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`; exact-SHA CI run `35673141210` passed. The remote production stack and Cloudflare Access ordering are verified; authenticated human smoke remains external.
 
 ## Current MVP Rules
 
@@ -70,7 +70,7 @@ See `docs/audit-logs.md`.
 
 CI runs secret scan, lint, typecheck, Prisma validation, Core unit tests, migrated PostgreSQL integration tests, real concurrency tests, build, production image build, and production Compose validation. The Core database suites use one synthetic PostgreSQL service and do not require production secrets.
 
-Historical validation passed the listed technical gates and historical OWNER/MEMBER smoke; those results do not establish current authenticated human readiness for the published repair. Repeat only the affected flows. No registration or permanent provisioning surface was added. Current exact-SHA CI run `35670363749` passed for revision `a15ed8dcdc85f2a56f0720898fe7d5eaf6a28274`.
+Historical validation passed the listed technical gates and historical OWNER/MEMBER smoke; those results do not establish current authenticated human readiness for the published repair. Repeat only the affected flows. No registration or permanent provisioning surface was added. Current exact-SHA CI run `35673141210` passed for revision `0c1fc27cff56f3ad0065ff4099c310d7b929d24e`.
 
 Run locally:
 
