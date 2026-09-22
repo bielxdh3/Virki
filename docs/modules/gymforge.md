@@ -83,17 +83,17 @@ Phase 2 design and Phase 3 private-hub implementation are complete. The followin
 - No public route or GymForge API is added. The feature remains inside the existing authenticated private hub page and server-action boundary.
 - Successful create/revoke audit events use only stable hashed competition, participant, and correction references plus a generic result. They omit the raw audit actor id and all actor ids from metadata; authoritative actor attribution remains on the correction row. They never include raw ids, request keys, names, reason, delta, score values, raw forms, or raw request data.
 - Correction and revocation history is retained. Permanent competition deletion is blocked whenever any correction history exists, and restrictive participant history prevents participant deletion from removing corrections.
-- The committed additive migration has not been applied to production. Deployment waits for a current verified backup and `prisma migrate deploy`.
+- The committed additive migration is applied to canonical remote production; the remote `_prisma_migrations` ledger includes `20260714100000_add_gymforge_score_corrections`. No pending migration remains for the current source revision.
 - After the first correction write, dropping the table or rolling the application back to a pre-Phase-3 commit is unsafe because the assignment, reactivation, and `DRAFT` guards live in the new runtime. Recovery requires a forward fix or verified restore.
 
 ## Migration Plan
 
 - Prisma schema changes: Additive score-correction model implemented.
-- Migration files: Committed additive migration present; not yet applied to production.
+- Migration files: Committed additive migration present and applied to canonical remote production.
 - Backfill requirements: None.
-- Deployment gate: Take a current verified backup, then run production `prisma migrate deploy`.
+- Deployment gate: For future migration-bearing releases, take a current verified backup, then run production `prisma migrate deploy` from the tooling-capable operator environment.
 - Rollback approach: Before the first write, ordinary application rollback remains possible if schema compatibility is preserved. After the first write, use a forward fix or verified restore; do not run a pre-Phase-3 application against live correction data.
-- Disposable validation plan: Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and build pass before commit; production migration deployment remains gated on backup confirmation.
+- Disposable validation plan: Eight focused scoring cases plus secret scan, lint, typecheck, Prisma validation, and build pass before commit; the current production migration state has been verified against the remote ledger.
 
 ## Backup And Restore
 
@@ -193,4 +193,4 @@ GymForge expansion is frozen. Private invitations and invite acceptance are not 
 - Cloudflare exposure check: Required before remote access.
 - Negative tests for unauthorized access: Required for current mutations and future visibility changes.
 - Workout integrity: Creation/editing supports exactly one set; update rejects unexpected zero/multi-set records; explicit deletion transactionally removes all dependent sets.
-- Score-correction Phase 3: Eight scoring cases and required repository validations pass. Production migration deployment, database-backed mutation smoke, and authenticated UI smoke remain gated on the backup/deploy phase.
+- Score-correction Phase 3: Eight scoring cases and required repository validations pass. Production migration state is applied and remote health/revision checks pass; database-backed mutation smoke and authenticated UI smoke remain user-controlled validation gates.
