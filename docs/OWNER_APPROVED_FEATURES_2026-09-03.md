@@ -2,7 +2,7 @@
 
 This document records product decisions approved by the repository owner on 2026-09-03.
 
-It began as a planning record. The disposition below is the current local implementation evidence; it does not mean the work is deployed or allowed to bypass BielOS security/review gates.
+It began as a planning record. The disposition below is the current campaign evidence; publication, runtime, and human-acceptance evidence are maintained in the deployment and master-campaign ledgers, and nothing bypasses BielOS security/review gates.
 
 ## Approved features
 
@@ -29,7 +29,7 @@ It began as a planning record. The disposition below is the current local implem
 - Default surfaces should show only what is necessary for the current action; secondary detail stays behind progressive disclosure.
 - GymForge expansion remains frozen unless separately approved.
 
-## Current local dispositions
+## Current campaign dispositions
 
 | Issue | Disposition | Evidence / limitation |
 | --- | --- | --- |
@@ -40,4 +40,4 @@ It began as a planning record. The disposition below is the current local implem
 | #12 Module Capability Contract v1 | COMPLETE (local) | `packages/types/src/capabilities.ts` and validation tests define bounded manifests/envelopes, explicit authz/audit semantics, duplicate rejection, and declared-version negotiation. |
 | #13 Recovery Center | COMPLETE (local) | `/core/recovery` shows freshness/provenance and does not infer recoverability from backup existence. |
 
-These dispositions are local only: publication, CI convergence, authenticated visual acceptance, and production execution remain separate gates.
+These dispositions are implemented and published in the current campaign. Exact revision/CI/runtime evidence is maintained in the deployment and master-campaign ledgers; authenticated visual acceptance remains the separate user-only gate.
