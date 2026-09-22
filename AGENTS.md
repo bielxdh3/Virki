@@ -1,155 +1,54 @@
-# BielOS Agent Instructions
+# BielOS contributor guide
 
-BielOS is a private personal hub, not a public SaaS.
+BielOS has five responsibilities: identity, authentication and SSO, security, project entry access, and audit. It authenticates people and decides whether a person may enter an external project. Project behavior and permissions stay with that project.
 
-The repository represents the real private BielOS codebase. Treat it as security-sensitive even when the task appears small.
+## Surfaces
 
-## Core Priorities
+- `biel.dev.br` is a minimal public page with a portal entry.
+- `portal.biel.dev.br` is the authenticated USER portal and OIDC issuer surface. A user sees only enabled projects with an active explicit grant.
+- `hub.biel.dev.br` is the ADMIN control plane. Cloudflare Access is the outer boundary; BielOS authentication and authorization are the inner boundary.
+- The administration navigation contains only Contas, Acessos, Segurança, Auditoria, and Conexões.
 
-1. Preserve security boundaries.
-2. Keep changes small and phase-scoped.
-3. Do not implement future modules unless explicitly requested.
-4. Do not expose secrets or private operational data.
-5. Minimize output.
-6. Prefer boring, maintainable solutions over clever complexity.
-7. Do not invent repository state. Inspect files before making claims.
+## Identity and authorization
 
-## Required BielOS Skill Selection
+- Stored roles are `ADMIN` and `USER` only. Unauthenticated requests are untrusted and denied by default.
+- There are no BielOS project roles. Access is an explicit USER-to-project grant.
+- Projects are external OIDC relying parties. BielOS does not host their experiences or manage their internal permissions.
+- Do not add a project unless an ADMIN registers its canonical origin, exact redirect URI allowlist, and client credentials.
+- Recheck account, project, and grant state when authorizing. Client supplied roles or grants are never authoritative.
 
-Every BielOS prompt must explicitly name the required BielOS skill at the top before general instructions.
+## Security and data
 
-The agent must follow the selected skill strictly before applying the general rules in this `AGENTS.md` file.
+- Preserve password hashes, MFA/TOTP, recovery, account security metadata, and compatible authentication/security audit history.
+- Keep host-only session cookies. Never share the central session with a project or across subdomains.
+- Require CSRF protection, rate limits, replay protection, generic authentication failures, safe logout, and server-side authorization for sensitive actions.
+- OIDC uses Authorization Code with PKCE S256, exact redirect matching, short-lived one-time codes, client binding, and state/nonce validation.
+- Never print or commit secrets, tokens, private keys, database URLs with passwords, dumps, backups, or raw security logs.
+- Admin security changes require fresh proof where the action policy specifies it.
 
-Use these skills by task type:
+## Implementation and interface
 
-- Phase review, commit review, completed phase check, next-step review, or deciding the next BielOS phase:
-  `.agents/skills/bielos-phase-review/SKILL.md`
-- Security, authentication, CSRF, sessions, Cloudflare, Docker exposure, secrets, audit logs, or production hardening:
-  `.agents/skills/bielos-security-review/SKILL.md`
-- BielOS identity, public intake, account lifecycle, module access, 2FA, recovery, or critical-operation elevation:
-  `.agents/skills/bielos-core-identity-implementation/SKILL.md`
-- Making the repository public, sharing repository access, publication safety, or sanitized public release:
-  `.agents/skills/bielos-publication-check/SKILL.md`
+- Keep the public page, USER portal, and ADMIN control plane small and direct.
+- Do not add dashboards, registries, modules, application intake, project runtime features, or appearance customization.
+- Preserve keyboard access, visible focus, labels, contrast, responsive behavior, and correct skip-link placement.
+- Keep focused tests for authorization, grants, OIDC, MFA, audit redaction, migrations, and production boundaries.
 
-If no existing BielOS skill matches the task, stop and report exactly:
+## Production operations
 
-`No matching BielOS skill found for this task.`
+- Local use is limited to development, builds, and disposable validation databases. Production runs only on the configured remote Windows host.
+- Production host values come from the ignored `.production.operator.json` file or `BIELOS_PRODUCTION_*` environment variables. Never add machine-specific host, path, or Cloudflare values to tracked files.
+- Run `npm run preflight:prod` before any production mutation. Require stable SSH probes, the expected host, remote Docker, the production identity marker, and the exact accepted revision. Do not use a local or WSL fallback.
+- Deploy only a clean `main` revision matching `origin/main` after exact-SHA CI is green.
+- Before a database change, create a production backup outside the repository, restore it to a disposable database, and validate the migration plan against that restore. Apply committed Prisma migrations; never use `prisma db push` in production.
+- Preserve persistent volumes. Do not delete Docker volumes, expose database ports, weaken Cloudflare Access, or change router/firewall settings.
+- Keep deManage isolated. Do not inspect its data or change its containers, networks, volumes, or services.
+- Cloudflare DNS, Tunnel, and Access settings are external state. Verify the public portal route and ensure the ADMIN host remains protected without imposing its Access policy on the USER portal.
 
-Do not proceed with implementation when no matching BielOS skill exists.
+## Documentation and validation
 
-Do not invent a new skill unless the user explicitly requests creating one.
+Keep documentation limited to current architecture, security, operations, SSO integration, and deployment. Remove obsolete product language rather than retaining it as a roadmap or tombstone.
 
-## Project Model
-
-- `biel.dev.br` is the public site.
-- `hub.biel.dev.br` is the private hub.
-- The hub must remain protected by Cloudflare Access first and BielOS internal auth second.
-- Cloudflare Access and BielOS internal auth are separate layers. Do not collapse them.
-- Docker host-published ports must remain bound to `127.0.0.1`.
-- Future modules are reserved unless explicitly requested:
-  - L-vault
-  - root.ark
-  - H-vault
-- GymForge is no longer merely reserved: its private-hub MVP includes participant and exercise administration, attendance check-ins and correction, single-set workout creation/editing plus explicit deletion, rankings and streaks, competition lifecycle management, participant assignment, deterministic automatic scoring, and additive competition score correction.
-- The current workout MVP intentionally creates and edits exactly one set per workout. Updates must fail safely when a stored workout unexpectedly has zero or multiple sets, while explicit workout deletion must transactionally remove all dependent sets.
-- GymForge competition score-correction Phases 2 and 3 are complete. Corrections preserve the separate current-state automatic base, use append-only additive/revocation history, and remain private to the existing authenticated hub boundary.
-- Further GymForge feature expansion is frozen while BielOS Core is the active product path. No GymForge invitation or optional feature phase is next.
-- Preserve existing GymForge behavior and its Cloudflare Access, BielOS internal auth, CSRF, audit logging, and private hub boundaries; integration work is limited to accurate hub registry/navigation behavior unless the user explicitly changes this direction.
-- Do not add GymForge upload or photo proof, public registration, invite acceptance before Phase 4, import/export, unsafe competition deletion, a public API, or broad social feed behavior unless explicitly requested in a scoped phase.
-
-## Permanent production host rule
-
-- BielOS real production runs only on the canonical remote Windows server through the trusted `servidor` SSH alias (Windows OpenSSH, port 22); the development PC is never a production host.
-- Before modifying, publishing, migrating, or deploying BielOS, run `npm run preflight:prod`. If SSH is unstable or unavailable, stop without beginning modification work and never fall back to WSL port 2222 or another machine.
-- Normal `*:prod` commands target the remote server. Never bring up the real BielOS production Compose stack on this PC; local use is limited to builds, tests, and disposable validation.
-- The server uses its own canonical `C:\BielOS` boundary and production-host marker. deManage remains a separate Compose project, directory, network, volume, and service set and must not be touched.
-- Production ingress remains Cloudflare Tunnel, Cloudflare Access, then BielOS internal authentication. Host-published app ports stay loopback-only, and secrets remain private and uncommitted.
-- Future production deployments target only the server unless the owner explicitly changes this decision.
-
-## Output Rules
-
-Keep output minimal.
-
-Do not provide progress updates.
-
-Do not narrate routine actions such as:
-- reading files;
-- editing files;
-- running commands;
-- checking configs;
-- inspecting diffs.
-
-Do not explain obvious implementation details unless they affect:
-- security;
-- architecture;
-- validation;
-- data integrity;
-- deployment behavior.
-
-Only interrupt if:
-- a blocking ambiguity requires user input;
-- a command fails and changes the plan;
-- a security-sensitive issue is found;
-- the requested scope cannot be completed.
-
-## Final Response Format
-
-Use this format only:
-
-- Status
-- Files changed
-- Behavior changed
-- Validations run
-- Validations not run
-- Remaining limitations
-
-Keep the final response compact.
-
-Do not include long logs unless a command failed.
-
-If a command failed, include only:
-- the command;
-- the relevant error lines;
-- the corrective action or limitation.
-
-Do not include motivational commentary, apologies, speculation, or broad explanations.
-
-If the task was completed, say so directly and stop.
-
-## Security Rules
-
-Never print, commit, log, or expose:
-
-- `.env` contents;
-- Cloudflare tunnel tokens;
-- Cloudflare credentials JSON;
-- Cloudflare Access JWTs;
-- cookies;
-- session tokens;
-- raw authorization headers;
-- raw request headers;
-- raw IP addresses;
-- database URLs with passwords;
-- private keys;
-- database dumps;
-- backups;
-- Google Takeout data;
-- Gmail exports;
-- Gmail attachments;
-- private operational logs.
-
-Use placeholders in examples.
-
-Safe placeholders include:
-- `replace-with-local-secret`
-- `change-me-in-your-local-env`
-- `owner@example.invalid`
-- `https://<team-name>.cloudflareaccess.com`
-- `<Access application AUD tag>`
-
-## Validation Expectations
-
-When relevant, run or document:
+For relevant code changes run the focused tests plus:
 
 ```bash
 npm run secrets:scan
@@ -157,36 +56,7 @@ npm run lint
 npm run typecheck
 npm run prisma:validate
 npm run build
+git diff --check
 ```
 
-For Docker-related changes, also validate the relevant Compose config when feasible.
-
-For security changes, explicitly state what could not be validated locally.
-
-## Token Economy Rules
-
-- Prefer the smallest safe context.
-- Inspect only files relevant to the task.
-- Do not read broad repository context unless required.
-- For docs-only tasks, run only `npm run secrets:scan` unless the prompt explicitly asks for more.
-- Do not run `npm run build`, `npm run typecheck`, `npm run lint`, Docker commands, or Prisma commands for docs-only changes.
-- Use one skill at most unless the task is explicitly security-sensitive.
-- Do not spawn subagents unless explicitly requested.
-- Keep final output compact.
-- Report skipped validations as intentionally skipped when they are not relevant.
-
-## Codex Behavior
-
-Follow repository instructions and relevant skills.
-
-Use `E:\BielOS` as the local BielOS repository path for this machine.
-
-Use minimal output mode by default.
-
-Do not create unrelated refactors.
-
-Do not modify unrelated files.
-
-Do not add dependencies unless they are clearly justified.
-
-Do not change runtime authentication, Cloudflare behavior, Docker port bindings, or database schema unless the task explicitly requires it.
+Validate Docker Compose and production runtime behavior when those areas change. Report any checks that could not run and why.

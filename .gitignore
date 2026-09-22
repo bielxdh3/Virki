@@ -8,6 +8,7 @@ coverage/
 .env
 .env.*
 !.env.example
+.production.operator.json
 
 *.log
 npm-debug.log*

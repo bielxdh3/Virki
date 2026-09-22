@@ -5,7 +5,7 @@ export const REVISION_LABEL = "org.opencontainers.image.revision";
 export const PRODUCTION_SERVICES = [
   "public-site",
   "hub",
-  "intake",
+  "oidc-issuer",
   "session-cleanup",
   "email-worker",
 ];

@@ -1,0 +1,308 @@
+import { SESSION_COOKIE_NAME, getSessionByToken, hashAuditIdentifier, writeAuditLog } from "@bielos/auth";
+import { prisma } from "@bielos/database";
+import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
+import { PrismaOidcAdapter } from "./adapter";
+import { hasValidOidcStateAndNonce, requiresProjectAccessInteraction } from "./authorization-policy";
+
+const issuer = readIssuer(process.env);
+const signingJwks = readSigningJwks(process.env.BIELOS_OIDC_SIGNING_JWKS);
+const cookieKey = readCookieKey(process.env.BIELOS_OIDC_COOKIE_KEY);
+const policy = interactionPolicy.base();
+const consentPrompt = policy.get("consent");
+if (!consentPrompt) throw new Error("OIDC consent policy is unavailable.");
+
+policy.add(new interactionPolicy.Prompt({ name: "bielos_session" }, new interactionPolicy.Check(
+  "central_session_required",
+  "A current BielOS portal session is required.",
+  async (rawContext) => {
+    const context = rawContext as KoaContextWithOIDC;
+    const accountId = context.oidc.session?.accountId;
+    if (!accountId) return false;
+    const token = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
+    const session = token ? await getSessionByToken(token) : null;
+    return !session || session.user.id !== accountId;
+  }
+)), 0);
+
+policy.add(new interactionPolicy.Prompt({ name: "bielos_project_access" }, new interactionPolicy.Check(
+  "active_project_grant",
+  "Project access is not enabled.",
+  "access_denied",
+  async (rawContext) => {
+    const context = rawContext as KoaContextWithOIDC;
+    const accountId = context.oidc.session?.accountId;
+    const clientId = context.oidc.client?.clientId;
+    if (!accountId || !clientId) return false;
+    const hasActiveGrant = await hasActiveProjectGrant(accountId, clientId);
+    return requiresProjectAccessInteraction(accountId, clientId, hasActiveGrant);
+  }
+)), 1);
+
+consentPrompt.checks.add(new interactionPolicy.Check(
+  "bielos_project_grant",
+  "Project access is not enabled.",
+  "access_denied",
+  async (rawContext) => {
+    const context = rawContext as KoaContextWithOIDC;
+    const accountId = context.oidc.session?.accountId;
+    if (!accountId) return false;
+    const clientId = context.oidc.client?.clientId;
+    return !clientId || !(await hasActiveProjectGrant(accountId, clientId));
+  }
+));
+
+const provider = new Provider(issuer, {
+  adapter: (model) => new PrismaOidcAdapter(model),
+  clients: [],
+  clientDefaults: {
+    grant_types: ["authorization_code"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "client_secret_basic",
+    id_token_signed_response_alg: "ES256"
+  },
+  scopes: ["openid", "profile", "email"],
+  claims: {
+    openid: ["sub"],
+    profile: ["name"],
+    email: ["email", "email_verified"]
+  },
+  features: {
+    devInteractions: { enabled: false },
+    clientCredentials: { enabled: false },
+    registration: { enabled: false },
+    registrationManagement: { enabled: false },
+    requestObjects: { request: false, requestUri: false },
+    deviceFlow: { enabled: false },
+    introspection: { enabled: false },
+    revocation: { enabled: true }
+  },
+  pkce: {
+    methods: ["S256"],
+    required: () => true
+  },
+  ttl: {
+    AuthorizationCode: 90,
+    AccessToken: 300
+  },
+  cookies: {
+    keys: [cookieKey],
+    long: { httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production" },
+    short: { httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production" }
+  },
+  jwks: signingJwks,
+  interactions: {
+    policy,
+    url: (_context, interaction) => `/interaction/${interaction.uid}`
+  },
+  findAccount: async (_context, id): Promise<Account | undefined> => {
+    const user = await prisma.user.findUnique({ where: { id }, select: { id: true, email: true, displayName: true, emailVerifiedAt: true, isActive: true, accountStatus: true } });
+    if (!user?.isActive || user.accountStatus !== "ACTIVE") return undefined;
+    return {
+      accountId: user.id,
+      async claims() {
+        return {
+          sub: user.id,
+          email: user.email,
+          email_verified: Boolean(user.emailVerifiedAt),
+          ...(user.displayName ? { name: user.displayName } : {})
+        };
+      }
+    };
+  }
+});
+
+provider.proxy = true;
+provider.use(async (rawContext, next) => {
+  const context = rawContext as KoaContextWithOIDC;
+  if (context.path === "/auth") {
+    if (context.method !== "GET") {
+      context.status = 405;
+      context.set("Allow", "GET");
+      context.body = { error: "invalid_request" };
+      return;
+    }
+    const scope = String(context.query.scope ?? "").split(/\s+/u);
+    const nonce = String(context.query.nonce ?? "");
+    const state = String(context.query.state ?? "");
+    if (!hasValidOidcStateAndNonce(state, nonce, scope.includes("openid"))) {
+      context.status = 400;
+      context.body = { error: "invalid_request", error_description: "state and nonce are required." };
+      return;
+    }
+  }
+
+  const match = context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u);
+  if (match) {
+    await handleInteraction(context, match[1]);
+    return;
+  }
+  await next();
+});
+
+provider.on("authorization.success", (context) => {
+  const oidc = (context as KoaContextWithOIDC).oidc;
+  void writeAuditLog({
+    eventType: "SSO_AUTHORIZATION_ISSUED",
+    result: "SUCCESS",
+    actorUserId: oidc.session?.accountId,
+    resource: "sso.authorization",
+    message: "Project authorization code issued.",
+    metadata: oidc.client ? { clientRef: hashAuditIdentifier(oidc.client.clientId) } : undefined
+  });
+});
+
+provider.on("authorization.error", (rawContext, error) => {
+  const context = rawContext as KoaContextWithOIDC;
+  const clientId = context.oidc.client?.clientId;
+  void writeAuditLog({
+    eventType: "SSO_AUTHORIZATION_DENIED",
+    result: "FAILURE",
+    actorUserId: context.oidc.session?.accountId,
+    resource: "sso.authorization",
+    message: "OIDC authorization request rejected.",
+    metadata: { ...(clientId ? { clientRef: hashAuditIdentifier(clientId) } : {}), error: safeOidcError(error) }
+  });
+});
+
+provider.on("grant.success", (rawContext) => {
+  const context = rawContext as KoaContextWithOIDC;
+  const clientId = context.oidc.client?.clientId;
+  void writeAuditLog({
+    eventType: "SSO_TOKEN_ISSUED",
+    result: "SUCCESS",
+    actorUserId: context.oidc.session?.accountId,
+    resource: "sso.token",
+    message: "OIDC token response issued.",
+    metadata: clientId ? { clientRef: hashAuditIdentifier(clientId) } : undefined
+  });
+});
+
+provider.on("grant.error", (rawContext) => {
+  const context = rawContext as KoaContextWithOIDC;
+  const clientId = context.oidc.client?.clientId;
+  void writeAuditLog({
+    eventType: "SSO_TOKEN_REJECTED",
+    result: "FAILURE",
+    actorUserId: context.oidc.session?.accountId,
+    resource: "sso.token",
+    message: "OIDC token request rejected.",
+    metadata: clientId ? { clientRef: hashAuditIdentifier(clientId) } : undefined
+  });
+});
+
+const port = Number(process.env.OIDC_ISSUER_PORT ?? "3003");
+if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("OIDC issuer port is invalid.");
+provider.listen(port, "0.0.0.0", () => {
+  console.log("BielOS OIDC issuer ready.");
+});
+
+async function handleInteraction(context: KoaContextWithOIDC, uid: string): Promise<void> {
+  const interaction = await provider.interactionDetails(context.req, context.res);
+  const sessionToken = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
+  const session = sessionToken ? await getSessionByToken(sessionToken) : null;
+
+  if (!session) {
+    const returnTo = `/interaction/${uid}`;
+    const login = new URL("/login", issuer);
+    login.searchParams.set("returnTo", returnTo);
+    context.status = 303;
+    context.redirect(login.href);
+    return;
+  }
+
+  if (["login", "bielos_session"].includes(interaction.prompt.name) || interaction.session?.accountId !== session.user.id) {
+    await provider.interactionFinished(context.req, context.res, {
+      login: { accountId: session.user.id, acr: "urn:bielos:loa:1", amr: ["pwd"] }
+    }, { mergeWithLastSubmission: false });
+    return;
+  }
+
+  if (interaction.prompt.name !== "consent") {
+    await denyInteraction(context);
+    return;
+  }
+
+  const clientId = getString(interaction.params.client_id);
+  if (!clientId || !(await hasActiveProjectGrant(session.user.id, clientId))) {
+    await writeAuditLog({
+      eventType: "SSO_AUTHORIZATION_DENIED",
+      result: "FAILURE",
+      actorUserId: session.user.id,
+      resource: "sso.authorization",
+      message: "Project access was not granted.",
+      metadata: { clientRef: clientId ? hashAuditIdentifier(clientId) : null }
+    });
+    await denyInteraction(context);
+    return;
+  }
+
+  const grant = interaction.grantId
+    ? await provider.Grant.find(interaction.grantId)
+    : new provider.Grant({ accountId: session.user.id, clientId });
+  if (!grant) {
+    await denyInteraction(context);
+    return;
+  }
+  grant.addOIDCScope("openid profile email");
+  const grantId = await grant.save();
+  await provider.interactionFinished(context.req, context.res, { consent: { grantId } }, { mergeWithLastSubmission: false });
+}
+
+async function denyInteraction(context: KoaContextWithOIDC): Promise<void> {
+  await provider.interactionFinished(context.req, context.res, {
+    error: "access_denied",
+    error_description: "Access denied."
+  }, { mergeWithLastSubmission: false });
+}
+
+async function hasActiveProjectGrant(userId: string, clientId: string): Promise<boolean> {
+  return Boolean(await prisma.userProjectGrant.findFirst({
+    where: { userId, revokedAt: null, connection: { clientId, enabled: true } },
+    select: { id: true }
+  }));
+}
+
+function readIssuer(env: NodeJS.ProcessEnv): string {
+  const issuerUrl = new URL(env.BIELOS_OIDC_ISSUER ?? "https://portal.biel.dev.br");
+  if (issuerUrl.username || issuerUrl.password || issuerUrl.search || issuerUrl.hash || issuerUrl.pathname !== "/") throw new Error("OIDC issuer URL is invalid.");
+  if (env.NODE_ENV === "production" && issuerUrl.protocol !== "https:") throw new Error("OIDC issuer requires HTTPS in production.");
+  return issuerUrl.origin;
+}
+
+function readSigningJwks(value: string | undefined): { keys: Array<Record<string, string>> } {
+  if (!value) throw new Error("OIDC signing keys are unavailable.");
+  const parsed: unknown = JSON.parse(value);
+  if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { keys?: unknown }).keys)) throw new Error("OIDC signing keys are invalid.");
+  const keys = (parsed as { keys: unknown[] }).keys;
+  if (!keys.length || keys.some((item) => !isPrivateSigningKey(item))) throw new Error("OIDC requires private ES256 signing keys with key IDs.");
+  return { keys: keys as Array<Record<string, string>> };
+}
+
+function isPrivateSigningKey(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const key = value as Record<string, unknown>;
+  return key.kty === "EC" && key.crv === "P-256" && key.alg === "ES256" && key.use === "sig" && typeof key.kid === "string" && Boolean(key.kid) && typeof key.d === "string";
+}
+
+function readCookieKey(value: string | undefined): string {
+  if (!value || !/^[A-Za-z0-9_-]{43}$/u.test(value) || Buffer.from(value, "base64url").length !== 32) throw new Error("OIDC cookie key is unavailable.");
+  return value;
+}
+
+function getCookie(header: string | undefined, name: string): string | null {
+  for (const part of (header ?? "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator > 0 && part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
+  }
+  return null;
+}
+
+function getString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function safeOidcError(value: unknown): string {
+  if (!value || typeof value !== "object") return "invalid_request";
+  const code = (value as { error?: unknown }).error;
+  return typeof code === "string" && /^[a-z_]{3,40}$/u.test(code) ? code : "invalid_request";
+}

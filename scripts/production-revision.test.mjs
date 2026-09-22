@@ -205,7 +205,7 @@ test("revision verifier safely categorizes missing, malformed, absent, and misma
       {
         "public-site": "",
         hub: "not-a-revision",
-        intake: "not-a-revision",
+        "oidc-issuer": "not-a-revision",
         "session-cleanup": unexpectedRevision,
         "email-worker": unexpectedRevision,
       },
@@ -216,7 +216,7 @@ test("revision verifier safely categorizes missing, malformed, absent, and misma
   assert.equal(result.ok, false);
   assert.ok(result.lines.includes("public-site: label missing"));
   assert.ok(result.lines.includes("hub: label malformed"));
-  assert.ok(result.lines.includes("intake: label malformed"));
+  assert.ok(result.lines.includes("oidc-issuer: label malformed"));
   assert.ok(result.lines.includes("session-cleanup: mismatch"));
   assert.ok(result.lines.includes("email-worker: mismatch"));
   assert.equal(result.lines.join("\n").includes(unexpectedRevision), false);

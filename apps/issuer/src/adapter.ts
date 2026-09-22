@@ -1,0 +1,114 @@
+import type { Adapter, AdapterPayload } from "oidc-provider";
+import { decryptOidcClientSecret, decryptOidcPayload, encryptOidcPayload, hashOidcIdentifier } from "@bielos/auth/oidc-secrets";
+import { prisma, type PrismaClient } from "@bielos/database";
+
+const grantBoundModels = new Set([
+  "AccessToken",
+  "AuthorizationCode",
+  "RefreshToken",
+  "DeviceCode",
+  "BackchannelAuthenticationRequest",
+  "PreAuthorizedCode"
+]);
+
+export class PrismaOidcAdapter implements Adapter {
+  constructor(private readonly model: string, private readonly database: Pick<PrismaClient, "oidcArtifact" | "projectConnection"> = prisma) {}
+
+  async upsert(id: string, payload: AdapterPayload, expiresIn: number): Promise<void> {
+    if (this.model === "Client") throw new Error("Client metadata is managed through project connections.");
+    const data = {
+      payloadCiphertext: encryptOidcPayload(JSON.stringify(payload)),
+      grantHash: grantBoundModels.has(this.model) && payload.grantId ? hashOidcIdentifier(payload.grantId) : null,
+      uidHash: payload.uid ? hashOidcIdentifier(payload.uid) : null,
+      userCodeHash: payload.userCode ? hashOidcIdentifier(payload.userCode) : null,
+      clientIdHash: payload.clientId ? hashOidcIdentifier(payload.clientId) : null,
+      accountIdHash: payload.accountId ? hashOidcIdentifier(payload.accountId) : null,
+      expiresAt: Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000) : null,
+      consumedAt: payload.consumed ? new Date(Number(payload.consumed) * 1000) : null
+    };
+    await this.database.oidcArtifact.upsert({
+      where: { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } },
+      update: data,
+      create: { model: this.model, idHash: hashOidcIdentifier(id), ...data }
+    });
+  }
+
+  async find(id: string): Promise<AdapterPayload | undefined> {
+    if (this.model === "Client") return this.findClient(id);
+    return this.readArtifact(await this.database.oidcArtifact.findUnique({ where: { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } } }));
+  }
+
+  async findByUid(uid: string): Promise<AdapterPayload | undefined> {
+    return this.readArtifact(await this.database.oidcArtifact.findFirst({ where: { model: this.model, uidHash: hashOidcIdentifier(uid) } }));
+  }
+
+  async findByUserCode(userCode: string): Promise<AdapterPayload | undefined> {
+    return this.readArtifact(await this.database.oidcArtifact.findFirst({ where: { model: this.model, userCodeHash: hashOidcIdentifier(userCode) } }));
+  }
+
+  async consume(id: string): Promise<void> {
+    const where = { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } };
+    const record = await this.database.oidcArtifact.findUnique({ where, select: { payloadCiphertext: true } });
+    if (!record) return;
+    const payload = parsePayload(decryptOidcPayload(record.payloadCiphertext));
+    if (payload.consumed) throw new Error("OIDC artifact was already consumed.");
+    payload.consumed = Math.floor(Date.now() / 1000);
+    const consumed = await this.database.oidcArtifact.updateMany({
+      where: { model: this.model, idHash: hashOidcIdentifier(id), consumedAt: null },
+      data: { payloadCiphertext: encryptOidcPayload(JSON.stringify(payload)), consumedAt: new Date() }
+    });
+    if (consumed.count !== 1) throw new Error("OIDC artifact was already consumed.");
+  }
+
+  async destroy(id: string): Promise<void> {
+    await this.database.oidcArtifact.deleteMany({ where: { model: this.model, idHash: hashOidcIdentifier(id) } });
+  }
+
+  async revokeByGrantId(grantId: string): Promise<void> {
+    await this.database.oidcArtifact.deleteMany({ where: { grantHash: hashOidcIdentifier(grantId) } });
+  }
+
+  private async findClient(clientId: string): Promise<AdapterPayload | undefined> {
+    const connection = await this.database.projectConnection.findUnique({
+      where: { clientId },
+      select: { clientId: true, clientSecretCiphertext: true, name: true, origin: true, redirectUris: true, enabled: true }
+    });
+    if (!connection?.enabled) return undefined;
+    const redirectUris = stringArray(connection.redirectUris);
+    if (!redirectUris.length) return undefined;
+    return {
+      client_id: connection.clientId,
+      client_secret: decryptOidcClientSecret(connection.clientSecretCiphertext),
+      client_name: connection.name,
+      client_uri: connection.origin,
+      redirect_uris: redirectUris,
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+      application_type: "web",
+      token_endpoint_auth_method: "client_secret_basic",
+      scope: "openid profile email",
+      id_token_signed_response_alg: "ES256"
+    };
+  }
+
+  private async readArtifact(record: { payloadCiphertext: string; expiresAt: Date | null } | null): Promise<AdapterPayload | undefined> {
+    if (!record) return undefined;
+    if (record.expiresAt && record.expiresAt <= new Date()) return undefined;
+    try {
+      return parsePayload(decryptOidcPayload(record.payloadCiphertext));
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function parsePayload(value: string): AdapterPayload {
+  const payload: unknown = JSON.parse(value);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid stored OIDC record.");
+  return payload as AdapterPayload;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return [];
+  return value;
+}

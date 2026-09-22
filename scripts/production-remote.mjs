@@ -6,18 +6,16 @@ import {
   runCommand,
 } from "./lib/production-revision.mjs";
 import {
-  PRODUCTION_ROOT,
-  PRODUCTION_SSH_ALIAS,
   SSH_OPTIONS,
   runProductionPreflight,
 } from "./production-preflight.mjs";
+import { PRODUCTION_CONFIG, isValidProductionConfig } from "./lib/production-config.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const remoteRunner = `${PRODUCTION_ROOT.replaceAll("\\", "/")}/scripts/production-server.ps1`;
 const allowedCommands = new Set([
   "start",
-  "core-up",
   "restart",
+  "prepare",
   "start-tunnel",
   "stop",
   "status",
@@ -25,10 +23,12 @@ const allowedCommands = new Set([
   "revision",
   "health",
   "logs",
-  "backup",
+  "backup-verify",
+  "migrate",
+  "migration-status",
+  "baseline",
   "audit-recent",
   "audit-cleanup",
-  "seed-owner",
   "sessions-cleanup",
   "config",
 ]);
@@ -40,10 +40,12 @@ export function parseRemoteProductionCommand(args) {
   return args[0];
 }
 
-function sshRunnerArgs(action, expectedRevision) {
+function sshRunnerArgs(action, expectedRevision, config = PRODUCTION_CONFIG) {
+  if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
+  const remoteRunner = `${config.root.replaceAll("\\", "/")}/scripts/production-server.ps1`;
   const args = [
     ...SSH_OPTIONS,
-    PRODUCTION_SSH_ALIAS,
+    config.sshAlias,
     "powershell.exe",
     "-NoLogo",
     "-NoProfile",
@@ -52,6 +54,8 @@ function sshRunnerArgs(action, expectedRevision) {
     "Bypass",
     "-File",
     remoteRunner,
+    "-Root",
+    config.root,
     "-Action",
     action,
   ];
@@ -59,8 +63,8 @@ function sshRunnerArgs(action, expectedRevision) {
   return args;
 }
 
-function runRemoteAction(action, expectedRevision, execute = runCommand) {
-  const result = execute("ssh", sshRunnerArgs(action, expectedRevision));
+function runRemoteAction(action, expectedRevision, execute = runCommand, config = PRODUCTION_CONFIG) {
+  const result = execute("ssh", sshRunnerArgs(action, expectedRevision, config));
   return {
     status: result.status,
     lines:
@@ -72,25 +76,25 @@ function runRemoteAction(action, expectedRevision, execute = runCommand) {
 
 export function runRemoteProductionCommand(
   args,
-  { execute = runCommand, preflight = runProductionPreflight } = {},
+  { execute = runCommand, preflight = runProductionPreflight, config = PRODUCTION_CONFIG } = {},
 ) {
   const command = parseRemoteProductionCommand(args);
-  const preflightResult = preflight({ execute });
+  const preflightResult = preflight({ execute, config });
   if (preflightResult instanceof Promise) {
-    return preflightResult.then((result) => finishRemoteCommand(command, result, execute));
+    return preflightResult.then((result) => finishRemoteCommand(command, result, execute, config));
   }
-  return finishRemoteCommand(command, preflightResult, execute);
+  return finishRemoteCommand(command, preflightResult, execute, config);
 }
 
-function finishRemoteCommand(command, preflightResult, execute) {
+function finishRemoteCommand(command, preflightResult, execute, config) {
   if (preflightResult.status !== 0) return preflightResult;
 
   let expectedRevision;
-  if (["start", "core-up", "restart"].includes(command)) {
+  if (["start", "restart", "prepare", "backup-verify", "migrate", "migration-status", "baseline"].includes(command)) {
     expectedRevision = inspectProductionSource({ repositoryRoot, execute }).revision;
   }
 
-  const result = runRemoteAction(command, expectedRevision, execute);
+  const result = runRemoteAction(command, expectedRevision, execute, config);
   return {
     status: result.status,
     lines: [...preflightResult.lines, ...result.lines],

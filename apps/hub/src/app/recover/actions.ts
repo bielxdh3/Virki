@@ -8,6 +8,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
+import { getSurface } from "../../lib/surface";
 
 export async function requestRecoveryAction(formData: FormData) {
   await requireAccess(formData, "account-recovery-request");
@@ -32,13 +33,21 @@ export async function completeRecoveryAction(formData: FormData) {
 export async function approveRecoveryAction(formData: FormData) {
   await requireAccess(formData, "account-recovery-approve");
   const session = await getCurrentSession();
-  if (!session || session.user.role !== "OWNER") redirect("/recover?error=1");
-  try { await requireSecurityElevation(session.user.id, session.id, "ACCOUNT_STATE_CHANGE"); await approveAccountRecovery(session.user, read(formData, "requestKey")); } catch { redirect("/core/security/admin?error=recovery"); }
-  redirect("/core/security/admin?status=recovery");
+  if (!session || session.user.role !== "ADMIN") redirect("/login");
+  try {
+    await requireSecurityElevation(session.user.id, session.id, "ACCOUNT_STATE_CHANGE");
+    await approveAccountRecovery(session.user, read(formData, "requestKey"));
+  } catch {
+    redirect("/admin/security?error=recovery");
+  }
+  redirect("/admin/security?status=recovery");
 }
 
 async function requireAccess(formData: FormData, source: string) {
-  if (!isCloudflareAccessAllowed(await validateHubCloudflareAccess(await headers(), source))) redirect("/login");
+  const requestHeaders = await headers();
+  const surface = getSurface(requestHeaders);
+  if (surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) redirect("/login");
   if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME)).valid) redirect("/login");
 }
+
 function read(formData: FormData, key: string): string { const value = formData.get(key); return typeof value === "string" ? value.trim() : ""; }

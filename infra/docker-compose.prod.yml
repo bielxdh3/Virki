@@ -10,19 +10,12 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:?NEXT_PUBLIC_HUB_URL must be set in local .env}
-      NEXT_PUBLIC_INTAKE_URL: ${NEXT_PUBLIC_INTAKE_URL:-}
+      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
     ports:
       - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
     command: npm run start --workspace @bielos/public-site
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-        ]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -33,14 +26,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      oidc-issuer:
+        condition: service_healthy
     env_file:
       - path: ../.env
         required: true
+      - path: ../.env.oidc
+        required: false
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:?NEXT_PUBLIC_HUB_URL must be set in local .env}
+      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:-https://hub.biel.dev.br}
+      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
+      BIELOS_HUB_HOSTNAME: ${BIELOS_HUB_HOSTNAME:-hub.biel.dev.br}
+      BIELOS_PORTAL_HOSTNAME: ${BIELOS_PORTAL_HOSTNAME:-portal.biel.dev.br}
+      BIELOS_OIDC_PROXY_URL: http://oidc-issuer:3003
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
+      BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
+      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
       CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
       CLOUDFLARE_ACCESS_AUDIENCE: ${CLOUDFLARE_ACCESS_AUDIENCE:?CLOUDFLARE_ACCESS_AUDIENCE must be set in local .env}
       CLOUDFLARE_TEAM_DOMAIN: ${CLOUDFLARE_TEAM_DOMAIN:?CLOUDFLARE_TEAM_DOMAIN must be set in local .env}
@@ -48,40 +51,49 @@ services:
       - "127.0.0.1:${HUB_PORT:-3001}:3001"
     command: npm run start --workspace @bielos/hub
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-        ]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
 
-  intake:
+  oidc-issuer:
     build: *bielos-build
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: true
+      - path: ../.env.oidc
+        required: false
     environment:
       NODE_ENV: production
-      INTAKE_PORT: 3002
-      PUBLIC_SITE_ORIGIN: ${PUBLIC_SITE_ORIGIN:?PUBLIC_SITE_ORIGIN must be set in local .env}
-      BIELOS_INTAKE_ENABLED: ${BIELOS_INTAKE_ENABLED:-false}
-      BIELOS_INTAKE_DATABASE_URL: ${BIELOS_INTAKE_DATABASE_URL:-}
-      BIELOS_INTAKE_ABUSE_SECRET: ${BIELOS_INTAKE_ABUSE_SECRET:-}
-      BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
-      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:-}
-      BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
-      BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
-      BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}
-      BIELOS_EMAIL_SMTP_USER: ${BIELOS_EMAIL_SMTP_USER:-}
-      BIELOS_EMAIL_SMTP_PASSWORD: ${BIELOS_EMAIL_SMTP_PASSWORD:-}
-      BIELOS_EMAIL_FROM: ${BIELOS_EMAIL_FROM:-}
-      BIELOS_EMAIL_REPLY_TO: ${BIELOS_EMAIL_REPLY_TO:-}
-    command: npm run start --workspace @bielos/intake
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
+      OIDC_ISSUER_PORT: 3003
+      BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
+    command: npm run start --workspace @bielos/issuer
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/.well-known/openid-configuration').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  migrate:
+    build:
+      <<: *bielos-build
+      target: migrator
+    profiles: ["migration"]
+    env_file:
+      - path: ../.env
+        required: true
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: npm run prisma:migrate:deploy
 
   session-cleanup:
     build: *bielos-build
@@ -97,12 +109,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       SESSION_CLEANUP_INTERVAL_SECONDS: ${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}
       AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
-    command:
-      [
-        "sh",
-        "-c",
-        "while true; do npm run sessions:cleanup --workspace @bielos/auth && npm run audit:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"
-      ]
+    command: ["sh", "-c", "while true; do npm run sessions:cleanup --workspace @bielos/auth && npm run audit:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"]
 
   email-worker:
     build: *bielos-build
@@ -110,11 +117,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: true
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
-      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:-}
+      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
       BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
       BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
       BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}

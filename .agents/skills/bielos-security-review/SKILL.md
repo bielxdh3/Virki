@@ -1,128 +1,36 @@
 ---
 name: bielos-security-review
-description: Use when reviewing BielOS security, authentication, Cloudflare Access, CSRF, session handling, Docker exposure, secrets, audit logs, or production hardening.
+description: Review BielOS authentication, authorization, OIDC, Cloudflare Access, sessions, CSRF, audit, deployment, or data-migration security.
 ---
 
-# BielOS Security Review Skill
+# BielOS security review
 
-Use this skill for security-sensitive BielOS work.
+Keep findings evidence-based and scoped. Do not print secrets or private production values. A review in a single-agent task is a fresh pass by the same agent; never imply independent review provenance.
 
-Keep output minimal and precise.
+## Trust boundaries
 
-Do not narrate routine inspection.
+1. Public page and unauthenticated protocol metadata.
+2. USER portal session and explicit project grant.
+3. ADMIN Cloudflare Access assertion and BielOS ADMIN session.
+4. External relying application and its own local session.
+5. Private Compose network, database, and remote production host.
 
-Do not paste long logs.
+## Review checklist
 
-Never print secret values.
+- Unknown hosts and anonymous protected routes fail closed.
+- ADMIN routes verify the Access JWT and BielOS role server-side; missing or invalid Access is forbidden.
+- USER access never inherits an ADMIN-only Access policy.
+- Session values are opaque, hashed at rest, host-only in cookies, revocable, and absent from logs.
+- Mutable actions enforce CSRF and fresh proof where required.
+- Login and recovery errors do not disclose account existence; rate limits fail closed.
+- MFA, recovery, and one-time protocol data resist replay and concurrent reuse.
+- OIDC enforces Authorization Code, PKCE S256, exact redirect URIs, state, nonce, issuer/client binding, expiry, and live grant checks.
+- Audit data contains safe identifiers and redacted context only; pagination and filters do not bypass authorization.
+- Public site exposes no private account, project, audit, or operational data.
+- Docker publishes only intended loopback ports; database and issuer stay private.
+- Production migrations have a verified backup/restore path and exact source revision.
+- Production operations do not touch deManage, remove persistent data, expose ports, or weaken Access.
 
-## Security Model
+## Output
 
-BielOS uses layered security:
-
-1. Cloudflare Tunnel without opening router ports.
-2. Cloudflare Access before the private hub.
-3. Optional origin-side Cloudflare Access JWT validation.
-4. BielOS internal authentication.
-5. Session token hashing at rest.
-6. HttpOnly session cookies.
-7. SameSite cookie protections.
-8. CSRF tokens for mutable hub routes.
-9. Audit logs without raw secrets or raw identifiers.
-10. Docker host-published ports bound to `127.0.0.1`.
-
-Do not weaken any layer unless the user explicitly asks.
-
-## Sensitive Data Rules
-
-Never expose:
-
-- `.env`;
-- Cloudflare tunnel token;
-- Cloudflare account IDs if treated as private;
-- Cloudflare Access JWT;
-- cookies;
-- session tokens;
-- raw auth headers;
-- raw request headers;
-- raw IP addresses;
-- database URL with password;
-- private keys;
-- credential JSON;
-- database dumps;
-- backups;
-- Google Takeout;
-- Gmail exports;
-- Gmail attachments;
-- logs containing private values.
-
-Use placeholders only.
-
-## Review Checklist
-
-Check for:
-
-- direct exposure of `hub` or port `3001`;
-- Docker ports not bound to `127.0.0.1`;
-- committed `.env` or `.env.*`;
-- Cloudflare credential JSON;
-- hardcoded tokens;
-- hardcoded passwords;
-- JWTs or cookies in logs;
-- raw IP storage;
-- raw user agent storage if avoidable;
-- weak auth changes;
-- CSRF bypasses;
-- mutable routes without CSRF;
-- audit logs that include sensitive values;
-- public-site leaking private internals;
-- docs exposing too much operational detail for public release.
-
-## Auth and Session Rules
-
-For auth/session work:
-
-- Do not expose whether a specific email exists.
-- Keep login failures generic.
-- Keep session token raw value out of the database.
-- Store only hashes of session tokens.
-- Logout must revoke session state and clear cookie.
-- Cleanup must not log session tokens.
-- Rate limiting must not reveal sensitive account state.
-
-## Cloudflare Rules
-
-For Cloudflare work:
-
-- Cloudflare Access is not a replacement for BielOS internal auth.
-- BielOS internal auth is not a replacement for Cloudflare Access.
-- Origin-side JWT validation must verify issuer, audience, signature, and expiration when enabled.
-- Missing or invalid required Access JWT must return HTTP `403`.
-- Do not commit real Access AUD values or tunnel tokens.
-
-## Output Format
-
-Use only:
-
-- Status
-- Security verdict
-- Findings
-- Required fixes
-- Acceptable limitations
-- Validations run
-- Validations not run
-
-Use severity when useful:
-
-- Critical
-- High
-- Medium
-- Low
-- Note
-
-Do not exaggerate. Do not speculate as fact.
-
-If no obvious issue is found, say:
-
-`Nenhum problema crítico encontrado no escopo revisado.`
-
-Still list limitations if validation was incomplete.
+State the security verdict, actionable findings with file/line evidence, checks run, checks unavailable, and material limits. Do not label an incomplete review comprehensive or independent.

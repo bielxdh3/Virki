@@ -58,23 +58,6 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_DB: bielos_core_test
-          POSTGRES_USER: bielos_test
-          POSTGRES_PASSWORD: local-validation-only
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bielos_test -d bielos_core_test"
-          --health-interval 1s
-          --health-timeout 3s
-          --health-retries 30
-
-    env:
-      CORE_TEST_DATABASE_URL: postgresql://bielos_test:local-validation-only@127.0.0.1:5432/bielos_core_test
 
     steps:
       - name: Checkout
@@ -89,13 +72,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Chromium for geometry tests
-        run: npx playwright install --with-deps chromium
-
       - name: Secret scan
         run: npm run secrets:scan
 
-      - name: Production revision tests
+      - name: Production control tests
         run: npm run test:production-revision
 
       - name: Lint
@@ -107,28 +87,19 @@ jobs:
       - name: Validate Prisma schema
         run: npm run prisma:validate
 
-      - name: Public site discovery tests
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Public surface tests
         run: npm run test:public-site
 
-      - name: Core unit tests
-        run: npm run test:core:unit
+      - name: Validate identity transition migration
+        run: npm run test:migration
 
-      - name: Hub layout geometry tests
-        run: npm run test:layout-geometry
-
-      - name: Core database integration tests
-        run: npm run test:core:db:integration
-
-      - name: Intake database role validation
-        run: npm run test:intake:db-role
-
-      - name: Backup and restore validation
+      - name: Validate database backup and restore
         run: npm run test:backup:restore
 
-      - name: Core concurrency tests
-        run: npm run test:core:concurrency
-
-      - name: Build
+      - name: Build applications
         run: npm run build
 
       - name: Build production Docker image
@@ -159,7 +130,7 @@ jobs:
           BIELOS_BUILD_REVISION: 0123456789abcdef0123456789abcdef01234567
           POSTGRES_PASSWORD: local-validation-only
           NEXT_PUBLIC_HUB_URL: https://hub.example.invalid
-          PUBLIC_SITE_ORIGIN: https://www.example.invalid
+          NEXT_PUBLIC_PORTAL_URL: https://portal.example.invalid
           CLOUDFLARE_ACCESS_AUDIENCE: ci-test-audience
           CLOUDFLARE_TEAM_DOMAIN: team.example.invalid
           CLOUDFLARE_TUNNEL_TOKEN: placeholder

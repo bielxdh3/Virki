@@ -11,7 +11,13 @@ const nextConfig = {
   },
   outputFileTracingRoot: workspaceRoot,
   serverExternalPackages: ["@node-rs/argon2", "@prisma/client"],
-  transpilePackages: ["@bielos/ui", "@bielos/types", "@bielos/auth", "@bielos/database"],
+  transpilePackages: ["@bielos/auth", "@bielos/database"],
+  async rewrites() {
+    const issuer = process.env.BIELOS_OIDC_PROXY_URL ?? "http://oidc-issuer:3003";
+    const portalHost = process.env.BIELOS_PORTAL_HOSTNAME ?? "portal.biel.dev.br";
+    const paths = ["/.well-known/:path*", "/auth", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/interaction/:path*", "/resume/:path*"];
+    return paths.map((source) => ({ source, has: [{ type: "host", value: portalHost }], destination: `${issuer}${source}` }));
+  },
   webpack: (config, { isServer }) => {
     if (isServer) {
       config.externals = [

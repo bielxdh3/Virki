@@ -113,6 +113,8 @@ export function verifyTotpCode(secret: string, code: string, now = new Date(), l
 export async function startTotpEnrollment(userId: string, email: string): Promise<{ secret: string; uri: string }> {
   const secret = createTotpSecret();
   await prisma.$transaction(async (transaction) => {
+    const current = await transaction.totpFactor.findUnique({ where: { userId }, select: { status: true } });
+    if (current?.status === "ACTIVE") throw new SecurityMutationError();
     await invalidateRememberedLoginGrants(transaction, userId);
     await revokeLoginChallenges(transaction, userId);
     await transaction.totpFactor.upsert({
@@ -144,13 +146,21 @@ export async function confirmTotpEnrollment(userId: string, code: string, now = 
   return recoveryCodes;
 }
 
-export async function disableTotp(userId: string): Promise<void> {
+export async function disableTotp(userId: string, code: string, now = new Date()): Promise<void> {
+  if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   await prisma.$transaction(async (transaction) => {
-    await transaction.totpFactor.updateMany({ where: { userId, status: "ACTIVE" }, data: { status: "REVOKED" } });
+    const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
+    if (!factor || factor.status !== "ACTIVE") throw new SecurityMutationError();
+    const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
+    if (step === null) throw new SecurityMutationError();
+    const consumed = await transaction.totpFactor.updateMany({ where: { id: factor.id, status: "ACTIVE", lastUsedStep: factor.lastUsedStep }, data: { status: "REVOKED", lastUsedStep: step } });
+    if (consumed.count !== 1) throw new SecurityMutationError();
     await transaction.user.update({ where: { id: userId }, data: { secondFactorMethod: "EMAIL" } });
     await transaction.recoveryCode.deleteMany({ where: { userId } });
     await invalidateRememberedLoginGrants(transaction, userId);
     await revokeLoginChallenges(transaction, userId);
+    await transaction.securityElevation.updateMany({ where: { userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
+    await transaction.session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: now } });
   });
   await writeAuditLog({ eventType: "SECOND_FACTOR_DISABLED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP second factor disabled." });
 }
@@ -160,11 +170,16 @@ export async function getAccountSecurityState(userId: string) {
   return user ? { secondFactorMethod: user.secondFactorMethod, emailVerified: Boolean(user.emailVerifiedAt), totpStatus: user.totpFactor?.status ?? "NOT_CONFIGURED", totpConfirmedAt: user.totpFactor?.confirmedAt ?? null, recoveryCodeCount: user._count.recoveryCodes, trustedDeviceCount: user._count.trustedDevices } : null;
 }
 
-export async function regenerateRecoveryCodes(userId: string): Promise<string[]> {
+export async function regenerateRecoveryCodes(userId: string, code: string, now = new Date()): Promise<string[]> {
+  if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
   await prisma.$transaction(async (transaction) => {
-    const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { status: true } });
-    if (factor?.status !== "ACTIVE") throw new SecurityMutationError();
+    const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
+    if (!factor || factor.status !== "ACTIVE") throw new SecurityMutationError();
+    const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
+    if (step === null) throw new SecurityMutationError();
+    const consumed = await transaction.totpFactor.updateMany({ where: { id: factor.id, status: "ACTIVE", lastUsedStep: factor.lastUsedStep }, data: { lastUsedStep: step } });
+    if (consumed.count !== 1) throw new SecurityMutationError();
     await transaction.recoveryCode.deleteMany({ where: { userId } });
     await transaction.recoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId, codeHash: hashRecoveryCode(value) })) });
   });
@@ -446,9 +461,9 @@ function getTotpKey(env: NodeJS.ProcessEnv): Buffer {
 }
 
 async function requireOwner(actor: { id: string; role: string }): Promise<void> {
-  if (actor.role !== "OWNER") throw new SecurityMutationError();
+  if (actor.role !== "ADMIN") throw new SecurityMutationError();
   const persisted = await prisma.user.findUnique({ where: { id: actor.id }, select: { role: true, isActive: true } });
-  if (!persisted?.isActive || persisted.role !== "OWNER") throw new SecurityMutationError();
+  if (!persisted?.isActive || persisted.role !== "ADMIN") throw new SecurityMutationError();
 }
 
 function totpValue(secret: string, step: number): number {

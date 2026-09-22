@@ -1,9 +1,42 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import {
   classifyCloudflareAccessJwtError,
   validateCloudflareAccessJwt
 } from "./cloudflare-access";
+
+test("validates a signed Access JWT against its issuer, audience, and JWKS", async () => {
+  const teamDomain = "https://signed-jwt-test.example.invalid";
+  const audience = "signed-jwt-test-audience";
+  const keyId = "signed-jwt-test-key";
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = await exportJWK(publicKey);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ keys: [{ ...jwk, kid: keyId, use: "sig", alg: "RS256" }] }), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  })) as typeof fetch;
+
+  try {
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "RS256", kid: keyId })
+      .setIssuer(teamDomain)
+      .setAudience(audience)
+      .setIssuedAt()
+      .setExpirationTime("2m")
+      .sign(privateKey);
+    const result = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), {
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
+      CLOUDFLARE_ACCESS_AUDIENCE: audience,
+      CLOUDFLARE_TEAM_DOMAIN: teamDomain
+    });
+
+    assert.deepEqual(result, { allowed: true, required: true, status: "valid" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("covers disabled, missing configuration, and missing JWT outcomes", async () => {
   assert.deepEqual(

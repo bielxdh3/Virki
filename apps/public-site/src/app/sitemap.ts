@@ -1,6 +1,7 @@
 import type { MetadataRoute } from "next";
-import { PUBLIC_SITE_URL } from "./discovery";
+
+const publicUrl = process.env.PUBLIC_SITE_URL ?? "https://biel.dev.br";
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  return [{ url: PUBLIC_SITE_URL }];
+  return [{ url: publicUrl }];
 }

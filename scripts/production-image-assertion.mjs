@@ -14,6 +14,7 @@ const moduleRoots = findNodeModulesRoots("/app");
 const forbiddenFound = moduleRoots.flatMap((root) => forbidden.filter((name) => fs.existsSync(packagePath(root, name))));
 const prismaBinaryFound = moduleRoots.some((root) => fs.existsSync(path.join(root, ".bin", "prisma")));
 const requiredClient = moduleRoots.some((root) => fs.existsSync(packagePath(root, "@prisma/client/package.json")));
+const oidcProvider = moduleRoots.some((root) => fs.existsSync(packagePath(root, "oidc-provider/package.json")));
 const argon2WrapperBinary = [
   "/app/node_modules/@node-rs/argon2/argon2.linux-x64-musl.node",
   "/app/node_modules/@node-rs/argon2/argon2.linux-arm64-musl.node"
@@ -41,7 +42,7 @@ const generatedClient = [
   "/app/apps/hub/node_modules/.prisma/client",
   "/app/node_modules/.prisma/client"
 ].some((root) => fs.existsSync(path.join(root, "default.js")) && (fs.existsSync(path.join(root, "client.js")) || fs.existsSync(path.join(root, "index.js"))));
-if (forbiddenFound.length > 0 || prismaBinaryFound || !requiredClient || !generatedClient || !runtimeClosure || !linuxBinary) process.exit(1);
+if (forbiddenFound.length > 0 || prismaBinaryFound || !requiredClient || !oidcProvider || !generatedClient || !runtimeClosure || !linuxBinary) process.exit(1);
 function packagePath(root, name) { return path.join(root, ...name.split("/")); }
 function findNodeModulesRoots(root) {
   const roots = [];

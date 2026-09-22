@@ -1,26 +1,11 @@
 import type { Metadata } from "next";
-import { getLocale } from "./locale";
 import "./globals.css";
-import { SessionHistoryGuard } from "./session-history-guard";
 
 export const metadata: Metadata = {
-  title: "BielOS Hub",
-  description: "Private BielOS hub shell."
+  title: "BielOS",
+  description: "Identidade, autenticação e acesso para projetos privados."
 };
 
-export default async function RootLayout({
-  children
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
-  const locale = await getLocale();
-
-  return (
-    <html lang={locale}>
-      <body>
-        <SessionHistoryGuard />
-        {children}
-      </body>
-    </html>
-  );
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return <html lang="pt-BR"><body>{children}</body></html>;
 }

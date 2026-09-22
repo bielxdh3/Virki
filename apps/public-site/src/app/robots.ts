@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
-import { PUBLIC_SITE_ORIGIN, PUBLIC_SITEMAP_URL } from "./discovery";
+
+const publicUrl = process.env.PUBLIC_SITE_URL ?? "https://biel.dev.br";
 
 export default function robots(): MetadataRoute.Robots {
   return {
@@ -7,7 +8,7 @@ export default function robots(): MetadataRoute.Robots {
       userAgent: "*",
       allow: "/"
     },
-    sitemap: PUBLIC_SITEMAP_URL,
-    host: PUBLIC_SITE_ORIGIN
+    sitemap: new URL("/sitemap.xml", publicUrl).href,
+    host: publicUrl
   };
 }

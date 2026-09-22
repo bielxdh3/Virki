@@ -8,42 +8,8 @@ datasource db {
 }
 
 enum UserRole {
-  OWNER
   ADMIN
-  MEMBER
-}
-
-enum ProjectVisibility {
-  PUBLIC
-  INTERNAL
-  SENSITIVE
-}
-
-enum ProjectStatus {
-  PLANNED
-  RESERVED
-  ACTIVE
-  PAUSED
-  ARCHIVED
-}
-
-enum AccessLevel {
-  VIEWER
-  EDITOR
-  OWNER
-}
-
-enum UnlockPurpose {
-  LOGIN
-  SENSITIVE_MODULE
-  RECOVERY
-}
-
-enum UnlockStatus {
-  PENDING
-  APPROVED
-  DENIED
-  EXPIRED
+  USER
 }
 
 enum AccountStatus {
@@ -53,60 +19,9 @@ enum AccountStatus {
   INACTIVE
 }
 
-enum AccountApplicationStatus {
-  PENDING_EMAIL
-  EMAIL_VERIFIED
-  IN_REVIEW
-  PARTIALLY_APPROVED
-  APPROVED
-  REJECTED
-  EXPIRED
-  ACTIVATED
-}
-
-enum ApplicationModuleDecisionStatus {
-  REQUESTED
-  APPROVED
-  REJECTED
-  BLOCKED
-  EXPIRED
-  REVOKED
-}
-
-enum ModuleCatalogVisibility {
-  PUBLIC
-  UNLISTED
-  PRIVATE
-}
-
-enum ModuleRuntimeAvailability {
-  AVAILABLE
-  UNAVAILABLE
-  INERT
-}
-
-enum AccessDurationKind {
-  PERMANENT
-  TEMPORARY
-}
-
-enum ModuleAccessStatus {
-  ACTIVE
-  EXPIRED
-  REVOKED
-}
-
-enum ModuleRequestStatus {
-  PENDING
-  APPROVED
-  REJECTED
-  BLOCKED
-  EXPIRED
-}
-
-enum FeaturePermissionStatus {
-  ACTIVE
-  INACTIVE
+enum SecondFactorMethod {
+  EMAIL
+  TOTP
 }
 
 enum OutboxMessageStatus {
@@ -118,11 +33,6 @@ enum OutboxMessageStatus {
 }
 
 enum EmailMessageKind {
-  APPLICATION_EMAIL_VERIFICATION
-  ACCOUNT_ACTIVATION
-  USER_VISIBLE_REJECTION
-  MODULE_ACCESS_CHANGED
-  FEATURE_PERMISSION_CHANGED
   NEW_DEVICE_VERIFICATION
   EMAIL_TWO_FACTOR
   PASSWORD_CHANGED
@@ -143,11 +53,6 @@ enum SecurityFactorStatus {
   PENDING
   ACTIVE
   REVOKED
-}
-
-enum SecondFactorMethod {
-  EMAIL
-  TOTP
 }
 
 enum DeviceChallengeStatus {
@@ -184,115 +89,44 @@ enum SecurityElevationStatus {
   CONSUMED
 }
 
-enum GymForgeParticipantStatus {
-  INVITED
-  ACTIVE
-  DISABLED
-  ARCHIVED
-}
-
-enum GymForgeParticipantRole {
-  ADMIN
-  PARTICIPANT
-}
-
-enum GymForgeWorkoutUnit {
-  KG
-  LB
-  BODYWEIGHT
-  OTHER
-}
-
-enum GymForgeCompetitionStatus {
-  DRAFT
-  ACTIVE
-  ENDED
-  ARCHIVED
-}
-
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  emailNormalized String? @unique
-  displayName  String?
-  passwordHash String?
-  role         UserRole @default(MEMBER)
-  isActive     Boolean  @default(true)
-  accountStatus AccountStatus @default(ACTIVE)
-  emailVerifiedAt DateTime?
-  secondFactorMethod SecondFactorMethod @default(EMAIL)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  sessions                        Session[]
-  projectAccesses                 ProjectAccess[]
-  securityUnlocks                 SecurityUnlock[]
-  auditLogs                       AuditLog[]
-  activatedApplications            AccountApplication[] @relation("ApplicationActivatedUser")
-  reviewedApplications             AccountApplication[] @relation("ApplicationReviewer")
-  applicationModuleDecisions      ApplicationModuleDecision[] @relation("ApplicationDecisionReviewer")
-  moduleAccessGrants               ModuleAccessGrant[] @relation("ModuleGrantUser")
-  moduleAccessGrantsGiven          ModuleAccessGrant[] @relation("ModuleGrantActor")
-  moduleAccessRequests             ModuleAccessRequest[]
-  reviewedModuleAccessRequests     ModuleAccessRequest[] @relation("ModuleRequestReviewer")
-  featurePermissionGrants          FeaturePermissionGrant[]
-  featurePermissionGrantsGiven     FeaturePermissionGrant[] @relation("FeatureGrantActor")
-  featurePermissionRequests        FeaturePermissionRequest[]
-  reviewedFeaturePermissionRequests FeaturePermissionRequest[] @relation("FeatureRequestReviewer")
-  totpFactor                       TotpFactor?
-  recoveryCodes                    RecoveryCode[]
-  deviceChallenges                 DeviceChallenge[]
-  trustedDevices                   TrustedDevice[]
-  accountRecoveryRequests          AccountRecoveryRequest[]
-  reviewedRecoveryRequests         AccountRecoveryRequest[] @relation("RecoveryReviewer")
-  administrativeCredential         AdministrativeCredential?
-  administrativeRecoveryCodes      AdministrativeRecoveryCode[]
-  securityElevations               SecurityElevation[]
-  gymForgeParticipants            GymForgeParticipant[]
-  gymForgeScoreCorrectionsCreated GymForgeCompetitionScoreCorrection[] @relation("GymForgeScoreCorrectionCreatedBy")
-  gymForgeScoreCorrectionsRevoked GymForgeCompetitionScoreCorrection[] @relation("GymForgeScoreCorrectionRevokedBy")
-}
-
-model Project {
-  id          String            @id @default(cuid())
-  name        String
-  slug        String            @unique
-  description String?
-  visibility  ProjectVisibility @default(INTERNAL)
-  status      ProjectStatus     @default(RESERVED)
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
-
-  accesses ProjectAccess[]
-  unlocks  SecurityUnlock[]
-}
-
-model ProjectAccess {
-  id          String      @id @default(cuid())
-  userId      String
-  projectId   String
-  accessLevel AccessLevel @default(VIEWER)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, projectId])
-  @@index([projectId])
+  id                       String              @id @default(cuid())
+  email                    String              @unique
+  emailNormalized          String?             @unique
+  displayName              String?
+  passwordHash             String?
+  role                     UserRole            @default(USER)
+  isActive                 Boolean             @default(true)
+  accountStatus            AccountStatus       @default(ACTIVE)
+  emailVerifiedAt          DateTime?
+  secondFactorMethod       SecondFactorMethod  @default(EMAIL)
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  sessions                 Session[]
+  auditLogs                AuditLog[]
+  projectGrants            UserProjectGrant[]
+  connectionsCreated       ProjectConnection[] @relation("ConnectionCreator")
+  totpFactor               TotpFactor?
+  recoveryCodes            RecoveryCode[]
+  deviceChallenges         DeviceChallenge[]
+  trustedDevices           TrustedDevice[]
+  accountRecoveryRequests  AccountRecoveryRequest[]
+  reviewedRecoveryRequests AccountRecoveryRequest[] @relation("RecoveryReviewer")
+  administrativeCredential AdministrativeCredential?
+  administrativeRecoveryCodes AdministrativeRecoveryCode[]
+  securityElevations       SecurityElevation[]
 }
 
 model Session {
-  id        String    @id @default(cuid())
-  sessionKey String   @unique @default(cuid())
-  userId    String
-  tokenHash String    @unique
-  expiresAt DateTime
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  revokedAt DateTime?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id         String    @id @default(cuid())
+  sessionKey String    @unique @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  revokedAt  DateTime?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])
@@ -312,23 +146,60 @@ model LoginRateLimit {
   @@index([expiresAt])
 }
 
-model SecurityUnlock {
-  id            String        @id @default(cuid())
-  userId        String
-  projectId     String?
-  purpose       UnlockPurpose
-  status        UnlockStatus  @default(PENDING)
-  challengeHash String
-  approvedAt    DateTime?
-  expiresAt     DateTime
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+model ProjectConnection {
+  id                   String             @id @default(cuid())
+  name                 String
+  slug                 String             @unique
+  description          String?
+  origin               String
+  enabled              Boolean            @default(true)
+  clientId             String             @unique
+  clientSecretCiphertext String
+  redirectUris         Json
+  createdByUserId      String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  createdBy            User?              @relation("ConnectionCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  grants               UserProjectGrant[]
 
-  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  @@index([enabled])
+}
 
-  @@index([userId])
-  @@index([projectId])
+model UserProjectGrant {
+  id              String           @id @default(cuid())
+  userId          String
+  connectionId    String
+  grantedByUserId String?
+  createdAt       DateTime         @default(now())
+  revokedAt       DateTime?
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connection      ProjectConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, connectionId])
+  @@index([connectionId, revokedAt])
+  @@index([userId, revokedAt])
+}
+
+model OidcArtifact {
+  id             String   @id @default(cuid())
+  model          String
+  idHash         String
+  payloadCiphertext String
+  grantHash      String?
+  uidHash        String?
+  userCodeHash   String?
+  clientIdHash   String?
+  accountIdHash  String?
+  expiresAt      DateTime?
+  consumedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([model, idHash])
+  @@index([model, uidHash])
+  @@index([model, userCodeHash])
+  @@index([model, grantHash])
+  @@index([clientIdHash, accountIdHash])
   @@index([expiresAt])
 }
 
@@ -342,213 +213,12 @@ model AuditLog {
   message        String?
   metadata       Json?
   createdAt      DateTime @default(now())
-
-  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  actor          User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([eventType])
   @@index([actorUserId])
   @@index([actorEmailHash])
   @@index([createdAt])
-}
-
-model AccountApplication {
-  id                  String                    @id @default(cuid())
-  emailNormalized     String
-  abuseIdentifierHash String?
-  displayName         String?
-  status              AccountApplicationStatus @default(PENDING_EMAIL)
-  reviewedByUserId    String?
-  internalReviewReason String?
-  retryAfterAt        DateTime?
-  indefinitelyBlocked Boolean                   @default(false)
-  activatedUserId     String?
-  createdAt           DateTime                  @default(now())
-  updatedAt           DateTime                  @updatedAt
-
-  activatedUser User? @relation("ApplicationActivatedUser", fields: [activatedUserId], references: [id], onDelete: SetNull)
-  reviewedByUser User? @relation("ApplicationReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
-  emailVerification ApplicationEmailVerification?
-  activation AccountActivation?
-  moduleDecisions ApplicationModuleDecision[] @relation("ApplicationModules")
-
-  @@index([emailNormalized])
-  @@index([status, createdAt])
-}
-
-model ApplicationEmailVerification {
-  id            String   @id @default(cuid())
-  applicationId String   @unique
-  tokenHash     String
-  expiresAt     DateTime
-  consumedAt    DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  application AccountApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-
-  @@index([expiresAt])
-}
-
-model AccountActivation {
-  id            String   @id @default(cuid())
-  applicationId String   @unique
-  tokenHash     String
-  expiresAt     DateTime
-  consumedAt    DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  application AccountApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-
-  @@index([expiresAt])
-}
-
-model ModuleCatalog {
-  id                   String                     @id @default(cuid())
-  key                  String                     @unique
-  name                 String
-  visibility           ModuleCatalogVisibility    @default(PRIVATE)
-  runtimeAvailability  ModuleRuntimeAvailability @default(INERT)
-  requestable          Boolean                    @default(false)
-  separateRepository   Boolean                    @default(false)
-  createdAt            DateTime                   @default(now())
-  updatedAt            DateTime                   @updatedAt
-
-  applicationDecisions ApplicationModuleDecision[]
-  accessGrants         ModuleAccessGrant[]
-  accessRequests       ModuleAccessRequest[]
-  featurePermissions   FeaturePermissionDeclaration[]
-}
-
-model ApplicationModuleDecision {
-  id                  String                          @id @default(cuid())
-  dedupeKey           String                          @unique
-  applicationId       String
-  moduleId            String
-  reason              String
-  status              ApplicationModuleDecisionStatus @default(REQUESTED)
-  internalReason      String?
-  userVisibleMessage  String?
-  accessDurationKind  AccessDurationKind              @default(PERMANENT)
-  accessExpiresAt     DateTime?
-  retryAfterAt        DateTime?
-  indefinitelyBlocked Boolean                         @default(false)
-  addedByOwner        Boolean                         @default(false)
-  reviewedByUserId    String?
-  decidedAt           DateTime?
-  createdAt           DateTime                        @default(now())
-  updatedAt           DateTime                        @updatedAt
-
-  application AccountApplication @relation("ApplicationModules", fields: [applicationId], references: [id], onDelete: Cascade)
-  module ModuleCatalog @relation(fields: [moduleId], references: [id], onDelete: Restrict)
-  reviewedByUser User? @relation("ApplicationDecisionReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
-
-  @@unique([applicationId, moduleId])
-  @@index([moduleId, status])
-}
-
-model ModuleAccessGrant {
-  id                  String             @id @default(cuid())
-  userId             String
-  moduleId           String
-  status              ModuleAccessStatus @default(ACTIVE)
-  accessDurationKind  AccessDurationKind @default(PERMANENT)
-  expiresAt           DateTime?
-  grantedByUserId     String?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
-  revokedAt           DateTime?
-
-  user User @relation("ModuleGrantUser", fields: [userId], references: [id], onDelete: Cascade)
-  module ModuleCatalog @relation(fields: [moduleId], references: [id], onDelete: Restrict)
-  grantedByUser User? @relation("ModuleGrantActor", fields: [grantedByUserId], references: [id], onDelete: SetNull)
-
-  @@unique([userId, moduleId])
-  @@index([moduleId, status])
-  @@index([expiresAt])
-}
-
-model ModuleAccessRequest {
-  id                  String              @id @default(cuid())
-  requestKey          String              @unique
-  userId              String
-  moduleId            String
-  reason              String
-  status              ModuleRequestStatus @default(PENDING)
-  userVisibleMessage  String?
-  retryAfterAt        DateTime?
-  indefinitelyBlocked Boolean             @default(false)
-  reviewedByUserId    String?
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  decidedAt           DateTime?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  module ModuleCatalog @relation(fields: [moduleId], references: [id], onDelete: Restrict)
-  reviewedByUser User? @relation("ModuleRequestReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
-
-  @@index([userId, moduleId, createdAt])
-  @@index([moduleId, status])
-}
-
-model FeaturePermissionDeclaration {
-  id          String                  @id @default(cuid())
-  moduleId    String
-  key         String
-  label       String
-  status      FeaturePermissionStatus @default(ACTIVE)
-  requestable Boolean                 @default(false)
-  createdAt   DateTime                @default(now())
-  updatedAt   DateTime                @updatedAt
-
-  module ModuleCatalog @relation(fields: [moduleId], references: [id], onDelete: Cascade)
-  grants FeaturePermissionGrant[]
-  requests FeaturePermissionRequest[]
-
-  @@unique([moduleId, key])
-  @@index([moduleId, status, requestable])
-}
-
-model FeaturePermissionGrant {
-  id              String   @id @default(cuid())
-  userId          String
-  permissionId    String
-  grantedByUserId String?
-  expiresAt       DateTime?
-  revokedAt       DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  permission FeaturePermissionDeclaration @relation(fields: [permissionId], references: [id], onDelete: Cascade)
-  grantedByUser User? @relation("FeatureGrantActor", fields: [grantedByUserId], references: [id], onDelete: SetNull)
-
-  @@unique([userId, permissionId])
-  @@index([permissionId])
-  @@index([expiresAt])
-}
-
-model FeaturePermissionRequest {
-  id                  String              @id @default(cuid())
-  requestKey          String              @unique
-  userId              String
-  permissionId        String
-  reason              String?
-  status              ModuleRequestStatus @default(PENDING)
-  userVisibleMessage  String?
-  retryAfterAt        DateTime?
-  indefinitelyBlocked Boolean             @default(false)
-  reviewedByUserId    String?
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  decidedAt           DateTime?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  permission FeaturePermissionDeclaration @relation(fields: [permissionId], references: [id], onDelete: Cascade)
-  reviewedByUser User? @relation("FeatureRequestReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
-
-  @@index([userId, permissionId, createdAt])
-  @@index([permissionId, status])
 }
 
 model EmailOutboxMessage {
@@ -565,7 +235,6 @@ model EmailOutboxMessage {
   terminalFailedAt DateTime?
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
-
   deliveryAttempts EmailDeliveryAttempt[]
 
   @@index([status, availableAt])
@@ -578,25 +247,23 @@ model EmailDeliveryAttempt {
   status      DeliveryAttemptStatus
   errorCode   String?
   attemptedAt DateTime              @default(now())
-
-  message EmailOutboxMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  message     EmailOutboxMessage    @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
   @@unique([messageId, attempt])
   @@index([attemptedAt])
 }
 
 model TotpFactor {
-  id               String               @id @default(cuid())
-  userId           String               @unique
+  id               String             @id @default(cuid())
+  userId           String             @unique
   secretCiphertext String
   keyVersion       Int
   lastUsedStep     Int?
   status           SecurityFactorStatus @default(PENDING)
   confirmedAt      DateTime?
-  createdAt        DateTime             @default(now())
-  updatedAt        DateTime             @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model RecoveryCode {
@@ -605,47 +272,43 @@ model RecoveryCode {
   codeHash  String
   usedAt    DateTime?
   createdAt DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, codeHash])
   @@index([userId, usedAt])
 }
 
 model DeviceChallenge {
-  id           String                 @id @default(cuid())
+  id           String               @id @default(cuid())
   userId       String
-  ceremonyId   String
+  ceremonyId   String               @unique
   deviceIdHash String
   codeHash     String
-  requiresTotp Boolean                @default(false)
+  requiresTotp Boolean              @default(false)
   status       DeviceChallengeStatus @default(PENDING)
   expiresAt    DateTime
   consumedAt   DateTime?
-  createdAt    DateTime               @default(now())
+  createdAt    DateTime             @default(now())
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([ceremonyId])
   @@index([userId, deviceIdHash])
   @@index([expiresAt])
 }
 
 model TrustedDevice {
-  id           String              @id @default(cuid())
-  deviceKey    String              @unique @default(cuid())
-  userId       String
-  deviceIdHash String
-  label        String?
-  status       TrustedDeviceStatus @default(TRUSTED)
-  lastSeenAt   DateTime            @default(now())
-  rememberedUntil DateTime?
-  strongVerifiedAt DateTime?
-  revokedAt    DateTime?
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                String              @id @default(cuid())
+  deviceKey         String              @unique @default(cuid())
+  userId            String
+  deviceIdHash      String
+  label             String?
+  status            TrustedDeviceStatus @default(TRUSTED)
+  lastSeenAt        DateTime            @default(now())
+  rememberedUntil   DateTime?
+  strongVerifiedAt  DateTime?
+  revokedAt         DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, deviceIdHash])
   @@index([userId, status])
@@ -653,21 +316,20 @@ model TrustedDevice {
 }
 
 model AccountRecoveryRequest {
-  id                  String                @id @default(cuid())
-  requestKey          String                @unique
-  userId              String
-  emailChallengeHash  String
-  emailVerifiedAt     DateTime?
-  status              RecoveryRequestStatus @default(PENDING)
-  expiresAt           DateTime
-  reviewedByUserId    String?
-  approvedAt          DateTime?
-  consumedAt          DateTime?
-  createdAt           DateTime              @default(now())
-  updatedAt           DateTime              @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  reviewedByUser User? @relation("RecoveryReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  id                 String                @id @default(cuid())
+  requestKey         String                @unique
+  userId             String
+  emailChallengeHash String
+  emailVerifiedAt    DateTime?
+  status             RecoveryRequestStatus @default(PENDING)
+  expiresAt          DateTime
+  reviewedByUserId   String?
+  approvedAt         DateTime?
+  consumedAt         DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  user               User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reviewedByUser     User?                 @relation("RecoveryReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
 
   @@index([userId, status])
   @@index([expiresAt])
@@ -682,8 +344,7 @@ model AdministrativeCredential {
   createdAt    DateTime                       @default(now())
   updatedAt    DateTime                       @updatedAt
   revokedAt    DateTime?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model AdministrativeRecoveryCode {
@@ -692,31 +353,29 @@ model AdministrativeRecoveryCode {
   codeHash  String
   usedAt    DateTime?
   createdAt DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, codeHash])
   @@index([userId, usedAt])
 }
 
 model SecurityElevation {
-  id                    String                  @id @default(cuid())
-  requestKey            String                  @unique
-  userId                String
-  sessionId             String
-  protocolVersion       Int
-  scope                 String
-  challengeHash         String
-  status                SecurityElevationStatus @default(PENDING)
-  manualUntilRevoked    Boolean                 @default(false)
-  expiresAt             DateTime
-  activatedAt           DateTime?
-  revokedAt             DateTime?
-  consumedAt            DateTime?
-  createdAt             DateTime                @default(now())
-  updatedAt             DateTime                @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                 String                  @id @default(cuid())
+  requestKey         String                  @unique
+  userId             String
+  sessionId          String
+  protocolVersion    Int
+  scope              String
+  challengeHash      String
+  status             SecurityElevationStatus @default(PENDING)
+  manualUntilRevoked Boolean                 @default(false)
+  expiresAt          DateTime
+  activatedAt        DateTime?
+  revokedAt          DateTime?
+  consumedAt         DateTime?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, sessionId, scope])
   @@index([status, expiresAt])
@@ -730,155 +389,4 @@ model SanitizedAuditReference {
   createdAt     DateTime @default(now())
 
   @@index([category, createdAt])
-}
-
-model GymForgeParticipant {
-  id          String                    @id @default(cuid())
-  userId      String?
-  displayName String
-  status      GymForgeParticipantStatus @default(INVITED)
-  role        GymForgeParticipantRole   @default(PARTICIPANT)
-  createdAt   DateTime                  @default(now())
-  updatedAt   DateTime                  @updatedAt
-  archivedAt  DateTime?
-
-  user                        User?                                @relation(fields: [userId], references: [id], onDelete: SetNull)
-  attendances                 GymForgeAttendance[]
-  workouts                    GymForgeWorkout[]
-  competitionAssignments      GymForgeCompetitionAssignment[]
-  competitionScoreCorrections GymForgeCompetitionScoreCorrection[]
-
-  @@unique([userId])
-  @@index([status])
-  @@index([role])
-  @@index([createdAt])
-}
-
-model GymForgeExercise {
-  id          String    @id @default(cuid())
-  name        String
-  category    String?
-  description String?
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  archivedAt  DateTime?
-
-  workoutSets GymForgeWorkoutSet[]
-
-  @@unique([name])
-  @@index([isActive])
-  @@index([category])
-}
-
-model GymForgeAttendance {
-  id              String   @id @default(cuid())
-  participantId   String
-  checkedInAt     DateTime @default(now())
-  effectiveDate   DateTime
-  source          String   @default("manual")
-  note            String?
-  countsForStreak Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  participant GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
-
-  @@unique([participantId, effectiveDate])
-  @@index([effectiveDate])
-  @@index([countsForStreak])
-}
-
-model GymForgeWorkout {
-  id            String   @id @default(cuid())
-  participantId String
-  workoutAt     DateTime @default(now())
-  note          String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  participant GymForgeParticipant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
-  sets        GymForgeWorkoutSet[]
-
-  @@index([participantId, workoutAt])
-  @@index([workoutAt])
-}
-
-model GymForgeWorkoutSet {
-  id         String              @id @default(cuid())
-  workoutId  String
-  exerciseId String
-  setNumber  Int
-  reps       Int
-  load       Decimal?
-  unit       GymForgeWorkoutUnit @default(KG)
-  note       String?
-  createdAt  DateTime            @default(now())
-  updatedAt  DateTime            @updatedAt
-
-  workout  GymForgeWorkout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
-  exercise GymForgeExercise @relation(fields: [exerciseId], references: [id], onDelete: Restrict)
-
-  @@unique([workoutId, exerciseId, setNumber])
-  @@index([exerciseId])
-}
-
-model GymForgeCompetition {
-  id          String                    @id @default(cuid())
-  name        String
-  description String?
-  status      GymForgeCompetitionStatus @default(DRAFT)
-  startsAt    DateTime?
-  endsAt      DateTime?
-  scoringRule String
-  createdAt   DateTime                  @default(now())
-  updatedAt   DateTime                  @updatedAt
-  archivedAt  DateTime?
-
-  assignments      GymForgeCompetitionAssignment[]
-  scoreCorrections GymForgeCompetitionScoreCorrection[]
-
-  @@index([status])
-  @@index([startsAt])
-  @@index([endsAt])
-}
-
-model GymForgeCompetitionAssignment {
-  id            String   @id @default(cuid())
-  competitionId String
-  participantId String
-  assignedAt    DateTime @default(now())
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  competition GymForgeCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
-  participant GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
-
-  @@unique([competitionId, participantId])
-  @@index([competitionId])
-  @@index([participantId])
-}
-
-model GymForgeCompetitionScoreCorrection {
-  id              String    @id @default(cuid())
-  competitionId   String
-  participantId   String
-  pointsDelta     Int
-  reason          String?
-  requestKey      String    @unique
-  createdByUserId String?
-  createdAt       DateTime  @default(now())
-  revokedAt       DateTime?
-  revokedByUserId String?
-
-  competition   GymForgeCompetition @relation(fields: [competitionId], references: [id], onDelete: Restrict)
-  participant   GymForgeParticipant @relation(fields: [participantId], references: [id], onDelete: Restrict)
-  createdByUser User?               @relation("GymForgeScoreCorrectionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  revokedByUser User?               @relation("GymForgeScoreCorrectionRevokedBy", fields: [revokedByUserId], references: [id], onDelete: SetNull)
-
-  @@index([competitionId, participantId, revokedAt], map: "GymForgeScoreCorrection_active_pair_idx")
-  @@index([competitionId, createdAt])
-  @@index([participantId, createdAt])
-  @@index([createdByUserId])
-  @@index([revokedByUserId])
 }

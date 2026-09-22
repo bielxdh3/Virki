@@ -1,9 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { PRODUCTION_CONFIG, isValidProductionConfig } from "./lib/production-config.mjs";
 
-export const PRODUCTION_SSH_ALIAS = "servidor";
-export const PRODUCTION_HOST = "192.168.2.67";
-export const PRODUCTION_PORT = "22";
-export const PRODUCTION_ROOT = "C:\\BielOS";
 export const SSH_OPTIONS = [
   "-o",
   "BatchMode=yes",
@@ -59,8 +56,9 @@ export function parseSshConfig(output) {
   };
 }
 
-export function buildSshArgs(remoteArguments) {
-  return [...SSH_OPTIONS, PRODUCTION_SSH_ALIAS, ...remoteArguments];
+export function buildSshArgs(remoteArguments, config = PRODUCTION_CONFIG) {
+  if (!isValidProductionConfig(config)) throw new ProductionPreflightError("OPERATOR_CONFIG_INVALID");
+  return [...SSH_OPTIONS, config.sshAlias, ...remoteArguments];
 }
 
 function encodePowerShell(script) {
@@ -99,7 +97,7 @@ function dockerScript() {
   ].join(";");
 }
 
-function runPowerShell(script, execute = run) {
+function runPowerShell(script, execute = run, config = PRODUCTION_CONFIG) {
   return execute(
     "ssh",
     buildSshArgs([
@@ -109,7 +107,7 @@ function runPowerShell(script, execute = run) {
       "-NonInteractive",
       "-EncodedCommand",
       encodePowerShell(script),
-    ]),
+    ], config),
   );
 }
 
@@ -128,14 +126,17 @@ function probeIsValid(result) {
   );
 }
 
-export async function runProductionPreflight({ execute = run, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
-  const config = execute("ssh", ["-G", PRODUCTION_SSH_ALIAS]);
+export async function runProductionPreflight({ execute = run, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), config: operatorConfig = PRODUCTION_CONFIG } = {}) {
+  if (!isValidProductionConfig(operatorConfig)) {
+    return { status: 1, lines: ["Private production operator configuration is missing or invalid."] };
+  }
+  const config = execute("ssh", ["-G", operatorConfig.sshAlias]);
   if (config.status !== 0) {
     return { status: 1, lines: ["SSH configuration could not be resolved."] };
   }
 
   const resolved = parseSshConfig(config.stdout);
-  if (resolved.hostname !== PRODUCTION_HOST || resolved.port !== PRODUCTION_PORT || !resolved.user) {
+  if (resolved.hostname.toLowerCase() !== operatorConfig.host.toLowerCase() || resolved.port !== String(operatorConfig.port) || !resolved.user) {
     return { status: 1, lines: ["SSH target does not match the canonical BielOS production server."] };
   }
 
@@ -151,7 +152,7 @@ export async function runProductionPreflight({ execute = run, sleep = (ms) => ne
         "-NonInteractive",
         "-EncodedCommand",
         encodePowerShell(probeScript()),
-      ]),
+      ], operatorConfig),
     );
     if (!probeIsValid(result)) {
       return { status: 1, lines: [`SSH preflight failed on probe ${attempt}.`] };
@@ -166,7 +167,7 @@ export async function runProductionPreflight({ execute = run, sleep = (ms) => ne
     if (attempt < PROBE_COUNT) await sleep(1000);
   }
 
-  const docker = runPowerShell(dockerScript(), execute);
+  const docker = runPowerShell(dockerScript(), execute, operatorConfig);
   if (
     docker.status !== 0 ||
     !lineValue(docker.stdout, "BIELOS_DOCKER_VERSION=") ||
@@ -176,7 +177,7 @@ export async function runProductionPreflight({ execute = run, sleep = (ms) => ne
     return { status: 1, lines: [...lines, "Remote Docker preflight failed."] };
   }
 
-  lines.push(`SSH preflight passed for ${PRODUCTION_SSH_ALIAS} (${identity}).`);
+  lines.push("SSH preflight passed with a stable server identity.");
   lines.push(`Remote Docker ${lineValue(docker.stdout, "BIELOS_DOCKER_VERSION=")} / Compose ${lineValue(docker.stdout, "BIELOS_COMPOSE_VERSION=")}.`);
   lines.push(`Remote free disk ${lineValue(docker.stdout, "BIELOS_DISK_FREE_GB=")} GB; deManage containers ${lineValue(docker.stdout, "BIELOS_DEMANAGE_COUNT=")}.`);
   return { status: 0, lines };

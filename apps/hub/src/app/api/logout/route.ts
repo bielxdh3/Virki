@@ -11,14 +11,14 @@ import {
 } from "@bielos/auth";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { createHubRedirectUrl } from "../../../lib/hub-redirect";
+import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const accessResult = await validateHubCloudflareAccess(request.headers, "hub-logout-api");
-
-  if (!isCloudflareAccessAllowed(accessResult)) {
+  const surface = getSurface(request.headers);
+  if (surface === "unknown") return new NextResponse("Not found", { status: 404 });
+  if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-logout-api"))) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
@@ -29,13 +29,7 @@ export async function POST(request: NextRequest) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  let redirectUrl: URL | undefined;
-
-  try {
-    redirectUrl = createHubRedirectUrl("/login", request.url);
-  } catch {
-    redirectUrl = undefined;
-  }
+  const redirectUrl = new URL("/login", getSurfaceBaseUrl(request.headers, request.url));
 
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const currentSession = sessionToken ? await getSessionByToken(sessionToken) : null;
@@ -70,9 +64,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const response = redirectUrl
-    ? NextResponse.redirect(redirectUrl, { status: 303 })
-    : new NextResponse("Service unavailable", { status: 503 });
+  const response = NextResponse.redirect(redirectUrl, { status: 303 });
   response.cookies.set(SESSION_COOKIE_NAME, "", getExpiredSessionCookieOptions());
 
   return response;

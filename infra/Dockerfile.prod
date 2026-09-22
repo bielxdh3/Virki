@@ -1,34 +1,28 @@
 FROM node:22-alpine AS build
 
 WORKDIR /app
-
 ENV NEXT_TELEMETRY_DISABLED=1
 
 ARG BIELOS_BUILD_REVISION
 ARG TARGETARCH
-
 RUN node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1] ?? "")) process.exit(1)' "$BIELOS_BUILD_REVISION"
 
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
 COPY apps/hub/package*.json ./apps/hub/
-COPY apps/intake/package*.json ./apps/intake/
-COPY packages/ui/package*.json ./packages/ui/
+COPY apps/issuer/package*.json ./apps/issuer/
 COPY packages/auth/package*.json ./packages/auth/
-COPY packages/config/package*.json ./packages/config/
 COPY packages/database/package*.json ./packages/database/
 COPY packages/database/prisma ./packages/database/prisma
 COPY packages/database/scripts ./packages/database/scripts
-COPY packages/types/package*.json ./packages/types/
-
 RUN npm ci
 
 COPY . .
-
+RUN npm run prisma:generate
+RUN npm run prisma:validate
+RUN npm run typecheck
 RUN npm run build
 
-# Keep only generated/runtime closures that are not part of the clean
-# production dependency install below.
 RUN set -eux; \
   case "$TARGETARCH" in \
     amd64) esbuild_platform="linux-x64"; argon2_platform="argon2-linux-x64-musl"; argon2_binary="argon2.linux-x64-musl.node" ;; \
@@ -41,75 +35,61 @@ RUN set -eux; \
   cp -a node_modules/.bin/tsx /runtime-artifacts/node_modules/.bin/tsx; \
   cp -a "node_modules/@esbuild/$esbuild_platform" /runtime-artifacts/node_modules/@esbuild/; \
   cp -a "node_modules/@node-rs/$argon2_platform/$argon2_binary" /runtime-artifacts/node_modules/@node-rs/argon2/; \
-  test -f node_modules/.prisma/client/default.js; \
-  mkdir -p /runtime-artifacts/apps/hub/node_modules; \
   cp -a node_modules/.prisma /runtime-artifacts/node_modules/.prisma; \
-  test -f apps/hub/node_modules/.prisma/client/default.js; \
-  cp -a apps/hub/node_modules/.prisma /runtime-artifacts/apps/hub/node_modules/.prisma; \
-  mkdir -p /runtime-artifacts/runtime/apps/intake/src /runtime-artifacts/runtime/packages/auth/src /runtime-artifacts/runtime/packages/database/src; \
-  cp apps/intake/src/server.ts apps/intake/src/handler.ts apps/intake/src/repository.ts /runtime-artifacts/runtime/apps/intake/src/; \
-  cp packages/auth/src/audit-recent.ts packages/auth/src/audit.ts packages/auth/src/cleanup-audit-logs.ts packages/auth/src/cleanup-sessions.ts packages/auth/src/command-output.ts packages/auth/src/constants.ts packages/auth/src/email-smtp.ts packages/auth/src/email-worker.ts packages/auth/src/email.ts packages/auth/src/index.ts packages/auth/src/rate-limit-config.ts packages/auth/src/security.ts /runtime-artifacts/runtime/packages/auth/src/; \
-  cp packages/database/src/index.ts packages/database/src/identity-access.ts packages/database/src/intake.ts /runtime-artifacts/runtime/packages/database/src/
+  cp -a apps/hub/node_modules/.prisma /runtime-artifacts/apps-hub-prisma; \
+  cp -a apps/issuer/src /runtime-artifacts/issuer-src; \
+  cp -a packages/auth/src /runtime-artifacts/auth-src; \
+  cp -a packages/database/src /runtime-artifacts/database-src
+
+FROM build AS migrator
+ENV NODE_ENV=production
+LABEL org.opencontainers.image.revision="${BIELOS_BUILD_REVISION}"
+CMD ["npm", "run", "prisma:migrate:deploy"]
 
 FROM node:22-alpine AS production-dependencies
-
 WORKDIR /app
-
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
 COPY apps/hub/package*.json ./apps/hub/
-COPY apps/intake/package*.json ./apps/intake/
-COPY packages/ui/package*.json ./packages/ui/
+COPY apps/issuer/package*.json ./apps/issuer/
 COPY packages/auth/package*.json ./packages/auth/
-COPY packages/config/package*.json ./packages/config/
 COPY packages/database/package*.json ./packages/database/
-COPY packages/types/package*.json ./packages/types/
-
 RUN npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit
 
 FROM node:22-alpine AS production
-
 WORKDIR /app
-
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-
 ARG BIELOS_BUILD_REVISION
-
 LABEL org.opencontainers.image.revision="${BIELOS_BUILD_REVISION}"
 
 COPY --from=production-dependencies /app/package.json ./package.json
 COPY --from=production-dependencies /app/apps/public-site/package.json ./apps/public-site/package.json
 COPY --from=production-dependencies /app/apps/hub/package.json ./apps/hub/package.json
-COPY --from=production-dependencies /app/apps/intake/package.json ./apps/intake/package.json
-COPY --from=production-dependencies /app/packages/ui/package.json ./packages/ui/package.json
+COPY --from=production-dependencies /app/apps/issuer/package.json ./apps/issuer/package.json
 COPY --from=production-dependencies /app/packages/auth/package.json ./packages/auth/package.json
-COPY --from=production-dependencies /app/packages/config/package.json ./packages/config/package.json
 COPY --from=production-dependencies /app/packages/database/package.json ./packages/database/package.json
-COPY --from=production-dependencies /app/packages/types/package.json ./packages/types/package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
+
 COPY --from=build /app/apps/public-site/.next ./apps/public-site/.next
 COPY --from=build /app/apps/public-site/public ./apps/public-site/public
 COPY --from=build /app/apps/public-site/next.config.mjs ./apps/public-site/next.config.mjs
 COPY --from=build /app/apps/hub/.next ./apps/hub/.next
 COPY --from=build /app/apps/hub/public ./apps/hub/public
 COPY --from=build /app/apps/hub/next.config.mjs ./apps/hub/next.config.mjs
-COPY --from=build /runtime-artifacts/runtime/apps/intake/src ./apps/intake/src
-COPY --from=build /runtime-artifacts/runtime/packages/auth/src ./packages/auth/src
-COPY --from=build /runtime-artifacts/runtime/packages/database/src ./packages/database/src
+COPY --from=build /runtime-artifacts/issuer-src ./apps/issuer/src
+COPY --from=build /runtime-artifacts/auth-src ./packages/auth/src
+COPY --from=build /runtime-artifacts/database-src ./packages/database/src
 COPY --from=build /runtime-artifacts/node_modules/tsx ./node_modules/tsx
 COPY --from=build /runtime-artifacts/node_modules/esbuild ./node_modules/esbuild
 COPY --from=build /runtime-artifacts/node_modules/@esbuild ./node_modules/@esbuild
 COPY --from=build /runtime-artifacts/node_modules/@node-rs/argon2 ./node_modules/@node-rs/argon2
 COPY --from=build /runtime-artifacts/node_modules/.bin/tsx ./node_modules/.bin/tsx
 COPY --from=build /runtime-artifacts/node_modules/.prisma ./node_modules/.prisma
-COPY --from=build /runtime-artifacts/apps/hub/node_modules/.prisma ./apps/hub/node_modules/.prisma
+COPY --from=build /runtime-artifacts/apps-hub-prisma ./apps/hub/node_modules/.prisma
 
 RUN mkdir -p /app/node_modules/.bin \
   && ln -sf ../tsx/dist/cli.mjs /app/node_modules/.bin/tsx
 
-EXPOSE 3000 3001
-
-# Compose overrides this default command for each app service. The neutral default
-# keeps the image runnable for the private hub if it is started manually.
+EXPOSE 3000 3001 3003
 CMD ["npm", "run", "start", "--workspace", "@bielos/hub"]

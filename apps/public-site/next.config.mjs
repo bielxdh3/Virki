@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ["@bielos/ui"]
+  transpilePackages: []
 };
 
 export default nextConfig;

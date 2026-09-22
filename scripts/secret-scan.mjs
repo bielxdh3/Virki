@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const MAX_TEXT_FILE_BYTES = 1024 * 1024;
@@ -131,6 +131,8 @@ function scanFilePath(filePath) {
 }
 
 function scanFileContents(filePath) {
+  if (!existsSync(filePath)) return;
+
   let buffer;
 
   try {
@@ -179,5 +181,5 @@ function scanLine(filePath, lineNumber, line) {
 
 function isAllowedPlaceholder(value) {
   const normalized = value.trim().toLowerCase();
-  return allowedPlaceholderValues.has(normalized) || normalized.startsWith("replace-");
+  return allowedPlaceholderValues.has(normalized) || normalized.startsWith("replace-") || /^\$(?:[a-z_][a-z\d_]*|\{[a-z_][a-z\d_]*\})$/iu.test(value.trim());
 }

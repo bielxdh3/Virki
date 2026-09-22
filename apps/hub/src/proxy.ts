@@ -1,79 +1,79 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@bielos/auth/constants";
-import { createHubRedirectUrl } from "./lib/hub-redirect";
+import { validateCloudflareAccessJwt } from "@bielos/auth/cloudflare-access";
+import { getSurface } from "./lib/surface";
 
+const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";
 const PUBLIC_ROUTES = new Set([
   "/login",
   "/api/login",
   "/login/verify",
   "/api/login/verify",
   "/api/logout",
-  "/api/health"
+  "/api/health",
+  "/recover",
+  "/api/recover"
 ]);
-const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml)$/i;
-const CLOUDFLARE_ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
-const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";
+const OIDC_ROOT_ROUTES = new Set([
+  "/auth",
+  "/token",
+  "/jwks",
+  "/session/end",
+  "/me",
+  "/token/revocation",
+]);
+const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml|woff2?)$/iu;
 
-export function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   return evaluateProxyRequest(request, process.env);
 }
 
-export function evaluateProxyRequest(
-  request: NextRequest,
-  env: Readonly<Record<string, string | undefined>>
-) {
-  const { pathname } = request.nextUrl;
+export async function evaluateProxyRequest(request: NextRequest, env: Readonly<Record<string, string | undefined>>) {
+  const surface = getSurface(request.headers, env as NodeJS.ProcessEnv);
+  const pathname = normalizePath(request.nextUrl.pathname);
 
-  if (isPublicPath(pathname)) {
-    return NextResponse.next();
+  if (surface === "unknown") return new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+
+  if (surface === "hub" && pathname !== "/api/health" && env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true") {
+    const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);
+    if (!access.allowed) return new NextResponse("Forbidden", { status: 403, headers: { "Cache-Control": "no-store" } });
   }
 
-  if (env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true") {
-    if (!request.headers.get(CLOUDFLARE_ACCESS_JWT_HEADER)) {
-      return new NextResponse("Forbidden", {
-        status: 403,
-        headers: { "Cache-Control": "no-store" }
-      });
-    }
+  if (isPublicPath(pathname, surface)) return NextResponse.next();
 
-    return protectedPassThrough();
+  if (!request.cookies.get(SESSION_COOKIE_NAME)?.value) {
+    const response = NextResponse.redirect(loginUrl(request, surface, env));
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   }
 
-  const hasSessionCookie = Boolean(request.cookies.get(SESSION_COOKIE_NAME)?.value);
-
-  if (!hasSessionCookie) {
-    try {
-      const response = NextResponse.redirect(createHubRedirectUrl("/login", request.url, env));
-      response.headers.set("Cache-Control", "no-store");
-      return response;
-    } catch {
-      return new NextResponse("Service unavailable", {
-        status: 503,
-        headers: { "Cache-Control": "no-store" }
-      });
-    }
-  }
-
-  return protectedPassThrough();
-}
-
-function protectedPassThrough(): NextResponse {
   const response = NextResponse.next();
   response.headers.set("Cache-Control", PROTECTED_CACHE_CONTROL);
   return response;
 }
 
-export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"]
-};
-
-function isPublicPath(pathname: string): boolean {
-  const normalizedPathname =
-    pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
-
-  return (
-    PUBLIC_ROUTES.has(normalizedPathname) ||
-    normalizedPathname.startsWith("/_next/") ||
-    PUBLIC_FILE_PATTERN.test(normalizedPathname)
-  );
+function loginUrl(request: NextRequest, surface: "hub" | "portal" | "local", env: Readonly<Record<string, string | undefined>>) {
+  const configured = surface === "hub" ? env.NEXT_PUBLIC_HUB_URL : env.NEXT_PUBLIC_PORTAL_URL;
+  const base = configured ? new URL(configured) : new URL(request.url);
+  base.pathname = "/login";
+  base.search = "";
+  base.hash = "";
+  return base;
 }
+
+function isPublicPath(pathname: string, surface: "hub" | "portal" | "local"): boolean {
+  if (
+    PUBLIC_ROUTES.has(pathname) ||
+    pathname.startsWith("/_next/") ||
+    PUBLIC_FILE_PATTERN.test(pathname)
+  ) return true;
+  if (surface !== "hub" && (pathname.startsWith("/.well-known/") || pathname.startsWith("/interaction/"))) return true;
+  if (surface !== "hub" && pathname.startsWith("/resume/")) return true;
+  return surface !== "hub" && OIDC_ROOT_ROUTES.has(pathname);
+}
+
+function normalizePath(pathname: string): string {
+  return pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+}
+
+export const config = { matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"] };

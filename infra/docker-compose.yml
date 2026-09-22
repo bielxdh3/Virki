@@ -1,5 +1,45 @@
 services:
-  app:
+  public-site:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
+    ports:
+      - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
+    command: npm run dev --workspace @bielos/public-site
+
+  hub:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      oidc-issuer:
+        condition: service_started
+    env_file:
+      - path: ../.env
+        required: true
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
+      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:-https://hub.biel.dev.br}
+      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
+      BIELOS_HUB_HOSTNAME: ${BIELOS_HUB_HOSTNAME:-hub.biel.dev.br}
+      BIELOS_PORTAL_HOSTNAME: ${BIELOS_PORTAL_HOSTNAME:-portal.biel.dev.br}
+      BIELOS_OIDC_PROXY_URL: http://oidc-issuer:3003
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "false"
+      BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
+      BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
+      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
+      BIELOS_OIDC_ADAPTER_KEY: ${BIELOS_OIDC_ADAPTER_KEY:?BIELOS_OIDC_ADAPTER_KEY must be set in local .env}
+    ports:
+      - "127.0.0.1:${HUB_PORT:-3001}:3001"
+    command: npm run dev --workspace @bielos/hub
+
+  oidc-issuer:
     build:
       context: ..
       dockerfile: infra/Dockerfile
@@ -12,39 +52,12 @@ services:
     environment:
       NODE_ENV: development
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
-      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:-https://hub.biel.dev.br}
-      NEXT_PUBLIC_INTAKE_URL: ${NEXT_PUBLIC_INTAKE_URL:-}
-    ports:
-      - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
-      - "127.0.0.1:${HUB_PORT:-3001}:3001"
-    command: npm run dev
-
-  intake:
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      NODE_ENV: development
-      INTAKE_PORT: 3002
-      PUBLIC_SITE_ORIGIN: ${PUBLIC_SITE_ORIGIN:-http://127.0.0.1:3000}
-      BIELOS_INTAKE_ENABLED: ${BIELOS_INTAKE_ENABLED:-false}
-      BIELOS_INTAKE_DATABASE_URL: ${BIELOS_INTAKE_DATABASE_URL:-}
-      BIELOS_INTAKE_ABUSE_SECRET: ${BIELOS_INTAKE_ABUSE_SECRET:-}
-      BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
-      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:-}
-      BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
-      BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
-      BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}
-      BIELOS_EMAIL_SMTP_USER: ${BIELOS_EMAIL_SMTP_USER:-}
-      BIELOS_EMAIL_SMTP_PASSWORD: ${BIELOS_EMAIL_SMTP_PASSWORD:-}
-      BIELOS_EMAIL_FROM: ${BIELOS_EMAIL_FROM:-}
-      BIELOS_EMAIL_REPLY_TO: ${BIELOS_EMAIL_REPLY_TO:-}
-    ports:
-      - "127.0.0.1:${INTAKE_PORT:-3002}:3002"
-    command: npm run dev --workspace @bielos/intake
+      OIDC_ISSUER_PORT: 3003
+      BIELOS_OIDC_ISSUER: ${BIELOS_OIDC_ISSUER:-https://portal.biel.dev.br}
+      BIELOS_OIDC_SIGNING_JWKS: ${BIELOS_OIDC_SIGNING_JWKS:?BIELOS_OIDC_SIGNING_JWKS must be set in local .env}
+      BIELOS_OIDC_COOKIE_KEY: ${BIELOS_OIDC_COOKIE_KEY:?BIELOS_OIDC_COOKIE_KEY must be set in local .env}
+      BIELOS_OIDC_ADAPTER_KEY: ${BIELOS_OIDC_ADAPTER_KEY:?BIELOS_OIDC_ADAPTER_KEY must be set in local .env}
+    command: npm run start --workspace @bielos/issuer
 
   postgres:
     image: postgres:17-alpine

@@ -3,9 +3,6 @@ import test from "node:test";
 import {
   buildSshArgs,
   parseSshConfig,
-  PRODUCTION_HOST,
-  PRODUCTION_PORT,
-  PRODUCTION_SSH_ALIAS,
   runProductionPreflight,
 } from "./production-preflight.mjs";
 import {
@@ -13,17 +10,27 @@ import {
   runRemoteProductionCommand,
 } from "./production-remote.mjs";
 import { ProductionRevisionError } from "./lib/production-revision.mjs";
+import { isValidProductionConfig } from "./lib/production-config.mjs";
+
+const operatorConfig = {
+  sshAlias: "test-production",
+  host: "production.example.invalid",
+  port: "2222",
+  root: "C:\\BielOS",
+};
 
 test("SSH preflight resolves only the canonical server target", () => {
   assert.deepEqual(
-    parseSshConfig(`user biel\nhostname ${PRODUCTION_HOST}\nport ${PRODUCTION_PORT}\n`),
-    { user: "biel", hostname: PRODUCTION_HOST, port: PRODUCTION_PORT },
+    parseSshConfig(`user deploy\nhostname ${operatorConfig.host}\nport ${operatorConfig.port}\n`),
+    { user: "deploy", hostname: operatorConfig.host, port: operatorConfig.port },
   );
-  assert.deepEqual(buildSshArgs(["powershell.exe"]).slice(-2), [PRODUCTION_SSH_ALIAS, "powershell.exe"]);
+  assert.deepEqual(buildSshArgs(["powershell.exe"], operatorConfig).slice(-2), [operatorConfig.sshAlias, "powershell.exe"]);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "C:\\..\\unsafe" }), false);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "C:\\BielOS; Write-Output bad" }), false);
 });
 
 test("remote production actions use a fixed allowlist", () => {
-  for (const action of ["start", "stop", "status", "ports", "revision", "health", "logs", "backup", "config"]) {
+  for (const action of ["start", "stop", "status", "ports", "revision", "health", "logs", "backup-verify", "migrate", "migration-status", "baseline", "config"]) {
     assert.equal(parseRemoteProductionCommand([action]), action);
   }
   assert.throws(
@@ -40,6 +47,7 @@ test("remote status routing performs preflight before SSH action", async () => {
       calls.push({ command, args });
       return { status: 0, stdout: "remote status\n" };
     },
+    config: operatorConfig,
   });
 
   assert.equal(result.status, 0);
@@ -53,11 +61,12 @@ test("remote status routing performs preflight before SSH action", async () => {
 test("SSH preflight requires eight stable probes and Docker", async () => {
   let probes = 0;
   const result = await runProductionPreflight({
+    config: operatorConfig,
     sleep: async () => {},
     execute: (command, args) => {
       if (command !== "ssh") return { status: 1, stdout: "" };
       if (args[0] === "-G") {
-        return { status: 0, stdout: "user biel\nhostname 192.168.2.67\nport 22\n" };
+        return { status: 0, stdout: `user deploy\nhostname ${operatorConfig.host}\nport ${operatorConfig.port}\n` };
       }
       probes += 1;
       if (probes <= 8) {
@@ -76,4 +85,5 @@ test("SSH preflight requires eight stable probes and Docker", async () => {
   assert.equal(result.status, 0);
   assert.equal(probes, 9);
   assert.ok(result.lines.some((line) => line.includes("8/8")));
+  assert.ok(result.lines.every((line) => !line.includes(operatorConfig.host)));
 });

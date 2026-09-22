@@ -11,14 +11,14 @@ import {
 import { DEVICE_COOKIE_NAME, startLoginCeremony } from "@bielos/auth/security";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { createHubRedirectUrl } from "../../../lib/hub-redirect";
+import { getSurface, getSurfaceBaseUrl, safeReturnTo } from "../../../lib/surface";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const accessResult = await validateHubCloudflareAccess(request.headers, "hub-login-api");
-
-  if (!isCloudflareAccessAllowed(accessResult)) {
+  const surface = getSurface(request.headers);
+  if (surface === "unknown") return new NextResponse("Not found", { status: 404 });
+  if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-login-api"))) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
@@ -29,13 +29,11 @@ export async function POST(request: Request) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  let failureRedirectUrl: URL;
-
-  try {
-    failureRedirectUrl = createHubRedirectUrl("/login", request.url);
-  } catch {
-    return new NextResponse("Service unavailable", { status: 503 });
-  }
+  const returnTo = safeReturnTo(getFormString(formData, "returnTo"));
+  const baseUrl = getSurfaceBaseUrl(request.headers, request.url);
+  const failureRedirectUrl = new URL("/login", baseUrl);
+  const defaultPath = surface === "hub" ? "/admin/accounts" : "/";
+  const successUrl = new URL(returnTo ?? defaultPath, baseUrl);
 
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
@@ -60,7 +58,7 @@ export async function POST(request: Request) {
             : "Login failed.",
       metadata: auditMetadata
     });
-    return redirectToLogin(failureRedirectUrl, true);
+    return redirectToLogin(failureRedirectUrl, true, returnTo);
   }
 
   let ceremony;
@@ -80,7 +78,7 @@ export async function POST(request: Request) {
       message: "Security verification unavailable.",
       metadata: auditMetadata
     });
-    return redirectToLogin(failureRedirectUrl, true);
+    return redirectToLogin(failureRedirectUrl, true, returnTo);
   }
 
   if (ceremony.kind === "SESSION") {
@@ -93,7 +91,7 @@ export async function POST(request: Request) {
       message: "Remembered-browser login succeeded.",
       metadata: { ...auditMetadata, rememberedBrowser: true }
     });
-    const response = NextResponse.redirect(createHubRedirectUrl("/", request.url), { status: 303 });
+    const response = NextResponse.redirect(successUrl, { status: 303 });
     response.cookies.set(SESSION_COOKIE_NAME, ceremony.session.token, getSessionCookieOptions(ceremony.session.expiresAt));
     return response;
   }
@@ -107,9 +105,10 @@ export async function POST(request: Request) {
     message: "Password accepted; security verification pending.",
     metadata: auditMetadata
   });
-  const verifyUrl = createHubRedirectUrl("/login/verify", request.url);
+  const verifyUrl = new URL("/login/verify", baseUrl);
   verifyUrl.searchParams.set("ceremony", ceremony.ceremonyId);
   verifyUrl.searchParams.set("factor", ceremony.factor.toLowerCase());
+  if (returnTo) verifyUrl.searchParams.set("returnTo", returnTo);
   const response = NextResponse.redirect(verifyUrl, { status: 303 });
   if (readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME) !== ceremony.deviceToken) {
     response.cookies.set(DEVICE_COOKIE_NAME, ceremony.deviceToken, {
@@ -124,10 +123,11 @@ export async function POST(request: Request) {
   return response;
 }
 
-function redirectToLogin(url: URL, failed: boolean) {
+function redirectToLogin(url: URL, failed: boolean, returnTo: string | null) {
   if (failed) {
     url.searchParams.set("error", "1");
   }
+  if (returnTo) url.searchParams.set("returnTo", returnTo);
 
   return NextResponse.redirect(url, { status: 303 });
 }

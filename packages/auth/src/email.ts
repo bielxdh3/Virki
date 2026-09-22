@@ -3,11 +3,6 @@ import { prisma, type Prisma } from "@bielos/database";
 import { isSmtpEmailTransportConfigured } from "./email-smtp";
 
 export type EmailMessageKind =
-  | "APPLICATION_EMAIL_VERIFICATION"
-  | "ACCOUNT_ACTIVATION"
-  | "USER_VISIBLE_REJECTION"
-  | "MODULE_ACCESS_CHANGED"
-  | "FEATURE_PERMISSION_CHANGED"
   | "NEW_DEVICE_VERIFICATION"
   | "EMAIL_TWO_FACTOR"
   | "PASSWORD_CHANGED"
@@ -113,25 +108,6 @@ export function enqueueEmailMessageForClient(
       updatedAt: message.now
     }
   });
-}
-
-export function enqueueEmailMessageForIntakeClient(
-  client: Pick<Prisma.TransactionClient, "$executeRaw">,
-  input: EmailMessageInput
-) {
-  if (input.kind !== "APPLICATION_EMAIL_VERIFICATION") {
-    throw new Error("Invalid intake email message.");
-  }
-  const message = prepareEmailMessage(input);
-  return client.$executeRaw`
-    SELECT "bielos_intake_enqueue_email_message"(
-      ${input.idempotencyKey},
-      ${message.recipientEmail},
-      ${input.locale},
-      CAST(${JSON.stringify(message.storedPayload)} AS JSONB),
-      CAST(${message.now} AS timestamp(3))
-    )
-  `;
 }
 
 export function enqueueEmailMessage(input: EmailMessageInput) {
@@ -254,11 +230,6 @@ export function renderEmailMessage(
   payload: Record<string, string>
 ): EmailTransportMessage {
   const subjectByKind: Record<EmailMessageKind, { "pt-BR": string; en: string }> = {
-    APPLICATION_EMAIL_VERIFICATION: { "pt-BR": "Verifique seu e-mail", en: "Verify your email" },
-    ACCOUNT_ACTIVATION: { "pt-BR": "Ative sua conta BielOS", en: "Activate your BielOS account" },
-    USER_VISIBLE_REJECTION: { "pt-BR": "Atualização da sua solicitação", en: "Application update" },
-    MODULE_ACCESS_CHANGED: { "pt-BR": "Atualização de acesso", en: "Access update" },
-    FEATURE_PERMISSION_CHANGED: { "pt-BR": "Atualização de permissão", en: "Permission update" },
     NEW_DEVICE_VERIFICATION: { "pt-BR": "Verifique este dispositivo", en: "Verify this device" },
     EMAIL_TWO_FACTOR: { "pt-BR": "Seu código BielOS", en: "Your BielOS code" },
     PASSWORD_CHANGED: { "pt-BR": "Senha alterada", en: "Password changed" },
