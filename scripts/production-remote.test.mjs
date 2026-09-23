@@ -43,6 +43,7 @@ test("clone SQL uses base64 to preserve quoted identifiers across PowerShell", (
 test("clone migrator uses the Compose network without an unsupported run flag", () => {
   const clonePrisma = productionServerScript.match(/function Invoke-ClonePrisma[\s\S]*?\n\}/u)?.[0];
   assert.ok(clonePrisma);
+  assert.match(clonePrisma, /'--progress', 'quiet'/u);
   assert.match(clonePrisma, /'--env', "DATABASE_URL=\$DatabaseUrl"/u);
   assert.doesNotMatch(clonePrisma, /'--network'/u);
   assert.match(clonePrisma, /COMPOSE_IGNORE_ORPHANS = 'true'/u);

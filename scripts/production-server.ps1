@@ -159,7 +159,7 @@ function Assert-IdentityState([string] $Container, [string] $Expected) {
 }
 
 function Invoke-ClonePrisma([string] $DatabaseUrl, [string[]] $Tail = @()) {
-  $arguments = $compose + @('--profile', 'migration', 'run', '--rm', '--no-deps', '--env', "DATABASE_URL=$DatabaseUrl", 'migrate') + $Tail
+  $arguments = $compose + @('--progress', 'quiet', '--profile', 'migration', 'run', '--rm', '--no-deps', '--env', "DATABASE_URL=$DatabaseUrl", 'migrate') + $Tail
   $hadIgnoreOrphans = Test-Path -LiteralPath 'Env:COMPOSE_IGNORE_ORPHANS'
   $previousIgnoreOrphans = $env:COMPOSE_IGNORE_ORPHANS
   $env:COMPOSE_IGNORE_ORPHANS = 'true'
