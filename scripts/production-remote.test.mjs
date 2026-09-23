@@ -40,6 +40,14 @@ test("clone SQL uses base64 to preserve quoted identifiers across PowerShell", (
   assert.doesNotMatch(cloneQuery, /'-c', \$Query/u);
 });
 
+test("clone migrator uses the Compose network without an unsupported run flag", () => {
+  const clonePrisma = productionServerScript.match(/function Invoke-ClonePrisma[\s\S]*?\n\}/u)?.[0];
+  assert.ok(clonePrisma);
+  assert.match(clonePrisma, /'--env', "DATABASE_URL=\$DatabaseUrl"/u);
+  assert.doesNotMatch(clonePrisma, /'--network'/u);
+  assert.match(productionServerScript, /--network', \$networkName, '--network-alias', \$alias/u);
+});
+
 test("SSH preflight resolves only the canonical server target", () => {
   assert.deepEqual(
     parseSshConfig(`user deploy\nhostname ${operatorConfig.host}\nport ${operatorConfig.port}\n`),

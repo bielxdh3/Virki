@@ -158,8 +158,8 @@ function Assert-IdentityState([string] $Container, [string] $Expected) {
   if ($value -ne $target) { Stop-Safely 'Production account-role state does not match the safe migration precondition.' }
 }
 
-function Invoke-ClonePrisma([string] $Network, [string] $DatabaseUrl, [string[]] $Tail = @()) {
-  $arguments = $compose + @('--profile', 'migration', 'run', '--rm', '--no-deps', '--network', $Network, '--env', "DATABASE_URL=$DatabaseUrl", 'migrate') + $Tail
+function Invoke-ClonePrisma([string] $DatabaseUrl, [string[]] $Tail = @()) {
+  $arguments = $compose + @('--profile', 'migration', 'run', '--rm', '--no-deps', '--env', "DATABASE_URL=$DatabaseUrl", 'migrate') + $Tail
   Invoke-DockerCapture $arguments | Out-Null
 }
 
@@ -175,8 +175,8 @@ function Assert-TransitionHistory($state, [int] $expectedTotal, [int] $baselineC
   }
 }
 
-function Assert-CloneMigrationStatus([string] $Network, [string] $DatabaseUrl) {
-  Invoke-ClonePrisma $Network $DatabaseUrl @('npx', 'prisma', 'migrate', 'status', '--schema', $MigrationSchema)
+function Assert-CloneMigrationStatus([string] $DatabaseUrl) {
+  Invoke-ClonePrisma $DatabaseUrl @('npx', 'prisma', 'migrate', 'status', '--schema', $MigrationSchema)
 }
 
 function New-VerifiedBackup {
@@ -231,11 +231,11 @@ function Validate-BackupAgainstMigrationPlan {
         Stop-Safely 'Restored production migration history is not the expected 14 applied migrations.'
       }
       Assert-IdentityState $containerName 'before'
-      Invoke-ClonePrisma $networkName $databaseUrl
+      Invoke-ClonePrisma $databaseUrl
       $migrated = Get-CloneMigrationState $containerName
       Assert-TransitionHistory $migrated 15
       Assert-IdentityState $containerName 'after'
-      Assert-CloneMigrationStatus $networkName $databaseUrl
+      Assert-CloneMigrationStatus $databaseUrl
     } else {
       $initial = Get-CloneMigrationState $containerName
       if ($initial.total -eq 1 -and $initial.unfinished -eq 0 -and $initial.rolledBack -eq 0 -and $initial.transition -eq 0 -and $initial.baseline -eq 1) {
@@ -243,7 +243,7 @@ function Validate-BackupAgainstMigrationPlan {
       } else {
         Assert-TransitionHistory $initial 15
         Assert-IdentityState $containerName 'after'
-        Invoke-ClonePrisma $networkName $databaseUrl @('npx', 'prisma', 'migrate', 'resolve', '--applied', '0_init', '--schema', $MigrationSchema)
+        Invoke-ClonePrisma $databaseUrl @('npx', 'prisma', 'migrate', 'resolve', '--applied', '0_init', '--schema', $MigrationSchema)
         $resolved = Get-CloneMigrationState $containerName
         Assert-TransitionHistory $resolved 16 1
         $deleteSql = 'DO $$ BEGIN IF (SELECT count(*) FROM "_prisma_migrations") <> 16 OR (SELECT count(*) FROM "_prisma_migrations" WHERE "migration_name" = ''0_init'') <> 1 OR (SELECT count(*) FROM "_prisma_migrations" WHERE "migration_name" = ''' + $TransitionMigration + ''') <> 1 OR EXISTS (SELECT 1 FROM "_prisma_migrations" WHERE "finished_at" IS NULL OR "rolled_back_at" IS NOT NULL) THEN RAISE EXCEPTION ''Unexpected history during verified baseline convergence''; END IF; DELETE FROM "_prisma_migrations" WHERE "migration_name" <> ''0_init''; END $$'
@@ -255,7 +255,7 @@ function Validate-BackupAgainstMigrationPlan {
           Stop-Safely 'Restored database baseline state is invalid.'
         }
       }
-      Assert-CloneMigrationStatus $networkName $databaseUrl
+      Assert-CloneMigrationStatus $databaseUrl
     }
   } finally {
     if ($started) { & docker rm --force --volumes $containerName *> $null }
