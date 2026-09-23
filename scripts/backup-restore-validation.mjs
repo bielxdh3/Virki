@@ -86,7 +86,20 @@ try {
 }
 
 async function seedRepresentativeData() {
-  const admin = await sourceClient.user.findUnique({ where: { id: "backup-admin" } });
+  let admin = await sourceClient.user.findUnique({ where: { id: "backup-admin" } });
+  admin ??= await sourceClient.user.create({
+    data: {
+      id: "backup-admin",
+      email: "admin@backup.invalid",
+      emailNormalized: "admin@backup.invalid",
+      displayName: "Backup validation administrator",
+      passwordHash: "backup-admin-password-hash",
+      role: "ADMIN",
+      accountStatus: "ACTIVE",
+      emailVerifiedAt: new Date(),
+      secondFactorMethod: "EMAIL",
+    },
+  });
   assert.ok(admin);
   const user = await sourceClient.user.create({
     data: {
@@ -166,6 +179,9 @@ async function seedRepresentativeData() {
 }
 
 async function verifyRestoredData() {
+  const admin = await restoredClient.user.findUnique({ where: { id: "backup-admin" } });
+  assert.equal(admin?.role, "ADMIN");
+  assert.ok(admin?.passwordHash);
   assert.equal((await restoredClient.user.findUnique({ where: { id: "backup-user" } }))?.email, "user@backup.invalid");
   assert.equal((await restoredClient.projectConnection.findUnique({ where: { id: "backup-connection" } }))?.clientId, "backup-client-id");
   assert.equal(await restoredClient.userProjectGrant.count({ where: { id: "backup-grant" } }), 1);
