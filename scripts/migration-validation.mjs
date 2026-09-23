@@ -145,12 +145,24 @@ function deployMigrations(schemaPath, databaseUrl) {
       ?? output.match(/SQLSTATE[\s:]+([0-9A-Z]{5})/iu)?.[1];
     const prismaCode = output.match(/\bP\d{4}\b/u)?.[0];
     const processCode = result.error && "code" in result.error && typeof result.error.code === "string" ? result.error.code : undefined;
-    throw new Error(`Disposable production migration validation failed (${sqlState ?? prismaCode ?? processCode ?? "unknown"}).`);
+    const dependency = describeDependencyFailure(output);
+    throw new Error(`Disposable production migration validation failed (${sqlState ?? prismaCode ?? processCode ?? "unknown"}${dependency ? `: ${dependency}` : ""}).`);
   }
 }
 
 function prismaCliPath() {
   return path.join(repositoryRoot, "node_modules", "prisma", "build", "index.js");
+}
+
+function describeDependencyFailure(output) {
+  if (!/\b2BP01\b/u.test(output)) return undefined;
+  const target = output.match(/cannot drop (table|type) "([A-Za-z0-9_]+)" because other objects depend on it/iu);
+  if (!target) return "dependent-object";
+  const detail = output.match(/DETAIL:\s*(?:constraint "([A-Za-z0-9_]+)" on table "([A-Za-z0-9_]+)"|column "([A-Za-z0-9_]+)" of table "([A-Za-z0-9_]+)") depends on (?:table|type) "[A-Za-z0-9_]+"/iu);
+  const object = detail
+    ? detail[1] ? `constraint ${detail[1]} on ${detail[2]}` : `column ${detail[3]} on ${detail[4]}`
+    : "unclassified-dependent-object";
+  return `cannot-drop-${target[1].toLowerCase()}-${target[2]} (${object})`;
 }
 
 function runSql(sql) {
