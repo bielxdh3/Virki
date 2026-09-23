@@ -13,8 +13,8 @@ const containers = {
   hub: `bielos-runtime-hub-${suffix}`,
   issuer: `bielos-runtime-issuer-${suffix}`,
 };
-const publicHost = "portal.runtime.invalid";
-const hubHost = "hub.runtime.invalid";
+const publicHost = "portal.biel.dev.br";
+const hubHost = "hub.biel.dev.br";
 const signingJwks = JSON.stringify({ keys: [createSigningKey()] });
 const cookieKey = randomBytes(32).toString("base64url");
 const adapterKey = randomBytes(32).toString("hex");
