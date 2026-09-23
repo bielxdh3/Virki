@@ -40,14 +40,17 @@ test("clone SQL uses base64 to preserve quoted identifiers across PowerShell", (
   assert.doesNotMatch(cloneQuery, /'-c', \$Query/u);
 });
 
-test("clone migrator uses the Compose network without an unsupported run flag", () => {
+test("migration Compose runs are quiet and scope orphan suppression", () => {
   const clonePrisma = productionServerScript.match(/function Invoke-ClonePrisma[\s\S]*?\n\}/u)?.[0];
   assert.ok(clonePrisma);
-  assert.match(clonePrisma, /'--progress', 'quiet'/u);
   assert.match(clonePrisma, /'--env', "DATABASE_URL=\$DatabaseUrl"/u);
   assert.doesNotMatch(clonePrisma, /'--network'/u);
-  assert.match(clonePrisma, /COMPOSE_IGNORE_ORPHANS = 'true'/u);
-  assert.doesNotMatch(clonePrisma, /COMPOSE_REMOVE_ORPHANS|--remove-orphans/u);
+  assert.match(productionServerScript, /^\$compose = @\(\s*'compose',\s*'--progress', 'quiet'/mu);
+  const scopedCompose = productionServerScript.match(/function Invoke-ComposeCaptureIgnoringOrphans[\s\S]*?\n\}/u)?.[0];
+  assert.ok(scopedCompose);
+  assert.match(scopedCompose, /COMPOSE_IGNORE_ORPHANS = 'true'/u);
+  assert.doesNotMatch(scopedCompose, /COMPOSE_REMOVE_ORPHANS|--remove-orphans/u);
+  assert.match(productionServerScript, /Invoke-ComposeCaptureIgnoringOrphans \(\$compose \+ @\('--profile', 'migration', 'run', '--rm', '--no-deps', 'migrate'\)\)/u);
   assert.match(productionServerScript, /--network', \$networkName, '--network-alias', \$alias/u);
 });
 

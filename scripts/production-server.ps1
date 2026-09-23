@@ -72,6 +72,7 @@ if ($sourceState['branch'] -ne 'main' -or $sourceState['clean'] -ne 'true' -or $
 
 $compose = @(
   'compose',
+  '--progress', 'quiet',
   '--project-name', 'bielos-prod',
   '--env-file', '.env',
   '-f', 'infra/docker-compose.prod.yml',
@@ -158,17 +159,21 @@ function Assert-IdentityState([string] $Container, [string] $Expected) {
   if ($value -ne $target) { Stop-Safely 'Production account-role state does not match the safe migration precondition.' }
 }
 
-function Invoke-ClonePrisma([string] $DatabaseUrl, [string[]] $Tail = @()) {
-  $arguments = $compose + @('--progress', 'quiet', '--profile', 'migration', 'run', '--rm', '--no-deps', '--env', "DATABASE_URL=$DatabaseUrl", 'migrate') + $Tail
+function Invoke-ComposeCaptureIgnoringOrphans([string[]] $Arguments) {
   $hadIgnoreOrphans = Test-Path -LiteralPath 'Env:COMPOSE_IGNORE_ORPHANS'
   $previousIgnoreOrphans = $env:COMPOSE_IGNORE_ORPHANS
   $env:COMPOSE_IGNORE_ORPHANS = 'true'
   try {
-    Invoke-DockerCapture $arguments | Out-Null
+    Invoke-DockerCapture $Arguments | Out-Null
   } finally {
     if ($hadIgnoreOrphans) { $env:COMPOSE_IGNORE_ORPHANS = $previousIgnoreOrphans }
     else { Remove-Item -LiteralPath 'Env:COMPOSE_IGNORE_ORPHANS' -ErrorAction SilentlyContinue }
   }
+}
+
+function Invoke-ClonePrisma([string] $DatabaseUrl, [string[]] $Tail = @()) {
+  $arguments = $compose + @('--profile', 'migration', 'run', '--rm', '--no-deps', '--env', "DATABASE_URL=$DatabaseUrl", 'migrate') + $Tail
+  Invoke-ComposeCaptureIgnoringOrphans $arguments
 }
 
 function Get-CloneMigrationState([string] $Container) {
@@ -385,7 +390,7 @@ switch ($Action) {
     $state = Assert-TransitionDatabaseReady
     if ($state.total -eq 14) {
       Stop-OldWriters
-      Invoke-DockerCapture ($compose + @('--profile', 'migration', 'run', '--rm', '--no-deps', 'migrate')) | Out-Null
+      Invoke-ComposeCaptureIgnoringOrphans ($compose + @('--profile', 'migration', 'run', '--rm', '--no-deps', 'migrate'))
       Remove-OldIntakeContainer
     }
     $finalState = Read-MigrationState
