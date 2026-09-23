@@ -219,6 +219,17 @@ function buildDatabaseUrl(port, database) {
   return url.toString();
 }
 
+function runSql(sql) {
+  const result = spawnSync("docker", ["exec", "-i", containerName, "psql", "-U", databaseUser, "-d", databaseName, "-v", "ON_ERROR_STOP=1"], {
+    input: sql,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 120_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) throw new Error("Disposable backup validation SQL failed.");
+}
+
 function runDocker(args) {
   const result = spawnSync("docker", args, { encoding: "utf8", windowsHide: true, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
   if (result.error || result.status !== 0) throw new Error("Disposable backup validation Docker command failed.");
