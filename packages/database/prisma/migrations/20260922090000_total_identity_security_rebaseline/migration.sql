@@ -11,6 +11,11 @@ BEGIN
   END IF;
 END $$;
 
+-- Remove intake database capabilities before the legacy catalog and account tables.
+DROP VIEW IF EXISTS "IntakePublicModuleCatalog";
+DROP FUNCTION IF EXISTS "bielos_intake_activate_application"(TEXT, TEXT, TEXT, TIMESTAMP WITHOUT TIME ZONE);
+DROP FUNCTION IF EXISTS "bielos_intake_enqueue_email_message"(TEXT, TEXT, TEXT, JSONB, TIMESTAMP WITHOUT TIME ZONE);
+
 -- Keep only auth/security messages and audit events that remain meaningful.
 DELETE FROM "EmailDeliveryAttempt"
 WHERE "messageId" IN (

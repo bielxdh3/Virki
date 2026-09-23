@@ -102,6 +102,9 @@ async function verifyRemovedProductSchema() {
   const rows = await client.$queryRaw`
     SELECT
       to_regclass('"AccountApplication"') IS NULL AS intake_removed,
+      to_regclass('"IntakePublicModuleCatalog"') IS NULL AS intake_view_removed,
+      to_regprocedure('bielos_intake_activate_application(text,text,text,timestamp without time zone)') IS NULL AS intake_activation_function_removed,
+      to_regprocedure('bielos_intake_enqueue_email_message(text,text,text,jsonb,timestamp without time zone)') IS NULL AS intake_email_function_removed,
       to_regclass('"ModuleCatalog"') IS NULL AS modules_removed,
       to_regclass('"GymForgeParticipant"') IS NULL AS gymforge_removed,
       to_regclass('"Project"') IS NULL AS old_project_model_removed,
@@ -110,6 +113,9 @@ async function verifyRemovedProductSchema() {
   `;
   assert.deepEqual(rows[0], {
     intake_removed: true,
+    intake_view_removed: true,
+    intake_activation_function_removed: true,
+    intake_email_function_removed: true,
     modules_removed: true,
     gymforge_removed: true,
     old_project_model_removed: true,
