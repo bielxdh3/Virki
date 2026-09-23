@@ -91,17 +91,19 @@ function createSigningKey() {
 }
 
 async function assertStatus(url, expectedStatus, headers = {}) {
+  let observedStatus = "unreachable";
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
       const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
       response.body?.cancel();
+      observedStatus = String(response.status);
       if (response.status === expectedStatus) return;
     } catch {
       // The container may still be starting.
     }
     await delay(1_000);
   }
-  throw new Error(`Runtime smoke endpoint did not return ${expectedStatus}.`);
+  throw new Error(`Runtime smoke endpoint ${new URL(url).pathname} returned ${observedStatus}; expected ${expectedStatus}.`);
 }
 
 async function waitForResponse(url, headers = {}) {
