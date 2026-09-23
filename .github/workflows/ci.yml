@@ -93,7 +93,7 @@ jobs:
       - name: Public surface tests
         run: npm run test:public-site
 
-      - name: Validate identity transition migration
+      - name: Validate clean migration baseline or transition plan
         run: npm run test:migration
 
       - name: Validate database backup and restore

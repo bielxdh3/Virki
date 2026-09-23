@@ -1,1 +1,0 @@
-ALTER TYPE "AccountApplicationStatus" ADD VALUE 'PARTIALLY_APPROVED';

@@ -8,6 +8,7 @@ import { PrismaClient } from "@prisma/client";
 
 const repositoryRoot = process.cwd();
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
+const baselineName = "0_init";
 const transitionName = "20260922090000_total_identity_security_rebaseline";
 const containerName = `bielos-migration-validation-${process.pid}`;
 const databaseName = "bielos_migration_validation";
@@ -18,11 +19,15 @@ let temporaryDirectory;
 let client;
 
 try {
-  const legacyDirectories = (await readdir(migrationsRoot, { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory() && entry.name !== transitionName)
+  const migrationDirectories = (await readdir(migrationsRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
-  assert.equal(legacyDirectories.length, 14, "Expected the production's fourteen applied migrations before transition.");
+  const baselinePlan = migrationDirectories.length === 1 && migrationDirectories[0] === baselineName;
+  const transitionPlan = migrationDirectories.includes(transitionName);
+  assert.ok(baselinePlan || transitionPlan, "Expected either the production transition plan or the clean baseline plan.");
+  const legacyDirectories = transitionPlan ? migrationDirectories.filter((name) => name !== transitionName) : [];
+  if (transitionPlan) assert.equal(legacyDirectories.length, 14, "Expected the production's fourteen applied migrations before transition.");
 
   runDocker([
     "run", "--detach", "--name", containerName, "--publish", "127.0.0.1::5432",
@@ -43,23 +48,38 @@ try {
   await mkdir(temporaryMigrationsDirectory, { recursive: true });
   await writeFile(path.join(temporaryPrismaDirectory, "schema.prisma"), await readFile(path.join(repositoryRoot, "packages", "database", "prisma", "schema.prisma")));
   await cp(path.join(migrationsRoot, "migration_lock.toml"), path.join(temporaryMigrationsDirectory, "migration_lock.toml"));
-  for (const migration of legacyDirectories) {
+  for (const migration of baselinePlan ? [baselineName] : legacyDirectories) {
     await cp(path.join(migrationsRoot, migration), path.join(temporaryMigrationsDirectory, migration), { recursive: true });
   }
 
-  await deployMigrations(path.join(temporaryPrismaDirectory, "schema.prisma"), databaseUrl);
-  assert.equal(runSql("SELECT count(*) FROM \"_prisma_migrations\" WHERE \"finished_at\" IS NOT NULL AND \"rolled_back_at\" IS NULL"), "14");
-  runSql(seedLegacyIdentity());
+  const schemaPath = path.join(temporaryPrismaDirectory, "schema.prisma");
+  if (baselinePlan) {
+    await deployMigrations(schemaPath, databaseUrl);
+    assert.equal(
+      runSql("SELECT count(*)::text || '|' || count(*) FILTER (WHERE \"finished_at\" IS NULL AND \"rolled_back_at\" IS NULL)::text || '|' || count(*) FILTER (WHERE \"rolled_back_at\" IS NOT NULL)::text || '|' || count(*) FILTER (WHERE \"migration_name\" = '0_init')::text FROM \"_prisma_migrations\""),
+      "1|0|0|1",
+      "Expected only the clean baseline to be applied to a fresh database.",
+    );
+    client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    await client.$connect();
+    await verifyRemovedProductSchema();
+    await verifyCurrentSchema(schemaPath, databaseUrl);
+    await verifyMigrationStatus(schemaPath, databaseUrl);
+  } else {
+    await deployMigrations(schemaPath, databaseUrl);
+    assert.equal(runSql("SELECT count(*) FROM \"_prisma_migrations\" WHERE \"finished_at\" IS NOT NULL AND \"rolled_back_at\" IS NULL"), "14");
+    runSql(seedLegacyIdentity());
 
-  await cp(path.join(migrationsRoot, transitionName), path.join(temporaryMigrationsDirectory, transitionName), { recursive: true });
-  await deployMigrations(path.join(temporaryPrismaDirectory, "schema.prisma"), databaseUrl);
-  assert.equal(runSql("SELECT count(*) FROM \"_prisma_migrations\" WHERE \"finished_at\" IS NOT NULL AND \"rolled_back_at\" IS NULL"), "15");
+    await cp(path.join(migrationsRoot, transitionName), path.join(temporaryMigrationsDirectory, transitionName), { recursive: true });
+    await deployMigrations(schemaPath, databaseUrl);
+    assert.equal(runSql("SELECT count(*) FROM \"_prisma_migrations\" WHERE \"finished_at\" IS NOT NULL AND \"rolled_back_at\" IS NULL"), "15");
 
-  client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
-  await client.$connect();
-  await verifyPreservedIdentity();
-  await verifyRemovedProductSchema();
-  await verifyMigrationStatus(path.join(temporaryPrismaDirectory, "schema.prisma"), databaseUrl);
+    client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    await client.$connect();
+    await verifyPreservedIdentity();
+    await verifyRemovedProductSchema();
+    await verifyMigrationStatus(schemaPath, databaseUrl);
+  }
 } finally {
   await client?.$disconnect();
   if (containerStarted) spawnSync("docker", ["rm", "--force", "--volumes", containerName], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
@@ -134,6 +154,18 @@ async function verifyMigrationStatus(schemaPath, databaseUrl) {
     maxBuffer: 10 * 1024 * 1024,
   });
   if (result.error || result.status !== 0) throw new Error("Validated migration history is not in sync.");
+}
+
+function verifyCurrentSchema(schemaPath, databaseUrl) {
+  const result = spawnSync(process.execPath, [prismaCliPath(), "migrate", "diff", "--from-url", databaseUrl, "--to-schema-datamodel", schemaPath, "--exit-code"], {
+    cwd: repositoryRoot,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 120_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) throw new Error("Fresh baseline schema does not match the current Prisma datamodel.");
 }
 
 function deployMigrations(schemaPath, databaseUrl) {
