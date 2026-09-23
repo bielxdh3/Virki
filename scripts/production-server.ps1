@@ -48,7 +48,7 @@ if (
 ) {
   Stop-Safely 'Production-host identity marker does not match this server.'
 }
-foreach ($requiredFile in @('.env', '.env.oidc', $RevisionPath, $SourceStatePath)) {
+foreach ($requiredFile in @('.env', '.env.oidc', '.bielos-deploy-revision', '.bielos-source-state')) {
   if (-not (Test-Path -LiteralPath (Join-Path $Root $requiredFile) -PathType Leaf)) {
     Stop-Safely 'Required private configuration or source marker is missing.'
   }

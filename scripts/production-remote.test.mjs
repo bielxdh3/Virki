@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   buildSshArgs,
@@ -18,6 +19,18 @@ const operatorConfig = {
   port: "2222",
   root: "C:\\BielOS",
 };
+const productionServerScript = readFileSync(new URL("./production-server.ps1", import.meta.url), "utf8");
+
+test("production server checks private configuration and markers at the root once", () => {
+  assert.match(
+    productionServerScript,
+    /foreach \(\$requiredFile in @\('\.env', '\.env\.oidc', '\.bielos-deploy-revision', '\.bielos-source-state'\)\)/u,
+  );
+  assert.match(
+    productionServerScript,
+    /Test-Path -LiteralPath \(Join-Path \$Root \$requiredFile\) -PathType Leaf/u,
+  );
+});
 
 test("SSH preflight resolves only the canonical server target", () => {
   assert.deepEqual(
