@@ -107,16 +107,27 @@ async function assertStatus(url, expectedStatus, headers = {}) {
 }
 
 async function waitForResponse(url, headers = {}) {
+  let observedStatus = "unreachable";
+  let redirectPath = "";
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
       const response = await requestOnce(url, headers);
+      observedStatus = String(response.statusCode);
+      const location = response.headers.location;
+      if (location) {
+        try {
+          redirectPath = new URL(location, url).pathname;
+        } catch {
+          redirectPath = "invalid-location";
+        }
+      }
       if (response.statusCode >= 200 && response.statusCode < 300) return response;
     } catch {
       // The container may still be starting.
     }
     await delay(1_000);
   }
-  throw new Error("Runtime smoke endpoint did not become available.");
+  throw new Error(`Runtime smoke endpoint ${new URL(url).pathname} returned ${observedStatus}; expected a successful response${redirectPath ? ` (redirect ${redirectPath})` : ""}.`);
 }
 
 function requestOnce(url, headers) {
