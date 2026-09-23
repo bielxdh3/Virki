@@ -1,5 +1,6 @@
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 
 const image = process.env.BIELOS_RUNTIME_IMAGE?.trim();
@@ -67,7 +68,7 @@ try {
   await assertStatus(`http://127.0.0.1:${hubPort}/login`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   const response = await waitForResponse(`http://127.0.0.1:${hubPort}/.well-known/openid-configuration`, { host: publicHost });
-  const discovery = await response.json();
+  const discovery = JSON.parse(response.body);
   if (
     discovery.issuer !== `https://${publicHost}` ||
     !Array.isArray(discovery.code_challenge_methods_supported) ||
@@ -94,10 +95,9 @@ async function assertStatus(url, expectedStatus, headers = {}) {
   let observedStatus = "unreachable";
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
-      const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
-      response.body?.cancel();
-      observedStatus = String(response.status);
-      if (response.status === expectedStatus) return;
+      const response = await requestOnce(url, headers);
+      observedStatus = String(response.statusCode);
+      if (response.statusCode === expectedStatus) return;
     } catch {
       // The container may still be starting.
     }
@@ -109,15 +109,33 @@ async function assertStatus(url, expectedStatus, headers = {}) {
 async function waitForResponse(url, headers = {}) {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
-      const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
-      if (response.ok) return response;
-      response.body?.cancel();
+      const response = await requestOnce(url, headers);
+      if (response.statusCode >= 200 && response.statusCode < 300) return response;
     } catch {
       // The container may still be starting.
     }
     await delay(1_000);
   }
   throw new Error("Runtime smoke endpoint did not become available.");
+}
+
+function requestOnce(url, headers) {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(target, { headers }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("error", reject);
+      response.on("end", () => resolve({
+        statusCode: response.statusCode ?? 0,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    request.setTimeout(5_000, () => request.destroy(new Error("Runtime smoke request timed out.")));
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 function readLoopbackPort(container, target) {
