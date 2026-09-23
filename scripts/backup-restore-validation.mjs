@@ -138,6 +138,7 @@ async function seedRepresentativeData() {
       deviceIdHash: "backup-device-hash",
       status: "TRUSTED",
       rememberedUntil: new Date(Date.now() + 60_000),
+      strongVerifiedAt: new Date(),
     },
   });
   await sourceClient.oidcArtifact.create({
