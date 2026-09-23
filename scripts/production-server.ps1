@@ -160,7 +160,15 @@ function Assert-IdentityState([string] $Container, [string] $Expected) {
 
 function Invoke-ClonePrisma([string] $DatabaseUrl, [string[]] $Tail = @()) {
   $arguments = $compose + @('--profile', 'migration', 'run', '--rm', '--no-deps', '--env', "DATABASE_URL=$DatabaseUrl", 'migrate') + $Tail
-  Invoke-DockerCapture $arguments | Out-Null
+  $hadIgnoreOrphans = Test-Path -LiteralPath 'Env:COMPOSE_IGNORE_ORPHANS'
+  $previousIgnoreOrphans = $env:COMPOSE_IGNORE_ORPHANS
+  $env:COMPOSE_IGNORE_ORPHANS = 'true'
+  try {
+    Invoke-DockerCapture $arguments | Out-Null
+  } finally {
+    if ($hadIgnoreOrphans) { $env:COMPOSE_IGNORE_ORPHANS = $previousIgnoreOrphans }
+    else { Remove-Item -LiteralPath 'Env:COMPOSE_IGNORE_ORPHANS' -ErrorAction SilentlyContinue }
+  }
 }
 
 function Get-CloneMigrationState([string] $Container) {

@@ -45,6 +45,8 @@ test("clone migrator uses the Compose network without an unsupported run flag", 
   assert.ok(clonePrisma);
   assert.match(clonePrisma, /'--env', "DATABASE_URL=\$DatabaseUrl"/u);
   assert.doesNotMatch(clonePrisma, /'--network'/u);
+  assert.match(clonePrisma, /COMPOSE_IGNORE_ORPHANS = 'true'/u);
+  assert.doesNotMatch(clonePrisma, /COMPOSE_REMOVE_ORPHANS|--remove-orphans/u);
   assert.match(productionServerScript, /--network', \$networkName, '--network-alias', \$alias/u);
 });
 
