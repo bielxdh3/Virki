@@ -144,7 +144,9 @@ function Read-MigrationState {
 }
 
 function Read-CloneQuery([string] $Container, [string] $Query) {
-  $rows = @(Invoke-DockerCapture @('exec', $Container, 'psql', '-U', 'bielos_validation', '-d', 'bielos_restore', '-At', '-v', 'ON_ERROR_STOP=1', '-c', $Query) | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+  $encodedQuery = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Query))
+  $shell = 'printf %s ' + $encodedQuery + ' | base64 -d | psql -U bielos_validation -d bielos_restore -At -v ON_ERROR_STOP=1'
+  $rows = @(Invoke-DockerCapture @('exec', $Container, 'sh', '-lc', $shell) | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
   if ($rows.Count -ne 1) { Stop-Safely 'Restored database verification returned an unexpected result.' }
   return $rows[0]
 }

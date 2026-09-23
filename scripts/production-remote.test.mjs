@@ -32,6 +32,14 @@ test("production server checks private configuration and markers at the root onc
   );
 });
 
+test("clone SQL uses base64 to preserve quoted identifiers across PowerShell", () => {
+  const cloneQuery = productionServerScript.match(/function Read-CloneQuery[\s\S]*?\n\}/u)?.[0];
+  assert.ok(cloneQuery);
+  assert.match(cloneQuery, /GetBytes\(\$Query\)/u);
+  assert.match(cloneQuery, /'sh', '-lc', \$shell/u);
+  assert.doesNotMatch(cloneQuery, /'-c', \$Query/u);
+});
+
 test("SSH preflight resolves only the canonical server target", () => {
   assert.deepEqual(
     parseSshConfig(`user deploy\nhostname ${operatorConfig.host}\nport ${operatorConfig.port}\n`),
