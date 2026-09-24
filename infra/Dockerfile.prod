@@ -1,4 +1,4 @@
-FROM node:22-alpine AS build
+FROM node:25-alpine AS build
 
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -46,7 +46,7 @@ ENV NODE_ENV=production
 LABEL org.opencontainers.image.revision="${BIELOS_BUILD_REVISION}"
 CMD ["npm", "run", "prisma:migrate:deploy"]
 
-FROM node:22-alpine AS production-dependencies
+FROM node:25-alpine AS production-dependencies
 WORKDIR /app
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
@@ -56,7 +56,7 @@ COPY packages/auth/package*.json ./packages/auth/
 COPY packages/database/package*.json ./packages/database/
 RUN npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit
 
-FROM node:22-alpine AS production
+FROM node:25-alpine AS production
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
