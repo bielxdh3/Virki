@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
+import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token";
 
 const portalUrl = "https://portal.localhost:3001";
@@ -27,21 +28,12 @@ type AuthFixture = {
 };
 
 let fixture: AuthFixture;
-let deviceCookieName: string;
-let sessionCookieName: string;
 
 test.beforeAll(async () => {
   if (!fixturePath) throw new Error("Authenticated E2E fixture path is unavailable.");
   const value: unknown = JSON.parse(await readFile(fixturePath, "utf8"));
   if (!isAuthFixture(value)) throw new Error("Authenticated E2E fixture is invalid.");
   fixture = value;
-
-  const [{ DEVICE_COOKIE_NAME }, { SESSION_COOKIE_NAME }] = await Promise.all([
-    import("@bielos/auth/security"),
-    import("@bielos/auth")
-  ]);
-  deviceCookieName = DEVICE_COOKIE_NAME;
-  sessionCookieName = SESSION_COOKIE_NAME;
 });
 
 test("USER can sign in and sees only the granted enabled project", async ({ browser }) => {
@@ -82,14 +74,14 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page.getByRole("heading", { level: 1, name: "Acessos", exact: true })).toBeVisible();
     await expect(page.getByText(`E2E User → ${fixture.projectName}`, { exact: true })).toBeVisible();
 
-    const sessionCookie = (await context.cookies(hubUrl)).find((cookie) => cookie.name === sessionCookieName);
+    const sessionCookie = (await context.cookies(hubUrl)).find((cookie) => cookie.name === SESSION_COOKIE_NAME);
     expect(sessionCookie?.value).toBeTruthy();
     if (!sessionCookie) throw new Error("Authenticated E2E session cookie was not created.");
 
     const accesslessContext = await browser.newContext();
     try {
       await accesslessContext.addCookies([{
-        name: sessionCookieName,
+        name: SESSION_COOKIE_NAME,
         value: sessionCookie.value,
         url: hubUrl,
         httpOnly: true,
@@ -107,7 +99,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page).toHaveURL(`${hubUrl}/login`);
 
     await context.addCookies([{
-      name: sessionCookieName,
+      name: SESSION_COOKIE_NAME,
       value: sessionCookie.value,
       url: hubUrl,
       httpOnly: true,
@@ -123,7 +115,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
 
 async function rememberDevice(context: BrowserContext, url: string, deviceToken: string): Promise<void> {
   await context.addCookies([{
-    name: deviceCookieName,
+    name: DEVICE_COOKIE_NAME,
     value: deviceToken,
     url,
     httpOnly: true,

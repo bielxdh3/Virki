@@ -21,7 +21,7 @@ import {
 } from "./index";
 import { prisma, type Prisma } from "@bielos/database";
 
-export const DEVICE_COOKIE_NAME = "bielos_device";
+export { DEVICE_COOKIE_NAME } from "./constants";
 export const SECURITY_CEREMONY_TTL_MS = 10 * 60 * 1000;
 export const DEVICE_TRUST_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 export const REMEMBERED_BROWSER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
