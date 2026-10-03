@@ -1,10 +1,12 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { prisma } from "@bielos/database";
+import { requireAdminPage } from "../../../lib/admin-page";
 import { createAccountAction, setAccountStateAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
 export default async function AccountsPage({ searchParams }: { searchParams: Promise<{ status?: string; error?: string }> }) {
+  await requireAdminPage();
   const params = await searchParams;
   const [users, csrf] = await Promise.all([
     prisma.user.findMany({ where: { role: "USER" }, select: { id: true, email: true, displayName: true, isActive: true, accountStatus: true, secondFactorMethod: true, createdAt: true, _count: { select: { sessions: true, projectGrants: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 }),

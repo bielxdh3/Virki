@@ -2,15 +2,15 @@ import { getAdministrativeCredentialState, listActiveSecurityElevations } from "
 import { listPendingAccountRecoveries } from "@bielos/auth/security";
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { prisma } from "@bielos/database";
-import { getCurrentSession } from "../../../lib/auth";
+import { requireAdminPage } from "../../../lib/admin-page";
 import { approveRecoveryAction } from "../../recover/actions";
 import { CredentialSetup, ElevationControls } from "./security-controls";
 
 export const dynamic = "force-dynamic";
 
 export default async function SecurityPage({ searchParams }: { searchParams: Promise<{ status?: string; error?: string }> }) {
-  const [params, session] = await Promise.all([searchParams, getCurrentSession()]);
-  if (!session) return null;
+  const session = await requireAdminPage();
+  const params = await searchParams;
   const [credential, activeElevations, recoveryRequests, csrf, activeSessions] = await Promise.all([
     getAdministrativeCredentialState(session.user.id),
     listActiveSecurityElevations(session.user, session.id),

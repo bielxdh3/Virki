@@ -1,10 +1,12 @@
 import { prisma } from "@bielos/database";
+import { requireAdminPage } from "../../../lib/admin-page";
 
 export const dynamic = "force-dynamic";
 
 type SearchParams = Promise<{ cursor?: string; event?: string }>;
 
 export default async function AuditPage({ searchParams }: { searchParams: SearchParams }) {
+  await requireAdminPage();
   const params = await searchParams;
   const cursor = params.cursor && /^[A-Za-z0-9_-]{8,80}$/u.test(params.cursor) ? params.cursor : undefined;
   const event = params.event && /^[A-Z0-9_]{3,80}$/u.test(params.event) ? params.event : undefined;

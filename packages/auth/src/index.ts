@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import { prisma, type Prisma } from "@bielos/database";
 import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
-import { createLoginAccountRateLimitIdentifierHash, createLoginAttemptRateLimitIdentifierHash, createLoginRateLimitIdentifierHash, createRateLimitIdentifierHash, getLoginRateLimitRefundState, isTrustedClientAddress } from "./rate-limit-config";
+import { createLoginAccountRateLimitIdentifierHash, createLoginAttemptRateLimitIdentifierHash, createLoginRateLimitIdentifierHash, createRateLimitIdentifierHash, getLoginRateLimitRefundState, isTrustedClientAddress, scopeLoginRateLimitEmail } from "./rate-limit-config";
 
 export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
 export { isTrustedClientAddress } from "./rate-limit-config";
@@ -77,6 +77,8 @@ export type LoginRateLimitResult = {
 export type RateLimitAttemptResult =
   | { allowed: false }
   | { allowed: true; windowStartedAt: Date };
+
+export type LoginRole = "ADMIN" | "USER";
 
 export type LoginAuthenticationResult =
   | { user: AuthenticatedUser; failureMode?: never }
@@ -326,7 +328,8 @@ export async function authenticateUserWithRateLimit(
   email: string,
   password: string,
   now = new Date(),
-  trustedClientAddress?: string
+  trustedClientAddress?: string,
+  requiredRole?: LoginRole
 ): Promise<LoginAuthenticationResult> {
   let sourceIdentifier: string | null = null;
   let sourceReservation: Extract<RateLimitAttemptResult, { allowed: true }> | null = null;
@@ -350,8 +353,9 @@ export async function authenticateUserWithRateLimit(
       if (!sourceAttempt.allowed) return { user: null, failureMode: "rate-limited" };
       sourceReservation = sourceAttempt;
     }
-    const accountIdentifierHash = createLoginAccountRateLimitIdentifierHash(email);
-    const identifierHash = createLoginAttemptRateLimitIdentifierHash(email, trustedClientAddress);
+    const rateLimitEmail = scopeLoginRateLimitEmail(email, requiredRole);
+    const accountIdentifierHash = createLoginAccountRateLimitIdentifierHash(rateLimitEmail);
+    const identifierHash = createLoginAttemptRateLimitIdentifierHash(rateLimitEmail, trustedClientAddress);
     await pruneExpiredLoginRateLimits(now);
 
     const activeSourceReservation = sourceReservation;
@@ -389,7 +393,8 @@ export async function authenticateUserWithRateLimit(
 
         const user = await authenticateUserFromLookup(
           () => findAuthenticationUser(transaction, email),
-          password
+          password,
+          requiredRole
         );
 
         if (!user) {
@@ -449,11 +454,14 @@ export async function authenticateUserWithRateLimit(
 
 async function authenticateUserFromLookup(
   lookup: () => Promise<AuthenticationUserRecord | null>,
-  password: string
+  password: string,
+  requiredRole?: LoginRole
 ): Promise<AuthenticatedUser | null> {
   const user = await lookup();
 
-  if (!user?.isActive || user.accountStatus !== "ACTIVE" || !user.passwordHash) {
+  // An account of another role is indistinguishable from a missing one, so the
+  // public portal cannot be used to guess (or lock out) ADMIN passwords.
+  if (!user?.isActive || user.accountStatus !== "ACTIVE" || !user.passwordHash || (requiredRole && user.role !== requiredRole)) {
     await verifyPassword(DUMMY_PASSWORD_HASH, password);
     return null;
   }

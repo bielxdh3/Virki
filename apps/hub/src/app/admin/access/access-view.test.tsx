@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import test from "node:test";
 import { prisma } from "@bielos/database";
-import AccessPage from "./page";
+import { AccessView } from "./access-view";
 
 function collectText(node: unknown): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -37,7 +37,7 @@ test("access picker filters active USER accounts and legacy ADMIN grants stay cl
   ]) as unknown as typeof originalGrantFindMany;
 
   try {
-    const page = await AccessPage({ searchParams: Promise.resolve({}) });
+    const page = await AccessView({ searchParams: Promise.resolve({}) });
     assert.deepEqual(userQuery?.where, { role: "USER", isActive: true, accountStatus: "ACTIVE" });
 
     const renderedText = collectText(page);

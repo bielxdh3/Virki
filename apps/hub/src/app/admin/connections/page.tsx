@@ -1,5 +1,6 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { prisma } from "@bielos/database";
+import { requireAdminPage } from "../../../lib/admin-page";
 import { ConnectionForm } from "./connection-form";
 import { deleteProjectConnectionAction, setProjectConnectionEnabledAction, updateProjectConnectionAction } from "../actions";
 import { RotateSecretForm } from "./rotate-secret-form";
@@ -7,6 +8,7 @@ import { RotateSecretForm } from "./rotate-secret-form";
 export const dynamic = "force-dynamic";
 
 export default async function ConnectionsPage({ searchParams }: { searchParams: Promise<{ status?: string; error?: string }> }) {
+  await requireAdminPage();
   const params = await searchParams;
   const [connections, csrf] = await Promise.all([
     prisma.projectConnection.findMany({ select: { id: true, name: true, slug: true, origin: true, launchUrl: true, redirectUris: true, enabled: true, _count: { select: { grants: true } } }, orderBy: [{ name: "asc" }, { id: "asc" }] }),

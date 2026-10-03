@@ -34,6 +34,8 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   const pathname = normalizePath(request.nextUrl.pathname);
 
   if (surface === "unknown") return new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  // Loopback/Compose host names never pass through Cloudflare Access; in production they only serve the health probe.
+  if (surface === "local" && env.NODE_ENV === "production" && pathname !== "/api/health") return new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
 
   if (surface === "hub" && pathname !== "/api/health") {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);

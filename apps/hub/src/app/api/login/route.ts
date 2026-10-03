@@ -48,7 +48,8 @@ export async function POST(request: Request) {
   const auditMetadata = createAuditRequestMetadata(request.headers, `${surface}-login`);
   const actorEmailHash = rateLimitIdentifier ? hashAuditEmail(rateLimitIdentifier) : undefined;
 
-  const authentication = await authenticateUserWithRateLimit(email, password, new Date(), request.headers.get("cf-connecting-ip")?.trim());
+  const requiredRole = surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined;
+  const authentication = await authenticateUserWithRateLimit(email, password, new Date(), request.headers.get("cf-connecting-ip")?.trim(), requiredRole);
   const user = authentication.user;
 
   if (!user) {

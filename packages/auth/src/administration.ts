@@ -97,7 +97,7 @@ export async function verifySecurityElevation(input: { actor: { id: string; role
     const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, undefined, now);
     if (!isAllowedScope(ceremony.scope)) throw new AdministrationMutationError();
     if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
-    const updated = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: now } }, data: { status: "ACTIVE", activatedAt: now } });
+    const updated = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: now }, createdAt: { gt: getElevationCeremonyOpenedAfter(now) } }, data: { status: "ACTIVE", activatedAt: now } });
     if (updated.count !== 1) throw new AdministrationMutationError();
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_ACTIVATED", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.elevation", message: "Administrative elevation activated.", metadata: { requestRef: hashAuditIdentifier(input.requestKey) } });
   });
@@ -200,7 +200,7 @@ async function createEmailElevationCeremony(input: { userId: string; sessionId: 
   const expiresAt = input.expiresAt ?? new Date(input.now.getTime() + ELEVATION_CEREMONY_TTL_MS);
   await prisma.$transaction(async (transaction) => {
     await transaction.securityElevation.updateMany({ where: { userId: input.userId, sessionId: input.sessionId, status: "PENDING" }, data: { status: "REVOKED", revokedAt: input.now } });
-    await transaction.securityElevation.create({ data: { requestKey, userId: input.userId, sessionId: input.sessionId, protocolVersion: ELEVATION_PROTOCOL_VERSION, scope: input.scope, challengeHash: hashSecurityCode(code), status: "PENDING", manualUntilRevoked: input.manualUntilRevoked ?? false, expiresAt } });
+    await transaction.securityElevation.create({ data: { requestKey, userId: input.userId, sessionId: input.sessionId, protocolVersion: ELEVATION_PROTOCOL_VERSION, scope: input.scope, challengeHash: hashSecurityCode(code), status: "PENDING", manualUntilRevoked: input.manualUntilRevoked ?? false, expiresAt, createdAt: input.now } });
     await enqueueEmailMessageForClient(transaction, { idempotencyKey: `admin-elevation:${requestKey}`, kind: input.kind, recipientEmail: input.recipientEmail, locale: input.locale, payload: { publicValues: { displayName: input.displayName ?? "" }, protectedValues: { code } } });
     if (input.audit) await writeAuditLogInTransaction(transaction, { ...input.audit, metadata: { ...input.audit.metadata, requestRef: hashAuditIdentifier(requestKey) } });
   });
@@ -209,9 +209,19 @@ async function createEmailElevationCeremony(input: { userId: string; sessionId: 
 
 async function getPendingCeremony(transaction: Prisma.TransactionClient, requestKey: string, userId: string, sessionId: string, scope: string | undefined, now: Date) {
   if (!isRequestKey(requestKey)) throw new AdministrationMutationError();
-  const ceremony = await transaction.securityElevation.findUnique({ where: { requestKey }, select: { id: true, challengeHash: true, scope: true, status: true, expiresAt: true, userId: true, sessionId: true } });
-  if (!ceremony || ceremony.status !== "PENDING" || ceremony.userId !== userId || ceremony.sessionId !== sessionId || (scope && ceremony.scope !== scope) || ceremony.expiresAt <= now) throw new AdministrationMutationError();
+  const ceremony = await transaction.securityElevation.findUnique({ where: { requestKey }, select: { id: true, challengeHash: true, scope: true, status: true, expiresAt: true, createdAt: true, userId: true, sessionId: true } });
+  if (!ceremony || ceremony.status !== "PENDING" || ceremony.userId !== userId || ceremony.sessionId !== sessionId || (scope && ceremony.scope !== scope) || !isElevationCeremonyOpen(ceremony, now)) throw new AdministrationMutationError();
   return ceremony;
+}
+
+// expiresAt is the lifetime of the elevation once activated (up to 24h, or forever for MANUAL);
+// the emailed code itself is only accepted for ELEVATION_CEREMONY_TTL_MS after it was sent.
+export function isElevationCeremonyOpen(ceremony: { createdAt: Date; expiresAt: Date }, now: Date): boolean {
+  return ceremony.expiresAt > now && ceremony.createdAt > getElevationCeremonyOpenedAfter(now) && ceremony.createdAt <= now;
+}
+
+function getElevationCeremonyOpenedAfter(now: Date): Date {
+  return new Date(now.getTime() - ELEVATION_CEREMONY_TTL_MS);
 }
 
 async function consumeAdministrativeProofAttempts(userId: string, requestKey: string, now: Date): Promise<void> {

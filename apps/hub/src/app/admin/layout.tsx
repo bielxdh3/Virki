@@ -1,10 +1,7 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { headers } from "next/headers";
-import { forbidden, redirect } from "next/navigation";
-import { getCurrentSession } from "../../lib/auth";
-import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, trustedReturnTo } from "../../lib/surface";
-import { isAdminRequestAllowed, isAdminRole } from "../../lib/admin-policy";
+import { requireAdminPage } from "../../lib/admin-page";
 
 const navigation = [
   ["/admin/accounts", "Contas"],
@@ -17,16 +14,9 @@ const navigation = [
 export const dynamic = "force-dynamic";
 
 export default async function AdminLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const session = await requireAdminPage();
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
-  const accessValid = isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "admin-layout"));
-  if (!isAdminRequestAllowed(surface, accessValid)) forbidden();
-  const session = await getCurrentSession();
-  if (!session) {
-    const returnTo = trustedReturnTo(requestHeaders, surface) ?? "/admin/accounts";
-    redirect(`/login?returnTo=${encodeURIComponent(returnTo)}`);
-  }
-  if (!isAdminRole(session.user.role)) forbidden();
   const csrf = createCsrfToken();
   const currentPath = trustedReturnTo(requestHeaders, surface, session.user.role);
   const currentPathname = currentPath?.split("?", 1)[0];

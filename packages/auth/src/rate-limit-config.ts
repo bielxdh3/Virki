@@ -58,6 +58,12 @@ export function createLoginAccountRateLimitIdentifierHash(
   return createLoginRateLimitIdentifierHash(email.trim().toLowerCase() || "unknown", env);
 }
 
+// Keeps counters for one login surface (hub = ADMIN, portal = USER) from locking out the other.
+export function scopeLoginRateLimitEmail(email: string, role: string | undefined): string {
+  const normalizedEmail = email.trim().toLowerCase() || "unknown";
+  return role ? `login-role:${role}:${normalizedEmail}` : normalizedEmail;
+}
+
 export function createLoginAttemptRateLimitIdentifierHash(
   email: string,
   trustedClientAddress: string | undefined,

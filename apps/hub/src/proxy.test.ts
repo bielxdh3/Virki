@@ -55,6 +55,21 @@ test("production Hub fails closed when the Access requirement flag is missing or
   }
 });
 
+test("production loopback and Compose host names only reach the health probe", async () => {
+  const productionEnv = { ...env, NODE_ENV: "production" };
+  for (const host of ["localhost", "127.0.0.1", "hub", "portal"]) {
+    for (const path of ["/admin/accounts", "/admin/audit", "/login", "/account/security", "/auth"]) {
+      const response = await evaluateProxyRequest(
+        new NextRequest(`http://${host}:3001${path}`, { headers: { host: `${host}:3001`, cookie: "bielos_session=forged", rsc: "1" } }),
+        productionEnv
+      );
+      assert.equal(response.status, 404, `${host}${path}`);
+    }
+    const health = await evaluateProxyRequest(new NextRequest(`http://${host}:3001/api/health`, { headers: { host: `${host}:3001` } }), productionEnv);
+    assert.equal(health.status, 200, `${host}/api/health`);
+  }
+});
+
 test("development Hub keeps its explicit local Access opt-out", async () => {
   const response = await evaluateProxyRequest(
     new NextRequest("https://hub.biel.dev.br/admin/accounts", { headers: { host: "hub.biel.dev.br" } }),

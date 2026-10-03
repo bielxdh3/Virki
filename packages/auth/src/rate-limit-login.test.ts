@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { prisma, type Prisma } from "@bielos/database";
 import { authenticateUserWithRateLimit, hashPassword } from "./index";
-import { createRateLimitIdentifierHash } from "./rate-limit-config";
+import { createLoginAccountRateLimitIdentifierHash, createRateLimitIdentifierHash, scopeLoginRateLimitEmail } from "./rate-limit-config";
 
 type RateLimitRow = {
   identifierHash: string;
@@ -84,6 +84,64 @@ test("successful logins release their source reservations without clearing faile
         expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
       });
     }
+  } finally {
+    testPrisma.$transaction = originalTransaction as unknown as typeof testPrisma.$transaction;
+    testPrisma.loginRateLimit = originalRateLimitDelegate as unknown as typeof testPrisma.loginRateLimit;
+  }
+});
+
+test("a surface-scoped login treats other roles as missing accounts and keeps separate counters", async () => {
+  const now = new Date("2026-10-03T05:00:00.000Z");
+  const rows = new Map<string, RateLimitRow>();
+  const admin = {
+    id: "admin-a",
+    email: "owner@example.invalid",
+    displayName: "Owner",
+    passwordHash: await hashPassword("correct-admin-password"),
+    role: "ADMIN",
+    isActive: true,
+    accountStatus: "ACTIVE"
+  };
+  const transaction = {
+    $queryRaw: async () => [],
+    loginRateLimit: {
+      findUnique: async ({ where }: { where: { identifierHash: string } }) => rows.get(where.identifierHash) ?? null,
+      create: async ({ data }: { data: RateLimitRow }) => { rows.set(data.identifierHash, data); },
+      update: async ({ where, data }: { where: { identifierHash: string }; data: Partial<RateLimitRow> }) => {
+        const existing = rows.get(where.identifierHash);
+        if (!existing) throw new Error("Expected rate-limit row.");
+        rows.set(where.identifierHash, { ...existing, ...data });
+      },
+      deleteMany: async ({ where }: { where: { identifierHash: { in: string[] } } }) => {
+        let count = 0;
+        for (const identifierHash of where.identifierHash.in) if (rows.delete(identifierHash)) count += 1;
+        return { count };
+      }
+    },
+    user: { findUnique: async () => admin }
+  } as unknown as Prisma.TransactionClient;
+  const testPrisma = prisma as unknown as {
+    $transaction: (callback: (client: Prisma.TransactionClient) => Promise<unknown>) => Promise<unknown>;
+    loginRateLimit: { deleteMany: (args: unknown) => Promise<{ count: number }> };
+  };
+  const originalTransaction = prisma.$transaction;
+  const originalRateLimitDelegate = prisma.loginRateLimit;
+  testPrisma.$transaction = async (callback) => callback(transaction);
+  testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }) };
+
+  try {
+    const portal = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, undefined, "USER");
+    assert.deepEqual(portal, { user: null, failureMode: "invalid-credentials" }, "the correct ADMIN password is rejected on the portal");
+
+    const portalAccountHash = createLoginAccountRateLimitIdentifierHash(scopeLoginRateLimitEmail(admin.email, "USER"));
+    const hubAccountHash = createLoginAccountRateLimitIdentifierHash(scopeLoginRateLimitEmail(admin.email, "ADMIN"));
+    assert.notEqual(portalAccountHash, hubAccountHash);
+    assert.equal(rows.get(portalAccountHash)?.attempts, 1, "the portal failure is counted on the portal scope");
+    assert.equal(rows.has(hubAccountHash), false, "portal failures never touch the hub counter");
+
+    const hub = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, undefined, "ADMIN");
+    assert.equal(hub.user?.id, admin.id);
+    assert.equal(rows.get(portalAccountHash)?.attempts, 1, "a hub success does not reset portal counters");
   } finally {
     testPrisma.$transaction = originalTransaction as unknown as typeof testPrisma.$transaction;
     testPrisma.loginRateLimit = originalRateLimitDelegate as unknown as typeof testPrisma.loginRateLimit;
