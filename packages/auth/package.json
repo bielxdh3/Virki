@@ -25,11 +25,11 @@
   },
   "dependencies": {
     "@bielos/database": "0.1.0",
-    "@node-rs/argon2": "^2.0.2",
+    "@node-rs/argon2": "^2.2.1",
     "jose": "^6.2.3",
     "nodemailer": "^10.0.10"
   },
   "devDependencies": {
-    "@types/nodemailer": "^8.0.1"
+    "@types/nodemailer": "^8.0.2"
   }
 }

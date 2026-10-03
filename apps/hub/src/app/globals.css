@@ -4,6 +4,7 @@
   --surface: #171d1f;
   --surface-raised: #1d2528;
   --line: #394448;
+  --control-border: #607074;
   --text: #f4f7f7;
   --muted: #c2cdcf;
   --accent: #8ce2d4;
@@ -50,8 +51,11 @@ details > summary.button-danger:hover { border-color: var(--danger); }
 .eyebrow { margin: 0 0 0.5rem; letter-spacing: 0.04em; text-transform: uppercase; }
 .form-stack { display: grid; gap: 0.9rem; max-width: 540px; margin: 1rem 0; }
 .form-stack label { display: grid; gap: 0.4rem; color: var(--muted); }
-.form-stack input, .form-stack select, .form-stack textarea { width: 100%; min-height: 44px; padding: 0.6rem; color: var(--text); border: 1px solid var(--line); border-radius: 0.3rem; background: #0d1113; }
+.form-stack input, .form-stack select, .form-stack textarea { width: 100%; min-height: 44px; padding: 0.6rem; color: var(--text); border: 1px solid var(--control-border); border-radius: 0.3rem; background: #0d1113; }
 .form-stack textarea { min-height: 88px; }
+.password-control { display: grid; gap: 0.4rem; }
+.password-field { display: flex; align-items: stretch; gap: 0.5rem; }
+.password-field input { flex: 1; min-width: 0; }
 .form-error { color: var(--danger); }
 .form-success { color: var(--accent); overflow-wrap: anywhere; }
 .auth-page, .public-page { display: grid; min-height: 100vh; place-items: center; padding: 1.25rem; }

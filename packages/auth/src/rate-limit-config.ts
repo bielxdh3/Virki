@@ -8,6 +8,26 @@ export type LoginRateLimitConfigurationState =
   | { available: true; source: "environment" | "synthetic" }
   | { available: false; source: "missing-production-secret" };
 
+export type LoginRateLimitReservationState = {
+  attempts: number;
+  windowStartedAt: Date;
+  blockedUntil: Date | null;
+};
+
+export function getLoginRateLimitRefundState(
+  existing: LoginRateLimitReservationState,
+  reservationWindowStartedAt: Date,
+  maxAttempts: number
+): Pick<LoginRateLimitReservationState, "attempts" | "blockedUntil"> | null {
+  if (existing.windowStartedAt.getTime() !== reservationWindowStartedAt.getTime()) return null;
+
+  const attempts = Math.max(existing.attempts - 1, 0);
+  return {
+    attempts,
+    blockedUntil: attempts < maxAttempts ? null : existing.blockedUntil
+  };
+}
+
 export function getLoginRateLimitConfigurationState(
   env: NodeJS.ProcessEnv = process.env
 ): LoginRateLimitConfigurationState {

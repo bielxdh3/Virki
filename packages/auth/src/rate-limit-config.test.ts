@@ -5,6 +5,7 @@ import {
   createLoginAccountRateLimitIdentifierHash,
   createLoginAttemptRateLimitIdentifierHash,
   createLoginRateLimitIdentifierHash,
+  getLoginRateLimitRefundState,
   getLoginRateLimitConfigurationState,
   isTrustedClientAddress
 } from "./rate-limit-config";
@@ -110,6 +111,28 @@ test("login account limit identifiers are normalized and independent of source a
   assert.equal(accountHash, createLoginAccountRateLimitIdentifierHash(" member@example.invalid ", env));
   assert.notEqual(accountHash, createLoginAttemptRateLimitIdentifierHash("member@example.invalid", "203.0.113.10", env));
   assert.notEqual(accountHash, createLoginAccountRateLimitIdentifierHash("other@example.invalid", env));
+});
+
+test("a successful login refunds only its reservation in the same source window", () => {
+  const windowStartedAt = new Date("2026-10-03T05:00:00.000Z");
+  const blockedUntil = new Date("2026-10-03T05:15:00.000Z");
+
+  assert.deepEqual(
+    getLoginRateLimitRefundState(
+      { attempts: 30, windowStartedAt, blockedUntil },
+      windowStartedAt,
+      30
+    ),
+    { attempts: 29, blockedUntil: null }
+  );
+  assert.equal(
+    getLoginRateLimitRefundState(
+      { attempts: 10, windowStartedAt, blockedUntil: null },
+      new Date("2026-10-03T05:15:00.000Z"),
+      30
+    ),
+    null
+  );
 });
 
 test("trusted client addresses reject ambiguous forwarding values", () => {

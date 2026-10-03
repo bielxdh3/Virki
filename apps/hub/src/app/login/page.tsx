@@ -4,6 +4,7 @@ import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, safeReturnTo } from "../../lib/surface";
+import { PasswordField } from "../password-field";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +33,10 @@ export default async function LoginPage({ searchParams }: { searchParams?: Promi
           <input type="hidden" name="returnTo" value={returnTo ?? ""} />
           {reauth ? <input type="hidden" name="reauth" value="1" /> : null}
           <label>E-mail<input type="email" name="email" autoComplete="username" maxLength={320} required /></label>
-          <label>Senha<input type="password" name="password" autoComplete="current-password" maxLength={256} required /></label>
+          <div className="password-control">
+            <label htmlFor="login-password">Senha</label>
+            <PasswordField id="login-password" name="password" autoComplete="current-password" maxLength={256} required />
+          </div>
           {params?.error ? <p className="form-error" role="alert">E-mail ou senha inválidos.</p> : null}
           <button className="button-primary" type="submit">Entrar</button>
         </form>
