@@ -3,8 +3,26 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const MAX_TEXT_FILE_BYTES = 1024 * 1024;
+const MAX_GIT_BLOB_BYTES = 64 * 1024 * 1024;
+const revisionArguments = process.argv.slice(2);
+let revision = null;
+
+if (revisionArguments.length > 0) {
+  if (revisionArguments.length !== 2 || revisionArguments[0] !== "--revision" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(revisionArguments[1])) {
+    console.error("Secret scan failed: invalid arguments.");
+    process.exit(2);
+  }
+  revision = revisionArguments[1];
+}
+
+const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
+const sensitiveDirectorySegments = new Set(["backup", "backups", "dumps", "gmail", "takeout", "google takeout", "attachments", "secrets"]);
 
 const forbiddenPathRules = [
+  {
+    id: "sensitive-export-directory",
+    test: (filePath) => filePath !== "infra/backups/.gitkeep" && filePath.split("/").some((segment) => sensitiveDirectorySegments.has(segment))
+  },
   {
     id: "env-file",
     test: (filePath) => {
@@ -17,10 +35,18 @@ const forbiddenPathRules = [
     test: (filePath) => filePath.startsWith("infra/cloudflare/") && filePath.endsWith(".json")
   },
   {
+    id: "aws-credentials",
+    test: (filePath) => /(?:^|\/)\.aws\/(?:credentials|config)$/u.test(filePath)
+  },
+  {
     id: "database-dump",
     test: (filePath) =>
-      /\.(?:bak|backup|db|dump|sqlite|sqlite3|sql)$/i.test(filePath) &&
+      /\.(?:bak|backup|db|dump|sqlite|sqlite3|sql)(?:\.(?:gz|gzip|bz2|xz|zst|lz4)|-(?:wal|shm|journal))?$/u.test(filePath) &&
       !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/i.test(filePath)
+  },
+  {
+    id: "application-log",
+    test: (filePath) => /\.log(?:\.\d+)?(?:\.(?:gz|gzip|bz2|xz|zst|lz4))?$/u.test(filePath)
   },
   {
     id: "google-takeout-export",
@@ -32,7 +58,7 @@ const forbiddenPathRules = [
   },
   {
     id: "private-key-file",
-    test: (filePath) => /(?:^|\/)(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|.*\.pem|.*\.key)$/i.test(filePath)
+    test: (filePath) => /(?:^|\/)(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*|.*\.(?:pem|key|p12|pfx|der|jks|keystore)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*)$/iu.test(filePath)
   }
 ];
 
@@ -73,7 +99,7 @@ const contentRules = [
   {
     id: "generic-secret-assignment",
     pattern:
-      /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|secret|token)\b\s*[:=]\s*["']?(?!$|<|false|local-validation-only|owner@example\.invalid|placeholder|replace)[A-Za-z0-9_./+=-]{24,}/i
+      /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|secret|token)\b["']?\s*[:=]\s*["']?(?!$|<|false|local-validation-only|owner@example\.invalid|placeholder|replace)[A-Za-z0-9_./+=-]{24,}/i
   }
 ];
 
@@ -89,9 +115,9 @@ const allowedPlaceholderValues = new Set([
 
 const findings = [];
 
-for (const filePath of getRepositoryFiles()) {
+for (const { filePath, objectId } of revision ? getRevisionFiles(revision) : getRepositoryFiles()) {
   scanFilePath(filePath);
-  scanFileContents(filePath);
+  scanFileContents(filePath, objectId);
 }
 
 if (findings.length > 0) {
@@ -116,12 +142,34 @@ function getRepositoryFiles() {
     .toString("utf8")
     .split("\0")
     .filter(Boolean)
-    .map((filePath) => filePath.replaceAll("\\", "/"));
+    .map((filePath) => ({ filePath: filePath.replaceAll("\\", "/"), objectId: null }));
+}
+
+function getRevisionFiles(sourceRevision) {
+  const output = execFileSync("git", ["ls-tree", "-r", "-z", "--full-tree", sourceRevision], {
+    encoding: "buffer",
+    env: gitEnvironment
+  });
+
+  return output
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .map((record) => {
+      const separator = record.indexOf("\t");
+      if (separator < 0) throw new Error("Invalid Git tree entry.");
+      const [mode, type, objectId] = record.slice(0, separator).split(" ");
+      if (type !== "blob" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(objectId ?? "")) return null;
+      if (mode !== "100644" && mode !== "100755" && mode !== "120000") return null;
+      return { filePath: record.slice(separator + 1).replaceAll("\\", "/"), objectId };
+    })
+    .filter((entry) => entry !== null);
 }
 
 function scanFilePath(filePath) {
+  const normalizedPath = filePath.replaceAll("\\", "/").toLowerCase();
   for (const rule of forbiddenPathRules) {
-    if (rule.test(filePath)) {
+    if (rule.test(normalizedPath)) {
       findings.push({
         file: filePath,
         rule: rule.id
@@ -130,13 +178,20 @@ function scanFilePath(filePath) {
   }
 }
 
-function scanFileContents(filePath) {
-  if (!existsSync(filePath)) return;
-
+function scanFileContents(filePath, objectId) {
   let buffer;
 
   try {
-    buffer = readFileSync(filePath);
+    if (objectId) {
+      buffer = execFileSync("git", ["cat-file", "blob", objectId], {
+        encoding: "buffer",
+        env: gitEnvironment,
+        maxBuffer: MAX_GIT_BLOB_BYTES
+      });
+    } else {
+      if (!existsSync(filePath)) return;
+      buffer = readFileSync(filePath);
+    }
   } catch {
     findings.push({
       file: filePath,
@@ -145,7 +200,16 @@ function scanFileContents(filePath) {
     return;
   }
 
-  if (buffer.includes(0)) return;
+  if (buffer.includes(0)) {
+    let binaryText = buffer.toString("latin1");
+    // NUL-delimited ASCII runs preserve UTF-16LE/BE text for the ordinary secret patterns.
+    // eslint-disable-next-line no-control-regex -- binary NUL bytes must be collapsed before content scanning.
+    binaryText = binaryText.replace(/([\x20-\x7e])\x00|\x00(?=[\x20-\x7e])/gu, "$1");
+    // eslint-disable-next-line no-control-regex -- remaining binary control bytes separate unrelated text runs.
+    binaryText = binaryText.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/gu, "\n");
+    scanLine(filePath, 1, binaryText);
+    return;
+  }
   if (buffer.length > MAX_TEXT_FILE_BYTES) {
     findings.push({
       file: filePath,

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { createReadStream, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,45 @@ import { readProductionConfig, isValidProductionConfig } from "./lib/production-
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const serverScriptPath = "scripts/production-server.sh";
+const secretScannerRelativePath = "scripts/secret-scan.mjs";
+const backupDirectorySentinel = "infra/backups/.gitkeep";
+const reservedArchiveSegments = new Set([
+  ".env",
+  ".production.operator.json",
+  ".bielos-release",
+  ".bielos-production-host",
+  ".npmrc",
+  ".dev.vars",
+  "backups",
+  "backup",
+  "dumps",
+  "releases",
+  "current",
+  "google takeout",
+  "takeout",
+  "gmail",
+  "attachments",
+  "secrets",
+]);
+
+function isSensitiveArchivePath(entry) {
+  const normalizedEntry = entry.replaceAll("\\", "/").toLowerCase().replace(/\/+$/u, "");
+  if (normalizedEntry === "infra/backups" || normalizedEntry === backupDirectorySentinel) return false;
+  const segments = entry.split("/");
+  const normalizedSegments = segments.map((segment) => segment.toLowerCase());
+  const name = segments.at(-1) ?? "";
+  if (normalizedSegments.some((segment) => reservedArchiveSegments.has(segment) || segment.startsWith(".dev.vars.") ||
+    (segment.startsWith(".env.") && segment !== ".env.example") || /^mail-attachments?$/u.test(segment) || /^takeout(?:[-_.]|$)/u.test(segment))) {
+    return true;
+  }
+  if (normalizedSegments[0] === "infra" && normalizedSegments[1] === "cloudflare" && name.toLowerCase().endsWith(".json")) return true;
+  if (/^(?:\.aws\/(?:credentials|config)|secrets\/[^/]+\.(?:pem|key))$/iu.test(entry) ||
+    /(?:^|\/)id_(?:rsa|dsa|ecdsa|ed25519)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*$/iu.test(entry)) return true;
+  if (/\.(?:pem|key|p12|pfx|der|jks|keystore|zip|tar|tgz|tar\.gz|tar\.[a-z0-9]+|mbox|log(?:\.[^/]+)*)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*$/iu.test(name)) return true;
+  if (/\.(?:sqlite3?|db|dump|bak|backup|sql)(?:\.(?:gz|gzip|bz2|xz|zst|lz4)|-(?:wal|shm|journal))?$/iu.test(name) &&
+    !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/iu.test(entry)) return true;
+  return false;
+}
 
 function requireSuccess(result, message) {
   if (!result || result.status !== 0) throw new ProductionRevisionError("COMMAND_FAILED", message);
@@ -49,27 +88,27 @@ function makeArchive(revision, execute) {
       }),
       "Accepted production source tree could not be inspected.",
     );
-    const reservedPaths = new Set([
-      ".env",
-      ".env.oidc",
-      ".env.oidc-data",
-      ".production.operator.json",
-      ".bielos-release",
-      ".bielos-production-host",
-    ]);
     const sourcePaths = [];
     for (const record of treeListing.split("\0").filter(Boolean)) {
       const separator = record.indexOf("\t");
       if (separator < 0) throw new ProductionRevisionError("COMMAND_FAILED");
-      const mode = record.slice(0, separator).split(" ", 1)[0];
+      const [mode, type, objectId] = record.slice(0, separator).split(" ");
       const entry = record.slice(separator + 1);
       if (mode !== "040000" && mode !== "100644" && mode !== "100755") {
         throw new ProductionRevisionError("COMMAND_FAILED");
       }
       sourcePaths.push(entry);
-      if (entry.split("/").some((segment) =>
-        reservedPaths.has(segment) || segment === "backups" || segment === "releases" || segment === "current"
-      )) {
+      if (entry.replaceAll("\\", "/").toLowerCase() === backupDirectorySentinel) {
+        if (mode !== "100644" || type !== "blob" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(objectId ?? "")) {
+          throw new ProductionRevisionError("COMMAND_FAILED");
+        }
+        const sentinelSize = requireSuccess(
+          execute("git", ["cat-file", "-s", objectId], { cwd: repositoryRoot, env: gitEnvironment }),
+          "Production backup sentinel could not be inspected.",
+        );
+        if (sentinelSize.trim() !== "0") throw new ProductionRevisionError("COMMAND_FAILED");
+      }
+      if (isSensitiveArchivePath(entry)) {
         throw new ProductionRevisionError("COMMAND_FAILED");
       }
     }
@@ -94,11 +133,26 @@ function makeArchive(revision, execute) {
 
     const listing = requireSuccess(execute("tar", ["-tf", archivePath]), "Production source archive could not be inspected.");
     const paths = listing.split(/\r?\n/u).filter(Boolean);
-    if (paths.some((entry) => entry.split("/").some((segment) =>
-      reservedPaths.has(segment) || segment === "backups" || segment === "releases" || segment === "current"
-    ))) {
+    if (paths.some(isSensitiveArchivePath)) {
       throw new ProductionRevisionError("COMMAND_FAILED");
     }
+
+    const scannerSource = requireSuccess(
+      execute("git", ["show", `${revision}:${secretScannerRelativePath}`], {
+        cwd: repositoryRoot,
+        env: gitEnvironment,
+      }),
+      "Accepted production secret scanner could not be loaded.",
+    );
+    const scannerPath = path.join(directory, "secret-scan.mjs");
+    writeFileSync(scannerPath, scannerSource, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    requireSuccess(
+      execute(process.execPath, [scannerPath, "--revision", revision], {
+        cwd: repositoryRoot,
+        env: gitEnvironment,
+      }),
+      "Accepted production source failed the secret scan.",
+    );
 
     return {
       archivePath,

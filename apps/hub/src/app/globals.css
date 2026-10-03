@@ -60,9 +60,16 @@ details > summary.button-danger:hover { border-color: var(--danger); }
 .form-success { color: var(--accent); overflow-wrap: anywhere; }
 .auth-page, .public-page { display: grid; min-height: 100vh; place-items: center; padding: 1.25rem; }
 .auth-panel { width: min(100%, 420px); padding: clamp(1.2rem, 4vw, 2rem); border: 1px solid var(--line); border-radius: 0.5rem; background: var(--surface); }
-.subtle-link { display: inline-block; margin-top: 0.8rem; }
+.subtle-link { display: inline-flex; align-items: center; min-height: 44px; margin-top: 0.8rem; }
 .auth-link-list { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-top: 0.8rem; }
 .auth-link-list .subtle-link { margin-top: 0; }
+.conflict-summary { max-width: 540px; padding: 0.75rem; border: 1px solid var(--line); border-radius: 0.3rem; }
+.conflict-summary h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+.conflict-summary dl { display: grid; gap: 0.6rem; margin: 0 0 1rem; }
+.conflict-summary dt { color: var(--muted); font-size: 0.88rem; }
+.conflict-summary dd { margin: 0; overflow-wrap: anywhere; }
+.conflict-summary ul { margin: 0; padding-left: 1.2rem; }
+.conflict-summary li { overflow-wrap: anywhere; }
 .public-panel { width: min(100%, 620px); padding: clamp(1.5rem, 5vw, 3rem); }
 .public-panel h1 { margin: 0 0 0.75rem; font-size: clamp(2rem, 7vw, 3.5rem); }
 .project-list { display: grid; gap: 0.25rem; margin: 1.5rem 0; }

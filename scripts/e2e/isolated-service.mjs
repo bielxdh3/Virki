@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertDisposableCoreTestDatabase } from "../core-test-database-safety.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..", "..");
@@ -24,9 +25,10 @@ const serviceEnvironment = {
   hub: [
     "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_HUB_HOSTNAME", "BIELOS_PORTAL_HOSTNAME",
     "BIELOS_HUB_URL", "BIELOS_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
-    "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_E2E_TLS_KEY_PATH",
+    "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_OIDC_PROXY_URL", "BIELOS_E2E_TLS_KEY_PATH",
     "BIELOS_E2E_TLS_CERTIFICATE_PATH"
-  ]
+  ],
+  issuer: ["DATABASE_URL", "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"]
 };
 
 export function buildServiceEnvironment(service, source = process.env, platform = process.platform) {
@@ -44,8 +46,17 @@ export function buildServiceEnvironment(service, source = process.env, platform 
     result.NODE_ENV = "development";
     result.NEXT_TELEMETRY_DISABLED = "1";
   }
-  if (service === "hub" && (!result.DATABASE_URL || !result.BIELOS_E2E_TLS_KEY_PATH || !result.BIELOS_E2E_TLS_CERTIFICATE_PATH)) {
+  if (service === "hub" && (!result.DATABASE_URL || !result.BIELOS_OIDC_PROXY_URL || !result.BIELOS_E2E_TLS_KEY_PATH || !result.BIELOS_E2E_TLS_CERTIFICATE_PATH)) {
     throw new Error("Hub E2E configuration is incomplete.");
+  }
+  if (service === "issuer" && (!result.DATABASE_URL || !result.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE || !result.BIELOS_OIDC_ISSUER || result.BIELOS_OIDC_BIND_ADDRESS !== "127.0.0.1" || !result.OIDC_ISSUER_PORT)) {
+    throw new Error("OIDC issuer E2E configuration is incomplete.");
+  }
+  if (service === "hub" || service === "issuer") {
+    const databaseUrl = result.DATABASE_URL?.trim();
+    if (!databaseUrl) throw new Error("E2E database configuration is incomplete.");
+    assertDisposableCoreTestDatabase(databaseUrl, source);
+    result.DATABASE_URL = databaseUrl;
   }
   if (service === "jwks" && !result.BIELOS_E2E_JWKS_REGISTRATION_TOKEN) {
     throw new Error("JWKS E2E registration configuration is incomplete.");
@@ -54,8 +65,9 @@ export function buildServiceEnvironment(service, source = process.env, platform 
   return result;
 }
 
-export function startIsolatedService(service, source = process.env) {
+export function startIsolatedService(service, source = process.env, { manageProcessLifecycle = true } = {}) {
   const env = buildServiceEnvironment(service, source);
+  if (service === "issuer") loadIssuerPrivateConfiguration(env);
   const { cwd, args } = getServiceCommand(service, source);
   const child = spawn(process.execPath, args, {
     cwd,
@@ -63,6 +75,8 @@ export function startIsolatedService(service, source = process.env) {
     stdio: "inherit",
     windowsHide: true
   });
+
+  if (!manageProcessLifecycle) return child;
 
   let stopping = false;
   const forwardSignal = (signal) => {
@@ -88,6 +102,12 @@ function getServiceCommand(service, source) {
     return { cwd: repositoryRoot, args: [join(scriptDirectory, "jwks-server.mjs")] };
   }
 
+  if (service === "issuer") {
+    const workspaceDirectory = join(repositoryRoot, "apps", "issuer");
+    const tsxCli = testRequire.resolve("tsx/cli", { paths: [workspaceDirectory] });
+    return { cwd: workspaceDirectory, args: [tsxCli, "src/server.ts"] };
+  }
+
   const workspace = service === "hub" ? "hub" : service === "public-site" ? "public-site" : undefined;
   if (!workspace) throw new Error("Unknown E2E service.");
   const workspaceDirectory = join(repositoryRoot, "apps", workspace);
@@ -104,6 +124,22 @@ function getServiceCommand(service, source) {
   }
 
   return { cwd: workspaceDirectory, args };
+}
+
+function loadIssuerPrivateConfiguration(environment) {
+  const file = environment.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE;
+  if (!file || !isAbsolute(file) || !existsSync(file)) throw new Error("OIDC issuer private E2E configuration is unavailable.");
+  const config = JSON.parse(readFileSync(file, "utf8"));
+  if (!config || typeof config !== "object" || Array.isArray(config) ||
+    typeof config.adapterKey !== "string" || !/^[a-f0-9]{64}$/iu.test(config.adapterKey) ||
+    typeof config.cookieKey !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(config.cookieKey) ||
+    !config.signingJwks || !Array.isArray(config.signingJwks.keys) || !config.signingJwks.keys.length) {
+    throw new Error("OIDC issuer private E2E configuration is invalid.");
+  }
+  environment.BIELOS_OIDC_ADAPTER_KEY = config.adapterKey;
+  environment.BIELOS_OIDC_COOKIE_KEY = config.cookieKey;
+  environment.BIELOS_OIDC_SIGNING_JWKS = JSON.stringify(config.signingJwks);
+  delete environment.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

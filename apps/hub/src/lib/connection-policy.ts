@@ -1,7 +1,28 @@
+import { createHash } from "node:crypto";
+
 export class ConnectionInputError extends Error {
   constructor() {
     super("Invalid project connection.");
   }
+}
+
+export function projectConnectionConfigurationRevision(connection: {
+  id: string;
+  name: string;
+  slug: string;
+  origin: string;
+  launchUrl: string | null;
+  redirectUris: readonly string[];
+}): string {
+  const configuration = [
+    connection.id,
+    connection.name,
+    connection.slug,
+    connection.origin,
+    connection.launchUrl,
+    connection.redirectUris,
+  ];
+  return createHash("sha256").update(JSON.stringify(configuration)).digest("base64url");
 }
 
 export function validateProjectConnectionInput(input: {

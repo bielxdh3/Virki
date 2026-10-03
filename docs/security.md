@@ -20,7 +20,7 @@
 ## Authorization
 
 - Roles are ADMIN and USER only. Anonymous visitors have no stored authority.
-- Every protected ADMIN page and action checks Cloudflare Access, the BielOS session, role, CSRF token, and any required fresh proof on the server.
+- Every protected ADMIN page checks Cloudflare Access, the current BielOS session, and the current role on the server. Mutating actions also check request origin and CSRF; fresh proof is required when the action policy specifies it.
 - A USER receives only explicit project-entry grants. Disabled accounts, connections, or revoked grants deny authorization.
 - Redirect URIs are exact HTTPS allowlist matches. Wildcards, credentials, fragments, and noncanonical values are rejected.
 - Authorization state is rechecked by the issuer when it completes the OIDC interaction.

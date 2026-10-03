@@ -1,12 +1,16 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 const KEY_BYTES = 32;
+type OidcSecretEnvironment = {
+  BIELOS_OIDC_ADAPTER_KEY?: string;
+  [key: string]: string | undefined;
+};
 
 export function hashOidcIdentifier(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-export function encryptOidcClientSecret(secret: string, env: NodeJS.ProcessEnv = process.env): string {
+export function encryptOidcClientSecret(secret: string, env: OidcSecretEnvironment = process.env): string {
   const key = readKey(env.BIELOS_OIDC_ADAPTER_KEY);
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
@@ -14,7 +18,7 @@ export function encryptOidcClientSecret(secret: string, env: NodeJS.ProcessEnv =
   return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), ciphertext.toString("base64url")].join(".");
 }
 
-export function decryptOidcClientSecret(value: string, env: NodeJS.ProcessEnv = process.env): string {
+export function decryptOidcClientSecret(value: string, env: OidcSecretEnvironment = process.env): string {
   const [version, iv, tag, ciphertext, extra] = value.split(".");
   if (version !== "v1" || !iv || !tag || !ciphertext || extra !== undefined) {
     throw new Error("Invalid encrypted OIDC client secret.");
@@ -24,7 +28,7 @@ export function decryptOidcClientSecret(value: string, env: NodeJS.ProcessEnv = 
   return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
 }
 
-export function encryptOidcPayload(value: string, env: NodeJS.ProcessEnv = process.env): string {
+export function encryptOidcPayload(value: string, env: OidcSecretEnvironment = process.env): string {
   const key = readKey(env.BIELOS_OIDC_ADAPTER_KEY);
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
@@ -32,7 +36,7 @@ export function encryptOidcPayload(value: string, env: NodeJS.ProcessEnv = proce
   return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), ciphertext.toString("base64url")].join(".");
 }
 
-export function decryptOidcPayload(value: string, env: NodeJS.ProcessEnv = process.env): string {
+export function decryptOidcPayload(value: string, env: OidcSecretEnvironment = process.env): string {
   const [version, iv, tag, ciphertext, extra] = value.split(".");
   if (version !== "v1" || !iv || !tag || !ciphertext || extra !== undefined) {
     throw new Error("Invalid encrypted OIDC data.");

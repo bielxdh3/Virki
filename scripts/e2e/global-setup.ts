@@ -1,18 +1,21 @@
-import { execFileSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { execFileSync, type ChildProcess } from "node:child_process";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdtemp, rmdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { hashPassword } from "@bielos/auth";
-import { encryptOidcClientSecret } from "@bielos/auth/oidc-secrets";
+import { encryptOidcClientSecret, hashOidcIdentifier } from "@bielos/auth/oidc-secrets";
 import { hashDeviceToken } from "@bielos/auth/security";
 import { PrismaClient } from "@bielos/database";
 
 // @ts-expect-error This existing JavaScript safety helper has no declaration file.
 import { assertDisposableCoreTestDatabase } from "../core-test-database-safety.mjs";
+// @ts-expect-error The isolated E2E service runner is JavaScript without a declaration file.
+import { startIsolatedService } from "./isolated-service.mjs";
 
 const E2E_DATABASE_ENV = "BIELOS_E2E_DATABASE_URL";
 const FIXTURE_FILE_ENV = "BIELOS_E2E_AUTH_FIXTURE_FILE";
+const OIDC_PRIVATE_CONFIG_ENV = "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE";
 
 type AccountFixture = {
   id: string;
@@ -37,6 +40,10 @@ type FixtureState = {
   disabledProjectSlug: string;
   disabledProjectClientId: string;
   disabledProjectConnectionId: string;
+  oidc: {
+    clientId: string;
+    clientSecret: string;
+  };
 };
 
 if (process.argv[2] === "--validate-database") {
@@ -47,6 +54,10 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   const databaseUrl = process.env[E2E_DATABASE_ENV]?.trim();
   delete process.env[FIXTURE_FILE_ENV];
   if (!databaseUrl) return;
+  const oidcPrivateConfigFile = process.env[OIDC_PRIVATE_CONFIG_ENV]?.trim();
+  if (!oidcPrivateConfigFile || !isAbsolute(oidcPrivateConfigFile)) {
+    throw new Error("E2E OIDC private configuration path is unavailable.");
+  }
 
   validateE2eDatabase(databaseUrl);
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
@@ -76,6 +87,8 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
 
   let temporaryDirectory: string | undefined;
   let fixtureFile: string | undefined;
+  let oidcPrivateConfigWritten = false;
+  let oidcIssuerProcess: ChildProcess | undefined;
   let seeded: FixtureState | undefined;
   try {
     temporaryDirectory = await mkdtemp(join(tmpdir(), "bielos-e2e-auth-"));
@@ -93,6 +106,18 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     const clientSecretCiphertext = encryptOidcClientSecret(oidcSecret, {
       BIELOS_OIDC_ADAPTER_KEY: oidcEncryptionKey
     });
+    const signingKey = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" });
+    const signingKeyId = randomUUID();
+    const signingJwks = {
+      keys: [{ ...signingKey, kid: signingKeyId, use: "sig", alg: "ES256" }]
+    };
+    const cookieKey = randomBytes(32).toString("base64url");
+    await writeFile(oidcPrivateConfigFile, JSON.stringify({
+      adapterKey: oidcEncryptionKey,
+      cookieKey,
+      signingJwks
+    }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    oidcPrivateConfigWritten = true;
 
     const records = await prisma.$transaction(async (transaction) => {
       const userRecord = await transaction.user.create({
@@ -198,12 +223,28 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
       disabledProjectName,
       disabledProjectSlug,
       disabledProjectClientId,
-      disabledProjectConnectionId: records.disabledProjectConnectionId
+      disabledProjectConnectionId: records.disabledProjectConnectionId,
+      oidc: {
+        clientId: projectClientId,
+        clientSecret: oidcSecret
+      }
     };
     await writeFile(fixtureFile, JSON.stringify(seeded), { encoding: "utf8", flag: "wx", mode: 0o600 });
     process.env[FIXTURE_FILE_ENV] = fixtureFile;
+
+    const startedOidcIssuer = startIsolatedService("issuer", {
+      ...process.env,
+      DATABASE_URL: databaseUrl,
+      BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE: oidcPrivateConfigFile,
+      BIELOS_OIDC_ISSUER: "https://portal.localhost:3001",
+      BIELOS_OIDC_BIND_ADDRESS: "127.0.0.1",
+      OIDC_ISSUER_PORT: "3003"
+    }, { manageProcessLifecycle: false }) as ChildProcess;
+    oidcIssuerProcess = startedOidcIssuer;
+    await waitForOidcIssuer(startedOidcIssuer, signingKeyId);
   } catch {
     let cleanupFailed = false;
+    await stopIsolatedService(oidcIssuerProcess).catch(() => { cleanupFailed = true; });
     try {
       if (seeded) await removeFixtureRecords(prisma, seeded);
     } catch {
@@ -212,6 +253,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     if (temporaryDirectory) {
       await removeTemporaryFixture(fixtureFile, temporaryDirectory).catch(() => { cleanupFailed = true; });
     }
+    if (oidcPrivateConfigWritten) await removeFile(oidcPrivateConfigFile).catch(() => { cleanupFailed = true; });
     await prisma.$disconnect().catch(() => { cleanupFailed = true; });
     throw new Error(cleanupFailed
       ? "E2E fixture setup failed; scoped cleanup also failed in the validated disposable database."
@@ -222,18 +264,21 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   const cleanupFile = fixtureFile;
   const cleanupDirectory = temporaryDirectory;
   if (!cleanupState || !cleanupFile || !cleanupDirectory) {
+    await stopIsolatedService(oidcIssuerProcess).catch(() => undefined);
     await prisma.$disconnect();
     throw new Error("E2E fixture setup did not produce a complete fixture.");
   }
 
   return async () => {
     let cleanupFailed = false;
+    await stopIsolatedService(oidcIssuerProcess).catch(() => { cleanupFailed = true; });
     try {
       await removeFixtureRecords(prisma, cleanupState);
     } catch {
       cleanupFailed = true;
     }
     await removeTemporaryFixture(cleanupFile, cleanupDirectory).catch(() => { cleanupFailed = true; });
+    await removeFile(oidcPrivateConfigFile).catch(() => { cleanupFailed = true; });
     await prisma.$disconnect().catch(() => { cleanupFailed = true; });
     delete process.env[FIXTURE_FILE_ENV];
     if (cleanupFailed) throw new Error("E2E fixture cleanup failed for run-scoped records.");
@@ -248,6 +293,14 @@ function validateE2eDatabase(databaseUrl = process.env[E2E_DATABASE_ENV]?.trim()
 async function removeFixtureRecords(prisma: PrismaClient, fixture: FixtureState): Promise<void> {
   const userIds = [fixture.user.id, fixture.admin.id];
   await prisma.$transaction(async (transaction) => {
+    await transaction.oidcArtifact.deleteMany({
+      where: {
+        OR: [
+          { clientIdHash: hashOidcIdentifier(fixture.projectClientId) },
+          { accountIdHash: hashOidcIdentifier(fixture.user.id) }
+        ]
+      }
+    });
     await transaction.auditLog.deleteMany({ where: { actorUserId: { in: userIds } } });
     await transaction.user.deleteMany({ where: { id: fixture.user.id, email: fixture.user.email, role: "USER" } });
     await transaction.user.deleteMany({ where: { id: fixture.admin.id, email: fixture.admin.email, role: "ADMIN" } });
@@ -268,6 +321,68 @@ async function removeFixtureRecords(prisma: PrismaClient, fixture: FixtureState)
         ]
       }
     });
+  });
+}
+
+async function waitForOidcIssuer(child: ChildProcess, expectedSigningKeyId: string): Promise<void> {
+  const readinessUrl = "http://127.0.0.1:3003/.well-known/openid-configuration";
+  const jwksUrl = "http://127.0.0.1:3003/jwks";
+  const deadline = Date.now() + 30_000;
+  let startupError: Error | undefined;
+  const recordStartupError = (error: Error) => { startupError = error; };
+  child.once("error", recordStartupError);
+  try {
+    while (Date.now() < deadline) {
+      if (startupError) throw new Error("E2E OIDC issuer could not start.");
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error("E2E OIDC issuer exited during startup.");
+      try {
+        const response = await fetch(readinessUrl, { signal: AbortSignal.timeout(500) });
+        if (response.ok) {
+          const metadata: unknown = await response.json();
+          if (metadata && typeof metadata === "object" && "issuer" in metadata && metadata.issuer === "https://portal.localhost:3001") {
+            const keysResponse = await fetch(jwksUrl, { signal: AbortSignal.timeout(500) });
+            const keySet: unknown = keysResponse.ok ? await keysResponse.json() : undefined;
+            const hasRunKey = keySet && typeof keySet === "object" && "keys" in keySet && Array.isArray(keySet.keys) &&
+              keySet.keys.some((key) => key && typeof key === "object" && "kid" in key && key.kid === expectedSigningKeyId);
+            if (hasRunKey && child.exitCode === null && child.signalCode === null) return;
+          }
+        }
+      } catch {
+        // The loopback issuer is expected to refuse connections until startup completes.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error("E2E OIDC issuer did not become ready.");
+  } finally {
+    child.off("error", recordStartupError);
+  }
+}
+
+async function stopIsolatedService(child: ChildProcess | undefined): Promise<void> {
+  if (!child || await waitForChildExit(child, 0)) return;
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child, 5_000)) return;
+  child.kill("SIGKILL");
+  if (!await waitForChildExit(child, 5_000)) throw new Error("E2E OIDC issuer process did not stop.");
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const finish = (exited: boolean) => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+  });
+}
+
+async function removeFile(file: string): Promise<void> {
+  await unlink(file).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
   });
 }
 

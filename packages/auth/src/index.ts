@@ -340,7 +340,7 @@ export async function authenticateUserWithRateLimit(
     }
     if (trustedClientAddress) {
       if (!isTrustedClientAddress(trustedClientAddress)) return { user: null, failureMode: "limiter-unavailable" };
-      const loginSourceIdentifier = `login-source-failure:v2:${trustedClientAddress}`;
+      const loginSourceIdentifier = `login-source-failure:v3:${requiredRole ?? "unscoped"}:${trustedClientAddress}`;
       sourceIdentifier = loginSourceIdentifier;
       const sourceAttempt = await prisma.$transaction((transaction) =>
         consumeRateLimitAttemptInTransaction(

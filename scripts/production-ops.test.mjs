@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { deployProduction } from "./deploy-production.mjs";
 import { isValidProductionConfig } from "./lib/production-config.mjs";
 import { runProductionPreflight } from "./production-preflight.mjs";
@@ -16,6 +17,9 @@ const config = {
 const preflightScript = readFileSync(new URL("./production-preflight.mjs", import.meta.url), "utf8");
 const serverScript = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
 const deploymentScript = readFileSync(new URL("./deploy-production.mjs", import.meta.url), "utf8");
+const secretScannerPath = fileURLToPath(new URL("./secret-scan.mjs", import.meta.url));
+const secretScannerSource = readFileSync(secretScannerPath, "utf8");
+const isSecretScanCommand = (command, args) => command === process.execPath && path.basename(args[0] ?? "") === "secret-scan.mjs" && args[1] === "--revision";
 
 test("native Linux preflight requires eight stable probes, the marker, and Docker", async () => {
   let remoteCalls = 0;
@@ -347,7 +351,7 @@ test("deployment downloads the exact-SHA tested images after preflight and trans
       return { status: 0, platform: "linux/amd64", lines: ["preflight ok"] };
     },
     execute: (command, args, options = {}) => {
-      sequence.push(command === "ssh" ? "ssh" : `${command}:${args[0]}`);
+      sequence.push(command === "ssh" ? "ssh" : isSecretScanCommand(command, args) ? "secret-scan" : command === "git" && args[0] === "show" && args[1] === revision + ":scripts/secret-scan.mjs" ? "scanner-source" : `${command}:${args[0]}`);
       if (command === "git") assert.equal(options.env?.GIT_NO_REPLACE_OBJECTS, "1");
       if (command === "git" && args[0] === "archive") {
         archivePath = args.find((value) => value.startsWith("--output=")).slice("--output=".length);
@@ -357,7 +361,14 @@ test("deployment downloads the exact-SHA tested images after preflight and trans
       if (command === "git" && args[0] === "ls-tree") {
         return {
           status: 0,
-          stdout: "100644 blob " + revision + "\tREADME.md\0" + "100644 blob " + revision + "\tscripts/production-server.sh\0",
+          stdout: [
+            `100644 blob ${revision}\tREADME.md`,
+            `100644 blob ${revision}\t.env.example`,
+            `100644 blob ${revision}\tscripts/production-server.sh`,
+            `040000 tree ${revision}\tinfra/backups`,
+            `100644 blob ${revision}\tinfra/backups/.gitkeep`,
+            `100644 blob ${revision}\tpackages/database/prisma/migrations/20261001000000_security_polish/migration.sql`,
+          ].join("\0") + "\0",
         };
       }
       if (command === "git" && args[0] === "check-attr") {
@@ -367,8 +378,14 @@ test("deployment downloads the exact-SHA tested images after preflight and trans
         }
         return { status: 0, stdout: attributes.join("\0") + "\0" };
       }
-      if (command === "git" && args[0] === "show") return { status: 0, stdout: serverScript };
-      if (command === "tar") return { status: 0, stdout: "README.md\nscripts/production-server.sh\n" };
+      if (command === "git" && args[0] === "cat-file" && args[1] === "-s") return { status: 0, stdout: "0\n" };
+      if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
+      if (command === "tar") return { status: 0, stdout: "README.md\n.env.example\nscripts/production-server.sh\ninfra/backups/\ninfra/backups/.gitkeep\npackages/database/prisma/migrations/20261001000000_security_polish/migration.sql\n" };
+      if (isSecretScanCommand(command, args)) {
+        assert.equal(args[1], "--revision");
+        assert.equal(args[2], revision);
+        return { status: 0, stdout: "Secret scan passed.\n" };
+      }
       if (command === "gh" && args[0] === "run" && args[1] === "download") {
         assert.equal(args[2], "54321");
         assert.equal(args[args.indexOf("--repo") + 1], "bielxdh3/BielOS");
@@ -408,7 +425,7 @@ test("deployment downloads the exact-SHA tested images after preflight and trans
   });
 
   assert.equal(result.status, 0);
-  assert.deepEqual(sequence.slice(0, 6), ["source", "ci", "git:archive", "git:ls-tree", "git:check-attr", "tar:-tf"]);
+  assert.deepEqual(sequence.slice(0, 9), ["source", "ci", "git:archive", "git:ls-tree", "git:cat-file", "git:check-attr", "tar:-tf", "scanner-source", "secret-scan"]);
   assert.ok(sequence.indexOf("preflight") < sequence.indexOf("gh:run"));
   assert.ok(sequence.indexOf("gh:run") < sequence.findIndex((item) => item.startsWith("scp:")));
   assert.equal(sequence.filter((item) => item.startsWith("scp:")).length, 2);
@@ -443,8 +460,9 @@ test("failed transfers and remote deploys invoke cleanup for only their unique s
           if (command === "git" && args[0] === "check-attr") {
             return { status: 0, stdout: "README.md\0export-ignore\0unspecified\0README.md\0export-subst\0unspecified\0" };
           }
-          if (command === "git" && args[0] === "show") return { status: 0, stdout: serverScript };
+          if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
           if (command === "tar") return { status: 0, stdout: "README.md\n" };
+          if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
           if (command === "gh") {
             const targetDirectory = args[args.indexOf("--dir") + 1];
             imageArchivePath = path.join(targetDirectory, "bielos-production-images.tar.gz");
@@ -485,7 +503,65 @@ test("failed transfers and remote deploys invoke cleanup for only their unique s
   }
 });
 
-test("a secret path in the Git archive blocks transfer and production contact", async () => {
+test("sensitive files in the Git tree block transfer and production contact", async () => {
+  for (const filePath of [
+    "apps/.env",
+    "apps/.env.staging",
+    ".npmrc",
+    "infra/cloudflare/account.json",
+    "Infra/Cloudflare/account.JSON",
+    "keys/client.key",
+    "database/bielos-dump.zip",
+    "infra/backups/production.dump",
+    "exports/production.dump.gz",
+    "database/cache.sqlite-wal",
+    "database/cache.sqlite-shm",
+    "database/production.sqlite3.gz",
+    "exports/snapshot.sql.zst",
+    "exports/account-backup.tar.gz",
+    "mail-attachments/account.mbox",
+    ".aws/credentials",
+    "secrets/id_ed25519",
+    "logs/app.log.1",
+    "logs/app.log.gz",
+    "database/prod.sqlite-journal",
+    "backup/prod-20261003",
+    "certs/private.der",
+    "keys/signing.pem.gz",
+    "keys/signing.pem.gz.gz",
+    "keys/id_ed25519.gz",
+    "keys/id_ed25519.gz.gz",
+  ]) {
+    let productionContact = false;
+    await assert.rejects(deployProduction({
+      action: "install",
+      config,
+      inspectSource: () => ({ branch: "main", revision }),
+      verifyCi: () => ({ ok: true, lines: [] }),
+      preflight: async () => {
+        productionContact = true;
+        return { status: 0, lines: [] };
+      },
+      execute: (command, args, options = {}) => {
+        if (command === "git") assert.equal(options.env?.GIT_NO_REPLACE_OBJECTS, "1");
+        if (command === "git" && args[0] === "archive") {
+          writeFileSync(args.find((value) => value.startsWith("--output=")).slice("--output=".length), "archive");
+          return { status: 0, stdout: "" };
+        }
+        if (command === "git" && args[0] === "ls-tree") {
+          return { status: 0, stdout: `100644 blob ${revision}\t${filePath}\0` };
+        }
+        if (command === "git" && args[0] === "show") return { status: 0, stdout: serverScript };
+        if (command === "tar") return { status: 0, stdout: `${filePath}\n` };
+        productionContact = true;
+        return { status: 1, stdout: "" };
+      },
+    }), /Production command failed/u, filePath);
+    assert.equal(productionContact, false, `${filePath} must not reach production preflight or transfer`);
+  }
+});
+
+test("a failed exact-revision secret scan blocks preflight and transfer", async () => {
   let productionContact = false;
   await assert.rejects(deployProduction({
     action: "install",
@@ -502,11 +578,15 @@ test("a secret path in the Git archive blocks transfer and production contact", 
         writeFileSync(args.find((value) => value.startsWith("--output=")).slice("--output=".length), "archive");
         return { status: 0, stdout: "" };
       }
-      if (command === "git" && args[0] === "ls-tree") {
-        return { status: 0, stdout: "100644 blob " + revision + "\tapps/.env\0" };
+      if (command === "git" && args[0] === "ls-tree") return { status: 0, stdout: `100644 blob ${revision}\tREADME.md\0` };
+      if (command === "git" && args[0] === "check-attr") return { status: 0, stdout: "README.md\0export-ignore\0unspecified\0README.md\0export-subst\0unspecified\0" };
+      if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
+      if (command === "tar") return { status: 0, stdout: "README.md\n" };
+      if (isSecretScanCommand(command, args)) {
+        assert.equal(args[1], "--revision");
+        assert.equal(args[2], revision);
+        return { status: 1, stdout: "", stderr: "Secret scan failed.\n" };
       }
-      if (command === "git" && args[0] === "show") return { status: 0, stdout: serverScript };
-      if (command === "tar") return { status: 0, stdout: "README.md\napps/.env\n" };
       productionContact = true;
       return { status: 1, stdout: "" };
     },

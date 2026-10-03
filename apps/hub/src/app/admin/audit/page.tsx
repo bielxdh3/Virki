@@ -21,7 +21,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Search
   const items = logs.slice(0, 50);
   const nextCursor = hasNext ? items.at(-1)?.id : undefined;
   const eventTypes = await prisma.auditLog.findMany({ distinct: ["eventType"], select: { eventType: true }, orderBy: { eventType: "asc" }, take: 100 });
-  return <main className="admin-main">
+  return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Auditoria</h1><p>Eventos de identidade, autenticação, segurança, acessos e conexões.</p></div></header>
     <form method="get" className="form-stack"><label>Tipo de evento<select name="event" defaultValue={event ?? ""}><option value="">Todos</option>{eventTypes.map(({ eventType }) => <option key={eventType} value={eventType}>{eventType}</option>)}</select></label><button type="submit">Filtrar</button></form>
     <section className="surface"><h2>Eventos recentes</h2>{items.length === 0 ? <p className="muted">Nenhum evento encontrado.</p> : <div className="row-list">{items.map((item) => {

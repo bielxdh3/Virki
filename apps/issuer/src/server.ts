@@ -263,12 +263,14 @@ provider.on("grant.error", (rawContext) => {
 
 const port = Number(process.env.OIDC_ISSUER_PORT ?? "3003");
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("OIDC issuer port is invalid.");
+const bindAddress = process.env.BIELOS_OIDC_BIND_ADDRESS ?? "0.0.0.0";
+if (bindAddress !== "0.0.0.0" && bindAddress !== "127.0.0.1") throw new Error("OIDC issuer bind address is invalid.");
 const providerCallback = provider.callback();
 const server = createServer((request, response) => {
   installAuditResponseGate(response);
   providerCallback(request, response);
 });
-server.listen(port, "0.0.0.0", () => {
+server.listen(port, bindAddress, () => {
   console.log("BielOS OIDC issuer ready.");
 });
 

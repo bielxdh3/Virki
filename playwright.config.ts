@@ -1,9 +1,12 @@
 import { defineConfig } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
+
+// @ts-expect-error This JavaScript safety helper has no declaration file.
+import { CORE_TEST_DATABASE_CONFIRMATION } from "./scripts/core-test-database-safety.mjs";
 
 const portalUrl = "https://portal.localhost:3001";
 const accessTeamDomain = "http://127.0.0.1:3010";
@@ -21,8 +24,10 @@ const e2eDatabaseUrl = process.env.BIELOS_E2E_DATABASE_URL;
 const tlsDirectory = mkdtempSync(join(tmpdir(), "bielos-e2e-tls-"));
 const tlsKeyPath = join(tlsDirectory, "server-key.pem");
 const tlsCertificatePath = join(tlsDirectory, "server-cert.pem");
+const oidcPrivateConfigPath = join(tlsDirectory, "issuer-config.json");
 
 try {
+  restrictTemporaryDirectory(tlsDirectory);
   generateLocalTlsPair(tlsKeyPath, tlsCertificatePath);
 } catch {
   rmSync(tlsDirectory, { recursive: true, force: true });
@@ -40,11 +45,13 @@ const localOnlyEnv = {
   BIELOS_PORTAL_HOSTNAME: "portal.localhost",
   BIELOS_HUB_URL: "https://hub.localhost:3001",
   BIELOS_PORTAL_URL: portalUrl,
+  BIELOS_OIDC_PROXY_URL: "http://127.0.0.1:3003",
   CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
   CLOUDFLARE_ACCESS_AUDIENCE: accessAudience,
   CLOUDFLARE_TEAM_DOMAIN: accessTeamDomain,
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "",
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
+  BIELOS_CORE_TEST_DATABASE_CONFIRM: CORE_TEST_DATABASE_CONFIRMATION,
   DATABASE_URL: e2eDatabaseUrl ?? "postgresql://127.0.0.1:1/bielos_e2e_test?connect_timeout=1"
 };
 const publicSiteEnv = {
@@ -59,9 +66,11 @@ const hubEnv = {
   BIELOS_E2E_TLS_KEY_PATH: tlsKeyPath,
   BIELOS_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath
 };
-
 process.env.BIELOS_E2E_ACCESS_AUDIENCE = accessAudience;
 process.env.BIELOS_E2E_ACCESS_ISSUER = accessTeamDomain;
+process.env.BIELOS_E2E_TLS_KEY_PATH = tlsKeyPath;
+process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
+process.env.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE = oidcPrivateConfigPath;
 process.env[registrationTokenEnv] = jwksRegistrationToken;
 process.env[registrationTokenInitializedEnv] = "true";
 
@@ -115,6 +124,16 @@ export default defineConfig({
     }
   ]
 });
+
+function restrictTemporaryDirectory(directory: string): void {
+  if (process.platform === "win32") {
+    const identity = execFileSync("whoami", [], { encoding: "utf8" }).trim();
+    if (!identity || /[\r\n]/u.test(identity)) throw new Error("Could not resolve the current Windows identity.");
+    execFileSync("icacls", [directory, "/inheritance:r", "/grant:r", `${identity}:(OI)(CI)F`], { stdio: "ignore" });
+    return;
+  }
+  chmodSync(directory, 0o700);
+}
 
 function generateLocalTlsPair(keyPath: string, certificatePath: string): void {
   const openssl = findExecutable("openssl");

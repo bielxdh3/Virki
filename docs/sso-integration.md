@@ -40,6 +40,6 @@ Logout from a project ends that project's local session. OIDC token revocation i
 
 ## Secret and signing-key handling
 
-Client secrets are encrypted at rest and cleared with outstanding transient OIDC artifacts when a connection is disabled, removed, or rotated. The issuer's asymmetric signing key and cookie key are kept in private runtime configuration. The issuer exposes public verification keys through its standard JWKS endpoint.
+Client secrets are encrypted at rest. Disabling a connection clears outstanding transient OIDC artifacts but retains its encrypted secret so the connection can be re-enabled; removing a connection deletes its stored record, and rotating replaces the secret. The issuer's asymmetric signing key and cookie key are kept in private runtime configuration. The issuer exposes public verification keys through its standard JWKS endpoint.
 
 For signing-key rotation, add a new key with a distinct `kid`, publish both public keys during an overlap period, confirm consumers accept the new key, then remove the previous key after all tokens signed by it have expired. Test the complete procedure before applying it in production. Never log or commit private JWK material.

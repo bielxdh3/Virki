@@ -18,7 +18,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
     Promise.resolve(createCsrfToken()),
     prisma.session.count({ where: { userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } } })
   ]);
-  return <main className="admin-main">
+  return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Segurança</h1><p>Credencial separada, elevação por sessão e recuperação administrativa.</p></div></header>
     {params.status && <p className="form-success" role="status">Alteração concluída.</p>}{params.error && <p className="form-error" role="alert">A ação não foi concluída. Tente novamente.</p>}
     {credential?.status === "ACTIVE" ? <section className="surface"><h2>Credencial administrativa</h2><p>Ativa · versão {credential.keyVersion} · atualizada em {credential.updatedAt.toLocaleString("pt-BR")}</p><p><a href="/account/security">Gerenciar MFA, códigos de recuperação e sessões da conta</a></p></section> : <CredentialSetup csrf={csrf} />}

@@ -69,10 +69,34 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
 
     await expect(page).toHaveURL(`${hubUrl}/admin/accounts`);
     await expect(page.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+    await assertAdminSkipLink(page);
     await page.getByRole("link", { name: "Acessos", exact: true }).click();
     await expect(page).toHaveURL(`${hubUrl}/admin/access`);
     await expect(page.getByRole("heading", { level: 1, name: "Acessos", exact: true })).toBeVisible();
     await expect(page.getByText(`E2E User → ${fixture.projectName}`, { exact: true })).toBeVisible();
+    await assertAdminSkipLink(page);
+
+    await page.getByRole("link", { name: "Conexões", exact: true }).click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/connections`);
+    await assertAdminSkipLink(page);
+    const projectRow = page.locator("article").filter({ hasText: fixture.projectName });
+    const editDetails = projectRow.locator("details").filter({ hasText: "Editar configuração" });
+    await editDetails.getByText("Editar configuração", { exact: true }).click();
+    const projectNameInput = editDetails.locator('input[name="name"]');
+    await projectNameInput.fill("Draft preserved after elevation expires");
+    await editDetails.getByRole("button", { name: "Salvar configuração", exact: true }).click();
+    await expect(editDetails).toHaveAttribute("open", "");
+    await expect(editDetails.getByRole("alert")).toContainText("valores enviados foram mantidos");
+    await expect(projectNameInput).toHaveValue("Draft preserved after elevation expires");
+
+    await page.getByRole("link", { name: "Segurança", exact: true }).click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/security`);
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    await assertAdminSkipLink(page);
+    await page.getByRole("link", { name: "Auditoria", exact: true }).click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/audit`);
+    await expect(page.getByRole("heading", { level: 1, name: "Auditoria", exact: true })).toBeVisible();
+    await assertAdminSkipLink(page);
 
     const sessionCookie = (await context.cookies(hubUrl)).find((cookie) => cookie.name === SESSION_COOKIE_NAME);
     expect(sessionCookie?.value).toBeTruthy();
@@ -128,6 +152,17 @@ async function signIn(page: import("@playwright/test").Page, account: AccountFix
   await page.getByLabel("E-mail", { exact: true }).fill(account.email);
   await page.getByLabel("Senha", { exact: true }).fill(account.password);
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
+}
+
+async function assertAdminSkipLink(page: import("@playwright/test").Page): Promise<void> {
+  await page.keyboard.press("Tab");
+  const skipLink = page.getByRole("link", { name: "Ir para o conteúdo", exact: true });
+  await expect(skipLink).toBeFocused();
+  await page.keyboard.press("Enter");
+  const main = page.getByRole("main");
+  await expect(main).toHaveCount(1);
+  await expect(main).toHaveAttribute("id", "admin-content");
+  await expect(main).toBeFocused();
 }
 
 function isAuthFixture(value: unknown): value is AuthFixture {

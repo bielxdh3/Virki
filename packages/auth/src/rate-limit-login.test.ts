@@ -15,7 +15,7 @@ type RateLimitRow = {
 test("successful logins release their source reservations without clearing failed attempts", async () => {
   const now = new Date("2026-10-03T05:00:00.000Z");
   const sourceAddress = "203.0.113.20";
-  const sourceIdentifier = `login-source-failure:v2:${sourceAddress}`;
+  const sourceIdentifier = `login-source-failure:v3:unscoped:${sourceAddress}`;
   const sourceHash = createRateLimitIdentifierHash(sourceIdentifier);
   const rows = new Map<string, RateLimitRow>([[sourceHash, {
     identifierHash: sourceHash,
@@ -92,6 +92,7 @@ test("successful logins release their source reservations without clearing faile
 
 test("a surface-scoped login treats other roles as missing accounts and keeps separate counters", async () => {
   const now = new Date("2026-10-03T05:00:00.000Z");
+  const sourceAddress = "203.0.113.27";
   const rows = new Map<string, RateLimitRow>();
   const admin = {
     id: "admin-a",
@@ -130,7 +131,7 @@ test("a surface-scoped login treats other roles as missing accounts and keeps se
   testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }) };
 
   try {
-    const portal = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, undefined, "USER");
+    const portal = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, sourceAddress, "USER");
     assert.deepEqual(portal, { user: null, failureMode: "invalid-credentials" }, "the correct ADMIN password is rejected on the portal");
 
     const portalAccountHash = createLoginAccountRateLimitIdentifierHash(scopeLoginRateLimitEmail(admin.email, "USER"));
@@ -138,10 +139,15 @@ test("a surface-scoped login treats other roles as missing accounts and keeps se
     assert.notEqual(portalAccountHash, hubAccountHash);
     assert.equal(rows.get(portalAccountHash)?.attempts, 1, "the portal failure is counted on the portal scope");
     assert.equal(rows.has(hubAccountHash), false, "portal failures never touch the hub counter");
+    const portalSourceHash = createRateLimitIdentifierHash(`login-source-failure:v3:USER:${sourceAddress}`);
+    const hubSourceHash = createRateLimitIdentifierHash(`login-source-failure:v3:ADMIN:${sourceAddress}`);
+    assert.equal(rows.get(portalSourceHash)?.attempts, 1, "portal failures use the portal source bucket");
+    assert.equal(rows.has(hubSourceHash), false, "portal failures never touch the hub source bucket");
 
-    const hub = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, undefined, "ADMIN");
+    const hub = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, sourceAddress, "ADMIN");
     assert.equal(hub.user?.id, admin.id);
     assert.equal(rows.get(portalAccountHash)?.attempts, 1, "a hub success does not reset portal counters");
+    assert.equal(rows.get(portalSourceHash)?.attempts, 1, "a hub success does not reset portal source counters");
   } finally {
     testPrisma.$transaction = originalTransaction as unknown as typeof testPrisma.$transaction;
     testPrisma.loginRateLimit = originalRateLimitDelegate as unknown as typeof testPrisma.loginRateLimit;

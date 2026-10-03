@@ -9,13 +9,27 @@ import { prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../lib/admin-mutation";
-import { ConnectionInputError, validateProjectConnectionInput } from "../../lib/connection-policy";
+import { ConnectionInputError, projectConnectionConfigurationRevision, validateProjectConnectionInput } from "../../lib/connection-policy";
 
 export type ConnectionActionState = {
   status: "idle" | "error" | "created" | "rotated";
   clientId?: string;
   secret?: string;
 };
+
+export type ConnectionEditActionState =
+  | { status: "idle" | "error" | "invalid" }
+  | {
+      status: "conflict";
+      latest: {
+        name: string;
+        slug: string;
+        origin: string;
+        launchUrl: string | null;
+        redirectUris: string[];
+        configurationRevision: string;
+      };
+    };
 
 export async function createAccountAction(formData: FormData): Promise<void> {
   const actor = await requireAdminMutation(formData, "admin-account-create");
@@ -158,11 +172,12 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
   }
 }
 
-export async function updateProjectConnectionAction(formData: FormData): Promise<void> {
+export async function updateProjectConnectionAction(_state: ConnectionEditActionState, formData: FormData): Promise<ConnectionEditActionState> {
   const actor = await requireAdminMutation(formData, "admin-project-connection-update");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     const connectionId = readFormString(formData, "connectionId");
+    const expectedRevision = readFormString(formData, "expectedRevision");
     const connection = validateProjectConnectionInput({
       name: readFormString(formData, "name"),
       slug: readFormString(formData, "slug"),
@@ -170,12 +185,20 @@ export async function updateProjectConnectionAction(formData: FormData): Promise
       launchUrl: readFormString(formData, "launchUrl"),
       redirectUris: readFormString(formData, "redirectUris")
     });
-    await prisma.$transaction(async (transaction) => {
+    const result = await prisma.$transaction(async (transaction) => {
       const existing = await transaction.projectConnection.findUnique({
         where: { id: connectionId },
-        select: { id: true, clientId: true, origin: true, redirectUris: true }
+        select: { id: true, clientId: true, name: true, slug: true, origin: true, launchUrl: true, redirectUris: true }
       });
       if (!existing) throw new Error("Connection was not found.");
+      const latestRedirectUris = (Array.isArray(existing.redirectUris) ? existing.redirectUris : []).filter((uri): uri is string => typeof uri === "string");
+      const latestRevision = projectConnectionConfigurationRevision({ ...existing, redirectUris: latestRedirectUris });
+      if (latestRevision !== expectedRevision) {
+        return {
+          saved: false as const,
+          latest: { ...existing, redirectUris: latestRedirectUris, configurationRevision: latestRevision }
+        };
+      }
       const redirectUrisChanged = JSON.stringify(existing.redirectUris) !== JSON.stringify(connection.redirectUris);
       const originChanged = existing.origin !== connection.origin;
       const oidcSettingsChanged = originChanged || redirectUrisChanged;
@@ -196,14 +219,28 @@ export async function updateProjectConnectionAction(formData: FormData): Promise
           launchUrlConfigured: Boolean(connection.launchUrl)
         }
       });
+      return { saved: true as const };
     }, { isolationLevel: "Serializable" });
+    if (!result.saved) {
+      return {
+        status: "conflict",
+        latest: {
+          name: result.latest.name,
+          slug: result.latest.slug,
+          origin: result.latest.origin,
+          launchUrl: result.latest.launchUrl,
+          redirectUris: result.latest.redirectUris,
+          configurationRevision: result.latest.configurationRevision
+        }
+      };
+    }
     revalidatePath("/admin/connections");
     revalidatePath("/");
     redirect("/admin/connections?status=updated");
   } catch (error) {
-    if (error instanceof ConnectionInputError) redirect("/admin/connections?error=configuration");
+    if (error instanceof ConnectionInputError) return { status: "invalid" };
     if (isRedirect(error)) throw error;
-    redirect("/admin/connections?error=update");
+    return { status: "error" };
   }
 }
 

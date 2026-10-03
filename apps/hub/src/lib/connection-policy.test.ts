@@ -1,6 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isExactRedirectUriAllowed, validateProjectConnectionInput, validateProjectLaunchUrl } from "./connection-policy";
+import { isExactRedirectUriAllowed, projectConnectionConfigurationRevision, validateProjectConnectionInput, validateProjectLaunchUrl } from "./connection-policy";
+
+test("connection configuration revision binds each editable field and the connection identity", () => {
+  const connection = {
+    id: "connection-1",
+    name: "Project Alpha",
+    slug: "project-alpha",
+    origin: "https://project.example.invalid",
+    launchUrl: "https://project.example.invalid/start",
+    redirectUris: ["https://project.example.invalid/auth/callback"],
+  };
+  const revision = projectConnectionConfigurationRevision(connection);
+  assert.equal(projectConnectionConfigurationRevision({ ...connection }), revision);
+  assert.match(revision, /^[A-Za-z0-9_-]{43}$/u);
+  for (const change of [
+    { id: "connection-2" },
+    { name: "Project Beta" },
+    { slug: "project-beta" },
+    { origin: "https://other.example.invalid" },
+    { launchUrl: null },
+    { redirectUris: ["https://project.example.invalid/changed"] },
+  ]) {
+    assert.notEqual(projectConnectionConfigurationRevision({ ...connection, ...change }), revision);
+  }
+});
 
 test("connection input accepts canonical origins and exact HTTPS redirect URIs", () => {
   assert.deepEqual(validateProjectConnectionInput({

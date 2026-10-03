@@ -34,7 +34,7 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
           <button type="submit">Sair</button>
         </form>
       </aside>
-      <div id="admin-content" tabIndex={-1}>{children}</div>
+      {children}
     </div>
   );
 }

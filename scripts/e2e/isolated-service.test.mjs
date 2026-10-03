@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { buildServiceEnvironment, platformEnvironmentVariableNames } from "./isolated-service.mjs";
 
 test("service children receive only their E2E allowlist and required OS paths", () => {
@@ -32,12 +33,21 @@ test("service children receive only their E2E allowlist and required OS paths", 
     NODE_PATH: "caller-controlled-module-path",
     CALLER_SECRET_SENTINEL: "must-not-reach-service",
     BIELOS_E2E_DATABASE_URL: "must-stay-in-the-runner",
+    BIELOS_CORE_TEST_DATABASE_CONFIRM: "disposable",
     BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "fixture-registration-token",
     BIELOS_PORTAL_URL: "https://portal.localhost:3001",
     BIELOS_HUB_HOSTNAME: "hub.localhost",
     BIELOS_PORTAL_HOSTNAME: "portal.localhost",
     BIELOS_HUB_URL: "https://hub.localhost:3001",
-    DATABASE_URL: "fixture-database-url",
+    DATABASE_URL: "postgresql://e2e_test@127.0.0.1:5432/bielos_test",
+    BIELOS_OIDC_PROXY_URL: "http://127.0.0.1:3003",
+    BIELOS_OIDC_ISSUER: "https://portal.localhost:3001",
+    BIELOS_OIDC_BIND_ADDRESS: "127.0.0.1",
+    OIDC_ISSUER_PORT: "3003",
+    BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE: "C:\\Temp\\issuer-config.json",
+    BIELOS_OIDC_ADAPTER_KEY: "must-stay-in-private-config",
+    BIELOS_OIDC_COOKIE_KEY: "must-stay-in-private-config",
+    BIELOS_OIDC_SIGNING_JWKS: "must-stay-in-private-config",
     CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
     CLOUDFLARE_ACCESS_AUDIENCE: "fixture-audience",
     CLOUDFLARE_TEAM_DOMAIN: "http://127.0.0.1:3010",
@@ -53,10 +63,11 @@ test("service children receive only their E2E allowlist and required OS paths", 
       allowed: [
         "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_HUB_HOSTNAME", "BIELOS_PORTAL_HOSTNAME",
         "BIELOS_HUB_URL", "BIELOS_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
-        "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_E2E_TLS_KEY_PATH",
+        "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_OIDC_PROXY_URL", "BIELOS_E2E_TLS_KEY_PATH",
         "BIELOS_E2E_TLS_CERTIFICATE_PATH"
       ]
-    }
+    },
+    { name: "issuer", allowed: ["DATABASE_URL", "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"] }
   ];
 
   for (const service of services) {
@@ -96,7 +107,48 @@ test("service children receive only their E2E allowlist and required OS paths", 
       assert.equal(result.home, true);
       assert.equal(result.tmpdir, true);
     }
+
+    if (service.name === "hub" || service.name === "issuer") {
+      assert.equal(environment.DATABASE_URL, source.DATABASE_URL, `${service.name} keeps the validated database URL`);
+      assert.equal(result.keys.includes("BIELOS_CORE_TEST_DATABASE_CONFIRM"), false, `${service.name} does not receive the test marker`);
+    }
   }
+
+  assert.throws(
+    () => buildServiceEnvironment("issuer", { ...source, BIELOS_OIDC_BIND_ADDRESS: "0.0.0.0" }, process.platform),
+    /configuration is incomplete/u,
+    "the isolated issuer cannot listen on every network interface"
+  );
+
+  const remoteDatabase = {
+    ...source,
+    DATABASE_URL: "postgresql://production_user@remote.example.invalid:5432/bielos"
+  };
+  for (const service of ["hub", "issuer"]) {
+    assert.throws(
+      () => buildServiceEnvironment(service, remoteDatabase, process.platform),
+      /local or isolated CI host/u,
+      `${service} refuses remote database targets`
+    );
+  }
+
+  const platformKeys = process.platform === "win32" ? platformEnvironmentVariableNames.windows : platformEnvironmentVariableNames.posix;
+  const direct = spawnSync(process.execPath, [fileURLToPath(new URL("./isolated-service.mjs", import.meta.url)), "hub"], {
+    env: {
+      ...Object.fromEntries(platformKeys.filter((key) => typeof source[key] === "string").map((key) => [key, source[key]])),
+      NODE_ENV: "development",
+      DATABASE_URL: remoteDatabase.DATABASE_URL,
+      BIELOS_CORE_TEST_DATABASE_CONFIRM: "disposable",
+      BIELOS_OIDC_PROXY_URL: "http://127.0.0.1:3003",
+      BIELOS_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
+      BIELOS_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem"
+    },
+    encoding: "utf8",
+    windowsHide: true
+  });
+  assert.equal(direct.status, 1, "direct Hub launch fails closed for a remote database");
+  assert.equal(direct.stderr, "E2E service configuration is invalid.\n");
+  assert.equal(direct.stderr.includes("remote.example.invalid"), false, "database targets are not echoed in errors");
 
   const windowsEnvironment = buildServiceEnvironment("public-site", source, "win32");
   for (const key of platformEnvironmentVariableNames.windows) {

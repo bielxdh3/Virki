@@ -12,7 +12,7 @@ export async function AccessView({ searchParams }: { searchParams: Promise<{ sta
     Promise.resolve(createCsrfToken())
   ]);
 
-  return <main className="admin-main">
+  return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Acessos</h1><p>Autorize somente a entrada de contas ativas em conexões habilitadas.</p></div></header>
     {params.status && <p className="form-success" role="status">Alteração concluída.</p>}
     {params.error && <p className="form-error" role="alert">A ação não foi concluída. Confira a seleção e a elevação de segurança.</p>}
