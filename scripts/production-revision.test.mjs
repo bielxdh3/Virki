@@ -94,68 +94,93 @@ function createTestRepository() {
   git(work, "remote", "add", "origin", remote);
   git(work, "push", "-u", "origin", "main");
 
-  return { root, work };
+  return { root, remote, work };
 }
 
 function withTestRepository(callback) {
   const repository = createTestRepository();
   try {
-    callback(repository.work);
+    callback(repository.work, repository.remote);
   } finally {
     rmSync(repository.root, { recursive: true, force: true });
   }
 }
 
-test("clean source inspection accepts a clean main matching origin", () => {
-  withTestRepository((work) => {
-    const state = inspectProductionSource({ repositoryRoot: work });
+test("clean source inspection accepts a clean main matching the canonical remote", () => {
+  withTestRepository((work, remote) => {
+    const state = inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote });
     assert.equal(state.branch, "main");
     assert.match(state.revision, /^[0-9a-f]{40}$/u);
   });
 });
 
-test("source inspection reports tracked, staged, and untracked dirty categories", () => {
+test("source inspection ignores Git replacement refs for the accepted revision", () => {
+  withTestRepository((work, remote) => {
+    const original = git(work, "rev-parse", "HEAD");
+    writeFileSync(path.join(work, "tracked.txt"), "replacement\n");
+    git(work, "add", "tracked.txt");
+    git(work, "commit", "-m", "replacement object");
+    const replacement = git(work, "rev-parse", "HEAD");
+    git(work, "reset", "--hard", original);
+    git(work, "update-ref", "refs/replace/" + original, replacement);
+
+    assert.equal(git(work, "show", original + ":tracked.txt"), "replacement");
+    const state = inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote });
+    assert.equal(state.revision, original);
+  });
+});
+
+test("source inspection rejects a fork or alternate origin before trusting its main", () => {
   withTestRepository((work) => {
-    writeFileSync(path.join(work, "tracked.txt"), "changed\n");
     expectCode(
       () => inspectProductionSource({ repositoryRoot: work }),
+      "SOURCE_REPOSITORY_MISMATCH",
+    );
+  });
+});
+
+test("source inspection reports tracked, staged, and untracked dirty categories", () => {
+  withTestRepository((work, remote) => {
+    writeFileSync(path.join(work, "tracked.txt"), "changed\n");
+    expectCode(
+      () => inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote }),
       "SOURCE_DIRTY_TRACKED",
     );
   });
 
-  withTestRepository((work) => {
+  withTestRepository((work, remote) => {
     writeFileSync(path.join(work, "tracked.txt"), "staged\n");
     git(work, "add", "tracked.txt");
     expectCode(
-      () => inspectProductionSource({ repositoryRoot: work }),
+      () => inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote }),
       "SOURCE_DIRTY_STAGED",
     );
   });
 
-  withTestRepository((work) => {
+  withTestRepository((work, remote) => {
     writeFileSync(path.join(work, "untracked.txt"), "untracked\n");
     expectCode(
-      () => inspectProductionSource({ repositoryRoot: work }),
+      () => inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote }),
       "SOURCE_DIRTY_UNTRACKED",
     );
   });
 });
 
 test("source inspection rejects branch and local/remote revision mismatches", () => {
-  withTestRepository((work) => {
+  withTestRepository((work, remote) => {
     git(work, "switch", "-c", "other");
     expectCode(
-      () => inspectProductionSource({ repositoryRoot: work }),
+      () => inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote }),
       "SOURCE_BRANCH_MISMATCH",
     );
   });
 
-  withTestRepository((work) => {
+  withTestRepository((work, remote) => {
     writeFileSync(path.join(work, "tracked.txt"), "new commit\n");
     git(work, "add", "tracked.txt");
     git(work, "commit", "-m", "local only");
     expectCode(
-      () => inspectProductionSource({ repositoryRoot: work }),
+      () => inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote }),
       "SOURCE_REMOTE_MISMATCH",
     );
   });

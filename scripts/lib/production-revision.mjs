@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 export const REVISION_LABEL = "org.opencontainers.image.revision";
+export const CANONICAL_BIELOS_REPOSITORY = "bielxdh3/BielOS";
+export const CANONICAL_BIELOS_REMOTE = `https://github.com/${CANONICAL_BIELOS_REPOSITORY}.git`;
 export const PRODUCTION_SERVICES = [
   "public-site",
   "hub",
@@ -19,6 +21,7 @@ const ERROR_MESSAGES = Object.freeze({
   SOURCE_DIRTY_STAGED: "Working tree has staged changes.",
   SOURCE_DIRTY_UNTRACKED: "Working tree has untracked files.",
   SOURCE_BRANCH_MISMATCH: "Active branch is not main.",
+  SOURCE_REPOSITORY_MISMATCH: "Origin is not the canonical BielOS repository.",
   SOURCE_REMOTE_MISMATCH: "Local and origin revisions do not match.",
   ARGUMENT_INVALID: "Production command arguments are invalid.",
   REMOTE_REQUIRED: "Production commands must target the canonical remote server.",
@@ -48,11 +51,12 @@ export function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     env: options.env,
+    input: options.input,
     encoding: "utf8",
     shell: false,
     windowsHide: true,
     maxBuffer: 64 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: options.input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
   });
 
   if (result.error) {
@@ -84,8 +88,9 @@ function pathsMatch(left, right) {
   return normalizedLeft === normalizedRight;
 }
 
-export function inspectProductionSource({ repositoryRoot, execute = runCommand }) {
-  const git = (args) => execute("git", args, { cwd: repositoryRoot });
+export function inspectProductionSource({ repositoryRoot, execute = runCommand, canonicalRemoteUrl = CANONICAL_BIELOS_REMOTE }) {
+  const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
+  const git = (args) => execute("git", args, { cwd: repositoryRoot, env: gitEnvironment });
   const resolvedRoot = requireSuccess(git(["rev-parse", "--show-toplevel"]));
 
   if (!pathsMatch(resolvedRoot, repositoryRoot)) {
@@ -95,6 +100,11 @@ export function inspectProductionSource({ repositoryRoot, execute = runCommand }
   const branch = requireSuccess(git(["branch", "--show-current"]));
   if (branch !== "main") {
     throw new ProductionRevisionError("SOURCE_BRANCH_MISMATCH");
+  }
+
+  const originUrl = requireSuccess(git(["remote", "get-url", "origin"]));
+  if (originUrl !== canonicalRemoteUrl) {
+    throw new ProductionRevisionError("SOURCE_REPOSITORY_MISMATCH");
   }
 
   const staged = git(["diff", "--cached", "--quiet", "--ignore-submodules", "--"]);
@@ -119,9 +129,13 @@ export function inspectProductionSource({ repositoryRoot, execute = runCommand }
   const revision = normalizeRevision(
     requireSuccess(git(["rev-parse", "--verify", "HEAD"])),
   );
-  const remoteRevision = normalizeRevision(
-    requireSuccess(git(["rev-parse", "--verify", "refs/remotes/origin/main"])),
-  );
+  const remoteMain = requireSuccess(
+    git(["ls-remote", "--exit-code", "--refs", "origin", "refs/heads/main"]),
+  ).split(/\s+/u);
+  if (remoteMain[1] !== "refs/heads/main") {
+    throw new ProductionRevisionError("SOURCE_REMOTE_MISMATCH");
+  }
+  const remoteRevision = normalizeRevision(remoteMain[0]);
 
   if (revision !== remoteRevision) {
     throw new ProductionRevisionError("SOURCE_REMOTE_MISMATCH");

@@ -2,123 +2,92 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  buildSshArgs,
-  parseSshConfig,
-  runProductionPreflight,
-} from "./production-preflight.mjs";
-import {
+  buildRemoteSshArgs,
   parseRemoteProductionCommand,
   runRemoteProductionCommand,
 } from "./production-remote.mjs";
 import { ProductionRevisionError } from "./lib/production-revision.mjs";
 import { isValidProductionConfig } from "./lib/production-config.mjs";
 
+const revision = "0123456789abcdef0123456789abcdef01234567";
 const operatorConfig = {
   sshAlias: "test-production",
   host: "production.example.invalid",
   port: "2222",
-  root: "C:\\BielOS",
+  root: "/srv/bielos",
 };
-const productionServerScript = readFileSync(new URL("./production-server.ps1", import.meta.url), "utf8");
 
-test("production server checks private configuration and markers at the root once", () => {
-  assert.match(
-    productionServerScript,
-    /foreach \(\$requiredFile in @\('\.env', '\.env\.oidc', '\.bielos-deploy-revision', '\.bielos-source-state'\)\)/u,
-  );
-  assert.match(
-    productionServerScript,
-    /Test-Path -LiteralPath \(Join-Path \$Root \$requiredFile\) -PathType Leaf/u,
-  );
+test("remote Linux Bash script uses LF line endings", () => {
+  const script = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
+  assert.equal(script.includes("\r"), false);
 });
 
-test("clone SQL uses base64 to preserve quoted identifiers across PowerShell", () => {
-  const cloneQuery = productionServerScript.match(/function Read-CloneQuery[\s\S]*?\n\}/u)?.[0];
-  assert.ok(cloneQuery);
-  assert.match(cloneQuery, /GetBytes\(\$Query\)/u);
-  assert.match(cloneQuery, /'sh', '-lc', \$shell/u);
-  assert.doesNotMatch(cloneQuery, /'-c', \$Query/u);
+test("production configuration accepts only safe absolute Linux roots", () => {
+  assert.equal(isValidProductionConfig(operatorConfig), true);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "C:\\BielOS" }), false);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "/srv/../unsafe" }), false);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "/srv/bielos;touch" }), false);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "/" }), false);
 });
 
-test("migration Compose runs are quiet and scope orphan suppression", () => {
-  const clonePrisma = productionServerScript.match(/function Invoke-ClonePrisma[\s\S]*?\n\}/u)?.[0];
-  assert.ok(clonePrisma);
-  assert.match(clonePrisma, /'--env', "DATABASE_URL=\$DatabaseUrl"/u);
-  assert.doesNotMatch(clonePrisma, /'--network'/u);
-  assert.match(productionServerScript, /^\$compose = @\(\s*'compose',\s*'--progress', 'quiet'/mu);
-  const scopedCompose = productionServerScript.match(/function Invoke-ComposeCaptureIgnoringOrphans[\s\S]*?\n\}/u)?.[0];
-  assert.ok(scopedCompose);
-  assert.match(scopedCompose, /COMPOSE_IGNORE_ORPHANS = 'true'/u);
-  assert.doesNotMatch(scopedCompose, /COMPOSE_REMOVE_ORPHANS|--remove-orphans/u);
-  assert.match(productionServerScript, /Invoke-ComposeCaptureIgnoringOrphans \(\$compose \+ @\('--profile', 'migration', 'run', '--rm', '--no-deps', 'migrate'\)\)/u);
-  assert.match(productionServerScript, /--network', \$networkName, '--network-alias', \$alias/u);
-});
-
-test("SSH preflight resolves only the canonical server target", () => {
-  assert.deepEqual(
-    parseSshConfig(`user deploy\nhostname ${operatorConfig.host}\nport ${operatorConfig.port}\n`),
-    { user: "deploy", hostname: operatorConfig.host, port: operatorConfig.port },
-  );
-  assert.deepEqual(buildSshArgs(["powershell.exe"], operatorConfig).slice(-2), [operatorConfig.sshAlias, "powershell.exe"]);
-  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "C:\\..\\unsafe" }), false);
-  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "C:\\BielOS; Write-Output bad" }), false);
-});
-
-test("remote production actions use a fixed allowlist", () => {
-  for (const action of ["start", "stop", "status", "ports", "revision", "health", "logs", "backup-verify", "migrate", "migration-status", "baseline", "config"]) {
+test("remote actions use a fixed list and a non-interactive Linux Bash runner", () => {
+  for (const action of ["start", "stop", "status", "ports", "revision", "health", "logs", "backup-verify", "maintenance-on", "maintenance-off", "config"]) {
     assert.equal(parseRemoteProductionCommand([action]), action);
   }
   assert.throws(
-    () => parseRemoteProductionCommand(["powershell", "-Command", "whoami"]),
+    () => parseRemoteProductionCommand(["bash", "-c", "whoami"]),
     (error) => error instanceof ProductionRevisionError && error.code === "ARGUMENT_INVALID",
   );
+
+  const args = buildRemoteSshArgs("status", revision, operatorConfig);
+  assert.equal(args.at(-1), `bash -s -- status ${operatorConfig.root} ${revision}`);
+  assert.ok(args.includes("StrictHostKeyChecking=yes"));
+  assert.equal(args.join(" ").includes("powershell"), false);
+  assert.throws(() => buildRemoteSshArgs("status", "bad", operatorConfig), /Revision is invalid/u);
 });
 
-test("remote status routing performs preflight before SSH action", async () => {
+test("remote actions require exact main-source and CI gates before preflight and SSH", async () => {
   const calls = [];
   const result = await runRemoteProductionCommand(["status"], {
-    preflight: async () => ({ status: 0, lines: ["preflight ok"] }),
-    execute: (command, args) => {
-      calls.push({ command, args });
-      return { status: 0, stdout: "remote status\n" };
-    },
     config: operatorConfig,
+    inspectSource: () => {
+      calls.push("source");
+      return { branch: "main", revision };
+    },
+    verifyCi: ({ revision: observed }) => {
+      calls.push(`ci:${observed}`);
+      return { ok: true, lines: ["exact SHA green"] };
+    },
+    preflight: async () => {
+      calls.push("preflight");
+      return { status: 0, lines: ["native Linux preflight ok"] };
+    },
+    execute: (command, args, options) => {
+      calls.push("ssh");
+      assert.equal(command, "ssh");
+      assert.ok(args.at(-1).includes(`bash -s -- status ${operatorConfig.root} ${revision}`));
+      assert.ok(options.input.includes("verify_host"));
+      return { status: 0, stdout: "status ok\n" };
+    },
   });
 
+  assert.deepEqual(calls, ["source", `ci:${revision}`, "preflight", "ssh"]);
   assert.equal(result.status, 0);
-  assert.deepEqual(result.lines, ["preflight ok", "remote status"]);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, "ssh");
-  assert.ok(calls[0].args.includes("-Action"));
-  assert.ok(calls[0].args.includes("status"));
+  assert.deepEqual(result.lines, ["native Linux preflight ok", "status ok"]);
 });
 
-test("SSH preflight requires eight stable probes and Docker", async () => {
-  let probes = 0;
-  const result = await runProductionPreflight({
+test("an unverified CI result fails before contacting the production host", async () => {
+  let preflightCalls = 0;
+  const result = await runRemoteProductionCommand(["restart"], {
     config: operatorConfig,
-    sleep: async () => {},
-    execute: (command, args) => {
-      if (command !== "ssh") return { status: 1, stdout: "" };
-      if (args[0] === "-G") {
-        return { status: 0, stdout: `user deploy\nhostname ${operatorConfig.host}\nport ${operatorConfig.port}\n` };
-      }
-      probes += 1;
-      if (probes <= 8) {
-        return {
-          status: 0,
-          stdout: "BIELOS_PROBE_ID=server\nBIELOS_PROBE_WD=C:\\Users\\Biel\nBIELOS_PROBE_POWERSHELL=powershell.exe\nBIELOS_PROBE_DOCKER=docker.exe\n",
-        };
-      }
-      return {
-        status: 0,
-        stdout: "BIELOS_DOCKER_VERSION=29\nBIELOS_DOCKER_INFO=29\nBIELOS_COMPOSE_VERSION=5\nBIELOS_DISK_FREE_GB=100\nBIELOS_DEMANAGE_COUNT=3\n",
-      };
+    inspectSource: () => ({ branch: "main", revision }),
+    verifyCi: () => ({ ok: false, lines: ["CI not green"] }),
+    preflight: async () => {
+      preflightCalls += 1;
+      return { status: 0, lines: [] };
     },
+    execute: () => assert.fail("Production SSH must not run when CI is not green."),
   });
-
-  assert.equal(result.status, 0);
-  assert.equal(probes, 9);
-  assert.ok(result.lines.some((line) => line.includes("8/8")));
-  assert.ok(result.lines.every((line) => !line.includes(operatorConfig.host)));
+  assert.equal(preflightCalls, 0);
+  assert.deepEqual(result, { status: 1, lines: ["CI not green"] });
 });

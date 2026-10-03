@@ -10,9 +10,10 @@ const grantBoundModels = new Set([
   "BackchannelAuthenticationRequest",
   "PreAuthorizedCode"
 ]);
+const projectAuthorizationModels = new Set([...grantBoundModels, "Grant"]);
 
 export class PrismaOidcAdapter implements Adapter {
-  constructor(private readonly model: string, private readonly database: Pick<PrismaClient, "oidcArtifact" | "projectConnection"> = prisma) {}
+  constructor(private readonly model: string, private readonly database: Pick<PrismaClient, "oidcArtifact" | "projectConnection" | "$transaction"> = prisma) {}
 
   async upsert(id: string, payload: AdapterPayload, expiresIn: number): Promise<void> {
     if (this.model === "Client") throw new Error("Client metadata is managed through project connections.");
@@ -26,10 +27,37 @@ export class PrismaOidcAdapter implements Adapter {
       expiresAt: Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000) : null,
       consumedAt: payload.consumed ? new Date(Number(payload.consumed) * 1000) : null
     };
-    await this.database.oidcArtifact.upsert({
+    const artifact = {
       where: { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } },
       update: data,
       create: { model: this.model, idHash: hashOidcIdentifier(id), ...data }
+    };
+    if (!projectAuthorizationModels.has(this.model)) {
+      await this.database.oidcArtifact.upsert(artifact);
+      return;
+    }
+
+    const { accountId, clientId } = getProjectAuthorizationContext(payload, grantBoundModels.has(this.model));
+    await this.database.$transaction(async (transaction) => {
+      const activeGrant = await transaction.$queryRaw<Array<{ id: string; redirectUris: unknown }>>`
+        SELECT grant_record."id", connection_record."redirectUris" AS "redirectUris"
+        FROM "UserProjectGrant" AS grant_record
+        INNER JOIN "User" AS account_record ON account_record."id" = grant_record."userId"
+        INNER JOIN "ProjectConnection" AS connection_record ON connection_record."id" = grant_record."connectionId"
+        WHERE grant_record."userId" = ${accountId}
+          AND connection_record."clientId" = ${clientId}
+          AND grant_record."revokedAt" IS NULL
+          AND account_record."role" = 'USER'
+          AND account_record."isActive" = TRUE
+          AND account_record."accountStatus" = 'ACTIVE'
+          AND connection_record."enabled" = TRUE
+        FOR UPDATE OF grant_record, account_record, connection_record
+      `;
+      if (activeGrant.length !== 1) throw new Error("OIDC authorization is no longer active.");
+      if (this.model === "AuthorizationCode" && (typeof payload.redirectUri !== "string" || !stringArray(activeGrant[0].redirectUris).includes(payload.redirectUri))) {
+        throw new Error("OIDC redirect URI is no longer registered.");
+      }
+      await transaction.oidcArtifact.upsert(artifact);
     });
   }
 
@@ -49,7 +77,7 @@ export class PrismaOidcAdapter implements Adapter {
   async consume(id: string): Promise<void> {
     const where = { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } };
     const record = await this.database.oidcArtifact.findUnique({ where, select: { payloadCiphertext: true } });
-    if (!record) return;
+    if (!record) throw new Error("OIDC artifact was not found.");
     const payload = parsePayload(decryptOidcPayload(record.payloadCiphertext));
     if (payload.consumed) throw new Error("OIDC artifact was already consumed.");
     payload.consumed = Math.floor(Date.now() / 1000);
@@ -100,6 +128,21 @@ export class PrismaOidcAdapter implements Adapter {
       return undefined;
     }
   }
+}
+
+export async function deleteExpiredOidcArtifacts(
+  database: Pick<PrismaClient, "oidcArtifact"> = prisma,
+  now = new Date()
+): Promise<number> {
+  const result = await database.oidcArtifact.deleteMany({ where: { expiresAt: { lte: now } } });
+  return result.count;
+}
+
+function getProjectAuthorizationContext(payload: AdapterPayload, requireProviderGrantId: boolean): { accountId: string; clientId: string } {
+  if (typeof payload.accountId !== "string" || !payload.accountId || typeof payload.clientId !== "string" || !payload.clientId || (requireProviderGrantId && (typeof payload.grantId !== "string" || !payload.grantId))) {
+    throw new Error("OIDC artifact authorization is incomplete.");
+  }
+  return { accountId: payload.accountId, clientId: payload.clientId };
 }
 
 function parsePayload(value: string): AdapterPayload {

@@ -7,70 +7,22 @@ export const EXPECTED_TOOLING_VERSIONS = {
   prisma: "6.19.3",
   "@prisma/client": "6.19.3",
   "@prisma/config": "6.19.3",
-  "deepmerge-ts": "7.1.5"
+  "deepmerge-ts": "8.0.2"
 };
 
-const expectedCounts = { info: 0, low: 0, moderate: 0, high: 3, critical: 0, total: 3 };
-const expectedVulnerabilities = {
-  "@prisma/config": {
-    name: "@prisma/config",
-    severity: "high",
-    isDirect: false,
-    via: ["deepmerge-ts"],
-    effects: ["prisma"],
-    range: "6.13.0-dev.1 - 8.1.0-dev.4",
-    nodes: ["node_modules/@prisma/config"],
-    fixAvailable: { name: "prisma", version: "6.12.0", isSemVerMajor: true }
-  },
-  "deepmerge-ts": {
-    name: "deepmerge-ts",
-    severity: "high",
-    isDirect: false,
-    via: [{
-      source: 1145093,
-      name: "deepmerge-ts",
-      dependency: "deepmerge-ts",
-      title: "DeepmergeTS has stack exhaustion when merging recursive object graphs",
-      url: "https://github.com/advisories/GHSA-ggr8-5vv4-36mx",
-      severity: "high",
-      cwe: ["CWE-674"],
-      cvss: { score: 0, vectorString: null },
-      range: "<8.0.0"
-    }],
-    effects: ["@prisma/config"],
-    range: "<8.0.0",
-    nodes: ["node_modules/deepmerge-ts"],
-    fixAvailable: { name: "prisma", version: "6.12.0", isSemVerMajor: true }
-  },
-  prisma: {
-    name: "prisma",
-    severity: "high",
-    isDirect: true,
-    via: ["@prisma/config"],
-    effects: [],
-    range: "6.13.0-dev.1 - 8.1.0-dev.4",
-    nodes: ["node_modules/prisma"],
-    fixAvailable: { name: "prisma", version: "6.12.0", isSemVerMajor: true }
-  }
-};
+const expectedCounts = { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 };
+const expectedVulnerabilities = {};
 
 export function evaluateToolingAudit(audit, { versions = EXPECTED_TOOLING_VERSIONS, productionReachable = false } = {}) {
   const errors = [];
   const counts = audit?.metadata?.vulnerabilities;
   const vulnerabilities = audit?.vulnerabilities;
-  const clean = isCleanAudit(counts, vulnerabilities);
 
   if (productionReachable) errors.push("The tooling advisory is reachable from the production tree.");
-  if (clean) {
-    return errors.length === 0
-      ? { ok: true, status: "exception-no-longer-needed", errors: ["Remove the temporary GHSA tooling exception."] }
-      : { ok: false, status: "failed", errors };
-  }
-
   if (audit?.auditReportVersion !== 2) errors.push("Unexpected npm audit report version.");
-  if (stable(counts) !== stable(expectedCounts)) errors.push("Vulnerability counts drifted from the accepted advisory set.");
-  if (stable(vulnerabilities) !== stable(expectedVulnerabilities)) errors.push("Advisory metadata, path, severity, or fix data drifted.");
-  if (stable(versions) !== stable(EXPECTED_TOOLING_VERSIONS)) errors.push("Prisma tooling versions drifted from the accepted path.");
+  if (stable(counts) !== stable(expectedCounts)) errors.push("The tooling dependency audit found vulnerabilities.");
+  if (stable(vulnerabilities) !== stable(expectedVulnerabilities)) errors.push("The tooling dependency audit returned vulnerability entries.");
+  if (stable(versions) !== stable(EXPECTED_TOOLING_VERSIONS)) errors.push("Prisma tooling versions drifted from the pinned versions.");
   return { ok: errors.length === 0, status: errors.length === 0 ? "passed" : "failed", errors };
 }
 
@@ -112,11 +64,6 @@ function readCurrentVersions() {
     const packageJson = path.join(root, "node_modules", ...name.split("/"), "package.json");
     return [name, JSON.parse(readFileSync(packageJson, "utf8")).version];
   }));
-}
-
-function isCleanAudit(counts, vulnerabilities) {
-  const cleanCounts = { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 };
-  return stable(counts) === stable(cleanCounts) && Object.keys(vulnerabilities ?? {}).length === 0;
 }
 
 function stable(value) {

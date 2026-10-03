@@ -2,15 +2,18 @@ import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import { prisma, type Prisma } from "@bielos/database";
 import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
-import { createLoginRateLimitIdentifierHash, createRateLimitIdentifierHash } from "./rate-limit-config";
+import { createLoginAccountRateLimitIdentifierHash, createLoginAttemptRateLimitIdentifierHash, createLoginRateLimitIdentifierHash, createRateLimitIdentifierHash, isTrustedClientAddress } from "./rate-limit-config";
 
 export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
+export { isTrustedClientAddress } from "./rate-limit-config";
 export {
   createAuditRequestMetadata,
   hashAuditEmail,
   hashAuditIdentifier,
   hashAuditUserAgent,
   writeAuditLog,
+  writeAuditLogRequired,
+  writeAuditLogInTransaction,
   type AuditEventType,
   type AuditLogInput,
   type AuditMetadata,
@@ -23,6 +26,7 @@ const DUMMY_PASSWORD_HASH =
   "$argon2id$v=19$m=65536,t=3,p=1$KWdtXzW0AylnuGwdi+AYHQ$/T76IyJJw69emqMKm2cc7E1k2lQFMBFp/qTumxvHvHw";
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5;
+const LOGIN_ACCOUNT_RATE_LIMIT_MAX_ATTEMPTS = 20;
 const LOGIN_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000;
 const LOGIN_RATE_LIMIT_LOCK_TIMEOUT_MS = 5_000;
 
@@ -35,7 +39,9 @@ export type AuthenticatedUser = {
 
 export type AuthenticatedSession = {
   id: string;
+  createdAt: Date;
   expiresAt: Date;
+  authenticationMethods: string[];
   user: AuthenticatedUser;
 };
 
@@ -154,7 +160,8 @@ export async function lockRateLimitIdentifierInTransaction(
 export async function consumeRateLimitAttemptInTransaction(
   transaction: Prisma.TransactionClient,
   identifier: string,
-  now = new Date()
+  now = new Date(),
+  maxAttempts = LOGIN_RATE_LIMIT_MAX_ATTEMPTS
 ): Promise<RateLimitAttemptResult> {
   const identifierHash = hashRateLimitIdentifier(identifier);
   await lockLoginRateLimitIdentifier(transaction, identifierHash);
@@ -194,17 +201,17 @@ export async function consumeRateLimitAttemptInTransaction(
     return { allowed: true };
   }
 
-  if (isLoginRateLimitBlocked(existing, now)) {
+  if (isLoginRateLimitBlocked(existing, now, maxAttempts)) {
     return { allowed: false };
   }
 
-  const attempts = Math.min(existing.attempts + 1, LOGIN_RATE_LIMIT_MAX_ATTEMPTS);
+  const attempts = Math.min(existing.attempts + 1, maxAttempts);
   await transaction.loginRateLimit.update({
     where: { identifierHash },
     data: {
       attempts,
       blockedUntil:
-        attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+        attempts >= maxAttempts
           ? getRateLimitWindowResetAt(existing.windowStartedAt)
           : null,
       expiresAt
@@ -289,15 +296,41 @@ export async function authenticateUser(
 export async function authenticateUserWithRateLimit(
   email: string,
   password: string,
-  now = new Date()
+  now = new Date(),
+  trustedClientAddress?: string
 ): Promise<LoginAuthenticationResult> {
   try {
-    const identifierHash = hashLoginRateLimitIdentifier(email);
+    if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(trustedClientAddress)) {
+      return { user: null, failureMode: "limiter-unavailable" };
+    }
+    if (trustedClientAddress) {
+      if (!isTrustedClientAddress(trustedClientAddress)) return { user: null, failureMode: "limiter-unavailable" };
+      const sourceAttempt = await prisma.$transaction((transaction) =>
+        consumeRateLimitAttemptInTransaction(transaction, `login-source:${trustedClientAddress}`, now, 30)
+      );
+      if (!sourceAttempt.allowed) return { user: null, failureMode: "rate-limited" };
+    }
+    const accountIdentifierHash = createLoginAccountRateLimitIdentifierHash(email);
+    const identifierHash = createLoginAttemptRateLimitIdentifierHash(email, trustedClientAddress);
     await pruneExpiredLoginRateLimits(now);
 
     return await prisma.$transaction(
       async (transaction) => {
+        await lockLoginRateLimitIdentifier(transaction, accountIdentifierHash);
         await lockLoginRateLimitIdentifier(transaction, identifierHash);
+        const accountEntry = await transaction.loginRateLimit.findUnique({
+          where: { identifierHash: accountIdentifierHash },
+          select: {
+            attempts: true,
+            windowStartedAt: true,
+            blockedUntil: true
+          }
+        });
+
+        if (accountEntry && isLoginRateLimitBlocked(accountEntry, now, LOGIN_ACCOUNT_RATE_LIMIT_MAX_ATTEMPTS)) {
+          return { user: null, failureMode: "rate-limited" };
+        }
+
         const entry = await transaction.loginRateLimit.findUnique({
           where: { identifierHash },
           select: {
@@ -318,10 +351,11 @@ export async function authenticateUserWithRateLimit(
 
         if (!user) {
           await recordFailedLoginEntry(transaction, identifierHash, now);
+          await recordFailedLoginEntry(transaction, accountIdentifierHash, now, LOGIN_ACCOUNT_RATE_LIMIT_MAX_ATTEMPTS);
           return { user: null, failureMode: "invalid-credentials" };
         }
 
-        await transaction.loginRateLimit.deleteMany({ where: { identifierHash } });
+        await transaction.loginRateLimit.deleteMany({ where: { identifierHash: { in: [accountIdentifierHash, identifierHash] } } });
         return { user };
       },
       { maxWait: 5_000, timeout: 15_000 }
@@ -403,7 +437,9 @@ export async function getSessionByToken(token: string): Promise<AuthenticatedSes
 
   return {
     id: session.id,
+    createdAt: session.createdAt,
     expiresAt: session.expiresAt,
+    authenticationMethods: session.authenticationMethods,
     user: {
       id: session.user.id,
       email: session.user.email,
@@ -471,7 +507,8 @@ async function lockLoginRateLimitIdentifier(
 async function recordFailedLoginEntry(
   transaction: Prisma.TransactionClient,
   identifierHash: string,
-  now: Date
+  now: Date,
+  maxAttempts = LOGIN_RATE_LIMIT_MAX_ATTEMPTS
 ): Promise<void> {
   const existing = await transaction.loginRateLimit.findUnique({
     where: { identifierHash },
@@ -508,13 +545,13 @@ async function recordFailedLoginEntry(
     return;
   }
 
-  const attempts = Math.min(existing.attempts + 1, LOGIN_RATE_LIMIT_MAX_ATTEMPTS);
+  const attempts = Math.min(existing.attempts + 1, maxAttempts);
   await transaction.loginRateLimit.update({
     where: { identifierHash },
     data: {
       attempts,
       blockedUntil:
-        attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+        attempts >= maxAttempts
           ? getRateLimitWindowResetAt(existing.windowStartedAt)
           : null,
       expiresAt
@@ -528,7 +565,8 @@ function isLoginRateLimitBlocked(
     windowStartedAt: Date;
     blockedUntil: Date | null;
   },
-  now: Date
+  now: Date,
+  maxAttempts = LOGIN_RATE_LIMIT_MAX_ATTEMPTS
 ): boolean {
   if (entry.blockedUntil && entry.blockedUntil > now) {
     return true;
@@ -536,7 +574,7 @@ function isLoginRateLimitBlocked(
 
   return (
     !isRateLimitWindowExpired(entry.windowStartedAt, now) &&
-    entry.attempts >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+    entry.attempts >= maxAttempts
   );
 }
 

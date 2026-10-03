@@ -11,7 +11,8 @@ import {
 } from "@bielos/auth";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
+import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost } from "../../../lib/surface";
+import { readBoundedFormData } from "../../../lib/request-form";
 
 export const dynamic = "force-dynamic";
 
@@ -21,15 +22,15 @@ export async function POST(request: NextRequest) {
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-logout-api"))) {
     return new NextResponse("Forbidden", { status: 403 });
   }
+  if (!hasSameOrigin(request.headers)) return new NextResponse("Forbidden", { status: 403 });
 
-  const formData = await request.formData();
+  const formData = await readBoundedFormData(request, 8 * 1024);
+  if (!formData) return new NextResponse("Bad Request", { status: 400 });
   const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {
     return new NextResponse("Forbidden", { status: 403 });
   }
-
-  const redirectUrl = new URL("/login", getSurfaceBaseUrl(request.headers, request.url));
 
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const currentSession = sessionToken ? await getSessionByToken(sessionToken) : null;
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest) {
   if (sessionToken && currentSession) {
     const revokedCount = await revokeSessionToken(sessionToken);
     const metadata = {
-      ...createAuditRequestMetadata(request.headers, "logout-route"),
+      ...createAuditRequestMetadata(request.headers, `${surface}-logout-route`),
       revokedCount
     };
 
@@ -46,7 +47,7 @@ export async function POST(request: NextRequest) {
       result: "SUCCESS",
       actorUserId: currentSession.user.id,
       actorEmailHash: hashAuditEmail(currentSession.user.email),
-      resource: "hub",
+      resource: surface,
       message: "User logged out.",
       metadata
     });
@@ -62,6 +63,32 @@ export async function POST(request: NextRequest) {
         metadata
       });
     }
+  }
+
+  let redirectUrl: URL;
+  try {
+    const configuredBaseUrl = surface === "hub"
+      ? process.env.BIELOS_HUB_URL
+      : surface === "portal"
+        ? process.env.BIELOS_PORTAL_URL
+        : undefined;
+    const redirectBase = getSurfaceBaseUrl(request.headers, request.url);
+    if (!redirectBase) throw new Error("Logout redirect origin is unavailable.");
+    const fallbackHost = requestHost(request.headers);
+    const redirectHost = redirectBase.hostname.toLowerCase().replace(/\.$/u, "");
+    if (process.env.NODE_ENV === "production" && (
+      surface === "local" ||
+      redirectBase.protocol !== "https:" ||
+      (!configuredBaseUrl && redirectHost !== fallbackHost)
+    )) throw new Error("Logout redirect origin is unavailable.");
+    redirectUrl = new URL("/login", redirectBase);
+  } catch {
+    const response = new NextResponse("Logout completed; redirect unavailable.", {
+      status: 503,
+      headers: { "Cache-Control": "no-store" }
+    });
+    response.cookies.set(SESSION_COOKIE_NAME, "", getExpiredSessionCookieOptions());
+    return response;
   }
 
   const response = NextResponse.redirect(redirectUrl, { status: 303 });

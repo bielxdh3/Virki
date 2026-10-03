@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, mkdtemp, mkdir, readFile, rm, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,17 +18,19 @@ const databasePassword = "migration-validation-only";
 let containerStarted = false;
 let temporaryDirectory;
 let client;
+let validationError;
 
 try {
   const migrationDirectories = (await readdir(migrationsRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
-  const baselinePlan = migrationDirectories.length === 1 && migrationDirectories[0] === baselineName;
+  const baselinePlan = migrationDirectories[0] === baselineName && !migrationDirectories.includes(transitionName);
   const transitionPlan = migrationDirectories.includes(transitionName);
-  assert.ok(baselinePlan || transitionPlan, "Expected either the production transition plan or the clean baseline plan.");
+  assert.ok(baselinePlan || transitionPlan, "Expected the clean baseline with forward migrations or the production transition plan.");
   const legacyDirectories = transitionPlan ? migrationDirectories.filter((name) => name !== transitionName) : [];
   if (transitionPlan) assert.equal(legacyDirectories.length, 14, "Expected the production's fourteen applied migrations before transition.");
+  const additiveDirectories = baselinePlan ? migrationDirectories.filter((name) => name !== baselineName) : [];
 
   runDocker([
     "run", "--detach", "--name", containerName, "--publish", "127.0.0.1::5432",
@@ -35,7 +38,7 @@ try {
     "--env", `POSTGRES_PASSWORD=${databasePassword}`,
     "--health-cmd", `pg_isready -U ${databaseUser} -d ${databaseName}`,
     "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "60",
-    "postgres:17-alpine",
+    "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
   ]);
   containerStarted = true;
   await waitForDatabase();
@@ -55,13 +58,36 @@ try {
   const schemaPath = path.join(temporaryPrismaDirectory, "schema.prisma");
   if (baselinePlan) {
     await deployMigrations(schemaPath, databaseUrl);
-    assert.equal(
-      runSql("SELECT count(*)::text || '|' || count(*) FILTER (WHERE \"finished_at\" IS NULL AND \"rolled_back_at\" IS NULL)::text || '|' || count(*) FILTER (WHERE \"rolled_back_at\" IS NOT NULL)::text || '|' || count(*) FILTER (WHERE \"migration_name\" = '0_init')::text FROM \"_prisma_migrations\""),
-      "1|0|0|1",
-      "Expected only the clean baseline to be applied to a fresh database.",
-    );
-    client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
-    await client.$connect();
+    assert.equal(runSql("SELECT count(*)::text || '|' || count(*) FILTER (WHERE \"finished_at\" IS NULL AND \"rolled_back_at\" IS NULL)::text || '|' || count(*) FILTER (WHERE \"rolled_back_at\" IS NOT NULL)::text || '|' || count(*) FILTER (WHERE \"migration_name\" = '0_init')::text FROM \"_prisma_migrations\""), "1|0|0|1", "Expected the clean baseline to be applied first to a fresh database.");
+    if (additiveDirectories.length > 0) {
+      client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+      await client.$connect();
+      runSql(seedRecoveryOutbox());
+      runSql(seedMigrationTransformFixtures());
+      const recoveryBefore = await readRecoveryOutboxState();
+      assert.equal(recoveryBefore.length, 1);
+      assert.match(recoveryBefore[0].idempotencyKey, /^account-recovery:[A-Za-z0-9_-]{32}$/u, "Expected a legacy recovery outbox key that the migration must rewrite.");
+      assert.equal(await client.deviceChallenge.count(), 3, "Expected every challenge fixture to exist before the additive migration.");
+      assert.equal(await client.accountRecoveryRequest.count(), 2, "Expected every recovery request fixture to exist before the additive migration.");
+
+      for (const migration of additiveDirectories) {
+        await cp(path.join(migrationsRoot, migration), path.join(temporaryMigrationsDirectory, migration), { recursive: true });
+      }
+      await deployMigrations(schemaPath, databaseUrl);
+      assert.equal(runSql("SELECT count(*)::text || '|' || count(*) FILTER (WHERE \"finished_at\" IS NOT NULL AND \"rolled_back_at\" IS NULL)::text || '|' || count(*) FILTER (WHERE \"finished_at\" IS NULL AND \"rolled_back_at\" IS NULL)::text || '|' || count(*) FILTER (WHERE \"rolled_back_at\" IS NOT NULL)::text FROM \"_prisma_migrations\""), `${migrationDirectories.length}|${migrationDirectories.length}|0|0`, "Expected every committed additive migration to apply once without rewriting migration history.");
+      const recoveryAfter = await readRecoveryOutboxState();
+      assert.deepEqual(recoveryAfter, recoveryBefore.map((message) => ({
+        ...message,
+        idempotencyKey: `account-recovery-migrated:${message.id}`,
+      })), "Additive migrations must rewrite legacy recovery keys and preserve all other message and delivery-attempt fields.");
+      await verifyMigrationTransformations();
+    } else {
+      assert.equal(runSql("SELECT count(*)::text || '|' || count(*) FILTER (WHERE \"finished_at\" IS NOT NULL AND \"rolled_back_at\" IS NULL)::text || '|' || count(*) FILTER (WHERE \"finished_at\" IS NULL AND \"rolled_back_at\" IS NULL)::text || '|' || count(*) FILTER (WHERE \"rolled_back_at\" IS NOT NULL)::text FROM \"_prisma_migrations\""), `${migrationDirectories.length}|${migrationDirectories.length}|0|0`, "Expected all committed migrations to apply to a fresh database.");
+    }
+    if (!client) {
+      client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+      await client.$connect();
+    }
     await verifyRemovedProductSchema();
     await verifyCurrentSchema(schemaPath, databaseUrl);
     await verifyMigrationStatus(schemaPath, databaseUrl);
@@ -80,11 +106,41 @@ try {
     await verifyRemovedProductSchema();
     await verifyMigrationStatus(schemaPath, databaseUrl);
   }
-} finally {
-  await client?.$disconnect();
-  if (containerStarted) spawnSync("docker", ["rm", "--force", "--volumes", containerName], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
-  if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+} catch (error) {
+  validationError = error;
 }
+
+const cleanupErrors = [];
+try {
+  await client?.$disconnect();
+} catch (error) {
+  cleanupErrors.push(error);
+}
+if (containerStarted) {
+  let result;
+  try {
+    result = spawnSync("docker", ["rm", "--force", "--volumes", containerName], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+  } catch (error) {
+    cleanupErrors.push(new Error("Disposable migration validation container cleanup could not be started.", { cause: error }));
+  }
+  if (result && (result.error || result.status !== 0)) {
+    const detail = result.error?.message ?? `exit status ${result.status ?? "unknown"}`;
+    cleanupErrors.push(new Error(`Disposable migration validation container cleanup failed (${detail}).`, result.error ? { cause: result.error } : undefined));
+  }
+}
+if (temporaryDirectory) {
+  try {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+}
+if (validationError && cleanupErrors.length > 0) {
+  throw new AggregateError([validationError, ...cleanupErrors], "Migration validation failed and cleanup also failed; both errors are preserved.");
+}
+if (validationError) throw validationError;
+if (cleanupErrors.length === 1) throw cleanupErrors[0];
+if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "Disposable migration validation cleanup failed.");
 
 async function verifyPreservedIdentity() {
   const admin = await client.user.findUnique({ where: { id: "validation-admin" } });
@@ -116,6 +172,78 @@ async function verifyPreservedIdentity() {
   assert.equal(await client.emailOutboxMessage.count({ where: { id: "validation-auth-email" } }), 1);
   assert.equal(await client.emailOutboxMessage.count({ where: { id: "validation-legacy-email" } }), 0);
   assert.equal(await client.emailDeliveryAttempt.count({ where: { messageId: "validation-legacy-email" } }), 0);
+}
+
+async function readRecoveryOutboxState() {
+  return client.emailOutboxMessage.findMany({
+    where: { kind: "ACCOUNT_RECOVERY" },
+    orderBy: { id: "asc" },
+    select: {
+      id: true,
+      idempotencyKey: true,
+      kind: true,
+      recipientEmail: true,
+      locale: true,
+      payload: true,
+      status: true,
+      attemptCount: true,
+      availableAt: true,
+      sentAt: true,
+      terminalFailedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      deliveryAttempts: {
+        orderBy: { attempt: "asc" },
+        select: { id: true, attempt: true, status: true, errorCode: true, attemptedAt: true },
+      },
+    },
+  });
+}
+
+async function verifyMigrationTransformations() {
+  const challenges = await client.deviceChallenge.findMany({
+    where: { id: { in: ["validation-challenge-pending", "validation-challenge-verified", "validation-challenge-consumed"] } },
+    orderBy: { id: "asc" },
+    select: { id: true, status: true, consumedAt: true },
+  });
+  assert.equal(await client.deviceChallenge.count(), 3, "Migration must preserve all device challenge rows.");
+  assert.deepEqual(challenges.map(({ id, status }) => ({ id, status })), [
+    { id: "validation-challenge-consumed", status: "VERIFIED" },
+    { id: "validation-challenge-pending", status: "REVOKED" },
+    { id: "validation-challenge-verified", status: "REVOKED" },
+  ], "Migration must revoke only unconsumed pending or verified device challenges.");
+  assert.ok(challenges.find(({ id }) => id === "validation-challenge-consumed")?.consumedAt instanceof Date);
+
+  const requestKeys = {
+    "validation-recovery-normalized": "recovery-key-normalized-fixture",
+    "validation-recovery-fallback": "recovery-key-fallback-fixture",
+  };
+  const recoveryRequests = await client.accountRecoveryRequest.findMany({
+    where: { id: { in: Object.keys(requestKeys) } },
+    orderBy: { id: "asc" },
+    select: {
+      id: true,
+      requestKeyHash: true,
+      emailAddressHash: true,
+      userId: true,
+      status: true,
+      user: { select: { email: true, emailNormalized: true } },
+    },
+  });
+  assert.equal(await client.accountRecoveryRequest.count(), 2, "Migration must preserve all account recovery request rows.");
+  assert.deepEqual(recoveryRequests.map(({ id, userId, status }) => ({ id, userId, status })), [
+    { id: "validation-recovery-fallback", userId: "validation-recovery-fallback-user", status: "APPROVED" },
+    { id: "validation-recovery-normalized", userId: "validation-recovery-normalized-user", status: "PENDING" },
+  ], "Migration must preserve recovery request identity and status.");
+  for (const request of recoveryRequests) {
+    assert.equal(request.requestKeyHash, sha256(requestKeys[request.id]), "Migration must hash each recovery request key without changing its row identity.");
+    const email = request.user.emailNormalized ?? request.user.email;
+    assert.equal(request.emailAddressHash, sha256(email.trim().toLowerCase()), "Migration must hash the email belonging to the linked recovery request user.");
+  }
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 async function verifyRemovedProductSchema() {
@@ -247,6 +375,33 @@ INSERT INTO "EmailOutboxMessage" ("id", "idempotencyKey", "kind", "recipientEmai
   ('validation-auth-email', 'validation-auth-email-key', 'PASSWORD_CHANGED'::"EmailMessageKind", 'admin@validation.invalid', 'en', '{"test":true}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
   ('validation-legacy-email', 'validation-legacy-email-key', 'APPLICATION_EMAIL_VERIFICATION'::"EmailMessageKind", 'user@validation.invalid', 'en', '{"test":true}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO "EmailDeliveryAttempt" ("id", "messageId", "attempt", "status") VALUES ('validation-legacy-email-attempt', 'validation-legacy-email', 1, 'FAILED'::"DeliveryAttemptStatus");
+COMMIT;
+`;
+}
+
+function seedRecoveryOutbox() {
+  return `
+INSERT INTO "EmailOutboxMessage" ("id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload", "status", "attemptCount", "availableAt", "createdAt", "updatedAt") VALUES
+  ('validation-account-recovery-email', 'account-recovery:0123456789abcdefghijklmnopqrstuv', 'ACCOUNT_RECOVERY'::"EmailMessageKind", 'user@validation.invalid', 'en', '{"version":1,"publicValues":{"displayName":"Validation user"},"protectedValues":{"ciphertext":"opaque-encrypted-recovery-payload","iv":"validation-iv","tag":"validation-tag"}}'::jsonb, 'RETRYABLE_FAILURE'::"OutboxMessageStatus", 2, CURRENT_TIMESTAMP + INTERVAL '5 minutes', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "EmailDeliveryAttempt" ("id", "messageId", "attempt", "status", "errorCode", "attemptedAt") VALUES
+  ('validation-account-recovery-attempt-1', 'validation-account-recovery-email', 1, 'FAILED'::"DeliveryAttemptStatus", 'transport-failure', CURRENT_TIMESTAMP - INTERVAL '2 minutes'),
+  ('validation-account-recovery-attempt-2', 'validation-account-recovery-email', 2, 'FAILED'::"DeliveryAttemptStatus", 'transport-failure', CURRENT_TIMESTAMP - INTERVAL '1 minute');
+`;
+}
+
+function seedMigrationTransformFixtures() {
+  return `
+BEGIN;
+INSERT INTO "User" ("id", "email", "emailNormalized", "displayName", "passwordHash", "role", "isActive", "accountStatus", "secondFactorMethod", "createdAt", "updatedAt") VALUES
+  ('validation-recovery-normalized-user', 'Primary@validation.invalid', 'primary@validation.invalid', 'Primary recovery fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-recovery-fallback-user', 'Fallback@validation.invalid', NULL, 'Fallback recovery fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "DeviceChallenge" ("id", "userId", "ceremonyId", "deviceIdHash", "codeHash", "status", "expiresAt", "consumedAt") VALUES
+  ('validation-challenge-pending', 'validation-recovery-normalized-user', 'validation-ceremony-pending', 'fixture-device-hash', 'fixture-code-hash', 'PENDING'::"DeviceChallengeStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', NULL),
+  ('validation-challenge-verified', 'validation-recovery-normalized-user', 'validation-ceremony-verified', 'fixture-device-hash', 'fixture-code-hash', 'VERIFIED'::"DeviceChallengeStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', NULL),
+  ('validation-challenge-consumed', 'validation-recovery-normalized-user', 'validation-ceremony-consumed', 'fixture-device-hash', 'fixture-code-hash', 'VERIFIED'::"DeviceChallengeStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', CURRENT_TIMESTAMP);
+INSERT INTO "AccountRecoveryRequest" ("id", "requestKey", "userId", "emailChallengeHash", "status", "expiresAt", "createdAt", "updatedAt") VALUES
+  ('validation-recovery-normalized', 'recovery-key-normalized-fixture', 'validation-recovery-normalized-user', 'fixture-email-challenge-hash', 'PENDING'::"RecoveryRequestStatus", CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-recovery-fallback', 'recovery-key-fallback-fixture', 'validation-recovery-fallback-user', 'fixture-email-challenge-hash', 'APPROVED'::"RecoveryRequestStatus", CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 COMMIT;
 `;
 }

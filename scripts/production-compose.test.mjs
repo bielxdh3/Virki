@@ -6,13 +6,21 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const productionCompose = readFileSync(path.join(repositoryRoot, "infra", "docker-compose.prod.yml"), "utf8");
+const developmentCompose = readFileSync(path.join(repositoryRoot, "infra", "docker-compose.yml"), "utf8");
 const cloudflareCompose = readFileSync(path.join(repositoryRoot, "infra", "docker-compose.cloudflare.yml"), "utf8");
 const cloudflareTemplate = readFileSync(path.join(repositoryRoot, "infra", "cloudflare", "config.example.yml"), "utf8");
 
 function serviceBlock(compose, service) {
+  compose = compose.replace(/\r\n/gu, "\n");
   const match = compose.match(new RegExp(`\\n  ${service}:\\n([\\s\\S]*?)(?=\\n  [a-z0-9-]+:\\n|\\nvolumes:|$)`, "u"));
   assert.ok(match, `Missing Compose service: ${service}`);
   return match[1];
+}
+
+function environmentKeys(block) {
+  const match = block.match(/(?:^|\n) {4}environment:\n([\s\S]*?)(?=\n {4}[a-z][a-z0-9_-]*:\n|$)/u);
+  assert.ok(match, "Missing Compose environment block");
+  return [...match[1].matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gmu)].map((entry) => entry[1]).sort();
 }
 
 test("production exposes only the public site and loopback application surfaces", () => {
@@ -32,16 +40,82 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
   assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
   assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:\?/u);
   assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u);
-  for (const block of [hub, issuer]) {
-    assert.match(block, /path: \.\.\/\.env\.oidc/u);
-    assert.match(block, /required: false/u);
-  }
+  assert.match(hub, /path: \.\.\/\.env\.oidc-data/u);
+  assert.match(hub, /required: true/u);
+  assert.match(issuer, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
+  assert.match(issuer, /path: \.\.\/\.env\.oidc-data/u);
+  assert.match(issuer, /required: true/u);
+  assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET:\s*\$\{BIELOS_RATE_LIMIT_HASH_SECRET:\?/u);
   assert.doesNotMatch(productionCompose, /BIELOS_OIDC_SIGNING_JWKS:\s*\$\{/u);
   assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
 });
 
+test("production containers receive only their scoped secret files", () => {
+  const hub = serviceBlock(productionCompose, "hub");
+  const issuer = serviceBlock(productionCompose, "oidc-issuer");
+  const tunnel = serviceBlock(cloudflareCompose, "cloudflared");
+  const appServices = ["hub", "oidc-issuer", "migrate", "session-cleanup", "email-worker"]
+    .map((service) => serviceBlock(productionCompose, service));
+
+  assert.ok(appServices.every((block) => !/path:\s*\.\.\/\.env\s*$/mu.test(block)));
+  assert.match(hub, /path: \.\.\/\.env\.oidc-data/u);
+  assert.doesNotMatch(hub, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
+  assert.match(issuer, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
+  assert.match(issuer, /path: \.\.\/\.env\.oidc-data/u);
+  assert.doesNotMatch(hub, /BIELOS_OIDC_SIGNING_JWKS|BIELOS_OIDC_COOKIE_KEY|BIELOS_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.doesNotMatch(issuer, /BIELOS_TOTP_ENCRYPTION_KEY|BIELOS_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET/u);
+  assert.match(tunnel, /TUNNEL_TOKEN:\s*\$\{CLOUDFLARE_TUNNEL_TOKEN/u);
+});
+
+test("development Hub and issuer receive only explicitly scoped environment variables", () => {
+  const hub = serviceBlock(developmentCompose, "hub");
+  const publicSite = serviceBlock(developmentCompose, "public-site");
+  const issuer = serviceBlock(developmentCompose, "oidc-issuer");
+
+  assert.match(hub, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
+  assert.match(publicSite, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
+  assert.doesNotMatch(`${hub}\n${publicSite}`, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-https:\/\/portal\.biel\.dev\.br\}/u);
+  assert.doesNotMatch(hub, /env_file:/u);
+  assert.doesNotMatch(issuer, /env_file:/u);
+  assert.match(hub, /BIELOS_EMAIL_SMTP_PASSWORD:/u);
+  assert.match(hub, /BIELOS_EMAIL_OUTBOX_KEY:/u);
+  assert.match(issuer, /BIELOS_OIDC_SIGNING_JWKS:/u);
+  assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET:/u);
+  assert.doesNotMatch(hub, /BIELOS_OIDC_SIGNING_JWKS|BIELOS_OIDC_COOKIE_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.doesNotMatch(issuer, /BIELOS_TOTP_ENCRYPTION_KEY|BIELOS_EMAIL_SMTP_PASSWORD|BIELOS_EMAIL_OUTBOX_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.deepEqual(environmentKeys(hub), [
+    "BIELOS_EMAIL_FROM", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_EMAIL_REPLY_TO", "BIELOS_EMAIL_SMTP_HOST",
+    "BIELOS_EMAIL_SMTP_PASSWORD", "BIELOS_EMAIL_SMTP_PORT", "BIELOS_EMAIL_SMTP_SECURE", "BIELOS_EMAIL_SMTP_USER",
+    "BIELOS_EMAIL_TRANSPORT", "BIELOS_HUB_HOSTNAME", "BIELOS_HUB_URL", "BIELOS_OIDC_ADAPTER_KEY",
+    "BIELOS_OIDC_PROXY_URL", "BIELOS_PORTAL_HOSTNAME", "BIELOS_PORTAL_URL", "BIELOS_RATE_LIMIT_HASH_SECRET",
+    "BIELOS_TOTP_ENCRYPTION_KEY", "CLOUDFLARE_ACCESS_JWT_REQUIRED", "DATABASE_URL", "NODE_ENV"
+  ]);
+  assert.deepEqual(environmentKeys(issuer), [
+    "BIELOS_OIDC_ADAPTER_KEY", "BIELOS_OIDC_COOKIE_KEY", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_SIGNING_JWKS",
+    "BIELOS_RATE_LIMIT_HASH_SECRET", "DATABASE_URL", "NODE_ENV", "OIDC_ISSUER_PORT"
+  ]);
+});
+
+test("production services use preloaded exact-revision images without remote builds or pulls", () => {
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup", "email-worker"]) {
+    const block = serviceBlock(productionCompose, service);
+    assert.match(block, /image:\s*\$\{BIELOS_PRODUCTION_IMAGE:\?/u);
+    assert.match(block, /pull_policy:\s*never/u);
+    assert.doesNotMatch(block, /build:/u);
+  }
+  const migrator = serviceBlock(productionCompose, "migrate");
+  assert.match(migrator, /image:\s*\$\{BIELOS_MIGRATOR_IMAGE:\?/u);
+  assert.match(migrator, /pull_policy:\s*never/u);
+  assert.doesNotMatch(migrator, /build:/u);
+});
+
 test("portal host reaches the hub OIDC proxy and Cloudflare tunnel uses no www alias", () => {
-  assert.match(serviceBlock(productionCompose, "hub"), /BIELOS_PORTAL_HOSTNAME:.*portal\.biel\.dev\.br/u);
+  const hub = serviceBlock(productionCompose, "hub");
+  assert.match(hub, /BIELOS_PORTAL_HOSTNAME:.*portal\.biel\.dev\.br/u);
+  assert.match(serviceBlock(productionCompose, "public-site"), /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
+  assert.match(hub, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
+  assert.doesNotMatch(productionCompose, /BIELOS_PORTAL_URL:\s*\$\{BIELOS_PORTAL_URL:-https:\/\/portal\.biel\.dev\.br\}/u);
   assert.match(cloudflareCompose, /- oidc-issuer/u);
   assert.match(cloudflareTemplate, /hostname: portal\.biel\.dev\.br\s+service: http:\/\/hub:3001/u);
   assert.doesNotMatch(cloudflareTemplate, /hostname: www\./u);
@@ -54,4 +128,7 @@ test("production workers and database retain restart policy without published po
     assert.doesNotMatch(block, /ports:/u);
   }
   assert.match(serviceBlock(productionCompose, "postgres"), /bielos_postgres_data:\/var\/lib\/postgresql\/data/u);
+  assert.match(serviceBlock(productionCompose, "postgres"), /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
+  assert.match(serviceBlock(cloudflareCompose, "cloudflared"), /cloudflare\/cloudflared:2026\.9\.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c/u);
+  assert.match(readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8"), /node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402/u);
 });

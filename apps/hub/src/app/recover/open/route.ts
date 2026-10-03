@@ -1,0 +1,36 @@
+import { NextResponse } from "next/server";
+import { getAccountRecoveryRequestId } from "@bielos/auth/security";
+import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
+import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
+import { RECOVERY_COOKIE_NAME } from "../../../lib/recovery";
+
+export const dynamic = "force-dynamic";
+
+export async function GET(request: Request) {
+  const surface = getSurface(request.headers);
+  if (surface === "unknown") return new NextResponse("Not found", { status: 404, headers: privateHeaders() });
+  if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "account-recovery-link"))) return new NextResponse("Forbidden", { status: 403, headers: privateHeaders() });
+  const baseUrl = getSurfaceBaseUrl(request.headers, request.url);
+  if (!baseUrl) return new NextResponse("Service Unavailable", { status: 503, headers: privateHeaders() });
+  const requestKey = new URL(request.url).searchParams.get("request") ?? "";
+  const recovery = await getAccountRecoveryRequestId(requestKey);
+  const destination = new URL("/recover", baseUrl);
+  if (!recovery) {
+    destination.searchParams.set("error", "1");
+    return NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
+  }
+  destination.searchParams.set("requestId", recovery.id);
+  const response = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
+  response.cookies.set(RECOVERY_COOKIE_NAME, requestKey, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/recover",
+    expires: recovery.expiresAt
+  });
+  return response;
+}
+
+function privateHeaders(): HeadersInit {
+  return { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" };
+}

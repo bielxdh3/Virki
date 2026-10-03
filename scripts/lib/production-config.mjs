@@ -31,9 +31,7 @@ export function isValidProductionConfig(config) {
     typeof config.host === "string" && /^[A-Za-z0-9.-]{1,253}$/u.test(config.host) &&
     Number.isInteger(port) && port >= 1 && port <= 65535 &&
     typeof config.root === "string" &&
-    /^[A-Za-z]:\\[A-Za-z0-9_. -]+(?:\\[A-Za-z0-9_. -]+)*$/u.test(config.root) &&
-    !config.root.split("\\").some((segment) => segment === "." || segment === "..")
+    /^\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/u.test(config.root) &&
+    !config.root.split("/").some((segment) => segment === "." || segment === "..")
   );
 }
-
-export const PRODUCTION_CONFIG = readProductionConfig();

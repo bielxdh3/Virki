@@ -145,7 +145,12 @@ function scanFileContents(filePath) {
     return;
   }
 
-  if (buffer.length > MAX_TEXT_FILE_BYTES || buffer.includes(0)) {
+  if (buffer.includes(0)) return;
+  if (buffer.length > MAX_TEXT_FILE_BYTES) {
+    findings.push({
+      file: filePath,
+      rule: "oversized-text-file"
+    });
     return;
   }
 

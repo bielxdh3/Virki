@@ -1,4 +1,5 @@
 import { getAdministrativeCredentialState, listActiveSecurityElevations } from "@bielos/auth/administration";
+import { listPendingAccountRecoveries } from "@bielos/auth/security";
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { prisma } from "@bielos/database";
 import { getCurrentSession } from "../../../lib/auth";
@@ -13,7 +14,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
   const [credential, activeElevations, recoveryRequests, csrf, activeSessions] = await Promise.all([
     getAdministrativeCredentialState(session.user.id),
     listActiveSecurityElevations(session.user, session.id),
-    prisma.accountRecoveryRequest.findMany({ where: { status: "PENDING", expiresAt: { gt: new Date() } }, select: { requestKey: true, status: true, emailVerifiedAt: true, expiresAt: true, createdAt: true, user: { select: { email: true, displayName: true } } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 50 }),
+    listPendingAccountRecoveries(session.user),
     Promise.resolve(createCsrfToken()),
     prisma.session.count({ where: { userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } } })
   ]);
@@ -23,7 +24,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
     {credential?.status === "ACTIVE" ? <section className="surface"><h2>Credencial administrativa</h2><p>Ativa · versão {credential.keyVersion} · atualizada em {credential.updatedAt.toLocaleString("pt-BR")}</p><p><a href="/account/security">Gerenciar MFA, códigos de recuperação e sessões da conta</a></p></section> : <CredentialSetup csrf={csrf} />}
     <ElevationControls csrf={csrf} credentialReady={credential?.status === "ACTIVE"} active={activeElevations.map((item) => ({ ...item, expiresAt: item.expiresAt.toISOString() }))} />
     <section className="surface"><h2>Recuperação de contas ({recoveryRequests.length})</h2><p className="muted">Pedidos expirados ou não verificados não aparecem aqui. Aprovar envia uma autorização de troca de senha ao titular.</p>
-      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.requestKey}><div className="row-main"><strong>{request.user.displayName || request.user.email}</strong><span>{request.user.email} · {request.emailVerifiedAt ? "E-mail confirmado" : "Aguardando confirmação"} · expira {request.expiresAt.toLocaleString("pt-BR")}</span></div>{request.emailVerifiedAt && <form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestKey" value={request.requestKey} /><button className="button-primary" type="submit">Aprovar recuperação</button></form>}</article>)}</div>}
+      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.emailNormalized} · E-mail confirmado · expira {request.expiresAt.toLocaleString("pt-BR")}</span></div><form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form></article>)}</div>}
     </section>
     <section className="surface"><h2>Sessões deste admin</h2><p>{activeSessions} sessão(ões) ativa(s), incluindo a sessão atual.</p></section>
   </main>;

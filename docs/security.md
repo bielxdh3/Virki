@@ -15,7 +15,7 @@
 - Cookies are host-only, HttpOnly, SameSite=Lax, and Secure in production.
 - TOTP seeds and protected email/OIDC payloads are encrypted at rest with environment-held keys.
 - TOTP setup, confirmation, disablement, recovery-code rotation, and account recovery use single-use or replay-protected proofs. High-risk ADMIN actions require current elevation where their action policy defines it.
-- Migration invalidates active sessions and temporary elevations and revokes remembered devices. Users must sign in again; their credentials and MFA material are retained.
+- The one-time `20260922090000_total_identity_security_rebaseline` transition invalidated active sessions and temporary elevations and revoked remembered devices while retaining credentials and MFA material. The current `20261001000000_security_polish` migration is additive: it revokes pending or verified device challenges and transforms recovery data, but does not revoke existing sessions, elevations, or remembered devices. Production migration history is reconciled only for the exact verified legacy ledger described in the deployment runbook; an unknown history fails closed.
 
 ## Authorization
 

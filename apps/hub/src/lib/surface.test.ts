@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getSurface, requestHost, safeReturnTo } from "./surface";
+import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost, safeReturnTo } from "./surface";
 
 test("surfaces use the verified Host header and exact configured hostnames", () => {
   const headers = new Headers({ host: "portal.biel.dev.br", "x-forwarded-host": "hub.biel.dev.br" });
@@ -12,5 +12,39 @@ test("surfaces use the verified Host header and exact configured hostnames", () 
 
 test("return targets remain relative and reject protocol-relative or auth-loop destinations", () => {
   assert.equal(safeReturnTo("/interaction/abcdefgh?x=1"), "/interaction/abcdefgh?x=1");
+  assert.equal(safeReturnTo("/interaction/abcdefgh?bielos_auth_request=opaque.marker", "portal", "USER"), "/interaction/abcdefgh?bielos_auth_request=opaque.marker");
   for (const value of ["https://attacker.invalid", "//attacker.invalid", "/\\attacker.invalid", "/api/logout", "/login", "/a\u0000b", "/" + "x".repeat(2048)]) assert.equal(safeReturnTo(value), null);
+});
+
+test("return targets are scoped to the selected surface and role", () => {
+  assert.equal(safeReturnTo("/admin/accounts", "hub", "ADMIN"), "/admin/accounts");
+  assert.equal(safeReturnTo("/admin/accounts", "portal", "USER"), null);
+  assert.equal(safeReturnTo("/interaction/abcdefgh", "hub", "ADMIN"), null);
+  assert.equal(safeReturnTo("/interaction/abcdefgh", "portal", "USER"), "/interaction/abcdefgh");
+  assert.equal(safeReturnTo("/admin/accounts", "local", "USER"), null);
+});
+
+test("same-origin form checks compare the complete host and require a secure origin", () => {
+  assert.equal(hasSameOrigin(new Headers({ host: "portal.biel.dev.br", origin: "https://portal.biel.dev.br" })), true);
+  assert.equal(hasSameOrigin(new Headers({ host: "portal.biel.dev.br", origin: "https://attacker.invalid" })), false);
+  assert.equal(hasSameOrigin(new Headers({ host: "portal.biel.dev.br:8443", origin: "https://portal.biel.dev.br" })), false);
+  assert.equal(hasSameOrigin(new Headers({ host: "portal.biel.dev.br" })), false);
+});
+
+test("production redirect origins use canonical surface hosts, never the internal request URL", () => {
+  const headers = new Headers({ host: "portal.biel.dev.br", "x-forwarded-host": "attacker.invalid" });
+  const base = getSurfaceBaseUrl(headers, "http://hub:3001/login", {
+    NODE_ENV: "production",
+    BIELOS_PORTAL_HOSTNAME: "portal.biel.dev.br"
+  });
+  assert.equal(base?.origin, "https://portal.biel.dev.br");
+  assert.equal(getSurfaceBaseUrl(headers, "http://hub:3001/login", {
+    NODE_ENV: "production",
+    BIELOS_PORTAL_HOSTNAME: "portal.biel.dev.br",
+    BIELOS_PORTAL_URL: "https://attacker.invalid"
+  }), null);
+  assert.equal(getSurfaceBaseUrl(headers, "http://hub:3001/login", {
+    NODE_ENV: "production",
+    BIELOS_PORTAL_HOSTNAME: "portal.biel.dev.br/path"
+  }), null);
 });

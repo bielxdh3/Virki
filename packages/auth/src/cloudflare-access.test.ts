@@ -69,6 +69,26 @@ test("covers disabled, missing configuration, and missing JWT outcomes", async (
   );
 });
 
+test("production always requires an Access JWT when the opt-in flag is missing or false", async () => {
+  const common = {
+    NODE_ENV: "production",
+    CLOUDFLARE_ACCESS_AUDIENCE: "synthetic-audience",
+    CLOUDFLARE_TEAM_DOMAIN: "https://team.example.invalid"
+  };
+
+  for (const env of [
+    common,
+    { ...common, CLOUDFLARE_ACCESS_JWT_REQUIRED: "false" }
+  ]) {
+    assert.deepEqual(await validateCloudflareAccessJwt(new Headers(), env), {
+      allowed: false,
+      required: true,
+      status: "missing",
+      reason: "missing-cloudflare-access-jwt"
+    });
+  }
+});
+
 test("rejects malformed and invalid JWT-shaped assertions", async () => {
   const env = {
     CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",

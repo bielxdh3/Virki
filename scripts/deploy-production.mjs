@@ -1,208 +1,286 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { createReadStream, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CANONICAL_BIELOS_REPOSITORY,
   inspectProductionSource,
   ProductionRevisionError,
   runCommand,
 } from "./lib/production-revision.mjs";
-import { PRODUCTION_CONFIG, isValidProductionConfig } from "./lib/production-config.mjs";
+import { verifyExactShaCi } from "./lib/production-ci.mjs";
 import { SSH_OPTIONS, runProductionPreflight } from "./production-preflight.mjs";
-import { runRemoteProductionCommand } from "./production-remote.mjs";
+import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const tempRoot = path.join(repositoryRoot, ".bielos-mission-tmp", "deploy");
-const archivePath = path.join(tempRoot, "production-source.zip");
-
-function encodePowerShell(script) {
-  return Buffer.from(script, "utf16le").toString("base64");
-}
-
-function remotePath(root, suffix) {
-  return `${root.replaceAll("\\", "/")}/${suffix.replaceAll("\\", "/")}`;
-}
-
-function runRemotePowerShell(script, config) {
-  return runCommand("ssh", [
-    ...SSH_OPTIONS,
-    config.sshAlias,
-    "powershell.exe",
-    "-NoLogo",
-    "-NoProfile",
-    "-NonInteractive",
-    "-EncodedCommand",
-    encodePowerShell(script),
-  ]);
-}
-
-function copyFileToRemote(localPath, target, config) {
-  return runCommand("scp", [
-    ...SSH_OPTIONS,
-    localPath,
-    `${config.sshAlias}:${target}`,
-  ]);
-}
+const serverScriptPath = "scripts/production-server.sh";
 
 function requireSuccess(result, message) {
-  if (result.status !== 0) throw new ProductionRevisionError("COMMAND_FAILED", message);
+  if (!result || result.status !== 0) throw new ProductionRevisionError("COMMAND_FAILED", message);
+  return result.stdout ?? "";
 }
 
-async function guardedStage(label, callback, config) {
-  const preflight = await runProductionPreflight({ config });
-  if (preflight.status !== 0) {
-    throw new ProductionRevisionError("COMMAND_FAILED", `${label}: SSH preflight failed.`);
-  }
-  const result = await callback();
-  requireSuccess(result, `${label} failed.`);
-  return result;
+function sourceScript(revision, execute) {
+  return requireSuccess(
+    execute("git", ["show", `${revision}:${serverScriptPath}`], {
+      cwd: repositoryRoot,
+      env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+    }),
+    "Accepted production script could not be loaded from the verified source revision.",
+  );
 }
 
-function prepareArchive(revision) {
-  mkdirSync(tempRoot, { recursive: true });
-  rmSync(archivePath, { force: true });
-  const result = runCommand("git", ["archive", "--format=zip", `--output=${archivePath}`, revision], {
-    cwd: repositoryRoot,
-  });
-  requireSuccess(result, "Source archive creation failed.");
-}
-
-function ensureRemoteLayout(config) {
-  const root = config.root;
-  const script = [
-    "$ErrorActionPreference='Stop'",
-    `$root='${root}'`,
-    "New-Item -ItemType Directory -Force -Path $root,(Join-Path $root '.deploy-tmp'),(Join-Path $root 'backups') | Out-Null",
-    "$marker=Join-Path $root '.bielos-production-host'",
-    `if(Test-Path -LiteralPath $marker){$lines=@(Get-Content -LiteralPath $marker); if($lines -notcontains 'role=production' -or $lines -notcontains 'protocol=1' -or $lines -notcontains ('path=' + $root) -or $lines -notcontains ('hostname=' + [Environment]::MachineName)){throw 'Production-host identity marker mismatch.'}} else {Set-Content -LiteralPath $marker -Value @('role=production','protocol=1',('hostname=' + [Environment]::MachineName),('path=' + $root)) -Encoding ascii}`,
-    "Write-Output ('ENV_MISSING=' + (-not (Test-Path -LiteralPath (Join-Path $root '.env'))))",
-    "Write-Output ('OIDC_ENV_MISSING=' + (-not (Test-Path -LiteralPath (Join-Path $root '.env.oidc'))))",
-  ].join(";");
-  return runRemotePowerShell(script, config);
-}
-
-function createPrivateOidcEnvironment(config) {
-  return runRemotePowerShell(buildPrivateOidcEnvironmentScript(config.root), config);
-}
-
-export function buildPrivateOidcEnvironmentScript(root) {
-  return [
-    "$ErrorActionPreference='Stop'",
-    `$root='${root}'`,
-    "$oidcPath=Join-Path $root '.env.oidc'",
-    "if(-not (Test-Path -LiteralPath $oidcPath)){",
-    "$rng=[Security.Cryptography.RandomNumberGenerator]::Create()",
-    "$cookieBytes=New-Object byte[] 32; $rng.GetBytes($cookieBytes)",
-    "$adapterBytes=New-Object byte[] 32; $rng.GetBytes($adapterBytes)",
-    "$ecdsa=[Security.Cryptography.ECDsaCng]::new(256)",
-    "$parameters=$ecdsa.ExportParameters($true)",
-    "$toUrlBase64={param([byte[]]$value) [Convert]::ToBase64String($value).TrimEnd('=').Replace('+','-').Replace('/','_')}",
-    "$publicX=& $toUrlBase64 $parameters.Q.X; $publicY=& $toUrlBase64 $parameters.Q.Y; $privateD=& $toUrlBase64 $parameters.D",
-    "$jwkKey=@{kty='EC';crv='P-256';alg='ES256';use='sig';kid=[guid]::NewGuid().ToString('N');x=$publicX;y=$publicY;d=$privateD}",
-    "$jwk=ConvertTo-Json -InputObject @{keys=@($jwkKey)} -Compress -Depth 4",
-    "$cookie=&$toUrlBase64 $cookieBytes",
-    "$adapter=[BitConverter]::ToString($adapterBytes).Replace('-','').ToLowerInvariant()",
-    "$lines=@('BIELOS_OIDC_ISSUER=https://portal.biel.dev.br',('BIELOS_OIDC_SIGNING_JWKS=' + $jwk),('BIELOS_OIDC_COOKIE_KEY=' + $cookie),('BIELOS_OIDC_ADAPTER_KEY=' + $adapter))",
-    "[IO.File]::WriteAllLines($oidcPath,$lines,[Text.UTF8Encoding]::new($false))",
-    "$ecdsa.Dispose(); $rng.Dispose()",
-    "}",
-    "if(-not (Test-Path -LiteralPath $oidcPath -PathType Leaf)){throw 'OIDC private environment file is invalid.'}",
-    "$current=[Security.Principal.WindowsIdentity]::GetCurrent().User",
-    "$acl=New-Object Security.AccessControl.FileSecurity; $acl.SetOwner($current); $acl.SetAccessRuleProtection($true,$false)",
-    "foreach($sidText in @($current.Value,'S-1-5-18','S-1-5-32-544')){$sid=[Security.Principal.SecurityIdentifier]::new($sidText); $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow); $acl.AddAccessRule($rule)}",
-    "[IO.File]::SetAccessControl($oidcPath,$acl)",
-    "Write-Output 'OIDC_ENV_READY=true'",
-  ].join(";");
-}
-
-function installArchive(revision, config) {
-  const root = config.root;
-  return runRemotePowerShell([
-    "$ErrorActionPreference='Stop'",
-    `$root='${root}'`,
-    "$zip=Join-Path $root '.deploy-tmp\\production-source.zip'",
-    "$stage=Join-Path $root '.deploy-tmp\\stage'",
-    `$revision='${revision}'`,
-    "if($revision -notmatch '^[0-9a-f]{40}$'){throw 'Invalid deployment revision.'}",
-    "if(-not (Test-Path -LiteralPath $zip -PathType Leaf)){throw 'Source archive is missing.'}",
-    "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue",
-    "Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force",
-    "if(-not (Test-Path -LiteralPath (Join-Path $stage 'scripts\\production-server.ps1'))){throw 'Source archive is incomplete.'}",
-    "$reserved=@('.env','.env.oidc','.bielos-production-host','.deploy-tmp','backups','.bielos-deploy-revision','.bielos-source-state','.bielos-migration-verification')",
-    "Get-ChildItem -LiteralPath $root -Force | Where-Object {$reserved -notcontains $_.Name} | Remove-Item -Recurse -Force",
-    "Get-ChildItem -LiteralPath $stage -Force | Move-Item -Destination $root -Force",
-    "Set-Content -LiteralPath (Join-Path $root '.bielos-deploy-revision') -Value $revision -Encoding ascii",
-    "Set-Content -LiteralPath (Join-Path $root '.bielos-source-state') -Value @('source=verified-archive','branch=main','clean=true',('revision=' + $revision)) -Encoding ascii",
-    "Remove-Item -LiteralPath $stage,$zip -Recurse -Force",
-    "Write-Output ('REMOTE_SOURCE_REVISION=' + $revision)",
-  ].join(";"), config);
-}
-
-function migrationPlan() {
-  const directory = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
-  const hasTransition = existsSync(path.join(directory, "20260922090000_total_identity_security_rebaseline", "migration.sql"));
-  const hasBaseline = existsSync(path.join(directory, "0_init", "migration.sql"));
-  if (hasTransition && hasBaseline) throw new ProductionRevisionError("MIGRATION_PLAN_AMBIGUOUS");
-  if (hasTransition) return "transition";
-  if (hasBaseline) return "baseline";
-  throw new ProductionRevisionError("MIGRATION_PLAN_MISSING");
-}
-
-async function runRemoteAction(action, config) {
-  const result = await runRemoteProductionCommand([action], { config });
-  if (result.status !== 0) {
-    throw new ProductionRevisionError("COMMAND_FAILED", `${action} failed.`);
-  }
-  return result;
-}
-
-export async function deployProduction({ action = "rebaseline", config = PRODUCTION_CONFIG } = {}) {
-  if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
-  if (!["install", "restart", "rebaseline"].includes(action)) {
-    throw new ProductionRevisionError("ARGUMENT_INVALID");
-  }
-
-  const source = inspectProductionSource({ repositoryRoot });
-  const plan = migrationPlan();
-  prepareArchive(source.revision);
+function makeArchive(revision, execute) {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "bielos-production-"));
   try {
-    const layout = await guardedStage("remote layout", () => ensureRemoteLayout(config), config);
-    if (layout.stdout.includes("ENV_MISSING=True")) {
-      await guardedStage("private production environment transfer", () => {
-        const localEnv = path.join(repositoryRoot, ".env");
-        if (!existsSync(localEnv)) throw new ProductionRevisionError("PRIVATE_ENV_MISSING");
-        return copyFileToRemote(localEnv, remotePath(config.root, ".env"), config);
-      }, config);
-    }
-    await guardedStage("OIDC signing environment setup", () => createPrivateOidcEnvironment(config), config);
-    await guardedStage("source transfer", () => copyFileToRemote(archivePath, remotePath(config.root, ".deploy-tmp/production-source.zip"), config), config);
-    await guardedStage("source install", () => installArchive(source.revision, config), config);
-    if (action === "install") {
-      return { status: 0, lines: ["Remote source staged; migration and services were not changed."] };
+    const archivePath = path.join(directory, "source.tar");
+    const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
+    const archive = execute("git", ["archive", "--format=tar", `--output=${archivePath}`, revision], {
+      cwd: repositoryRoot,
+      env: gitEnvironment,
+    });
+    requireSuccess(archive, "Accepted production source archive could not be created.");
+
+    const treeListing = requireSuccess(
+      execute("git", ["ls-tree", "-r", "-t", "-z", "--full-tree", revision], {
+        cwd: repositoryRoot,
+        env: gitEnvironment,
+      }),
+      "Accepted production source tree could not be inspected.",
+    );
+    const reservedPaths = new Set([
+      ".env",
+      ".env.oidc",
+      ".env.oidc-data",
+      ".production.operator.json",
+      ".bielos-release",
+      ".bielos-production-host",
+    ]);
+    const sourcePaths = [];
+    for (const record of treeListing.split("\0").filter(Boolean)) {
+      const separator = record.indexOf("\t");
+      if (separator < 0) throw new ProductionRevisionError("COMMAND_FAILED");
+      const mode = record.slice(0, separator).split(" ", 1)[0];
+      const entry = record.slice(separator + 1);
+      if (mode !== "040000" && mode !== "100644" && mode !== "100755") {
+        throw new ProductionRevisionError("COMMAND_FAILED");
+      }
+      sourcePaths.push(entry);
+      if (entry.split("/").some((segment) =>
+        reservedPaths.has(segment) || segment === "backups" || segment === "releases" || segment === "current"
+      )) {
+        throw new ProductionRevisionError("COMMAND_FAILED");
+      }
     }
 
-    await runRemoteAction("prepare", config);
-    await runRemoteAction("backup-verify", config);
-    await runRemoteAction(plan === "transition" ? "migrate" : "baseline", config);
-    const deployed = await runRemoteAction("restart", config);
-    const status = await runRemoteAction("migration-status", config);
+    const attributes = requireSuccess(
+      execute("git", ["check-attr", "--cached", "-z", "export-ignore", "export-subst", "--stdin"], {
+        cwd: repositoryRoot,
+        env: gitEnvironment,
+        input: sourcePaths.join("\0") + "\0",
+      }),
+      "Accepted production source attributes could not be inspected.",
+    );
+    const attributeFields = attributes.split("\0").filter(Boolean);
+    if (attributeFields.length !== sourcePaths.length * 6) throw new ProductionRevisionError("COMMAND_FAILED");
+    for (let index = 0; index < attributeFields.length; index += 3) {
+      const attribute = attributeFields[index + 1];
+      const value = attributeFields[index + 2];
+      if (!["export-ignore", "export-subst"].includes(attribute) || !["unspecified", "unset", "false"].includes(value)) {
+        throw new ProductionRevisionError("COMMAND_FAILED");
+      }
+    }
+
+    const listing = requireSuccess(execute("tar", ["-tf", archivePath]), "Production source archive could not be inspected.");
+    const paths = listing.split(/\r?\n/u).filter(Boolean);
+    if (paths.some((entry) => entry.split("/").some((segment) =>
+      reservedPaths.has(segment) || segment === "backups" || segment === "releases" || segment === "current"
+    ))) {
+      throw new ProductionRevisionError("COMMAND_FAILED");
+    }
+
+    return {
+      archivePath,
+      directory,
+      archiveHash: createHash("sha256").update(readFileSync(archivePath)).digest("hex"),
+    };
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function copyArchive(archivePath, revision, archiveId, config, execute) {
+  const remotePath = `${config.root}/.deploy-tmp/source-${revision}-${archiveId}.tar`;
+  return execute("scp", [
+    ...SSH_OPTIONS,
+    archivePath,
+    `${config.sshAlias}:${remotePath}`,
+  ]);
+}
+
+function copyImageArchive(archivePath, revision, archiveId, config, execute) {
+  const remotePath = `${config.root}/.deploy-tmp/images-${revision}-${archiveId}.tar.gz`;
+  return execute("scp", [
+    ...SSH_OPTIONS,
+    archivePath,
+    `${config.sshAlias}:${remotePath}`,
+  ]);
+}
+
+async function hashFile(filePath) {
+  const hash = createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", resolve);
+  });
+  return hash.digest("hex");
+}
+
+async function downloadProductionImages({ runId, revision, platform, execute }) {
+  if (!Number.isSafeInteger(runId) || runId <= 0 || !["linux/amd64", "linux/arm64"].includes(platform)) {
+    throw new ProductionRevisionError("COMMAND_FAILED");
+  }
+  const directory = mkdtempSync(path.join(os.tmpdir(), "bielos-production-images-"));
+  try {
+    const platformName = platform.replace("/", "-");
+    const artifactName = `bielos-production-images-${revision}-${platformName}`;
+    requireSuccess(
+      execute("gh", [
+        "run", "download", String(runId),
+        "--repo", CANONICAL_BIELOS_REPOSITORY,
+        "--name", artifactName,
+        "--dir", directory,
+      ], { cwd: repositoryRoot }),
+      "Exact-revision production images could not be downloaded from CI.",
+    );
+    const archiveName = "bielos-production-images.tar.gz";
+    const entries = readdirSync(directory);
+    const archivePath = path.join(directory, archiveName);
+    if (entries.length !== 1 || entries[0] !== archiveName || !lstatSync(archivePath).isFile()) {
+      throw new ProductionRevisionError("COMMAND_FAILED");
+    }
+    return {
+      archivePath,
+      directory,
+      archiveHash: await hashFile(archivePath),
+    };
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function runRemoteScript(action, revision, archiveHash, archiveId, imageHash, imageId, script, config, execute) {
+  if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
+  const archiveArguments = archiveHash ? ` ${archiveHash} ${archiveId}` : "";
+  const imageArguments = imageHash ? ` ${imageHash} ${imageId}` : "";
+  const remoteCommand = `bash -s -- ${action} ${config.root} ${revision}${archiveArguments}${imageArguments}`;
+  return execute("ssh", [...SSH_OPTIONS, config.sshAlias, remoteCommand], { input: script });
+}
+
+function cleanupRemoteStaging(revision, archiveId, script, config, execute) {
+  if (!isValidProductionConfig(config) || !/^[0-9a-f]{40}$/u.test(revision) || !/^[a-f0-9]{24}$/u.test(archiveId)) {
+    throw new ProductionRevisionError("COMMAND_FAILED", "Failed production artifact transfer could not be safely identified for cleanup.");
+  }
+  const remoteCommand = `bash -s -- cleanup-deploy-staging ${config.root} ${revision} ${archiveId}`;
+  return execute("ssh", [...SSH_OPTIONS, config.sshAlias, remoteCommand], { input: script });
+}
+
+function cleanupAfterFailure(error, revision, archiveId, script, config, execute) {
+  let cleanupResult;
+  let cleanupFailed = false;
+  try {
+    cleanupResult = cleanupRemoteStaging(revision, archiveId, script, config, execute);
+  } catch {
+    cleanupFailed = true;
+  }
+  if (cleanupFailed || cleanupResult?.status !== 0) {
+    throw new ProductionRevisionError("COMMAND_FAILED", "Production operation failed and remote staging cleanup could not be confirmed.");
+  }
+  throw error;
+}
+
+export async function deployProduction({
+  action = "deploy",
+  config = readProductionConfig(),
+  execute = runCommand,
+  inspectSource = inspectProductionSource,
+  verifyCi = verifyExactShaCi,
+  preflight = runProductionPreflight,
+} = {}) {
+  if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
+  if (!["install", "deploy"].includes(action)) throw new ProductionRevisionError("ARGUMENT_INVALID");
+
+  const source = inspectSource({ repositoryRoot, execute });
+  const ci = verifyCi({ revision: source.revision, execute, repositoryRoot });
+  if (!ci.ok) return { status: 1, lines: ci.lines };
+
+  let archive;
+  let imageArchive;
+  const archiveId = randomBytes(12).toString("hex");
+  try {
+    archive = makeArchive(source.revision, execute);
+    const sourceCode = sourceScript(source.revision, execute);
+    const preflightResult = await preflight({ execute, config });
+    if (preflightResult.status !== 0) return preflightResult;
+
+    if (action === "deploy") {
+      imageArchive = await downloadProductionImages({
+        runId: ci.runId,
+        revision: source.revision,
+        platform: preflightResult.platform,
+        execute,
+      });
+    }
+    try {
+      requireSuccess(copyArchive(archive.archivePath, source.revision, archiveId, config, execute), "Verified source archive transfer failed.");
+      if (imageArchive) {
+        requireSuccess(copyImageArchive(imageArchive.archivePath, source.revision, archiveId, config, execute), "Exact-revision production image transfer failed.");
+      }
+    } catch (error) {
+      cleanupAfterFailure(error, source.revision, archiveId, sourceCode, config, execute);
+    }
+
+    if (action === "install") {
+      const installed = requireSuccess(
+        runRemoteScript("install-source", source.revision, archive.archiveHash, archiveId, "", "", sourceCode, config, execute),
+        "Remote source staging failed.",
+      );
+      return { status: 0, lines: [...preflightResult.lines, ...installed.trim().split(/\r?\n/u).filter(Boolean), "Source staged; migration and services were not changed."] };
+    }
+
+    let deployed;
+    try {
+      deployed = requireSuccess(
+        runRemoteScript("deploy", source.revision, archive.archiveHash, archiveId, imageArchive.archiveHash, archiveId, sourceCode, config, execute),
+        "Remote deployment stopped. Maintenance remains active if production mutation had begun.",
+      );
+    } catch (error) {
+      cleanupAfterFailure(error, source.revision, archiveId, sourceCode, config, execute);
+    }
     return {
       status: 0,
       lines: [
-        `Production ${plan} completed for source ${source.revision}.`,
-        ...deployed.lines,
-        ...status.lines,
+        ...preflightResult.lines,
+        ...deployed.trim().split(/\r?\n/u).filter(Boolean),
       ],
     };
   } finally {
-    const relativeTemp = path.relative(repositoryRoot, tempRoot);
-    if (!relativeTemp.startsWith("..") && !path.isAbsolute(relativeTemp)) {
-      rmSync(tempRoot, { recursive: true, force: true });
+    if (archive?.directory && path.dirname(archive.directory) === os.tmpdir()) {
+      rmSync(archive.directory, { recursive: true, force: true });
+    }
+    if (imageArchive?.directory && path.dirname(imageArchive.directory) === os.tmpdir()) {
+      rmSync(imageArchive.directory, { recursive: true, force: true });
     }
   }
 }
 
-if (process.argv[1] && process.argv[1].endsWith("deploy-production.mjs")) {
-  deployProduction({ action: process.argv[2] ?? "rebaseline" })
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  deployProduction({ action: process.argv[2] ?? "deploy" })
     .then((result) => {
       for (const line of result.lines ?? ["Remote deployment complete."]) console.log(line);
       process.exitCode = result.status ?? 0;

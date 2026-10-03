@@ -3,15 +3,18 @@ import { forbidden } from "next/navigation";
 import { headers } from "next/headers";
 import { getCurrentSession } from "./auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "./cloudflare-access";
-import { getSurface } from "./surface";
-import { isAdminRequestAllowed, isAdminRole } from "./admin-policy";
+import { getSurface, hasSameOrigin } from "./surface";
+import { isAdminRequestAllowed, isAdminRole, isHubAdminMutationSurface } from "./admin-policy";
 
 type AdminSession = NonNullable<Awaited<ReturnType<typeof getCurrentSession>>>;
 
 export async function requireAdminMutation(formData: FormData, source: string): Promise<AdminSession> {
   const requestHeaders = await headers();
+  const surface = getSurface(requestHeaders);
+  if (!isHubAdminMutationSurface(surface)) forbidden();
   const accessValid = isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source));
-  if (!isAdminRequestAllowed(getSurface(requestHeaders), accessValid)) forbidden();
+  if (!isAdminRequestAllowed(surface, accessValid)) forbidden();
+  if (!hasSameOrigin(requestHeaders)) forbidden();
   const csrf = formData.get(CSRF_FORM_FIELD_NAME);
   if (typeof csrf !== "string" || !validateCsrfToken(csrf).valid) forbidden();
   const session = await getCurrentSession();

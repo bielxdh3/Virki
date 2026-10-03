@@ -6,12 +6,15 @@ import {
   normalizeEmail,
   getSessionCookieOptions,
   SESSION_COOKIE_NAME,
-  writeAuditLog
+  writeAuditLog,
+  writeAuditLogRequired
 } from "@bielos/auth";
 import { DEVICE_COOKIE_NAME, startLoginCeremony } from "@bielos/auth/security";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { getSurface, getSurfaceBaseUrl, safeReturnTo } from "../../../lib/surface";
+import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../lib/surface";
+import { readBoundedFormData } from "../../../lib/request-form";
+import { createLoginResponseAfterRequiredAudit } from "../../../lib/login-audit";
 
 export const dynamic = "force-dynamic";
 
@@ -21,27 +24,31 @@ export async function POST(request: Request) {
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-login-api"))) {
     return new NextResponse("Forbidden", { status: 403 });
   }
+  if (!hasSameOrigin(request.headers)) return new NextResponse("Forbidden", { status: 403 });
 
-  const formData = await request.formData();
+  const formData = await readBoundedFormData(request);
+  if (!formData) return new NextResponse("Bad Request", { status: 400 });
   const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME));
 
   if (!csrfResult.valid) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  const returnTo = safeReturnTo(getFormString(formData, "returnTo"));
+  const requestedReturnTo = getFormString(formData, "returnTo");
+  const reauth = getFormString(formData, "reauth") === "1";
   const baseUrl = getSurfaceBaseUrl(request.headers, request.url);
+  if (!baseUrl) return new NextResponse("Service Unavailable", { status: 503, headers: { "cache-control": "no-store" } });
   const failureRedirectUrl = new URL("/login", baseUrl);
   const defaultPath = surface === "hub" ? "/admin/accounts" : "/";
-  const successUrl = new URL(returnTo ?? defaultPath, baseUrl);
 
-  const email = String(formData.get("email") ?? "");
-  const password = String(formData.get("password") ?? "");
+  const email = getFormString(formData, "email");
+  const password = getFormRawString(formData, "password");
+  if (email.length > 320 || password.length > 256) return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface), reauth);
   const rateLimitIdentifier = normalizeEmail(email);
-  const auditMetadata = createAuditRequestMetadata(request.headers, "hub-login");
+  const auditMetadata = createAuditRequestMetadata(request.headers, `${surface}-login`);
   const actorEmailHash = rateLimitIdentifier ? hashAuditEmail(rateLimitIdentifier) : undefined;
 
-  const authentication = await authenticateUserWithRateLimit(email, password);
+  const authentication = await authenticateUserWithRateLimit(email, password, new Date(), request.headers.get("cf-connecting-ip")?.trim());
   const user = authentication.user;
 
   if (!user) {
@@ -49,7 +56,7 @@ export async function POST(request: Request) {
       eventType: "AUTH_LOGIN_FAILURE",
       result: "FAILURE",
       actorEmailHash,
-      resource: "hub",
+      resource: surface,
       message:
         authentication.failureMode === "rate-limited"
           ? "Login rate limit reached."
@@ -58,15 +65,25 @@ export async function POST(request: Request) {
             : "Login failed.",
       metadata: auditMetadata
     });
-    return redirectToLogin(failureRedirectUrl, true, returnTo);
+    return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface), reauth);
   }
+
+  if ((surface === "hub" && user.role !== "ADMIN") || (surface === "portal" && user.role !== "USER")) {
+    await writeAuditLog({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: user.id, actorEmailHash: hashAuditEmail(user.email), resource: surface, message: "Login failed.", metadata: auditMetadata });
+    return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface, user.role), reauth);
+  }
+
+  const returnTo = safeReturnTo(requestedReturnTo, surface, user.role);
+  const successUrl = new URL(returnTo ?? defaultPath, baseUrl);
 
   let ceremony;
   try {
     ceremony = await startLoginCeremony(
       user.id,
       readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME),
-      "pt-BR"
+      "pt-BR",
+      new Date(),
+      reauth
     );
   } catch {
     await writeAuditLog({
@@ -74,65 +91,93 @@ export async function POST(request: Request) {
       result: "FAILURE",
       actorUserId: user.id,
       actorEmailHash: hashAuditEmail(user.email),
-      resource: "hub",
+      resource: surface,
       message: "Security verification unavailable.",
       metadata: auditMetadata
     });
-    return redirectToLogin(failureRedirectUrl, true, returnTo);
+    return redirectToLogin(failureRedirectUrl, true, returnTo, reauth);
   }
 
   if (ceremony.kind === "SESSION") {
-    await writeAuditLog({
-      eventType: "AUTH_LOGIN_SUCCESS",
-      result: "SUCCESS",
-      actorUserId: user.id,
-      actorEmailHash: hashAuditEmail(user.email),
-      resource: "hub",
-      message: "Remembered-browser login succeeded.",
-      metadata: { ...auditMetadata, rememberedBrowser: true }
-    });
-    const response = NextResponse.redirect(successUrl, { status: 303 });
-    response.cookies.set(SESSION_COOKIE_NAME, ceremony.session.token, getSessionCookieOptions(ceremony.session.expiresAt));
-    return response;
+    try {
+      return await createLoginResponseAfterRequiredAudit(
+        () => writeAuditLogRequired({
+          eventType: "AUTH_LOGIN_SUCCESS",
+          result: "SUCCESS",
+          actorUserId: user.id,
+          actorEmailHash: hashAuditEmail(user.email),
+          resource: surface,
+          message: "Remembered-browser login succeeded.",
+          metadata: { ...auditMetadata, rememberedBrowser: true }
+        }),
+        () => {
+          const response = NextResponse.redirect(successUrl, { status: 303 });
+          response.cookies.set(SESSION_COOKIE_NAME, ceremony.session.token, getSessionCookieOptions(ceremony.session.expiresAt));
+          return response;
+        }
+      );
+    } catch {
+      return auditUnavailableResponse();
+    }
   }
 
-  await writeAuditLog({
-    eventType: "AUTH_LOGIN_SUCCESS",
-    result: "INFO",
-    actorUserId: user.id,
-    actorEmailHash: hashAuditEmail(user.email),
-    resource: "hub",
-    message: "Password accepted; security verification pending.",
-    metadata: auditMetadata
-  });
-  const verifyUrl = new URL("/login/verify", baseUrl);
-  verifyUrl.searchParams.set("ceremony", ceremony.ceremonyId);
-  verifyUrl.searchParams.set("factor", ceremony.factor.toLowerCase());
-  if (returnTo) verifyUrl.searchParams.set("returnTo", returnTo);
-  const response = NextResponse.redirect(verifyUrl, { status: 303 });
-  if (readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME) !== ceremony.deviceToken) {
-    response.cookies.set(DEVICE_COOKIE_NAME, ceremony.deviceToken, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 180 * 24 * 60 * 60
-    });
+  try {
+    return await createLoginResponseAfterRequiredAudit(
+      () => writeAuditLogRequired({
+        eventType: "AUTH_LOGIN_SUCCESS",
+        result: "INFO",
+        actorUserId: user.id,
+        actorEmailHash: hashAuditEmail(user.email),
+        resource: surface,
+        message: "Password accepted; security verification pending.",
+        metadata: auditMetadata
+      }),
+      () => {
+        const verifyUrl = new URL("/login/verify", baseUrl);
+        verifyUrl.searchParams.set("ceremony", ceremony.ceremonyId);
+        verifyUrl.searchParams.set("factor", ceremony.factor.toLowerCase());
+        if (returnTo) verifyUrl.searchParams.set("returnTo", returnTo);
+        const response = NextResponse.redirect(verifyUrl, { status: 303 });
+        if (readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME) !== ceremony.deviceToken) {
+          response.cookies.set(DEVICE_COOKIE_NAME, ceremony.deviceToken, {
+            httpOnly: true,
+            sameSite: "lax",
+            secure: process.env.NODE_ENV === "production",
+            path: "/",
+            maxAge: 180 * 24 * 60 * 60
+          });
+        }
+        return response;
+      }
+    );
+  } catch {
+    return auditUnavailableResponse();
   }
-
-  return response;
 }
 
-function redirectToLogin(url: URL, failed: boolean, returnTo: string | null) {
+function auditUnavailableResponse() {
+  return new NextResponse("Service Unavailable", {
+    status: 503,
+    headers: { "cache-control": "no-store" }
+  });
+}
+
+function redirectToLogin(url: URL, failed: boolean, returnTo: string | null, reauth = false) {
   if (failed) {
     url.searchParams.set("error", "1");
   }
   if (returnTo) url.searchParams.set("returnTo", returnTo);
+  if (reauth) url.searchParams.set("reauth", "1");
 
   return NextResponse.redirect(url, { status: 303 });
 }
 
 function getFormString(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function getFormRawString(formData: FormData, key: string): string {
   const value = formData.get(key);
   return typeof value === "string" ? value : "";
 }

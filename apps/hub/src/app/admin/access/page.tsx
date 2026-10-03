@@ -7,9 +7,9 @@ export const dynamic = "force-dynamic";
 export default async function AccessPage({ searchParams }: { searchParams: Promise<{ status?: string; error?: string }> }) {
   const params = await searchParams;
   const [users, connections, grants, csrf] = await Promise.all([
-    prisma.user.findMany({ where: { isActive: true, accountStatus: "ACTIVE" }, select: { id: true, email: true, displayName: true }, orderBy: { email: "asc" } }),
+    prisma.user.findMany({ where: { role: "USER", isActive: true, accountStatus: "ACTIVE" }, select: { id: true, email: true, displayName: true }, orderBy: { email: "asc" } }),
     prisma.projectConnection.findMany({ where: { enabled: true }, select: { id: true, name: true, origin: true }, orderBy: { name: "asc" } }),
-    prisma.userProjectGrant.findMany({ where: { revokedAt: null }, select: { id: true, createdAt: true, user: { select: { email: true, displayName: true } }, connection: { select: { name: true, enabled: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200 }),
+    prisma.userProjectGrant.findMany({ where: { revokedAt: null }, select: { id: true, createdAt: true, user: { select: { email: true, displayName: true, role: true } }, connection: { select: { name: true, enabled: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200 }),
     Promise.resolve(createCsrfToken())
   ]);
 
@@ -25,9 +25,11 @@ export default async function AccessPage({ searchParams }: { searchParams: Promi
         <button className="button-primary" type="submit">Conceder acesso</button>
       </form>}
     </section>
-    <section className="surface"><h2>Acessos ativos ({grants.length}{grants.length === 200 ? "+" : ""})</h2>
-      {grants.length === 0 ? <p className="muted">Nenhum acesso concedido.</p> : <div className="row-list">{grants.map((grant) => <article className="list-row" key={grant.id}>
-        <div className="row-main"><strong>{grant.user.displayName || grant.user.email} → {grant.connection.name}</strong><span>{grant.user.email}{grant.connection.enabled ? "" : " · conexão desabilitada"}</span></div>
+    <section className="surface"><h2>Concessões não revogadas ({grants.length}{grants.length === 200 ? "+" : ""})</h2>
+      {grants.length === 0 ? <p className="muted">Nenhuma concessão registrada.</p> : <div className="row-list">{grants.map((grant) => <article className="list-row" key={grant.id}>
+        <div className="row-main"><strong>{grant.user.displayName || grant.user.email} → {grant.connection.name}</strong><span>{grant.user.email}{grant.connection.enabled ? "" : " · conexão desabilitada"}</span>
+          {grant.user.role === "ADMIN" && <span className="muted">Conta ADMIN · concessão legada; não autoriza entrada no projeto.</span>}
+        </div>
         <form action={revokeProjectAccessAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="grantId" value={grant.id} /><button className="button-danger" type="submit">Revogar</button></form>
       </article>)}</div>}
     </section>

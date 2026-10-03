@@ -25,7 +25,7 @@ try {
   runDocker([
     "run", "--detach", "--name", containers.publicSite, "--network", network,
     "--publish", "127.0.0.1::3000", "--env", "NODE_ENV=production",
-    "--env", `NEXT_PUBLIC_PORTAL_URL=https://${publicHost}`,
+    "--env", `BIELOS_PORTAL_URL=https://${publicHost}`,
     image, "npm", "run", "start", "--workspace", "@bielos/public-site",
   ]);
   const publicPort = readLoopbackPort(containers.publicSite, "3000/tcp");
@@ -45,8 +45,8 @@ try {
   runDocker([
     "run", "--detach", "--name", containers.hub, "--network", network,
     "--publish", "127.0.0.1::3001", "--env", "NODE_ENV=production",
-    "--env", `NEXT_PUBLIC_HUB_URL=https://${hubHost}`,
-    "--env", `NEXT_PUBLIC_PORTAL_URL=https://${publicHost}`,
+    "--env", `BIELOS_HUB_URL=https://${hubHost}`,
+    "--env", `BIELOS_PORTAL_URL=https://${publicHost}`,
     "--env", `BIELOS_HUB_HOSTNAME=${hubHost}`,
     "--env", `BIELOS_PORTAL_HOSTNAME=${publicHost}`,
     "--env", "BIELOS_OIDC_PROXY_URL=http://oidc-issuer:3003",

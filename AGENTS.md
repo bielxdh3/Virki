@@ -29,13 +29,13 @@ BielOS has five responsibilities: identity, authentication and SSO, security, pr
 ## Implementation and interface
 
 - Keep the public page, USER portal, and ADMIN control plane small and direct.
-- Do not add dashboards, registries, modules, application intake, project runtime features, or appearance customization.
+- Keep each surface limited to identity, authentication, security, project entry, and audit; projects own their application experiences and internal authorization.
 - Preserve keyboard access, visible focus, labels, contrast, responsive behavior, and correct skip-link placement.
 - Keep focused tests for authorization, grants, OIDC, MFA, audit redaction, migrations, and production boundaries.
 
 ## Production operations
 
-- Local use is limited to development, builds, and disposable validation databases. Production runs only on the configured remote Windows host.
+- Local use is limited to development, builds, and disposable validation databases. Production runs only on the configured remote native Linux host; Windows and WSL are not production targets.
 - Production host values come from the ignored `.production.operator.json` file or `BIELOS_PRODUCTION_*` environment variables. Never add machine-specific host, path, or Cloudflare values to tracked files.
 - Run `npm run preflight:prod` before any production mutation. Require stable SSH probes, the expected host, remote Docker, the production identity marker, and the exact accepted revision. Do not use a local or WSL fallback.
 - Deploy only a clean `main` revision matching `origin/main` after exact-SHA CI is green.

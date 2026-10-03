@@ -18,6 +18,7 @@ let containerStarted = false;
 let temporaryDirectory;
 let sourceClient;
 let restoredClient;
+let validationError;
 
 try {
   runDocker([
@@ -26,7 +27,7 @@ try {
     "--env", `POSTGRES_PASSWORD=${databasePassword}`,
     "--health-cmd", `pg_isready -U ${databaseUser} -d ${databaseName}`,
     "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "60",
-    "postgres:17-alpine",
+    "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
   ]);
   containerStarted = true;
   await waitForDatabase();
@@ -78,12 +79,46 @@ try {
   assert.deepEqual(await readMigrations(restoredClient), expectedMigrations);
   await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), restoredUrl);
   await verifyRestoredData();
-} finally {
-  await restoredClient?.$disconnect();
-  await sourceClient?.$disconnect();
-  if (containerStarted) spawnSync("docker", ["rm", "--force", "--volumes", containerName], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
-  if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+} catch (error) {
+  validationError = error;
 }
+
+const cleanupErrors = [];
+try {
+  await restoredClient?.$disconnect();
+} catch (error) {
+  cleanupErrors.push(error);
+}
+try {
+  await sourceClient?.$disconnect();
+} catch (error) {
+  cleanupErrors.push(error);
+}
+if (containerStarted) {
+  let result;
+  try {
+    result = spawnSync("docker", ["rm", "--force", "--volumes", containerName], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+  } catch (error) {
+    cleanupErrors.push(new Error("Disposable backup validation container cleanup could not be started.", { cause: error }));
+  }
+  if (result && (result.error || result.status !== 0)) {
+    const detail = result.error?.message ?? `exit status ${result.status ?? "unknown"}`;
+    cleanupErrors.push(new Error(`Disposable backup validation container cleanup failed (${detail}).`, result.error ? { cause: result.error } : undefined));
+  }
+}
+if (temporaryDirectory) {
+  try {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+}
+if (validationError && cleanupErrors.length > 0) {
+  throw new AggregateError([validationError, ...cleanupErrors], "Backup validation failed and cleanup also failed; both errors are preserved.");
+}
+if (validationError) throw validationError;
+if (cleanupErrors.length === 1) throw cleanupErrors[0];
+if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "Disposable backup validation cleanup failed.");
 
 async function seedRepresentativeData() {
   let admin = await sourceClient.user.findUnique({ where: { id: "backup-admin" } });
@@ -154,6 +189,33 @@ async function seedRepresentativeData() {
       strongVerifiedAt: new Date(),
     },
   });
+  await sourceClient.deviceChallenge.create({
+    data: {
+      id: "backup-device-challenge",
+      userId: user.id,
+      ceremonyId: "backup-device-challenge-ceremony",
+      deviceIdHash: "backup-device-challenge-device-hash",
+      emailAddressHash: "backup-device-challenge-email-hash",
+      codeHash: "backup-device-challenge-code-hash",
+      emailVerifiedAt: new Date("2026-01-02T03:04:05.000Z"),
+      status: "VERIFIED",
+      expiresAt: new Date("2027-01-02T03:04:05.000Z"),
+    },
+  });
+  await sourceClient.accountRecoveryRequest.create({
+    data: {
+      id: "backup-account-recovery-request",
+      userId: user.id,
+      requestKeyHash: "backup-recovery-request-key-hash",
+      emailAddressHash: "backup-recovery-request-email-hash",
+      emailChallengeHash: "backup-recovery-request-challenge-hash",
+      emailVerifiedAt: new Date("2026-02-03T04:05:06.000Z"),
+      status: "APPROVED",
+      expiresAt: new Date("2027-02-03T04:05:06.000Z"),
+      reviewedByUserId: admin.id,
+      approvedAt: new Date("2026-02-03T04:05:07.000Z"),
+    },
+  });
   await sourceClient.oidcArtifact.create({
     data: {
       id: "backup-artifact",
@@ -176,6 +238,33 @@ async function seedRepresentativeData() {
       metadata: { validation: true },
     },
   });
+  await sourceClient.emailOutboxMessage.create({
+    data: {
+      id: "backup-account-recovery-email",
+      idempotencyKey: "account-recovery:backup-validation-request",
+      kind: "ACCOUNT_RECOVERY",
+      recipientEmail: user.email,
+      locale: "en",
+      payload: {
+        version: 1,
+        publicValues: { displayName: "Backup validation user" },
+        protectedValues: {
+          ciphertext: "opaque-encrypted-recovery-payload",
+          iv: "backup-validation-iv",
+          tag: "backup-validation-tag",
+        },
+      },
+      status: "RETRYABLE_FAILURE",
+      attemptCount: 2,
+      availableAt: new Date(Date.now() + 5 * 60_000),
+      deliveryAttempts: {
+        create: [
+          { id: "backup-recovery-attempt-1", attempt: 1, status: "FAILED", errorCode: "transport-failure" },
+          { id: "backup-recovery-attempt-2", attempt: 2, status: "FAILED", errorCode: "transport-failure" },
+        ],
+      },
+    },
+  });
 }
 
 async function verifyRestoredData() {
@@ -189,8 +278,49 @@ async function verifyRestoredData() {
   assert.equal((await restoredClient.totpFactor.findUnique({ where: { userId: "backup-user" } }))?.secretCiphertext, "encrypted-backup-totp-secret");
   assert.equal(await restoredClient.recoveryCode.count({ where: { id: "backup-recovery" } }), 1);
   assert.equal((await restoredClient.trustedDevice.findUnique({ where: { id: "backup-device" } }))?.status, "TRUSTED");
+  const sourceChallenge = await sourceClient.deviceChallenge.findUnique({ where: { id: "backup-device-challenge" } });
+  const challenge = await restoredClient.deviceChallenge.findUnique({ where: { id: "backup-device-challenge" } });
+  assert.ok(sourceChallenge, "Source device challenge must exist before backup.");
+  assert.ok(challenge, "Restored device challenge must exist.");
+  assert.deepEqual(challenge, sourceChallenge, "Backup restore must preserve every device challenge field.");
+  assert.equal(challenge?.userId, "backup-user");
+  assert.equal(challenge?.status, "VERIFIED");
+  assert.equal(challenge?.deviceIdHash, "backup-device-challenge-device-hash");
+  assert.equal(challenge?.emailAddressHash, "backup-device-challenge-email-hash");
+  assert.equal(challenge?.codeHash, "backup-device-challenge-code-hash");
+  const sourceRecoveryRequest = await sourceClient.accountRecoveryRequest.findUnique({ where: { id: "backup-account-recovery-request" } });
+  const recoveryRequest = await restoredClient.accountRecoveryRequest.findUnique({ where: { id: "backup-account-recovery-request" } });
+  assert.ok(sourceRecoveryRequest, "Source account recovery request must exist before backup.");
+  assert.ok(recoveryRequest, "Restored account recovery request must exist.");
+  assert.deepEqual(recoveryRequest, sourceRecoveryRequest, "Backup restore must preserve every account recovery request field.");
+  assert.equal(recoveryRequest?.userId, "backup-user");
+  assert.equal(recoveryRequest?.reviewedByUserId, "backup-admin");
+  assert.equal(recoveryRequest?.status, "APPROVED");
+  assert.equal(recoveryRequest?.requestKeyHash, "backup-recovery-request-key-hash");
+  assert.equal(recoveryRequest?.emailAddressHash, "backup-recovery-request-email-hash");
+  assert.equal(recoveryRequest?.emailChallengeHash, "backup-recovery-request-challenge-hash");
   assert.equal((await restoredClient.oidcArtifact.findUnique({ where: { id: "backup-artifact" } }))?.payloadCiphertext, "encrypted-backup-oidc-artifact");
   assert.equal(await restoredClient.auditLog.count({ where: { id: "backup-audit", eventType: "AUTH_LOGIN_SUCCESS" } }), 1);
+  const recoveryMessage = await restoredClient.emailOutboxMessage.findUnique({
+    where: { id: "backup-account-recovery-email" },
+    include: { deliveryAttempts: { orderBy: { attempt: "asc" } } },
+  });
+  assert.deepEqual(recoveryMessage?.payload, {
+    version: 1,
+    publicValues: { displayName: "Backup validation user" },
+    protectedValues: {
+      ciphertext: "opaque-encrypted-recovery-payload",
+      iv: "backup-validation-iv",
+      tag: "backup-validation-tag",
+    },
+  });
+  assert.equal(recoveryMessage?.status, "RETRYABLE_FAILURE");
+  assert.equal(recoveryMessage?.attemptCount, 2);
+  assert.equal(recoveryMessage?.deliveryAttempts.length, 2);
+  assert.deepEqual(recoveryMessage?.deliveryAttempts.map(({ attempt, status, errorCode }) => ({ attempt, status, errorCode })), [
+    { attempt: 1, status: "FAILED", errorCode: "transport-failure" },
+    { attempt: 2, status: "FAILED", errorCode: "transport-failure" },
+  ]);
 }
 
 async function migrate(prismaDirectory, databaseUrl) {

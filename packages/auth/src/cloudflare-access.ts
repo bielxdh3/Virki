@@ -129,7 +129,7 @@ export function classifyCloudflareAccessJwtError(error: unknown): CloudflareAcce
 export function isCloudflareAccessJwtRequired(
   env: NodeJS.ProcessEnv = process.env
 ): boolean {
-  return env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true";
+  return env.NODE_ENV === "production" || env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true";
 }
 
 function getCloudflareAccessConfig(env: NodeJS.ProcessEnv): CloudflareAccessConfig {

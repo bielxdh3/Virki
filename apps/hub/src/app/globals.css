@@ -26,6 +26,8 @@ button:hover { border-color: var(--accent); }
 .button-primary { color: #061b17; border-color: var(--accent); background: var(--accent); font-weight: 700; }
 .button-secondary { display: inline-flex; align-items: center; justify-content: center; color: var(--text); background: var(--surface); text-decoration: none; }
 .button-danger { color: var(--danger); border-color: #80534e; }
+details > summary.button-danger { padding: 0.55rem 0.9rem; border: 1px solid #80534e; border-radius: 0.35rem; background: var(--surface-raised); }
+details > summary.button-danger:hover { border-color: var(--danger); }
 .admin-shell { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 100vh; }
 .admin-sidebar { display: flex; flex-direction: column; gap: 1.5rem; padding: 1.25rem; border-right: 1px solid var(--line); background: var(--surface); }
 .brand { color: var(--text); font-weight: 750; text-decoration: none; letter-spacing: 0.02em; }
@@ -55,6 +57,8 @@ button:hover { border-color: var(--accent); }
 .auth-page, .public-page { display: grid; min-height: 100vh; place-items: center; padding: 1.25rem; }
 .auth-panel { width: min(100%, 420px); padding: clamp(1.2rem, 4vw, 2rem); border: 1px solid var(--line); border-radius: 0.5rem; background: var(--surface); }
 .subtle-link { display: inline-block; margin-top: 0.8rem; }
+.auth-link-list { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-top: 0.8rem; }
+.auth-link-list .subtle-link { margin-top: 0; }
 .public-panel { width: min(100%, 620px); padding: clamp(1.5rem, 5vw, 3rem); }
 .public-panel h1 { margin: 0 0 0.75rem; font-size: clamp(2rem, 7vw, 3.5rem); }
 .project-list { display: grid; gap: 0.25rem; margin: 1.5rem 0; }

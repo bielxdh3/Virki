@@ -33,4 +33,4 @@ No project experience, internal project roles, or project permissions are repres
 
 The data model retains user credentials, MFA and recovery records, sessions, trusted-device records, account-recovery records, administrative credentials/elevations, sanitized audit entries, external OIDC connections, explicit grants, and encrypted OIDC transient artifacts. OIDC database identifiers are hashed; protocol payloads and client secrets are encrypted.
 
-Production database changes use committed Prisma migrations. A clean baseline initializes a new database; the documented production rebaseline reconciles migration history only after a verified restore and schema check.
+Production database changes use committed Prisma migrations. A clean `0_init` baseline initializes a new database. The one-time production rebaseline accepts only the exact documented fifteen-row legacy transition history, and only after a verified restore passes migration-history, identity, recovery-outbox, migration-status, and resulting-schema checks. Any other history fails closed; routine deploys do not rewrite migration history.

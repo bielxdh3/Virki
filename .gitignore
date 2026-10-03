@@ -8,7 +8,16 @@ coverage/
 .env
 .env.*
 !.env.example
+.npmrc
+.dev.vars
+.dev.vars.*
 .production.operator.json
+
+# Private key and container credential files
+*.pem
+*.key
+*.p12
+*.pfx
 
 *.log
 npm-debug.log*
@@ -24,11 +33,33 @@ Thumbs.db
 *.sqlite3
 *.db
 *.dump
+*.bak
+*.backup
+*.dump.sql
+*dump*.sql
+*backup*.sql
+*backup*.sql.gz
+*dump*.sql.gz
+*backup*.tar
+*dump*.tar
+*backup*.tgz
+*dump*.tgz
+*backup*.tar.gz
+*dump*.tar.gz
+*backup*.zip
+*dump*.zip
 backups/
+**/backups/
+dumps/
+**/dumps/
 infra/backups/*
 !infra/backups/
 !infra/backups/.gitkeep
 .bielos-mission-tmp/
+playwright-report/
+/.dual_codex/
+/.playwright-cli/
+/test-results/
 infra/cloudflare/*.json
 infra/cloudflare/cert.pem
 

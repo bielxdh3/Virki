@@ -122,6 +122,7 @@ model Session {
   sessionKey String    @unique @default(cuid())
   userId     String
   tokenHash  String    @unique
+  authenticationMethods String[] @default(["pwd"])
   expiresAt  DateTime
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -152,6 +153,7 @@ model ProjectConnection {
   slug                 String             @unique
   description          String?
   origin               String
+  launchUrl            String?
   enabled              Boolean            @default(true)
   clientId             String             @unique
   clientSecretCiphertext String
@@ -279,17 +281,19 @@ model RecoveryCode {
 }
 
 model DeviceChallenge {
-  id           String               @id @default(cuid())
-  userId       String
-  ceremonyId   String               @unique
-  deviceIdHash String
-  codeHash     String
-  requiresTotp Boolean              @default(false)
-  status       DeviceChallengeStatus @default(PENDING)
-  expiresAt    DateTime
-  consumedAt   DateTime?
-  createdAt    DateTime             @default(now())
-  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                String               @id @default(cuid())
+  userId            String
+  ceremonyId        String               @unique
+  deviceIdHash      String
+  emailAddressHash  String
+  codeHash          String
+  requiresTotp      Boolean              @default(false)
+  emailVerifiedAt   DateTime?
+  status            DeviceChallengeStatus @default(PENDING)
+  expiresAt         DateTime
+  consumedAt        DateTime?
+  createdAt         DateTime             @default(now())
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, deviceIdHash])
   @@index([expiresAt])
@@ -317,7 +321,8 @@ model TrustedDevice {
 
 model AccountRecoveryRequest {
   id                 String                @id @default(cuid())
-  requestKey         String                @unique
+  requestKeyHash     String                @unique
+  emailAddressHash   String
   userId             String
   emailChallengeHash String
   emailVerifiedAt    DateTime?

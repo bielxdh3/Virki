@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { isIP } from "node:net";
 
 const SYNTHETIC_NON_PRODUCTION_KEY = "bielos-synthetic-non-production-rate-limit-key";
 const CONFIGURATION_UNAVAILABLE_MESSAGE = "Login rate limiter configuration unavailable.";
@@ -28,6 +29,28 @@ export function createLoginRateLimitIdentifierHash(
   env: NodeJS.ProcessEnv = process.env
 ): string {
   return createRateLimitIdentifierHash(normalizedIdentifier, env);
+}
+
+export function createLoginAccountRateLimitIdentifierHash(
+  email: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return createLoginRateLimitIdentifierHash(email.trim().toLowerCase() || "unknown", env);
+}
+
+export function createLoginAttemptRateLimitIdentifierHash(
+  email: string,
+  trustedClientAddress: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  const normalizedEmail = email.trim().toLowerCase() || "unknown";
+  const sourceAddress = trustedClientAddress ?? "unscoped";
+  return createLoginRateLimitIdentifierHash(`login-attempt\0${normalizedEmail}\0${sourceAddress}`, env);
+}
+
+export function isTrustedClientAddress(value: string | undefined): value is string {
+  if (!value || value.length > 64 || value !== value.trim() || value.includes(",")) return false;
+  return isIP(value) !== 0;
 }
 
 export function createRateLimitIdentifierHash(
