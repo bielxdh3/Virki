@@ -147,6 +147,7 @@ jobs:
           CLOUDFLARE_TUNNEL_TOKEN: placeholder
         run: |
           cp .env.example .env
+          touch .env.oidc .env.oidc-data
           docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml config --no-env-resolution --quiet
 
   production-images:
