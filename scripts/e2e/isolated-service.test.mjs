@@ -1,8 +1,18 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildServiceEnvironment, platformEnvironmentVariableNames } from "./isolated-service.mjs";
+
+const { transform } = createRequire(import.meta.url)("playwright/lib/common");
+
+test("Playwright loads E2E global setup with its ESM service imports", async () => {
+  const setupPath = fileURLToPath(new URL("./global-setup.mts", import.meta.url));
+  const setupModule = await transform.requireOrImport(setupPath);
+
+  assert.equal(typeof setupModule.default, "function");
+});
 
 test("service children receive only their E2E allowlist and required OS paths", () => {
   const source = {

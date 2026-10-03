@@ -265,7 +265,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Guard disposable E2E database target
-        run: npx tsx scripts/e2e/global-setup.ts --validate-database
+        run: npx tsx scripts/e2e/global-setup.mts --validate-database
 
       - name: Apply committed Prisma migrations to disposable PostgreSQL
         run: npm run prisma:migrate:deploy
