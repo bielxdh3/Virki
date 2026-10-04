@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ElevationScope } from "@bielos/auth/administration";
 import { changeAdminPasswordAction, completeCredentialSetupAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
@@ -14,18 +14,25 @@ const scopes: Array<[ElevationScope, string]> = [
   ["ADMIN_RECOVERY_REGENERATE", "Gerar códigos de recuperação"]
 ];
 
-export function CredentialSetup({ csrf }: { csrf: string }) {
+export function CredentialSetup({ csrf, activeCredential }: { csrf: string; activeCredential?: { keyVersion: number; updatedAt: string } }) {
   const router = useRouter();
+  const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
   const [start, startAction, starting] = useActionState(startCredentialSetupAction, initialState);
   const [complete, completeAction, completing] = useActionState(completeCredentialSetupAction, initialState);
+  const showRecoveryCodes = Boolean(complete.recoveryCodes && !recoveryCodesAcknowledged);
   return (
     <section className="surface">
       <h2>Credencial administrativa</h2>
-      <p>Configure uma senha administrativa separada e guarde os códigos de recuperação fora deste dispositivo.</p>
-      {complete.recoveryCodes ? (
+      <p>{activeCredential ? "Credencial administrativa separada configurada. Gerencie-a com elevação de segurança." : "Configure uma senha administrativa separada e guarde os códigos de recuperação fora deste dispositivo."}</p>
+      {showRecoveryCodes && complete.recoveryCodes ? (
         <>
           <RecoveryCodes codes={complete.recoveryCodes} />
-          <button type="button" onClick={() => router.refresh()}>Continuar para elevação</button>
+          <button type="button" onClick={() => { setRecoveryCodesAcknowledged(true); router.refresh(); }}>Continuar para elevação</button>
+        </>
+      ) : activeCredential ? (
+        <>
+          <p>Ativa · versão {activeCredential.keyVersion} · atualizada em {activeCredential.updatedAt}</p>
+          <p><a href="/account/security">Gerenciar MFA, códigos de recuperação e sessões da conta</a></p>
         </>
       ) : start.requestKey ? (
         <form action={completeAction} className="form-stack">

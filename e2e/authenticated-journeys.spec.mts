@@ -145,8 +145,21 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await credentialForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(credentialCode);
     await credentialForm.locator('input[name="newPassword"]').fill(administrativePassword);
     await credentialForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
-    await expect(credentialSection.getByRole("heading", { name: /Códigos de recuperação/u })).toBeVisible();
-    await expect(credentialSection.locator("ul li")).toHaveCount(10);
+    try {
+      await expect(credentialSection.getByRole("heading", { name: /Códigos de recuperação/u })).toBeVisible();
+      await expect(credentialSection.locator("ul li")).toHaveCount(10);
+    } catch {
+      const credentialState = await prisma.administrativeCredential.findUnique({
+        where: { userId: fixture.admin.id },
+        select: { status: true }
+      });
+      const ceremonyState = await prisma.securityElevation.findUnique({
+        where: { requestKey: credentialRequestKey },
+        select: { status: true }
+      });
+      const recoveryCodeCount = await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id } });
+      throw new Error(`E2E ADMIN recovery-code view is unavailable (credential=${credentialState?.status ?? "missing"}; ceremony=${ceremonyState?.status ?? "missing"}; storedCodeCount=${recoveryCodeCount}).`);
+    }
     await credentialSection.getByRole("button", { name: "Continuar para elevação", exact: true }).click();
 
     const elevationSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Elevação temporária", exact: true }) });

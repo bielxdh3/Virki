@@ -124,10 +124,18 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       sameSite: "Lax"
     }]);
     const page = await context.newPage();
+    const flowResponses: string[] = [];
+    page.on("response", (response) => {
+      const responseUrl = new URL(response.url());
+      if (responseUrl.origin !== portalUrl || !["document", "fetch", "xhr"].includes(response.request().resourceType())) return;
+      const path = safeOidcPagePath(responseUrl.pathname);
+      flowResponses.push(`${response.request().method()} ${path} ${response.status()}`);
+      if (flowResponses.length > 16) flowResponses.shift();
+    });
     await page.goto(makeAuthorizationUrl(codeChallenge, state, nonce).href);
     await completePortalLoginIfNeeded(page, true);
 
-    const callback = await waitForAuthorizationCallback(page, callbackUri, nextCallback);
+    const callback = await waitForAuthorizationCallback(page, callbackUri, nextCallback, flowResponses);
     expect(callback.origin === new URL(callbackUri).origin).toBe(true);
     expect(callback.pathname === "/callback").toBe(true);
     expect(callback.searchParams.getAll("state")).toHaveLength(1);
@@ -207,9 +215,10 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const expectedChallenge = createHash("sha256").update(expectedVerifier, "ascii").digest("base64url");
     const rejectedState = randomOpaqueValue();
     const rejectedNonce = randomOpaqueValue();
+    flowResponses.length = 0;
     await page.goto(makeAuthorizationUrl(expectedChallenge, rejectedState, rejectedNonce).href);
     await completePortalLoginIfNeeded(page);
-    const rejectedCallback = await waitForAuthorizationCallback(page, callbackUri, nextCallback);
+    const rejectedCallback = await waitForAuthorizationCallback(page, callbackUri, nextCallback, flowResponses);
     expect(rejectedCallback.searchParams.get("state") === rejectedState).toBe(true);
     const rejectedCode = rejectedCallback.searchParams.get("code");
     if (!rejectedCode) throw new Error("OIDC callback did not contain an authorization code for PKCE rejection.");
@@ -349,7 +358,8 @@ async function completePortalLoginIfNeeded(page: import("@playwright/test").Page
 async function waitForAuthorizationCallback(
   page: import("@playwright/test").Page,
   callbackUri: string,
-  nextCallback: () => Promise<URL>
+  nextCallback: () => Promise<URL>,
+  flowResponses: string[]
 ): Promise<URL> {
   const callbackOrigin = new URL(callbackUri).origin;
   const callback = nextCallback();
@@ -371,14 +381,16 @@ async function waitForAuthorizationCallback(
     const safeAlert = alerts.map(sanitizeDiagnosticText).filter(Boolean).slice(0, 2).join(" | ") || "none";
     const bodyText = await page.locator("body").innerText().catch(() => "");
     const bodyState = classifyOidcPageContent(bodyText);
-    throw new Error(`OIDC browser did not reach its callback (origin=${origin}; pageState=${pageState}; pagePath=${pagePath}; bodyState=${bodyState}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}).`);
+    throw new Error(`OIDC browser did not reach its callback (origin=${origin}; pageState=${pageState}; pagePath=${pagePath}; bodyState=${bodyState}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}; responses=${flowResponses.join(",") || "none"}).`);
   }
   return callback;
 }
 
 function safeOidcPagePath(pathname: string): string {
-  if (["/", "/login", "/login/verify", "/account/security", "/auth", "/callback", "/api/login", "/api/login/verify"].includes(pathname)) return pathname;
+  if (["/", "/login", "/login/verify", "/account/security", "/auth", "/callback", "/api/login", "/api/login/verify", "/token", "/jwks", "/me", "/session/end"].includes(pathname)) return pathname;
+  if (pathname.startsWith("/.well-known/")) return "/.well-known/[route]";
   if (/^\/(?:interaction|resume)\/[^/]+$/u.test(pathname)) return pathname.startsWith("/interaction/") ? "/interaction/[id]" : "/resume/[id]";
+  if (/^\/login\/.+$/u.test(pathname)) return "/login/[route]";
   if (pathname.startsWith("/account/")) return "/account/[route]";
   if (pathname.startsWith("/api/")) return "/api/[route]";
   return "unrecognized";
