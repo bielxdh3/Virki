@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { useRouter } from "next/navigation";
 import type { ElevationScope } from "@bielos/auth/administration";
 import { changeAdminPasswordAction, completeCredentialSetupAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
@@ -14,12 +15,37 @@ const scopes: Array<[ElevationScope, string]> = [
 ];
 
 export function CredentialSetup({ csrf }: { csrf: string }) {
+  const router = useRouter();
   const [start, startAction, starting] = useActionState(startCredentialSetupAction, initialState);
   const [complete, completeAction, completing] = useActionState(completeCredentialSetupAction, initialState);
-  return <section className="surface"><h2>Credencial administrativa</h2><p>Configure uma senha administrativa separada e guarde os códigos de recuperação fora deste dispositivo.</p>
-    {!start.requestKey ? <form action={startAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><label>Senha normal atual<input name="normalPassword" type="password" autoComplete="current-password" required /></label><button type="submit" disabled={starting}>{starting ? "Enviando…" : "Enviar código de confirmação"}</button>{start.status === "error" && <p className="form-error" role="alert">Não foi possível iniciar a configuração. Confira o e-mail validado e tente novamente.</p>}</form>
-      : <form action={completeAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><input type="hidden" name="requestKey" value={start.requestKey} /><label>Código enviado por e-mail<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required /></label><label>Nova senha administrativa (16 caracteres ou mais)<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label><button type="submit" disabled={completing}>{completing ? "Configurando…" : "Configurar credencial"}</button>{complete.status === "error" && <p className="form-error" role="alert">Código inválido ou expirado. Inicie novamente.</p>}{complete.recoveryCodes && <RecoveryCodes codes={complete.recoveryCodes} />}</form>}
-  </section>;
+  return (
+    <section className="surface">
+      <h2>Credencial administrativa</h2>
+      <p>Configure uma senha administrativa separada e guarde os códigos de recuperação fora deste dispositivo.</p>
+      {complete.recoveryCodes ? (
+        <>
+          <RecoveryCodes codes={complete.recoveryCodes} />
+          <button type="button" onClick={() => router.refresh()}>Continuar para elevação</button>
+        </>
+      ) : start.requestKey ? (
+        <form action={completeAction} className="form-stack">
+          <input type="hidden" name="csrfToken" value={csrf} />
+          <input type="hidden" name="requestKey" value={start.requestKey} />
+          <label>Código enviado por e-mail<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required /></label>
+          <label>Nova senha administrativa (16 caracteres ou mais)<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
+          <button type="submit" disabled={completing}>{completing ? "Configurando…" : "Configurar credencial"}</button>
+          {complete.status === "error" && <p className="form-error" role="alert">Código inválido ou expirado. Inicie novamente.</p>}
+        </form>
+      ) : (
+        <form action={startAction} className="form-stack">
+          <input type="hidden" name="csrfToken" value={csrf} />
+          <label>Senha normal atual<input name="normalPassword" type="password" autoComplete="current-password" required /></label>
+          <button type="submit" disabled={starting}>{starting ? "Enviando…" : "Enviar código de confirmação"}</button>
+          {start.status === "error" && <p className="form-error" role="alert">Não foi possível iniciar a configuração. Confira o e-mail validado e tente novamente.</p>}
+        </form>
+      )}
+    </section>
+  );
 }
 
 export function ElevationControls({ csrf, credentialReady, active }: { csrf: string; credentialReady: boolean; active: Array<{ requestKey: string; scope: string; manualUntilRevoked: boolean; expiresAt: Date | string }> }) {

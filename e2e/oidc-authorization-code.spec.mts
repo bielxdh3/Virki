@@ -369,7 +369,9 @@ async function waitForAuthorizationCallback(
     const loginFormVisible = await page.getByLabel("E-mail", { exact: true }).isVisible().catch(() => false);
     const alerts = await page.getByRole("alert").allTextContents().catch(() => []);
     const safeAlert = alerts.map(sanitizeDiagnosticText).filter(Boolean).slice(0, 2).join(" | ") || "none";
-    throw new Error(`OIDC browser did not reach its callback (origin=${origin}; pageState=${pageState}; pagePath=${pagePath}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}).`);
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    const bodyState = classifyOidcPageContent(bodyText);
+    throw new Error(`OIDC browser did not reach its callback (origin=${origin}; pageState=${pageState}; pagePath=${pagePath}; bodyState=${bodyState}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}).`);
   }
   return callback;
 }
@@ -380,6 +382,17 @@ function safeOidcPagePath(pathname: string): string {
   if (pathname.startsWith("/account/")) return "/account/[route]";
   if (pathname.startsWith("/api/")) return "/api/[route]";
   return "unrecognized";
+}
+
+function classifyOidcPageContent(value: string): string {
+  const text = value.toLowerCase();
+  if (!text.trim()) return "empty";
+  if (/\b404\b|not found|não encontrado/iu.test(text)) return "not-found";
+  if (/\b500\b|internal server error|application error|erro interno/iu.test(text)) return "server-error";
+  if (/access denied|forbidden|acesso negado/iu.test(text)) return "access-denied";
+  if (/consent|consentimento/iu.test(text)) return "consent";
+  if (/entrar|sign in|e-mail/iu.test(text)) return "login";
+  return "other";
 }
 
 function sanitizeDiagnosticText(value: string): string {

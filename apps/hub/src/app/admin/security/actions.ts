@@ -30,7 +30,6 @@ export async function completeCredentialSetupAction(_state: SecurityFormState, f
   const session = await requireAdminMutation(formData, "admin-credential-setup-complete");
   try {
     const recoveryCodes = await completeAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code"), newPassword: readFormRawString(formData, "newPassword") });
-    revalidatePath("/admin/security");
     return { status: "complete", recoveryCodes };
   } catch { return { status: "error" }; }
 }

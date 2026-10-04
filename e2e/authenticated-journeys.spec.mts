@@ -146,6 +146,8 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await credentialForm.locator('input[name="newPassword"]').fill(administrativePassword);
     await credentialForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
     await expect(credentialSection.getByRole("heading", { name: /Códigos de recuperação/u })).toBeVisible();
+    await expect(credentialSection.locator("ul li")).toHaveCount(10);
+    await credentialSection.getByRole("button", { name: "Continuar para elevação", exact: true }).click();
 
     const elevationSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Elevação temporária", exact: true }) });
     const elevationForm = elevationSection.locator("form").first();
