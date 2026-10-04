@@ -357,12 +357,29 @@ async function waitForAuthorizationCallback(
     await page.waitForURL((url) => url.origin === callbackOrigin && url.pathname === "/callback", { timeout: 15_000 });
   } catch {
     const pathname = new URL(page.url()).pathname;
-    const pageState = pathname === "/login" ? "login" : pathname.startsWith("/interaction/") ? "interaction" : pathname === "/auth" ? "auth" : "other";
+    const pageState = pathname === "/login" ? "login"
+      : pathname === "/login/verify" ? "login-verification"
+        : pathname === "/" ? "portal-home"
+          : pathname === "/account/security" ? "account-security"
+            : pathname.startsWith("/interaction/") ? "interaction"
+              : pathname === "/auth" ? "auth" : "other";
     const loginFormVisible = await page.getByLabel("E-mail", { exact: true }).isVisible().catch(() => false);
-    const alertCount = await page.getByRole("alert").count().catch(() => 0);
-    throw new Error(`OIDC browser did not reach its callback (pageState=${pageState}; loginFormVisible=${loginFormVisible}; alertCount=${alertCount}).`);
+    const alerts = await page.getByRole("alert").allTextContents().catch(() => []);
+    const safeAlert = alerts.map(sanitizeDiagnosticText).filter(Boolean).slice(0, 2).join(" | ") || "none";
+    throw new Error(`OIDC browser did not reach its callback (pageState=${pageState}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}).`);
   }
   return callback;
+}
+
+function sanitizeDiagnosticText(value: string): string {
+  return value
+    .replace(/https?:\/\/\S+/giu, "[url]")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, "[email]")
+    .replace(/\b\d{6}\b/gu, "[code]")
+    .replace(/\b[A-Z0-9_-]{20,}\b/giu, "[opaque]")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 120);
 }
 
 async function registerRedirectUri(redirectUri: string): Promise<void> {

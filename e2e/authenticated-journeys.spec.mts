@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
+import { hashSessionToken, verifyPassword } from "@bielos/auth";
 import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
 import { decryptEmailPayload } from "@bielos/auth/email";
 import { PrismaClient } from "@bielos/database";
@@ -128,6 +129,18 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
       // The scoped state below distinguishes a delayed or rejected flow without exposing its code.
     }
     if (!confirmationStarted) {
+      const adminState = await prisma.user.findUnique({
+        where: { id: fixture.admin.id },
+        select: { role: true, isActive: true, emailVerifiedAt: true, passwordHash: true }
+      });
+      const passwordMatches = Boolean(adminState?.passwordHash && await verifyPassword(adminState.passwordHash, fixture.admin.password));
+      const credential = await prisma.administrativeCredential.findUnique({ where: { userId: fixture.admin.id }, select: { status: true } });
+      const sessionToken = (await context.cookies(hubUrl)).find((cookie) => cookie.name === SESSION_COOKIE_NAME)?.value;
+      const currentSession = sessionToken
+        ? await prisma.session.findUnique({ where: { tokenHash: hashSessionToken(sessionToken) }, select: { userId: true, revokedAt: true, expiresAt: true } })
+        : null;
+      const emailKey = process.env.BIELOS_EMAIL_OUTBOX_KEY?.trim();
+      const emailKeyValid = Boolean(emailKey && Buffer.from(emailKey, /^[0-9a-f]{64}$/iu.test(emailKey) ? "hex" : "base64url").length === 32);
       const ceremony = await prisma.securityElevation.findFirst({
         where: { userId: fixture.admin.id, scope: "ADMIN_CREDENTIAL_SETUP", status: "PENDING" },
         select: { requestKey: true }
@@ -138,7 +151,8 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
         })
         : 0;
       const feedback = (await startError.textContent().catch(() => null))?.trim() || "none";
-      throw new Error(`E2E ADMIN verification did not reach the code form (feedback=${feedback}; pendingCeremony=${Boolean(ceremony)}; matchingOutboxMessage=${outboxCount === 1}).`);
+      const sessionValid = Boolean(currentSession && currentSession.userId === fixture.admin.id && !currentSession.revokedAt && currentSession.expiresAt > new Date());
+      throw new Error(`E2E ADMIN verification did not reach the code form (feedback=${feedback}; roleAdmin=${adminState?.role === "ADMIN"}; accountActive=${adminState?.isActive === true}; emailVerified=${Boolean(adminState?.emailVerifiedAt)}; passwordMatches=${passwordMatches}; credentialActive=${credential?.status === "ACTIVE"}; sessionValid=${sessionValid}; emailKeyValid=${emailKeyValid}; pendingCeremony=${Boolean(ceremony)}; matchingOutboxMessage=${outboxCount === 1}).`);
     }
     const credentialRequestKey = await credentialForm.locator('input[name="requestKey"]').inputValue();
     const credentialCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, credentialRequestKey);
