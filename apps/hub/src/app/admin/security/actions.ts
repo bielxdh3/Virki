@@ -23,13 +23,7 @@ export async function startCredentialSetupAction(_state: SecurityFormState, form
   try {
     const requestKey = await startAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, normalPassword: readFormRawString(formData, "normalPassword"), locale: "pt-BR" });
     return { status: "started", requestKey };
-  } catch (error) {
-    if (process.env.BIELOS_E2E_ACCESS_DIAGNOSTICS === "true") {
-      const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]*$/u.test(error.name) ? error.name : "UnknownError";
-      console.error(`E2E admin credential setup failed (${errorName}).`);
-    }
-    return { status: "error" };
-  }
+  } catch { return { status: "error" }; }
 }
 
 export async function completeCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {

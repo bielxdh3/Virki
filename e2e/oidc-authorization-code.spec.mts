@@ -356,19 +356,30 @@ async function waitForAuthorizationCallback(
   try {
     await page.waitForURL((url) => url.origin === callbackOrigin && url.pathname === "/callback", { timeout: 15_000 });
   } catch {
-    const pathname = new URL(page.url()).pathname;
+    const currentUrl = new URL(page.url());
+    const pathname = currentUrl.pathname;
+    const origin = currentUrl.origin === callbackOrigin ? "callback" : currentUrl.origin === portalUrl ? "portal" : "other";
     const pageState = pathname === "/login" ? "login"
       : pathname === "/login/verify" ? "login-verification"
         : pathname === "/" ? "portal-home"
           : pathname === "/account/security" ? "account-security"
             : pathname.startsWith("/interaction/") ? "interaction"
               : pathname === "/auth" ? "auth" : "other";
+    const pagePath = safeOidcPagePath(pathname);
     const loginFormVisible = await page.getByLabel("E-mail", { exact: true }).isVisible().catch(() => false);
     const alerts = await page.getByRole("alert").allTextContents().catch(() => []);
     const safeAlert = alerts.map(sanitizeDiagnosticText).filter(Boolean).slice(0, 2).join(" | ") || "none";
-    throw new Error(`OIDC browser did not reach its callback (pageState=${pageState}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}).`);
+    throw new Error(`OIDC browser did not reach its callback (origin=${origin}; pageState=${pageState}; pagePath=${pagePath}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}).`);
   }
   return callback;
+}
+
+function safeOidcPagePath(pathname: string): string {
+  if (["/", "/login", "/login/verify", "/account/security", "/auth", "/callback", "/api/login", "/api/login/verify"].includes(pathname)) return pathname;
+  if (/^\/(?:interaction|resume)\/[^/]+$/u.test(pathname)) return pathname.startsWith("/interaction/") ? "/interaction/[id]" : "/resume/[id]";
+  if (pathname.startsWith("/account/")) return "/account/[route]";
+  if (pathname.startsWith("/api/")) return "/api/[route]";
+  return "unrecognized";
 }
 
 function sanitizeDiagnosticText(value: string): string {

@@ -23,6 +23,11 @@ if (process.env[registrationTokenInitializedEnv] === "true" && !initializedRegis
 const jwksRegistrationToken = initializedRegistrationToken ?? randomBytes(32).toString("base64url");
 const e2eDatabaseUrl = process.env.BIELOS_E2E_DATABASE_URL;
 const runtimeReady = process.env.BIELOS_E2E_RUNTIME_READY === "true";
+const inheritedTotpEncryptionKey = runtimeReady ? process.env.BIELOS_TOTP_ENCRYPTION_KEY : undefined;
+if (runtimeReady && (!inheritedTotpEncryptionKey || !/^[0-9a-f]{64}$/iu.test(inheritedTotpEncryptionKey))) {
+  throw new Error("Inherited E2E TOTP encryption key is invalid.");
+}
+const totpEncryptionKey = inheritedTotpEncryptionKey ?? randomBytes(32).toString("hex");
 const inheritedTlsDirectory = reuseE2eRuntimeDirectory(process.env);
 if (runtimeReady && !inheritedTlsDirectory) throw new Error("Inherited E2E runtime artifacts are incomplete or outside the private temp directory.");
 const ownsRuntimeArtifacts = !runtimeReady;
@@ -74,6 +79,7 @@ const localOnlyEnv = {
   CLOUDFLARE_ACCESS_AUDIENCE: accessAudience,
   CLOUDFLARE_TEAM_DOMAIN: accessTeamDomain,
   BIELOS_E2E_ACCESS_DIAGNOSTICS: "true",
+  BIELOS_TOTP_ENCRYPTION_KEY: totpEncryptionKey,
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "",
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
   BIELOS_EMAIL_OUTBOX_KEY: emailOutboxKey,
@@ -94,6 +100,7 @@ const hubEnv = {
 };
 process.env.BIELOS_E2E_ACCESS_AUDIENCE = accessAudience;
 process.env.BIELOS_E2E_ACCESS_ISSUER = accessTeamDomain;
+process.env.BIELOS_TOTP_ENCRYPTION_KEY = totpEncryptionKey;
 process.env.BIELOS_E2E_TLS_KEY_PATH = tlsKeyPath;
 process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
 process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH = tlsCaCertificatePath;
