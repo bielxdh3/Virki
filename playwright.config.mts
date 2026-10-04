@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
+import { reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
 
 // @ts-expect-error This JavaScript safety helper has no declaration file.
 import { CORE_TEST_DATABASE_CONFIRMATION } from "./scripts/core-test-database-safety.mjs";
@@ -21,7 +22,11 @@ if (process.env[registrationTokenInitializedEnv] === "true" && !initializedRegis
 }
 const jwksRegistrationToken = initializedRegistrationToken ?? randomBytes(32).toString("base64url");
 const e2eDatabaseUrl = process.env.BIELOS_E2E_DATABASE_URL;
-const tlsDirectory = mkdtempSync(join(tmpdir(), "bielos-e2e-tls-"));
+const runtimeReady = process.env.BIELOS_E2E_RUNTIME_READY === "true";
+const inheritedTlsDirectory = reuseE2eRuntimeDirectory(process.env);
+if (runtimeReady && !inheritedTlsDirectory) throw new Error("Inherited E2E runtime artifacts are incomplete or outside the private temp directory.");
+const ownsRuntimeArtifacts = !runtimeReady;
+const tlsDirectory = inheritedTlsDirectory ?? mkdtempSync(join(tmpdir(), "bielos-e2e-tls-"));
 const tlsKeyPath = join(tlsDirectory, "server-key.pem");
 const tlsCertificatePath = join(tlsDirectory, "server-cert.pem");
 const tlsCaKeyPath = join(tlsDirectory, "test-ca-key.pem");
@@ -30,22 +35,30 @@ const tlsCsrPath = join(tlsDirectory, "server.csr");
 const tlsExtensionsPath = join(tlsDirectory, "server-extensions.cnf");
 const accessSigningKeyPath = join(tlsDirectory, "access-signing-key.json");
 const oidcPrivateConfigPath = join(tlsDirectory, "issuer-config.json");
-const emailOutboxKey = randomBytes(32).toString("base64url");
+const inheritedEmailOutboxKey = process.env.BIELOS_EMAIL_OUTBOX_KEY;
+if (runtimeReady && (!inheritedEmailOutboxKey || !/^[A-Za-z0-9_-]{43}$/u.test(inheritedEmailOutboxKey) || Buffer.from(inheritedEmailOutboxKey, "base64url").length !== 32)) {
+  throw new Error("Inherited E2E outbox key is invalid.");
+}
+const emailOutboxKey = inheritedEmailOutboxKey ?? randomBytes(32).toString("base64url");
 
 try {
-  restrictTemporaryDirectory(tlsDirectory);
-  generateLocalTlsPair(tlsKeyPath, tlsCertificatePath, tlsCaKeyPath, tlsCaCertificatePath, tlsCsrPath, tlsExtensionsPath);
+  if (ownsRuntimeArtifacts) {
+    restrictTemporaryDirectory(tlsDirectory);
+    generateLocalTlsPair(tlsKeyPath, tlsCertificatePath, tlsCaKeyPath, tlsCaCertificatePath, tlsCsrPath, tlsExtensionsPath);
+  }
   assertLocalTlsPair(tlsCertificatePath, tlsCaCertificatePath);
-  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  const kid = randomUUID();
-  const publicJwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
-  writeFileSync(accessSigningKeyPath, JSON.stringify({ kid, publicJwk, privateKey: privateKey.export({ format: "pem", type: "pkcs8" }) }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+  if (ownsRuntimeArtifacts) {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const kid = randomUUID();
+    const publicJwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
+    writeFileSync(accessSigningKeyPath, JSON.stringify({ kid, publicJwk, privateKey: privateKey.export({ format: "pem", type: "pkcs8" }) }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+  }
 } catch {
-  rmSync(tlsDirectory, { recursive: true, force: true });
+  if (ownsRuntimeArtifacts) rmSync(tlsDirectory, { recursive: true, force: true });
   throw new Error("E2E requires local TLS and signing key generation support.");
 }
 
-process.once("exit", () => rmSync(tlsDirectory, { recursive: true, force: true }));
+if (ownsRuntimeArtifacts) process.once("exit", () => rmSync(tlsDirectory, { recursive: true, force: true }));
 
 const localOnlyEnv = {
   NODE_OPTIONS: "",
@@ -87,6 +100,8 @@ process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH = tlsCaCertificatePath;
 process.env.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE = oidcPrivateConfigPath;
 process.env.BIELOS_E2E_ACCESS_SIGNING_KEY_FILE = accessSigningKeyPath;
 process.env.BIELOS_EMAIL_OUTBOX_KEY = emailOutboxKey;
+process.env.BIELOS_E2E_RUNTIME_DIRECTORY = tlsDirectory;
+process.env.BIELOS_E2E_RUNTIME_READY = "true";
 process.env[registrationTokenEnv] = jwksRegistrationToken;
 process.env[registrationTokenInitializedEnv] = "true";
 

@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, randomBytes, verify as verifySignature, X509Certificate, type JsonWebKey as NodeJsonWebKey } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest, createServer as createHttpsServer } from "node:https";
@@ -281,10 +282,11 @@ function requestHub(path: string, options: {
       const peerSubject = safeCommonName(peer?.subject);
       const peerIssuer = safeCommonName(peer?.issuer);
       const peerChain = safeCertificateChain(peer);
+      const opensslPeerChain = safeOpenSslPeerChain(process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH);
       const expectedFingerprint = options.expectedCertificate ? new X509Certificate(options.expectedCertificate).fingerprint256 : "unavailable";
       const caFingerprint = new X509Certificate(options.ca).fingerprint256;
       const authorizationError = socket?.authorizationError ? String(socket.authorizationError).replace(/[^A-Z0-9_-]/giu, "").slice(0, 80) : "none";
-      reject(new Error(`OIDC HTTPS request for ${path} to portal.localhost failed (${code}; peer=${peerFingerprint}; peerSubject=${peerSubject}; peerIssuer=${peerIssuer}; peerChain=${peerChain}; expectedLeaf=${expectedFingerprint}; trustedCA=${caFingerprint}; authorization=${authorizationError}).`));
+      reject(new Error(`OIDC HTTPS request for ${path} to portal.localhost failed (${code}; peer=${peerFingerprint}; peerSubject=${peerSubject}; peerIssuer=${peerIssuer}; peerChain=${peerChain}; opensslPeerChain=${opensslPeerChain}; expectedLeaf=${expectedFingerprint}; trustedCA=${caFingerprint}; authorization=${authorizationError}).`));
     });
     request.end(options.body);
   });
@@ -300,6 +302,30 @@ function safeCertificateChain(value: unknown): string {
     current = "issuerCertificate" in current ? current.issuerCertificate : undefined;
   }
   return fingerprints.length ? fingerprints.join(",") : "unavailable";
+}
+
+function safeOpenSslPeerChain(caPath: string | undefined): string {
+  if (!caPath) return "unavailable";
+  let output: string;
+  try {
+    output = execFileSync("openssl", [
+      "s_client", "-connect", "127.0.0.1:3001", "-servername", "portal.localhost",
+      "-verify_hostname", "portal.localhost", "-verify_return_error", "-verify", "5",
+      "-CAfile", caPath, "-no-CApath", "-showcerts"
+    ], { encoding: "utf8", input: "", timeout: 5_000, maxBuffer: 64 * 1024 });
+  } catch (error) {
+    if (!error || typeof error !== "object") return "unavailable";
+    const stdout = "stdout" in error ? String(error.stdout ?? "") : "";
+    const stderr = "stderr" in error ? String(error.stderr ?? "") : "";
+    output = `${stdout}\n${stderr}`;
+  }
+  const certificates = [...output.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/gu)]
+    .slice(0, 3)
+    .map(([pem]) => {
+      try { return new X509Certificate(pem).fingerprint256; } catch { return undefined; }
+    })
+    .filter((fingerprint): fingerprint is string => Boolean(fingerprint));
+  return certificates.length ? certificates.join(",") : "unavailable";
 }
 
 function safeCommonName(value: unknown): string {

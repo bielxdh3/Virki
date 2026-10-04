@@ -118,7 +118,28 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const administrativePassword = randomBytes(32).toString("base64url");
     await credentialForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await credentialForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
-    await expect(credentialForm.getByLabel("Código enviado por e-mail", { exact: true })).toBeVisible();
+    const confirmationCodeInput = credentialForm.getByLabel("Código enviado por e-mail", { exact: true });
+    const startError = credentialForm.getByRole("alert");
+    let confirmationStarted = false;
+    try {
+      await expect(confirmationCodeInput.or(startError)).toBeVisible({ timeout: 15_000 });
+      confirmationStarted = await confirmationCodeInput.isVisible();
+    } catch {
+      // The scoped state below distinguishes a delayed or rejected flow without exposing its code.
+    }
+    if (!confirmationStarted) {
+      const ceremony = await prisma.securityElevation.findFirst({
+        where: { userId: fixture.admin.id, scope: "ADMIN_CREDENTIAL_SETUP", status: "PENDING" },
+        select: { requestKey: true }
+      });
+      const outboxCount = ceremony
+        ? await prisma.emailOutboxMessage.count({
+          where: { idempotencyKey: `admin-elevation:${ceremony.requestKey}`, kind: "ADMIN_EMAIL_VERIFICATION", recipientEmail: fixture.admin.email }
+        })
+        : 0;
+      const feedback = (await startError.textContent().catch(() => null))?.trim() || "none";
+      throw new Error(`E2E ADMIN verification did not reach the code form (feedback=${feedback}; pendingCeremony=${Boolean(ceremony)}; matchingOutboxMessage=${outboxCount === 1}).`);
+    }
     const credentialRequestKey = await credentialForm.locator('input[name="requestKey"]').inputValue();
     const credentialCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, credentialRequestKey);
     await credentialForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(credentialCode);
