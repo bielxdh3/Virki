@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -131,7 +131,15 @@ test("inventory rejects relative directories, symlink roots and unsafe marker fi
   await assert.rejects(inventoryBackupDirectory("relative/backups"), /absolute backup inventory directory/u);
   await withInventoryFixture(async (root) => {
     await mkdir(path.join(root, "folder.dump"));
-    await writeFile(path.join(root, ".bielos-migration-verification"), "revision=not-safe", { mode: 0o600 });
+    const markerPath = path.join(root, ".bielos-migration-verification");
+    await writeFile(markerPath, [
+      `revision=${revision}`,
+      `backup_name=${backupName}`,
+      `backup_sha256=${"b".repeat(64)}`,
+      "verified_at=2026-10-03T12:00:00Z",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    await chmod(markerPath, 0o644);
     const inventory = await inventoryBackupDirectory(root, { getStatfs: fakeStatfs(60) });
     assert.equal(inventory.verificationMarker.status, "unsafe");
     assert.deepEqual(inventory.retentionPlan.plannedDeletions, []);

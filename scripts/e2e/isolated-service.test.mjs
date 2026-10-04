@@ -101,6 +101,8 @@ test("service children receive only their E2E allowlist and required OS paths", 
     BIELOS_E2E_ACCESS_DIAGNOSTICS: "true",
     BIELOS_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
     BIELOS_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem",
+    BIELOS_CSRF_SIGNING_KEY: "a".repeat(64),
+    NODE_EXTRA_CA_CERTS: join(tmpdir(), "fixture-ca-cert.pem"),
     BIELOS_TOTP_ENCRYPTION_KEY: "e2e-totp-key-sentinel",
     BIELOS_EMAIL_OUTBOX_KEY: "e2e-email-key-sentinel"
   };
@@ -114,7 +116,7 @@ test("service children receive only their E2E allowlist and required OS paths", 
         "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_HUB_HOSTNAME", "BIELOS_PORTAL_HOSTNAME",
         "BIELOS_HUB_URL", "BIELOS_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
         "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_E2E_ACCESS_DIAGNOSTICS", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_OIDC_PROXY_URL", "BIELOS_E2E_TLS_KEY_PATH",
-        "BIELOS_E2E_TLS_CERTIFICATE_PATH", "BIELOS_EMAIL_OUTBOX_KEY"
+        "BIELOS_E2E_TLS_CERTIFICATE_PATH", "BIELOS_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "BIELOS_EMAIL_OUTBOX_KEY"
       ]
     },
     { name: "issuer", allowed: ["DATABASE_URL", "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"] }
@@ -162,7 +164,20 @@ test("service children receive only their E2E allowlist and required OS paths", 
       assert.equal(environment.DATABASE_URL, source.DATABASE_URL, `${service.name} keeps the validated database URL`);
       assert.equal(result.keys.includes("BIELOS_CORE_TEST_DATABASE_CONFIRM"), false, `${service.name} does not receive the test marker`);
     }
+    if (service.name === "hub") {
+      assert.equal(environment.BIELOS_CSRF_SIGNING_KEY, source.BIELOS_CSRF_SIGNING_KEY, "all Hub dev workers receive the same E2E-only CSRF key");
+      assert.equal(environment.NODE_EXTRA_CA_CERTS, source.NODE_EXTRA_CA_CERTS, "the Hub trusts only the E2E runtime CA bundle");
+    } else {
+      assert.equal(result.keys.includes("BIELOS_CSRF_SIGNING_KEY"), false, `${service.name} does not receive the Hub CSRF key`);
+      assert.equal(result.keys.includes("NODE_EXTRA_CA_CERTS"), false, `${service.name} does not receive the Hub CA bundle`);
+    }
   }
+
+  assert.throws(
+    () => buildServiceEnvironment("hub", { ...source, BIELOS_CSRF_SIGNING_KEY: "invalid" }, process.platform),
+    /configuration is incomplete/u,
+    "the Hub rejects an invalid shared E2E CSRF key"
+  );
 
   assert.throws(
     () => buildServiceEnvironment("issuer", { ...source, BIELOS_OIDC_BIND_ADDRESS: "0.0.0.0" }, process.platform),

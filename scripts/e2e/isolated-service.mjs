@@ -26,7 +26,7 @@ const serviceEnvironment = {
     "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_HUB_HOSTNAME", "BIELOS_PORTAL_HOSTNAME",
     "BIELOS_HUB_URL", "BIELOS_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
     "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_E2E_ACCESS_DIAGNOSTICS", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_OIDC_PROXY_URL", "BIELOS_E2E_TLS_KEY_PATH",
-    "BIELOS_E2E_TLS_CERTIFICATE_PATH", "BIELOS_EMAIL_OUTBOX_KEY"
+    "BIELOS_E2E_TLS_CERTIFICATE_PATH", "BIELOS_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "BIELOS_EMAIL_OUTBOX_KEY"
   ],
   issuer: ["DATABASE_URL", "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"]
 };
@@ -46,7 +46,7 @@ export function buildServiceEnvironment(service, source = process.env, platform 
     result.NODE_ENV = "development";
     result.NEXT_TELEMETRY_DISABLED = "1";
   }
-  if (service === "hub" && (!result.DATABASE_URL || !result.BIELOS_OIDC_PROXY_URL || !result.BIELOS_E2E_TLS_KEY_PATH || !result.BIELOS_E2E_TLS_CERTIFICATE_PATH)) {
+  if (service === "hub" && (!result.DATABASE_URL || !result.BIELOS_OIDC_PROXY_URL || !result.BIELOS_E2E_TLS_KEY_PATH || !result.BIELOS_E2E_TLS_CERTIFICATE_PATH || !/^[a-f0-9]{64}$/iu.test(result.BIELOS_CSRF_SIGNING_KEY ?? "") || !result.NODE_EXTRA_CA_CERTS || !isAbsolute(result.NODE_EXTRA_CA_CERTS))) {
     throw new Error("Hub E2E configuration is incomplete.");
   }
   if (service === "issuer" && (!result.DATABASE_URL || !result.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE || !result.BIELOS_OIDC_ISSUER || result.BIELOS_OIDC_BIND_ADDRESS !== "127.0.0.1" || !result.OIDC_ISSUER_PORT)) {
@@ -117,7 +117,9 @@ function getServiceCommand(service, source) {
   if (service === "hub") {
     const keyPath = source.BIELOS_E2E_TLS_KEY_PATH;
     const certificatePath = source.BIELOS_E2E_TLS_CERTIFICATE_PATH;
-    if (!keyPath || !certificatePath || !isAbsolute(keyPath) || !isAbsolute(certificatePath) || !existsSync(keyPath) || !existsSync(certificatePath)) {
+    const caCertificatePath = source.NODE_EXTRA_CA_CERTS;
+    const expectedCaCertificatePath = certificatePath ? join(dirname(certificatePath), "test-ca-cert.pem") : undefined;
+    if (!keyPath || !certificatePath || !isAbsolute(keyPath) || !isAbsolute(certificatePath) || !existsSync(keyPath) || !existsSync(certificatePath) || !caCertificatePath || !isAbsolute(caCertificatePath) || !existsSync(caCertificatePath) || !expectedCaCertificatePath || resolve(caCertificatePath) !== resolve(expectedCaCertificatePath)) {
       throw new Error("Hub E2E TLS files are unavailable.");
     }
     args.push("--experimental-https", "--experimental-https-key", keyPath, "--experimental-https-cert", certificatePath);

@@ -28,6 +28,7 @@ if (runtimeReady && (!inheritedTotpEncryptionKey || !/^[0-9a-f]{64}$/iu.test(inh
   throw new Error("Inherited E2E TOTP encryption key is invalid.");
 }
 const totpEncryptionKey = inheritedTotpEncryptionKey ?? randomBytes(32).toString("hex");
+const csrfSigningKey = randomBytes(32).toString("hex");
 const inheritedTlsDirectory = reuseE2eRuntimeDirectory(process.env);
 if (runtimeReady && !inheritedTlsDirectory) throw new Error("Inherited E2E runtime artifacts are incomplete or outside the private temp directory.");
 const ownsRuntimeArtifacts = !runtimeReady;
@@ -80,6 +81,8 @@ const localOnlyEnv = {
   CLOUDFLARE_TEAM_DOMAIN: accessTeamDomain,
   BIELOS_E2E_ACCESS_DIAGNOSTICS: "true",
   BIELOS_TOTP_ENCRYPTION_KEY: totpEncryptionKey,
+  BIELOS_CSRF_SIGNING_KEY: csrfSigningKey,
+  NODE_EXTRA_CA_CERTS: tlsCaCertificatePath,
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "",
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
   BIELOS_EMAIL_OUTBOX_KEY: emailOutboxKey,
