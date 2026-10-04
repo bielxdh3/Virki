@@ -117,6 +117,7 @@ export default defineConfig({
       url: `${accessTeamDomain}/cdn-cgi/access/certs`,
       reuseExistingServer: false,
       timeout: 30_000,
+      stdout: "pipe",
       env: {
         NODE_OPTIONS: "",
         NODE_PATH: "",

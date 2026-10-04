@@ -254,6 +254,7 @@ function requestHub(path: string, options: {
 }): Promise<HubResponse> {
   if (!path.startsWith("/") || path.startsWith("//")) throw new Error("OIDC issuer endpoint path is invalid.");
   return new Promise((resolve, reject) => {
+    let tlsSocket: TLSSocket | undefined;
     const request = httpsRequest({
       hostname: "127.0.0.1",
       port: 3001,
@@ -267,22 +268,38 @@ function requestHub(path: string, options: {
       response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
       response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
     });
+    request.once("socket", (socket) => {
+      if (socket instanceof TLSSocket) tlsSocket = socket;
+    });
     request.once("error", (error: unknown) => {
       const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
         ? error.code
         : "NETWORK_ERROR";
-      const socket = request.socket instanceof TLSSocket ? request.socket : undefined;
-      const peer = socket?.getPeerCertificate();
+      const socket = tlsSocket ?? (request.socket instanceof TLSSocket ? request.socket : undefined);
+      const peer = socket?.getPeerCertificate(true);
       const peerFingerprint = typeof peer?.fingerprint256 === "string" ? peer.fingerprint256 : "unavailable";
       const peerSubject = safeCommonName(peer?.subject);
       const peerIssuer = safeCommonName(peer?.issuer);
+      const peerChain = safeCertificateChain(peer);
       const expectedFingerprint = options.expectedCertificate ? new X509Certificate(options.expectedCertificate).fingerprint256 : "unavailable";
       const caFingerprint = new X509Certificate(options.ca).fingerprint256;
       const authorizationError = socket?.authorizationError ? String(socket.authorizationError).replace(/[^A-Z0-9_-]/giu, "").slice(0, 80) : "none";
-      reject(new Error(`OIDC HTTPS request for ${path} to portal.localhost failed (${code}; peer=${peerFingerprint}; peerSubject=${peerSubject}; peerIssuer=${peerIssuer}; expectedLeaf=${expectedFingerprint}; trustedCA=${caFingerprint}; authorization=${authorizationError}).`));
+      reject(new Error(`OIDC HTTPS request for ${path} to portal.localhost failed (${code}; peer=${peerFingerprint}; peerSubject=${peerSubject}; peerIssuer=${peerIssuer}; peerChain=${peerChain}; expectedLeaf=${expectedFingerprint}; trustedCA=${caFingerprint}; authorization=${authorizationError}).`));
     });
     request.end(options.body);
   });
+}
+
+function safeCertificateChain(value: unknown): string {
+  const fingerprints: string[] = [];
+  const visited = new Set<object>();
+  let current = value;
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current);
+    if ("fingerprint256" in current && typeof current.fingerprint256 === "string") fingerprints.push(current.fingerprint256);
+    current = "issuerCertificate" in current ? current.issuerCertificate : undefined;
+  }
+  return fingerprints.length ? fingerprints.join(",") : "unavailable";
 }
 
 function safeCommonName(value: unknown): string {

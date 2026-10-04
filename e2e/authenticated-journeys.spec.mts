@@ -105,7 +105,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const editAlert = editDetails.getByRole("alert");
     await expect(editAlert).toContainText("elevação de segurança");
     await expect(editAlert).toContainText("valores enviados foram mantidos");
-    await expect(projectNameInput).toHaveValue("Draft preserved after elevation expires");
+    await expect(projectNameInput).toHaveValue("Draft preserved without elevation");
     await expect(redirectUrisInput).toHaveValue("https://project.e2e.invalid/callback");
 
     await page.getByRole("link", { name: "Segurança", exact: true }).click();
