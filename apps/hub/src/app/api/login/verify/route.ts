@@ -17,9 +17,10 @@ export async function POST(request: Request) {
   if (!hasSameOrigin(request.headers)) return new NextResponse("Forbidden", { status: 403 });
   const formData = await readBoundedFormData(request);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
-  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME)).valid) return new NextResponse("Forbidden", { status: 403 });
+  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "login-verification" }).valid) return new NextResponse("Forbidden", { status: 403 });
   const ceremony = read(formData, "ceremony");
   const factor = read(formData, "factor").toLowerCase();
+  const requiredRole = surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined;
   const code = read(formData, "code");
   const returnTo = safeReturnTo(read(formData, "returnTo"), surface);
   const deviceToken = readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME);
@@ -35,7 +36,7 @@ export async function POST(request: Request) {
   errorUrl.searchParams.set("error", "1");
   try {
     if (factor === "email") {
-      const result = await verifyLoginEmailCode(ceremony, code, deviceToken);
+      const result = await verifyLoginEmailCode(ceremony, code, deviceToken, new Date(), requiredRole);
       if (result.requiresTotp) {
         const totpUrl = new URL("/login/verify", baseUrl);
         totpUrl.searchParams.set("ceremony", ceremony);
@@ -49,10 +50,10 @@ export async function POST(request: Request) {
       return sessionResponse(result.session, baseUrl, returnTo, surface, "email", auditMetadata);
     }
     if (factor === "totp") {
-      return sessionResponse(await verifyLoginTotpCode(ceremony, code, deviceToken), baseUrl, returnTo, surface, "totp", auditMetadata);
+      return sessionResponse(await verifyLoginTotpCode(ceremony, code, deviceToken, new Date(), requiredRole), baseUrl, returnTo, surface, "totp", auditMetadata);
     }
     if (factor === "recovery") {
-      const result = await verifyLoginRecoveryCode(ceremony, code, deviceToken);
+      const result = await verifyLoginRecoveryCode(ceremony, code, deviceToken, new Date(), requiredRole);
       if (result.kind === "EMAIL_REQUIRED") {
         const emailUrl = new URL("/login/verify", baseUrl);
         emailUrl.searchParams.set("ceremony", ceremony);

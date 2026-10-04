@@ -14,7 +14,7 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
   const params = await searchParams;
   const [connections, csrf] = await Promise.all([
     prisma.projectConnection.findMany({ select: { id: true, name: true, slug: true, origin: true, launchUrl: true, redirectUris: true, enabled: true, _count: { select: { grants: true } } }, orderBy: [{ name: "asc" }, { id: "asc" }] }),
-    Promise.resolve(createCsrfToken())
+    Promise.resolve(createCsrfToken({ scope: "admin-connections" }))
   ]);
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Conexões</h1><p>Clientes OIDC externos. BielOS não armazena nem hospeda suas experiências.</p></div></header>

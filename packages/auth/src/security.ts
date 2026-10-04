@@ -55,6 +55,22 @@ export class SecurityMutationError extends Error {
   }
 }
 
+export type AccountRecoveryRole = "USER" | "ADMIN";
+export type RequiredLoginRole = "USER" | "ADMIN";
+export type AccountRecoveryIdentity = { id: string; role: string; isActive: boolean; accountStatus: string };
+
+export function isAccountRecoveryEligible(user: Omit<AccountRecoveryIdentity, "id"> | null | undefined, expectedRole: AccountRecoveryRole): boolean {
+  return Boolean(user && user.role === expectedRole && user.isActive && user.accountStatus === "ACTIVE");
+}
+
+export function isPublicAccountRecoveryEligible(user: Omit<AccountRecoveryIdentity, "id"> | null | undefined): boolean {
+  return isAccountRecoveryEligible(user, "USER");
+}
+
+export function canApproveAccountRecovery(actor: { id: string; role: string }, target: AccountRecoveryIdentity): boolean {
+  return actor.role === "ADMIN" && actor.id !== target.id && isAccountRecoveryRole(target.role) && target.isActive && target.accountStatus === "ACTIVE";
+}
+
 export function generateDeviceToken(): string {
   return randomBytes(32).toString("base64url");
 }
@@ -225,14 +241,15 @@ export async function startLoginCeremony(
   deviceToken: string | undefined,
   locale: EmailLocale,
   now = new Date(),
-  forceFreshProof = false
+  forceFreshProof = false,
+  expectedRole?: RequiredLoginRole
 ): Promise<LoginCeremonyStart> {
   const token = deviceToken && /^[A-Za-z0-9_-]{32,100}$/.test(deviceToken) ? deviceToken : generateDeviceToken();
   const deviceIdHash = hashDeviceToken(token);
   try {
     return await prisma.$transaction(async (transaction) => {
-      const user = await transaction.user.findUnique({ where: { id: userId }, select: { id: true, email: true, emailNormalized: true, emailVerifiedAt: true, displayName: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } });
-      if (!user?.isActive || user.accountStatus !== "ACTIVE") throw new SecurityMutationError();
+      const user = await transaction.user.findUnique({ where: { id: userId }, select: { id: true, email: true, emailNormalized: true, emailVerifiedAt: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } });
+      if (!user?.isActive || user.accountStatus !== "ACTIVE" || (expectedRole && user.role !== expectedRole) || !await lockActiveLoginAccountInTransaction(transaction, userId, expectedRole)) throw new SecurityMutationError();
       const trusted = await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } });
       const isTrusted = trusted?.status === "TRUSTED" && trusted.revokedAt === null;
       const requiresTotp = user.secondFactorMethod === "TOTP" && user.totpFactor?.status === "ACTIVE";
@@ -268,13 +285,13 @@ export async function startLoginCeremony(
   }
 }
 
-export async function verifyLoginEmailCode(ceremonyId: string, code: string, deviceToken: string, now = new Date()): Promise<{ requiresTotp: boolean; session: CreatedLoginSession | null }> {
+export async function verifyLoginEmailCode(ceremonyId: string, code: string, deviceToken: string, now = new Date(), expectedRole?: RequiredLoginRole): Promise<{ requiresTotp: boolean; session: CreatedLoginSession | null }> {
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken) || !/^\d{6}$/.test(code)) throw new SecurityMutationError();
   try {
     const result = await prisma.$transaction(async (transaction) => {
-      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, codeHash: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } } } });
+      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, codeHash: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } } } });
       const requiresTotpNow = challenge?.user.secondFactorMethod === "TOTP" && challenge.user.totpFactor?.status === "ACTIVE";
-      if (!challenge || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.requiresTotp !== requiresTotpNow || challenge.status !== "PENDING" || challenge.consumedAt || challenge.expiresAt <= now) throw new SecurityMutationError();
+      if (!challenge || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.requiresTotp !== requiresTotpNow || challenge.status !== "PENDING" || challenge.consumedAt || challenge.expiresAt <= now || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
       const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
       const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
       if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
@@ -294,12 +311,12 @@ export async function verifyLoginEmailCode(ceremonyId: string, code: string, dev
   }
 }
 
-export async function verifyLoginTotpCode(ceremonyId: string, code: string, deviceToken: string, now = new Date()): Promise<CreatedLoginSession> {
+export async function verifyLoginTotpCode(ceremonyId: string, code: string, deviceToken: string, now = new Date(), expectedRole?: RequiredLoginRole): Promise<CreatedLoginSession> {
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken)) throw new SecurityMutationError();
   try {
     const result = await prisma.$transaction(async (transaction) => {
-      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, isActive: true, accountStatus: true, totpFactor: { select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } } } } } });
-      if (!challenge || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || challenge.user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
+      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, totpFactor: { select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } } } } } });
+      if (!challenge || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || challenge.user.totpFactor?.status !== "ACTIVE" || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
       const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
       const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
       if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
@@ -319,12 +336,12 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, devi
   }
 }
 
-export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, deviceToken: string, now = new Date()): Promise<{ kind: "EMAIL_REQUIRED" } | { kind: "RECOVERED"; session: CreatedLoginSession }> {
+export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, deviceToken: string, now = new Date(), expectedRole?: RequiredLoginRole): Promise<{ kind: "EMAIL_REQUIRED" } | { kind: "RECOVERED"; session: CreatedLoginSession }> {
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken) || code.length > 32) throw new SecurityMutationError();
   try {
     const result = await prisma.$transaction(async (transaction) => {
-      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { id: true, status: true, lastUsedStep: true } } } } } });
-      if (!challenge || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || challenge.user.secondFactorMethod !== "TOTP" || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.user.totpFactor?.status !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now) throw new SecurityMutationError();
+      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { id: true, status: true, lastUsedStep: true } } } } } });
+      if (!challenge || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || challenge.user.secondFactorMethod !== "TOTP" || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.user.totpFactor?.status !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
 
       const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
       const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
@@ -390,6 +407,14 @@ export async function revokeTrustedDevice(userId: string, deviceKey: string): Pr
 }
 
 export async function requestAccountRecovery(email: string, locale: EmailLocale, now = new Date(), trustedClientAddress?: string): Promise<void> {
+  return requestAccountRecoveryForRole("USER", email, locale, now, trustedClientAddress);
+}
+
+export async function requestAdministrativeAccountRecovery(email: string, locale: EmailLocale, now = new Date(), trustedClientAddress?: string): Promise<void> {
+  return requestAccountRecoveryForRole("ADMIN", email, locale, now, trustedClientAddress);
+}
+
+async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, email: string, locale: EmailLocale, now: Date, trustedClientAddress?: string): Promise<void> {
   if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(trustedClientAddress)) return;
   if (trustedClientAddress) {
     if (!isTrustedClientAddress(trustedClientAddress)) return;
@@ -402,22 +427,22 @@ export async function requestAccountRecovery(email: string, locale: EmailLocale,
     consumeRateLimitAttemptInTransaction(transaction, `account-recovery-address:${normalizedEmail}`, now)
   );
   if (!addressAttempt.allowed) return;
-  const actionBase = getRecoveryActionBaseUrl();
+  const actionBase = getRecoveryActionBaseUrl(expectedRole);
   if (!actionBase) return;
-  const user = await prisma.user.findUnique({ where: { emailNormalized: normalizedEmail }, select: { id: true, email: true, emailNormalized: true, displayName: true, isActive: true, accountStatus: true } });
-  if (!user?.isActive || user.accountStatus !== "ACTIVE") return;
+  const user = await prisma.user.findUnique({ where: { emailNormalized: normalizedEmail }, select: { id: true, email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } });
+  if (!user || !isAccountRecoveryEligible(user, expectedRole)) return;
   try {
     const requested = await prisma.$transaction(async (transaction) => {
       const rateLimitIdentifier = `account-recovery:${normalizedEmail}`;
       await lockRateLimitIdentifierInTransaction(transaction, rateLimitIdentifier);
-      if (!await lockActiveRecoveryAccountInTransaction(transaction, user.id)) return false;
+      if (!await lockActiveRecoveryAccountInTransaction(transaction, user.id, expectedRole)) return false;
       const latestRequest = await transaction.accountRecoveryRequest.findFirst({ where: { userId: user.id }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
       if (latestRequest && latestRequest.createdAt.getTime() + RECOVERY_REQUEST_COOLDOWN_MS > now.getTime()) return false;
       const attempt = await consumeRateLimitAttemptInTransaction(transaction, rateLimitIdentifier, now);
       if (!attempt.allowed) return false;
       const requestKey = randomBytes(24).toString("base64url");
       const code = generateNumericCode();
-      await transaction.accountRecoveryRequest.updateMany({ where: { userId: user.id, status: "PENDING" }, data: { status: "EXPIRED" } });
+      await transaction.accountRecoveryRequest.updateMany({ where: { userId: user.id, status: { in: ["PENDING", "APPROVED"] } }, data: { status: "EXPIRED" } });
       const recoveryRequest = await transaction.accountRecoveryRequest.create({ data: { requestKeyHash: hashRecoveryRequestKey(requestKey), emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), userId: user.id, emailChallengeHash: hashSecurityCode(code), expiresAt: new Date(now.getTime() + RECOVERY_REQUEST_TTL_MS) } });
       const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase).toString();
       await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: user.email, locale, payload: { publicValues: { displayName: user.displayName ?? "" }, protectedValues: { code, actionUrl } } });
@@ -430,28 +455,28 @@ export async function requestAccountRecovery(email: string, locale: EmailLocale,
   }
 }
 
-export async function getAccountRecoveryRequestId(requestKey: string, now = new Date()): Promise<{ id: string; expiresAt: Date } | null> {
+export async function getAccountRecoveryRequestId(requestKey: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<{ id: string; expiresAt: Date } | null> {
   if (!isCeremonyId(requestKey)) return null;
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { requestKeyHash: hashRecoveryRequestKey(requestKey) }, select: { id: true, status: true, expiresAt: true } });
-  if (!request || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED" || request.expiresAt <= now) return null;
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { requestKeyHash: hashRecoveryRequestKey(requestKey) }, select: { id: true, status: true, expiresAt: true, user: { select: { role: true, isActive: true, accountStatus: true } } } });
+  if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED" || request.expiresAt <= now) return null;
   return { id: request.id, expiresAt: request.expiresAt };
 }
 
-export async function getAccountRecoveryState(requestId: string, requestKey: string, now = new Date()) {
+export async function getAccountRecoveryState(requestId: string, requestKey: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER") {
   if (!isDatabaseId(requestId) || !isCeremonyId(requestKey)) return null;
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, status: true, emailVerifiedAt: true, expiresAt: true, user: { select: { emailNormalized: true, email: true, isActive: true, accountStatus: true } } } });
-  if (!request || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !request.user.isActive || request.user.accountStatus !== "ACTIVE" || request.expiresAt <= now || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED") return null;
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, status: true, emailVerifiedAt: true, expiresAt: true, user: { select: { emailNormalized: true, email: true, role: true, isActive: true, accountStatus: true } } } });
+  if (!request || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !isAccountRecoveryEligible(request.user, expectedRole) || request.expiresAt <= now || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED") return null;
   return { id: request.id, status: request.status, emailVerified: Boolean(request.emailVerifiedAt), expiresAt: request.expiresAt };
 }
 
-export async function verifyAccountRecoveryEmail(requestId: string, requestKey: string, code: string, now = new Date()): Promise<void> {
+export async function verifyAccountRecoveryEmail(requestId: string, requestKey: string, code: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<void> {
   if (!isDatabaseId(requestId) || !isCeremonyId(requestKey) || !/^\d{6}$/.test(code)) throw new SecurityMutationError();
   try {
     const result = await prisma.$transaction(async (transaction) => {
-      const initial = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true } });
-      if (!initial || !await lockActiveRecoveryAccountInTransaction(transaction, initial.userId)) throw new SecurityMutationError();
-      const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, userId: true, requestKeyHash: true, emailAddressHash: true, emailChallengeHash: true, emailVerifiedAt: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, isActive: true, accountStatus: true } } } });
-      if (!request || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.status !== "PENDING" || request.emailVerifiedAt || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !request.user.isActive || request.user.accountStatus !== "ACTIVE") throw new SecurityMutationError();
+      const initial = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true, user: { select: { role: true } } } });
+      if (!initial || initial.user.role !== expectedRole || !await lockActiveRecoveryAccountInTransaction(transaction, initial.userId, expectedRole)) throw new SecurityMutationError();
+      const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, userId: true, requestKeyHash: true, emailAddressHash: true, emailChallengeHash: true, emailVerifiedAt: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
+      if (!request || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.status !== "PENDING" || request.emailVerifiedAt || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !isAccountRecoveryEligible(request.user, expectedRole)) throw new SecurityMutationError();
       const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-verification-user:${request.userId}`, now);
       const requestAttempt = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-verification:${request.id}`, now);
       if (!accountAttempt.allowed || !requestAttempt.allowed) return { kind: "REJECTED" as const };
@@ -471,15 +496,15 @@ export async function verifyAccountRecoveryEmail(requestId: string, requestKey: 
 export async function listPendingAccountRecoveries(actor: { id: string; role: string }) {
   await requireAdmin(actor);
   return prisma.accountRecoveryRequest.findMany({
-    where: getPendingAccountRecoveryQueueWhere(new Date()),
+    where: getPendingAccountRecoveryQueueWhere(new Date(), actor.id),
     orderBy: { createdAt: "asc" },
     take: 50,
-    select: { id: true, createdAt: true, expiresAt: true, emailVerifiedAt: true, user: { select: { emailNormalized: true, displayName: true } } }
+    select: { id: true, createdAt: true, expiresAt: true, emailVerifiedAt: true, user: { select: { emailNormalized: true, displayName: true, role: true } } }
   });
 }
 
-export function getPendingAccountRecoveryQueueWhere(now: Date): Prisma.AccountRecoveryRequestWhereInput {
-  return { status: "PENDING", emailVerifiedAt: { not: null }, expiresAt: { gt: now } };
+export function getPendingAccountRecoveryQueueWhere(now: Date, excludeTargetUserId?: string): Prisma.AccountRecoveryRequestWhereInput {
+  return { status: "PENDING", emailVerifiedAt: { not: null }, expiresAt: { gt: now }, user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", ...(excludeTargetUserId ? { id: { not: excludeTargetUserId } } : {}) } };
 }
 
 export function getApprovedAccountRecoveryExpiry(now: Date): Date {
@@ -489,15 +514,14 @@ export function getApprovedAccountRecoveryExpiry(now: Date): Date {
 export async function approveAccountRecovery(actor: { id: string; role: string }, requestId: string, now = new Date()): Promise<void> {
   await requireAdmin(actor);
   if (!isDatabaseId(requestId)) throw new SecurityMutationError();
-  const actionBase = getRecoveryActionBaseUrl();
-  if (!actionBase) throw new SecurityMutationError();
   const requestKey = randomBytes(24).toString("base64url");
   const result = await prisma.$transaction(async (transaction) => {
-    const initial = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true } });
-    if (!initial || !await lockActiveRecoveryAccountInTransaction(transaction, initial.userId)) throw new SecurityMutationError();
-    const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, status: true, emailVerifiedAt: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, isActive: true, accountStatus: true } } } });
-    if (!request || request.status !== "PENDING" || !request.emailVerifiedAt || request.expiresAt <= now) throw new SecurityMutationError();
-    if (!request.user.isActive || request.user.accountStatus !== "ACTIVE") throw new SecurityMutationError();
+    const initial = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true, user: { select: { role: true } } } });
+    if (!initial || !isAccountRecoveryRole(initial.user.role) || !await lockActiveRecoveryAccountInTransaction(transaction, initial.userId, initial.user.role)) throw new SecurityMutationError();
+    const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, userId: true, status: true, emailVerifiedAt: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
+    if (!request || request.status !== "PENDING" || !request.emailVerifiedAt || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !canApproveAccountRecovery(actor, { id: request.userId, ...request.user })) throw new SecurityMutationError();
+    const actionBase = getRecoveryActionBaseUrl(request.user.role);
+    if (!actionBase) throw new SecurityMutationError();
     const approved = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash: request.requestKeyHash, status: "PENDING", emailVerifiedAt: { not: null }, expiresAt: { gt: now } }, data: { status: "APPROVED", requestKeyHash: hashRecoveryRequestKey(requestKey), reviewedByUserId: actor.id, approvedAt: now, expiresAt: getApprovedAccountRecoveryExpiry(now) } });
     if (approved.count !== 1) return approved;
     const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase).toString();
@@ -508,11 +532,11 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
   if (result.count !== 1) throw new SecurityMutationError();
 }
 
-export async function consumeApprovedAccountRecovery(requestId: string, requestKey: string, newPassword: string, now = new Date()): Promise<void> {
+export async function consumeApprovedAccountRecovery(requestId: string, requestKey: string, newPassword: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<void> {
   if (!isDatabaseId(requestId) || !isCeremonyId(requestKey) || newPassword.length < 12 || newPassword.length > 256) throw new SecurityMutationError();
   const requestKeyHash = hashRecoveryRequestKey(requestKey);
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, isActive: true, accountStatus: true } } } });
-  if (!request || !safeEqual(request.requestKeyHash, requestKeyHash) || request.status !== "APPROVED" || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !request.user.isActive || request.user.accountStatus !== "ACTIVE") throw new SecurityMutationError();
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
+  if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || !safeEqual(request.requestKeyHash, requestKeyHash) || request.status !== "APPROVED" || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email)) throw new SecurityMutationError();
   const attempts = await prisma.$transaction(async (transaction) => {
     const account = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-completion-user:${request.userId}`, now);
     const ceremony = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-completion:${request.id}`, now);
@@ -521,10 +545,10 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
   if (!attempts) throw new SecurityMutationError();
   const newPasswordHash = await hashPassword(newPassword);
   await prisma.$transaction(async (transaction) => {
-    if (!await lockActiveRecoveryAccountInTransaction(transaction, request.userId)) throw new SecurityMutationError();
+    if (!await lockActiveRecoveryAccountInTransaction(transaction, request.userId, expectedRole)) throw new SecurityMutationError();
     await lockAndExpireSiblingAccountRecoveriesInTransaction(transaction, request.userId, request.id);
-    const current = await transaction.accountRecoveryRequest.findUnique({ where: { id: request.id }, select: { userId: true, requestKeyHash: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, isActive: true, accountStatus: true } } } });
-    if (!current || current.userId !== request.userId || !safeEqual(current.requestKeyHash, requestKeyHash) || current.emailAddressHash !== hashEmailAddress(current.user.emailNormalized ?? current.user.email) || current.status !== "APPROVED" || current.expiresAt <= now || !current.user.isActive || current.user.accountStatus !== "ACTIVE") throw new SecurityMutationError();
+    const current = await transaction.accountRecoveryRequest.findUnique({ where: { id: request.id }, select: { userId: true, requestKeyHash: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
+    if (!current || current.userId !== request.userId || !safeEqual(current.requestKeyHash, requestKeyHash) || current.emailAddressHash !== hashEmailAddress(current.user.emailNormalized ?? current.user.email) || current.status !== "APPROVED" || current.expiresAt <= now || !isAccountRecoveryEligible(current.user, expectedRole)) throw new SecurityMutationError();
     const claimed = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash, emailAddressHash: request.emailAddressHash, status: "APPROVED", expiresAt: { gt: now } }, data: { status: "CONSUMED", consumedAt: now } });
     if (claimed.count !== 1) throw new SecurityMutationError();
     await transaction.user.update({ where: { id: request.userId }, data: { passwordHash: newPasswordHash, emailVerifiedAt: now } });
@@ -596,15 +620,38 @@ export async function revokeUserAuthenticationProofsInTransaction(transaction: P
   });
 }
 
-export async function lockActiveRecoveryAccountInTransaction(transaction: Prisma.TransactionClient, userId: string): Promise<boolean> {
+export async function lockActiveRecoveryAccountInTransaction(transaction: Prisma.TransactionClient, userId: string, expectedRole: AccountRecoveryRole = "USER"): Promise<boolean> {
   const accounts = await transaction.$queryRaw<Array<{ id: string }>>`
     SELECT "id"
     FROM "User"
     WHERE "id" = ${userId}
+      AND "role" = ${expectedRole}
       AND "isActive" = TRUE
       AND "accountStatus" = 'ACTIVE'
     FOR UPDATE
   `;
+  return accounts.length === 1;
+}
+
+export async function lockActiveLoginAccountInTransaction(transaction: Prisma.TransactionClient, userId: string, expectedRole?: RequiredLoginRole): Promise<boolean> {
+  const accounts = expectedRole
+    ? await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "User"
+      WHERE "id" = ${userId}
+        AND "role" = ${expectedRole}
+        AND "isActive" = TRUE
+        AND "accountStatus" = 'ACTIVE'
+      FOR UPDATE
+    `
+    : await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "User"
+      WHERE "id" = ${userId}
+        AND "isActive" = TRUE
+        AND "accountStatus" = 'ACTIVE'
+      FOR UPDATE
+    `;
   return accounts.length === 1;
 }
 
@@ -707,18 +754,22 @@ function isTrustedClientAddress(value: string | undefined): value is string {
   return Boolean(value && value.length <= 64 && value === value.trim() && !value.includes(",") && isIP(value));
 }
 
-function getRecoveryActionBaseUrl(): URL | null {
-  const configured = process.env.BIELOS_PORTAL_URL?.trim();
+function getRecoveryActionBaseUrl(role: AccountRecoveryRole): URL | null {
+  const configured = (role === "ADMIN" ? process.env.BIELOS_HUB_URL : process.env.BIELOS_PORTAL_URL)?.trim();
   if (!configured) return null;
   try {
     const url = new URL(configured);
-    const expectedHost = (process.env.BIELOS_PORTAL_HOSTNAME ?? "portal.biel.dev.br").toLowerCase();
+    const expectedHost = (role === "ADMIN" ? process.env.BIELOS_HUB_HOSTNAME ?? "hub.biel.dev.br" : process.env.BIELOS_PORTAL_HOSTNAME ?? "portal.biel.dev.br").toLowerCase();
     const production = process.env.NODE_ENV === "production";
-    if ((url.protocol !== "https:" && (production || url.protocol !== "http:")) || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "") || (production && url.hostname.toLowerCase() !== expectedHost)) return null;
+    if ((url.protocol !== "https:" && (production || url.protocol !== "http:")) || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "") || (production && (url.hostname.toLowerCase() !== expectedHost || url.port !== ""))) return null;
     return url;
   } catch {
     return null;
   }
+}
+
+function isAccountRecoveryRole(value: string): value is AccountRecoveryRole {
+  return value === "USER" || value === "ADMIN";
 }
 
 function isDatabaseId(value: string): boolean {

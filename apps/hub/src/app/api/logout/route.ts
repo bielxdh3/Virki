@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
 
   const formData = await readBoundedFormData(request, 8 * 1024);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
-  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME));
+  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME), { scope: "logout" });
 
   if (!csrfResult.valid) {
     return new NextResponse("Forbidden", { status: 403 });

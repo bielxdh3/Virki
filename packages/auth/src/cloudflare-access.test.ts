@@ -89,6 +89,40 @@ test("production always requires an Access JWT when the opt-in flag is missing o
   }
 });
 
+test("production rejects HTTP and malformed Cloudflare JWKS origins while isolated loopback HTTP remains supported", async () => {
+  const common = {
+    NODE_ENV: "production",
+    CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
+    CLOUDFLARE_ACCESS_AUDIENCE: "synthetic-audience"
+  };
+  for (const teamDomain of [
+    "http://team.example.invalid",
+    "https://user:password@team.example.invalid",
+    "https://team.example.invalid/path",
+    "https://team.example.invalid?next=invalid",
+    "https://127.0.0.1",
+    "https://team.example.invalid:8443"
+  ]) {
+    assert.deepEqual(await validateCloudflareAccessJwt(new Headers(), { ...common, CLOUDFLARE_TEAM_DOMAIN: teamDomain }), {
+      allowed: false,
+      required: true,
+      status: "misconfigured",
+      reason: "invalid-cloudflare-access-config"
+    }, teamDomain);
+  }
+
+  assert.deepEqual(await validateCloudflareAccessJwt(new Headers(), {
+    CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
+    CLOUDFLARE_ACCESS_AUDIENCE: "synthetic-audience",
+    CLOUDFLARE_TEAM_DOMAIN: "http://127.0.0.1:3010"
+  }), {
+    allowed: false,
+    required: true,
+    status: "missing",
+    reason: "missing-cloudflare-access-jwt"
+  });
+});
+
 test("rejects malformed and invalid JWT-shaped assertions", async () => {
   const env = {
     CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",

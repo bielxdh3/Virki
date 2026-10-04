@@ -19,7 +19,7 @@ export default async function LoginPage({ searchParams }: { searchParams?: Promi
   if (session && ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER"))) forbidden();
   const returnTo = safeReturnTo(params?.returnTo, surface, session?.user.role);
   if (session && !reauth) redirect(returnTo ?? (session.user.role === "ADMIN" ? "/admin/accounts" : "/"));
-  const csrfToken = createCsrfToken();
+  const csrfToken = createCsrfToken({ scope: "login" });
 
   return (
     <main className="auth-page">

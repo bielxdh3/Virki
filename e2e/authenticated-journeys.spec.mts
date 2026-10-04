@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
+import { verifyPassword } from "@bielos/auth";
 import { decryptEmailPayload } from "@bielos/auth/email";
 import { PrismaClient } from "@bielos/database";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
@@ -19,14 +20,18 @@ const hasFixture = Boolean(fixturePath && existsSync(fixturePath));
 test.skip(!e2eDatabaseUrl || !hasFixture, "Authenticated E2E requires an explicit disposable E2E database and its global-setup fixture.");
 
 type AccountFixture = {
+  id: string;
   email: string;
   password: string;
   deviceToken: string;
 };
 
+type RecoveryReviewerFixture = AccountFixture & { administrativePassword: string };
+
 type AuthFixture = {
   user: AccountFixture;
   admin: AccountFixture;
+  recoveryReviewer: RecoveryReviewerFixture;
   projectName: string;
   projectLaunchUrl: string;
   ungrantedProjectName: string;
@@ -306,6 +311,187 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
   }
 });
 
+test("ADMIN recovery is Access-protected, role-bound, independently approved, and revokes the old session", async ({ browser }) => {
+  const prisma = createE2ePrismaClient();
+  const contexts: BrowserContext[] = [];
+  const createContext = async () => {
+    const context = await browser.newContext();
+    contexts.push(context);
+    return context;
+  };
+  const newPassword = randomBytes(32).toString("base64url");
+  try {
+    const portalContext = await createContext();
+    const portalPage = await portalContext.newPage();
+    await portalPage.goto(`${portalUrl}/recover`);
+    await portalPage.getByLabel("E-mail", { exact: true }).fill(fixture.admin.email);
+    await portalPage.getByRole("button", { name: "Enviar instruções", exact: true }).click();
+    await expect(portalPage.getByRole("status")).toContainText("Se a conta puder ser recuperada");
+    expect(await prisma.accountRecoveryRequest.count({ where: { userId: fixture.admin.id } })).toBe(0);
+
+    const noAccessContext = await createContext();
+    const noAccessPage = await noAccessContext.newPage();
+    const deniedHubResponse = await noAccessPage.goto(`${hubUrl}/recover`);
+    expect(deniedHubResponse?.status()).toBe(403);
+    await expect(noAccessPage.getByRole("heading", { name: "Recuperar acesso administrativo", exact: true })).toHaveCount(0);
+
+    const targetContext = await createContext();
+    await rememberDevice(targetContext, hubUrl, fixture.admin.deviceToken);
+    const targetPage = await targetContext.newPage();
+    await addCloudflareAccessHeader(targetPage);
+    await targetPage.goto(`${hubUrl}/admin/accounts`);
+    await expect(targetPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+    await signIn(targetPage, fixture.admin);
+    await expect(targetPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+
+    const hubContext = await createContext();
+    const hubPage = await hubContext.newPage();
+    await addCloudflareAccessHeader(hubPage);
+    await hubPage.goto(`${hubUrl}/recover`);
+    await expect(hubPage.getByRole("heading", { name: "Recuperar acesso administrativo", exact: true })).toBeVisible();
+    await hubPage.getByLabel("E-mail", { exact: true }).fill(fixture.admin.email);
+    await hubPage.getByRole("button", { name: "Enviar instruções", exact: true }).click();
+    await expect(hubPage.getByRole("status")).toContainText("Se a conta puder ser recuperada");
+
+    const recovery = await prisma.accountRecoveryRequest.findFirst({
+      where: { userId: fixture.admin.id, status: "PENDING", emailVerifiedAt: null },
+      orderBy: { createdAt: "desc" },
+      select: { id: true }
+    });
+    expect(recovery).not.toBeNull();
+    if (!recovery) throw new Error("E2E protected ADMIN recovery request was not created.");
+    const requestMessage = await readLatestRecoveryEmail(prisma, fixture.admin.email, "account-recovery:");
+    const requestKey = requestMessage.actionUrl ? new URL(requestMessage.actionUrl).searchParams.get("request") : null;
+    expect(new URL(requestMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(hubUrl);
+    expect(requestMessage.code).toMatch(/^\d{6}$/u);
+    expect(requestKey).toMatch(/^[A-Za-z0-9_-]{32,100}$/u);
+
+    const portalOpenUrl = new URL(requestMessage.actionUrl ?? `${hubUrl}/recover/open`);
+    portalOpenUrl.host = new URL(portalUrl).host;
+    await portalPage.goto(portalOpenUrl.toString());
+    await expect(portalPage).toHaveURL(`${portalUrl}/recover?error=1`);
+    await expect(portalPage.getByRole("alert")).toContainText("não é válido ou expirou");
+
+    await hubPage.goto(requestMessage.actionUrl!);
+    const openedRecoveryUrl = new URL(hubPage.url());
+    expect(openedRecoveryUrl.origin).toBe(hubUrl);
+    expect(openedRecoveryUrl.pathname).toBe("/recover");
+    expect(openedRecoveryUrl.searchParams.has("requestId")).toBe(true);
+    const requestCode = hubPage.getByLabel("Código de verificação", { exact: true });
+    await expect(requestCode).toBeVisible();
+    await requestCode.fill(requestMessage.code!);
+    await hubPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
+    await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+
+    await targetPage.goto(`${hubUrl}/admin/security`);
+    await expect(targetPage.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    await expect(targetPage.getByText(fixture.admin.email, { exact: true })).toHaveCount(0);
+
+    const reviewerContext = await createContext();
+    await rememberDevice(reviewerContext, hubUrl, fixture.recoveryReviewer.deviceToken);
+    const reviewerPage = await reviewerContext.newPage();
+    await addCloudflareAccessHeader(reviewerPage);
+    await reviewerPage.goto(`${hubUrl}/admin/security`);
+    await expect(reviewerPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Fsecurity`);
+    await signIn(reviewerPage, fixture.recoveryReviewer);
+    await expect(reviewerPage.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+
+    const elevationSection = reviewerPage.locator("section.surface").filter({ has: reviewerPage.getByRole("heading", { name: "Elevação temporária", exact: true }) });
+    const elevationForm = elevationSection.locator("form").first();
+    await elevationForm.locator('select[name="scope"]').selectOption("ACCOUNT_STATE_CHANGE");
+    await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.recoveryReviewer.password);
+    await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(fixture.recoveryReviewer.administrativePassword);
+    await elevationForm.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
+    const elevationVerificationForm = elevationSection.locator("form").nth(1);
+    await expect(elevationVerificationForm.getByLabel("Código", { exact: true })).toBeVisible();
+    const elevationRequestKey = await elevationVerificationForm.locator('input[name="requestKey"]').inputValue();
+    const elevationCode = await readLatestAdminVerificationCode(prisma, fixture.recoveryReviewer.email, elevationRequestKey);
+    await elevationVerificationForm.getByLabel("Código", { exact: true }).fill(elevationCode);
+    await elevationVerificationForm.getByRole("button", { name: "Ativar elevação", exact: true }).click();
+    await expect(reviewerPage).toHaveURL(`${hubUrl}/admin/security?status=elevation#admin-content`);
+    const recoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.admin.email });
+    await expect(recoveryRow).toBeVisible();
+    await recoveryRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click();
+    await expect(reviewerPage).toHaveURL(`${hubUrl}/admin/security?status=recovery#admin-content`);
+
+    const approvalMessage = await readLatestRecoveryEmail(prisma, fixture.admin.email, "account-recovery-approved:");
+    expect(new URL(approvalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(hubUrl);
+    await hubPage.goto(approvalMessage.actionUrl!);
+    await expect(hubPage.getByRole("status")).toContainText("Solicitação aprovada");
+    await hubPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
+    await hubPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    await expect(hubPage).toHaveURL(`${hubUrl}/login?recovered=1`);
+    await expect(hubPage.getByRole("status")).toContainText("A senha foi atualizada");
+
+    const recoveredAdmin = await prisma.user.findUnique({ where: { id: fixture.admin.id }, select: { passwordHash: true } });
+    expect(recoveredAdmin).not.toBeNull();
+    expect(await verifyPassword(recoveredAdmin!.passwordHash, newPassword)).toBe(true);
+    expect(await verifyPassword(recoveredAdmin!.passwordHash, fixture.admin.password)).toBe(false);
+    expect(await prisma.session.count({ where: { userId: fixture.admin.id, revokedAt: null, expiresAt: { gt: new Date() } } })).toBe(0);
+    expect(await prisma.trustedDevice.count({ where: { userId: fixture.admin.id, status: "TRUSTED", revokedAt: null } })).toBe(0);
+    expect(await prisma.securityElevation.count({ where: { userId: fixture.admin.id, status: { in: ["PENDING", "ACTIVE"] } } })).toBe(0);
+    expect(await prisma.deviceChallenge.count({ where: { userId: fixture.admin.id, status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null } })).toBe(0);
+    const oldSessionPage = await targetContext.newPage();
+    await oldSessionPage.goto(`${hubUrl}/admin/accounts`);
+    await expect(oldSessionPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+
+    const userContext = await createContext();
+    await rememberDevice(userContext, portalUrl, fixture.user.deviceToken);
+    const userPage = await userContext.newPage();
+    await userPage.goto(`${portalUrl}/`);
+    await expect(userPage).toHaveURL(`${portalUrl}/login?returnTo=%2F`);
+    await signIn(userPage, fixture.user);
+    await expect(userPage.getByRole("heading", { level: 1, name: "Projetos", exact: true })).toBeVisible();
+
+    await portalPage.goto(`${portalUrl}/recover`);
+    await portalPage.getByLabel("E-mail", { exact: true }).fill(fixture.user.email);
+    await portalPage.getByRole("button", { name: "Enviar instruções", exact: true }).click();
+    await expect(portalPage.getByRole("status")).toContainText("Se a conta puder ser recuperada");
+    const userRecovery = await prisma.accountRecoveryRequest.findFirst({
+      where: { userId: fixture.user.id, status: "PENDING", emailVerifiedAt: null },
+      orderBy: { createdAt: "desc" },
+      select: { id: true }
+    });
+    expect(userRecovery).not.toBeNull();
+    if (!userRecovery) throw new Error("E2E public USER recovery request was not created.");
+    const userRequestMessage = await readLatestRecoveryEmail(prisma, fixture.user.email, "account-recovery:");
+    expect(new URL(userRequestMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(portalUrl);
+    await portalPage.goto(userRequestMessage.actionUrl!);
+    const userRecoveryCode = portalPage.getByLabel("Código de verificação", { exact: true });
+    await expect(userRecoveryCode).toBeVisible();
+    await userRecoveryCode.fill(userRequestMessage.code!);
+    await portalPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
+    await expect(portalPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+
+    await reviewerPage.goto(`${hubUrl}/admin/security`);
+    const userRecoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.user.email });
+    await expect(userRecoveryRow).toBeVisible();
+    await userRecoveryRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click();
+    await expect(reviewerPage).toHaveURL(`${hubUrl}/admin/security?status=recovery#admin-content`);
+    const userApprovalMessage = await readLatestRecoveryEmail(prisma, fixture.user.email, "account-recovery-approved:");
+    expect(new URL(userApprovalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(portalUrl);
+    await portalPage.goto(userApprovalMessage.actionUrl!);
+    await expect(portalPage.getByRole("status")).toContainText("Solicitação aprovada");
+    const newUserPassword = randomBytes(32).toString("base64url");
+    await portalPage.getByLabel("Nova senha", { exact: true }).fill(newUserPassword);
+    await portalPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    await expect(portalPage).toHaveURL(`${portalUrl}/login?recovered=1`);
+    const recoveredUser = await prisma.user.findUnique({ where: { id: fixture.user.id }, select: { passwordHash: true } });
+    expect(recoveredUser).not.toBeNull();
+    expect(await verifyPassword(recoveredUser!.passwordHash, newUserPassword)).toBe(true);
+    expect(await verifyPassword(recoveredUser!.passwordHash, fixture.user.password)).toBe(false);
+    expect(await prisma.session.count({ where: { userId: fixture.user.id, revokedAt: null, expiresAt: { gt: new Date() } } })).toBe(0);
+    expect(await prisma.trustedDevice.count({ where: { userId: fixture.user.id, status: "TRUSTED", revokedAt: null } })).toBe(0);
+    expect(await prisma.securityElevation.count({ where: { userId: fixture.user.id, status: { in: ["PENDING", "ACTIVE"] } } })).toBe(0);
+    expect(await prisma.deviceChallenge.count({ where: { userId: fixture.user.id, status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null } })).toBe(0);
+    await userPage.goto(`${portalUrl}/`);
+    await expect(userPage).toHaveURL(`${portalUrl}/login?returnTo=%2F`);
+  } finally {
+    await Promise.all(contexts.map((context) => context.close().catch(() => undefined)));
+    await prisma.$disconnect();
+  }
+});
+
 function createE2ePrismaClient(): PrismaClient {
   const databaseUrl = process.env.BIELOS_E2E_DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("Authenticated E2E requires the explicit disposable database fixture.");
@@ -322,6 +508,18 @@ async function readLatestAdminVerificationCode(prisma: PrismaClient, email: stri
   const code = decryptEmailPayload(message.payload).code;
   if (!/^\d{6}$/u.test(code ?? "")) throw new Error("E2E admin verification message is invalid.");
   return code;
+}
+
+async function readLatestRecoveryEmail(prisma: PrismaClient, email: string, idempotencyPrefix: string): Promise<Record<string, string>> {
+  const message = await prisma.emailOutboxMessage.findFirst({
+    where: { idempotencyKey: { startsWith: idempotencyPrefix }, recipientEmail: email, kind: "ACCOUNT_RECOVERY" },
+    orderBy: { createdAt: "desc" },
+    select: { payload: true }
+  });
+  if (!message) throw new Error("E2E account recovery message is unavailable.");
+  const payload = decryptEmailPayload(message.payload);
+  if (!payload.actionUrl) throw new Error("E2E account recovery action link is unavailable.");
+  return payload;
 }
 
 async function rememberDevice(context: BrowserContext, url: string, deviceToken: string): Promise<void> {
@@ -358,9 +556,10 @@ function isAuthFixture(value: unknown): value is AuthFixture {
   const isAccount = (account: unknown): account is AccountFixture => {
     if (!account || typeof account !== "object") return false;
     const record = account as Record<string, unknown>;
-    return typeof record.email === "string" && typeof record.password === "string" && typeof record.deviceToken === "string";
+    return typeof record.id === "string" && typeof record.email === "string" && typeof record.password === "string" && typeof record.deviceToken === "string";
   };
-  return isAccount(candidate.user) && isAccount(candidate.admin) && typeof candidate.projectConnectionId === "string" && typeof candidate.projectName === "string" &&
+  const recoveryReviewer = candidate.recoveryReviewer as Record<string, unknown> | undefined;
+  return isAccount(candidate.user) && isAccount(candidate.admin) && isAccount(recoveryReviewer) && typeof recoveryReviewer?.administrativePassword === "string" && typeof candidate.projectConnectionId === "string" && typeof candidate.projectName === "string" &&
     typeof candidate.projectLaunchUrl === "string" && new URL(candidate.projectLaunchUrl).hostname.endsWith(".invalid") &&
     typeof candidate.ungrantedProjectName === "string" && typeof candidate.disabledProjectName === "string";
 }

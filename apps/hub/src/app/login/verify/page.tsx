@@ -21,7 +21,7 @@ export default async function LoginVerificationPage({ searchParams }: { searchPa
   const loginHref = returnTo ? `/login?returnTo=${encodeURIComponent(returnTo)}` : "/login";
   if (session && !ceremony) redirect(safeReturnTo(params?.returnTo, surface, session.user.role) ?? (session.user.role === "ADMIN" ? "/admin/accounts" : "/"));
   if (!session && !ceremony) redirect(loginHref);
-  const csrfToken = createCsrfToken();
+  const csrfToken = createCsrfToken({ scope: "login-verification" });
   const recoveryParams = new URLSearchParams({ ceremony, factor: "recovery", flow: "recovery" });
   if (returnTo) recoveryParams.set("returnTo", returnTo);
 

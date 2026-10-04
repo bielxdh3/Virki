@@ -10,7 +10,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
   const params = await searchParams;
   const [users, csrf] = await Promise.all([
     prisma.user.findMany({ where: { role: "USER" }, select: { id: true, email: true, displayName: true, isActive: true, accountStatus: true, secondFactorMethod: true, createdAt: true, _count: { select: { sessions: true, projectGrants: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 }),
-    Promise.resolve(createCsrfToken())
+    Promise.resolve(createCsrfToken({ scope: "admin-accounts" }))
   ]);
 
   return <main className="admin-main" id="admin-content" tabIndex={-1}>

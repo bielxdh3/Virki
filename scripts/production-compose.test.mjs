@@ -46,6 +46,8 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
   assert.match(issuer, /path: \.\.\/\.env\.oidc-data/u);
   assert.match(issuer, /required: true/u);
   assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET:\s*\$\{BIELOS_RATE_LIMIT_HASH_SECRET:\?/u);
+  assert.match(hub, /BIELOS_AUDIT_HASH_SECRET:\s*\$\{BIELOS_AUDIT_HASH_SECRET:\?/u);
+  assert.match(hub, /BIELOS_CSRF_SIGNING_KEY:\s*\$\{BIELOS_CSRF_SIGNING_KEY:\?/u);
   assert.doesNotMatch(productionCompose, /BIELOS_OIDC_SIGNING_JWKS:\s*\$\{/u);
   assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
 });
@@ -65,6 +67,8 @@ test("production containers receive only their scoped secret files", () => {
   assert.doesNotMatch(hub, /BIELOS_OIDC_SIGNING_JWKS|BIELOS_OIDC_COOKIE_KEY|BIELOS_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
   assert.doesNotMatch(issuer, /BIELOS_TOTP_ENCRYPTION_KEY|BIELOS_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
   assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET/u);
+  assert.match(hub, /BIELOS_AUDIT_HASH_SECRET/u);
+  assert.match(hub, /BIELOS_CSRF_SIGNING_KEY/u);
   assert.match(tunnel, /TUNNEL_TOKEN:\s*\$\{CLOUDFLARE_TUNNEL_TOKEN/u);
 });
 
@@ -85,6 +89,7 @@ test("development Hub and issuer receive only explicitly scoped environment vari
   assert.doesNotMatch(hub, /BIELOS_OIDC_SIGNING_JWKS|BIELOS_OIDC_COOKIE_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
   assert.doesNotMatch(issuer, /BIELOS_TOTP_ENCRYPTION_KEY|BIELOS_EMAIL_SMTP_PASSWORD|BIELOS_EMAIL_OUTBOX_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
   assert.deepEqual(environmentKeys(hub), [
+    "BIELOS_AUDIT_HASH_SECRET", "BIELOS_CSRF_SIGNING_KEY", "BIELOS_CSRF_SIGNING_KEY_PREVIOUS",
     "BIELOS_EMAIL_FROM", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_EMAIL_REPLY_TO", "BIELOS_EMAIL_SMTP_HOST",
     "BIELOS_EMAIL_SMTP_PASSWORD", "BIELOS_EMAIL_SMTP_PORT", "BIELOS_EMAIL_SMTP_SECURE", "BIELOS_EMAIL_SMTP_USER",
     "BIELOS_EMAIL_TRANSPORT", "BIELOS_HUB_HOSTNAME", "BIELOS_HUB_URL", "BIELOS_OIDC_ADAPTER_KEY",
@@ -131,4 +136,26 @@ test("production workers and database retain restart policy without published po
   assert.match(serviceBlock(productionCompose, "postgres"), /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
   assert.match(serviceBlock(cloudflareCompose, "cloudflared"), /cloudflare\/cloudflared:2026\.9\.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c/u);
   assert.match(readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8"), /node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402/u);
+});
+
+test("production application, maintenance, and migration services run non-root with a read-only root filesystem", () => {
+  for (const service of ["public-site", "hub", "oidc-issuer", "migrate", "session-cleanup", "email-worker"]) {
+    const block = serviceBlock(productionCompose, service);
+    assert.match(block, /^\s+user:\s*node:node$/mu, service);
+    assert.match(block, /^\s+read_only:\s*true$/mu, service);
+    assert.match(block, /^\s+cap_drop:\s*\[ALL\]$/mu, service);
+    assert.match(block, /^\s+security_opt:\s*\[no-new-privileges:true\]$/mu, service);
+    assert.match(block, /\/tmp:rw,noexec,nosuid,nodev,size=64m/u, service);
+  }
+  assert.match(serviceBlock(productionCompose, "hub"), /\/app\/apps\/hub\/\.next\/cache:rw,noexec,nosuid,nodev,size=128m/u);
+  assert.match(serviceBlock(productionCompose, "public-site"), /\/app\/apps\/public-site\/\.next\/cache:rw,noexec,nosuid,nodev,size=128m/u);
+  const dockerfile = readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8");
+  assert.match(dockerfile, /FROM build AS migrator[\s\S]*?USER node:node[\s\S]*?CMD \["npm", "run", "prisma:migrate:deploy"\]/u);
+  assert.match(dockerfile, /ENV HOME=\/tmp\/node-home[\s\S]*?USER node:node/u);
+  const runtimeSmoke = readFileSync(path.join(repositoryRoot, "scripts", "production-runtime-smoke.mjs"), "utf8");
+  const imageAssertion = readFileSync(path.join(repositoryRoot, "scripts", "production-image-assertion.mjs"), "utf8");
+  assert.match(runtimeSmoke, /"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"/u);
+  assert.match(runtimeSmoke, /assertSecurityHeaders\(response\.headers\)/u);
+  assert.match(imageAssertion, /runtimeUid !== 1000/u);
+  assert.match(imageAssertion, /"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"/u);
 });

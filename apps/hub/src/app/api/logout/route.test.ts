@@ -16,6 +16,8 @@ test("logout redirects to the configured public hub origin", async () => {
   const originalHubUrl = process.env.BIELOS_HUB_URL;
   const originalHubHostname = process.env.BIELOS_HUB_HOSTNAME;
   const originalNodeEnv = process.env.NODE_ENV;
+  const originalCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY;
+  const originalPreviousCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
   let access: ProductionAccessAssertion | undefined;
 
   try {
@@ -25,9 +27,11 @@ test("logout redirects to the configured public hub origin", async () => {
     process.env.CLOUDFLARE_TEAM_DOMAIN = access.teamDomain;
     process.env.BIELOS_HUB_URL = "https://hub.example.invalid";
     process.env.BIELOS_HUB_HOSTNAME = "hub.example.invalid";
+    process.env.BIELOS_CSRF_SIGNING_KEY = "11".repeat(32);
+    delete process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
     setEnvironmentVariable("NODE_ENV", "production");
     const formData = new FormData();
-    formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken());
+    formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "logout" }));
 
     const response = await POST(new NextRequest("https://hub.example.invalid:3001/api/logout", {
       method: "POST",
@@ -48,6 +52,8 @@ test("logout redirects to the configured public hub origin", async () => {
     restoreEnvironmentVariable("CLOUDFLARE_TEAM_DOMAIN", originalTeamDomain);
     restoreEnvironmentVariable("BIELOS_HUB_URL", originalHubUrl);
     restoreEnvironmentVariable("BIELOS_HUB_HOSTNAME", originalHubHostname);
+    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY", originalCsrfKey);
+    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
     restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   }
 });
@@ -59,6 +65,8 @@ test("production logout redirects to the canonical host when the explicit public
   const originalHubUrl = process.env.BIELOS_HUB_URL;
   const originalHubHostname = process.env.BIELOS_HUB_HOSTNAME;
   const originalNodeEnv = process.env.NODE_ENV;
+  const originalCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY;
+  const originalPreviousCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
   let access: ProductionAccessAssertion | undefined;
 
   try {
@@ -66,11 +74,13 @@ test("production logout redirects to the canonical host when the explicit public
     process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "true";
     process.env.CLOUDFLARE_ACCESS_AUDIENCE = access.audience;
     process.env.CLOUDFLARE_TEAM_DOMAIN = access.teamDomain;
+    process.env.BIELOS_CSRF_SIGNING_KEY = "11".repeat(32);
+    delete process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
     setEnvironmentVariable("NODE_ENV", "production");
     delete process.env.BIELOS_HUB_URL;
     process.env.BIELOS_HUB_HOSTNAME = "hub.biel.dev.br";
     const formData = new FormData();
-    formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken());
+    formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "logout" }));
 
     const response = await POST(new NextRequest("http://hub:3001/api/logout", {
       method: "POST",
@@ -97,6 +107,8 @@ test("production logout redirects to the canonical host when the explicit public
     restoreEnvironmentVariable("CLOUDFLARE_TEAM_DOMAIN", originalTeamDomain);
     restoreEnvironmentVariable("BIELOS_HUB_URL", originalHubUrl);
     restoreEnvironmentVariable("BIELOS_HUB_HOSTNAME", originalHubHostname);
+    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY", originalCsrfKey);
+    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
     restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   }
 });
@@ -108,6 +120,8 @@ test("invalid production redirect configuration clears the cookie without an ext
   const originalHubUrl = process.env.BIELOS_HUB_URL;
   const originalHubHostname = process.env.BIELOS_HUB_HOSTNAME;
   const originalNodeEnv = process.env.NODE_ENV;
+  const originalCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY;
+  const originalPreviousCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
   let access: ProductionAccessAssertion | undefined;
 
   try {
@@ -117,9 +131,11 @@ test("invalid production redirect configuration clears the cookie without an ext
     process.env.CLOUDFLARE_TEAM_DOMAIN = access.teamDomain;
     process.env.BIELOS_HUB_URL = "https://attacker.invalid";
     process.env.BIELOS_HUB_HOSTNAME = "hub.biel.dev.br";
+    process.env.BIELOS_CSRF_SIGNING_KEY = "11".repeat(32);
+    delete process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
     setEnvironmentVariable("NODE_ENV", "production");
     const formData = new FormData();
-    formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken());
+    formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "logout" }));
 
     const response = await POST(new NextRequest("http://hub:3001/api/logout", {
       method: "POST",
@@ -143,6 +159,8 @@ test("invalid production redirect configuration clears the cookie without an ext
     restoreEnvironmentVariable("CLOUDFLARE_TEAM_DOMAIN", originalTeamDomain);
     restoreEnvironmentVariable("BIELOS_HUB_URL", originalHubUrl);
     restoreEnvironmentVariable("BIELOS_HUB_HOSTNAME", originalHubHostname);
+    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY", originalCsrfKey);
+    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
     restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   }
 });

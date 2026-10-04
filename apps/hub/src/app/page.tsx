@@ -27,7 +27,7 @@ export default async function HomePage() {
     orderBy: { connection: { name: "asc" } },
     select: { connection: { select: { name: true, description: true, launchUrl: true } } }
   });
-  const csrf = createCsrfToken();
+  const csrf = createCsrfToken({ scope: "logout" });
 
   return (
     <>

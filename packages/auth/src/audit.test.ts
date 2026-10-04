@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeAuditMetadata, writeAuditLogInTransaction, type AuditMetadata, type AuditLogInput } from "./audit";
+import { formatAuditEmailReference, hashAuditEmail, sanitizeAuditMetadata, writeAuditLogInTransaction, type AuditMetadata, type AuditLogInput } from "./audit";
+
+test("audit email references use keyed, versioned pseudonyms and preserve legacy display", () => {
+  const firstKey = "11".repeat(32);
+  const secondKey = "22".repeat(32);
+  const first = hashAuditEmail("Member@example.invalid", { NODE_ENV: "production", BIELOS_AUDIT_HASH_SECRET: firstKey } as NodeJS.ProcessEnv);
+  const normalized = hashAuditEmail(" member@example.invalid ", { NODE_ENV: "production", BIELOS_AUDIT_HASH_SECRET: firstKey } as NodeJS.ProcessEnv);
+  const rotated = hashAuditEmail("member@example.invalid", { NODE_ENV: "production", BIELOS_AUDIT_HASH_SECRET: secondKey } as NodeJS.ProcessEnv);
+
+  assert.equal(first, normalized);
+  assert.match(first, /^hmac-v1:[a-f0-9]{16}:[a-f0-9]{64}$/u);
+  assert.notEqual(first, rotated);
+  assert.equal(formatAuditEmailReference(first), first.split(":")[2].slice(0, 10));
+  assert.equal(formatAuditEmailReference("0123456789abcdef".repeat(4)), "0123456789");
+  assert.throws(() => hashAuditEmail("member@example.invalid", { NODE_ENV: "production" } as NodeJS.ProcessEnv));
+});
 
 test("audit persistence keeps useful nested references", async () => {
   const digest = "0123456789abcdef".repeat(4);

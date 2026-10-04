@@ -3,6 +3,13 @@ services:
     image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m
     environment:
       NODE_ENV: production
       BIELOS_PORTAL_URL: ${BIELOS_PORTAL_URL:-}
@@ -19,6 +26,13 @@ services:
     image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,6 +50,9 @@ services:
       BIELOS_OIDC_PROXY_URL: http://oidc-issuer:3003
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
+      BIELOS_AUDIT_HASH_SECRET: ${BIELOS_AUDIT_HASH_SECRET:?BIELOS_AUDIT_HASH_SECRET must be set in local .env}
+      BIELOS_CSRF_SIGNING_KEY: ${BIELOS_CSRF_SIGNING_KEY:?BIELOS_CSRF_SIGNING_KEY must be set in local .env}
+      BIELOS_CSRF_SIGNING_KEY_PREVIOUS: ${BIELOS_CSRF_SIGNING_KEY_PREVIOUS:-}
       BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
       BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
       CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
@@ -54,6 +71,12 @@ services:
     image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +101,12 @@ services:
     image: ${BIELOS_MIGRATOR_IMAGE:?BIELOS_MIGRATOR_IMAGE must be set in local .env}
     pull_policy: never
     profiles: ["migration"]
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
@@ -90,6 +119,12 @@ services:
     image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,6 +139,12 @@ services:
     image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     depends_on:
       postgres:
         condition: service_healthy

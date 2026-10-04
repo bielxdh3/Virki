@@ -28,6 +28,7 @@ playwright-report
 **/playwright-report
 .dual_codex
 **/.dual_codex
+/.dual-codex-task-*.md
 .playwright-cli
 **/.playwright-cli
 *.log

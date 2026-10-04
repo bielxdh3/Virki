@@ -22,11 +22,13 @@ type AccountFixture = {
   email: string;
   password: string;
   deviceToken: string;
+  administrativePassword?: string;
 };
 
 type FixtureState = {
   user: AccountFixture;
   admin: AccountFixture;
+  recoveryReviewer: AccountFixture;
   projectName: string;
   projectLaunchUrl: string;
   projectSlug: string;
@@ -84,6 +86,13 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     password: randomBytes(32).toString("base64url"),
     deviceToken: randomBytes(32).toString("base64url")
   };
+  const reviewerAdministrativePassword = randomBytes(32).toString("base64url");
+  const recoveryReviewer: Omit<AccountFixture, "id"> = {
+    email: `${runId}.recovery-reviewer@e2e.invalid`,
+    password: randomBytes(32).toString("base64url"),
+    deviceToken: randomBytes(32).toString("base64url"),
+    administrativePassword: reviewerAdministrativePassword
+  };
 
   let temporaryDirectory: string | undefined;
   let fixtureFile: string | undefined;
@@ -95,9 +104,11 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     fixtureFile = join(temporaryDirectory, "fixture.json");
     await restrictTemporaryDirectory(temporaryDirectory);
 
-    const [userPasswordHash, adminPasswordHash] = await Promise.all([
+    const [userPasswordHash, adminPasswordHash, reviewerPasswordHash, reviewerAdministrativePasswordHash] = await Promise.all([
       hashPassword(user.password),
-      hashPassword(admin.password)
+      hashPassword(admin.password),
+      hashPassword(recoveryReviewer.password),
+      hashPassword(reviewerAdministrativePassword)
     ]);
     const now = new Date();
     const rememberedUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000);
@@ -145,6 +156,22 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
           emailVerifiedAt: now
         },
         select: { id: true }
+      });
+      const recoveryReviewerRecord = await transaction.user.create({
+        data: {
+          email: recoveryReviewer.email,
+          emailNormalized: recoveryReviewer.email,
+          displayName: "E2E Recovery Reviewer",
+          passwordHash: reviewerPasswordHash,
+          role: "ADMIN",
+          isActive: true,
+          accountStatus: "ACTIVE",
+          emailVerifiedAt: now
+        },
+        select: { id: true }
+      });
+      await transaction.administrativeCredential.create({
+        data: { userId: recoveryReviewerRecord.id, passwordHash: reviewerAdministrativePasswordHash, status: "ACTIVE" }
       });
       const connection = await transaction.projectConnection.create({
         data: {
@@ -195,13 +222,15 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
       await transaction.trustedDevice.createMany({
         data: [
           { userId: userRecord.id, deviceIdHash: hashDeviceToken(user.deviceToken), rememberedUntil, strongVerifiedAt: now },
-          { userId: adminRecord.id, deviceIdHash: hashDeviceToken(admin.deviceToken), rememberedUntil, strongVerifiedAt: now }
+          { userId: adminRecord.id, deviceIdHash: hashDeviceToken(admin.deviceToken), rememberedUntil, strongVerifiedAt: now },
+          { userId: recoveryReviewerRecord.id, deviceIdHash: hashDeviceToken(recoveryReviewer.deviceToken), rememberedUntil, strongVerifiedAt: now }
         ]
       });
 
       return {
         userId: userRecord.id,
         adminId: adminRecord.id,
+        recoveryReviewerId: recoveryReviewerRecord.id,
         projectConnectionId: connection.id,
         ungrantedProjectConnectionId: ungrantedConnection.id,
         disabledProjectConnectionId: disabledConnection.id
@@ -211,6 +240,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     seeded = {
       user: { ...user, id: records.userId },
       admin: { ...admin, id: records.adminId },
+      recoveryReviewer: { ...recoveryReviewer, id: records.recoveryReviewerId },
       projectName,
       projectSlug,
       projectClientId,
@@ -291,7 +321,7 @@ function validateE2eDatabase(databaseUrl = process.env[E2E_DATABASE_ENV]?.trim()
 }
 
 async function removeFixtureRecords(prisma: PrismaClient, fixture: FixtureState): Promise<void> {
-  const userIds = [fixture.user.id, fixture.admin.id];
+  const userIds = [fixture.user.id, fixture.admin.id, fixture.recoveryReviewer.id];
   await prisma.$transaction(async (transaction) => {
     await transaction.oidcArtifact.deleteMany({
       where: {
@@ -304,6 +334,7 @@ async function removeFixtureRecords(prisma: PrismaClient, fixture: FixtureState)
     await transaction.auditLog.deleteMany({ where: { actorUserId: { in: userIds } } });
     await transaction.user.deleteMany({ where: { id: fixture.user.id, email: fixture.user.email, role: "USER" } });
     await transaction.user.deleteMany({ where: { id: fixture.admin.id, email: fixture.admin.email, role: "ADMIN" } });
+    await transaction.user.deleteMany({ where: { id: fixture.recoveryReviewer.id, email: fixture.recoveryReviewer.email, role: "ADMIN" } });
     await transaction.projectConnection.deleteMany({
       where: {
         OR: [

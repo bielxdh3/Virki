@@ -91,7 +91,7 @@ async function requireAccountMutation(formData: FormData, source: string) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   if (!hasSameOrigin(requestHeaders) || surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) redirect("/login");
-  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME)).valid) redirect("/login");
+  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "account-security" }).valid) redirect("/login");
   const session = await getCurrentSession();
   if (!session) redirect("/login");
   if ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) redirect("/login");

@@ -16,10 +16,17 @@ export async function requireAdminMutation(formData: FormData, source: string): 
   if (!isAdminRequestAllowed(surface, accessValid)) forbidden();
   if (!hasSameOrigin(requestHeaders)) forbidden();
   const csrf = formData.get(CSRF_FORM_FIELD_NAME);
-  if (typeof csrf !== "string" || !validateCsrfToken(csrf).valid) forbidden();
+  if (typeof csrf !== "string" || !validateCsrfToken(csrf, { scope: getAdminCsrfScope(source) }).valid) forbidden();
   const session = await getCurrentSession();
   if (!session || !isAdminRole(session.user.role)) forbidden();
   return session as AdminSession;
+}
+
+function getAdminCsrfScope(source: string): string {
+  if (source.startsWith("admin-account-")) return "admin-accounts";
+  if (source.startsWith("admin-project-access-")) return "admin-access";
+  if (source.startsWith("admin-project-connection-")) return "admin-connections";
+  return "admin-security";
 }
 
 export function readFormString(formData: FormData, key: string): string {

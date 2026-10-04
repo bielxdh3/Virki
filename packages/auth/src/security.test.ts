@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createTotpSecret,
+  canApproveAccountRecovery,
   decryptTotpSecret,
   encryptTotpSecret,
   getApprovedAccountRecoveryExpiry,
@@ -9,6 +10,9 @@ import {
   hashDeviceToken,
   hashRecoveryCode,
   hashSecurityCode,
+  isAccountRecoveryEligible,
+  isPublicAccountRecoveryEligible,
+  lockActiveLoginAccountInTransaction,
   lockActiveRecoveryAccountInTransaction,
   lockAndExpireSiblingAccountRecoveriesInTransaction,
   revokeUserAuthenticationProofsInTransaction,
@@ -48,8 +52,33 @@ test("administrator recovery queue excludes requests at or past expiry", () => {
   assert.deepEqual(getPendingAccountRecoveryQueueWhere(now), {
     status: "PENDING",
     emailVerifiedAt: { not: null },
-    expiresAt: { gt: now }
+    expiresAt: { gt: now },
+    user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE" }
   });
+  assert.deepEqual(getPendingAccountRecoveryQueueWhere(now, "admin-1"), {
+    status: "PENDING",
+    emailVerifiedAt: { not: null },
+    expiresAt: { gt: now },
+    user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", id: { not: "admin-1" } }
+  });
+});
+
+test("recovery role policy isolates portal requests and requires a different active Admin to approve", () => {
+  const activeUser = { id: "user-1", role: "USER", isActive: true, accountStatus: "ACTIVE" };
+  const activeAdmin = { id: "admin-1", role: "ADMIN", isActive: true, accountStatus: "ACTIVE" };
+  const reviewer = { id: "admin-2", role: "ADMIN" };
+
+  assert.equal(isPublicAccountRecoveryEligible(activeUser), true);
+  assert.equal(isPublicAccountRecoveryEligible(activeAdmin), false);
+  assert.equal(isAccountRecoveryEligible(activeAdmin, "ADMIN"), true);
+  assert.equal(isAccountRecoveryEligible(activeUser, "ADMIN"), false);
+  assert.equal(isPublicAccountRecoveryEligible({ ...activeUser, isActive: false }), false);
+  assert.equal(isPublicAccountRecoveryEligible({ ...activeUser, accountStatus: "SUSPENDED" }), false);
+  assert.equal(canApproveAccountRecovery(reviewer, activeUser), true);
+  assert.equal(canApproveAccountRecovery(reviewer, activeAdmin), true);
+  assert.equal(canApproveAccountRecovery({ id: activeUser.id, role: "ADMIN" }, activeUser), false);
+  assert.equal(canApproveAccountRecovery({ id: activeAdmin.id, role: "ADMIN" }, activeAdmin), false);
+  assert.equal(canApproveAccountRecovery(reviewer, { ...activeAdmin, isActive: false }), false);
 });
 
 test("approved account recovery gets a fresh completion window", () => {
@@ -70,8 +99,29 @@ test("recovery state transitions serialize on the active account row", async () 
   } as never;
 
   assert.equal(await lockActiveRecoveryAccountInTransaction(transaction, "user-a"), true);
-  assert.match(query, /"isActive" = TRUE[\s\S]*"accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE/u);
-  assert.deepEqual(values, ["user-a"]);
+  assert.match(query, /"role" = \?[\s\S]*"isActive" = TRUE[\s\S]*"accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE/u);
+  assert.deepEqual(values, ["user-a", "USER"]);
+  values = [];
+  await lockActiveRecoveryAccountInTransaction(transaction, "admin-a", "ADMIN");
+  assert.deepEqual(values, ["admin-a", "ADMIN"]);
+});
+
+test("login verification locks the account under the role allowed by its current surface", async () => {
+  let query = "";
+  let values: unknown[] = [];
+  const transaction = {
+    $queryRaw: async (strings: TemplateStringsArray, ...parameters: unknown[]) => {
+      query = strings.join("?");
+      values = parameters;
+      return [{ id: "admin-a" }];
+    }
+  } as never;
+
+  assert.equal(await lockActiveLoginAccountInTransaction(transaction, "admin-a", "ADMIN"), true);
+  assert.match(query, /"role" = \?[\s\S]*"isActive" = TRUE[\s\S]*"accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE/u);
+  assert.deepEqual(values, ["admin-a", "ADMIN"]);
+  assert.equal(await lockActiveLoginAccountInTransaction(transaction, "user-a", "USER"), true);
+  assert.deepEqual(values, ["user-a", "USER"]);
 });
 
 test("recovery completion locks per account and expires every pending or approved sibling", async () => {

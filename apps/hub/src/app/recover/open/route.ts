@@ -8,12 +8,13 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   const surface = getSurface(request.headers);
-  if (surface === "unknown") return new NextResponse("Not found", { status: 404, headers: privateHeaders() });
+  if (surface === "unknown" || (surface === "local" && process.env.NODE_ENV === "production")) return new NextResponse("Not found", { status: 404, headers: privateHeaders() });
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "account-recovery-link"))) return new NextResponse("Forbidden", { status: 403, headers: privateHeaders() });
   const baseUrl = getSurfaceBaseUrl(request.headers, request.url);
   if (!baseUrl) return new NextResponse("Service Unavailable", { status: 503, headers: privateHeaders() });
+  const expectedRole = surface === "hub" ? "ADMIN" : "USER";
   const requestKey = new URL(request.url).searchParams.get("request") ?? "";
-  const recovery = await getAccountRecoveryRequestId(requestKey);
+  const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
   const destination = new URL("/recover", baseUrl);
   if (!recovery) {
     destination.searchParams.set("error", "1");

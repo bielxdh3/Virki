@@ -8,6 +8,7 @@ export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
 export { isTrustedClientAddress } from "./rate-limit-config";
 export {
   createAuditRequestMetadata,
+  formatAuditEmailReference,
   hashAuditEmail,
   hashAuditIdentifier,
   hashAuditUserAgent,

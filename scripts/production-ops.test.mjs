@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -667,4 +668,44 @@ test("a directory-only Git export-ignore attribute blocks transfer and productio
     },
   }), /Production command failed/u);
   assert.equal(productionContact, false);
+});
+
+test("production health checks use validated configured hosts and the configured OIDC issuer", { skip: process.platform === "win32" ? "The local Windows bash launcher has no available WSL distribution; CI runs native Bash." : false }, () => {
+  const validatorStart = serverScript.indexOf("is_valid_dns_hostname() {");
+  const validatorEnd = serverScript.indexOf("\n}\n", validatorStart);
+  const start = serverScript.indexOf("assert_health() {");
+  const end = serverScript.indexOf("\n}\n", start);
+  assert.ok(validatorStart >= 0 && validatorEnd > validatorStart);
+  assert.ok(start >= 0 && end > start);
+  const validator = serverScript.slice(validatorStart, validatorEnd + 2);
+  const health = serverScript.slice(start, end);
+
+  assert.match(health, /is_valid_dns_hostname "\$portal_hostname" && is_valid_dns_hostname "\$hub_hostname"/u);
+  const hostnames = [
+    "portal.biel.dev.br",
+    "preview-1.example.test",
+    "bad..example.com",
+    "-bad.example.com",
+    "bad-.example.com",
+    `${"a".repeat(64)}.example.com`,
+    `${"a.".repeat(126)}aa`,
+    "valid.example.com\r\nInjected: yes",
+  ];
+  const bash = spawnSync("bash", ["-c", `${validator}\nfor hostname in "$@"; do if is_valid_dns_hostname "$hostname"; then printf 'Y\\n'; else printf 'N\\n'; fi; done`, "bielos-hostname-test", ...hostnames], { encoding: "utf8" });
+  assert.equal(bash.status, 0, bash.stderr);
+  assert.deepEqual(bash.stdout.trim().split(/\r?\n/u), ["Y", "Y", "N", "N", "N", "N", "N", "N"]);
+  assert.match(health, /BIELOS_PORTAL_HOSTNAME/u);
+  assert.match(health, /BIELOS_HUB_HOSTNAME/u);
+  assert.match(health, /BIELOS_OIDC_ISSUER/u);
+  assert.match(health, /"https:\/\/\$portal_hostname"/u);
+  assert.match(health, /Host: \$portal_hostname/u);
+  assert.match(health, /Host: \$hub_hostname/u);
+  assert.doesNotMatch(health, /portal\.biel\.dev\.br|hub\.biel\.dev\.br/u);
+});
+
+test("temporary dual-Codex task notes stay out of source and Docker archives", () => {
+  const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
+  const dockerignore = readFileSync(new URL("../.dockerignore", import.meta.url), "utf8");
+  assert.match(gitignore, /^\/\.dual-codex-task-\*\.md$/mu);
+  assert.match(dockerignore, /^\/\.dual-codex-task-\*\.md$/mu);
 });

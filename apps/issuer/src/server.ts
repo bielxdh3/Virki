@@ -3,6 +3,7 @@ import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAtt
 import { prisma } from "@bielos/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
+import { setIssuerSecurityHeaders } from "./http-security";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
@@ -267,6 +268,7 @@ const bindAddress = process.env.BIELOS_OIDC_BIND_ADDRESS ?? "0.0.0.0";
 if (bindAddress !== "0.0.0.0" && bindAddress !== "127.0.0.1") throw new Error("OIDC issuer bind address is invalid.");
 const providerCallback = provider.callback();
 const server = createServer((request, response) => {
+  setIssuerSecurityHeaders(response);
   installAuditResponseGate(response);
   providerCallback(request, response);
 });

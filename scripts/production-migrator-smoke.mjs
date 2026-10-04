@@ -41,8 +41,9 @@ try {
   databaseCreated = true;
   await waitForDatabase();
   const migratorEnv = { ...process.env, DATABASE_URL: databaseUrl };
-  requireDocker(["run", "--rm", "--network", network, "--env", "DATABASE_URL", image, "npm", "run", "prisma:migrate:deploy"], { env: migratorEnv });
-  requireDocker(["run", "--rm", "--network", network, "--env", "DATABASE_URL", image, "npm", "run", "prisma:migrate:status"], { env: migratorEnv });
+  const runtimeSafetyArgs = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m"];
+  requireDocker(["run", ...runtimeSafetyArgs, "--rm", "--network", network, "--env", "DATABASE_URL", image, "npm", "run", "prisma:migrate:deploy"], { env: migratorEnv });
+  requireDocker(["run", ...runtimeSafetyArgs, "--rm", "--network", network, "--env", "DATABASE_URL", image, "npm", "run", "prisma:migrate:status"], { env: migratorEnv });
 } catch {
   failure = true;
 } finally {

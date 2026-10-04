@@ -83,6 +83,9 @@ jobs:
           bash -n scripts/production-server.sh
           node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs
 
+      - name: Read-only backup inventory tests
+        run: npm run test:backup:inventory
+
       - name: Lint
         run: npm run lint
 

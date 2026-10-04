@@ -18,12 +18,16 @@ const hubHost = "hub.biel.dev.br";
 const signingJwks = JSON.stringify({ keys: [createSigningKey()] });
 const cookieKey = randomBytes(32).toString("base64url");
 const adapterKey = randomBytes(32).toString("hex");
+const runtimeSafetyArgs = [
+  "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+  "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
+];
 
 try {
   runDocker(["network", "create", network]);
 
   runDocker([
-    "run", "--detach", "--name", containers.publicSite, "--network", network,
+    "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.publicSite, "--network", network,
     "--publish", "127.0.0.1::3000", "--env", "NODE_ENV=production",
     "--env", `BIELOS_PORTAL_URL=https://${publicHost}`,
     image, "npm", "run", "start", "--workspace", "@bielos/public-site",
@@ -31,7 +35,7 @@ try {
   const publicPort = readLoopbackPort(containers.publicSite, "3000/tcp");
 
   runDocker([
-    "run", "--detach", "--name", containers.issuer, "--network", network,
+    "run", ...runtimeSafetyArgs, "--detach", "--name", containers.issuer, "--network", network,
     "--network-alias", "oidc-issuer", "--env", "NODE_ENV=production",
     "--env", "OIDC_ISSUER_PORT=3003", "--env", `BIELOS_OIDC_ISSUER=https://${publicHost}`,
     "--env", `BIELOS_OIDC_SIGNING_JWKS=${signingJwks}`,
@@ -43,7 +47,7 @@ try {
   ]);
 
   runDocker([
-    "run", "--detach", "--name", containers.hub, "--network", network,
+    "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.hub, "--network", network,
     "--publish", "127.0.0.1::3001", "--env", "NODE_ENV=production",
     "--env", `BIELOS_HUB_URL=https://${hubHost}`,
     "--env", `BIELOS_PORTAL_URL=https://${publicHost}`,
@@ -52,6 +56,8 @@ try {
     "--env", "BIELOS_OIDC_PROXY_URL=http://oidc-issuer:3003",
     "--env", "DATABASE_URL=postgresql://bielos_app:local-validation-only@database:5432/bielos",
     "--env", `BIELOS_RATE_LIMIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
+    "--env", `BIELOS_AUDIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
+    "--env", `BIELOS_CSRF_SIGNING_KEY=${randomBytes(32).toString("hex")}`,
     "--env", `BIELOS_TOTP_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
     "--env", `BIELOS_EMAIL_OUTBOX_KEY=${randomBytes(32).toString("hex")}`,
     "--env", `BIELOS_OIDC_ADAPTER_KEY=${adapterKey}`,
@@ -62,12 +68,15 @@ try {
   ]);
   const hubPort = readLoopbackPort(containers.hub, "3001/tcp");
 
-  await assertStatus(`http://127.0.0.1:${publicPort}/`, 200);
-  await assertStatus(`http://127.0.0.1:${hubPort}/api/health`, 200);
+  const publicResponse = await assertStatus(`http://127.0.0.1:${publicPort}/`, 200);
+  assertSecurityHeaders(publicResponse.headers);
+  const hubHealth = await assertStatus(`http://127.0.0.1:${hubPort}/api/health`, 200);
+  assertSecurityHeaders(hubHealth.headers);
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost });
   await assertStatus(`http://127.0.0.1:${hubPort}/login`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   const response = await waitForResponse(`http://127.0.0.1:${hubPort}/.well-known/openid-configuration`, { host: publicHost });
+  assertSecurityHeaders(response.headers);
   const discovery = JSON.parse(response.body);
   if (
     discovery.issuer !== `https://${publicHost}` ||
@@ -97,13 +106,27 @@ async function assertStatus(url, expectedStatus, headers = {}) {
     try {
       const response = await requestOnce(url, headers);
       observedStatus = String(response.statusCode);
-      if (response.statusCode === expectedStatus) return;
+      if (response.statusCode === expectedStatus) return response;
     } catch {
       // The container may still be starting.
     }
     await delay(1_000);
   }
   throw new Error(`Runtime smoke endpoint ${new URL(url).pathname} returned ${observedStatus}; expected ${expectedStatus}.`);
+}
+
+function assertSecurityHeaders(headers) {
+  const expected = {
+    "content-security-policy": "frame-ancestors 'none'",
+    "permissions-policy": "camera=(), geolocation=(), microphone=()",
+    "referrer-policy": "no-referrer",
+    "strict-transport-security": "max-age=31536000",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+  };
+  for (const [name, value] of Object.entries(expected)) {
+    if (headers[name] !== value) throw new Error(`Runtime smoke is missing security header ${name}.`);
+  }
 }
 
 async function waitForResponse(url, headers = {}) {

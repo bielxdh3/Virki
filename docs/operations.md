@@ -60,6 +60,7 @@ The deploy command creates a `git archive` from that exact commit with Git repla
 | `npm run preflight:prod` | Verify the native Linux target, stable SSH identity, pre-provisioned marker, remote private files, Docker and Compose. |
 | `npm run deploy:prod` | Stage the accepted source, verify backup and migration on a restore, migrate under maintenance, then health-check the release. |
 | `npm run backup:prod` | Create a custom-format PostgreSQL backup outside releases and test the current committed migrations against its restored copy. |
+| `npm run backup:inventory -- --directory <absolute-path>` | Read-only fixture or approved-directory inventory: list retained files, report the current verification marker, and alert below 15% free space. It cannot delete files; use disposable fixtures for validation. |
 | `npm run start:prod` | Start the accepted release when migration status is current. |
 | `npm run stop:prod` | Stop BielOS services without removing persistent volumes. |
 | `npm run restart:prod` | Recreate services from the accepted preloaded images after migration status passes. |

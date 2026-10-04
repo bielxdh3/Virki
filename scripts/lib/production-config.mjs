@@ -27,7 +27,7 @@ export function isValidProductionConfig(config) {
   if (!config || typeof config !== "object") return false;
   const port = Number(config.port);
   return (
-    typeof config.sshAlias === "string" && /^[A-Za-z0-9_.-]{1,128}$/u.test(config.sshAlias) &&
+    typeof config.sshAlias === "string" && /^(?!-)[A-Za-z0-9_.-]{1,128}$/u.test(config.sshAlias) &&
     typeof config.host === "string" && /^[A-Za-z0-9.-]{1,253}$/u.test(config.host) &&
     Number.isInteger(port) && port >= 1 && port <= 65535 &&
     typeof config.root === "string" &&

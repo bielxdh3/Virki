@@ -12,7 +12,7 @@ export default async function AccountSecurityPage({ searchParams }: { searchPara
   if (!data) redirect("/login");
   const surface = getSurface(requestHeaders);
   if ((surface === "hub" && data.session.user.role !== "ADMIN") || (surface === "portal" && data.session.user.role !== "USER")) redirect("/");
-  const csrf = createCsrfToken();
+  const csrf = createCsrfToken({ scope: "account-security" });
   const totpPending = data.state?.totpStatus === "PENDING";
   return <main className="admin-main">
     <a className="text-link" href={data.session.user.role === "ADMIN" ? "/admin/security" : "/"}>← Voltar</a>

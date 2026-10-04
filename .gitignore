@@ -58,6 +58,7 @@ infra/backups/*
 .bielos-mission-tmp/
 playwright-report/
 /.dual_codex/
+/.dual-codex-task-*.md
 /.playwright-cli/
 /test-results/
 infra/cloudflare/*.json

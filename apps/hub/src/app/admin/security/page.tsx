@@ -15,7 +15,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
     getAdministrativeCredentialState(session.user.id),
     listActiveSecurityElevations(session.user, session.id),
     listPendingAccountRecoveries(session.user),
-    Promise.resolve(createCsrfToken()),
+    Promise.resolve(createCsrfToken({ scope: "admin-security" })),
     prisma.session.count({ where: { userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } } })
   ]);
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
@@ -29,8 +29,8 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
       } : undefined}
     />
     <ElevationControls csrf={csrf} credentialReady={credential?.status === "ACTIVE"} active={activeElevations.map((item) => ({ ...item, expiresAt: item.expiresAt.toISOString() }))} />
-    <section className="surface"><h2>Recuperação de contas ({recoveryRequests.length})</h2><p className="muted">Pedidos expirados ou não verificados não aparecem aqui. Aprovar envia uma autorização de troca de senha ao titular.</p>
-      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.emailNormalized} · E-mail confirmado · expira {request.expiresAt.toLocaleString("pt-BR")}</span></div><form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form></article>)}</div>}
+    <section className="surface"><h2>Recuperação de contas ({recoveryRequests.length})</h2><p className="muted">Pedidos expirados, não verificados ou da sua própria conta não aparecem aqui. Aprovar envia uma autorização de troca de senha ao titular; a aprovação exige elevação ativa.</p>
+      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.role === "ADMIN" ? "Administrador" : "Usuário"} · {request.user.emailNormalized} · E-mail confirmado · expira {request.expiresAt.toLocaleString("pt-BR")}</span></div><form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form></article>)}</div>}
     </section>
     <section className="surface"><h2>Sessões deste admin</h2><p>{activeSessions} sessão(ões) ativa(s), incluindo a sessão atual.</p></section>
   </main>;

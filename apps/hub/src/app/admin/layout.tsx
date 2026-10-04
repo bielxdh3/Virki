@@ -17,7 +17,7 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
   const session = await requireAdminPage();
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
-  const csrf = createCsrfToken();
+  const csrf = createCsrfToken({ scope: "logout" });
   const currentPath = trustedReturnTo(requestHeaders, surface, session.user.role);
   const currentPathname = currentPath?.split("?", 1)[0];
 

@@ -9,7 +9,7 @@ export async function AccessView({ searchParams }: { searchParams: Promise<{ sta
     prisma.user.findMany({ where: { role: "USER", isActive: true, accountStatus: "ACTIVE" }, select: { id: true, email: true, displayName: true }, orderBy: { email: "asc" } }),
     prisma.projectConnection.findMany({ where: { enabled: true }, select: { id: true, name: true, origin: true }, orderBy: { name: "asc" } }),
     prisma.userProjectGrant.findMany({ where: { revokedAt: null }, select: { id: true, createdAt: true, user: { select: { email: true, displayName: true, role: true } }, connection: { select: { name: true, enabled: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200 }),
-    Promise.resolve(createCsrfToken())
+    Promise.resolve(createCsrfToken({ scope: "admin-access" }))
   ]);
 
   return <main className="admin-main" id="admin-content" tabIndex={-1}>

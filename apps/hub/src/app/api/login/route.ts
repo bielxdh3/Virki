@@ -28,7 +28,7 @@ export async function POST(request: Request) {
 
   const formData = await readBoundedFormData(request);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
-  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME));
+  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME), { scope: "login" });
 
   if (!csrfResult.valid) {
     return new NextResponse("Forbidden", { status: 403 });
@@ -84,7 +84,8 @@ export async function POST(request: Request) {
       readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME),
       "pt-BR",
       new Date(),
-      reauth
+      reauth,
+      requiredRole
     );
   } catch {
     await writeAuditLog({

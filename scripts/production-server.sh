@@ -240,17 +240,26 @@ assert_loopback_ports() {
   done
 }
 
+is_valid_dns_hostname() {
+  local hostname=$1
+  [[ "${#hostname}" -le 253 && "$hostname" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]
+}
+
 assert_health() {
-  local public_status hub_status discovery access_status public_binding hub_binding
+  local public_status hub_status discovery access_status public_binding hub_binding portal_hostname hub_hostname oidc_issuer
   public_binding=$(compose port public-site 3000)
   hub_binding=$(compose port hub 3001)
   [[ "$public_binding" =~ ^127\.0\.0\.1:[0-9]+$ && "$hub_binding" =~ ^127\.0\.0\.1:[0-9]+$ ]] || fail 'Production application port binding is not loopback-only.'
+  portal_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.BIELOS_PORTAL_HOSTNAME ?? "")') || fail 'Configured portal host could not be read.'
+  hub_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.BIELOS_HUB_HOSTNAME ?? "")') || fail 'Configured Hub host could not be read.'
+  oidc_issuer=$(compose exec -T oidc-issuer node -e 'process.stdout.write(process.env.BIELOS_OIDC_ISSUER ?? "")') || fail 'Configured OIDC issuer could not be read.'
+  is_valid_dns_hostname "$portal_hostname" && is_valid_dns_hostname "$hub_hostname" && [[ "$oidc_issuer" == "https://$portal_hostname" ]] || fail 'Configured application hosts or OIDC issuer are invalid.'
   public_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://$public_binding") || fail 'Public site health request failed.'
   hub_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://$hub_binding/api/health") || fail 'Hub health request failed.'
-  discovery=$(curl --silent --show-error --max-time 10 --header 'Host: portal.biel.dev.br' "http://$hub_binding/.well-known/openid-configuration") || fail 'Portal OIDC discovery request failed.'
-  access_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' --header 'Host: hub.biel.dev.br' "http://$hub_binding/admin/accounts") || fail 'Hub Access boundary request failed.'
+  discovery=$(curl --silent --show-error --max-time 10 --header "Host: $portal_hostname" "http://$hub_binding/.well-known/openid-configuration") || fail 'Portal OIDC discovery request failed.'
+  access_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' --header "Host: $hub_hostname" "http://$hub_binding/admin/accounts") || fail 'Hub Access boundary request failed.'
   [[ "$public_status" == 200 && "$hub_status" == 200 && "$access_status" == 403 ]] || fail 'Production health or ADMIN boundary check failed.'
-  [[ "$discovery" == *'"issuer":"https://portal.biel.dev.br"'* && "$discovery" == *'"S256"'* && "$discovery" == *'"code"'* ]] || fail 'Portal discovery profile does not match the expected OIDC issuer.'
+  [[ "$discovery" == *"\"issuer\":\"$oidc_issuer\""* && "$discovery" == *'"S256"'* && "$discovery" == *'"code"'* ]] || fail 'Portal discovery profile does not match the expected OIDC issuer.'
   printf 'Public site, hub health, portal OIDC discovery, and unauthenticated Hub denial are healthy.\n'
 }
 
