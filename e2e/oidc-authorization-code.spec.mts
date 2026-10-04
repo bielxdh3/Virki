@@ -99,6 +99,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const authorizationPath = issuerEndpointPath(discovery.authorization_endpoint, "/auth");
     const tokenPath = issuerEndpointPath(discovery.token_endpoint, "/token");
     const jwksPath = issuerEndpointPath(discovery.jwks_uri, "/jwks");
+    const userinfoPath = issuerEndpointPath(discovery.userinfo_endpoint, "/me");
     const makeAuthorizationUrl = (challenge: string, requestState: string, requestNonce: string) => {
       const url = new URL(authorizationPath, portalUrl);
       url.search = new URLSearchParams({
@@ -171,6 +172,8 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const tokenSet = parseJsonObject(tokenResponse.body, "OIDC token response is invalid.");
     const idToken = readString(tokenSet.id_token);
     if (!idToken) throw new Error("OIDC token response did not contain an ID token.");
+    const accessToken = readString(tokenSet.access_token);
+    if (!accessToken) throw new Error("OIDC token response did not contain an access token.");
     const [headerPart, claimsPart, signaturePart, extraPart] = idToken.split(".");
     if (!headerPart || !claimsPart || !signaturePart || extraPart !== undefined) throw new Error("OIDC ID token is malformed.");
     const header = parseJwtSegment(headerPart);
@@ -197,9 +200,17 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     expect(claims.sub === fixture.user.id).toBe(true);
     expect(audience.includes(fixture.oidc.clientId)).toBe(true);
     expect(claims.nonce === nonce).toBe(true);
-    expect(claims.email === fixture.user.email).toBe(true);
-    expect(claims.email_verified === true).toBe(true);
     expect(typeof claims.exp === "number" && claims.exp > Math.floor(Date.now() / 1_000)).toBe(true);
+
+    const userinfoResponse = await requestHub(userinfoPath, {
+      ca: caCertificate,
+      headers: { authorization: `Bearer ${accessToken}` }
+    });
+    expect(userinfoResponse.status).toBe(200);
+    const userinfo = parseJsonObject(userinfoResponse.body, "OIDC UserInfo response is invalid.");
+    expect(userinfo.sub === fixture.user.id).toBe(true);
+    expect(userinfo.email === fixture.user.email).toBe(true);
+    expect(userinfo.email_verified === true).toBe(true);
 
     const replayResponse = await requestHub(tokenPath, {
       ca: caCertificate,

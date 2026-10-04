@@ -184,9 +184,12 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await activeEditDetails.getByText("Editar configuração", { exact: true }).click();
     const activeNameInput = activeEditDetails.locator('input[name="name"]');
     const originInput = activeEditDetails.locator('input[name="origin"]');
+    const activeRedirectUrisInput = activeEditDetails.locator('textarea[name="redirectUris"]');
     const saveButton = activeEditDetails.getByRole("button", { name: "Salvar configuração", exact: true });
 
     await originInput.fill("http://project.e2e.invalid");
+    await activeRedirectUrisInput.fill("https://project.e2e.invalid/callback");
+    expect(await originInput.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(true);
     const formIsNativelyValid = await activeEditDetails.locator("form").evaluate((form) => (form as HTMLFormElement).checkValidity());
     expect(formIsNativelyValid).toBe(true);
     const originBeforeInvalidSave = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { origin: true } });
@@ -201,6 +204,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(activeEditDetails.getByRole("alert")).toContainText("Não foi possível salvar");
     await expect(activeEditDetails.getByRole("alert")).toContainText("valores enviados foram mantidos");
     await expect(originInput).toHaveValue("http://project.e2e.invalid");
+    await expect(activeRedirectUrisInput).toHaveValue("https://project.e2e.invalid/callback");
     const originAfterInvalidSave = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { origin: true } });
     expect(originAfterInvalidSave?.origin).toBe(originBeforeInvalidSave.origin);
 
