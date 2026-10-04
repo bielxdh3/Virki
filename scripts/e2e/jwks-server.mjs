@@ -4,15 +4,19 @@ import { timingSafeEqual } from "node:crypto";
 const publicKeys = new Map();
 const MAX_BODY_BYTES = 16 * 1024;
 const registrationToken = process.env.BIELOS_E2E_JWKS_REGISTRATION_TOKEN;
+let diagnosticSequence = 0;
 
 if (!registrationToken) throw new Error("E2E JWKS registration token is required.");
 
 const server = createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/cdn-cgi/access/certs") {
+    const keys = [...publicKeys.values()];
+    const userAgent = request.headers["user-agent"];
+    report(`GET source=${safeUserAgent(userAgent)} keys=${describeKeys(keys)}`);
     response.writeHead(200, {
       "Cache-Control": "no-store",
       "Content-Type": "application/json"
-    }).end(JSON.stringify({ keys: [...publicKeys.values()] }));
+    }).end(JSON.stringify({ keys }));
     return;
   }
 
@@ -29,6 +33,7 @@ const server = createServer(async (request, response) => {
         return;
       }
       publicKeys.set(jwk.kid, jwk);
+      report(`REGISTER kid=${safeKid(jwk.kid)} alg=${jwk.alg} kty=${jwk.kty} use=${jwk.use} count=${publicKeys.size}`);
       response.writeHead(204).end();
     } catch {
       response.writeHead(400).end();
@@ -40,6 +45,24 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(3010, "127.0.0.1");
+
+function report(event) {
+  diagnosticSequence += 1;
+  process.stdout.write(`[E2E JWKS seq=${diagnosticSequence} time=${process.hrtime.bigint()}] ${event}\n`);
+}
+
+function safeKid(value) {
+  return typeof value === "string" ? value.replace(/[^A-Za-z0-9._-]/gu, "_").slice(0, 64) : "invalid";
+}
+
+function safeUserAgent(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._/-]{1,80}$/u.test(value) ? value : "unknown";
+}
+
+function describeKeys(keys) {
+  if (keys.length === 0) return "none";
+  return keys.map((key) => `${safeKid(key.kid)}/${key.alg}/${key.kty}/${key.use}`).join(",");
+}
 
 async function readJwk(request) {
   let body = "";

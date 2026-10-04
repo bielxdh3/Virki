@@ -98,7 +98,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await editDetails.getByText("Editar configuração", { exact: true }).click();
     const projectNameInput = editDetails.locator('input[name="name"]');
     const redirectUrisInput = editDetails.locator('textarea[name="redirectUris"]');
-    await projectNameInput.fill("Draft preserved after elevation expires");
+    await projectNameInput.fill("Draft preserved without elevation");
     await redirectUrisInput.fill("https://project.e2e.invalid/callback");
     await editDetails.getByRole("button", { name: "Salvar configuração", exact: true }).click();
     await expect(editDetails).toHaveAttribute("open", "");
@@ -118,7 +118,9 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const administrativePassword = randomBytes(32).toString("base64url");
     await credentialForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await credentialForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
-    const credentialCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email);
+    await expect(credentialForm.getByLabel("Código enviado por e-mail", { exact: true })).toBeVisible();
+    const credentialRequestKey = await credentialForm.locator('input[name="requestKey"]').inputValue();
+    const credentialCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, credentialRequestKey);
     await credentialForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(credentialCode);
     await credentialForm.locator('input[name="newPassword"]').fill(administrativePassword);
     await credentialForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
@@ -130,9 +132,12 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(administrativePassword);
     await elevationForm.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
-    const elevationCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email);
-    await elevationSection.getByLabel("Código", { exact: true }).fill(elevationCode);
-    await elevationSection.getByRole("button", { name: "Ativar elevação", exact: true }).click();
+    const elevationVerificationForm = elevationSection.locator("form").nth(1);
+    await expect(elevationVerificationForm.getByLabel("Código", { exact: true })).toBeVisible();
+    const elevationRequestKey = await elevationVerificationForm.locator('input[name="requestKey"]').inputValue();
+    const elevationCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, elevationRequestKey);
+    await elevationVerificationForm.getByLabel("Código", { exact: true }).fill(elevationCode);
+    await elevationVerificationForm.getByRole("button", { name: "Ativar elevação", exact: true }).click();
     await expect(page).toHaveURL(hubUrl + "/admin/security?status=elevation");
     await expect(elevationSection.locator("article").filter({ hasText: "Gerenciar conexões" })).toBeVisible();
 
@@ -178,6 +183,23 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page).toHaveURL(hubUrl + "/admin/connections?status=updated");
     await expect(page.getByRole("status")).toContainText("Alteração concluída");
     await expect(page.getByText("Draft preserved after authorization rejection", { exact: true })).toBeVisible();
+
+    const expiryProjectRow = page.locator("article").filter({ hasText: "Draft preserved after authorization rejection" });
+    const expiryEditDetails = expiryProjectRow.locator("details").filter({ hasText: "Editar configuração" });
+    await expiryEditDetails.getByText("Editar configuração", { exact: true }).click();
+    const expiryNameInput = expiryEditDetails.locator('input[name="name"]');
+    await expiryNameInput.fill("Draft preserved after elevation expires");
+    const expiredElevation = await prisma.securityElevation.updateMany({
+      where: { requestKey: elevationRequestKey, status: "ACTIVE" },
+      data: { expiresAt: new Date(Date.now() - 1_000) }
+    });
+    expect(expiredElevation.count).toBe(1);
+    await expiryEditDetails.getByRole("button", { name: "Salvar configuração", exact: true }).click();
+    await expect(expiryEditDetails.getByRole("alert")).toContainText("elevação de segurança");
+    await expect(expiryEditDetails.getByRole("alert")).toContainText("valores enviados foram mantidos");
+    await expect(expiryNameInput).toHaveValue("Draft preserved after elevation expires");
+    const unchangedAfterExpiry = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true } });
+    expect(unchangedAfterExpiry?.name).toBe("Draft preserved after authorization rejection");
     expect(hydrationMismatch).toBe(false);
 
     await page.getByRole("link", { name: "Segurança", exact: true }).click();
@@ -235,10 +257,9 @@ function createE2ePrismaClient(): PrismaClient {
   return new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 }
 
-async function readLatestAdminVerificationCode(prisma: PrismaClient, email: string): Promise<string> {
+async function readLatestAdminVerificationCode(prisma: PrismaClient, email: string, requestKey: string): Promise<string> {
   const message = await prisma.emailOutboxMessage.findFirst({
-    where: { recipientEmail: email, kind: "ADMIN_EMAIL_VERIFICATION" },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    where: { idempotencyKey: `admin-elevation:${requestKey}`, recipientEmail: email, kind: "ADMIN_EMAIL_VERIFICATION" },
     select: { payload: true }
   });
   if (!message) throw new Error("E2E admin verification message is unavailable.");
@@ -283,7 +304,7 @@ function isAuthFixture(value: unknown): value is AuthFixture {
     const record = account as Record<string, unknown>;
     return typeof record.email === "string" && typeof record.password === "string" && typeof record.deviceToken === "string";
   };
-  return isAccount(candidate.user) && isAccount(candidate.admin) && typeof candidate.projectName === "string" &&
+  return isAccount(candidate.user) && isAccount(candidate.admin) && typeof candidate.projectConnectionId === "string" && typeof candidate.projectName === "string" &&
     typeof candidate.projectLaunchUrl === "string" && new URL(candidate.projectLaunchUrl).hostname.endsWith(".invalid") &&
     typeof candidate.ungrantedProjectName === "string" && typeof candidate.disabledProjectName === "string";
 }

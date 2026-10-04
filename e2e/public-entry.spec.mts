@@ -58,7 +58,8 @@ for (const viewport of [
 
       expect(Boolean(adminResponse?.request().headers()["cf-access-jwt-assertion"])).toBe(true);
       const accessReason = adminResponse?.headers()["x-bielos-e2e-access-reason"] ?? "not-reported";
-      await expect.soft(adminResponse?.status(), `Cloudflare Access rejected the E2E assertion (${accessReason}).`).toBe(307);
+      const accessKid = adminResponse?.headers()["x-bielos-e2e-access-kid"] ?? "not-reported";
+      await expect.soft(adminResponse?.status(), `Cloudflare Access rejected the E2E assertion (${accessReason}; kid=${accessKid}).`).toBe(307);
       await expect.soft(adminResponse?.headers().location).toBe(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
       await expect.soft(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
       await expect.soft(page.getByRole("heading", { name: "Contas", exact: true })).toHaveCount(0);

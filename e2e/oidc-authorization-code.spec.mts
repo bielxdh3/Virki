@@ -2,6 +2,7 @@ import { createHash, createPublicKey, randomBytes, verify as verifySignature, X5
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest, createServer as createHttpsServer } from "node:https";
+import { TLSSocket } from "node:tls";
 import { DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
 import { PrismaClient } from "@bielos/database";
 import { expect, test, type BrowserContext } from "@playwright/test";
@@ -89,7 +90,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const codeChallenge = createHash("sha256").update(codeVerifier, "ascii").digest("base64url");
     const state = randomOpaqueValue();
     const nonce = randomOpaqueValue();
-    const discoveryResponse = await requestHub("/.well-known/openid-configuration", { ca: caCertificate });
+    const discoveryResponse = await requestHub("/.well-known/openid-configuration", { ca: caCertificate, expectedCertificate: certificate });
     expect(discoveryResponse.status).toBe(200);
     const discovery = parseJsonObject(discoveryResponse.body, "OIDC discovery response is invalid.");
     expect(discovery.issuer === portalUrl).toBe(true);
@@ -246,6 +247,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
 
 function requestHub(path: string, options: {
   ca: Buffer;
+  expectedCertificate?: Buffer;
   method?: "GET" | "POST";
   headers?: Record<string, string>;
   body?: string;
@@ -269,10 +271,26 @@ function requestHub(path: string, options: {
       const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
         ? error.code
         : "NETWORK_ERROR";
-      reject(new Error("OIDC HTTPS request for " + path + " to portal.localhost failed (" + code + ")."));
+      const socket = request.socket instanceof TLSSocket ? request.socket : undefined;
+      const peer = socket?.getPeerCertificate();
+      const peerFingerprint = typeof peer?.fingerprint256 === "string" ? peer.fingerprint256 : "unavailable";
+      const peerSubject = safeCommonName(peer?.subject);
+      const peerIssuer = safeCommonName(peer?.issuer);
+      const expectedFingerprint = options.expectedCertificate ? new X509Certificate(options.expectedCertificate).fingerprint256 : "unavailable";
+      const caFingerprint = new X509Certificate(options.ca).fingerprint256;
+      const authorizationError = socket?.authorizationError ? String(socket.authorizationError).replace(/[^A-Z0-9_-]/giu, "").slice(0, 80) : "none";
+      reject(new Error(`OIDC HTTPS request for ${path} to portal.localhost failed (${code}; peer=${peerFingerprint}; peerSubject=${peerSubject}; peerIssuer=${peerIssuer}; expectedLeaf=${expectedFingerprint}; trustedCA=${caFingerprint}; authorization=${authorizationError}).`));
     });
     request.end(options.body);
   });
+}
+
+function safeCommonName(value: unknown): string {
+  if (!value || typeof value !== "object" || !("CN" in value)) return "unavailable";
+  const commonName = value.CN;
+  const text = Array.isArray(commonName) ? commonName[0] : commonName;
+  if (typeof text !== "string") return "unavailable";
+  return text.replace(/[^\p{L}\p{N} ._-]/gu, "").slice(0, 80) || "unavailable";
 }
 
 async function completePortalLoginIfNeeded(page: import("@playwright/test").Page): Promise<void> {

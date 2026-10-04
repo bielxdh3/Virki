@@ -43,6 +43,8 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
       const headers = new Headers({ "Cache-Control": "no-store" });
       if (env.NODE_ENV === "development" && env.BIELOS_E2E_ACCESS_DIAGNOSTICS === "true" && access.reason) {
         headers.set("x-bielos-e2e-access-reason", access.reason);
+        const kid = readE2eAccessKeyId(request.headers.get("cf-access-jwt-assertion"));
+        if (kid) headers.set("x-bielos-e2e-access-kid", kid);
       }
       return new NextResponse("Forbidden", { status: 403, headers });
     }
@@ -64,6 +66,19 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   const response = NextResponse.next({ request: { headers: forwardedHeaders } });
   response.headers.set("Cache-Control", PROTECTED_CACHE_CONTROL);
   return response;
+}
+
+function readE2eAccessKeyId(token: string | null): string | undefined {
+  const encodedHeader = token?.split(".", 1)[0];
+  if (!encodedHeader) return undefined;
+  try {
+    const base64 = encodedHeader.replace(/-/gu, "+").replace(/_/gu, "/").padEnd(Math.ceil(encodedHeader.length / 4) * 4, "=");
+    const header: unknown = JSON.parse(atob(base64));
+    if (!header || typeof header !== "object" || !("kid" in header) || typeof header.kid !== "string" || !/^[A-Za-z0-9._-]{1,64}$/u.test(header.kid)) return undefined;
+    return header.kid;
+  } catch {
+    return undefined;
+  }
 }
 
 function loginUrl(request: NextRequest, surface: "hub" | "portal" | "local", env: Readonly<Record<string, string | undefined>>, returnTo: string | null) {
