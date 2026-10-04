@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { reuseE2eRuntimeDirectory } from "./runtime-artifacts.mjs";
+import { reuseE2eEmailOutboxKey, reuseE2eRuntimeDirectory } from "./runtime-artifacts.mjs";
 
 test("reuses only a complete parent-created E2E runtime directory", () => {
   const directory = mkdtempSync(join(tmpdir(), "bielos-e2e-tls-test-"));
@@ -27,4 +27,9 @@ test("reuses only a complete parent-created E2E runtime directory", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("does not reuse an ambient email outbox key outside a ready E2E runtime", () => {
+  assert.equal(reuseE2eEmailOutboxKey({ BIELOS_E2E_RUNTIME_READY: "false", BIELOS_EMAIL_OUTBOX_KEY: "ambient-value" }), undefined);
+  assert.equal(reuseE2eEmailOutboxKey({ BIELOS_E2E_RUNTIME_READY: "true", BIELOS_EMAIL_OUTBOX_KEY: "shared-test-value" }), "shared-test-value");
 });

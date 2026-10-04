@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
-import { reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
+import { reuseE2eEmailOutboxKey, reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
 
 // @ts-expect-error This JavaScript safety helper has no declaration file.
 import { CORE_TEST_DATABASE_CONFIRMATION } from "./scripts/core-test-database-safety.mjs";
@@ -35,7 +35,7 @@ const tlsCsrPath = join(tlsDirectory, "server.csr");
 const tlsExtensionsPath = join(tlsDirectory, "server-extensions.cnf");
 const accessSigningKeyPath = join(tlsDirectory, "access-signing-key.json");
 const oidcPrivateConfigPath = join(tlsDirectory, "issuer-config.json");
-const inheritedEmailOutboxKey = process.env.BIELOS_EMAIL_OUTBOX_KEY;
+const inheritedEmailOutboxKey = reuseE2eEmailOutboxKey(process.env);
 if (runtimeReady && (!inheritedEmailOutboxKey || !/^[A-Za-z0-9_-]{43}$/u.test(inheritedEmailOutboxKey) || Buffer.from(inheritedEmailOutboxKey, "base64url").length !== 32)) {
   throw new Error("Inherited E2E outbox key is invalid.");
 }

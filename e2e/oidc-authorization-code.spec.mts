@@ -125,9 +125,9 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     }]);
     const page = await context.newPage();
     await page.goto(makeAuthorizationUrl(codeChallenge, state, nonce).href);
-    await completePortalLoginIfNeeded(page);
+    await completePortalLoginIfNeeded(page, true);
 
-    const callback = await nextCallback();
+    const callback = await waitForAuthorizationCallback(page, callbackUri, nextCallback);
     expect(callback.origin === new URL(callbackUri).origin).toBe(true);
     expect(callback.pathname === "/callback").toBe(true);
     expect(callback.searchParams.getAll("state")).toHaveLength(1);
@@ -209,7 +209,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const rejectedNonce = randomOpaqueValue();
     await page.goto(makeAuthorizationUrl(expectedChallenge, rejectedState, rejectedNonce).href);
     await completePortalLoginIfNeeded(page);
-    const rejectedCallback = await nextCallback();
+    const rejectedCallback = await waitForAuthorizationCallback(page, callbackUri, nextCallback);
     expect(rejectedCallback.searchParams.get("state") === rejectedState).toBe(true);
     const rejectedCode = rejectedCallback.searchParams.get("code");
     if (!rejectedCode) throw new Error("OIDC callback did not contain an authorization code for PKCE rejection.");
@@ -336,12 +336,33 @@ function safeCommonName(value: unknown): string {
   return text.replace(/[^\p{L}\p{N} ._-]/gu, "").slice(0, 80) || "unavailable";
 }
 
-async function completePortalLoginIfNeeded(page: import("@playwright/test").Page): Promise<void> {
+async function completePortalLoginIfNeeded(page: import("@playwright/test").Page, required = false): Promise<void> {
   const emailInput = page.getByLabel("E-mail", { exact: true });
-  if (!(await emailInput.isVisible())) return;
+  if (!required && !(await emailInput.isVisible())) return;
+  await expect(emailInput).toBeVisible({ timeout: 10_000 });
   await emailInput.fill(fixture.user.email);
   await page.getByLabel("Senha", { exact: true }).fill(fixture.user.password);
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
+  await expect(emailInput).toBeHidden({ timeout: 10_000 });
+}
+
+async function waitForAuthorizationCallback(
+  page: import("@playwright/test").Page,
+  callbackUri: string,
+  nextCallback: () => Promise<URL>
+): Promise<URL> {
+  const callbackOrigin = new URL(callbackUri).origin;
+  const callback = nextCallback();
+  try {
+    await page.waitForURL((url) => url.origin === callbackOrigin && url.pathname === "/callback", { timeout: 15_000 });
+  } catch {
+    const pathname = new URL(page.url()).pathname;
+    const pageState = pathname === "/login" ? "login" : pathname.startsWith("/interaction/") ? "interaction" : pathname === "/auth" ? "auth" : "other";
+    const loginFormVisible = await page.getByLabel("E-mail", { exact: true }).isVisible().catch(() => false);
+    const alertCount = await page.getByRole("alert").count().catch(() => 0);
+    throw new Error(`OIDC browser did not reach its callback (pageState=${pageState}; loginFormVisible=${loginFormVisible}; alertCount=${alertCount}).`);
+  }
+  return callback;
 }
 
 async function registerRedirectUri(redirectUri: string): Promise<void> {

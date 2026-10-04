@@ -27,3 +27,7 @@ export function reuseE2eRuntimeDirectory(env = process.env) {
 
   return directory;
 }
+
+export function reuseE2eEmailOutboxKey(env = process.env) {
+  return env.BIELOS_E2E_RUNTIME_READY === "true" ? env.BIELOS_EMAIL_OUTBOX_KEY : undefined;
+}
