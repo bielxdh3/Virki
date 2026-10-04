@@ -14,7 +14,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test:unit": "tsx --test apps/hub/next.config.test.mjs apps/hub/src/lib/admin-policy.test.ts apps/hub/src/lib/connection-policy.test.ts apps/hub/src/lib/surface.test.ts apps/hub/src/lib/login-audit.test.ts apps/hub/src/proxy.test.ts apps/hub/src/lib/admin-page.test.ts apps/hub/src/app/admin/access/access-view.test.tsx apps/hub/src/app/api/logout/route.test.ts packages/auth/src/audit.test.ts packages/auth/src/email.test.ts packages/auth/src/security.test.ts packages/auth/src/administration.test.ts packages/auth/src/cloudflare-access.test.ts packages/auth/src/command-output.test.ts packages/auth/src/rate-limit-config.test.ts packages/auth/src/rate-limit-login.test.ts packages/auth/src/session-cookie.test.ts packages/auth/src/oidc-secrets.test.ts packages/database/src/index.test.ts apps/issuer/src/adapter.test.ts apps/issuer/src/audit-gate.test.ts apps/issuer/src/authorization-policy.test.ts apps/issuer/src/provider-metadata.test.ts scripts/secret-scan.test.mjs scripts/e2e/isolated-service.test.mjs",
     "test:public-site": "tsx --test apps/public-site/src/app/public-surface.test.tsx",
-    "test:e2e": "playwright test --config=playwright.config.ts",
+    "test:e2e": "playwright test --config=playwright.config.mts",
     "test:migration": "node scripts/migration-validation.mjs",
     "test:backup:restore": "node scripts/backup-restore-validation.mjs",
     "test:production:runtime": "node scripts/production-runtime-smoke.mjs",

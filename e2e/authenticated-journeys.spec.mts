@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
-import { addCloudflareAccessHeader } from "../scripts/e2e/access-token";
+import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 const portalUrl = "https://portal.localhost:3001";
 const hubUrl = "https://hub.localhost:3001";

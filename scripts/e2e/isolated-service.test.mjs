@@ -9,7 +9,7 @@ import { buildServiceEnvironment, platformEnvironmentVariableNames } from "./iso
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-test("Playwright CLI loads the E2E setup and OIDC spec through the supported ESM path", () => {
+test("Playwright loads E2E config, setup, and OIDC spec through their ESM entrypoints", () => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "bielos-playwright-loader-"));
   try {
     const configPath = join(temporaryDirectory, "playwright.config.mjs");
@@ -30,13 +30,22 @@ test("Playwright CLI loads the E2E setup and OIDC spec through the supported ESM
     if (process.platform === "win32" && environment.PATH === undefined && process.env.Path) {
       environment.PATH = process.env.Path;
     }
-    const result = spawnSync(process.execPath, [
-      resolve(repositoryRoot, "node_modules/playwright/cli.js"), "test", "--config", configPath
-    ], { cwd: repositoryRoot, env: environment, encoding: "utf8", timeout: 30_000, windowsHide: true });
-    assert.ifError(result.error);
-    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-    assert.equal(result.status, 0, `Playwright could not load the E2E ESM modules.\n${output}`);
-    assert.match(output, /1 skipped/u, "the real OIDC spec was discovered and safely skipped without a fixture");
+    const cliPath = resolve(repositoryRoot, "node_modules/playwright/cli.js");
+    const options = { cwd: repositoryRoot, env: environment, encoding: "utf8", timeout: 30_000, windowsHide: true };
+    const setupResult = spawnSync(process.execPath, [cliPath, "test", "--config", configPath], options);
+    assert.ifError(setupResult.error);
+    const setupOutput = `${setupResult.stdout ?? ""}\n${setupResult.stderr ?? ""}`;
+    assert.equal(setupResult.status, 0, `Playwright could not load the E2E setup modules.\n${setupOutput}`);
+    assert.match(setupOutput, /1 skipped/u, "the real OIDC spec was discovered and safely skipped without a fixture");
+
+    const configPathUnderTest = resolve(repositoryRoot, "playwright.config.mts");
+    const listingResult = spawnSync(process.execPath, [cliPath, "test", "--list", "--config", configPathUnderTest], options);
+    assert.ifError(listingResult.error);
+    const listingOutput = `${listingResult.stdout ?? ""}\n${listingResult.stderr ?? ""}`;
+    assert.equal(listingResult.status, 0, `Playwright could not load the actual ESM config and tests.\n${listingOutput}`);
+    assert.match(listingOutput, /oidc-authorization-code\.spec\.mts/u, "the OIDC ESM spec is discoverable from the real config");
+    assert.match(listingOutput, /authenticated-journeys\.spec\.mts/u, "the authenticated ESM spec is discoverable from the real config");
+    assert.match(listingOutput, /public-entry\.spec\.mts/u, "the public ESM spec is discoverable from the real config");
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { addCloudflareAccessHeader } from "../scripts/e2e/access-token";
+import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 const publicUrl = "http://127.0.0.1:3000";
 const portalUrl = "https://portal.localhost:3001";
