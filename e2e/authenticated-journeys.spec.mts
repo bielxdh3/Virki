@@ -1,8 +1,14 @@
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
+import { decryptEmailPayload } from "@bielos/auth/email";
+import { PrismaClient } from "@bielos/database";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
+
+// @ts-expect-error This JavaScript safety helper has no declaration file.
+import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 
 const portalUrl = "https://portal.localhost:3001";
 const hubUrl = "https://hub.localhost:3001";
@@ -59,13 +65,21 @@ test("USER can sign in and sees only the granted enabled project", async ({ brow
 
 test("ADMIN can sign in to a protected page, navigate, and have the session revoked on logout", async ({ browser }) => {
   const context = await browser.newContext();
+  const prisma = createE2ePrismaClient();
+  let hydrationMismatch = false;
   try {
     await rememberDevice(context, hubUrl, fixture.admin.deviceToken);
     const page = await context.newPage();
+    page.on("console", (message) => {
+      if (/hydration|server-rendered html/iu.test(message.text())) hydrationMismatch = true;
+    });
     await addCloudflareAccessHeader(page);
     await page.goto(`${hubUrl}/admin/accounts`);
     await expect(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
     await signIn(page, fixture.admin);
+    const sessionCookie = (await context.cookies(hubUrl)).find((cookie) => cookie.name === SESSION_COOKIE_NAME);
+    expect(sessionCookie?.value).toBeTruthy();
+    if (!sessionCookie) throw new Error("Authenticated E2E session cookie was not created.");
 
     await expect(page).toHaveURL(`${hubUrl}/admin/accounts`);
     await expect(page.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
@@ -86,8 +100,82 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await projectNameInput.fill("Draft preserved after elevation expires");
     await editDetails.getByRole("button", { name: "Salvar configuração", exact: true }).click();
     await expect(editDetails).toHaveAttribute("open", "");
-    await expect(editDetails.getByRole("alert")).toContainText("valores enviados foram mantidos");
+    const editAlert = editDetails.getByRole("alert");
+    await expect(editAlert).toContainText("elevação de segurança");
+    await expect(editAlert).toContainText("valores enviados foram mantidos");
     await expect(projectNameInput).toHaveValue("Draft preserved after elevation expires");
+
+    await page.getByRole("link", { name: "Segurança", exact: true }).click();
+    await expect(page).toHaveURL(hubUrl + "/admin/security");
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    await assertAdminSkipLink(page);
+
+    const credentialSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Credencial administrativa", exact: true }) });
+    const credentialForm = credentialSection.locator("form").first();
+    const administrativePassword = randomBytes(32).toString("base64url");
+    await credentialForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await credentialForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
+    const credentialCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email);
+    await credentialForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(credentialCode);
+    await credentialForm.locator('input[name="newPassword"]').fill(administrativePassword);
+    await credentialForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
+    await expect(credentialSection.getByRole("heading", { name: /Códigos de recuperação/u })).toBeVisible();
+
+    const elevationSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Elevação temporária", exact: true }) });
+    const elevationForm = elevationSection.locator("form").first();
+    await elevationForm.locator('select[name="scope"]').selectOption("PROJECT_CONNECTION_MANAGE");
+    await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(administrativePassword);
+    await elevationForm.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
+    const elevationCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email);
+    await elevationSection.getByLabel("Código", { exact: true }).fill(elevationCode);
+    await elevationSection.getByRole("button", { name: "Ativar elevação", exact: true }).click();
+    await expect(page).toHaveURL(hubUrl + "/admin/security?status=elevation");
+    await expect(elevationSection.locator("article").filter({ hasText: "Gerenciar conexões" })).toBeVisible();
+
+    await page.getByRole("link", { name: "Conexões", exact: true }).click();
+    await expect(page).toHaveURL(hubUrl + "/admin/connections");
+    const activeProjectRow = page.locator("article").filter({ hasText: fixture.projectName });
+    const activeEditDetails = activeProjectRow.locator("details").filter({ hasText: "Editar configuração" });
+    await activeEditDetails.getByText("Editar configuração", { exact: true }).click();
+    const activeNameInput = activeEditDetails.locator('input[name="name"]');
+    const originInput = activeEditDetails.locator('input[name="origin"]');
+    const saveButton = activeEditDetails.getByRole("button", { name: "Salvar configuração", exact: true });
+
+    await originInput.fill("http://project.e2e.invalid");
+    await saveButton.click();
+    await expect(activeEditDetails.getByRole("alert")).toContainText("Não foi possível salvar");
+    await expect(activeEditDetails.getByRole("alert")).toContainText("valores enviados foram mantidos");
+    await expect(originInput).toHaveValue("http://project.e2e.invalid");
+
+    await originInput.fill("https://project.e2e.invalid");
+    await activeNameInput.fill("Draft preserved after authorization rejection");
+    const csrfField = activeEditDetails.locator('input[name="csrfToken"]');
+    const validCsrf = await csrfField.inputValue();
+    await csrfField.evaluate((element) => { (element as HTMLInputElement).value = "invalid-e2e-csrf"; });
+    await saveButton.click();
+    await expect(activeEditDetails.getByRole("alert")).toContainText("Não foi possível confirmar sua autorização");
+    await expect(activeEditDetails.getByRole("alert")).toContainText("valores enviados foram mantidos");
+    await expect(activeNameInput).toHaveValue("Draft preserved after authorization rejection");
+    await csrfField.evaluate((element, value) => { (element as HTMLInputElement).value = value; }, validCsrf);
+    const unchangedConnection = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true } });
+    expect(unchangedConnection?.name).toBe(fixture.projectName);
+
+    await prisma.projectConnection.update({ where: { id: fixture.projectConnectionId }, data: { name: "Concurrent ADMIN update" } });
+    await saveButton.click();
+    const conflictAlert = activeEditDetails.getByRole("alert");
+    await expect(conflictAlert).toContainText("Outro ADMIN alterou esta conexão");
+    await expect(conflictAlert).toContainText("valores enviados foram mantidos");
+    await expect(activeEditDetails.locator(".conflict-summary")).toContainText("Concurrent ADMIN update");
+    await expect(activeNameInput).toHaveValue("Draft preserved after authorization rejection");
+    await expect(saveButton).toBeDisabled();
+    await activeEditDetails.getByRole("button", { name: "Reaplicar meu rascunho sobre esta versão", exact: true }).click();
+    await expect(saveButton).toBeEnabled();
+    await saveButton.click();
+    await expect(page).toHaveURL(hubUrl + "/admin/connections?status=updated");
+    await expect(page.getByRole("status")).toContainText("Alteração concluída");
+    await expect(page.getByText("Draft preserved after authorization rejection", { exact: true })).toBeVisible();
+    expect(hydrationMismatch).toBe(false);
 
     await page.getByRole("link", { name: "Segurança", exact: true }).click();
     await expect(page).toHaveURL(`${hubUrl}/admin/security`);
@@ -97,10 +185,6 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page).toHaveURL(`${hubUrl}/admin/audit`);
     await expect(page.getByRole("heading", { level: 1, name: "Auditoria", exact: true })).toBeVisible();
     await assertAdminSkipLink(page);
-
-    const sessionCookie = (await context.cookies(hubUrl)).find((cookie) => cookie.name === SESSION_COOKIE_NAME);
-    expect(sessionCookie?.value).toBeTruthy();
-    if (!sessionCookie) throw new Error("Authenticated E2E session cookie was not created.");
 
     const accesslessContext = await browser.newContext();
     try {
@@ -133,9 +217,32 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await page.goto(`${hubUrl}/admin/accounts`);
     await expect(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await prisma.$disconnect();
+    }
   }
 });
+
+function createE2ePrismaClient(): PrismaClient {
+  const databaseUrl = process.env.BIELOS_E2E_DATABASE_URL?.trim();
+  if (!databaseUrl) throw new Error("Authenticated E2E requires the explicit disposable database fixture.");
+  assertDisposableCoreTestDatabase(databaseUrl, process.env);
+  return new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+}
+
+async function readLatestAdminVerificationCode(prisma: PrismaClient, email: string): Promise<string> {
+  const message = await prisma.emailOutboxMessage.findFirst({
+    where: { recipientEmail: email, kind: "ADMIN_EMAIL_VERIFICATION" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { payload: true }
+  });
+  if (!message) throw new Error("E2E admin verification message is unavailable.");
+  const code = decryptEmailPayload(message.payload).code;
+  if (!/^\d{6}$/u.test(code ?? "")) throw new Error("E2E admin verification message is invalid.");
+  return code;
+}
 
 async function rememberDevice(context: BrowserContext, url: string, deviceToken: string): Promise<void> {
   await context.addCookies([{

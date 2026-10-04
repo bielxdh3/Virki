@@ -252,13 +252,19 @@ function requestHub(path: string, options: {
       path,
       method: options.method ?? "GET",
       headers: { ...options.headers, Host: "portal.localhost:3001" },
+      servername: "portal.localhost",
       ca: options.ca
     }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
       response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
     });
-    request.once("error", reject);
+    request.once("error", (error: unknown) => {
+      const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code
+        : "NETWORK_ERROR";
+      reject(new Error("OIDC HTTPS request for " + path + " to portal.localhost failed (" + code + ")."));
+    });
     request.end(options.body);
   });
 }

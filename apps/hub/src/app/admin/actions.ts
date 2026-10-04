@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { hashPassword, normalizeEmail, hashAuditEmail, writeAuditLogInTransaction } from "@bielos/auth";
 import { revokeUserAuthenticationProofsInTransaction } from "@bielos/auth/security";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@bielos/auth/oidc-secrets";
-import { requireSecurityElevation } from "@bielos/auth/administration";
+import { AdministrationMutationError, requireSecurityElevation } from "@bielos/auth/administration";
 import { prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -18,7 +18,7 @@ export type ConnectionActionState = {
 };
 
 export type ConnectionEditActionState =
-  | { status: "idle" | "error" | "invalid" }
+  | { status: "idle" | "error" | "invalid" | "authorization" | "elevation-required" }
   | {
       status: "conflict";
       latest: {
@@ -173,7 +173,13 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
 }
 
 export async function updateProjectConnectionAction(_state: ConnectionEditActionState, formData: FormData): Promise<ConnectionEditActionState> {
-  const actor = await requireAdminMutation(formData, "admin-project-connection-update");
+  let actor: Awaited<ReturnType<typeof requireAdminMutation>>;
+  try {
+    actor = await requireAdminMutation(formData, "admin-project-connection-update");
+  } catch (error) {
+    if (isForbidden(error)) return { status: "authorization" };
+    throw error;
+  }
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     const connectionId = readFormString(formData, "connectionId");
@@ -238,6 +244,7 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
     revalidatePath("/");
     redirect("/admin/connections?status=updated");
   } catch (error) {
+    if (error instanceof AdministrationMutationError) return { status: "elevation-required" };
     if (error instanceof ConnectionInputError) return { status: "invalid" };
     if (isRedirect(error)) throw error;
     return { status: "error" };
@@ -306,4 +313,8 @@ export async function deleteProjectConnectionAction(formData: FormData): Promise
 
 function isRedirect(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "digest" in error && String((error as { digest?: unknown }).digest).startsWith("NEXT_REDIRECT"));
+}
+
+function isForbidden(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "digest" in error && (error as { digest?: unknown }).digest === "NEXT_HTTP_ERROR_FALLBACK;403");
 }

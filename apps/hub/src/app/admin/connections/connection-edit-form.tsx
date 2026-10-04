@@ -17,6 +17,7 @@ type ConnectionEditValues = {
 
 export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: string; csrfFieldName: string; connection: ConnectionEditValues }) {
   const [state, action, pending] = useActionState(updateProjectConnectionAction, initialState);
+  const editDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const reapplyButtonRef = useRef<HTMLButtonElement | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
   const [focusSaveAfterReapply, setFocusSaveAfterReapply] = useState(false);
@@ -33,6 +34,10 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
   const canReapplyDraft = state.status === "conflict" && draft.expectedRevision !== state.latest.configurationRevision;
 
   useEffect(() => {
+    if (state.status !== "idle") editDetailsRef.current?.setAttribute("open", "");
+  }, [state.status]);
+
+  useEffect(() => {
     if (conflictRevision) reapplyButtonRef.current?.focus();
   }, [conflictRevision]);
 
@@ -43,7 +48,7 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
     }
   }, [canReapplyDraft, focusSaveAfterReapply]);
 
-  return <details open={state.status === "error" || state.status === "invalid" || state.status === "conflict"}>
+  return <details ref={editDetailsRef}>
     <summary>Editar configuração</summary>
     <p className="muted">Alterar origem ou redirect URIs encerra fluxos OIDC pendentes. As concessões dos usuários permanecem.</p>
     <form action={action} className="form-stack">
@@ -55,10 +60,12 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
       <label>Origem HTTPS<input name="origin" type="url" required value={draft.origin} onChange={(event) => setDraft((current) => ({ ...current, origin: event.target.value }))} /></label>
       <label>URL de entrada (opcional)<input name="launchUrl" type="url" value={draft.launchUrl} onChange={(event) => setDraft((current) => ({ ...current, launchUrl: event.target.value }))} /></label>
       <label>Redirect URIs exatas<textarea name="redirectUris" required value={draft.redirectUris} onChange={(event) => setDraft((current) => ({ ...current, redirectUris: event.target.value }))} /></label>
-      {state.status === "invalid" && <p className="form-error" role="alert">Não foi possível salvar. Use uma origem HTTPS canônica, uma URL de entrada na mesma origem e de 1 a 10 redirect URIs HTTPS exatas, únicas e sem fragmentos; confira também o nome e o formato do slug. Seu rascunho foi mantido.</p>}
-      {state.status === "error" && <p className="form-error" role="alert">Ocorreu um erro ao salvar a configuração. Confira os dados e tente novamente. Se persistir, consulte outro ADMIN. Seu rascunho foi mantido.</p>}
+      {state.status === "invalid" && <p className="form-error" role="alert">Não foi possível salvar. Use uma origem HTTPS canônica, uma URL de entrada na mesma origem e de 1 a 10 redirect URIs HTTPS exatas, únicas e sem fragmentos; confira também o nome e o formato do slug. Os valores enviados foram mantidos.</p>}
+      {state.status === "authorization" && <p className="form-error" role="alert">Não foi possível confirmar sua autorização para salvar. Atualize a página e autentique-se novamente. Os valores enviados foram mantidos.</p>}
+      {state.status === "elevation-required" && <p className="form-error" role="alert">A elevação de segurança para gerenciar conexões expirou ou não está ativa. Solicite uma nova elevação antes de salvar. Os valores enviados foram mantidos.</p>}
+      {state.status === "error" && <p className="form-error" role="alert">Ocorreu um erro ao salvar a configuração. Confira os dados e tente novamente. Se persistir, consulte outro ADMIN. Os valores enviados foram mantidos.</p>}
       {state.status === "conflict" && <>
-        <p className="form-error" role="alert">Outro ADMIN alterou esta conexão. Seu rascunho continua aberto. Compare os valores atuais abaixo; confirme se quer reaplicar seu rascunho antes de salvar.</p>
+        <p className="form-error" role="alert">Outro ADMIN alterou esta conexão. Os valores enviados foram mantidos. Compare os valores atuais abaixo; confirme se quer reaplicar seu rascunho antes de salvar.</p>
         <section className="conflict-summary" aria-label="Configuração salva atualmente">
           <h3>Valores salvos atualmente</h3>
           <dl>

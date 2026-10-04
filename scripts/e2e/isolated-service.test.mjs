@@ -99,7 +99,8 @@ test("service children receive only their E2E allowlist and required OS paths", 
     CLOUDFLARE_ACCESS_AUDIENCE: "fixture-audience",
     CLOUDFLARE_TEAM_DOMAIN: "http://127.0.0.1:3010",
     BIELOS_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
-    BIELOS_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem"
+    BIELOS_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem",
+    BIELOS_EMAIL_OUTBOX_KEY: "e2e-email-key-sentinel"
   };
 
   const services = [
@@ -111,7 +112,7 @@ test("service children receive only their E2E allowlist and required OS paths", 
         "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_HUB_HOSTNAME", "BIELOS_PORTAL_HOSTNAME",
         "BIELOS_HUB_URL", "BIELOS_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
         "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_OIDC_PROXY_URL", "BIELOS_E2E_TLS_KEY_PATH",
-        "BIELOS_E2E_TLS_CERTIFICATE_PATH"
+        "BIELOS_E2E_TLS_CERTIFICATE_PATH", "BIELOS_EMAIL_OUTBOX_KEY"
       ]
     },
     { name: "issuer", allowed: ["DATABASE_URL", "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"] }

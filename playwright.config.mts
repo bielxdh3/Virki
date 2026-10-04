@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -24,14 +24,20 @@ const e2eDatabaseUrl = process.env.BIELOS_E2E_DATABASE_URL;
 const tlsDirectory = mkdtempSync(join(tmpdir(), "bielos-e2e-tls-"));
 const tlsKeyPath = join(tlsDirectory, "server-key.pem");
 const tlsCertificatePath = join(tlsDirectory, "server-cert.pem");
+const accessSigningKeyPath = join(tlsDirectory, "access-signing-key.json");
 const oidcPrivateConfigPath = join(tlsDirectory, "issuer-config.json");
+const emailOutboxKey = randomBytes(32).toString("base64url");
 
 try {
   restrictTemporaryDirectory(tlsDirectory);
   generateLocalTlsPair(tlsKeyPath, tlsCertificatePath);
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const kid = randomUUID();
+  const publicJwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
+  writeFileSync(accessSigningKeyPath, JSON.stringify({ kid, publicJwk, privateKey: privateKey.export({ format: "pem", type: "pkcs8" }) }), { encoding: "utf8", flag: "wx", mode: 0o600 });
 } catch {
   rmSync(tlsDirectory, { recursive: true, force: true });
-  throw new Error("E2E requires an already-installed OpenSSL or PowerShell certificate API.");
+  throw new Error("E2E requires local TLS and signing key generation support.");
 }
 
 process.once("exit", () => rmSync(tlsDirectory, { recursive: true, force: true }));
@@ -51,6 +57,7 @@ const localOnlyEnv = {
   CLOUDFLARE_TEAM_DOMAIN: accessTeamDomain,
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "",
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
+  BIELOS_EMAIL_OUTBOX_KEY: emailOutboxKey,
   BIELOS_CORE_TEST_DATABASE_CONFIRM: CORE_TEST_DATABASE_CONFIRMATION,
   DATABASE_URL: e2eDatabaseUrl ?? "postgresql://127.0.0.1:1/bielos_e2e_test?connect_timeout=1"
 };
@@ -71,6 +78,8 @@ process.env.BIELOS_E2E_ACCESS_ISSUER = accessTeamDomain;
 process.env.BIELOS_E2E_TLS_KEY_PATH = tlsKeyPath;
 process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
 process.env.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE = oidcPrivateConfigPath;
+process.env.BIELOS_E2E_ACCESS_SIGNING_KEY_FILE = accessSigningKeyPath;
+process.env.BIELOS_EMAIL_OUTBOX_KEY = emailOutboxKey;
 process.env[registrationTokenEnv] = jwksRegistrationToken;
 process.env[registrationTokenInitializedEnv] = "true";
 

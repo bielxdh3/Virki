@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { SESSION_COOKIE_NAME } from "@bielos/auth/constants";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 const publicUrl = "http://127.0.0.1:3000";
@@ -49,9 +50,18 @@ for (const viewport of [
     try {
       const page = await context.newPage();
       await addCloudflareAccessHeader(page);
+      let adminResponse: import("@playwright/test").Response | undefined;
+      page.on("response", (response) => {
+        if (response.url() === `${hubUrl}/admin/accounts` && response.request().method() === "GET") adminResponse = response;
+      });
       await page.goto(`${hubUrl}/admin/accounts`);
 
-      await expect(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+      await expect.soft(adminResponse?.status()).toBe(307);
+      await expect.soft(adminResponse?.headers().location).toBe(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+      await expect.soft(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+      await expect.soft(page.getByRole("heading", { name: "Contas", exact: true })).toHaveCount(0);
+      await expect.soft(page.getByRole("link", { name: "Acessos", exact: true })).toHaveCount(0);
+      expect((await context.cookies(hubUrl)).some((cookie) => cookie.name === SESSION_COOKIE_NAME)).toBe(false);
       await expect(page.getByRole("heading", { level: 1, name: "Entrar", exact: true })).toBeVisible();
       await expect(page.getByLabel("E-mail", { exact: true })).toBeVisible();
       await expect(page.getByLabel("Senha", { exact: true })).toBeVisible();

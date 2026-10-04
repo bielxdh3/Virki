@@ -1,4 +1,5 @@
-import { createSign, generateKeyPairSync, randomUUID, type KeyObject } from "node:crypto";
+import { createPrivateKey, createSign, type KeyObject } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 
 const HUB_URL = "https://hub.localhost:3001";
@@ -46,16 +47,17 @@ async function getRegisteredSigningKey(issuer: string): Promise<RegisteredSignin
 }
 
 async function registerSigningKey(issuer: string): Promise<RegisteredSigningKey> {
-  const kid = randomUUID();
-  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  const publicJwk = {
-    ...publicKey.export({ format: "jwk" }),
-    kid,
-    use: "sig",
-    alg: "RS256"
-  };
-  await registerTestSigningKey(issuer, publicJwk);
-  return { kid, privateKey };
+  const keyFile = process.env.BIELOS_E2E_ACCESS_SIGNING_KEY_FILE;
+  if (!keyFile) throw new Error("Synthetic E2E Cloudflare Access signing key is unavailable.");
+  let key: unknown;
+  try {
+    key = JSON.parse(readFileSync(keyFile, "utf8"));
+  } catch {
+    throw new Error("Synthetic E2E Cloudflare Access signing key is invalid.");
+  }
+  if (!isSigningKey(key)) throw new Error("Synthetic E2E Cloudflare Access signing key is invalid.");
+  await registerTestSigningKey(issuer, key.publicJwk);
+  return { kid: key.kid, privateKey: createPrivateKey(key.privateKey) };
 }
 
 function encode(value: Record<string, string | number>): string {
@@ -75,4 +77,16 @@ async function registerTestSigningKey(issuer: string, jwk: Record<string, unknow
     body: JSON.stringify(jwk)
   });
   if (!response.ok) throw new Error("Synthetic E2E Cloudflare Access key registration failed.");
+}
+
+function isSigningKey(value: unknown): value is { kid: string; publicJwk: Record<string, unknown>; privateKey: string } {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  const publicJwk = candidate.publicJwk;
+  if (!publicJwk || typeof publicJwk !== "object") return false;
+  const jwk = publicJwk as Record<string, unknown>;
+  return typeof candidate.kid === "string" && candidate.kid.length > 0 &&
+    typeof candidate.privateKey === "string" && candidate.privateKey.includes("PRIVATE KEY") &&
+    jwk.kid === candidate.kid && jwk.kty === "RSA" && jwk.alg === "RS256" && jwk.use === "sig" &&
+    typeof jwk.n === "string" && typeof jwk.e === "string";
 }
