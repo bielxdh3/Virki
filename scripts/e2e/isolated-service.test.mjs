@@ -1,17 +1,45 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildServiceEnvironment, platformEnvironmentVariableNames } from "./isolated-service.mjs";
 
-const { transform } = createRequire(import.meta.url)("playwright/lib/common");
+const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-test("Playwright loads E2E global setup with its ESM service imports", async () => {
-  const setupPath = fileURLToPath(new URL("./global-setup.mts", import.meta.url));
-  const setupModule = await transform.requireOrImport(setupPath);
+test("Playwright CLI loads the E2E setup and OIDC spec through the supported ESM path", () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "bielos-playwright-loader-"));
+  try {
+    const configPath = join(temporaryDirectory, "playwright.config.mjs");
+    const config = {
+      globalSetup: resolve(repositoryRoot, "scripts/e2e/global-setup.mts"),
+      testDir: resolve(repositoryRoot, "e2e"),
+      testMatch: "oidc-authorization-code.spec.mts",
+      outputDir: temporaryDirectory,
+      workers: 1,
+      reporter: "line"
+    };
+    writeFileSync(configPath, `export default ${JSON.stringify(config)};\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
 
-  assert.equal(typeof setupModule.default, "function");
+    const platformNames = platformEnvironmentVariableNames[process.platform === "win32" ? "windows" : "posix"];
+    const environment = Object.fromEntries(platformNames
+      .filter((key) => typeof process.env[key] === "string")
+      .map((key) => [key, process.env[key]]));
+    if (process.platform === "win32" && environment.PATH === undefined && process.env.Path) {
+      environment.PATH = process.env.Path;
+    }
+    const result = spawnSync(process.execPath, [
+      resolve(repositoryRoot, "node_modules/playwright/cli.js"), "test", "--config", configPath
+    ], { cwd: repositoryRoot, env: environment, encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.ifError(result.error);
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.equal(result.status, 0, `Playwright could not load the E2E ESM modules.\n${output}`);
+    assert.match(output, /1 skipped/u, "the real OIDC spec was discovered and safely skipped without a fixture");
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("service children receive only their E2E allowlist and required OS paths", () => {
