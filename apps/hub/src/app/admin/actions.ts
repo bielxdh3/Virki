@@ -17,10 +17,21 @@ export type ConnectionActionState = {
   secret?: string;
 };
 
+export type ConnectionEditDraft = {
+  name: string;
+  slug: string;
+  origin: string;
+  launchUrl: string;
+  redirectUris: string;
+  expectedRevision: string;
+};
+
 export type ConnectionEditActionState =
-  | { status: "idle" | "error" | "invalid" | "authorization" | "elevation-required" }
+  | { status: "idle" }
+  | { status: "error" | "invalid" | "authorization" | "elevation-required"; draft: ConnectionEditDraft }
   | {
       status: "conflict";
+      draft: ConnectionEditDraft;
       latest: {
         name: string;
         slug: string;
@@ -173,23 +184,30 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
 }
 
 export async function updateProjectConnectionAction(_state: ConnectionEditActionState, formData: FormData): Promise<ConnectionEditActionState> {
+  const draft = {
+    name: readFormRawString(formData, "name"),
+    slug: readFormRawString(formData, "slug"),
+    origin: readFormRawString(formData, "origin"),
+    launchUrl: readFormRawString(formData, "launchUrl"),
+    redirectUris: readFormRawString(formData, "redirectUris"),
+    expectedRevision: readFormRawString(formData, "expectedRevision")
+  };
   let actor: Awaited<ReturnType<typeof requireAdminMutation>>;
   try {
     actor = await requireAdminMutation(formData, "admin-project-connection-update");
   } catch (error) {
-    if (isForbidden(error)) return { status: "authorization" };
+    if (isForbidden(error)) return { status: "authorization", draft };
     throw error;
   }
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     const connectionId = readFormString(formData, "connectionId");
-    const expectedRevision = readFormString(formData, "expectedRevision");
     const connection = validateProjectConnectionInput({
-      name: readFormString(formData, "name"),
-      slug: readFormString(formData, "slug"),
-      origin: readFormString(formData, "origin"),
-      launchUrl: readFormString(formData, "launchUrl"),
-      redirectUris: readFormString(formData, "redirectUris")
+      name: draft.name,
+      slug: draft.slug,
+      origin: draft.origin,
+      launchUrl: draft.launchUrl,
+      redirectUris: draft.redirectUris
     });
     const result = await prisma.$transaction(async (transaction) => {
       const existing = await transaction.projectConnection.findUnique({
@@ -199,7 +217,7 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
       if (!existing) throw new Error("Connection was not found.");
       const latestRedirectUris = (Array.isArray(existing.redirectUris) ? existing.redirectUris : []).filter((uri): uri is string => typeof uri === "string");
       const latestRevision = projectConnectionConfigurationRevision({ ...existing, redirectUris: latestRedirectUris });
-      if (latestRevision !== expectedRevision) {
+      if (latestRevision !== draft.expectedRevision) {
         return {
           saved: false as const,
           latest: { ...existing, redirectUris: latestRedirectUris, configurationRevision: latestRevision }
@@ -230,6 +248,7 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
     if (!result.saved) {
       return {
         status: "conflict",
+        draft,
         latest: {
           name: result.latest.name,
           slug: result.latest.slug,
@@ -244,10 +263,10 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
     revalidatePath("/");
     redirect("/admin/connections?status=updated");
   } catch (error) {
-    if (error instanceof AdministrationMutationError) return { status: "elevation-required" };
-    if (error instanceof ConnectionInputError) return { status: "invalid" };
+    if (error instanceof AdministrationMutationError) return { status: "elevation-required", draft };
+    if (error instanceof ConnectionInputError) return { status: "invalid", draft };
     if (isRedirect(error)) throw error;
-    return { status: "error" };
+    return { status: "error", draft };
   }
 }
 

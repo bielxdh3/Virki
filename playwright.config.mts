@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -24,13 +24,18 @@ const e2eDatabaseUrl = process.env.BIELOS_E2E_DATABASE_URL;
 const tlsDirectory = mkdtempSync(join(tmpdir(), "bielos-e2e-tls-"));
 const tlsKeyPath = join(tlsDirectory, "server-key.pem");
 const tlsCertificatePath = join(tlsDirectory, "server-cert.pem");
+const tlsCaKeyPath = join(tlsDirectory, "test-ca-key.pem");
+const tlsCaCertificatePath = join(tlsDirectory, "test-ca-cert.pem");
+const tlsCsrPath = join(tlsDirectory, "server.csr");
+const tlsExtensionsPath = join(tlsDirectory, "server-extensions.cnf");
 const accessSigningKeyPath = join(tlsDirectory, "access-signing-key.json");
 const oidcPrivateConfigPath = join(tlsDirectory, "issuer-config.json");
 const emailOutboxKey = randomBytes(32).toString("base64url");
 
 try {
   restrictTemporaryDirectory(tlsDirectory);
-  generateLocalTlsPair(tlsKeyPath, tlsCertificatePath);
+  generateLocalTlsPair(tlsKeyPath, tlsCertificatePath, tlsCaKeyPath, tlsCaCertificatePath, tlsCsrPath, tlsExtensionsPath);
+  assertLocalTlsPair(tlsCertificatePath, tlsCaCertificatePath);
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const kid = randomUUID();
   const publicJwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
@@ -55,6 +60,7 @@ const localOnlyEnv = {
   CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
   CLOUDFLARE_ACCESS_AUDIENCE: accessAudience,
   CLOUDFLARE_TEAM_DOMAIN: accessTeamDomain,
+  BIELOS_E2E_ACCESS_DIAGNOSTICS: "true",
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "",
   BIELOS_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
   BIELOS_EMAIL_OUTBOX_KEY: emailOutboxKey,
@@ -77,6 +83,7 @@ process.env.BIELOS_E2E_ACCESS_AUDIENCE = accessAudience;
 process.env.BIELOS_E2E_ACCESS_ISSUER = accessTeamDomain;
 process.env.BIELOS_E2E_TLS_KEY_PATH = tlsKeyPath;
 process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
+process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH = tlsCaCertificatePath;
 process.env.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE = oidcPrivateConfigPath;
 process.env.BIELOS_E2E_ACCESS_SIGNING_KEY_FILE = accessSigningKeyPath;
 process.env.BIELOS_EMAIL_OUTBOX_KEY = emailOutboxKey;
@@ -144,17 +151,48 @@ function restrictTemporaryDirectory(directory: string): void {
   chmodSync(directory, 0o700);
 }
 
-function generateLocalTlsPair(keyPath: string, certificatePath: string): void {
+function generateLocalTlsPair(keyPath: string, certificatePath: string, caKeyPath: string, caCertificatePath: string, csrPath: string, extensionsPath: string): void {
   const openssl = findExecutable("openssl");
   if (openssl) {
     execFileSync(openssl, [
       "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+      "-keyout", caKeyPath,
+      "-out", caCertificatePath,
+      "-days", "1",
+      "-sha256",
+      "-subj", "/CN=BielOS E2E Root CA",
+      "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+      "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+      "-addext", "subjectKeyIdentifier=hash"
+    ], { stdio: "ignore" });
+    execFileSync(openssl, [
+      "req", "-new", "-newkey", "rsa:2048", "-nodes",
       "-keyout", keyPath,
+      "-out", csrPath,
+      "-sha256",
+      "-subj", "/CN=portal.localhost",
+      "-addext", "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,IP:127.0.0.1"
+    ], { stdio: "ignore" });
+    writeFileSync(extensionsPath, [
+      "[server_cert]",
+      "basicConstraints=critical,CA:FALSE",
+      "keyUsage=critical,digitalSignature,keyEncipherment",
+      "extendedKeyUsage=serverAuth",
+      "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,IP:127.0.0.1",
+      "subjectKeyIdentifier=hash",
+      "authorityKeyIdentifier=keyid,issuer",
+      ""
+    ].join("\n"), { encoding: "ascii", flag: "wx", mode: 0o600 });
+    execFileSync(openssl, [
+      "x509", "-req", "-in", csrPath,
+      "-CA", caCertificatePath,
+      "-CAkey", caKeyPath,
+      "-CAcreateserial",
       "-out", certificatePath,
       "-days", "1",
-      "-subj", "/CN=portal.localhost",
-      "-addext", "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,IP:127.0.0.1",
-      "-addext", "basicConstraints=critical,CA:TRUE"
+      "-sha256",
+      "-extfile", extensionsPath,
+      "-extensions", "server_cert"
     ], { stdio: "ignore" });
     return;
   }
@@ -164,6 +202,11 @@ function generateLocalTlsPair(keyPath: string, certificatePath: string): void {
 
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
+$rootRsa = [System.Security.Cryptography.RSA]::Create(2048)
+$rootRequest = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=BielOS E2E Root CA', $rootRsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$rootRequest.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
+$rootRequest.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign -bor [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::CrlSign, $true))
+$rootCertificate = $rootRequest.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddDays(1))
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=portal.localhost', $rsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $subjectAltNames = [System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
@@ -171,18 +214,40 @@ $subjectAltNames.AddDnsName('portal.localhost')
 $subjectAltNames.AddDnsName('hub.localhost')
 $subjectAltNames.AddIpAddress([System.Net.IPAddress]::Loopback)
 $request.CertificateExtensions.Add($subjectAltNames.Build())
-$request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
-$certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddHours(1))
+$request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
+$request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature -bor [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyEncipherment, $true))
+$serverUsages = [System.Security.Cryptography.OidCollection]::new()
+$null = $serverUsages.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))
+$request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($serverUsages, $true))
+$serial = [byte[]]::new(16)
+$random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$random.GetBytes($serial)
+$serial[0] = $serial[0] -band 0x7f
+$serial[15] = $serial[15] -bor 1
+$signatureGenerator = [System.Security.Cryptography.X509Certificates.X509SignatureGenerator]::CreateForRSA($rootRsa, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$certificate = $request.Create($rootCertificate.SubjectName, $signatureGenerator, [DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddDays(1), $serial)
 [System.IO.File]::WriteAllText($env:BIELOS_E2E_CERT_PATH, $certificate.ExportCertificatePem(), [System.Text.Encoding]::ASCII)
 [System.IO.File]::WriteAllText($env:BIELOS_E2E_KEY_PATH, $rsa.ExportPkcs8PrivateKeyPem(), [System.Text.Encoding]::ASCII)
+[System.IO.File]::WriteAllText($env:BIELOS_E2E_CA_CERT_PATH, $rootCertificate.ExportCertificatePem(), [System.Text.Encoding]::ASCII)
 $certificate.Dispose()
+$rootCertificate.Dispose()
+$rootRsa.Dispose()
+$random.Dispose()
 $rsa.Dispose()
 `;
 
   execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
-    env: { ...process.env, BIELOS_E2E_CERT_PATH: certificatePath, BIELOS_E2E_KEY_PATH: keyPath },
+    env: { ...process.env, BIELOS_E2E_CERT_PATH: certificatePath, BIELOS_E2E_KEY_PATH: keyPath, BIELOS_E2E_CA_CERT_PATH: caCertificatePath },
     stdio: "ignore"
   });
+}
+
+function assertLocalTlsPair(certificatePath: string, caCertificatePath: string): void {
+  const certificate = new X509Certificate(readFileSync(certificatePath));
+  const caCertificate = new X509Certificate(readFileSync(caCertificatePath));
+  if (certificate.ca || !caCertificate.ca || !certificate.verify(caCertificate.publicKey) || !certificate.checkHost("portal.localhost")) {
+    throw new Error("Generated E2E TLS certificate is not a valid server leaf signed by the test CA.");
+  }
 }
 
 function findExecutable(name: string): string | undefined {

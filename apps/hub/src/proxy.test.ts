@@ -39,6 +39,26 @@ test("hub login and admin routes reject unverified Access assertions", async () 
   assert.equal(response.status, 403);
 });
 
+test("E2E Access diagnostics expose only a safe reason in development", async () => {
+  const request = new NextRequest("https://hub.biel.dev.br/admin/accounts", {
+    headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "opaque-for-proxy-layer-only" }
+  });
+  const diagnosticEnv = {
+    ...env,
+    NODE_ENV: "development",
+    CLOUDFLARE_ACCESS_AUDIENCE: "proxy-test-audience",
+    CLOUDFLARE_TEAM_DOMAIN: "https://proxy-test.example.invalid",
+    BIELOS_E2E_ACCESS_DIAGNOSTICS: "true"
+  };
+  const developmentResponse = await evaluateProxyRequest(request, diagnosticEnv);
+  assert.equal(developmentResponse.status, 403);
+  assert.equal(developmentResponse.headers.get("x-bielos-e2e-access-reason"), "invalid-cloudflare-access-jwt");
+
+  const productionResponse = await evaluateProxyRequest(request, { ...diagnosticEnv, NODE_ENV: "production" });
+  assert.equal(productionResponse.status, 403);
+  assert.equal(productionResponse.headers.has("x-bielos-e2e-access-reason"), false);
+});
+
 test("production Hub fails closed when the Access requirement flag is missing or false", async () => {
   for (const accessFlag of [undefined, "false"]) {
     const productionEnv = {

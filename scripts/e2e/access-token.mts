@@ -1,5 +1,7 @@
-import { createPrivateKey, createSign, type KeyObject } from "node:crypto";
+import { createPrivateKey, type KeyObject } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { SignJWT } from "jose";
+import { validateCloudflareAccessJwt } from "@bielos/auth/cloudflare-access";
 import type { Page } from "@playwright/test";
 
 const HUB_URL = "https://hub.localhost:3001";
@@ -27,13 +29,20 @@ async function createCloudflareAccessToken(): Promise<string> {
 
   const { kid, privateKey } = await getRegisteredSigningKey(issuer);
   const issuedAt = Math.floor(Date.now() / 1000);
-  const protectedHeader = encode({ alg: "RS256", typ: "JWT", kid });
-  const payload = encode({ iss: issuer, aud: audience, iat: issuedAt, exp: issuedAt + 60 });
-  const signingInput = `${protectedHeader}.${payload}`;
-  const signer = createSign("RSA-SHA256");
-  signer.update(signingInput);
-  signer.end();
-  return `${signingInput}.${signer.sign(privateKey, "base64url")}`;
+  const token = await new SignJWT({})
+    .setProtectedHeader({ alg: "RS256", typ: "JWT", kid })
+    .setIssuer(issuer)
+    .setAudience(audience)
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(issuedAt + 120)
+    .sign(privateKey);
+  const verification = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), {
+    CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
+    CLOUDFLARE_ACCESS_AUDIENCE: audience,
+    CLOUDFLARE_TEAM_DOMAIN: issuer
+  });
+  if (!verification.allowed) throw new Error(`Synthetic E2E Cloudflare Access JWT did not validate (${verification.reason ?? verification.status}).`);
+  return token;
 }
 
 async function getRegisteredSigningKey(issuer: string): Promise<RegisteredSigningKey> {
@@ -58,10 +67,6 @@ async function registerSigningKey(issuer: string): Promise<RegisteredSigningKey>
   if (!isSigningKey(key)) throw new Error("Synthetic E2E Cloudflare Access signing key is invalid.");
   await registerTestSigningKey(issuer, key.publicJwk);
   return { kid: key.kid, privateKey: createPrivateKey(key.privateKey) };
-}
-
-function encode(value: Record<string, string | number>): string {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 }
 
 async function registerTestSigningKey(issuer: string, jwk: Record<string, unknown>): Promise<void> {

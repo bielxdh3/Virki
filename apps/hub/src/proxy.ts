@@ -39,7 +39,13 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
 
   if (surface === "hub" && pathname !== "/api/health") {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);
-    if (!access.allowed) return new NextResponse("Forbidden", { status: 403, headers: { "Cache-Control": "no-store" } });
+    if (!access.allowed) {
+      const headers = new Headers({ "Cache-Control": "no-store" });
+      if (env.NODE_ENV === "development" && env.BIELOS_E2E_ACCESS_DIAGNOSTICS === "true" && access.reason) {
+        headers.set("x-bielos-e2e-access-reason", access.reason);
+      }
+      return new NextResponse("Forbidden", { status: 403, headers });
+    }
   }
 
   if (isPublicPath(pathname, surface)) return NextResponse.next();

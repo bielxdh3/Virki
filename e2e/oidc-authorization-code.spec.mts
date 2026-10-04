@@ -35,9 +35,14 @@ test.beforeAll(async () => {
 test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and cannot replay the code", async ({ browser }) => {
   const keyPath = process.env.BIELOS_E2E_TLS_KEY_PATH;
   const certificatePath = process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH;
-  if (!keyPath || !certificatePath) throw new Error("OIDC E2E loopback TLS material is unavailable.");
-  const [key, certificate] = await Promise.all([readFile(keyPath), readFile(certificatePath)]);
-  if (!new X509Certificate(certificate).ca) throw new Error("OIDC E2E server certificate is not a certificate authority.");
+  const caCertificatePath = process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH;
+  if (!keyPath || !certificatePath || !caCertificatePath) throw new Error("OIDC E2E loopback TLS material is unavailable.");
+  const [key, certificate, caCertificate] = await Promise.all([readFile(keyPath), readFile(certificatePath), readFile(caCertificatePath)]);
+  const serverCertificate = new X509Certificate(certificate);
+  const testCaCertificate = new X509Certificate(caCertificate);
+  if (serverCertificate.ca || !testCaCertificate.ca || !serverCertificate.verify(testCaCertificate.publicKey) || !serverCertificate.checkHost("portal.localhost")) {
+    throw new Error("OIDC E2E server certificate is not a valid leaf signed by the test CA.");
+  }
   const callbacks: URL[] = [];
   const callbackWaiters: Array<(url: URL) => void> = [];
   const receiveCallback = (url: URL) => {
@@ -84,7 +89,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const codeChallenge = createHash("sha256").update(codeVerifier, "ascii").digest("base64url");
     const state = randomOpaqueValue();
     const nonce = randomOpaqueValue();
-    const discoveryResponse = await requestHub("/.well-known/openid-configuration", { ca: certificate });
+    const discoveryResponse = await requestHub("/.well-known/openid-configuration", { ca: caCertificate });
     expect(discoveryResponse.status).toBe(200);
     const discovery = parseJsonObject(discoveryResponse.body, "OIDC discovery response is invalid.");
     expect(discovery.issuer === portalUrl).toBe(true);
@@ -139,7 +144,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     }).toString();
     const clientAuthorization = `Basic ${Buffer.from(`${fixture.oidc.clientId}:${fixture.oidc.clientSecret}`, "utf8").toString("base64")}`;
     const tokenResponse = await requestHub(tokenPath, {
-      ca: certificate,
+      ca: caCertificate,
       method: "POST",
       headers: {
         authorization: clientAuthorization,
@@ -157,7 +162,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const header = parseJwtSegment(headerPart);
     const claims = parseJwtSegment(claimsPart);
     expect(header.alg === "ES256").toBe(true);
-    const jwksResponse = await requestHub(jwksPath, { ca: certificate });
+    const jwksResponse = await requestHub(jwksPath, { ca: caCertificate });
     expect(jwksResponse.status).toBe(200);
     const jwks = parseJsonObject(jwksResponse.body, "OIDC JWKS response is invalid.");
     if (!Array.isArray(jwks.keys)) throw new Error("OIDC JWKS did not contain signing keys.");
@@ -183,7 +188,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     expect(typeof claims.exp === "number" && claims.exp > Math.floor(Date.now() / 1_000)).toBe(true);
 
     const replayResponse = await requestHub(tokenPath, {
-      ca: certificate,
+      ca: caCertificate,
       method: "POST",
       headers: {
         authorization: clientAuthorization,
@@ -216,7 +221,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       code_verifier: wrongVerifier
     }).toString();
     const wrongVerifierResponse = await requestHub(tokenPath, {
-      ca: certificate,
+      ca: caCertificate,
       method: "POST",
       headers: {
         authorization: clientAuthorization,

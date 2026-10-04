@@ -17,10 +17,10 @@ type ConnectionEditValues = {
 
 export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: string; csrfFieldName: string; connection: ConnectionEditValues }) {
   const [state, action, pending] = useActionState(updateProjectConnectionAction, initialState);
-  const editDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const reapplyButtonRef = useRef<HTMLButtonElement | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
   const [focusSaveAfterReapply, setFocusSaveAfterReapply] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [draft, setDraft] = useState(() => ({
     name: connection.name,
     slug: connection.slug,
@@ -34,8 +34,11 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
   const canReapplyDraft = state.status === "conflict" && draft.expectedRevision !== state.latest.configurationRevision;
 
   useEffect(() => {
-    if (state.status !== "idle") editDetailsRef.current?.setAttribute("open", "");
-  }, [state.status]);
+    if (state.status !== "idle") {
+      setDetailsOpen(true);
+      if ("draft" in state) setDraft(state.draft);
+    }
+  }, [state]);
 
   useEffect(() => {
     if (conflictRevision) reapplyButtonRef.current?.focus();
@@ -48,7 +51,7 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
     }
   }, [canReapplyDraft, focusSaveAfterReapply]);
 
-  return <details ref={editDetailsRef} suppressHydrationWarning>
+  return <details open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
     <summary>Editar configuração</summary>
     <p className="muted">Alterar origem ou redirect URIs encerra fluxos OIDC pendentes. As concessões dos usuários permanecem.</p>
     <form action={action} className="form-stack">
