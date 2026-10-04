@@ -99,6 +99,7 @@ function isPublicPath(pathname: string, surface: "hub" | "portal" | "local"): bo
   ) return true;
   if (surface !== "hub" && (pathname.startsWith("/.well-known/") || pathname.startsWith("/interaction/"))) return true;
   if (surface !== "hub" && pathname.startsWith("/resume/")) return true;
+  if (surface !== "hub" && /^\/auth\/[A-Za-z0-9_-]{8,160}$/u.test(pathname)) return true;
   return surface !== "hub" && OIDC_ROOT_ROUTES.has(pathname);
 }
 

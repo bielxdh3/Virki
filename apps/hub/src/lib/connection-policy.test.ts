@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isExactRedirectUriAllowed, projectConnectionConfigurationRevision, validateProjectConnectionInput, validateProjectLaunchUrl } from "./connection-policy";
+import { ConnectionInputError, isExactRedirectUriAllowed, projectConnectionConfigurationRevision, validateProjectConnectionInput, validateProjectLaunchUrl } from "./connection-policy";
 
 test("connection configuration revision binds each editable field and the connection identity", () => {
   const connection = {
@@ -57,6 +57,7 @@ test("redirect URI matching is exact and does not accept wildcard or origin-only
 });
 
 test("connection validation rejects HTTP, credentials, fragments, and noncanonical URLs", () => {
+  assert.throws(() => validateProjectConnectionInput({ name: "Alpha", slug: "alpha", origin: "http://project.example.invalid", redirectUris: "https://project.example.invalid/callback" }), ConnectionInputError);
   for (const redirectUri of [
     "http://project.example.invalid/callback",
     "https://user:password@project.example.invalid/callback",

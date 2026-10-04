@@ -187,10 +187,22 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const saveButton = activeEditDetails.getByRole("button", { name: "Salvar configuração", exact: true });
 
     await originInput.fill("http://project.e2e.invalid");
+    const formIsNativelyValid = await activeEditDetails.locator("form").evaluate((form) => (form as HTMLFormElement).checkValidity());
+    expect(formIsNativelyValid).toBe(true);
+    const originBeforeInvalidSave = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { origin: true } });
+    if (!originBeforeInvalidSave) throw new Error("E2E project connection disappeared before invalid-origin validation.");
+    const invalidSaveResponse = page.waitForResponse((response) => {
+      const responseUrl = new URL(response.url());
+      return response.request().method() === "POST" && responseUrl.origin === hubUrl && responseUrl.pathname === "/admin/connections";
+    }, { timeout: 10_000 });
     await saveButton.click();
+    expect((await invalidSaveResponse).status()).toBe(200);
+    await expect(activeEditDetails).toHaveAttribute("open", "");
     await expect(activeEditDetails.getByRole("alert")).toContainText("Não foi possível salvar");
     await expect(activeEditDetails.getByRole("alert")).toContainText("valores enviados foram mantidos");
     await expect(originInput).toHaveValue("http://project.e2e.invalid");
+    const originAfterInvalidSave = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { origin: true } });
+    expect(originAfterInvalidSave?.origin).toBe(originBeforeInvalidSave.origin);
 
     await originInput.fill("https://project.e2e.invalid");
     await activeNameInput.fill("Draft preserved after authorization rejection");
@@ -219,6 +231,8 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page).toHaveURL(hubUrl + "/admin/connections?status=updated");
     await expect(page.getByRole("status")).toContainText("Alteração concluída");
     await expect(page.getByText("Draft preserved after authorization rejection", { exact: true })).toBeVisible();
+    const updatedConnection = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true, origin: true } });
+    expect(updatedConnection).toEqual({ name: "Draft preserved after authorization rejection", origin: "https://project.e2e.invalid" });
 
     const expiryProjectRow = page.locator("article").filter({ hasText: "Draft preserved after authorization rejection" });
     const expiryEditDetails = expiryProjectRow.locator("details").filter({ hasText: "Editar configuração" });

@@ -20,7 +20,7 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
   const reapplyButtonRef = useRef<HTMLButtonElement | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
   const [focusSaveAfterReapply, setFocusSaveAfterReapply] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const [draft, setDraft] = useState(() => ({
     name: connection.name,
     slug: connection.slug,
@@ -35,7 +35,7 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
 
   useEffect(() => {
     if (state.status !== "idle") {
-      setDetailsOpen(true);
+      if (detailsRef.current) detailsRef.current.open = true;
       if ("draft" in state) setDraft(state.draft);
     }
   }, [state]);
@@ -51,7 +51,7 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
     }
   }, [canReapplyDraft, focusSaveAfterReapply]);
 
-  return <details open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+  return <details ref={detailsRef}>
     <summary>Editar configuração</summary>
     <p className="muted">Alterar origem ou redirect URIs encerra fluxos OIDC pendentes. As concessões dos usuários permanecem.</p>
     <form action={action} className="form-stack">

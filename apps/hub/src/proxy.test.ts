@@ -13,9 +13,11 @@ test("unknown hosts are denied and the hub requires a valid Access assertion", a
 });
 
 test("portal OIDC endpoints are public to clients while account surfaces still require a session", async () => {
-  for (const path of ["/.well-known/openid-configuration", "/auth", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/interaction/abcdefghijklmnop"]) {
+  for (const path of ["/.well-known/openid-configuration", "/auth", "/auth/abcdefghijklmnop", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/interaction/abcdefghijklmnop"]) {
     assert.equal((await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env)).status, 200, path);
   }
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/auth/short/nested", { headers: { host: "portal.biel.dev.br" } }), env)).status, 307);
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/auth/abcdefghijklmnop", { headers: { host: "hub.biel.dev.br" } }), env)).status, 403);
   const protectedResponse = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/account/security", { headers: { host: "portal.biel.dev.br" } }), env);
   assert.equal(protectedResponse.status, 307);
   assert.equal(protectedResponse.headers.get("location"), "https://portal.biel.dev.br/login?returnTo=%2Faccount%2Fsecurity");

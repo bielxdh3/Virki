@@ -139,6 +139,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     await completePortalLoginIfNeeded(page, true);
 
     const callback = await waitForAuthorizationCallback(page, callbackUri, nextCallback, flowResponses);
+    expect(flowResponses).toContain("GET /auth/[route] 303 -> callback/callback");
     expect(callback.origin === new URL(callbackUri).origin).toBe(true);
     expect(callback.pathname === "/callback").toBe(true);
     expect(callback.searchParams.getAll("state")).toHaveLength(1);
