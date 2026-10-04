@@ -153,7 +153,8 @@ function generateLocalTlsPair(keyPath: string, certificatePath: string): void {
       "-out", certificatePath,
       "-days", "1",
       "-subj", "/CN=portal.localhost",
-      "-addext", "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,IP:127.0.0.1"
+      "-addext", "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,IP:127.0.0.1",
+      "-addext", "basicConstraints=critical,CA:TRUE"
     ], { stdio: "ignore" });
     return;
   }
@@ -170,6 +171,7 @@ $subjectAltNames.AddDnsName('portal.localhost')
 $subjectAltNames.AddDnsName('hub.localhost')
 $subjectAltNames.AddIpAddress([System.Net.IPAddress]::Loopback)
 $request.CertificateExtensions.Add($subjectAltNames.Build())
+$request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
 $certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddHours(1))
 [System.IO.File]::WriteAllText($env:BIELOS_E2E_CERT_PATH, $certificate.ExportCertificatePem(), [System.Text.Encoding]::ASCII)
 [System.IO.File]::WriteAllText($env:BIELOS_E2E_KEY_PATH, $rsa.ExportPkcs8PrivateKeyPem(), [System.Text.Encoding]::ASCII)

@@ -48,7 +48,7 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
     }
   }, [canReapplyDraft, focusSaveAfterReapply]);
 
-  return <details ref={editDetailsRef}>
+  return <details ref={editDetailsRef} suppressHydrationWarning>
     <summary>Editar configuração</summary>
     <p className="muted">Alterar origem ou redirect URIs encerra fluxos OIDC pendentes. As concessões dos usuários permanecem.</p>
     <form action={action} className="form-stack">

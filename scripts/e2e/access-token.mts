@@ -9,7 +9,7 @@ type RegisteredSigningKey = { kid: string; privateKey: KeyObject };
 let registeredSigningKey: Promise<RegisteredSigningKey> | undefined;
 
 export async function addCloudflareAccessHeader(page: Page): Promise<void> {
-  await page.route(`${HUB_URL}/**`, async (route) => {
+  await page.context().route(`${HUB_URL}/**`, async (route) => {
     const token = await createCloudflareAccessToken();
     await route.continue({
       headers: {

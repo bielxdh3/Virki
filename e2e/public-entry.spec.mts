@@ -56,6 +56,7 @@ for (const viewport of [
       });
       await page.goto(`${hubUrl}/admin/accounts`);
 
+      expect(Boolean(adminResponse?.request().headers()["cf-access-jwt-assertion"])).toBe(true);
       await expect.soft(adminResponse?.status()).toBe(307);
       await expect.soft(adminResponse?.headers().location).toBe(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
       await expect.soft(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);

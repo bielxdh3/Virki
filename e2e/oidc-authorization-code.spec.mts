@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, randomBytes, verify as verifySignature, type JsonWebKey as NodeJsonWebKey } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, verify as verifySignature, X509Certificate, type JsonWebKey as NodeJsonWebKey } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest, createServer as createHttpsServer } from "node:https";
@@ -37,6 +37,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
   const certificatePath = process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH;
   if (!keyPath || !certificatePath) throw new Error("OIDC E2E loopback TLS material is unavailable.");
   const [key, certificate] = await Promise.all([readFile(keyPath), readFile(certificatePath)]);
+  if (!new X509Certificate(certificate).ca) throw new Error("OIDC E2E server certificate is not a certificate authority.");
   const callbacks: URL[] = [];
   const callbackWaiters: Array<(url: URL) => void> = [];
   const receiveCallback = (url: URL) => {

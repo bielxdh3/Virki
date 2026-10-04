@@ -97,13 +97,16 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const editDetails = projectRow.locator("details").filter({ hasText: "Editar configuração" });
     await editDetails.getByText("Editar configuração", { exact: true }).click();
     const projectNameInput = editDetails.locator('input[name="name"]');
+    const redirectUrisInput = editDetails.locator('textarea[name="redirectUris"]');
     await projectNameInput.fill("Draft preserved after elevation expires");
+    await redirectUrisInput.fill("https://project.e2e.invalid/callback");
     await editDetails.getByRole("button", { name: "Salvar configuração", exact: true }).click();
     await expect(editDetails).toHaveAttribute("open", "");
     const editAlert = editDetails.getByRole("alert");
     await expect(editAlert).toContainText("elevação de segurança");
     await expect(editAlert).toContainText("valores enviados foram mantidos");
     await expect(projectNameInput).toHaveValue("Draft preserved after elevation expires");
+    await expect(redirectUrisInput).toHaveValue("https://project.e2e.invalid/callback");
 
     await page.getByRole("link", { name: "Segurança", exact: true }).click();
     await expect(page).toHaveURL(hubUrl + "/admin/security");
