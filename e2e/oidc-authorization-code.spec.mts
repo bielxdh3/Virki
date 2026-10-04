@@ -129,7 +129,10 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       const responseUrl = new URL(response.url());
       if (responseUrl.origin !== portalUrl || !["document", "fetch", "xhr"].includes(response.request().resourceType())) return;
       const path = safeOidcPagePath(responseUrl.pathname);
-      flowResponses.push(`${response.request().method()} ${path} ${response.status()}`);
+      const redirect = response.status() >= 300 && response.status() < 400
+        ? safeOidcRedirect(response.headers()["location"], responseUrl, callbackUri)
+        : "";
+      flowResponses.push(`${response.request().method()} ${path} ${response.status()}${redirect}`);
       if (flowResponses.length > 16) flowResponses.shift();
     });
     await page.goto(makeAuthorizationUrl(codeChallenge, state, nonce).href);
@@ -389,11 +392,25 @@ async function waitForAuthorizationCallback(
 function safeOidcPagePath(pathname: string): string {
   if (["/", "/login", "/login/verify", "/account/security", "/auth", "/callback", "/api/login", "/api/login/verify", "/token", "/jwks", "/me", "/session/end"].includes(pathname)) return pathname;
   if (pathname.startsWith("/.well-known/")) return "/.well-known/[route]";
+  if (pathname.startsWith("/_next/")) return "/_next/[asset]";
   if (/^\/(?:interaction|resume)\/[^/]+$/u.test(pathname)) return pathname.startsWith("/interaction/") ? "/interaction/[id]" : "/resume/[id]";
   if (/^\/login\/.+$/u.test(pathname)) return "/login/[route]";
   if (pathname.startsWith("/account/")) return "/account/[route]";
   if (pathname.startsWith("/api/")) return "/api/[route]";
+  const [first] = pathname.split("/").filter(Boolean);
+  if (first && /^[a-z][a-z-]{0,31}$/u.test(first)) return `/${first}/[route]`;
   return "unrecognized";
+}
+
+function safeOidcRedirect(location: string | undefined, responseUrl: URL, callbackUri: string): string {
+  if (!location) return "";
+  try {
+    const target = new URL(location, responseUrl);
+    const targetOrigin = target.origin === portalUrl ? "portal" : target.origin === new URL(callbackUri).origin ? "callback" : "other";
+    return ` -> ${targetOrigin}${safeOidcPagePath(target.pathname)}`;
+  } catch {
+    return " -> invalid";
+  }
 }
 
 function classifyOidcPageContent(value: string): string {

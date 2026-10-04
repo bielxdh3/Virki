@@ -174,7 +174,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const elevationCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, elevationRequestKey);
     await elevationVerificationForm.getByLabel("Código", { exact: true }).fill(elevationCode);
     await elevationVerificationForm.getByRole("button", { name: "Ativar elevação", exact: true }).click();
-    await expect(page).toHaveURL(hubUrl + "/admin/security?status=elevation");
+    await expect(page).toHaveURL(hubUrl + "/admin/security?status=elevation#admin-content");
     await expect(elevationSection.locator("article").filter({ hasText: "Gerenciar conexões" })).toBeVisible();
 
     await page.getByRole("link", { name: "Conexões", exact: true }).click();
