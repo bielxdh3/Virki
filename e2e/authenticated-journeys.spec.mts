@@ -234,7 +234,9 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await saveButton.click();
     await expect(page).toHaveURL(hubUrl + "/admin/connections?status=updated");
     await expect(page.getByRole("status")).toContainText("Alteração concluída");
-    await expect(page.getByText("Draft preserved after authorization rejection", { exact: true })).toBeVisible();
+    const savedProjectRow = page.locator("article.connection-row").filter({ hasText: "Draft preserved after authorization rejection" });
+    await expect(savedProjectRow).toBeVisible();
+    await expect(savedProjectRow.locator("strong")).toContainText("Draft preserved after authorization rejection");
     const updatedConnection = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true, origin: true } });
     expect(updatedConnection).toEqual({ name: "Draft preserved after authorization rejection", origin: "https://project.e2e.invalid" });
 
