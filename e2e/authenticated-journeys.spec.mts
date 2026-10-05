@@ -536,21 +536,24 @@ async function rememberDevice(context: BrowserContext, url: string, deviceToken:
 async function signIn(page: import("@playwright/test").Page, account: AccountFixture): Promise<void> {
   await page.getByLabel("E-mail", { exact: true }).fill(account.email);
   await page.getByLabel("Senha", { exact: true }).fill(account.password);
+  const expectedOrigin = new URL(page.url()).origin;
   const documentOrigin = await page.evaluate(() => window.origin);
   const loginResponsePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === "/api/login" && response.request().method() === "POST"
   );
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
   const loginResponse = await loginResponsePromise;
+  const requestOrigin = loginResponse.request().headers().origin;
   if (loginResponse.status() === 403) {
-    const requestOrigin = loginResponse.request().headers().origin;
-    throw new Error(`E2E login request was denied by a security check (${loginDenialDiagnostic(loginResponse.headers())}; document-origin=${safeOriginKind(documentOrigin, new URL(page.url()).origin)}; request-origin=${safeOriginKind(requestOrigin, new URL(page.url()).origin)}).`);
+    throw new Error(`E2E login request was denied by a security check (${loginDenialDiagnostic(loginResponse.headers())}; document-origin=${safeOriginKind(documentOrigin, expectedOrigin)}; request-origin=${safeOriginKind(requestOrigin, expectedOrigin)}).`);
   }
+  expect(documentOrigin).toBe(expectedOrigin);
+  expect(requestOrigin).toBe(expectedOrigin);
 }
 
 function safeOriginKind(value: string | undefined, expectedOrigin: string): string {
   if (!value) return "missing";
-  if (value === "null") return "opaque";
+  if (value === "null") return "null-origin";
   return value === expectedOrigin ? "same-origin" : "other-origin";
 }
 
@@ -577,7 +580,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "same-origin-missing-host",
     "same-origin-invalid-host",
     "same-origin-malformed-origin",
-    "same-origin-opaque-origin",
+    "same-origin-null-origin",
     "same-origin-comma-in-origin",
     "same-origin-disallowed-protocol",
     "same-origin-authority-mismatch",

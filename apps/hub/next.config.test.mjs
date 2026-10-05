@@ -34,12 +34,12 @@ test("OIDC rewrites default to Compose DNS for builds and allow loopback for dir
     assert.equal(composeRewrite.destination, "http://oidc-issuer:3003/.well-known/:path*");
 
     process.env.NODE_ENV = "production";
-    for (const surfaceConfig of [config, publicConfig]) {
+    for (const [surfaceConfig, expectedReferrerPolicy] of [[config, "strict-origin"], [publicConfig, "no-referrer"]]) {
       const routeHeaders = (await surfaceConfig.headers()).find((route) => route.source === "/:path*").headers;
       const headerMap = Object.fromEntries(routeHeaders.map(({ key, value }) => [key.toLowerCase(), value]));
       assert.equal(headerMap["content-security-policy"], "frame-ancestors 'none'");
       assert.equal(headerMap["permissions-policy"], "camera=(), geolocation=(), microphone=()");
-      assert.equal(headerMap["referrer-policy"], "no-referrer");
+      assert.equal(headerMap["referrer-policy"], expectedReferrerPolicy);
       assert.equal(headerMap["x-content-type-options"], "nosniff");
       assert.equal(headerMap["x-frame-options"], "DENY");
       assert.equal(headerMap["strict-transport-security"], "max-age=31536000");

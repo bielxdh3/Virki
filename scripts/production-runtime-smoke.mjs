@@ -71,12 +71,12 @@ try {
   const publicResponse = await assertStatus(`http://127.0.0.1:${publicPort}/`, 200);
   assertSecurityHeaders(publicResponse.headers);
   const hubHealth = await assertStatus(`http://127.0.0.1:${hubPort}/api/health`, 200);
-  assertSecurityHeaders(hubHealth.headers);
+  assertSecurityHeaders(hubHealth.headers, "strict-origin");
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost });
   await assertStatus(`http://127.0.0.1:${hubPort}/login`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   const response = await waitForResponse(`http://127.0.0.1:${hubPort}/.well-known/openid-configuration`, { host: publicHost });
-  assertSecurityHeaders(response.headers);
+  assertSecurityHeaders(response.headers, "strict-origin");
   const discovery = JSON.parse(response.body);
   if (
     discovery.issuer !== `https://${publicHost}` ||
@@ -115,11 +115,11 @@ async function assertStatus(url, expectedStatus, headers = {}) {
   throw new Error(`Runtime smoke endpoint ${new URL(url).pathname} returned ${observedStatus}; expected ${expectedStatus}.`);
 }
 
-function assertSecurityHeaders(headers) {
+function assertSecurityHeaders(headers, referrerPolicy = "no-referrer") {
   const expected = {
     "content-security-policy": "frame-ancestors 'none'",
     "permissions-policy": "camera=(), geolocation=(), microphone=()",
-    "referrer-policy": "no-referrer",
+    "referrer-policy": referrerPolicy,
     "strict-transport-security": "max-age=31536000",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",

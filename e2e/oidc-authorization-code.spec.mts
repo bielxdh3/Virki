@@ -343,7 +343,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "same-origin-missing-host",
     "same-origin-invalid-host",
     "same-origin-malformed-origin",
-    "same-origin-opaque-origin",
+    "same-origin-null-origin",
     "same-origin-comma-in-origin",
     "same-origin-disallowed-protocol",
     "same-origin-authority-mismatch",
@@ -360,7 +360,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
 
 function safeOriginKind(value: string | undefined, expectedOrigin: string): string {
   if (!value) return "missing";
-  if (value === "null") return "opaque";
+  if (value === "null") return "null-origin";
   return value === expectedOrigin ? "same-origin" : "other-origin";
 }
 
@@ -412,9 +412,20 @@ async function completePortalLoginIfNeeded(page: import("@playwright/test").Page
   const emailInput = page.getByLabel("E-mail", { exact: true });
   if (!required && !(await emailInput.isVisible())) return;
   await expect(emailInput).toBeVisible({ timeout: 10_000 });
+  const documentOrigin = await page.evaluate(() => window.origin);
   await emailInput.fill(fixture.user.email);
   await page.getByLabel("Senha", { exact: true }).fill(fixture.user.password);
+  const loginResponsePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/login" && response.request().method() === "POST"
+  );
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
+  const loginResponse = await loginResponsePromise;
+  const requestOrigin = loginResponse.request().headers().origin;
+  if (loginResponse.status() === 403) {
+    throw new Error(`OIDC login POST was denied (${loginDenialDiagnostic(loginResponse.headers())}; document-origin=${safeOriginKind(documentOrigin, portalUrl)}; request-origin=${safeOriginKind(requestOrigin, portalUrl)}).`);
+  }
+  expect(documentOrigin).toBe(portalUrl);
+  expect(requestOrigin).toBe(portalUrl);
   await expect(emailInput).toBeHidden({ timeout: 10_000 });
 }
 
