@@ -9,6 +9,8 @@ const productionCompose = readFileSync(path.join(repositoryRoot, "infra", "docke
 const developmentCompose = readFileSync(path.join(repositoryRoot, "infra", "docker-compose.yml"), "utf8");
 const cloudflareCompose = readFileSync(path.join(repositoryRoot, "infra", "docker-compose.cloudflare.yml"), "utf8");
 const cloudflareTemplate = readFileSync(path.join(repositoryRoot, "infra", "cloudflare", "config.example.yml"), "utf8");
+const environmentTemplate = readFileSync(path.join(repositoryRoot, ".env.example"), "utf8");
+const databaseRoleSetup = readFileSync(path.join(repositoryRoot, "infra", "postgres-init", "10-bielos-database-roles.sh"), "utf8");
 
 function serviceBlock(compose, service) {
   compose = compose.replace(/\r\n/gu, "\n");
@@ -136,6 +138,46 @@ test("production workers and database retain restart policy without published po
   assert.match(serviceBlock(productionCompose, "postgres"), /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
   assert.match(serviceBlock(cloudflareCompose, "cloudflared"), /cloudflare\/cloudflared:2026\.9\.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c/u);
   assert.match(readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8"), /node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402/u);
+});
+
+test("runtime, migrator, and PostgreSQL bootstrap credentials stay separated", () => {
+  const postgres = serviceBlock(productionCompose, "postgres");
+  const developmentPostgres = serviceBlock(developmentCompose, "postgres");
+  const migrator = serviceBlock(productionCompose, "migrate");
+  const applicationServices = ["hub", "oidc-issuer", "session-cleanup", "email-worker"]
+    .map((service) => serviceBlock(productionCompose, service));
+
+  assert.match(postgres, /POSTGRES_USER:\s*\$\{POSTGRES_USER:-bielos_bootstrap\}/u);
+  assert.match(postgres, /BIELOS_RUNTIME_DB_PASSWORD:\s*\$\{BIELOS_RUNTIME_DB_PASSWORD:\?/u);
+  assert.match(postgres, /BIELOS_MIGRATOR_DB_PASSWORD:\s*\$\{BIELOS_MIGRATOR_DB_PASSWORD:\?/u);
+  assert.doesNotMatch(postgres, /BIELOS_LOCAL_MIGRATOR_CREATEDB/u);
+  assert.match(developmentPostgres, /BIELOS_LOCAL_MIGRATOR_CREATEDB:\s*"true"/u);
+  assert.match(databaseRoleSetup, /case "\$\{BIELOS_LOCAL_MIGRATOR_CREATEDB:-false\}" in\s+false\) ;;\s+true\)[\s\S]*?ALTER ROLE bielos_migrator CREATEDB/u);
+  assert.match(postgres, /\.\/postgres-init\/10-bielos-database-roles\.sh:[^\n]*:ro/u);
+  assert.match(postgres, /pg_isready -h 127\.0\.0\.1/u);
+  assert.match(developmentPostgres, /pg_isready -h 127\.0\.0\.1/u);
+  assert.match(migrator, /MIGRATION_DATABASE_URL:\s*\$\{MIGRATION_DATABASE_URL:\?/u);
+  assert.doesNotMatch(migrator, /^\s+DATABASE_URL:/mu);
+  assert.ok(applicationServices.every((block) => /DATABASE_URL:\s*\$\{DATABASE_URL:\?/u.test(block)));
+  assert.ok(applicationServices.every((block) => !/MIGRATION_DATABASE_URL|POSTGRES_PASSWORD|BIELOS_RUNTIME_DB_PASSWORD|BIELOS_MIGRATOR_DB_PASSWORD/u.test(block)));
+  assert.match(environmentTemplate, /^POSTGRES_USER=bielos_bootstrap$/mu);
+  assert.match(environmentTemplate, /^DATABASE_URL=postgresql:\/\/bielos_runtime:/mu);
+  assert.match(environmentTemplate, /^MIGRATION_DATABASE_URL=postgresql:\/\/bielos_migrator:/mu);
+  assert.match(environmentTemplate, /^BIELOS_RUNTIME_DB_PASSWORD=replace-with-64-hex-character-secret$/mu);
+  assert.match(environmentTemplate, /^BIELOS_MIGRATOR_DB_PASSWORD=replace-with-a-different-64-hex-character-secret$/mu);
+});
+
+test("database CLI routes schema mutations through the migrator identity", () => {
+  const databasePackage = JSON.parse(readFileSync(path.join(repositoryRoot, "packages", "database", "package.json"), "utf8"));
+  const migrationRunner = readFileSync(path.join(repositoryRoot, "packages", "database", "scripts", "prisma-migrate.mjs"), "utf8");
+
+  assert.match(databasePackage.scripts["prisma:migrate"], /scripts\/prisma-migrate\.mjs dev/u);
+  assert.match(databasePackage.scripts["prisma:migrate:deploy"], /scripts\/prisma-migrate\.mjs deploy/u);
+  assert.match(databasePackage.scripts["prisma:migrate:status"], /scripts\/prisma-migrate\.mjs status/u);
+  assert.match(databasePackage.scripts["prisma:push"], /scripts\/prisma-migrate\.mjs push/u);
+  assert.match(migrationRunner, /MIGRATION_DATABASE_URL must use the bielos_migrator database role/u);
+  assert.match(migrationRunner, /decodeURIComponent\(url\.username\) === "bielos_migrator"/u);
+  assert.match(migrationRunner, /env: \{ \.\.\.process\.env, DATABASE_URL: migrationUrl \}/u);
 });
 
 test("production application, maintenance, and migration services run non-root with a read-only root filesystem", () => {

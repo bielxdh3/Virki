@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildServiceEnvironment, platformEnvironmentVariableNames } from "./isolated-service.mjs";
+import { buildServiceEnvironment, getServiceCommand, platformEnvironmentVariableNames } from "./isolated-service.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -48,6 +48,32 @@ test("Playwright loads E2E config, setup, and OIDC spec through their ESM entryp
     assert.match(listingOutput, /public-entry\.spec\.mts/u, "the public ESM spec is discoverable from the real config");
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("Hub Next dev receives the private E2E CA for its server worker", () => {
+  const tlsDirectory = mkdtempSync(join(tmpdir(), "bielos-e2e-next-tls-"));
+  const keyPath = join(tlsDirectory, "server-key.pem");
+  const certificatePath = join(tlsDirectory, "server-cert.pem");
+  const caCertificatePath = join(tlsDirectory, "test-ca-cert.pem");
+  try {
+    for (const path of [keyPath, certificatePath, caCertificatePath]) {
+      writeFileSync(path, "fixture", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    }
+
+    const { args } = getServiceCommand("hub", {
+      BIELOS_E2E_TLS_KEY_PATH: keyPath,
+      BIELOS_E2E_TLS_CERTIFICATE_PATH: certificatePath,
+      NODE_EXTRA_CA_CERTS: caCertificatePath
+    });
+    assert.deepEqual(args.slice(-7), [
+      "--experimental-https",
+      "--experimental-https-key", keyPath,
+      "--experimental-https-cert", certificatePath,
+      "--experimental-https-ca", caCertificatePath
+    ]);
+  } finally {
+    rmSync(tlsDirectory, { recursive: true, force: true });
   }
 });
 

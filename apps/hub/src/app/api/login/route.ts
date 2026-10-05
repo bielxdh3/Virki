@@ -22,16 +22,16 @@ export async function POST(request: Request) {
   const surface = getSurface(request.headers);
   if (surface === "unknown") return new NextResponse("Not found", { status: 404 });
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-login-api"))) {
-    return new NextResponse("Forbidden", { status: 403 });
+    return loginForbiddenResponse("cloudflare-access");
   }
-  if (!hasSameOrigin(request.headers)) return new NextResponse("Forbidden", { status: 403 });
+  if (!hasSameOrigin(request.headers)) return loginForbiddenResponse("same-origin");
 
   const formData = await readBoundedFormData(request);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
   const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME), { scope: "login" });
 
   if (!csrfResult.valid) {
-    return new NextResponse("Forbidden", { status: 403 });
+    return loginForbiddenResponse(`csrf-${csrfResult.reason}`);
   }
 
   const requestedReturnTo = getFormString(formData, "returnTo");
@@ -155,6 +155,14 @@ export async function POST(request: Request) {
   } catch {
     return auditUnavailableResponse();
   }
+}
+
+function loginForbiddenResponse(reason: string): NextResponse {
+  const response = new NextResponse("Forbidden", { status: 403 });
+  if (process.env.NODE_ENV === "development" && process.env.BIELOS_E2E_ACCESS_DIAGNOSTICS === "true") {
+    response.headers.set("x-bielos-e2e-login-reason", reason);
+  }
+  return response;
 }
 
 function auditUnavailableResponse() {

@@ -133,7 +133,10 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       const redirect = response.status() >= 300 && response.status() < 400
         ? safeOidcRedirect(response.headers()["location"], responseUrl, callbackUri)
         : "";
-      flowResponses.push(`${response.request().method()} ${path} ${response.status()}${redirect}`);
+      const loginDenial = responseUrl.pathname === "/api/login" && response.status() === 403
+        ? ` (${loginDenialDiagnostic(response.headers())})`
+        : "";
+      flowResponses.push(`${response.request().method()} ${path} ${response.status()}${redirect}${loginDenial}`);
       if (flowResponses.length > 16) flowResponses.shift();
     });
     await page.goto(makeAuthorizationUrl(codeChallenge, state, nonce).href);
@@ -314,6 +317,34 @@ function requestHub(path: string, options: {
     });
     request.end(options.body);
   });
+}
+
+function loginDenialDiagnostic(headers: Record<string, string>): string {
+  const allowedReasons = new Set([
+    "cloudflare-access",
+    "csrf-expired",
+    "csrf-invalid",
+    "csrf-malformed",
+    "csrf-misconfigured",
+    "csrf-missing",
+    "csrf-wrong-scope",
+    "expired-cloudflare-access-jwt",
+    "inactive-cloudflare-access-jwt",
+    "invalid-cloudflare-access-audience",
+    "invalid-cloudflare-access-config",
+    "invalid-cloudflare-access-issuer",
+    "invalid-cloudflare-access-jwt",
+    "invalid-cloudflare-access-signature",
+    "missing-cloudflare-access-config",
+    "missing-cloudflare-access-jwt",
+    "missing-cloudflare-access-signing-key",
+    "same-origin"
+  ]);
+  const routeReason = headers["x-bielos-e2e-login-reason"];
+  if (routeReason) return `login-route:${allowedReasons.has(routeReason) ? routeReason : "unrecognized"}`;
+  const proxyReason = headers["x-bielos-e2e-access-reason"];
+  if (proxyReason) return `hub-proxy:${allowedReasons.has(proxyReason) ? proxyReason : "unrecognized"}`;
+  return "not-reported";
 }
 
 function safeCertificateChain(value: unknown): string {

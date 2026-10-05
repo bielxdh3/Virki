@@ -40,7 +40,7 @@ readonly maintenance_path="$root/.bielos-maintenance"
 readonly migration_schema='packages/database/prisma/schema.prisma'
 readonly migration_directory='packages/database/prisma/migrations'
 readonly transition_migration_name='20260922090000_total_identity_security_rebaseline'
-readonly migration_status_args=(--profile migration run --rm --no-deps migrate npx prisma migrate status --schema "$migration_schema")
+readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @bielos/database)
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
 readonly state_changing_actions=' install-source cleanup-deploy-staging deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
 readonly -a legacy_transition_migrations=(
@@ -270,7 +270,14 @@ database_query() {
 
 clone_query() {
   local container=$1 sql=$2
-  docker exec -i "$container" psql -U bielos_restore -d bielos_restore -At -v ON_ERROR_STOP=1 <<< "$sql"
+  docker exec -i "$container" psql -U bielos_runtime -d bielos_restore -At -v ON_ERROR_STOP=1 <<< "$sql"
+}
+
+clone_migration_query() {
+  local container=$1 sql=$2
+  [[ "${migrator_password:-}" =~ ^[a-f0-9]{64}$ ]] || fail 'Disposable migration role credential is unavailable.'
+  local -x PGPASSWORD="$migrator_password"
+  docker exec -i --env PGPASSWORD "$container" psql --host 127.0.0.1 -U bielos_migrator -d bielos_restore -At -v ON_ERROR_STOP=1 <<< "$sql"
 }
 
 current_migration_names() {
@@ -382,13 +389,17 @@ migration_history_is_current_prefix() {
 }
 
 run_migration_prisma() {
-  local database_url=$1 override=$2 migration_container=$3 isolation_id=$4
-  shift 4
-  if [[ -n "$override" ]]; then
-    local -x DATABASE_URL="$database_url"
-    compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate npx prisma "$@"
+  local database_url=$1 override=$2 migration_container=$3 isolation_id=$4 operation=$5
+  [[ "$operation" == resolve-baseline || "$operation" == verify-schema ]] || fail 'Migration administrative action is not allowlisted.'
+  if [[ -n "$database_url" ]]; then
+    local -x MIGRATION_DATABASE_URL="$database_url"
   else
-    compose --profile migration run --rm --no-deps migrate npx prisma "$@"
+    unset MIGRATION_DATABASE_URL
+  fi
+  if [[ -n "$override" ]]; then
+    compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate npm run "prisma:migrate:$operation" --workspace @bielos/database
+  else
+    compose --profile migration run --rm --no-deps migrate npm run "prisma:migrate:$operation" --workspace @bielos/database
   fi
 }
 
@@ -418,9 +429,9 @@ END
 SQL
 )
   if [[ -n "$container" ]]; then
-    clone_query "$container" "$sql" >/dev/null
+    clone_migration_query "$container" "$sql" >/dev/null
   else
-    database_query "$sql" >/dev/null
+    compose exec -T postgres sh -lc 'PGPASSWORD="$BIELOS_MIGRATOR_DB_PASSWORD" psql --host 127.0.0.1 -U bielos_migrator -d "$POSTGRES_DB" -At -v ON_ERROR_STOP=1' <<< "$sql" >/dev/null
   fi
 }
 
@@ -445,7 +456,7 @@ normalize_migration_history() {
 
   names=$(migration_history_names "$container")
   if [[ "$state" == '15|15|0|0|15|0|1|14|0' && "$names" == "$expected_legacy" ]]; then
-    run_migration_prisma "$database_url" "$override" "$migration_container" "$isolation_id" migrate resolve --applied 0_init --schema "$migration_schema"
+    run_migration_prisma "$database_url" "$override" "$migration_container" "$isolation_id" resolve-baseline
     state=$(migration_history_summary "$container" "$legacy_names_sql" "$allowed_names_sql")
     names=$(migration_history_names "$container")
   fi
@@ -459,7 +470,7 @@ normalize_migration_history() {
 
 verify_migration_schema() {
   local database_url=$1 override=$2 migration_container=$3 isolation_id=$4
-  run_migration_prisma "$database_url" "$override" "$migration_container" "$isolation_id" migrate diff --from-schema-datasource "$migration_schema" --to-schema-datamodel "$migration_schema" --exit-code >/dev/null 2>&1 || fail 'Restored or production database schema does not match the committed Prisma datamodel.'
+  run_migration_prisma "$database_url" "$override" "$migration_container" "$isolation_id" verify-schema >/dev/null 2>&1 || fail 'Restored or production database schema does not match the committed Prisma datamodel.'
 }
 
 identity_snapshot_sql='SELECT count(*) FILTER (WHERE "role"::text = '\''ADMIN'\'')::text || '\''|'\'' || count(*) FILTER (WHERE "role"::text = '\''USER'\'')::text || '\''|'\'' || count(*)::text FROM "User"'
@@ -524,10 +535,10 @@ wait_for_clone() {
 
 run_clone_migrations() {
   local database_url=$1 override=$2 migration_container=$3 isolation_id=$4 database_container=$5
-  local -x DATABASE_URL="$database_url"
+  local -x MIGRATION_DATABASE_URL="$database_url"
   normalize_migration_history "$database_url" "$database_container" "$override" "$migration_container" "$isolation_id"
   compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate
-  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate npx prisma migrate status --schema "$migration_schema"
+  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate npm run prisma:migrate:status --workspace @bielos/database
   verify_migration_schema "$database_url" "$override" "$migration_container" "$isolation_id"
 }
 
@@ -628,7 +639,7 @@ cleanup_failed_backup_verification() {
 }
 
 create_verified_backup() {
-  local stamp isolation_id backup_path partial_backup_path container db_network alias database_url override migration_container password verification_tmp backup_verified=false
+  local stamp isolation_id backup_path partial_backup_path container db_network alias database_url override migration_container bootstrap_password runtime_password migrator_password verification_tmp backup_verified=false
   stamp="$(date -u +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
   isolation_id=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
   [[ "$isolation_id" =~ ^[a-f0-9]{24}$ ]] || fail 'Could not create a unique restore isolation identifier.'
@@ -642,10 +653,13 @@ create_verified_backup() {
   db_network="bielos-restore-net-$isolation_id"
   migration_container="bielos-restore-migrate-$isolation_id"
   override="$temp_dir/restore-$isolation_id.compose.yml"
-  password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
-  [[ "$password" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not create an ephemeral restore database password.'
-  local -x POSTGRES_PASSWORD="$password"
-  database_url="postgresql://bielos_restore:$password@$alias:5432/bielos_restore?schema=public"
+  bootstrap_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  runtime_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  migrator_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  [[ "$bootstrap_password" =~ ^[a-f0-9]{64}$ && "$runtime_password" =~ ^[a-f0-9]{64}$ && "$migrator_password" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not create isolated PostgreSQL role credentials.'
+  [[ "$bootstrap_password" != "$runtime_password" && "$bootstrap_password" != "$migrator_password" && "$runtime_password" != "$migrator_password" ]] || fail 'Isolated PostgreSQL role credentials are not distinct.'
+  local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="$migrator_password"
+  database_url="postgresql://bielos_migrator:$migrator_password@$alias:5432/bielos_restore?schema=public"
   verification_tmp="$verification_path.tmp.$$"
   [[ ! -e "$backup_path" && ! -L "$backup_path" && ! -e "$partial_backup_path" && ! -L "$partial_backup_path" ]] || fail 'A production backup path already exists.'
   rm -f -- "$verification_path" "$verification_tmp"
@@ -667,11 +681,14 @@ create_verified_backup() {
   } > "$override"
   chmod 600 -- "$override"
   docker run --detach --name "$container" --label "bielos.restore.operation=$isolation_id" --network "$db_network" --network-alias "$alias" \
-    --env POSTGRES_DB=bielos_restore --env POSTGRES_USER=bielos_restore --env POSTGRES_PASSWORD \
-    --health-cmd 'pg_isready -U bielos_restore -d bielos_restore' --health-interval 1s --health-timeout 3s --health-retries 60 \
+    --env POSTGRES_DB=bielos_restore --env POSTGRES_USER --env POSTGRES_PASSWORD \
+    --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD \
+    --volume "$source_dir/infra/postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro" \
+    --health-cmd 'pg_isready -h 127.0.0.1 -U bielos_bootstrap -d bielos_restore' --health-interval 1s --health-timeout 3s --health-retries 60 \
     postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 >/dev/null || fail 'Disposable PostgreSQL restore target could not start.'
   wait_for_clone "$container"
-  docker exec --interactive --user postgres "$container" pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges -U bielos_restore -d bielos_restore < "$partial_backup_path" >/dev/null
+  docker exec --interactive --user postgres "$container" pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges -U bielos_bootstrap -d bielos_restore < "$partial_backup_path" >/dev/null
+  docker exec --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD "$container" sh /docker-entrypoint-initdb.d/10-bielos-database-roles.sh || fail 'Restored database role separation could not be applied.'
 
   local before_identity before_recovery after_identity after_recovery
   before_identity=$(identity_snapshot "$container")
@@ -825,6 +842,10 @@ install_source() {
     chmod 600 -- "$stage/.bielos-release"
     mv -- "$stage" "$release"
   fi
+  local role_script="$release/infra/postgres-init/10-bielos-database-roles.sh"
+  [[ -f "$role_script" && ! -L "$role_script" ]] || fail 'PostgreSQL role initializer is missing or unsafe.'
+  chmod 644 -- "$role_script"
+  [[ "$(stat -c '%a' -- "$role_script")" == 644 ]] || fail 'PostgreSQL role initializer is not readable by the database container.'
   rm -f -- "$archive" || fail 'Verified source archive could not be removed after staging.'
   {
     printf 'revision=%s\n' "$revision"

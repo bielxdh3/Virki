@@ -17,6 +17,8 @@ const config = {
 };
 const preflightScript = readFileSync(new URL("./production-preflight.mjs", import.meta.url), "utf8");
 const serverScript = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
+const migrationRunnerSource = readFileSync(new URL("../packages/database/scripts/prisma-migrate.mjs", import.meta.url), "utf8");
+const migrationRunnerPath = fileURLToPath(new URL("../packages/database/scripts/prisma-migrate.mjs", import.meta.url));
 const deploymentScript = readFileSync(new URL("./deploy-production.mjs", import.meta.url), "utf8");
 const secretScannerPath = fileURLToPath(new URL("./secret-scan.mjs", import.meta.url));
 const secretScannerSource = readFileSync(secretScannerPath, "utf8");
@@ -99,7 +101,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(serverScript, /assert_active_source/u);
   assert.match(serverScript, /activate_source/u);
   assert.match(serverScript, /compose up --detach --force-recreate "\$\{application_services\[@\]\}"/u);
-  assert.match(serverScript, /prisma migrate status/u);
+  assert.match(serverScript, /prisma:migrate:status --workspace @bielos\/database/u);
   assert.match(serverScript, /encrypted recovery outbox payload or delivery-attempt metadata/u);
   assert.match(serverScript, /docker rm --force --volumes "\$container_id"/u);
   assert.doesNotMatch(serverScript, /\bcompose[^\n]*\bdown\b|docker volume rm|prisma db push|powershell/i);
@@ -107,6 +109,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(serverScript, /flock -n "\$state_lock_fd"/u);
   assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
   assert.match(serverScript, /tar --list --verbose --quoting-style=c --file "\$archive"/u);
+  assert.match(serverScript, /local role_script="\$release\/infra\/postgres-init\/10-bielos-database-roles\.sh"[\s\S]*?chmod 644 -- "\$role_script"[\s\S]*?stat -c '%a' -- "\$role_script"/u);
   assert.match(serverScript, /Source archive contains a link or unsupported filesystem entry/u);
   assert.match(serverScript, /find "\$stage" -type l -print -quit/u);
   assert.match(serverScript, /current .bielos-release .bielos-production-host/u);
@@ -206,8 +209,12 @@ test("routed services start only after app checks, and failure cleanup preserves
 
 test("restore clone and migration runner use an isolated password-protected internal network", () => {
   assert.match(serverScript, /docker network create --internal --label "bielos\.restore\.operation=\$isolation_id" "\$db_network"/u);
-  assert.match(serverScript, /local -x POSTGRES_PASSWORD="\$password"[\s\S]*?--env POSTGRES_PASSWORD/u);
-  assert.match(serverScript, /password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
+  assert.match(serverScript, /local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="\$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="\$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="\$migrator_password"[\s\S]*?--env POSTGRES_PASSWORD/u);
+  assert.match(serverScript, /bootstrap_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
+  assert.match(serverScript, /runtime_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
+  assert.match(serverScript, /migrator_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
+  assert.match(serverScript, /\$bootstrap_password" != "\$runtime_password" && "\$bootstrap_password" != "\$migrator_password" && "\$runtime_password" != "\$migrator_password/u);
+  assert.match(serverScript, /--env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD/u);
   assert.match(serverScript, /services:[\s\S]*?migrate:[\s\S]*?networks:[\s\S]*?- restore/u);
   assert.match(serverScript, /external: true[\s\S]*?name: %s/u);
   assert.match(serverScript, /compose_with_override "\$override" --profile migration run --rm --no-deps --name "\$migration_container" --label "bielos\.restore\.operation=\$isolation_id"/u);
@@ -281,11 +288,15 @@ test("production migration reconciles only exact baseline histories and verifies
   assert.match(prefix, /expected=\$\(migration_history_name_set "\$\{prefix\[@\]\}"\)/u);
   assert.match(prefix, /"\$history_names" == "\$expected"/u);
   assert.match(normalizer, /migration_history_is_current_prefix "\$names" "\$\{current_names\[@\]\}" \|\| fail 'Production migration history skips a committed migration\.'/u);
-  const resolve = normalizer.indexOf("migrate resolve --applied 0_init");
+  const resolve = normalizer.indexOf('resolve-baseline');
   const exactResolvedState = normalizer.indexOf("state" , resolve);
   const guardedPrune = prune.indexOf("actual_names <> '$expected_names'");
   const deleteRows = prune.indexOf('DELETE FROM "_prisma_migrations" WHERE "migration_name" <> \'0_init\'');
   assert.ok(resolve >= 0 && exactResolvedState > resolve && guardedPrune >= 0 && deleteRows > guardedPrune);
+  assert.match(normalizer, /run_migration_prisma .* resolve-baseline/u);
+  assert.match(prune, /clone_migration_query "\$container" "\$sql"/u);
+  assert.match(prune, /PGPASSWORD="\$BIELOS_MIGRATOR_DB_PASSWORD" psql --host 127\.0\.0\.1 -U bielos_migrator/u);
+  assert.doesNotMatch(prune, /database_query "\$sql"|\$POSTGRES_USER/u);
   assert.ok(prune.includes("DO \\$bielos\\$"));
   assert.match(prune, /"finished_at" IS NULL OR "rolled_back_at" IS NOT NULL/u);
 
@@ -293,8 +304,8 @@ test("production migration reconciles only exact baseline histories and verifies
   const cloneEnd = serverScript.indexOf("\ncleanup_clone()", cloneStart);
   const clone = serverScript.slice(cloneStart, cloneEnd);
   assert.ok(clone.indexOf("normalize_migration_history") < clone.indexOf('migrate\n'));
-  assert.ok(clone.indexOf('migrate\n') < clone.indexOf('migrate npx prisma migrate status'));
-  assert.ok(clone.indexOf('migrate npx prisma migrate status') < clone.indexOf("verify_migration_schema"));
+  assert.ok(clone.indexOf('migrate\n') < clone.indexOf('migrate npm run prisma:migrate:status'));
+  assert.ok(clone.indexOf('migrate npm run prisma:migrate:status') < clone.indexOf("verify_migration_schema"));
 
   const applyStart = serverScript.indexOf("apply_production_migrations() {");
   const applyEnd = serverScript.indexOf("\nassert_no_maintenance()", applyStart);
@@ -303,7 +314,8 @@ test("production migration reconciles only exact baseline histories and verifies
   assert.ok(apply.indexOf("normalize_migration_history") < apply.indexOf("compose --profile migration run --rm --no-deps migrate"));
   assert.ok(apply.indexOf("compose --profile migration run --rm --no-deps migrate") < apply.indexOf("run_migration_status"));
   assert.ok(apply.indexOf("run_migration_status") < apply.indexOf("verify_migration_schema"));
-  assert.match(serverScript, /migrate diff --from-schema-datasource "\$migration_schema" --to-schema-datamodel "\$migration_schema" --exit-code/u);
+  assert.match(history, /run_migration_prisma .* verify-schema/u);
+  assert.match(migrationRunnerSource, /\["verify-schema", \["migrate", "diff", "--from-schema-datasource", schemaPath, "--to-schema-datamodel", schemaPath, "--exit-code"\]\]/u);
 });
 
 test("recovery snapshots account for the intended legacy-key migration and retain full outbox state", () => {
@@ -668,6 +680,34 @@ test("a directory-only Git export-ignore attribute blocks transfer and productio
     },
   }), /Production command failed/u);
   assert.equal(productionContact, false);
+});
+
+test("production migration uses the protected Compose URL when no disposable override is supplied", () => {
+  const migrationStart = serverScript.indexOf("run_migration_prisma() {");
+  const migrationEnd = serverScript.indexOf("\nprune_legacy_migration_history() {", migrationStart);
+  const migrationRunner = serverScript.slice(migrationStart, migrationEnd);
+  assert.match(migrationRunner, /if \[\[ -n "\$database_url" \]\]; then[\s\S]*?local -x MIGRATION_DATABASE_URL="\$database_url"[\s\S]*?else\s+unset MIGRATION_DATABASE_URL/u);
+  assert.doesNotMatch(migrationRunner, /local -x MIGRATION_DATABASE_URL="\$database_url"[\s\S]{0,80}compose /u);
+  const pruneStart = serverScript.indexOf("prune_legacy_migration_history() {");
+  const pruneEnd = serverScript.indexOf("\nnormalize_migration_history() {", pruneStart);
+  const prune = serverScript.slice(pruneStart, pruneEnd);
+  assert.match(prune, /clone_migration_query "\$container" "\$sql"[\s\S]*?else\s+compose exec -T postgres sh -lc 'PGPASSWORD="\$BIELOS_MIGRATOR_DB_PASSWORD" psql --host 127\.0\.0\.1 -U bielos_migrator -d "\$POSTGRES_DB"/u);
+  assert.doesNotMatch(prune, /compose exec -T -e MIGRATION_DATABASE_URL/u);
+  assert.match(serverScript, /--health-cmd 'pg_isready -h 127\.0\.0\.1 -U bielos_bootstrap -d bielos_restore'/u);
+});
+
+test("production migration wrapper refuses schema development and db push commands before Prisma runs", () => {
+  for (const command of ["dev", "push"]) {
+    const result = spawnSync(process.execPath, [migrationRunnerPath, command], {
+      env: {
+        NODE_ENV: "production",
+      },
+      encoding: "utf8",
+      windowsHide: true
+    });
+    assert.equal(result.status, 1, `${command} must be rejected in production.`);
+    assert.match(result.stderr ?? "", /development schema commands are disabled in production/u);
+  }
 });
 
 test("production health checks use validated configured hosts and the configured OIDC issuer", { skip: process.platform === "win32" ? "The local Windows bash launcher has no available WSL distribution; CI runs native Bash." : false }, () => {

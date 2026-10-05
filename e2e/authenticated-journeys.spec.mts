@@ -536,7 +536,42 @@ async function rememberDevice(context: BrowserContext, url: string, deviceToken:
 async function signIn(page: import("@playwright/test").Page, account: AccountFixture): Promise<void> {
   await page.getByLabel("E-mail", { exact: true }).fill(account.email);
   await page.getByLabel("Senha", { exact: true }).fill(account.password);
+  const loginResponsePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/login" && response.request().method() === "POST"
+  );
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
+  const loginResponse = await loginResponsePromise;
+  if (loginResponse.status() === 403) {
+    throw new Error(`E2E login request was denied by a security check (${loginDenialDiagnostic(loginResponse.headers())}).`);
+  }
+}
+
+function loginDenialDiagnostic(headers: Record<string, string>): string {
+  const allowedReasons = new Set([
+    "cloudflare-access",
+    "csrf-expired",
+    "csrf-invalid",
+    "csrf-malformed",
+    "csrf-misconfigured",
+    "csrf-missing",
+    "csrf-wrong-scope",
+    "expired-cloudflare-access-jwt",
+    "inactive-cloudflare-access-jwt",
+    "invalid-cloudflare-access-audience",
+    "invalid-cloudflare-access-config",
+    "invalid-cloudflare-access-issuer",
+    "invalid-cloudflare-access-jwt",
+    "invalid-cloudflare-access-signature",
+    "missing-cloudflare-access-config",
+    "missing-cloudflare-access-jwt",
+    "missing-cloudflare-access-signing-key",
+    "same-origin"
+  ]);
+  const routeReason = headers["x-bielos-e2e-login-reason"];
+  if (routeReason) return `login-route:${allowedReasons.has(routeReason) ? routeReason : "unrecognized"}`;
+  const proxyReason = headers["x-bielos-e2e-access-reason"];
+  if (proxyReason) return `hub-proxy:${allowedReasons.has(proxyReason) ? proxyReason : "unrecognized"}`;
+  return "not-reported";
 }
 
 async function assertAdminSkipLink(page: import("@playwright/test").Page): Promise<void> {

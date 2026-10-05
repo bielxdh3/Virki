@@ -36,7 +36,7 @@ try {
     "run", "--detach", "--name", containerName, "--publish", "127.0.0.1::5432",
     "--env", `POSTGRES_DB=${databaseName}`, "--env", `POSTGRES_USER=${databaseUser}`,
     "--env", `POSTGRES_PASSWORD=${databasePassword}`,
-    "--health-cmd", `pg_isready -U ${databaseUser} -d ${databaseName}`,
+    "--health-cmd", `pg_isready -h 127.0.0.1 -U ${databaseUser} -d ${databaseName}`,
     "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "60",
     "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
   ]);

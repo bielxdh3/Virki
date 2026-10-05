@@ -16,7 +16,6 @@ import {
   hashAuditIdentifier,
   hashSessionToken,
   lockRateLimitIdentifierInTransaction,
-  writeAuditLog,
   writeAuditLogInTransaction
 } from "./index";
 import { prisma, type Prisma } from "@bielos/database";
@@ -285,6 +284,10 @@ export async function startLoginCeremony(
   }
 }
 
+function loginAuditSource(expectedRole?: RequiredLoginRole): string {
+  return expectedRole === "ADMIN" ? "hub-login" : expectedRole === "USER" ? "portal-login" : "local-login";
+}
+
 export async function verifyLoginEmailCode(ceremonyId: string, code: string, deviceToken: string, now = new Date(), expectedRole?: RequiredLoginRole): Promise<{ requiresTotp: boolean; session: CreatedLoginSession | null }> {
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken) || !/^\d{6}$/.test(code)) throw new SecurityMutationError();
   try {
@@ -300,11 +303,20 @@ export async function verifyLoginEmailCode(ceremonyId: string, code: string, dev
       if (verified.count !== 1) throw new SecurityMutationError();
       await transaction.user.update({ where: { id: challenge.userId }, data: { emailVerifiedAt: now } });
       await transaction.trustedDevice.upsert({ where: { userId_deviceIdHash: { userId: challenge.userId, deviceIdHash: challenge.deviceIdHash } }, update: { status: "TRUSTED", revokedAt: null, lastSeenAt: now, rememberedUntil: null, strongVerifiedAt: null }, create: { deviceKey: randomBytes(24).toString("base64url"), userId: challenge.userId, deviceIdHash: challenge.deviceIdHash, status: "TRUSTED", lastSeenAt: now } });
-      if (challenge.requiresTotp) return { kind: "SUCCESS" as const, value: { requiresTotp: true, session: null } };
-      return { kind: "SUCCESS" as const, value: { requiresTotp: false, session: await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now, ["pwd", "otp", "mfa"]) } };
+      const session = challenge.requiresTotp
+        ? null
+        : await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now, ["pwd", "otp", "mfa"]);
+      await writeAuditLogInTransaction(transaction, {
+        eventType: "DEVICE_VERIFIED",
+        result: "SUCCESS",
+        actorUserId: challenge.userId,
+        resource: "identity.device",
+        message: "Login security ceremony verified.",
+        metadata: { source: loginAuditSource(expectedRole), ceremonyRef: hashAuditIdentifier(ceremonyId) }
+      });
+      return { kind: "SUCCESS" as const, value: { requiresTotp: challenge.requiresTotp, session } };
     }, { isolationLevel: "Serializable" });
     if (result.kind !== "SUCCESS") throw new SecurityMutationError();
-    await writeAuditLog({ eventType: "DEVICE_VERIFIED", result: "SUCCESS", resource: "identity.device", message: "Login security ceremony verified.", metadata: { ceremonyRef: hashAuditIdentifier(ceremonyId) } });
     return result.value;
   } catch {
     throw new SecurityMutationError();
@@ -326,10 +338,18 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, devi
       const claimed = await transaction.totpFactor.updateMany({ where: { id: factor.id, status: "ACTIVE", lastUsedStep: factor.lastUsedStep }, data: { lastUsedStep: step } });
       if (claimed.count !== 1) throw new SecurityMutationError();
       const methods = ["pwd", "otp", "mfa"];
-      return { kind: "SUCCESS" as const, value: await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now, methods) };
+      const session = await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now, methods);
+      await writeAuditLogInTransaction(transaction, {
+        eventType: "DEVICE_VERIFIED",
+        result: "SUCCESS",
+        actorUserId: challenge.userId,
+        resource: "identity.2fa",
+        message: "TOTP login verification succeeded.",
+        metadata: { source: loginAuditSource(expectedRole), ceremonyRef: hashAuditIdentifier(ceremonyId) }
+      });
+      return { kind: "SUCCESS" as const, value: session };
     }, { isolationLevel: "Serializable" });
     if (result.kind !== "SUCCESS") throw new SecurityMutationError();
-    await writeAuditLog({ eventType: "DEVICE_VERIFIED", result: "SUCCESS", resource: "identity.2fa", message: "TOTP login verification succeeded.", metadata: { ceremonyRef: hashAuditIdentifier(ceremonyId) } });
     return result.value;
   } catch {
     throw new SecurityMutationError();

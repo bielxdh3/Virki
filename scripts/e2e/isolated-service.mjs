@@ -97,7 +97,7 @@ export function startIsolatedService(service, source = process.env, { manageProc
   return child;
 }
 
-function getServiceCommand(service, source) {
+export function getServiceCommand(service, source) {
   if (service === "jwks") {
     return { cwd: repositoryRoot, args: [join(scriptDirectory, "jwks-server.mjs")] };
   }
@@ -122,7 +122,7 @@ function getServiceCommand(service, source) {
     if (!keyPath || !certificatePath || !isAbsolute(keyPath) || !isAbsolute(certificatePath) || !existsSync(keyPath) || !existsSync(certificatePath) || !caCertificatePath || !isAbsolute(caCertificatePath) || !existsSync(caCertificatePath) || !expectedCaCertificatePath || resolve(caCertificatePath) !== resolve(expectedCaCertificatePath)) {
       throw new Error("Hub E2E TLS files are unavailable.");
     }
-    args.push("--experimental-https", "--experimental-https-key", keyPath, "--experimental-https-cert", certificatePath);
+    args.push("--experimental-https", "--experimental-https-key", keyPath, "--experimental-https-cert", certificatePath, "--experimental-https-ca", caCertificatePath);
   }
 
   return { cwd: workspaceDirectory, args };

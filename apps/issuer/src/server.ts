@@ -3,7 +3,7 @@ import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAtt
 import { prisma } from "@bielos/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
-import { setIssuerSecurityHeaders } from "./http-security";
+import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
@@ -169,6 +169,7 @@ provider.proxy = true;
 const authorizationRequestStartedAt = new WeakMap<object, number>();
 provider.use(async (rawContext, next) => {
   const context = rawContext as KoaContextWithOIDC;
+  setIssuerSensitiveResponseCachePolicy(context.res, context.path);
   if (context.path === "/auth") {
     if (context.method !== "GET") {
       context.status = 405;

@@ -10,7 +10,7 @@ services:
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bielos_test -d bielos_core_test"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bielos_test -d bielos_core_test"]
       interval: 1s
       timeout: 3s
       retries: 30

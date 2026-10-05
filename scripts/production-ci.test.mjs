@@ -97,6 +97,28 @@ test("production images are uploaded only after exact main-push builds pass on b
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
 });
 
+test("authenticated E2E uses the real PostgreSQL role initializer and scoped disposable credentials", () => {
+  const e2e = workflow.match(/authenticated-e2e:[\s\S]*?(?=\n\x20{2}[a-z-]+:|$)/u)?.[0] ?? "";
+  assert.ok(e2e);
+  assert.match(e2e, /Start least-privilege disposable PostgreSQL/u);
+  assert.match(e2e, /BIELOS_E2E_ACCESS_DIAGNOSTICS: "true"/u);
+  assert.match(e2e, /--health-cmd 'pg_isready -h 127\.0\.0\.1 -U bielos_bootstrap -d bielos_e2e_test'/u);
+  assert.match(e2e, /infra\/postgres-init\/10-bielos-database-roles\.sh[^\n]*:ro/u);
+  assert.match(e2e, /scripts\/e2e\/20-bielos-e2e-runtime-test-role\.sh[^\n]*:ro/u);
+  assert.match(e2e, /--tmpfs \/var\/lib\/postgresql\/data:[^\n]*/u);
+  assert.match(e2e, /BIELOS_E2E_DATABASE_URL=%s:\/\/%s:%s@127\.0\.0\.1:%s/u);
+  assert.match(e2e, /DATABASE_URL=%s:\/\/%s:%s@127\.0\.0\.1:%s/u);
+  assert.match(e2e, /MIGRATION_DATABASE_URL=%s:\/\/%s:%s@127\.0\.0\.1:%s/u);
+  assert.match(e2e, /runtime_role=bielos_runtime/u);
+  assert.match(e2e, /migrator_role=bielos_migrator/u);
+  assert.match(e2e, /e2e_test_role=bielos_runtime_test/u);
+  assert.match(e2e, /Guard disposable E2E database target[\s\S]*?Apply committed Prisma migrations to disposable PostgreSQL/u);
+  const cleanup = e2e.slice(e2e.indexOf("- name: Remove disposable PostgreSQL"));
+  assert.match(cleanup, /if: always\(\)[\s\S]*?docker ps --all --quiet[\s\S]*?docker rm --force/u);
+  assert.doesNotMatch(cleanup, /docker rm[^\n]*\|\| true/u);
+  assert.doesNotMatch(e2e, /services:\r?\n\x20+postgres:/u);
+});
+
 test("CodeQL workflow pins supported actions to immutable verified commits and keeps scan permissions narrow", () => {
   assert.match(codeqlWorkflow, /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/u);
   assert.match(codeqlWorkflow, /uses: github\/codeql-action\/(?:init|analyze)@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4\.38\.2/u);

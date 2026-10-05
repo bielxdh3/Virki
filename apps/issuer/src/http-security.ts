@@ -8,3 +8,12 @@ export function setIssuerSecurityHeaders(response: ServerResponse, production = 
   response.setHeader("X-Frame-Options", "DENY");
   if (production) response.setHeader("Strict-Transport-Security", "max-age=31536000");
 }
+
+export function setIssuerSensitiveResponseCachePolicy(
+  response: Pick<ServerResponse, "setHeader">,
+  pathname: string
+): void {
+  if (pathname === "/auth" || /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u.test(pathname)) {
+    response.setHeader("Cache-Control", "no-store");
+  }
+}

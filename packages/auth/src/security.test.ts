@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
+import { prisma } from "@bielos/database";
 import {
   createTotpSecret,
   canApproveAccountRecovery,
+  consumeApprovedAccountRecovery,
   decryptTotpSecret,
   encryptTotpSecret,
   getApprovedAccountRecoveryExpiry,
@@ -104,6 +107,126 @@ test("recovery state transitions serialize on the active account row", async () 
   values = [];
   await lockActiveRecoveryAccountInTransaction(transaction, "admin-a", "ADMIN");
   assert.deepEqual(values, ["admin-a", "ADMIN"]);
+});
+
+test("approved password recovery changes the password and revokes access while preserving TOTP and recovery codes", async (context) => {
+  type MutationArgs = { data?: Record<string, unknown> };
+  const userId = "user-recovery-1";
+  const requestId = "recovery-request-1";
+  const requestKey = "R".repeat(32);
+  const email = "recovery-user@example.test";
+  const emailNormalized = email.toLowerCase();
+  const now = new Date("2026-10-05T12:00:00.000Z");
+  const totpFactor = { id: "totp-factor-1", userId, status: "ACTIVE", secretCiphertext: "encrypted-test-factor", keyVersion: 1, lastUsedStep: 123 };
+  const recoveryCodes = [
+    { id: "recovery-code-1", userId, codeHash: "recovery-hash-1", usedAt: null },
+    { id: "recovery-code-2", userId, codeHash: "recovery-hash-2", usedAt: null }
+  ];
+  const user = {
+    email,
+    emailNormalized,
+    displayName: "Recovery user",
+    role: "USER",
+    isActive: true,
+    accountStatus: "ACTIVE",
+    secondFactorMethod: "TOTP",
+    totpFactor,
+    recoveryCodes
+  };
+  const request = {
+    id: requestId,
+    requestKeyHash: createHash("sha256").update(requestKey, "utf8").digest("hex"),
+    userId,
+    emailAddressHash: createHash("sha256").update(emailNormalized, "utf8").digest("hex"),
+    status: "APPROVED",
+    expiresAt: new Date(now.getTime() + 60_000),
+    user
+  };
+  const mfaOperations: string[] = [];
+  const revocations = { sessions: 0, elevations: 0, devices: 0, challenges: 0 };
+  let requestStatus = "APPROVED";
+  let passwordHash = "old-password-hash";
+  let userUpdateData: Record<string, unknown> | undefined;
+  let auditEvent = "";
+
+  const transaction = {
+    $queryRaw: async (query: TemplateStringsArray) => query.join("").includes('FROM "User"') ? [{ id: userId }] : [],
+    loginRateLimit: {
+      findUnique: async () => null,
+      create: async () => ({})
+    },
+    accountRecoveryRequest: {
+      findUnique: async () => ({ ...request, status: requestStatus }),
+      updateMany: async ({ data }: MutationArgs) => {
+        if (data?.status === "CONSUMED") requestStatus = "CONSUMED";
+        return { count: 1 };
+      }
+    },
+    user: {
+      update: async ({ data }: MutationArgs) => {
+        userUpdateData = data;
+        passwordHash = String(data?.passwordHash ?? "");
+        return { id: userId };
+      }
+    },
+    emailOutboxMessage: { upsert: async () => ({ id: "outbox-message-1" }) },
+    session: {
+      updateMany: async () => { revocations.sessions += 1; return { count: 1 }; }
+    },
+    securityElevation: {
+      updateMany: async () => { revocations.elevations += 1; return { count: 1 }; }
+    },
+    trustedDevice: {
+      updateMany: async () => { revocations.devices += 1; return { count: 1 }; }
+    },
+    deviceChallenge: {
+      updateMany: async () => { revocations.challenges += 1; return { count: 1 }; }
+    },
+    totpFactor: {
+      updateMany: async () => { mfaOperations.push("totp-update"); return { count: 1 }; },
+      deleteMany: async () => { mfaOperations.push("totp-delete"); return { count: 1 }; }
+    },
+    recoveryCode: {
+      updateMany: async () => { mfaOperations.push("recovery-code-update"); return { count: 1 }; },
+      deleteMany: async () => { mfaOperations.push("recovery-code-delete"); return { count: 1 }; }
+    },
+    auditLog: {
+      create: async ({ data }: MutationArgs) => {
+        auditEvent = String(data?.eventType ?? "");
+        return { id: "audit-entry-1" };
+      }
+    }
+  };
+
+  const recoveryRequestDelegate = prisma.accountRecoveryRequest;
+  const originalFindUnique = Object.getOwnPropertyDescriptor(recoveryRequestDelegate, "findUnique");
+  const originalTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(originalFindUnique && originalTransaction);
+  Object.defineProperty(recoveryRequestDelegate, "findUnique", { ...originalFindUnique, value: async () => request });
+  Object.defineProperty(prisma, "$transaction", {
+    ...originalTransaction,
+    value: async (operation: (value: never) => Promise<unknown>) => operation(transaction as never)
+  });
+  context.after(() => {
+    Object.defineProperty(recoveryRequestDelegate, "findUnique", originalFindUnique);
+    Object.defineProperty(prisma, "$transaction", originalTransaction);
+  });
+
+  await consumeApprovedAccountRecovery(requestId, requestKey, "new password for recovery", now);
+
+  assert.equal(requestStatus, "CONSUMED");
+  assert.notEqual(passwordHash, "old-password-hash");
+  assert.deepEqual(Object.keys(userUpdateData ?? {}).sort(), ["emailVerifiedAt", "passwordHash"]);
+  assert.equal(userUpdateData?.emailVerifiedAt, now);
+  assert.deepEqual(revocations, { sessions: 1, elevations: 1, devices: 1, challenges: 1 });
+  assert.deepEqual(mfaOperations, []);
+  assert.equal(totpFactor.status, "ACTIVE");
+  assert.equal(user.secondFactorMethod, "TOTP");
+  assert.deepEqual(recoveryCodes, [
+    { id: "recovery-code-1", userId, codeHash: "recovery-hash-1", usedAt: null },
+    { id: "recovery-code-2", userId, codeHash: "recovery-hash-2", usedAt: null }
+  ]);
+  assert.equal(auditEvent, "ACCOUNT_RECOVERY_CONSUMED");
 });
 
 test("login verification locks the account under the role allowed by its current surface", async () => {

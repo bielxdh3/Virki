@@ -22,6 +22,16 @@ test("accepts only explicitly disposable local PostgreSQL targets", () => {
   assert.equal(target.pathname, "/bielos_core_test");
 });
 
+test("accepts the isolated runtime identity used only by authenticated browser fixtures", () => {
+  const target = assertDisposableCoreTestDatabase(
+    "postgresql://bielos_runtime_test:local-validation-only@127.0.0.1:55432/bielos_e2e_test",
+    safeEnvironment
+  );
+
+  assert.equal(target.username, "bielos_runtime_test");
+  assert.equal(target.pathname, "/bielos_e2e_test");
+});
+
 test("rejects production mode, remote hosts, and non-test identities", () => {
   assert.throws(() =>
     assertDisposableCoreTestDatabase(

@@ -3,7 +3,7 @@ import test from "node:test";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
-import { setIssuerSecurityHeaders } from "./http-security";
+import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 
 test("issuer applies frame, MIME, referrer, and production transport headers", () => {
   const values = new Map<string, string>();
@@ -21,6 +21,40 @@ test("issuer applies frame, MIME, referrer, and production transport headers", (
   setIssuerSecurityHeaders(response, false);
   assert.equal(values.has("strict-transport-security"), false);
   assert.equal(values.get("x-frame-options"), "DENY");
+});
+
+test("personalized OIDC authorization and interaction responses are no-store without disabling public metadata caching", async (context) => {
+  const server = createServer((request, response) => {
+    const pathname = new URL(request.url ?? "/", "http://issuer.invalid").pathname;
+    setIssuerSensitiveResponseCachePolicy(response, pathname);
+    if (pathname === "/.well-known/openid-configuration" || pathname === "/jwks") {
+      response.setHeader("Cache-Control", "public, max-age=300");
+    }
+    response.statusCode = 303;
+    response.setHeader("Location", "/login");
+    response.end();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  for (const path of ["/auth?state=synthetic-state&nonce=synthetic-nonce", "/interaction/abcdefgh?marker=synthetic-marker"]) {
+    const response = await fetch(`${baseUrl}${path}`, { redirect: "manual" });
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  }
+
+  for (const path of ["/.well-known/openid-configuration", "/jwks"]) {
+    const response = await fetch(`${baseUrl}${path}`, { redirect: "manual" });
+    assert.equal(response.headers.get("cache-control"), "public, max-age=300");
+  }
 });
 
 test("OIDC responses wait for required audit persistence and fail closed without leaking response data", async (context) => {

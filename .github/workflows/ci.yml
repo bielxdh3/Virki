@@ -29,6 +29,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify Prisma dependency tree
+        run: |
+          node --version
+          npm --version
+          npm ls @prisma/config deepmerge-ts --all
+
       - name: Audit Prisma tooling policy
         run: node scripts/tooling-audit-policy.mjs
 
@@ -104,6 +110,9 @@ jobs:
       - name: Validate clean migration baseline or transition plan
         run: npm run test:migration
 
+      - name: Test isolated PostgreSQL role separation
+        run: npm run test:database:roles
+
       - name: Validate database backup and restore
         run: npm run test:backup:restore
 
@@ -137,12 +146,10 @@ jobs:
 
       - name: Validate production Compose config
         env:
-          DATABASE_URL: postgresql://bielos_app:local-validation-only@postgres:5432/bielos
           BIELOS_RATE_LIMIT_HASH_SECRET: replace-with-test-secret
           BIELOS_BUILD_REVISION: 0123456789abcdef0123456789abcdef01234567
           BIELOS_PRODUCTION_IMAGE: bielos-production-ci:0123456789abcdef0123456789abcdef01234567
           BIELOS_MIGRATOR_IMAGE: bielos-migrator-ci:0123456789abcdef0123456789abcdef01234567
-          POSTGRES_PASSWORD: local-validation-only
           BIELOS_HUB_URL: https://hub.example.invalid
           BIELOS_PORTAL_URL: https://portal.example.invalid
           CLOUDFLARE_ACCESS_AUDIENCE: ci-test-audience
@@ -223,22 +230,9 @@ jobs:
   authenticated-e2e:
     name: Authenticated browser E2E
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-        env:
-          POSTGRES_DB: bielos_core_test
-          POSTGRES_USER: bielos_core_test
-          POSTGRES_PASSWORD: core_test_only_password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bielos_core_test -d bielos_core_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
     env:
       BIELOS_CORE_TEST_DATABASE_CONFIRM: disposable
+      BIELOS_E2E_ACCESS_DIAGNOSTICS: "true"
 
     steps:
       - name: Checkout
@@ -253,16 +247,52 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Construct disposable E2E database URLs
+      - name: Start least-privilege disposable PostgreSQL
         shell: bash
-        env:
-          BIELOS_E2E_DATABASE_USER: bielos_core_test
-          BIELOS_E2E_DATABASE_PASSWORD: core_test_only_password
-          BIELOS_E2E_DATABASE_NAME: bielos_core_test
         run: |
-          database_url="postgresql://${BIELOS_E2E_DATABASE_USER}:${BIELOS_E2E_DATABASE_PASSWORD}@127.0.0.1:5432/${BIELOS_E2E_DATABASE_NAME}"
-          printf 'BIELOS_E2E_DATABASE_URL=%s\n' "$database_url" >> "$GITHUB_ENV"
-          printf 'DATABASE_URL=%s\n' "$database_url" >> "$GITHUB_ENV"
+          container_name="bielos-e2e-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bootstrap_password="$(openssl rand -hex 32)"
+          runtime_password="$(openssl rand -hex 32)"
+          migrator_password="$(openssl rand -hex 32)"
+          e2e_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$bootstrap_password"
+          echo "::add-mask::$runtime_password"
+          echo "::add-mask::$migrator_password"
+          echo "::add-mask::$e2e_password"
+          docker run --detach --rm --name "$container_name" \
+            --publish 127.0.0.1::5432 \
+            --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m \
+            --health-cmd 'pg_isready -h 127.0.0.1 -U bielos_bootstrap -d bielos_e2e_test' \
+            --health-interval 1s --health-timeout 3s --health-retries 90 \
+            --env POSTGRES_DB=bielos_e2e_test \
+            --env POSTGRES_USER=bielos_bootstrap \
+            --env "POSTGRES_PASSWORD=$bootstrap_password" \
+            --env "BIELOS_RUNTIME_DB_PASSWORD=$runtime_password" \
+            --env "BIELOS_MIGRATOR_DB_PASSWORD=$migrator_password" \
+            --volume "$GITHUB_WORKSPACE/infra/postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro" \
+            --env "BIELOS_E2E_DATABASE_PASSWORD=$e2e_password" \
+            --volume "$GITHUB_WORKSPACE/scripts/e2e/20-bielos-e2e-runtime-test-role.sh:/docker-entrypoint-initdb.d/20-bielos-e2e-runtime-test-role.sh:ro" \
+            postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 >/dev/null
+          for attempt in $(seq 1 90); do
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$container_name" 2>/dev/null || true)"
+            if [ "$health" = healthy ]; then break; fi
+            if [ "$health" = unhealthy ]; then echo 'Disposable PostgreSQL initialization failed.' >&2; exit 1; fi
+            sleep 1
+          done
+          if [ "$(docker inspect --format='{{.State.Health.Status}}' "$container_name")" != healthy ]; then
+            echo 'Disposable PostgreSQL did not become healthy.' >&2
+            exit 1
+          fi
+          mapped_port="$(docker port "$container_name" 5432/tcp)"
+          case "$mapped_port" in 127.0.0.1:*) ;; *) echo 'Disposable PostgreSQL port is not loopback-bound.' >&2; exit 1 ;; esac
+          host_port="${mapped_port##*:}"
+          database_protocol=postgresql
+          runtime_role=bielos_runtime
+          migrator_role=bielos_migrator
+          e2e_test_role=bielos_runtime_test
+          printf 'BIELOS_E2E_DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$e2e_test_role" "$e2e_password" "$host_port" >> "$GITHUB_ENV"
+          printf 'DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$runtime_role" "$runtime_password" "$host_port" >> "$GITHUB_ENV"
+          printf 'MIGRATION_DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$migrator_role" "$migrator_password" "$host_port" >> "$GITHUB_ENV"
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
@@ -275,3 +305,11 @@ jobs:
 
       - name: Run browser E2E
         run: npm run test:e2e
+
+      - name: Remove disposable PostgreSQL
+        if: always()
+        shell: bash
+        run: |
+          container_name="bielos-e2e-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container_id="$(docker ps --all --quiet --filter "name=^/${container_name}$")"
+          if [ -n "$container_id" ]; then docker rm --force "$container_id" >/dev/null; fi

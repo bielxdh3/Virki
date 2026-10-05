@@ -1,62 +1,34 @@
-# PostgreSQL privilege transition
+# PostgreSQL role separation
 
-## Current boundary
+## Runtime boundary
 
-The tracked development example assigns `POSTGRES_USER=bielos_app` and uses the same login in `DATABASE_URL`. On a fresh official PostgreSQL image initialization, `POSTGRES_USER` is the bootstrap superuser; this is a reference-configuration risk, not evidence about the uninspected production cluster. The production Compose file also currently passes one `DATABASE_URL` to the Hub, issuer, email worker, session cleanup and migrator.
+Production Compose gives the Hub, issuer, session cleanup, and email worker `DATABASE_URL` for `bielos_runtime`. The one-shot migration service receives only `MIGRATION_DATABASE_URL` for `bielos_migrator`. PostgreSQL's `POSTGRES_USER` is the bootstrap administrator and is passed only to the database container. The tracked `.env.example` uses three different roles and separate secrets.
 
-This change does not connect to a live database, alter an existing volume, or change production credentials. Existing official-image volumes do not replay initialization scripts when restarted, so changing the environment alone is not a role migration.
+The authenticated browser E2E fixture creates a fourth, isolated `bielos_runtime_test` identity only in its disposable test container. Its host and database name must still pass the existing explicit E2E database guard. The E2E Hub and issuer use this role only against that disposable database; production Compose does not create or use it.
 
-## Target identities
+The runtime role has database `CONNECT`, schema `USAGE`, application table DML, sequence access, and enum/type usage, with no object routine execution, database or schema creation, temporary-table, superuser, role-creation, database-creation, replication, inheritance, or `BYPASSRLS` privileges. The database revokes `CONNECT` from `PUBLIC`; only the bootstrap administrator and explicitly provisioned BielOS roles can connect. Bootstrap, runtime, and migrator passwords must all be distinct. The role script removes existing membership edges involving the runtime or migrator roles and clears excess direct/default object grants to both application roles and `PUBLIC` before applying the intended grants. It grants the migrator `EXECUTE` only on `pgcrypto.digest(text,text)`, required by the committed security-polish migration; it removes `PUBLIC` execution from existing public-schema routines and from the migrator's default privileges. In production and test fixtures, the migrator is not privileged at cluster level; it owns only the BielOS `public` schema objects and can create objects there. The development Compose service alone enables `CREATEDB` on the migrator so Prisma `migrate dev` can create its disposable shadow database. Default privileges grant runtime DML on future migration-created tables, sequence use, and enum/type use.
 
-Use three distinct identities for a future owner-approved transition:
+`pgcrypto` is installed by the bootstrap role. It is referenced by a committed migration but not by application runtime code. The later `CREATE EXTENSION IF NOT EXISTS` migration remains safe for fresh and existing databases because the extension is present before the migrator runs.
 
-| Role | Intended use | Required limits |
-| --- | --- | --- |
-| Bootstrap administrator | PostgreSQL image initialization and owner-operated provisioning | Keep credentials out of application services; no routine application connection. |
-| `bielos_migrator` | Explicit Prisma migration job | Owns the application schema and migration-created objects; no superuser, role creation, or database creation. Grant database `CREATE` only if the migration needs it. PostgreSQL 17 marks `pgcrypto` as trusted; its migration can install it with database `CREATE`, but the disposable migration test must confirm the actual image behavior. |
-| `bielos_app` | Hub, issuer, outbox worker, and cleanup runtime | No superuser, `CREATEDB`, `CREATEROLE`, `BYPASSRLS`, schema `CREATE`, or object ownership. Grant `CONNECT`, schema `USAGE`, application table DML, and the sequence privileges required by observed queries. |
+## Initialization and legacy volumes
 
-The runtime role needs `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on current application tables and `USAGE`, `SELECT`, and `UPDATE` on sequences if used by Prisma. Confirm this against the complete schema and runtime query paths in disposable PostgreSQL before adoption. The migration role must set explicit default privileges for future migration-created tables and sequences; defaults are role-specific and do not repair existing objects.
+`infra/postgres-init/10-bielos-database-roles.sh` runs automatically only when the official PostgreSQL image initializes an empty data directory. It accepts independent 64-hex runtime and migrator passwords that differ from the bootstrap password, does not print them, restricts both roles, installs `pgcrypto`, and grants the required access. It also removes old role memberships involving either application role, removes default `PUBLIC CONNECT`, and clears existing direct and default `PUBLIC` object privileges before applying the explicit runtime grants. The migration role receives execute access to the one pgcrypto digest overload used by the committed migration; new public-schema routines do not inherit execution by `PUBLIC`. Before changing ownership, it fails closed if it finds public-schema relations or enum/domain/range types outside the current BielOS Prisma schema and migration table, or any non-extension-owned `SECURITY DEFINER` routine in `public`. Review such objects manually; do not broaden the allowlist without evidence.
 
-## Owner-controlled transition procedure
+Existing volumes do not replay initialization scripts. Their owner must inventory the database, restore a verified backup to a disposable PostgreSQL 17 instance, and validate the transition there before running the same idempotent role script against any persistent database. The script transfers only allowlisted objects in `public`; it does not use `REASSIGN OWNED`, drop roles, remove data, or revoke the bootstrap administrator.
 
-Do not use this procedure until an owner has scheduled a maintenance window and approved an isolated clone result.
+For an existing production volume, do not switch `DATABASE_URL`, `MIGRATION_DATABASE_URL`, or `POSTGRES_USER` to the new identities first. During a separately approved maintenance window, retain the cluster's current bootstrap login, add the two new role passwords to the protected environment, recreate only the PostgreSQL container with its existing data volume, and execute the mounted role script once as that existing administrator. Inspect the role attributes, grants, object ownership, and application health on the disposable restore before applying the same step to a persistent database. Only after the owner verifies the new roles may the protected application and migration URLs be switched. A healthy `pg_isready` result does not prove that either login exists or can authenticate. No such live transition is authorized or performed by this repository task.
 
-1. Confirm the expected production host and source revision through the normal release process. Create a protected backup outside the repository, record its SHA-256, and restore it to a disposable PostgreSQL 17 instance. Never use a production connection for trial SQL.
-2. On the disposable restore, record `pg_roles`, database and schema ACLs, object owners, extension owners, `_prisma_migrations`, and the current application smoke results. Check for unknown roles or extensions and stop if the inventory does not match the reviewed baseline.
-3. Create the runtime and migrator logins using owner-managed secret input. Do not place passwords in SQL files, shell history, command arguments, logs, or repository files. Create the restricted runtime grants and migrator default privileges as separate, reviewed statements.
-4. Transfer only the inventoried BielOS schema objects to `bielos_migrator`; do not use an unreviewed blanket `REASSIGN OWNED`. Preserve extension and platform-owned objects. Ensure the migrator can run the committed `CREATE EXTENSION IF NOT EXISTS pgcrypto` migration without granting runtime `CREATE`.
-5. Validate the disposable restore using both identities: migrations/status as migrator; CRUD, sessions, outbox, audit, login and OIDC reads/writes as runtime. Assert that runtime cannot create, alter, or drop a table, create an extension, create a role/database, bypass row security, or access unrelated schemas. Test the exact production Compose environment boundary and backup/restore with the restricted runtime credentials.
-6. Prepare a rollback that keeps the bootstrap administrator available and restores the prior protected environment configuration if validation fails. Do not remove old logins or revoke their provisioning access until the owner accepts the restore test and has an independently verified rollback point.
-7. Only after the owner explicitly approves the production operation, apply the same reviewed statements through the normal production change process, set separate runtime and migrator connection values in the ignored operator configuration, deploy the exact accepted image, and immediately repeat the privilege and health verification.
+## Owner-controlled transition
 
-## Verification SQL for the disposable restore
+No production connection, role change, migration, backup, or deployment was performed for this change. For a future owner-approved transition:
 
-Replace role/database identifiers only after reviewing the actual database inventory. These are verification queries, not a migration script.
+1. Set independent 64-hex `BIELOS_RUNTIME_DB_PASSWORD` and `BIELOS_MIGRATOR_DB_PASSWORD` values in the protected operator environment. Set `DATABASE_URL` for `bielos_runtime` and `MIGRATION_DATABASE_URL` for `bielos_migrator` using those exact values. Preserve the existing bootstrap role and password until the owner accepts the restore test and rollback plan.
+2. Create a protected backup, verify its digest, and restore it into a disposable PostgreSQL 17 instance. Record roles, grants, object owners, routines, extensions, and migration state. Stop if unexpected public-schema objects or non-extension-owned `SECURITY DEFINER` routines are present, or any environment value does not match the reviewed configuration.
+3. On the disposable restore, run the role script as the existing bootstrap administrator. It requires the two role-password environment variables and the database name from the container environment. Apply and inspect Prisma migration status through the migration URL.
+4. Run Hub, issuer, email-worker, session-cleanup, OIDC, audit, and backup/restore validation with the runtime URL. Verify that runtime DML succeeds and that `CREATE`, `ALTER`, and `DROP` on persistent tables, database creation, role creation, temporary tables, and row-security bypass are denied.
+5. Keep the bootstrap administrator available for rollback. If runtime checks fail, restore the previous protected service configuration. Do not remove old credentials until a separate owner decision after an independently verified recovery point.
+6. Production application requires a separate owner approval and maintenance plan. Apply the reviewed transition through the normal production change process, then verify exact role attributes, grants, migration status, backup/restore, and health. This repository task does not authorize those live actions.
 
-```sql
-SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
-FROM pg_roles
-WHERE rolname IN ('bielos_app', 'bielos_migrator');
+## Disposable evidence
 
-SELECT has_database_privilege('bielos_app', current_database(), 'CONNECT') AS app_can_connect,
-       has_database_privilege('bielos_app', current_database(), 'CREATE') AS app_can_create;
-
-SELECT has_schema_privilege('bielos_app', 'public', 'USAGE') AS app_can_use_schema,
-       has_schema_privilege('bielos_app', 'public', 'CREATE') AS app_can_create_in_schema;
-
-SELECT has_table_privilege('bielos_app', '"User"', 'SELECT') AS app_can_read_users,
-       has_table_privilege('bielos_app', '"User"', 'INSERT') AS app_can_insert_users,
-       has_table_privilege('bielos_app', '"User"', 'UPDATE') AS app_can_update_users,
-       has_table_privilege('bielos_app', '"User"', 'DELETE') AS app_can_delete_users;
-
-SELECT has_sequence_privilege('bielos_app', sequence_schema || '.' || sequence_name, 'USAGE') AS app_can_use_sequence
-FROM information_schema.sequences
-WHERE sequence_schema = 'public';
-
-SELECT extname, pg_get_userbyid(extowner) AS extension_owner
-FROM pg_extension
-WHERE extname = 'pgcrypto';
-```
-
-The CI migration image currently validates migrations with a disposable database, but it does not yet prove this split-role transition. Local Docker/PostgreSQL role and restore tests remain an external prerequisite until a safe disposable engine is available.
+CI runs `npm run test:database:roles` against two pinned, disposable PostgreSQL 17 containers. One initializes from empty storage; the other first applies migrations as the bootstrap role and seeds prior runtime/migrator role memberships plus excess direct and default runtime and `PUBLIC` grants to model an existing transition. Both cases then exercise the migration role, inspect ownership and privilege attributes, prove runtime and E2E-fixture DML, assert an unrelated role cannot connect through `PUBLIC`, reject bootstrap password reuse, and assert that runtime DDL is denied. The test removes only the containers it creates. Local execution is unavailable when Docker is unavailable; it must be reported as blocked rather than simulated.

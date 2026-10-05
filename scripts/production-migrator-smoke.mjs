@@ -1,6 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 const image = process.env.BIELOS_MIGRATOR_IMAGE?.trim();
 if (!image || !/^bielos-migrator-ci:[0-9a-f]{40}$/u.test(image)) {
@@ -11,10 +13,13 @@ const id = randomUUID();
 const network = `bielos-migrator-smoke-${id}`;
 const databaseContainer = `bielos-migrator-db-${id}`;
 const databaseHost = `database-${id}`;
-const databaseUser = "bielos_validation";
+const databaseUser = "bielos_bootstrap";
 const databaseName = "bielos_validation";
-const databasePassword = randomBytes(32).toString("base64url");
-const databaseUrl = `postgresql://${databaseUser}:${databasePassword}@${databaseHost}:5432/${databaseName}?schema=public`;
+const bootstrapPassword = randomBytes(32).toString("hex");
+const runtimePassword = randomBytes(32).toString("hex");
+const migratorPassword = randomBytes(32).toString("hex");
+const migrationUrl = `postgresql://bielos_migrator:${migratorPassword}@${databaseHost}:5432/${databaseName}?schema=public`;
+const roleSetupPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "infra", "postgres-init", "10-bielos-database-roles.sh");
 const postgresImage = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
 let networkCreated = false;
 let databaseCreated = false;
@@ -29,21 +34,25 @@ try {
     "--network", network, "--network-alias", databaseHost,
     "--label", `org.bielos.validation=${id}`,
     "--env", "POSTGRES_USER", "--env", "POSTGRES_PASSWORD", "--env", "POSTGRES_DB",
+    "--env", "BIELOS_RUNTIME_DB_PASSWORD", "--env", "BIELOS_MIGRATOR_DB_PASSWORD",
+    "--volume", `${roleSetupPath}:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro`,
     postgresImage,
   ], {
     env: {
       ...process.env,
       POSTGRES_USER: databaseUser,
-      POSTGRES_PASSWORD: databasePassword,
+      POSTGRES_PASSWORD: bootstrapPassword,
       POSTGRES_DB: databaseName,
+      BIELOS_RUNTIME_DB_PASSWORD: runtimePassword,
+      BIELOS_MIGRATOR_DB_PASSWORD: migratorPassword,
     },
   });
   databaseCreated = true;
   await waitForDatabase();
-  const migratorEnv = { ...process.env, DATABASE_URL: databaseUrl };
+  const migratorEnv = { ...process.env, MIGRATION_DATABASE_URL: migrationUrl };
   const runtimeSafetyArgs = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m"];
-  requireDocker(["run", ...runtimeSafetyArgs, "--rm", "--network", network, "--env", "DATABASE_URL", image, "npm", "run", "prisma:migrate:deploy"], { env: migratorEnv });
-  requireDocker(["run", ...runtimeSafetyArgs, "--rm", "--network", network, "--env", "DATABASE_URL", image, "npm", "run", "prisma:migrate:status"], { env: migratorEnv });
+  requireDocker(["run", ...runtimeSafetyArgs, "--rm", "--network", network, "--env", "MIGRATION_DATABASE_URL", image, "npm", "run", "prisma:migrate:deploy"], { env: migratorEnv });
+  requireDocker(["run", ...runtimeSafetyArgs, "--rm", "--network", network, "--env", "MIGRATION_DATABASE_URL", image, "npm", "run", "prisma:migrate:status"], { env: migratorEnv });
 } catch {
   failure = true;
 } finally {
@@ -61,7 +70,7 @@ console.log(JSON.stringify({ status: "passed", migratorImage: image, migrationsA
 
 async function waitForDatabase() {
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (runDocker(["exec", databaseContainer, "pg_isready", "-U", databaseUser, "-d", databaseName], { timeout: 10_000 }).ok) return;
+    if (runDocker(["exec", databaseContainer, "pg_isready", "-h", "127.0.0.1", "-U", databaseUser, "-d", databaseName], { timeout: 10_000 }).ok) return;
     await delay(1_000);
   }
   throw new Error("Disposable PostgreSQL database did not become ready.");
