@@ -65,6 +65,7 @@ async function verifyDatabaseRoles(kind) {
     const port = getMappedPort(name);
     const bootstrapUrl = connectionUrl("bielos_bootstrap", bootstrapPassword, port);
     const migratorUrl = connectionUrl("bielos_migrator", migratorPassword, port);
+    runPsql(name, "bielos_bootstrap", bootstrapPassword, "CREATE ROLE bielos_connect_probe NOLOGIN;", "prepare unprivileged database connection probe");
 
     if (kind === "populated") {
       runMigrationsDirect(bootstrapUrl, "prepare populated legacy fixture");
@@ -126,7 +127,6 @@ async function verifyDatabaseRoles(kind) {
     const memberships = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT count(*) = 0 FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test'));`, "inspect role memberships");
     assert.equal(memberships.trim(), "t", "Runtime, migrator, and isolated E2E roles must not have role memberships.");
 
-    runPsql(name, "bielos_bootstrap", bootstrapPassword, "CREATE ROLE bielos_connect_probe NOLOGIN;", "prepare unprivileged database connection probe");
     const publicConnect = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_database_privilege('bielos_connect_probe', current_database(), 'CONNECT') AND NOT has_table_privilege('bielos_connect_probe', 'public."User"', 'TRUNCATE') AND NOT EXISTS (SELECT 1 FROM pg_database AS db_entry CROSS JOIN LATERAL aclexplode(COALESCE(db_entry.datacl, acldefault('d', db_entry.datdba))) AS privilege WHERE db_entry.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CONNECT');`, "inspect public database connectivity");
     assert.equal(publicConnect.trim(), "t", "Only the bootstrap, runtime, and migrator roles may connect to the application database.");
 

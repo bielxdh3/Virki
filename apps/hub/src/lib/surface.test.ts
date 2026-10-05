@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost, safeReturnTo } from "./surface";
+import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost, safeReturnTo, sameOriginFailureReason } from "./surface";
 
 test("surfaces use the verified Host header and exact configured hostnames", () => {
   const headers = new Headers({ host: "portal.biel.dev.br", "x-forwarded-host": "hub.biel.dev.br" });
@@ -29,6 +29,16 @@ test("same-origin form checks compare the complete host and require a secure ori
   assert.equal(hasSameOrigin(new Headers({ host: "portal.biel.dev.br", origin: "https://attacker.invalid" })), false);
   assert.equal(hasSameOrigin(new Headers({ host: "portal.biel.dev.br:8443", origin: "https://portal.biel.dev.br" })), false);
   assert.equal(hasSameOrigin(new Headers({ host: "portal.biel.dev.br" })), false);
+});
+
+test("same-origin rejection diagnostics expose only stable reason codes", () => {
+  assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001", origin: "https://portal.localhost:3001" })), null);
+  assert.equal(sameOriginFailureReason(new Headers({ host: "127.0.0.1:3001", origin: "https://portal.localhost:3001" })), "hostname-mismatch");
+  assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost", origin: "https://portal.localhost:3001" })), "port-mismatch");
+  assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001" })), "missing-origin");
+  assert.equal(sameOriginFailureReason(new Headers({ origin: "https://portal.localhost:3001" })), "missing-host");
+  assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001", origin: "not-an-origin" })), "malformed-origin");
+  assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001", origin: "ftp://attacker.invalid" })), "disallowed-protocol");
 });
 
 test("production redirect origins use canonical surface hosts, never the internal request URL", () => {

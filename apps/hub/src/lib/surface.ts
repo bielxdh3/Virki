@@ -8,19 +8,55 @@ export function requestHost(headers: Pick<Headers, "get">): string {
   return host.replace(/:\d+$/u, "").replace(/\.$/u, "").toLowerCase();
 }
 
-export function hasSameOrigin(headers: Pick<Headers, "get">): boolean {
+export type SameOriginFailureReason =
+  | "missing-origin"
+  | "missing-host"
+  | "invalid-host"
+  | "malformed-origin"
+  | "disallowed-protocol"
+  | "authority-mismatch"
+  | "hostname-mismatch"
+  | "port-mismatch"
+  | "invalid-origin-components";
+
+export function sameOriginFailureReason(headers: Pick<Headers, "get">): SameOriginFailureReason | null {
   const origin = headers.get("origin");
+  if (!origin) return "missing-origin";
   const hostHeader = headers.get("host")?.trim().toLowerCase().replace(/\.$/u, "") ?? "";
-  if (!origin || !hostHeader || hostHeader.includes(",") || containsUnsafeHostCharacter(hostHeader)) return false;
+  if (!hostHeader) return "missing-host";
+  if (hostHeader.includes(",") || containsUnsafeHostCharacter(hostHeader)) return "invalid-host";
   try {
     const parsed = new URL(origin);
     const allowedProtocol = parsed.protocol === "https:" || (process.env.NODE_ENV !== "production" && parsed.protocol === "http:");
     const originHost = parsed.host.toLowerCase().replace(/\.$/u, "");
     const requestOriginHost = normalizeDefaultPort(hostHeader, parsed.protocol);
-    return allowedProtocol && normalizeDefaultPort(originHost, parsed.protocol) === requestOriginHost && parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && parsed.search === "" && parsed.hash === "";
+    if (!allowedProtocol) return "disallowed-protocol";
+    if (normalizeDefaultPort(originHost, parsed.protocol) !== requestOriginHost) {
+      return classifyAuthorityMismatch(parsed, hostHeader);
+    }
+    if (parsed.username !== "" || parsed.password !== "" || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+      return "invalid-origin-components";
+    }
+    return null;
   } catch {
-    return false;
+    return "malformed-origin";
   }
+}
+
+function classifyAuthorityMismatch(origin: URL, hostHeader: string): "authority-mismatch" | "hostname-mismatch" | "port-mismatch" | "invalid-host" {
+  try {
+    const request = new URL(`${origin.protocol}//${hostHeader}`);
+    if (request.username !== "" || request.password !== "" || request.pathname !== "/" || request.search !== "" || request.hash !== "") return "invalid-host";
+    if (request.hostname.toLowerCase().replace(/\.$/u, "") !== origin.hostname.toLowerCase().replace(/\.$/u, "")) return "hostname-mismatch";
+    if (request.port !== origin.port) return "port-mismatch";
+    return "authority-mismatch";
+  } catch {
+    return "invalid-host";
+  }
+}
+
+export function hasSameOrigin(headers: Pick<Headers, "get">): boolean {
+  return sameOriginFailureReason(headers) === null;
 }
 
 function normalizeDefaultPort(host: string, protocol: string): string {

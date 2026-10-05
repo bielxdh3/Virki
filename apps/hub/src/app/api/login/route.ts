@@ -12,7 +12,7 @@ import {
 import { DEVICE_COOKIE_NAME, startLoginCeremony } from "@bielos/auth/security";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../lib/surface";
+import { getSurface, getSurfaceBaseUrl, safeReturnTo, sameOriginFailureReason } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
 import { createLoginResponseAfterRequiredAudit } from "../../../lib/login-audit";
 
@@ -24,7 +24,8 @@ export async function POST(request: Request) {
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-login-api"))) {
     return loginForbiddenResponse("cloudflare-access");
   }
-  if (!hasSameOrigin(request.headers)) return loginForbiddenResponse("same-origin");
+  const sameOriginFailure = sameOriginFailureReason(request.headers);
+  if (sameOriginFailure) return loginForbiddenResponse(`same-origin-${sameOriginFailure}`);
 
   const formData = await readBoundedFormData(request);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
