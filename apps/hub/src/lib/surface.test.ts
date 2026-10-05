@@ -37,6 +37,8 @@ test("same-origin rejection diagnostics expose only stable reason codes", () => 
   assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost", origin: "https://portal.localhost:3001" })), "port-mismatch");
   assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001" })), "missing-origin");
   assert.equal(sameOriginFailureReason(new Headers({ origin: "https://portal.localhost:3001" })), "missing-host");
+  assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001", origin: "null" })), "opaque-origin");
+  assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001", origin: "https://portal.localhost:3001, https://portal.localhost:3001" })), "comma-in-origin");
   assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001", origin: "not-an-origin" })), "malformed-origin");
   assert.equal(sameOriginFailureReason(new Headers({ host: "portal.localhost:3001", origin: "ftp://attacker.invalid" })), "disallowed-protocol");
 });

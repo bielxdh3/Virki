@@ -338,7 +338,18 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "missing-cloudflare-access-config",
     "missing-cloudflare-access-jwt",
     "missing-cloudflare-access-signing-key",
-    "same-origin"
+    "same-origin",
+    "same-origin-missing-origin",
+    "same-origin-missing-host",
+    "same-origin-invalid-host",
+    "same-origin-malformed-origin",
+    "same-origin-opaque-origin",
+    "same-origin-comma-in-origin",
+    "same-origin-disallowed-protocol",
+    "same-origin-authority-mismatch",
+    "same-origin-hostname-mismatch",
+    "same-origin-port-mismatch",
+    "same-origin-invalid-origin-components"
   ]);
   const routeReason = headers["x-bielos-e2e-login-reason"];
   if (routeReason) return `login-route:${allowedReasons.has(routeReason) ? routeReason : "unrecognized"}`;

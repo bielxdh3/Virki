@@ -13,6 +13,8 @@ export type SameOriginFailureReason =
   | "missing-host"
   | "invalid-host"
   | "malformed-origin"
+  | "opaque-origin"
+  | "comma-in-origin"
   | "disallowed-protocol"
   | "authority-mismatch"
   | "hostname-mismatch"
@@ -39,6 +41,8 @@ export function sameOriginFailureReason(headers: Pick<Headers, "get">): SameOrig
     }
     return null;
   } catch {
+    if (origin.trim().toLowerCase() === "null") return "opaque-origin";
+    if (origin.includes(",")) return "comma-in-origin";
     return "malformed-origin";
   }
 }

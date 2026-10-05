@@ -569,6 +569,8 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "same-origin-missing-host",
     "same-origin-invalid-host",
     "same-origin-malformed-origin",
+    "same-origin-opaque-origin",
+    "same-origin-comma-in-origin",
     "same-origin-disallowed-protocol",
     "same-origin-authority-mismatch",
     "same-origin-hostname-mismatch",
