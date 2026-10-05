@@ -281,7 +281,20 @@ function docker(args, label, { allowFailure = false } = {}) {
   });
   if (result.error) throw new Error(`${label} could not run Docker (${result.error.code ?? "unknown error"}).`);
   if (!allowFailure && result.status !== 0) {
-    throw new Error(`${label} failed in Docker (exit ${result.status ?? "unknown"}).`);
+    const detail = redactDockerDiagnostics(result.stderr ?? "", args);
+    throw new Error(`${label} failed in Docker (exit ${result.status ?? "unknown"})${detail ? `: ${detail}` : ""}.`);
   }
   return result;
+}
+
+function redactDockerDiagnostics(value, args) {
+  let output = String(value).trim();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] === "--env" ? args[index + 1] : args[index].startsWith("--env=") ? args[index].slice("--env=".length) : "";
+    const separator = argument.indexOf("=");
+    if (separator >= 0 && argument.slice(separator + 1)) {
+      output = output.replaceAll(argument.slice(separator + 1), "[redacted]");
+    }
+  }
+  return output.slice(-2000);
 }

@@ -320,6 +320,20 @@ function requestHub(path: string, options: {
 }
 
 function loginDenialDiagnostic(headers: Record<string, string>): string {
+  const ceremonyStages = new Set([
+    "transaction-start",
+    "account-lookup",
+    "account-state",
+    "account-lock",
+    "trusted-device-lookup",
+    "remembered-challenges-revoke",
+    "remembered-session-create",
+    "challenge-revoke",
+    "challenge-code-hash",
+    "challenge-create",
+    "outbox-enqueue",
+    "transaction-commit"
+  ]);
   const allowedReasons = new Set([
     "cloudflare-access",
     "csrf-expired",
@@ -358,9 +372,21 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "security-ceremony-unavailable"
   ]);
   const routeReason = headers["x-bielos-e2e-login-reason"];
-  if (routeReason) return `login-route:${allowedReasons.has(routeReason) ? routeReason : "unrecognized"}`;
+  if (routeReason) {
+    const stage = routeReason.startsWith("security-ceremony-unavailable-")
+      ? routeReason.slice("security-ceremony-unavailable-".length)
+      : "";
+    const recognized = allowedReasons.has(routeReason) || ceremonyStages.has(stage);
+    return `login-route:${recognized ? routeReason : "unrecognized"}`;
+  }
   const proxyReason = headers["x-bielos-e2e-access-reason"];
-  if (proxyReason) return `hub-proxy:${allowedReasons.has(proxyReason) ? proxyReason : "unrecognized"}`;
+  if (proxyReason) {
+    const stage = proxyReason.startsWith("security-ceremony-unavailable-")
+      ? proxyReason.slice("security-ceremony-unavailable-".length)
+      : "";
+    const recognized = allowedReasons.has(proxyReason) || ceremonyStages.has(stage);
+    return `hub-proxy:${recognized ? proxyReason : "unrecognized"}`;
+  }
   return "not-reported";
 }
 
