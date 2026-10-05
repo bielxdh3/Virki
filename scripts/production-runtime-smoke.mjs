@@ -76,7 +76,7 @@ try {
   await assertStatus(`http://127.0.0.1:${hubPort}/login`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   const response = await waitForResponse(`http://127.0.0.1:${hubPort}/.well-known/openid-configuration`, { host: publicHost });
-  assertSecurityHeaders(response.headers, "strict-origin");
+  assertSecurityHeaders(response.headers);
   const discovery = JSON.parse(response.body);
   if (
     discovery.issuer !== `https://${publicHost}` ||

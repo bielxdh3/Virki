@@ -349,7 +349,13 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "same-origin-authority-mismatch",
     "same-origin-hostname-mismatch",
     "same-origin-port-mismatch",
-    "same-origin-invalid-origin-components"
+    "same-origin-invalid-origin-components",
+    "input-too-long",
+    "authentication-invalid-credentials",
+    "authentication-rate-limited",
+    "authentication-limiter-unavailable",
+    "role-mismatch",
+    "security-ceremony-unavailable"
   ]);
   const routeReason = headers["x-bielos-e2e-login-reason"];
   if (routeReason) return `login-route:${allowedReasons.has(routeReason) ? routeReason : "unrecognized"}`;
@@ -426,6 +432,13 @@ async function completePortalLoginIfNeeded(page: import("@playwright/test").Page
   }
   expect(documentOrigin).toBe(portalUrl);
   expect(requestOrigin).toBe(portalUrl);
+  const location = loginResponse.headers().location;
+  if (loginResponse.status() === 303 && location) {
+    const redirect = new URL(location, portalUrl);
+    if (redirect.pathname === "/login" && redirect.searchParams.get("error") === "1") {
+      throw new Error(`OIDC login was rejected (${loginDenialDiagnostic(loginResponse.headers())}).`);
+    }
+  }
   await expect(emailInput).toBeHidden({ timeout: 10_000 });
 }
 

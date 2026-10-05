@@ -44,7 +44,7 @@ export async function POST(request: Request) {
 
   const email = getFormString(formData, "email");
   const password = getFormRawString(formData, "password");
-  if (email.length > 320 || password.length > 256) return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface), reauth);
+  if (email.length > 320 || password.length > 256) return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface), reauth, "input-too-long");
   const rateLimitIdentifier = normalizeEmail(email);
   const auditMetadata = createAuditRequestMetadata(request.headers, `${surface}-login`);
   const actorEmailHash = rateLimitIdentifier ? hashAuditEmail(rateLimitIdentifier) : undefined;
@@ -67,12 +67,17 @@ export async function POST(request: Request) {
             : "Login failed.",
       metadata: auditMetadata
     });
-    return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface), reauth);
+    const reason = authentication.failureMode === "rate-limited"
+      ? "authentication-rate-limited"
+      : authentication.failureMode === "limiter-unavailable"
+        ? "authentication-limiter-unavailable"
+        : "authentication-invalid-credentials";
+    return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface), reauth, reason);
   }
 
   if ((surface === "hub" && user.role !== "ADMIN") || (surface === "portal" && user.role !== "USER")) {
     await writeAuditLog({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: user.id, actorEmailHash: hashAuditEmail(user.email), resource: surface, message: "Login failed.", metadata: auditMetadata });
-    return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface, user.role), reauth);
+    return redirectToLogin(failureRedirectUrl, true, safeReturnTo(requestedReturnTo, surface, user.role), reauth, "role-mismatch");
   }
 
   const returnTo = safeReturnTo(requestedReturnTo, surface, user.role);
@@ -98,7 +103,7 @@ export async function POST(request: Request) {
       message: "Security verification unavailable.",
       metadata: auditMetadata
     });
-    return redirectToLogin(failureRedirectUrl, true, returnTo, reauth);
+    return redirectToLogin(failureRedirectUrl, true, returnTo, reauth, "security-ceremony-unavailable");
   }
 
   if (ceremony.kind === "SESSION") {
@@ -159,7 +164,10 @@ export async function POST(request: Request) {
 }
 
 function loginForbiddenResponse(reason: string): NextResponse {
-  const response = new NextResponse("Forbidden", { status: 403 });
+  return addE2eLoginDiagnostic(new NextResponse("Forbidden", { status: 403 }), reason);
+}
+
+function addE2eLoginDiagnostic(response: NextResponse, reason: string): NextResponse {
   if (process.env.NODE_ENV === "development" && process.env.BIELOS_E2E_ACCESS_DIAGNOSTICS === "true") {
     response.headers.set("x-bielos-e2e-login-reason", reason);
   }
@@ -173,14 +181,15 @@ function auditUnavailableResponse() {
   });
 }
 
-function redirectToLogin(url: URL, failed: boolean, returnTo: string | null, reauth = false) {
+function redirectToLogin(url: URL, failed: boolean, returnTo: string | null, reauth = false, diagnosticReason?: string) {
   if (failed) {
     url.searchParams.set("error", "1");
   }
   if (returnTo) url.searchParams.set("returnTo", returnTo);
   if (reauth) url.searchParams.set("reauth", "1");
 
-  return NextResponse.redirect(url, { status: 303 });
+  const response = NextResponse.redirect(url, { status: 303 });
+  return diagnosticReason ? addE2eLoginDiagnostic(response, diagnosticReason) : response;
 }
 
 function getFormString(formData: FormData, key: string): string {

@@ -199,7 +199,7 @@ test("production application, maintenance, and migration services run non-root w
   assert.match(runtimeSmoke, /"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"/u);
   assert.match(runtimeSmoke, /assertSecurityHeaders\(publicResponse\.headers\)/u);
   assert.match(runtimeSmoke, /assertSecurityHeaders\(hubHealth\.headers, "strict-origin"\)/u);
-  assert.match(runtimeSmoke, /assertSecurityHeaders\(response\.headers, "strict-origin"\)/u);
+  assert.match(runtimeSmoke, /assertSecurityHeaders\(response\.headers\)/u);
   assert.match(runtimeSmoke, /function assertSecurityHeaders\(headers, referrerPolicy = "no-referrer"\)/u);
   assert.match(imageAssertion, /runtimeUid !== 1000/u);
   assert.match(imageAssertion, /"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"/u);
