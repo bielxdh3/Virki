@@ -125,6 +125,7 @@ $$;
 GRANT CONNECT ON DATABASE :"database_name" TO bielos_runtime, bielos_migrator;
 REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE :"database_name" FROM PUBLIC;
 REVOKE CREATE, TEMPORARY ON DATABASE :"database_name" FROM bielos_runtime;
+GRANT CREATE ON DATABASE :"database_name" TO bielos_migrator;
 GRANT TEMPORARY ON DATABASE :"database_name" TO bielos_migrator;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
