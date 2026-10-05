@@ -97,6 +97,7 @@ async function verifyDatabaseRoles(kind) {
         "sh", "/test/20-bielos-e2e-runtime-test-role.sh"
       ], "provision isolated E2E runtime role");
       assert.equal(e2eRole.status, 0, "Could not provision the isolated E2E runtime role.");
+      runPsql(name, "bielos_bootstrap", bootstrapPassword, "GRANT bielos_role_parent TO bielos_runtime_test; GRANT bielos_runtime_test TO bielos_role_child; GRANT TRUNCATE, REFERENCES, TRIGGER ON TABLE public.\"User\" TO bielos_runtime_test; CREATE SEQUENCE public.__bielos_runtime_test_sequence; GRANT UPDATE ON SEQUENCE public.__bielos_runtime_test_sequence TO bielos_runtime_test; CREATE FUNCTION public.__bielos_runtime_test_exec_probe() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$; REVOKE ALL PRIVILEGES ON FUNCTION public.__bielos_runtime_test_exec_probe() FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.__bielos_runtime_test_exec_probe() TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator GRANT TRUNCATE ON TABLES TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public GRANT TRUNCATE ON TABLES TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator GRANT EXECUTE ON ROUTINES TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public GRANT EXECUTE ON ROUTINES TO bielos_runtime_test;", "seed stale isolated E2E role memberships and grants");
 
       const publicRoutinePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_function_privilege('bielos_connect_probe', 'public.__bielos_public_exec_probe()', 'EXECUTE');`, "inspect legacy public routine grants");
       assert.equal(publicRoutinePrivileges.trim(), "t", "Existing-volume transition must remove direct PUBLIC routine execution.");
@@ -158,13 +159,21 @@ async function verifyDatabaseRoles(kind) {
     assert.equal(runtimePrivileges.trim(), "t", "Runtime grants must permit application DML while denying database and schema DDL.");
     const e2ePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_runtime_test', current_database(), 'CONNECT') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_runtime_test', 'public', 'USAGE') AND NOT has_schema_privilege('bielos_runtime_test', 'public', 'CREATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'SELECT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'INSERT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'UPDATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'DELETE') AND has_type_privilege('bielos_runtime_test', 'public."UserRole"', 'USAGE');`, "inspect isolated E2E role grants");
     assert.equal(e2ePrivileges.trim(), "t", "The isolated E2E role must support fixture DML without database or schema DDL.");
+    if (kind === "populated") {
+      const e2eExcessPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, "SELECT NOT has_table_privilege('bielos_runtime_test', 'public.\"User\"', 'TRUNCATE') AND NOT has_table_privilege('bielos_runtime_test', 'public.\"User\"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime_test', 'public.\"User\"', 'TRIGGER') AND NOT has_sequence_privilege('bielos_runtime_test', 'public.__bielos_runtime_test_sequence', 'UPDATE') AND NOT has_function_privilege('bielos_runtime_test', 'public.__bielos_runtime_test_exec_probe()', 'EXECUTE');", "inspect normalized isolated E2E privileges");
+      assert.equal(e2eExcessPrivileges.trim(), "t", "The isolated E2E role must lose stale elevated object grants when reprovisioned.");
+    }
 
     runPsql(name, "bielos_migrator", migratorPassword, "CREATE TABLE public.__bielos_role_probe (id integer PRIMARY KEY, value text NOT NULL); ALTER TABLE public.__bielos_role_probe ADD COLUMN changed boolean NOT NULL DEFAULT false;", "create objects with migration role");
     const newObjectPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_table_privilege('bielos_runtime', 'public.__bielos_role_probe', 'TRUNCATE');`, "inspect future runtime grants");
     assert.equal(newObjectPrivileges.trim(), "t", "Future migration objects must not inherit unexpected runtime privileges.");
+    const newE2eObjectPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, "SELECT NOT has_table_privilege('bielos_runtime_test', 'public.__bielos_role_probe', 'TRUNCATE');", "inspect future isolated E2E grants");
+    assert.equal(newE2eObjectPrivileges.trim(), "t", "Future migration objects must not inherit stale isolated E2E privileges.");
     runPsql(name, "bielos_migrator", migratorPassword, "CREATE FUNCTION public.__bielos_role_probe_routine() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;", "create future migration routine");
     const newRoutinePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_function_privilege('bielos_migrator', 'public.digest(text,text)', 'EXECUTE') AND NOT has_function_privilege('bielos_runtime', 'public.__bielos_role_probe_routine()', 'EXECUTE');`, "inspect future routine grants");
     assert.equal(newRoutinePrivileges.trim(), "t", "The migrator must retain only its explicit pgcrypto migration access, and future routines must not be executable by runtime.");
+    const newE2eRoutinePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, "SELECT NOT has_function_privilege('bielos_runtime_test', 'public.__bielos_role_probe_routine()', 'EXECUTE');", "inspect future isolated E2E routine grants");
+    assert.equal(newE2eRoutinePrivileges.trim(), "t", "Future migration routines must not inherit stale isolated E2E execute privileges.");
     runPsql(name, "bielos_migrator", migratorPassword, "DROP FUNCTION public.__bielos_role_probe_routine();", "remove future routine fixture");
     const pgcryptoMigrationAccess = runPsql(name, "bielos_migrator", migratorPassword, "SELECT encode(public.digest('bielos-migration-probe', 'sha256'), 'hex');", "verify migrator pgcrypto access");
     assert.match(pgcryptoMigrationAccess, /^[a-f0-9]{64}$/mu, "The migration role must be able to use the pgcrypto digest function required by the committed migration.");
@@ -183,6 +192,9 @@ async function verifyDatabaseRoles(kind) {
     assert.match(forbiddenDdl.stderr ?? "", /permission denied/u, "Runtime DDL must fail specifically because the role lacks permission.");
 
     runPsql(name, "bielos_migrator", migratorPassword, "DROP TABLE public.__bielos_role_probe;", "clean temporary role probe");
+    if (kind === "populated") {
+      runPsql(name, "bielos_bootstrap", bootstrapPassword, "DROP FUNCTION public.__bielos_runtime_test_exec_probe(); DROP SEQUENCE public.__bielos_runtime_test_sequence;", "clean existing-volume E2E privilege probes");
+    }
   } finally {
     docker(["rm", "--force", name], `remove ${kind} PostgreSQL fixture`, { allowFailure: true });
   }

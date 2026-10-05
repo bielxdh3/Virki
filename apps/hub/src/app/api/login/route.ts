@@ -9,7 +9,7 @@ import {
   writeAuditLog,
   writeAuditLogRequired
 } from "@bielos/auth";
-import { DEVICE_COOKIE_NAME, startLoginCeremony } from "@bielos/auth/security";
+import { DEVICE_COOKIE_NAME, getLoginCeremonyFailureStage, startLoginCeremony } from "@bielos/auth/security";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, sameOriginFailureReason } from "../../../lib/surface";
@@ -93,7 +93,7 @@ export async function POST(request: Request) {
       reauth,
       requiredRole
     );
-  } catch {
+  } catch (error) {
     await writeAuditLog({
       eventType: "AUTH_LOGIN_FAILURE",
       result: "FAILURE",
@@ -103,7 +103,14 @@ export async function POST(request: Request) {
       message: "Security verification unavailable.",
       metadata: auditMetadata
     });
-    return redirectToLogin(failureRedirectUrl, true, returnTo, reauth, "security-ceremony-unavailable");
+    const stage = getLoginCeremonyFailureStage(error);
+    return redirectToLogin(
+      failureRedirectUrl,
+      true,
+      returnTo,
+      reauth,
+      stage ? "security-ceremony-unavailable-" + stage : "security-ceremony-unavailable"
+    );
   }
 
   if (ceremony.kind === "SESSION") {

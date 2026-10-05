@@ -27,10 +27,31 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bielos_runtime_test')
 \gexec
 
 ALTER ROLE bielos_runtime_test LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'e2e_password';
+
+DO $$
+DECLARE
+  membership record;
+BEGIN
+  FOR membership IN
+    SELECT granted_role.rolname AS granted_role_name, member_role.rolname AS member_role_name
+    FROM pg_auth_members AS role_membership
+    JOIN pg_roles AS granted_role ON granted_role.oid = role_membership.roleid
+    JOIN pg_roles AS member_role ON member_role.oid = role_membership.member
+    WHERE granted_role.rolname = 'bielos_runtime_test'
+       OR member_role.rolname = 'bielos_runtime_test'
+  LOOP
+    EXECUTE format('REVOKE %I FROM %I', membership.granted_role_name, membership.member_role_name);
+  END LOOP;
+END
+$$;
+
 GRANT CONNECT ON DATABASE :"database_name" TO bielos_runtime_test;
 REVOKE CREATE, TEMPORARY ON DATABASE :"database_name" FROM bielos_runtime_test;
 REVOKE ALL ON SCHEMA public FROM bielos_runtime_test;
 GRANT USAGE ON SCHEMA public TO bielos_runtime_test;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM bielos_runtime_test;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM bielos_runtime_test;
+REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public FROM bielos_runtime_test;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bielos_runtime_test;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bielos_runtime_test;
 
@@ -52,11 +73,28 @@ BEGIN
           AND dependency.deptype = 'e'
       )
   LOOP
+    EXECUTE format('REVOKE ALL PRIVILEGES ON TYPE public.%I FROM bielos_runtime_test', item.typname);
     EXECUTE format('GRANT USAGE ON TYPE public.%I TO bielos_runtime_test', item.typname);
   END LOOP;
 END
 $$;
 
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator
+  REVOKE ALL PRIVILEGES ON TABLES FROM bielos_runtime_test;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
+  REVOKE ALL PRIVILEGES ON TABLES FROM bielos_runtime_test;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator
+  REVOKE ALL PRIVILEGES ON SEQUENCES FROM bielos_runtime_test;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
+  REVOKE ALL PRIVILEGES ON SEQUENCES FROM bielos_runtime_test;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator
+  REVOKE ALL PRIVILEGES ON ROUTINES FROM bielos_runtime_test;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
+  REVOKE ALL PRIVILEGES ON ROUTINES FROM bielos_runtime_test;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator
+  REVOKE ALL PRIVILEGES ON TYPES FROM bielos_runtime_test;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
+  REVOKE ALL PRIVILEGES ON TYPES FROM bielos_runtime_test;
 ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bielos_runtime_test;
 ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public

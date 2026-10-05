@@ -8,6 +8,7 @@ import {
   consumeApprovedAccountRecovery,
   decryptTotpSecret,
   encryptTotpSecret,
+  getLoginCeremonyFailureStage,
   getApprovedAccountRecoveryExpiry,
   getPendingAccountRecoveryQueueWhere,
   hashDeviceToken,
@@ -15,6 +16,7 @@ import {
   hashSecurityCode,
   isAccountRecoveryEligible,
   isPublicAccountRecoveryEligible,
+  LoginCeremonyStartError,
   lockActiveLoginAccountInTransaction,
   lockActiveRecoveryAccountInTransaction,
   lockAndExpireSiblingAccountRecoveriesInTransaction,
@@ -22,6 +24,11 @@ import {
   verifySecurityCode,
   verifyTotpCode
 } from "./security";
+
+test("login ceremony diagnostics expose only fixed failure stages", () => {
+  assert.equal(getLoginCeremonyFailureStage(new LoginCeremonyStartError("outbox-enqueue")), "outbox-enqueue");
+  assert.equal(getLoginCeremonyFailureStage(new Error("private database detail")), undefined);
+});
 
 test("TOTP secrets are encrypted and never returned from ciphertext", () => {
   const secret = createTotpSecret();
