@@ -203,9 +203,6 @@ async function verifyDatabaseRoles(kind) {
     assert.match(forbiddenDdl.stderr ?? "", /permission denied/u, "Runtime DDL must fail specifically because the role lacks permission.");
 
     runPsql(name, "bielos_migrator", migratorPassword, "DROP TABLE public.__bielos_role_probe;", "clean temporary role probe");
-    if (kind === "populated") {
-      runPsql(name, "bielos_bootstrap", bootstrapPassword, "DROP FUNCTION public.__bielos_runtime_test_exec_probe(); DROP SEQUENCE public.__bielos_runtime_test_sequence;", "clean existing-volume E2E privilege probes");
-    }
   } catch (error) {
     failure = error;
   }

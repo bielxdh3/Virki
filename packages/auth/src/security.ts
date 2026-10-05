@@ -690,7 +690,7 @@ export async function lockActiveRecoveryAccountInTransaction(transaction: Prisma
     SELECT "id"
     FROM "User"
     WHERE "id" = ${userId}
-      AND "role" = ${expectedRole}
+      AND "role" = ${expectedRole}::"UserRole"
       AND "isActive" = TRUE
       AND "accountStatus" = 'ACTIVE'
     FOR UPDATE
@@ -704,7 +704,7 @@ export async function lockActiveLoginAccountInTransaction(transaction: Prisma.Tr
       SELECT "id"
       FROM "User"
       WHERE "id" = ${userId}
-        AND "role" = ${expectedRole}
+        AND "role" = ${expectedRole}::"UserRole"
         AND "isActive" = TRUE
         AND "accountStatus" = 'ACTIVE'
       FOR UPDATE

@@ -109,7 +109,7 @@ test("recovery state transitions serialize on the active account row", async () 
   } as never;
 
   assert.equal(await lockActiveRecoveryAccountInTransaction(transaction, "user-a"), true);
-  assert.match(query, /"role" = \?[\s\S]*"isActive" = TRUE[\s\S]*"accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE/u);
+  assert.match(query, /"role" = \?::"UserRole"[\s\S]*"isActive" = TRUE[\s\S]*"accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE/u);
   assert.deepEqual(values, ["user-a", "USER"]);
   values = [];
   await lockActiveRecoveryAccountInTransaction(transaction, "admin-a", "ADMIN");
@@ -248,7 +248,7 @@ test("login verification locks the account under the role allowed by its current
   } as never;
 
   assert.equal(await lockActiveLoginAccountInTransaction(transaction, "admin-a", "ADMIN"), true);
-  assert.match(query, /"role" = \?[\s\S]*"isActive" = TRUE[\s\S]*"accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE/u);
+  assert.match(query, /"role" = \?::"UserRole"[\s\S]*"isActive" = TRUE[\s\S]*"accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE/u);
   assert.deepEqual(values, ["admin-a", "ADMIN"]);
   assert.equal(await lockActiveLoginAccountInTransaction(transaction, "user-a", "USER"), true);
   assert.deepEqual(values, ["user-a", "USER"]);
