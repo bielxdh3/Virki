@@ -60,6 +60,7 @@ async function verifyDatabaseRoles(kind) {
   const start = docker(args, `start ${kind} PostgreSQL fixture`);
   assert.equal(start.status, 0, `Could not start the ${kind} disposable PostgreSQL fixture.`);
 
+  let failure;
   try {
     await waitForHealthy(name);
     const port = getMappedPort(name);
@@ -105,6 +106,21 @@ async function verifyDatabaseRoles(kind) {
     }
 
     runMigrationsAsMigrator(migratorUrl, "apply Prisma migrations as migrator");
+    if (kind === "populated") {
+      const normalizeE2eRole = docker([
+        "exec",
+        `--env=BIELOS_E2E_DATABASE_PASSWORD=${e2ePassword}`,
+        name,
+        "sh", e2eRoleSetupContainerPath
+      ], "remove stale isolated E2E privileges before the database transition");
+      assert.equal(normalizeE2eRole.status, 0, "Isolated E2E privileges must be normalized before database transition checks.");
+      const e2eExcessPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_table_privilege('bielos_runtime_test', 'public."User"', 'TRUNCATE') AND NOT has_table_privilege('bielos_runtime_test', 'public."User"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime_test', 'public."User"', 'TRIGGER') AND NOT has_sequence_privilege('bielos_runtime_test', 'public.__bielos_runtime_test_sequence', 'UPDATE') AND NOT has_function_privilege('bielos_runtime_test', 'public.__bielos_runtime_test_exec_probe()', 'EXECUTE');`, "inspect normalized isolated E2E privileges");
+      assert.equal(e2eExcessPrivileges.trim(), "t", "The isolated E2E role must lose stale elevated object grants when reprovisioned.");
+      const e2eMemberships = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT count(*) = 0 FROM pg_auth_members WHERE roleid = (SELECT oid FROM pg_roles WHERE rolname = 'bielos_runtime_test') OR member = (SELECT oid FROM pg_roles WHERE rolname = 'bielos_runtime_test');`, "inspect normalized isolated E2E role memberships");
+      assert.equal(e2eMemberships.trim(), "t", "The isolated E2E role must lose stale role memberships when reprovisioned.");
+      runPsql(name, "bielos_bootstrap", bootstrapPassword, "DROP FUNCTION public.__bielos_runtime_test_exec_probe(); DROP SEQUENCE public.__bielos_runtime_test_sequence;", "remove isolated E2E privilege probes before database transition");
+    }
+
     const repeatProvision = docker([
       "exec",
       `--env=BIELOS_RUNTIME_DB_PASSWORD=${runtimePassword}`,
@@ -159,11 +175,6 @@ async function verifyDatabaseRoles(kind) {
     assert.equal(runtimePrivileges.trim(), "t", "Runtime grants must permit application DML while denying database and schema DDL.");
     const e2ePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_runtime_test', current_database(), 'CONNECT') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_runtime_test', 'public', 'USAGE') AND NOT has_schema_privilege('bielos_runtime_test', 'public', 'CREATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'SELECT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'INSERT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'UPDATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'DELETE') AND has_type_privilege('bielos_runtime_test', 'public."UserRole"', 'USAGE');`, "inspect isolated E2E role grants");
     assert.equal(e2ePrivileges.trim(), "t", "The isolated E2E role must support fixture DML without database or schema DDL.");
-    if (kind === "populated") {
-      const e2eExcessPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, "SELECT NOT has_table_privilege('bielos_runtime_test', 'public.\"User\"', 'TRUNCATE') AND NOT has_table_privilege('bielos_runtime_test', 'public.\"User\"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime_test', 'public.\"User\"', 'TRIGGER') AND NOT has_sequence_privilege('bielos_runtime_test', 'public.__bielos_runtime_test_sequence', 'UPDATE') AND NOT has_function_privilege('bielos_runtime_test', 'public.__bielos_runtime_test_exec_probe()', 'EXECUTE');", "inspect normalized isolated E2E privileges");
-      assert.equal(e2eExcessPrivileges.trim(), "t", "The isolated E2E role must lose stale elevated object grants when reprovisioned.");
-    }
-
     runPsql(name, "bielos_migrator", migratorPassword, "CREATE TABLE public.__bielos_role_probe (id integer PRIMARY KEY, value text NOT NULL); ALTER TABLE public.__bielos_role_probe ADD COLUMN changed boolean NOT NULL DEFAULT false;", "create objects with migration role");
     const newObjectPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_table_privilege('bielos_runtime', 'public.__bielos_role_probe', 'TRUNCATE');`, "inspect future runtime grants");
     assert.equal(newObjectPrivileges.trim(), "t", "Future migration objects must not inherit unexpected runtime privileges.");
@@ -195,9 +206,28 @@ async function verifyDatabaseRoles(kind) {
     if (kind === "populated") {
       runPsql(name, "bielos_bootstrap", bootstrapPassword, "DROP FUNCTION public.__bielos_runtime_test_exec_probe(); DROP SEQUENCE public.__bielos_runtime_test_sequence;", "clean existing-volume E2E privilege probes");
     }
-  } finally {
-    docker(["rm", "--force", name], `remove ${kind} PostgreSQL fixture`, { allowFailure: true });
+  } catch (error) {
+    failure = error;
   }
+
+  try {
+    const cleanup = docker(["rm", "--force", name], `remove ${kind} PostgreSQL fixture`, { allowFailure: true });
+    if (cleanup.status !== 0) {
+      const remaining = docker([
+        "container", "ls", "--all", "--quiet", "--filter", `name=^/${name}$`
+      ], `verify ${kind} PostgreSQL fixture cleanup`);
+      if (remaining.stdout.trim()) {
+        const detail = redactDockerDiagnostics(cleanup.stderr ?? "", ["rm", "--force", name]);
+        throw new Error(`remove ${kind} PostgreSQL fixture failed in Docker (exit ${cleanup.status ?? "unknown"})${detail ? `: ${detail}` : ""}.`);
+      }
+    }
+  } catch (cleanupError) {
+    failure = failure
+      ? new AggregateError([failure, cleanupError], "PostgreSQL role validation and fixture cleanup both failed.")
+      : cleanupError;
+  }
+
+  if (failure) throw failure;
 }
 
 async function waitForHealthy(name) {

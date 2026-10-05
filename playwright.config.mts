@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
 import { generateKeyPairSync, randomBytes, randomUUID, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { reuseE2eEmailOutboxKey, reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
@@ -41,6 +41,8 @@ const tlsCsrPath = join(tlsDirectory, "server.csr");
 const tlsExtensionsPath = join(tlsDirectory, "server-extensions.cnf");
 const accessSigningKeyPath = join(tlsDirectory, "access-signing-key.json");
 const oidcPrivateConfigPath = join(tlsDirectory, "issuer-config.json");
+const chromiumHomePath = join(tlsDirectory, "chromium-home");
+const chromiumNssDbPath = join(chromiumHomePath, ".pki", "nssdb");
 const inheritedEmailOutboxKey = reuseE2eEmailOutboxKey(process.env);
 if (runtimeReady && (!inheritedEmailOutboxKey || !/^[A-Za-z0-9_-]{43}$/u.test(inheritedEmailOutboxKey) || Buffer.from(inheritedEmailOutboxKey, "base64url").length !== 32)) {
   throw new Error("Inherited E2E outbox key is invalid.");
@@ -53,6 +55,21 @@ try {
     generateLocalTlsPair(tlsKeyPath, tlsCertificatePath, tlsCaKeyPath, tlsCaCertificatePath, tlsCsrPath, tlsExtensionsPath);
   }
   assertLocalTlsPair(tlsCertificatePath, tlsCaCertificatePath);
+  if (process.platform === "linux") {
+    // Chromium trusts only this run's CA through a private NSS database.
+    for (const path of [chromiumHomePath, join(chromiumHomePath, ".pki"), chromiumNssDbPath]) {
+      mkdirSync(path, { recursive: true, mode: 0o700 });
+      chmodSync(path, 0o700);
+    }
+    const database = `sql:${chromiumNssDbPath}`;
+    if (!existsSync(join(chromiumNssDbPath, "cert9.db"))) {
+      execFileSync("certutil", ["-N", "--empty-password", "-d", database], { stdio: "ignore" });
+    }
+    const certificates = execFileSync("certutil", ["-L", "-d", database], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    if (!certificates.includes("BielOS E2E Test CA")) {
+      execFileSync("certutil", ["-A", "-d", database, "-n", "BielOS E2E Test CA", "-t", "C,,", "-i", tlsCaCertificatePath], { stdio: "ignore" });
+    }
+  }
   if (ownsRuntimeArtifacts) {
     const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const kid = randomUUID();
@@ -61,7 +78,7 @@ try {
   }
 } catch {
   if (ownsRuntimeArtifacts) rmSync(tlsDirectory, { recursive: true, force: true });
-  throw new Error("E2E requires local TLS and signing key generation support.");
+  throw new Error("E2E requires local TLS, Chromium CA trust, and signing-key generation support.");
 }
 
 if (ownsRuntimeArtifacts) process.once("exit", () => rmSync(tlsDirectory, { recursive: true, force: true }));
@@ -124,8 +141,8 @@ export default defineConfig({
   reporter: "list",
   use: {
     browserName: "chromium",
-    ignoreHTTPSErrors: true,
     launchOptions: {
+      env: process.platform === "linux" ? { ...process.env, HOME: chromiumHomePath } : undefined,
       args: [
         "--disable-background-networking",
         "--disable-component-update",

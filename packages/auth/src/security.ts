@@ -58,7 +58,8 @@ export type LoginCeremonyFailureStage =
   | "transaction-start"
   | "account-lookup"
   | "account-state"
-  | "account-lock"
+  | "account-lock-query"
+  | "account-lock-no-match"
   | "trusted-device-lookup"
   | "remembered-challenges-revoke"
   | "remembered-session-create"
@@ -276,8 +277,12 @@ export async function startLoginCeremony(
       const user = await transaction.user.findUnique({ where: { id: userId }, select: { id: true, email: true, emailNormalized: true, emailVerifiedAt: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } });
       stage = "account-state";
       if (!user?.isActive || user.accountStatus !== "ACTIVE" || (expectedRole && user.role !== expectedRole)) throw new SecurityMutationError();
-      stage = "account-lock";
-      if (!await lockActiveLoginAccountInTransaction(transaction, userId, expectedRole)) throw new SecurityMutationError();
+      stage = "account-lock-query";
+      const accountLocked = await lockActiveLoginAccountInTransaction(transaction, userId, expectedRole);
+      if (!accountLocked) {
+        stage = "account-lock-no-match";
+        throw new SecurityMutationError();
+      }
       stage = "trusted-device-lookup";
       const trusted = await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } });
       const isTrusted = trusted?.status === "TRUSTED" && trusted.revokedAt === null;

@@ -294,6 +294,11 @@ jobs:
           printf 'DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$runtime_role" "$runtime_password" "$host_port" >> "$GITHUB_ENV"
           printf 'MIGRATION_DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$migrator_role" "$migrator_password" "$host_port" >> "$GITHUB_ENV"
 
+      - name: Install Chromium certificate trust tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libnss3-tools
+
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 

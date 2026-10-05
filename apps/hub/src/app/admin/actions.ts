@@ -9,6 +9,7 @@ import { prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../lib/admin-mutation";
+import { compareAndSetProjectConnectionSecret } from "../../lib/connection-secret-rotation";
 import { ConnectionInputError, projectConnectionConfigurationRevision, validateProjectConnectionInput } from "../../lib/connection-policy";
 
 export type ConnectionActionState = {
@@ -275,11 +276,12 @@ export async function rotateProjectClientSecretAction(_state: ConnectionActionSt
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     const connectionId = readFormString(formData, "connectionId");
-    const connection = await prisma.projectConnection.findUnique({ where: { id: connectionId }, select: { id: true, clientId: true, enabled: true } });
+    const connection = await prisma.projectConnection.findUnique({ where: { id: connectionId }, select: { id: true, clientId: true, enabled: true, clientSecretCiphertext: true } });
     if (!connection || !connection.enabled) return { status: "error" };
     const secret = randomBytes(48).toString("base64url");
     await prisma.$transaction(async (transaction) => {
-      await transaction.projectConnection.update({ where: { id: connectionId }, data: { clientSecretCiphertext: encryptOidcClientSecret(secret) } });
+      const rotated = await compareAndSetProjectConnectionSecret(transaction, connection, encryptOidcClientSecret(secret));
+      if (!rotated) throw new Error("Project connection changed before secret rotation completed.");
       await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, resource: "project.connection", message: "Client secret rotated and outstanding OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id), clientRef: hashOidcIdentifier(connection.clientId) } });
     });

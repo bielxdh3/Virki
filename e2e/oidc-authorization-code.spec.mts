@@ -115,7 +115,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       return url;
     };
 
-    context = await browser.newContext({ ignoreHTTPSErrors: true });
+    context = await browser.newContext();
     await context.addCookies([{
       name: DEVICE_COOKIE_NAME,
       value: fixture.user.deviceToken,
@@ -324,7 +324,8 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "transaction-start",
     "account-lookup",
     "account-state",
-    "account-lock",
+    "account-lock-query",
+    "account-lock-no-match",
     "trusted-device-lookup",
     "remembered-challenges-revoke",
     "remembered-session-create",
