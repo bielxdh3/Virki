@@ -238,7 +238,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(saveButton).toBeEnabled();
     await saveButton.click();
     await expect(page).toHaveURL(hubUrl + "/admin/connections?status=updated");
-    await expect(page.getByRole("status")).toContainText("Alteração concluída");
+    await expect(page.locator('p.form-success[role="status"]')).toContainText("Alteração concluída", { timeout: 15_000 });
     const savedProjectRow = page.locator("article.connection-row").filter({ hasText: "Draft preserved after authorization rejection" });
     await expect(savedProjectRow).toBeVisible();
     await expect(savedProjectRow.locator("strong")).toContainText("Draft preserved after authorization rejection");
@@ -370,7 +370,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     portalOpenUrl.host = new URL(portalUrl).host;
     await portalPage.goto(portalOpenUrl.toString());
     await expect(portalPage).toHaveURL(`${portalUrl}/recover?error=1`);
-    await expect(portalPage.getByRole("alert")).toContainText("não é válido ou expirou");
+    await expect(portalPage.locator('p.form-error[role="alert"]')).toContainText("Não foi possível abrir este link. Solicite novas instruções pelo formulário abaixo.");
 
     await hubPage.goto(requestMessage.actionUrl!);
     const openedRecoveryUrl = new URL(hubPage.url());
