@@ -134,7 +134,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
         ? safeOidcRedirect(response.headers()["location"], responseUrl, callbackUri)
         : "";
       const loginDenial = responseUrl.pathname === "/api/login" && response.status() === 403
-        ? ` (${loginDenialDiagnostic(response.headers())})`
+        ? ` (${loginDenialDiagnostic(response.headers())}; request-origin=${safeOriginKind(response.request().headers().origin, portalUrl)})`
         : "";
       flowResponses.push(`${response.request().method()} ${path} ${response.status()}${redirect}${loginDenial}`);
       if (flowResponses.length > 16) flowResponses.shift();
@@ -356,6 +356,12 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
   const proxyReason = headers["x-bielos-e2e-access-reason"];
   if (proxyReason) return `hub-proxy:${allowedReasons.has(proxyReason) ? proxyReason : "unrecognized"}`;
   return "not-reported";
+}
+
+function safeOriginKind(value: string | undefined, expectedOrigin: string): string {
+  if (!value) return "missing";
+  if (value === "null") return "opaque";
+  return value === expectedOrigin ? "same-origin" : "other-origin";
 }
 
 function safeCertificateChain(value: unknown): string {
