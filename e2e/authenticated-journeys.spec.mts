@@ -76,6 +76,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
   try {
     await rememberDevice(context, hubUrl, fixture.admin.deviceToken);
     const page = await context.newPage();
+    const hubPageResponses = observeHubPageResponses(page, "/admin/connections");
     page.on("console", (message) => {
       if (/hydration|server-rendered html/iu.test(message.text())) {
         firstHydrationMismatchPhase ??= adminJourneyPhase;
@@ -246,7 +247,15 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(saveButton).toBeEnabled();
     await saveButton.click();
     await expect(page).toHaveURL(hubUrl + "/admin/connections?status=updated");
-    await expect(page.locator('p.form-success[role="status"]')).toContainText("Alteração concluída", { timeout: 15_000 });
+    try {
+      await expect(page.locator('p.form-success[role="status"]')).toContainText("Alteração concluída", { timeout: 15_000 });
+    } catch {
+      const saved = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true } });
+      const savedRowVisible = await page.locator("article.connection-row").filter({ hasText: "Draft preserved after authorization rejection" }).isVisible().catch(() => false);
+      const errorVisible = await page.getByRole("alert").isVisible().catch(() => false);
+      const openEditorVisible = await activeEditDetails.isVisible().catch(() => false);
+      throw new Error(`E2E ADMIN connection update status is unavailable (redirect=updated; persistedDraft=${saved?.name === "Draft preserved after authorization rejection"}; updatedRowVisible=${savedRowVisible}; errorVisible=${errorVisible}; editorVisible=${openEditorVisible}; hubResponses=${await hubPageResponses()}).`);
+    }
     const savedProjectRow = page.locator("article.connection-row").filter({ hasText: "Draft preserved after authorization rejection" });
     await expect(savedProjectRow).toBeVisible();
     await expect(savedProjectRow.locator("strong")).toContainText("Draft preserved after authorization rejection");
@@ -358,6 +367,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
 
     const hubContext = await createContext();
     const hubPage = await hubContext.newPage();
+    const hubRecoveryResponses = observeHubPageResponses(hubPage, "/recover");
     await addCloudflareAccessHeader(hubPage);
     await hubPage.goto(`${hubUrl}/recover`);
     await expect(hubPage.getByRole("heading", { name: "Recuperar acesso administrativo", exact: true })).toBeVisible();
@@ -409,7 +419,9 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
             ? "login-redirect"
             : "no-outcome-flag";
       const alertVisible = await hubPage.getByRole("alert").isVisible().catch(() => false);
-      throw new Error(`E2E ADMIN recovery verification status is unavailable (outcome=${outcome}; state=${recoveryState?.status ?? "missing"}; emailVerified=${Boolean(recoveryState?.emailVerifiedAt)}; alertVisible=${alertVisible}).`);
+      const verificationFormVisible = await hubPage.getByLabel("Código de verificação", { exact: true }).isVisible().catch(() => false);
+      const verifiedStatusVisible = await hubPage.getByRole("status").isVisible().catch(() => false);
+      throw new Error(`E2E ADMIN recovery verification status is unavailable (outcome=${outcome}; state=${recoveryState?.status ?? "missing"}; emailVerified=${Boolean(recoveryState?.emailVerifiedAt)}; alertVisible=${alertVisible}; verificationFormVisible=${verificationFormVisible}; verifiedStatusVisible=${verifiedStatusVisible}; hubResponses=${await hubRecoveryResponses()}).`);
     }
 
     await targetPage.goto(`${hubUrl}/admin/security`);
@@ -585,6 +597,36 @@ async function signIn(page: import("@playwright/test").Page, account: AccountFix
       throw new Error(`E2E login was rejected (${loginDenialDiagnostic(loginResponse.headers())}).`);
     }
   }
+}
+
+function observeHubPageResponses(page: import("@playwright/test").Page, pathname: "/admin/connections" | "/recover"): () => Promise<string> {
+  const pending: Promise<string>[] = [];
+  const allowedAccessReasons = new Set([
+    "missing-cloudflare-access-config",
+    "invalid-cloudflare-access-config",
+    "missing-cloudflare-access-jwt",
+    "invalid-cloudflare-access-jwt",
+    "expired-cloudflare-access-jwt",
+    "invalid-cloudflare-access-audience",
+    "invalid-cloudflare-access-issuer",
+    "inactive-cloudflare-access-jwt",
+    "invalid-cloudflare-access-signature",
+    "missing-cloudflare-access-signing-key"
+  ]);
+  page.on("response", (response) => {
+    const responseUrl = new URL(response.url());
+    if (responseUrl.origin !== hubUrl || responseUrl.pathname !== pathname) return;
+    if (!["document", "fetch"].includes(response.request().resourceType())) return;
+    const responseStatus = response.status();
+    pending.push(response.headerValue("x-bielos-e2e-access-reason").then((reason) => {
+      const safeReason = reason && allowedAccessReasons.has(reason) ? reason : "none";
+      return `${pathname}:${responseStatus}:access-${safeReason}`;
+    }).catch(() => `${pathname}:${responseStatus}:access-unavailable`));
+  });
+  return async () => {
+    const responses = await Promise.all(pending);
+    return responses.slice(-8).join(",") || "none";
+  };
 }
 
 function safeOriginKind(value: string | undefined, expectedOrigin: string): string {

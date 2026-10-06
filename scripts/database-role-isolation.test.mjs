@@ -147,8 +147,17 @@ async function verifyDatabaseRoles(kind) {
     const publicConnect = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_database_privilege('bielos_connect_probe', current_database(), 'CONNECT') AND NOT has_table_privilege('bielos_connect_probe', 'public."User"', 'TRUNCATE') AND NOT EXISTS (SELECT 1 FROM pg_database AS db_entry CROSS JOIN LATERAL aclexplode(COALESCE(db_entry.datacl, acldefault('d', db_entry.datdba))) AS privilege WHERE db_entry.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CONNECT');`, "inspect public database connectivity");
     assert.equal(publicConnect.trim(), "t", "Only the bootstrap, runtime, and migrator roles may connect to the application database.");
 
-    const migratorDatabaseDdl = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_migrator', current_database(), 'CONNECT') AND has_database_privilege('bielos_migrator', current_database(), 'CREATE') AND has_database_privilege('bielos_migrator', current_database(), 'TEMPORARY') AND NOT has_database_privilege('bielos_runtime', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT EXISTS (SELECT 1 FROM pg_database AS db_entry CROSS JOIN LATERAL aclexplode(COALESCE(db_entry.datacl, acldefault('d', db_entry.datdba))) AS privilege WHERE db_entry.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE');`, "inspect database migration privileges");
-    assert.equal(migratorDatabaseDdl.trim(), "t", "The migration role needs database CREATE for Prisma schema DDL; runtime roles and PUBLIC must not have it.");
+    const migratorDatabaseDdl = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_migrator', current_database(), 'CONNECT') AND NOT has_database_privilege('bielos_migrator', current_database(), 'CREATE') AND has_database_privilege('bielos_migrator', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_migrator', 'public', 'CREATE') AND NOT has_database_privilege('bielos_runtime', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT EXISTS (SELECT 1 FROM pg_database AS db_entry CROSS JOIN LATERAL aclexplode(COALESCE(db_entry.datacl, acldefault('d', db_entry.datdba))) AS privilege WHERE db_entry.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE');`, "inspect database and schema migration privileges");
+    assert.equal(migratorDatabaseDdl.trim(), "t", "The migration role must be limited to schema CREATE within public; runtime roles, the migrator, and PUBLIC must not have database CREATE.");
+
+    const forbiddenMigratorSchema = docker([
+      "exec", `--env=PGPASSWORD=${migratorPassword}`, name,
+      "psql", "--no-psqlrc", "--host", "127.0.0.1", "--username", "bielos_migrator",
+      "--dbname", "bielos_roles_test", "--set", "ON_ERROR_STOP=1", "--command",
+      "CREATE SCHEMA __bielos_forbidden_probe;"
+    ], "attempt migrator database-level schema creation", { allowFailure: true });
+    assert.notEqual(forbiddenMigratorSchema.status, 0, "The migrator must not create schemas outside public.");
+    assert.match(forbiddenMigratorSchema.stderr ?? "", /permission denied/u, "Additional schema creation must fail for lack of database CREATE.");
 
     const sharedApplicationPassword = randomBytes(32).toString("hex");
     const passwordReuseCases = [
