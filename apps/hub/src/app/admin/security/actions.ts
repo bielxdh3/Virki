@@ -52,8 +52,8 @@ export async function verifyElevationAction(formData: FormData): Promise<void> {
   try {
     await verifySecurityElevation({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code") });
     revalidatePath("/admin/security");
-  } catch { redirect("/admin/security?error=elevation"); }
-  redirect("/admin/security?status=elevation");
+  } catch { redirect("/admin/security?error=elevation#admin-content"); }
+  redirect("/admin/security?status=elevation#admin-content");
 }
 
 export async function revokeElevationAction(formData: FormData): Promise<void> {
@@ -67,9 +67,9 @@ export async function revokeElevationAction(formData: FormData): Promise<void> {
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
     return true;
   });
-  if (!revoked) redirect("/admin/security?error=elevation");
+  if (!revoked) redirect("/admin/security?error=elevation#admin-content");
   revalidatePath("/admin/security");
-  redirect("/admin/security?status=revoked");
+  redirect("/admin/security?status=revoked#admin-content");
 }
 
 export async function revokeOtherSessionsAction(formData: FormData): Promise<void> {
@@ -79,7 +79,7 @@ export async function revokeOtherSessionsAction(formData: FormData): Promise<voi
     if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other active admin sessions revoked.", metadata: { revokedCount: result.count } });
   });
   revalidatePath("/admin/security");
-  redirect("/admin/security?status=sessions");
+  redirect("/admin/security?status=sessions#admin-content");
 }
 
 export async function changeAdminPasswordAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {

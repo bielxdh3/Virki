@@ -84,9 +84,9 @@ export async function approveRecoveryAction(formData: FormData) {
     await requireSecurityElevation(session.user.id, session.id, "ACCOUNT_STATE_CHANGE");
     await approveAccountRecovery(session.user, read(formData, "requestId"));
   } catch {
-    redirect("/admin/security?error=recovery");
+    redirect("/admin/security?error=recovery#admin-content");
   }
-  redirect("/admin/security?status=recovery");
+  redirect("/admin/security?status=recovery#admin-content");
 }
 
 async function requireRecoveryAccess(formData: FormData, csrfScope: string, requiredSurface?: "hub" | "portal"): Promise<{ requestHeaders: Headers; expectedRole: "ADMIN" | "USER" }> {
