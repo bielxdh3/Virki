@@ -35,6 +35,17 @@ const reservedArchiveSegments = new Set([
   "attachments",
   "secrets",
 ]);
+const sensitiveArchiveExtensions = new Set([
+  "pem", "key", "p12", "pfx", "der", "jks", "keystore", "zip", "tar", "tgz", "mbox", "log"
+]);
+const compressionExtensions = new Set(["gz", "gzip", "bz2", "xz", "zst", "lz4"]);
+
+function hasSensitiveArchiveExtension(name) {
+  const parts = name.toLowerCase().split(".");
+  if (parts.length < 2) return false;
+  while (parts.length > 1 && compressionExtensions.has(parts.at(-1))) parts.pop();
+  return parts.slice(1).some((extension) => sensitiveArchiveExtensions.has(extension));
+}
 
 function isSensitiveArchivePath(entry) {
   const normalizedEntry = entry.replaceAll("\\", "/").toLowerCase().replace(/\/+$/u, "");
@@ -49,7 +60,7 @@ function isSensitiveArchivePath(entry) {
   if (normalizedSegments[0] === "infra" && normalizedSegments[1] === "cloudflare" && name.toLowerCase().endsWith(".json")) return true;
   if (/^(?:\.aws\/(?:credentials|config)|secrets\/[^/]+\.(?:pem|key))$/iu.test(entry) ||
     /(?:^|\/)id_(?:rsa|dsa|ecdsa|ed25519)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*$/iu.test(entry)) return true;
-  if (/\.(?:pem|key|p12|pfx|der|jks|keystore|zip|tar|tgz|tar\.gz|tar\.[a-z0-9]+|mbox|log(?:\.[^/]+)*)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*$/iu.test(name)) return true;
+  if (hasSensitiveArchiveExtension(name)) return true;
   if (/\.(?:sqlite3?|db|dump|bak|backup|sql)(?:\.(?:gz|gzip|bz2|xz|zst|lz4)|-(?:wal|shm|journal))?$/iu.test(name) &&
     !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/iu.test(entry)) return true;
   return false;

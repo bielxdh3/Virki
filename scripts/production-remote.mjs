@@ -104,7 +104,7 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  runRemoteProductionCommand(process.argv.slice(2))
+  Promise.resolve(runRemoteProductionCommand(process.argv.slice(2)))
     .then((result) => {
       for (const line of result.lines) {
         if (result.status === 0) console.log(line);

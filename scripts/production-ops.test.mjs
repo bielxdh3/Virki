@@ -755,3 +755,18 @@ test("temporary dual-Codex task notes stay out of source and Docker archives", (
   assert.match(gitignore, /^\/\.dual-codex-task-\*\.md$/mu);
   assert.match(dockerignore, /^\/\.dual-codex-task-\*\.md$/mu);
 });
+
+
+test("restore-clone migration ledger reads use the migrator role, never runtime", () => {
+  const namesStart = serverScript.indexOf("migration_history_names() {");
+  const namesEnd = serverScript.indexOf("\nmigration_history_summary() {", namesStart);
+  const summaryStart = namesEnd + 1;
+  const summaryEnd = serverScript.indexOf("\nmigration_history_is_clean_baseline() {", summaryStart);
+  assert.ok(namesStart >= 0 && namesEnd > namesStart && summaryEnd > summaryStart);
+  const namesFunction = serverScript.slice(namesStart, namesEnd);
+  const summaryFunction = serverScript.slice(summaryStart, summaryEnd);
+  assert.match(namesFunction, /clone_migration_query "\$container" "\$sql"/u);
+  assert.match(summaryFunction, /clone_migration_query "\$container" "\$sql"/u);
+  assert.doesNotMatch(namesFunction, /clone_query "\$container" "\$sql"/u);
+  assert.doesNotMatch(summaryFunction, /clone_query "\$container" "\$sql"/u);
+});

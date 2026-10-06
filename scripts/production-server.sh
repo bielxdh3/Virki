@@ -332,7 +332,7 @@ FROM "_prisma_migrations"
 SQL
 )
   if [[ -n "$container" ]]; then
-    clone_query "$container" "$sql"
+    clone_migration_query "$container" "$sql"
   else
     database_query "$sql"
   fi
@@ -355,7 +355,7 @@ FROM "_prisma_migrations"
 SQL
 )
   if [[ -n "$container" ]]; then
-    clone_query "$container" "$sql"
+    clone_migration_query "$container" "$sql"
   else
     database_query "$sql"
   fi

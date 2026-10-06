@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { lstat, open, readFile, readdir, realpath, statfs } from "node:fs/promises";
+import { lstat, open, readdir, realpath, statfs } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -70,15 +70,26 @@ export async function inventoryBackupDirectory(directory, {
   let markerStatus = "absent";
   const markerPath = path.join(canonicalDirectory, markerName);
   try {
-    const markerStat = await lstat(markerPath);
-    if (process.platform === "win32" || !markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1 || (markerStat.mode & 0o777) !== 0o600) {
-      markerStatus = "unsafe";
+    if (process.platform === "win32" || !constants.O_NOFOLLOW) {
+      const markerStat = await lstat(markerPath);
+      markerStatus = markerStat.isFile() && !markerStat.isSymbolicLink() && markerStat.nlink === 1 && (markerStat.mode & 0o777) === 0o600 ? "unsupported" : "unsafe";
     } else {
-      marker = parseMarker(await readFile(markerPath, "utf8"));
-      markerStatus = marker ? "present" : "malformed";
+      const markerHandle = await open(markerPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const markerStat = await markerHandle.stat();
+        if (!markerStat.isFile() || markerStat.nlink !== 1 || (markerStat.mode & 0o777) !== 0o600) {
+          markerStatus = "unsafe";
+        } else {
+          marker = parseMarker(await markerHandle.readFile("utf8"));
+          markerStatus = marker ? "present" : "malformed";
+        }
+      } finally {
+        await markerHandle.close();
+      }
     }
   } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
+    if (error?.code === "ELOOP") markerStatus = "unsafe";
+    else if (error?.code !== "ENOENT") throw error;
   }
 
   const entries = await readdir(canonicalDirectory, { withFileTypes: true });
