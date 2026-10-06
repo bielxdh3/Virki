@@ -110,12 +110,14 @@ const localOnlyEnv = {
 const publicSiteEnv = {
   NODE_OPTIONS: "",
   NODE_PATH: "",
+  BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
   NODE_ENV: "development",
   NEXT_TELEMETRY_DISABLED: "1",
   BIELOS_PORTAL_URL: portalUrl
 };
 const hubEnv = {
   ...localOnlyEnv,
+  BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
   BIELOS_E2E_TLS_KEY_PATH: tlsKeyPath,
   BIELOS_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath
 };
@@ -164,6 +166,7 @@ export default defineConfig({
       env: {
         NODE_OPTIONS: "",
         NODE_PATH: "",
+        BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
         BIELOS_E2E_JWKS_REGISTRATION_TOKEN: jwksRegistrationToken
       }
     },

@@ -6,7 +6,7 @@ import { isAbsolute, join } from "node:path";
 import { hashPassword } from "@bielos/auth";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@bielos/auth/oidc-secrets";
 import { hashDeviceToken } from "@bielos/auth/security";
-import { PrismaClient } from "@bielos/database";
+import { Prisma, PrismaClient } from "@bielos/database";
 
 // @ts-expect-error This existing JavaScript safety helper has no declaration file.
 import { assertDisposableCoreTestDatabase } from "../core-test-database-safety.mjs";
@@ -14,6 +14,7 @@ import { assertDisposableCoreTestDatabase } from "../core-test-database-safety.m
 import { startIsolatedService } from "./isolated-service.mjs";
 
 const E2E_DATABASE_ENV = "BIELOS_E2E_DATABASE_URL";
+const AUDIT_CLEANUP_DATABASE_ENV = "BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL";
 const FIXTURE_FILE_ENV = "BIELOS_E2E_AUTH_FIXTURE_FILE";
 const OIDC_PRIVATE_CONFIG_ENV = "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE";
 
@@ -55,6 +56,8 @@ if (process.argv[2] === "--validate-database") {
 
 export default async function globalSetup(): Promise<(() => Promise<void>) | void> {
   const databaseUrl = process.env[E2E_DATABASE_ENV]?.trim();
+  const auditCleanupDatabaseUrl = process.env[AUDIT_CLEANUP_DATABASE_ENV]?.trim();
+  delete process.env[AUDIT_CLEANUP_DATABASE_ENV];
   delete process.env[FIXTURE_FILE_ENV];
   if (!databaseUrl) return;
   const oidcPrivateConfigFile = process.env[OIDC_PRIVATE_CONFIG_ENV]?.trim();
@@ -62,8 +65,9 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     throw new Error("E2E OIDC private configuration path is unavailable.");
   }
 
-  validateE2eDatabase(databaseUrl);
+  const validatedAuditCleanupDatabaseUrl = validateAuditCleanupDatabase(auditCleanupDatabaseUrl, databaseUrl).href;
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+  const auditCleanupPrisma = new PrismaClient({ datasources: { db: { url: validatedAuditCleanupDatabaseUrl } } });
   const runId = randomUUID();
   const projectSlug = `e2e-${runId}`;
   const projectClientId = `e2e-${runId}`;
@@ -106,11 +110,13 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   let oidcPrivateConfigWritten = false;
   let oidcIssuerProcess: ChildProcess | undefined;
   let seeded: FixtureState | undefined;
+  let setupStage = "temporary-fixture-storage";
   try {
     temporaryDirectory = await mkdtemp(join(tmpdir(), "bielos-e2e-auth-"));
     fixtureFile = join(temporaryDirectory, "fixture.json");
     await restrictTemporaryDirectory(temporaryDirectory);
 
+    setupStage = "credential-preparation";
     const [userPasswordHash, recoveryTargetUserPasswordHash, adminPasswordHash, reviewerPasswordHash, reviewerAdministrativePasswordHash] = await Promise.all([
       hashPassword(user.password),
       hashPassword(recoveryTargetUser.password),
@@ -131,6 +137,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
       keys: [{ ...signingKey, kid: signingKeyId, use: "sig", alg: "ES256" }]
     };
     const cookieKey = randomBytes(32).toString("base64url");
+    setupStage = "oidc-private-config";
     await writeFile(oidcPrivateConfigFile, JSON.stringify({
       adapterKey: oidcEncryptionKey,
       cookieKey,
@@ -138,6 +145,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     }), { encoding: "utf8", flag: "wx", mode: 0o600 });
     oidcPrivateConfigWritten = true;
 
+    setupStage = "fixture-database-seed";
     const records = await prisma.$transaction(async (transaction) => {
       const userRecord = await transaction.user.create({
         data: {
@@ -286,9 +294,11 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
         clientSecret: oidcSecret
       }
     };
+    setupStage = "fixture-file-write";
     await writeFile(fixtureFile, JSON.stringify(seeded), { encoding: "utf8", flag: "wx", mode: 0o600 });
     process.env[FIXTURE_FILE_ENV] = fixtureFile;
 
+    setupStage = "issuer-start";
     const startedOidcIssuer = startIsolatedService("issuer", {
       ...process.env,
       DATABASE_URL: databaseUrl,
@@ -298,23 +308,19 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
       OIDC_ISSUER_PORT: "3003"
     }, { manageProcessLifecycle: false }) as ChildProcess;
     oidcIssuerProcess = startedOidcIssuer;
+    setupStage = "issuer-readiness";
     await waitForOidcIssuer(startedOidcIssuer, signingKeyId);
   } catch {
-    let cleanupFailed = false;
-    await stopIsolatedService(oidcIssuerProcess).catch(() => { cleanupFailed = true; });
-    try {
-      if (seeded) await removeFixtureRecords(prisma, seeded);
-    } catch {
-      cleanupFailed = true;
-    }
-    if (temporaryDirectory) {
-      await removeTemporaryFixture(fixtureFile, temporaryDirectory).catch(() => { cleanupFailed = true; });
-    }
-    if (oidcPrivateConfigWritten) await removeFile(oidcPrivateConfigFile).catch(() => { cleanupFailed = true; });
-    await prisma.$disconnect().catch(() => { cleanupFailed = true; });
-    throw new Error(cleanupFailed
-      ? "E2E fixture setup failed; scoped cleanup also failed in the validated disposable database."
-      : "E2E fixture setup failed in the validated disposable database.");
+    const failures = await runCleanupSteps([
+      ["issuer-stop", () => stopIsolatedService(oidcIssuerProcess)],
+      ["fixture-records", async () => { if (seeded) await removeFixtureRecords(prisma, auditCleanupPrisma, seeded); }],
+      ["fixture-files", async () => { if (temporaryDirectory) await removeTemporaryFixture(fixtureFile, temporaryDirectory); }],
+      ["issuer-config", async () => { if (oidcPrivateConfigWritten) await removeFile(oidcPrivateConfigFile); }],
+      ["runtime-disconnect", () => prisma.$disconnect()],
+      ["audit-disconnect", () => auditCleanupPrisma.$disconnect()]
+    ]);
+    delete process.env[FIXTURE_FILE_ENV];
+    throw new Error(`E2E fixture setup failed at: ${setupStage}.${failures.length ? ` Cleanup failed at: ${failures.join(", ")}.` : ""}`);
   }
 
   const cleanupState = seeded;
@@ -323,22 +329,21 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   if (!cleanupState || !cleanupFile || !cleanupDirectory) {
     await stopIsolatedService(oidcIssuerProcess).catch(() => undefined);
     await prisma.$disconnect();
+    await auditCleanupPrisma.$disconnect();
     throw new Error("E2E fixture setup did not produce a complete fixture.");
   }
 
   return async () => {
-    let cleanupFailed = false;
-    await stopIsolatedService(oidcIssuerProcess).catch(() => { cleanupFailed = true; });
-    try {
-      await removeFixtureRecords(prisma, cleanupState);
-    } catch {
-      cleanupFailed = true;
-    }
-    await removeTemporaryFixture(cleanupFile, cleanupDirectory).catch(() => { cleanupFailed = true; });
-    await removeFile(oidcPrivateConfigFile).catch(() => { cleanupFailed = true; });
-    await prisma.$disconnect().catch(() => { cleanupFailed = true; });
+    const failures = await runCleanupSteps([
+      ["issuer-stop", () => stopIsolatedService(oidcIssuerProcess)],
+      ["fixture-records", () => removeFixtureRecords(prisma, auditCleanupPrisma, cleanupState)],
+      ["fixture-files", () => removeTemporaryFixture(cleanupFile, cleanupDirectory)],
+      ["issuer-config", () => removeFile(oidcPrivateConfigFile)],
+      ["runtime-disconnect", () => prisma.$disconnect()],
+      ["audit-disconnect", () => auditCleanupPrisma.$disconnect()]
+    ]);
     delete process.env[FIXTURE_FILE_ENV];
-    if (cleanupFailed) throw new Error("E2E fixture cleanup failed for run-scoped records.");
+    if (failures.length) throw new Error(`E2E fixture cleanup failed at: ${failures.join(", ")}.`);
   };
 }
 
@@ -347,41 +352,88 @@ function validateE2eDatabase(databaseUrl = process.env[E2E_DATABASE_ENV]?.trim()
   return assertDisposableCoreTestDatabase(databaseUrl, process.env) as URL;
 }
 
-async function removeFixtureRecords(prisma: PrismaClient, fixture: FixtureState): Promise<void> {
+export function validateAuditCleanupDatabase(cleanupDatabaseUrl: string | undefined, databaseUrl: string): URL {
+  const target = validateE2eDatabase(databaseUrl);
+  try {
+    if (!cleanupDatabaseUrl) throw new Error();
+    const cleanup = new URL(cleanupDatabaseUrl);
+    if (cleanup.protocol !== target.protocol || cleanup.hostname !== target.hostname || cleanup.port !== target.port ||
+      cleanup.pathname !== target.pathname || cleanup.search !== target.search || cleanup.hash ||
+      decodeURIComponent(cleanup.username) !== "bielos_audit_maintenance" || !cleanup.password) throw new Error();
+    return cleanup;
+  } catch {
+    throw new Error("E2E audit cleanup requires the maintenance role on the exact validated disposable database.");
+  }
+}
+
+type CleanupStage = "issuer-stop" | "fixture-records" | "fixture-files" | "issuer-config" | "runtime-disconnect" | "audit-disconnect";
+
+class FixtureCleanupError extends Error {
+  constructor(readonly stage: "audit-records" | "runtime-records") {
+    super(`E2E fixture cleanup failed at: ${stage}.`);
+  }
+}
+
+export async function runCleanupSteps(steps: readonly (readonly [CleanupStage, () => Promise<unknown>])[]): Promise<string[]> {
+  const failures: string[] = [];
+  for (const [stage, run] of steps) {
+    try { await run(); } catch (error) { failures.push(error instanceof FixtureCleanupError ? error.stage : stage); }
+  }
+  return failures;
+}
+
+async function removeFixtureRecords(prisma: PrismaClient, auditCleanupPrisma: PrismaClient, fixture: FixtureState): Promise<void> {
   const userIds = [fixture.user.id, fixture.recoveryTargetUser.id, fixture.admin.id, fixture.recoveryReviewer.id];
-  await prisma.$transaction(async (transaction) => {
-    await transaction.oidcArtifact.deleteMany({
-      where: {
-        OR: [
-          { clientIdHash: hashOidcIdentifier(fixture.projectClientId) },
-          { accountIdHash: hashOidcIdentifier(fixture.user.id) },
-          { accountIdHash: hashOidcIdentifier(fixture.recoveryTargetUser.id) }
-        ]
-      }
-    });
-    await transaction.auditLog.deleteMany({ where: { actorUserId: { in: userIds } } });
-    await transaction.user.deleteMany({ where: { id: fixture.user.id, email: fixture.user.email, role: "USER" } });
-    await transaction.user.deleteMany({ where: { id: fixture.recoveryTargetUser.id, email: fixture.recoveryTargetUser.email, role: "USER" } });
-    await transaction.user.deleteMany({ where: { id: fixture.admin.id, email: fixture.admin.email, role: "ADMIN" } });
-    await transaction.user.deleteMany({ where: { id: fixture.recoveryReviewer.id, email: fixture.recoveryReviewer.email, role: "ADMIN" } });
-    await transaction.projectConnection.deleteMany({
-      where: {
-        OR: [
-          { id: fixture.projectConnectionId, slug: fixture.projectSlug, clientId: fixture.projectClientId },
-          {
-            id: fixture.ungrantedProjectConnectionId,
-            slug: fixture.ungrantedProjectSlug,
-            clientId: fixture.ungrantedProjectClientId
-          },
-          {
-            id: fixture.disabledProjectConnectionId,
-            slug: fixture.disabledProjectSlug,
-            clientId: fixture.disabledProjectClientId
+  // DELETE without RETURNING needs SELECT only on the fixture actor predicate.
+  try {
+    await auditCleanupPrisma.$executeRaw(Prisma.sql`DELETE FROM public."AuditLog" WHERE "actorUserId" IN (${Prisma.join(userIds)})`);
+  } catch {
+    // Keep actors intact when audit deletion fails, so a subsequent cleanup can still scope them.
+    throw new FixtureCleanupError("audit-records");
+  }
+  try {
+    await prisma.$transaction(async (transaction) => {
+      await transaction.oidcArtifact.deleteMany({
+        where: {
+          OR: [
+            { clientIdHash: hashOidcIdentifier(fixture.projectClientId) },
+            { accountIdHash: hashOidcIdentifier(fixture.user.id) },
+            { accountIdHash: hashOidcIdentifier(fixture.recoveryTargetUser.id) }
+          ]
+        }
+      });
+      await transaction.emailOutboxMessage.deleteMany({
+        where: {
+          recipientEmail: {
+            in: [fixture.user.email, fixture.recoveryTargetUser.email, fixture.admin.email, fixture.recoveryReviewer.email]
           }
-        ]
-      }
+        }
+      });
+      await transaction.user.deleteMany({ where: { id: fixture.user.id, email: fixture.user.email, role: "USER" } });
+      await transaction.user.deleteMany({ where: { id: fixture.recoveryTargetUser.id, email: fixture.recoveryTargetUser.email, role: "USER" } });
+      await transaction.user.deleteMany({ where: { id: fixture.admin.id, email: fixture.admin.email, role: "ADMIN" } });
+      await transaction.user.deleteMany({ where: { id: fixture.recoveryReviewer.id, email: fixture.recoveryReviewer.email, role: "ADMIN" } });
+      await transaction.projectConnection.deleteMany({
+        where: {
+          OR: [
+            { id: fixture.projectConnectionId, slug: fixture.projectSlug, clientId: fixture.projectClientId },
+            {
+              id: fixture.ungrantedProjectConnectionId,
+              slug: fixture.ungrantedProjectSlug,
+              clientId: fixture.ungrantedProjectClientId
+            },
+            {
+              id: fixture.disabledProjectConnectionId,
+              slug: fixture.disabledProjectSlug,
+              clientId: fixture.disabledProjectClientId
+            }
+          ]
+        }
+      });
     });
-  });
+  } catch {
+    throw new FixtureCleanupError("runtime-records");
+  }
 }
 
 async function waitForOidcIssuer(child: ChildProcess, expectedSigningKeyId: string): Promise<void> {

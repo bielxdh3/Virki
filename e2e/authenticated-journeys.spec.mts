@@ -177,19 +177,43 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const initialAdministrativeRecoveryCode = (await credentialSection.locator("ul li").first().textContent())?.trim();
     if (!initialAdministrativeRecoveryCode) throw new Error("E2E ADMIN recovery code is unavailable for the recovery journey.");
     adminJourneyPhase = "credential-acknowledgment";
-    const historyLengthBeforeAcknowledgment = await page.evaluate(() => window.history.length);
-    await credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true }).click();
-    await expect(page).toHaveURL(`${hubUrl}/admin/security?status=credential#admin-content`);
-    await expect(page.getByRole("status")).toContainText("Credencial administrativa configurada");
-    expect(await page.evaluate(() => window.history.length)).toBe(historyLengthBeforeAcknowledgment);
-    await page.goBack();
-    await expect(page).not.toHaveURL(`${hubUrl}/admin/security?status=credential#admin-content`);
-    await expect(page.getByText(initialAdministrativeRecoveryCode, { exact: true })).toHaveCount(0);
-    await page.goForward();
-    await expect(page).toHaveURL(`${hubUrl}/admin/security?status=credential#admin-content`);
-
+    const credentialBeforeAcknowledgment = await prisma.administrativeCredential.findUnique({
+      where: { userId: fixture.admin.id }, select: { status: true, keyVersion: true }
+    });
+    expect(credentialBeforeAcknowledgment?.status).toBe("ACTIVE");
+    expect(await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id, usedAt: null } })).toBe(10);
+    const predecessorUrl = `${hubUrl}/admin/security#recovery-code-predecessor`;
+    const acknowledgementUrl = `${hubUrl}/admin/security?status=credential#admin-content`;
+    // Two native fragment entries deliberately keep the document that displayed the codes reachable with Back.
+    await page.evaluate(() => { window.location.hash = "recovery-code-predecessor"; });
+    await expect(page).toHaveURL(predecessorUrl);
+    await expect(credentialSection.locator("ul li code")).toHaveCount(10);
+    await page.evaluate(() => { window.location.hash = "recovery-code-acknowledgment"; });
+    await expect(page).toHaveURL(`${hubUrl}/admin/security#recovery-code-acknowledgment`);
+    await expect(credentialSection.locator("ul li code")).toHaveCount(10);
+    const acknowledgeRecoveryCodes = credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true });
     const recoveryForm = credentialSection.locator("form").filter({ has: credentialSection.getByLabel("Código de recuperação administrativa", { exact: true }) });
+    await acknowledgeRecoveryCodes.click();
+    await expect(page).toHaveURL(acknowledgementUrl);
+    await expect(page.getByRole("status")).toContainText("Credencial administrativa configurada");
+    await expect(credentialSection.locator("ul li code")).toHaveCount(0);
+    await expect(acknowledgeRecoveryCodes).toHaveCount(0);
     await expect(recoveryForm).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(predecessorUrl);
+    await expect(credentialSection.locator("ul li code")).toHaveCount(0);
+    await expect(acknowledgeRecoveryCodes).toHaveCount(0);
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    await page.goForward();
+    await expect(page).toHaveURL(acknowledgementUrl);
+    await expect(page.getByRole("status")).toContainText("Credencial administrativa configurada");
+    await expect(credentialSection.locator("ul li code")).toHaveCount(0);
+    await expect(acknowledgeRecoveryCodes).toHaveCount(0);
+    await expect(recoveryForm).toBeVisible();
+    expect(await prisma.administrativeCredential.findUnique({
+      where: { userId: fixture.admin.id }, select: { status: true, keyVersion: true }
+    })).toEqual(credentialBeforeAcknowledgment);
+    expect(await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id, usedAt: null } })).toBe(10);
     const recoveredAdministrativePassword = randomBytes(32).toString("base64url");
     await recoveryForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await recoveryForm.getByLabel("Código de recuperação administrativa", { exact: true }).fill("invalid-one-time-code");

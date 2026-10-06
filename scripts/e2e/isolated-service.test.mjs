@@ -6,8 +6,68 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildChromiumEnvironment, buildServiceEnvironment, getServiceCommand, platformEnvironmentVariableNames } from "./isolated-service.mjs";
+import { runCleanupSteps, validateAuditCleanupDatabase } from "./global-setup.mts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+
+test("audit cleanup database uses the exact validated disposable target and maintenance role", () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousConfirmation = process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM;
+  const runtimeDatabaseUrl = ["postgresql:/", "/bielos_runtime_test:", "runtime-only@127.0.0.1:55432/bielos_e2e_test?schema=public"].join("");
+  const cleanupDatabaseUrl = ["postgresql:/", "/bielos_audit_maintenance:", "maintenance-only@127.0.0.1:55432/bielos_e2e_test?schema=public"].join("");
+  process.env.NODE_ENV = "test";
+  process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM = "disposable";
+  try {
+    const target = validateAuditCleanupDatabase(cleanupDatabaseUrl, runtimeDatabaseUrl);
+    assert.equal(target.protocol, "postgresql:");
+    assert.equal(target.username, "bielos_audit_maintenance");
+    assert.equal(target.hostname, "127.0.0.1");
+    assert.equal(target.port, "55432");
+    assert.equal(target.pathname, "/bielos_e2e_test");
+    assert.equal(target.search, "?schema=public");
+
+    const mismatches = [
+      cleanupDatabaseUrl.replace("bielos_audit_maintenance", "bielos_runtime_test"),
+      cleanupDatabaseUrl.replace("127.0.0.1:55432", "localhost:55432"),
+      cleanupDatabaseUrl.replace(":55432/", ":55433/"),
+      cleanupDatabaseUrl.replace("/bielos_e2e_test", "/bielos_other_test"),
+      cleanupDatabaseUrl.replace("schema=public", "schema=other"),
+      cleanupDatabaseUrl.replace(":maintenance-only@", "@"),
+      cleanupDatabaseUrl.replace("?schema=public", "?schema=public#fragment")
+    ];
+    for (const mismatch of mismatches) {
+      assert.throws(
+        () => validateAuditCleanupDatabase(mismatch, runtimeDatabaseUrl),
+        { message: "E2E audit cleanup requires the maintenance role on the exact validated disposable database." }
+      );
+    }
+    assert.throws(
+      () => validateAuditCleanupDatabase(undefined, runtimeDatabaseUrl),
+      { message: "E2E audit cleanup requires the maintenance role on the exact validated disposable database." }
+    );
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousConfirmation === undefined) delete process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM;
+    else process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM = previousConfirmation;
+  }
+});
+
+test("fixture cleanup runs in order and reports fixed labels without raw errors", async () => {
+  const events = [];
+  const rawError = "untrusted database diagnostic sentinel";
+  const failures = await runCleanupSteps([
+    ["issuer-stop", async () => { events.push("issuer-stop"); }],
+    ["fixture-records", async () => { events.push("fixture-records"); throw new Error(rawError); }],
+    ["fixture-files", async () => { events.push("fixture-files"); }],
+    ["issuer-config", async () => { events.push("issuer-config"); }],
+    ["runtime-disconnect", async () => { events.push("runtime-disconnect"); }],
+    ["audit-disconnect", async () => { events.push("audit-disconnect"); }]
+  ]);
+  assert.deepEqual(events, ["issuer-stop", "fixture-records", "fixture-files", "issuer-config", "runtime-disconnect", "audit-disconnect"]);
+  assert.deepEqual(failures, ["fixture-records"]);
+  assert.equal(JSON.stringify(failures).includes(rawError), false);
+});
 
 test("Playwright loads E2E config, setup, and OIDC spec through their ESM entrypoints", () => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "bielos-playwright-loader-"));
@@ -106,6 +166,7 @@ test("service children receive only their E2E allowlist and required OS paths", 
     NODE_PATH: "caller-controlled-module-path",
     CALLER_SECRET_SENTINEL: "must-not-reach-service",
     BIELOS_E2E_DATABASE_URL: "must-stay-in-the-runner",
+    BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "maintenance-must-stay-in-global-setup",
     BIELOS_CORE_TEST_DATABASE_CONFIRM: "disposable",
     BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "fixture-registration-token",
     BIELOS_PORTAL_URL: "https://portal.localhost:3001",
@@ -279,7 +340,8 @@ test("Chromium receives only required platform variables and never BielOS secret
     BIELOS_CSRF_SIGNING_KEY: "must-not-reach-browser",
     BIELOS_TOTP_ENCRYPTION_KEY: "must-not-reach-browser",
     BIELOS_EMAIL_OUTBOX_KEY: "must-not-reach-browser",
-    BIELOS_E2E_ACCESS_SIGNING_KEY_FILE: "private-signing-key.json"
+    BIELOS_E2E_ACCESS_SIGNING_KEY_FILE: "private-signing-key.json",
+    BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "maintenance-must-not-reach-browser"
   };
 
   const linux = buildChromiumEnvironment(source, "linux", "/private/e2e/chromium-home");
@@ -293,7 +355,7 @@ test("Chromium receives only required platform variables and never BielOS secret
   assert.equal(windows.USERPROFILE, source.USERPROFILE);
 
   for (const environment of [linux, windows]) {
-    for (const name of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "DATABASE_URL", "BIELOS_CSRF_SIGNING_KEY", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_E2E_ACCESS_SIGNING_KEY_FILE"]) {
+    for (const name of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "DATABASE_URL", "BIELOS_CSRF_SIGNING_KEY", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_E2E_ACCESS_SIGNING_KEY_FILE", "BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL"]) {
       assert.equal(Object.hasOwn(environment, name), false, `${name} is excluded from Chromium`);
     }
   }

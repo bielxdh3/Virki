@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { PrismaClient } from "@prisma/client";
+import { describeBackupMigrationFailure } from "./lib/backup-migration-diagnostics.mjs";
 
 const repositoryRoot = process.cwd();
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
@@ -31,6 +32,7 @@ try {
   ]);
   containerStarted = true;
   await waitForDatabase();
+  runSql("CREATE ROLE bielos_audit_maintenance NOLOGIN");
 
   const port = readPublishedPort();
   const sourceUrl = buildDatabaseUrl(port, databaseName);
@@ -48,12 +50,12 @@ try {
     for (const entry of migrations.filter((item) => item.isDirectory() && item.name !== transitionName)) {
       await cp(path.join(migrationsRoot, entry.name), path.join(temporaryMigrationsDirectory, entry.name), { recursive: true });
     }
-    await migrate(temporaryPrismaDirectory, sourceUrl);
+    await migrate(temporaryPrismaDirectory, sourceUrl, "source-legacy");
     runSql("INSERT INTO \"User\" (\"id\",\"email\",\"emailNormalized\",\"displayName\",\"passwordHash\",\"role\",\"accountStatus\",\"emailVerifiedAt\",\"secondFactorMethod\",\"createdAt\",\"updatedAt\") VALUES ('backup-admin','admin@backup.invalid','admin@backup.invalid','Backup administrator','legacy-password-hash','OWNER'::\"UserRole\",'ACTIVE'::\"AccountStatus\",CURRENT_TIMESTAMP,'EMAIL'::\"SecondFactorMethod\",CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)");
     await cp(path.join(migrationsRoot, transitionName), path.join(temporaryMigrationsDirectory, transitionName), { recursive: true });
-    await migrate(temporaryPrismaDirectory, sourceUrl);
+    await migrate(temporaryPrismaDirectory, sourceUrl, "source-transition");
   } else if (baselinePresent) {
-    await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), sourceUrl);
+    await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), sourceUrl, "source-baseline");
   } else {
     throw new Error("Backup validation migration plan is missing.");
   }
@@ -77,7 +79,7 @@ try {
   restoredClient = new PrismaClient({ datasources: { db: { url: restoredUrl } } });
   await restoredClient.$connect();
   assert.deepEqual(await readMigrations(restoredClient), expectedMigrations);
-  await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), restoredUrl);
+  await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), restoredUrl, "restored");
   await verifyRestoredData();
 } catch (error) {
   validationError = error;
@@ -323,7 +325,7 @@ async function verifyRestoredData() {
   ]);
 }
 
-async function migrate(prismaDirectory, databaseUrl) {
+async function migrate(prismaDirectory, databaseUrl, stage) {
   const prismaCli = path.join(repositoryRoot, "node_modules", "prisma", "build", "index.js");
   const result = spawnSync(process.execPath, [prismaCli, "migrate", "deploy", "--schema", path.join(prismaDirectory, "schema.prisma")], {
     cwd: repositoryRoot,
@@ -333,7 +335,7 @@ async function migrate(prismaDirectory, databaseUrl) {
     timeout: 120_000,
     maxBuffer: 10 * 1024 * 1024,
   });
-  if (result.error || result.status !== 0) throw new Error("Disposable backup migration deployment failed.");
+  if (result.error || result.status !== 0) throw new Error(describeBackupMigrationFailure(result, stage));
 }
 
 async function readMigrations(databaseClient) {

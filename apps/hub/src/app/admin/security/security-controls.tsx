@@ -1,6 +1,7 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { ElevationScope } from "@bielos/auth/administration";
 import { changeAdminPasswordAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
@@ -17,7 +18,9 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
   const [start, startAction, starting] = useActionState(startCredentialSetupAction, initialState);
   const [complete, completeAction, completing] = useActionState(completeCredentialSetupAction, initialState);
   const [recovery, recoveryAction, recovering] = useActionState(recoverAdminCredentialAction, initialState);
-  const showRecoveryCodes = Boolean(complete.recoveryCodes);
+  const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
+  const acknowledgingRecoveryCodes = useRef(false);
+  const showRecoveryCodes = Boolean(complete.recoveryCodes && !recoveryCodesAcknowledged);
   return (
     <section className="surface">
       <h2>Credencial administrativa</h2>
@@ -30,7 +33,12 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
             href="/admin/security?status=credential#admin-content"
             onClick={(event) => {
               event.preventDefault();
-              window.location.replace(event.currentTarget.href);
+              if (acknowledgingRecoveryCodes.current) return;
+              acknowledgingRecoveryCodes.current = true;
+              const destination = event.currentTarget.href;
+              // Commit dismissal before the outgoing document can enter the browser's back/forward cache.
+              flushSync(() => setRecoveryCodesAcknowledged(true));
+              window.location.replace(destination);
             }}
           >
             Continuar para elevação
