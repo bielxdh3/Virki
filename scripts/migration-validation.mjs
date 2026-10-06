@@ -45,6 +45,8 @@ try {
   const port = readPublishedPort();
   const databaseUrl = buildDatabaseUrl(port);
 
+  runSql("CREATE ROLE bielos_audit_maintenance NOLOGIN");
+
   temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "bielos-migration-validation-"));
   const temporaryPrismaDirectory = path.join(temporaryDirectory, "prisma");
   const temporaryMigrationsDirectory = path.join(temporaryPrismaDirectory, "migrations");
