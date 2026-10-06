@@ -35,6 +35,8 @@ BielOS uses `oidc-provider` with Authorization Code, PKCE S256 required, short-l
 
 Signing keys and the OIDC cookie key are private runtime configuration. Public JWKs are published by standard discovery/JWKS endpoints. Never place private JWK values in source, browser bundles, logs, or audit metadata. Keep stable key IDs and rotate keys through a tested overlap window that covers the maximum issued token lifetime.
 
+The OIDC data-encryption key supports one bounded overlap key via `BIELOS_OIDC_ADAPTER_KEY_PREVIOUS`. New ciphertext is always written with `BIELOS_OIDC_ADAPTER_KEY`; reads may fall back to the previous key only during rotation. Operators should introduce the new current key while retaining the old value as previous, allow short-lived OIDC artifacts to expire and rotate stored project client secrets through the supported application flow, then remove the previous key. Do not keep an indefinite key ring.
+
 ## Audit and redaction
 
 Audit entries contain event type, result, actor reference, resource, safe message, timestamp, and sanitized structured metadata. Connection/client references are hashed. Audit views use stable cursor pagination and event filters. Never record passwords, session values, cookies, TOTP seeds, recovery plaintext, client secrets, private keys, bearer tokens, or raw credential payloads.
