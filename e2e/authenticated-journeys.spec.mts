@@ -30,6 +30,7 @@ type RecoveryReviewerFixture = AccountFixture & { administrativePassword: string
 
 type AuthFixture = {
   user: AccountFixture;
+  recoveryTargetUser: AccountFixture;
   admin: AccountFixture;
   recoveryReviewer: RecoveryReviewerFixture;
   projectName: string;
@@ -487,25 +488,25 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await expect(oldSessionPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
 
     const userContext = await createContext();
-    await rememberDevice(userContext, portalUrl, fixture.user.deviceToken);
+    await rememberDevice(userContext, portalUrl, fixture.recoveryTargetUser.deviceToken);
     const userPage = await userContext.newPage();
     await userPage.goto(`${portalUrl}/`);
     await expect(userPage).toHaveURL(`${portalUrl}/login?returnTo=%2F`);
-    await signIn(userPage, fixture.user);
+    await signIn(userPage, fixture.recoveryTargetUser);
     await expect(userPage.getByRole("heading", { level: 1, name: "Projetos", exact: true })).toBeVisible();
 
     await portalPage.goto(`${portalUrl}/recover`);
-    await portalPage.getByLabel("E-mail", { exact: true }).fill(fixture.user.email);
+    await portalPage.getByLabel("E-mail", { exact: true }).fill(fixture.recoveryTargetUser.email);
     await portalPage.getByRole("button", { name: "Enviar instruções", exact: true }).click();
     await expect(portalPage.getByRole("status")).toContainText("Se a conta puder ser recuperada");
     const userRecovery = await prisma.accountRecoveryRequest.findFirst({
-      where: { userId: fixture.user.id, status: "PENDING", emailVerifiedAt: null },
+      where: { userId: fixture.recoveryTargetUser.id, status: "PENDING", emailVerifiedAt: null },
       orderBy: { createdAt: "desc" },
       select: { id: true }
     });
     expect(userRecovery).not.toBeNull();
     if (!userRecovery) throw new Error("E2E public USER recovery request was not created.");
-    const userRequestMessage = await readLatestRecoveryEmail(prisma, fixture.user.email, "account-recovery:");
+    const userRequestMessage = await readLatestRecoveryEmail(prisma, fixture.recoveryTargetUser.email, "account-recovery:");
     expect(new URL(userRequestMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(portalUrl);
     await portalPage.goto(userRequestMessage.actionUrl!);
     const userRecoveryCode = portalPage.getByLabel("Código de verificação", { exact: true });
@@ -515,11 +516,11 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await expect(portalPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
 
     await reviewerPage.goto(`${hubUrl}/admin/security`);
-    const userRecoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.user.email });
+    const userRecoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.recoveryTargetUser.email });
     await expect(userRecoveryRow).toBeVisible();
     await userRecoveryRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click();
     await expect(reviewerPage).toHaveURL(`${hubUrl}/admin/security?status=recovery#admin-content`);
-    const userApprovalMessage = await readLatestRecoveryEmail(prisma, fixture.user.email, "account-recovery-approved:");
+    const userApprovalMessage = await readLatestRecoveryEmail(prisma, fixture.recoveryTargetUser.email, "account-recovery-approved:");
     expect(new URL(userApprovalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(portalUrl);
     await portalPage.goto(userApprovalMessage.actionUrl!);
     await expect(portalPage.getByRole("status")).toContainText("Solicitação aprovada");
@@ -527,14 +528,14 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await portalPage.getByLabel("Nova senha", { exact: true }).fill(newUserPassword);
     await portalPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     await expect(portalPage).toHaveURL(`${portalUrl}/login?recovered=1`);
-    const recoveredUser = await prisma.user.findUnique({ where: { id: fixture.user.id }, select: { passwordHash: true } });
+    const recoveredUser = await prisma.user.findUnique({ where: { id: fixture.recoveryTargetUser.id }, select: { passwordHash: true } });
     expect(recoveredUser).not.toBeNull();
     expect(await verifyPassword(recoveredUser!.passwordHash, newUserPassword)).toBe(true);
-    expect(await verifyPassword(recoveredUser!.passwordHash, fixture.user.password)).toBe(false);
-    expect(await prisma.session.count({ where: { userId: fixture.user.id, revokedAt: null, expiresAt: { gt: new Date() } } })).toBe(0);
-    expect(await prisma.trustedDevice.count({ where: { userId: fixture.user.id, status: "TRUSTED", revokedAt: null } })).toBe(0);
-    expect(await prisma.securityElevation.count({ where: { userId: fixture.user.id, status: { in: ["PENDING", "ACTIVE"] } } })).toBe(0);
-    expect(await prisma.deviceChallenge.count({ where: { userId: fixture.user.id, status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null } })).toBe(0);
+    expect(await verifyPassword(recoveredUser!.passwordHash, fixture.recoveryTargetUser.password)).toBe(false);
+    expect(await prisma.session.count({ where: { userId: fixture.recoveryTargetUser.id, revokedAt: null, expiresAt: { gt: new Date() } } })).toBe(0);
+    expect(await prisma.trustedDevice.count({ where: { userId: fixture.recoveryTargetUser.id, status: "TRUSTED", revokedAt: null } })).toBe(0);
+    expect(await prisma.securityElevation.count({ where: { userId: fixture.recoveryTargetUser.id, status: { in: ["PENDING", "ACTIVE"] } } })).toBe(0);
+    expect(await prisma.deviceChallenge.count({ where: { userId: fixture.recoveryTargetUser.id, status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null } })).toBe(0);
     await userPage.goto(`${portalUrl}/`);
     await expect(userPage).toHaveURL(`${portalUrl}/login?returnTo=%2F`);
   } finally {
@@ -736,7 +737,7 @@ function isAuthFixture(value: unknown): value is AuthFixture {
     return typeof record.id === "string" && typeof record.email === "string" && typeof record.password === "string" && typeof record.deviceToken === "string";
   };
   const recoveryReviewer = candidate.recoveryReviewer as Record<string, unknown> | undefined;
-  return isAccount(candidate.user) && isAccount(candidate.admin) && isAccount(recoveryReviewer) && typeof recoveryReviewer?.administrativePassword === "string" && typeof candidate.projectConnectionId === "string" && typeof candidate.projectName === "string" &&
+  return isAccount(candidate.user) && isAccount(candidate.recoveryTargetUser) && isAccount(candidate.admin) && isAccount(recoveryReviewer) && typeof recoveryReviewer?.administrativePassword === "string" && typeof candidate.projectConnectionId === "string" && typeof candidate.projectName === "string" &&
     typeof candidate.projectLaunchUrl === "string" && new URL(candidate.projectLaunchUrl).hostname.endsWith(".invalid") &&
     typeof candidate.ungrantedProjectName === "string" && typeof candidate.disabledProjectName === "string";
 }

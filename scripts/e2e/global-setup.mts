@@ -27,6 +27,7 @@ type AccountFixture = {
 
 type FixtureState = {
   user: AccountFixture;
+  recoveryTargetUser: AccountFixture;
   admin: AccountFixture;
   recoveryReviewer: AccountFixture;
   projectName: string;
@@ -71,6 +72,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   const disabledProjectSlug = `${projectSlug}-disabled`;
   const disabledProjectClientId = `${projectClientId}-disabled`;
   const userEmail = `${runId}.user@e2e.invalid`;
+  const recoveryTargetEmail = `${runId}.recovery-target@e2e.invalid`;
   const adminEmail = `${runId}.admin@e2e.invalid`;
   const projectName = `E2E project ${runId.slice(0, 8)}`;
   const ungrantedProjectName = `E2E ungranted project ${runId.slice(0, 8)}`;
@@ -78,6 +80,11 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   const projectLaunchUrl = "https://project.e2e.invalid/launch";
   const user: Omit<AccountFixture, "id"> = {
     email: userEmail,
+    password: randomBytes(32).toString("base64url"),
+    deviceToken: randomBytes(32).toString("base64url")
+  };
+  const recoveryTargetUser: Omit<AccountFixture, "id"> = {
+    email: recoveryTargetEmail,
     password: randomBytes(32).toString("base64url"),
     deviceToken: randomBytes(32).toString("base64url")
   };
@@ -104,8 +111,9 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     fixtureFile = join(temporaryDirectory, "fixture.json");
     await restrictTemporaryDirectory(temporaryDirectory);
 
-    const [userPasswordHash, adminPasswordHash, reviewerPasswordHash, reviewerAdministrativePasswordHash] = await Promise.all([
+    const [userPasswordHash, recoveryTargetUserPasswordHash, adminPasswordHash, reviewerPasswordHash, reviewerAdministrativePasswordHash] = await Promise.all([
       hashPassword(user.password),
+      hashPassword(recoveryTargetUser.password),
       hashPassword(admin.password),
       hashPassword(recoveryReviewer.password),
       hashPassword(reviewerAdministrativePassword)
@@ -137,6 +145,19 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
           emailNormalized: user.email,
           displayName: "E2E User",
           passwordHash: userPasswordHash,
+          role: "USER",
+          isActive: true,
+          accountStatus: "ACTIVE",
+          emailVerifiedAt: now
+        },
+        select: { id: true }
+      });
+      const recoveryTargetUserRecord = await transaction.user.create({
+        data: {
+          email: recoveryTargetUser.email,
+          emailNormalized: recoveryTargetUser.email,
+          displayName: "E2E Recovery Target",
+          passwordHash: recoveryTargetUserPasswordHash,
           role: "USER",
           isActive: true,
           accountStatus: "ACTIVE",
@@ -217,11 +238,15 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
         data: { userId: userRecord.id, connectionId: connection.id }
       });
       await transaction.userProjectGrant.create({
+        data: { userId: recoveryTargetUserRecord.id, connectionId: connection.id }
+      });
+      await transaction.userProjectGrant.create({
         data: { userId: userRecord.id, connectionId: disabledConnection.id }
       });
       await transaction.trustedDevice.createMany({
         data: [
           { userId: userRecord.id, deviceIdHash: hashDeviceToken(user.deviceToken), rememberedUntil, strongVerifiedAt: now },
+          { userId: recoveryTargetUserRecord.id, deviceIdHash: hashDeviceToken(recoveryTargetUser.deviceToken), rememberedUntil, strongVerifiedAt: now },
           { userId: adminRecord.id, deviceIdHash: hashDeviceToken(admin.deviceToken), rememberedUntil, strongVerifiedAt: now },
           { userId: recoveryReviewerRecord.id, deviceIdHash: hashDeviceToken(recoveryReviewer.deviceToken), rememberedUntil, strongVerifiedAt: now }
         ]
@@ -229,6 +254,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
 
       return {
         userId: userRecord.id,
+        recoveryTargetUserId: recoveryTargetUserRecord.id,
         adminId: adminRecord.id,
         recoveryReviewerId: recoveryReviewerRecord.id,
         projectConnectionId: connection.id,
@@ -239,6 +265,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
 
     seeded = {
       user: { ...user, id: records.userId },
+      recoveryTargetUser: { ...recoveryTargetUser, id: records.recoveryTargetUserId },
       admin: { ...admin, id: records.adminId },
       recoveryReviewer: { ...recoveryReviewer, id: records.recoveryReviewerId },
       projectName,
@@ -321,18 +348,20 @@ function validateE2eDatabase(databaseUrl = process.env[E2E_DATABASE_ENV]?.trim()
 }
 
 async function removeFixtureRecords(prisma: PrismaClient, fixture: FixtureState): Promise<void> {
-  const userIds = [fixture.user.id, fixture.admin.id, fixture.recoveryReviewer.id];
+  const userIds = [fixture.user.id, fixture.recoveryTargetUser.id, fixture.admin.id, fixture.recoveryReviewer.id];
   await prisma.$transaction(async (transaction) => {
     await transaction.oidcArtifact.deleteMany({
       where: {
         OR: [
           { clientIdHash: hashOidcIdentifier(fixture.projectClientId) },
-          { accountIdHash: hashOidcIdentifier(fixture.user.id) }
+          { accountIdHash: hashOidcIdentifier(fixture.user.id) },
+          { accountIdHash: hashOidcIdentifier(fixture.recoveryTargetUser.id) }
         ]
       }
     });
     await transaction.auditLog.deleteMany({ where: { actorUserId: { in: userIds } } });
     await transaction.user.deleteMany({ where: { id: fixture.user.id, email: fixture.user.email, role: "USER" } });
+    await transaction.user.deleteMany({ where: { id: fixture.recoveryTargetUser.id, email: fixture.recoveryTargetUser.email, role: "USER" } });
     await transaction.user.deleteMany({ where: { id: fixture.admin.id, email: fixture.admin.email, role: "ADMIN" } });
     await transaction.user.deleteMany({ where: { id: fixture.recoveryReviewer.id, email: fixture.recoveryReviewer.email, role: "ADMIN" } });
     await transaction.projectConnection.deleteMany({
