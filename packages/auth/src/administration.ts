@@ -33,6 +33,7 @@ export async function startAdministrativeCredentialSetup(input: {
 }): Promise<string> {
   const now = input.now ?? new Date();
   const admin = await requireAdminSession(input.actor, input.sessionId, now);
+  await consumeAdminCredentialSetupStartAttempt(input.actor.id, now);
   if (!admin.passwordHash || !await verifyPassword(admin.passwordHash, input.normalPassword) || !admin.emailVerifiedAt) throw new AdministrationMutationError();
   const existing = await prisma.administrativeCredential.findUnique({ where: { userId: input.actor.id }, select: { status: true } });
   if (existing?.status === "ACTIVE") throw new AdministrationMutationError();
@@ -53,17 +54,42 @@ export async function completeAdministrativeCredentialSetup(input: {
   await consumeAdministrativeProofAttempts(input.actor.id, input.requestKey, now);
   const passwordHash = await hashPassword(input.newPassword);
   const recoveryCodes = await prisma.$transaction(async (transaction) => {
+    const lockedAdmin = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "User"
+      WHERE "id" = ${input.actor.id}
+        AND "role" = 'ADMIN'::"UserRole"
+        AND "isActive" = TRUE
+      FOR UPDATE
+    `;
+    if (lockedAdmin.length !== 1) throw new AdministrationMutationError();
+    const credential = await transaction.administrativeCredential.findUnique({ where: { userId: input.actor.id }, select: { status: true } });
+    if (credential?.status === "ACTIVE") throw new AdministrationMutationError();
+
     const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_SETUP_SCOPE, now);
     if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
     const consumed = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING" }, data: { status: "CONSUMED", consumedAt: now } });
     if (consumed.count !== 1) throw new AdministrationMutationError();
+    await transaction.securityElevation.updateMany({
+      where: { userId: input.actor.id, scope: ADMIN_CREDENTIAL_SETUP_SCOPE, status: "PENDING", id: { not: ceremony.id } },
+      data: { status: "REVOKED", revokedAt: now }
+    });
+
     const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
-    await transaction.administrativeCredential.upsert({ where: { userId: input.actor.id }, update: { passwordHash, status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null }, create: { userId: input.actor.id, passwordHash, status: "ACTIVE" } });
+    if (credential) {
+      const activated = await transaction.administrativeCredential.updateMany({
+        where: { userId: input.actor.id, status: { in: ["NOT_CONFIGURED", "REVOKED"] } },
+        data: { passwordHash, status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null }
+      });
+      if (activated.count !== 1) throw new AdministrationMutationError();
+    } else {
+      await transaction.administrativeCredential.create({ data: { userId: input.actor.id, passwordHash, status: "ACTIVE" } });
+    }
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.admin", message: "Administrative credential configured." });
     return recoveryCodes;
-  });
+  }, { isolationLevel: "Serializable" });
   return recoveryCodes;
 }
 
@@ -233,6 +259,12 @@ async function consumeAdministrativeProofAttempts(userId: string, requestKey: st
     return ceremony.allowed;
   });
   if (!result) throw new AdministrationMutationError();
+}
+
+async function consumeAdminCredentialSetupStartAttempt(userId: string, now: Date): Promise<void> {
+  if (!isDatabaseId(userId)) throw new AdministrationMutationError();
+  const result = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `admin-credential-setup-start:${userId}`, now));
+  if (!result.allowed) throw new AdministrationMutationError();
 }
 
 async function consumeAdminElevationStartAttempt(userId: string, now: Date): Promise<void> {

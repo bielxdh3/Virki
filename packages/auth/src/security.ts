@@ -4,6 +4,7 @@ import {
   createHash,
   createHmac,
   randomBytes,
+  randomInt,
   timingSafeEqual
 } from "node:crypto";
 import { isIP } from "node:net";
@@ -114,7 +115,7 @@ export function resolveLoginDeviceToken(
 }
 
 export function generateNumericCode(): string {
-  return String(randomBytes(4).readUInt32BE(0) % 1_000_000).padStart(6, "0");
+  return String(randomInt(0, 1_000_000)).padStart(6, "0");
 }
 
 export function hashSecurityCode(code: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -173,6 +174,7 @@ export function verifyTotpCode(secret: string, code: string, now = new Date(), l
 export async function startTotpEnrollment(userId: string, email: string): Promise<{ secret: string; uri: string }> {
   const secret = createTotpSecret();
   await prisma.$transaction(async (transaction) => {
+    if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
     const current = await transaction.totpFactor.findUnique({ where: { userId }, select: { status: true } });
     if (current?.status === "ACTIVE") throw new SecurityMutationError();
     await invalidateRememberedLoginGrants(transaction, userId);
@@ -183,7 +185,7 @@ export async function startTotpEnrollment(userId: string, email: string): Promis
       create: { userId, secretCiphertext: encryptTotpSecret(secret), keyVersion: TOTP_KEY_VERSION, status: "PENDING" }
     });
     await writeAuditLogInTransaction(transaction, { eventType: "SECOND_FACTOR_ENROLLMENT_STARTED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP enrollment started." });
-  });
+  }, { isolationLevel: "Serializable" });
   return { secret, uri: createTotpUri(email, secret) };
 }
 
@@ -191,6 +193,7 @@ export async function confirmTotpEnrollment(userId: string, code: string, now = 
   await consumeSecurityProofAttempt(userId, now);
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   const recoveryCodes = await prisma.$transaction(async (transaction) => {
+    if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "PENDING") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -205,7 +208,7 @@ export async function confirmTotpEnrollment(userId: string, code: string, now = 
     await revokeLoginChallenges(transaction, userId);
     await writeAuditLogInTransaction(transaction, { eventType: "SECOND_FACTOR_ENROLLED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP second factor enrolled." });
     return recoveryCodes;
-  });
+  }, { isolationLevel: "Serializable" });
   return recoveryCodes;
 }
 
@@ -299,7 +302,8 @@ export async function startLoginCeremony(
       const resolvedDeviceToken = resolvedDevice.deviceToken;
       const deviceIdHash = hashDeviceToken(resolvedDeviceToken);
       const isTrusted = resolvedDevice.isTrusted;
-      const requiresTotp = user.secondFactorMethod === "TOTP" && user.totpFactor?.status === "ACTIVE";
+      if (user.secondFactorMethod === "TOTP" && user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
+      const requiresTotp = user.secondFactorMethod === "TOTP";
       const hasRememberedGrant = Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
 
       if (hasRememberedGrant && !forceFreshProof) {
