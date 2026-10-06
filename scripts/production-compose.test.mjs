@@ -78,6 +78,7 @@ test("development Hub and issuer receive only explicitly scoped environment vari
   const hub = serviceBlock(developmentCompose, "hub");
   const publicSite = serviceBlock(developmentCompose, "public-site");
   const issuer = serviceBlock(developmentCompose, "oidc-issuer");
+  const postgres = serviceBlock(developmentCompose, "postgres");
 
   assert.match(hub, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
   assert.match(publicSite, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
@@ -90,16 +91,19 @@ test("development Hub and issuer receive only explicitly scoped environment vari
   assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET:/u);
   assert.doesNotMatch(hub, /BIELOS_OIDC_SIGNING_JWKS|BIELOS_OIDC_COOKIE_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
   assert.doesNotMatch(issuer, /BIELOS_TOTP_ENCRYPTION_KEY|BIELOS_EMAIL_SMTP_PASSWORD|BIELOS_EMAIL_OUTBOX_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.doesNotMatch(`${publicSite}\n${postgres}`, /BIELOS_OIDC_ADAPTER_KEY(?:_PREVIOUS)?/u);
   assert.deepEqual(environmentKeys(hub), [
     "BIELOS_AUDIT_HASH_SECRET", "BIELOS_CSRF_SIGNING_KEY", "BIELOS_CSRF_SIGNING_KEY_PREVIOUS",
     "BIELOS_EMAIL_FROM", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_EMAIL_REPLY_TO", "BIELOS_EMAIL_SMTP_HOST",
     "BIELOS_EMAIL_SMTP_PASSWORD", "BIELOS_EMAIL_SMTP_PORT", "BIELOS_EMAIL_SMTP_SECURE", "BIELOS_EMAIL_SMTP_USER",
     "BIELOS_EMAIL_TRANSPORT", "BIELOS_HUB_HOSTNAME", "BIELOS_HUB_URL", "BIELOS_OIDC_ADAPTER_KEY",
+    "BIELOS_OIDC_ADAPTER_KEY_PREVIOUS",
     "BIELOS_OIDC_PROXY_URL", "BIELOS_PORTAL_HOSTNAME", "BIELOS_PORTAL_URL", "BIELOS_RATE_LIMIT_HASH_SECRET",
     "BIELOS_TOTP_ENCRYPTION_KEY", "CLOUDFLARE_ACCESS_JWT_REQUIRED", "DATABASE_URL", "NODE_ENV"
   ]);
   assert.deepEqual(environmentKeys(issuer), [
-    "BIELOS_OIDC_ADAPTER_KEY", "BIELOS_OIDC_COOKIE_KEY", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_SIGNING_JWKS",
+    "BIELOS_OIDC_ADAPTER_KEY", "BIELOS_OIDC_ADAPTER_KEY_PREVIOUS", "BIELOS_OIDC_COOKIE_KEY",
+    "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_SIGNING_JWKS",
     "BIELOS_RATE_LIMIT_HASH_SECRET", "DATABASE_URL", "NODE_ENV", "OIDC_ISSUER_PORT"
   ]);
 });
