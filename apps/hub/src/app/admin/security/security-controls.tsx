@@ -25,7 +25,16 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
       {showRecoveryCodes && complete.recoveryCodes ? (
         <>
           <RecoveryCodes codes={complete.recoveryCodes} />
-          <button type="button" onClick={() => window.location.reload()}>Continuar para elevação</button>
+          <a
+            className="button-secondary"
+            href="/admin/security?status=credential#admin-content"
+            onClick={(event) => {
+              event.preventDefault();
+              window.location.replace(event.currentTarget.href);
+            }}
+          >
+            Continuar para elevação
+          </a>
         </>
       ) : activeCredential ? (
         <>

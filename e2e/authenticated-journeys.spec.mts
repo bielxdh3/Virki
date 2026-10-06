@@ -176,7 +176,17 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     }
     const initialAdministrativeRecoveryCode = (await credentialSection.locator("ul li").first().textContent())?.trim();
     if (!initialAdministrativeRecoveryCode) throw new Error("E2E ADMIN recovery code is unavailable for the recovery journey.");
-    await credentialSection.getByRole("button", { name: "Continuar para elevação", exact: true }).click();
+    adminJourneyPhase = "credential-acknowledgment";
+    const historyLengthBeforeAcknowledgment = await page.evaluate(() => window.history.length);
+    await credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true }).click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/security?status=credential#admin-content`);
+    await expect(page.getByRole("status")).toContainText("Credencial administrativa configurada");
+    expect(await page.evaluate(() => window.history.length)).toBe(historyLengthBeforeAcknowledgment);
+    await page.goBack();
+    await expect(page).not.toHaveURL(`${hubUrl}/admin/security?status=credential#admin-content`);
+    await expect(page.getByText(initialAdministrativeRecoveryCode, { exact: true })).toHaveCount(0);
+    await page.goForward();
+    await expect(page).toHaveURL(`${hubUrl}/admin/security?status=credential#admin-content`);
 
     const recoveryForm = credentialSection.locator("form").filter({ has: credentialSection.getByLabel("Código de recuperação administrativa", { exact: true }) });
     await expect(recoveryForm).toBeVisible();

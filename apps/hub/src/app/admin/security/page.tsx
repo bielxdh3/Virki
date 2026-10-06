@@ -20,7 +20,9 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
   ]);
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Segurança</h1><p>Credencial separada, elevação por sessão e recuperação administrativa.</p></div></header>
-    {params.status && <p className="form-success" role="status">Alteração concluída.</p>}{params.error && <p className="form-error" role="alert">A ação não foi concluída. Tente novamente.</p>}
+    {params.status === "credential"
+      ? credential?.status === "ACTIVE" && <p className="form-success" role="status">Credencial administrativa configurada. Agora você pode solicitar uma elevação.</p>
+      : params.status && <p className="form-success" role="status">Alteração concluída.</p>}{params.error && <p className="form-error" role="alert">A ação não foi concluída. Tente novamente.</p>}
     <CredentialSetup
       csrf={csrf}
       activeCredential={credential?.status === "ACTIVE" ? {
