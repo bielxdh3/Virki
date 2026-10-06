@@ -3,8 +3,9 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
-import { verifyPassword } from "@bielos/auth";
+import { hashSessionToken, verifyPassword } from "@bielos/auth";
 import { decryptEmailPayload } from "@bielos/auth/email";
+import { getPendingAccountRecoveryQueueWhere } from "@bielos/auth/security";
 import { PrismaClient } from "@bielos/database";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
@@ -448,6 +449,52 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await signIn(reviewerPage, fixture.recoveryReviewer);
     await expect(reviewerPage.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
 
+    const recoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.admin.email });
+    const recoveryQueueSnapshot = async () => {
+      const [requestState, sessionCookie] = await Promise.all([
+        prisma.accountRecoveryRequest.findUnique({
+          where: { id: recovery.id },
+          select: {
+            status: true,
+            emailVerifiedAt: true,
+            expiresAt: true,
+            userId: true,
+            user: { select: { role: true, isActive: true, accountStatus: true } }
+          }
+        }),
+        reviewerContext.cookies(hubUrl).then((cookies) => cookies.find((cookie) => cookie.name === SESSION_COOKIE_NAME))
+      ]);
+      const reviewerSession = sessionCookie
+        ? await prisma.session.findUnique({
+          where: { tokenHash: hashSessionToken(sessionCookie.value) },
+          select: { userId: true, revokedAt: true, expiresAt: true }
+        })
+        : null;
+      const queueMatch = reviewerSession
+        ? await prisma.accountRecoveryRequest.findFirst({
+          where: {
+            id: recovery.id,
+            ...getPendingAccountRecoveryQueueWhere(new Date(), reviewerSession.userId)
+          },
+          select: { id: true }
+        })
+        : null;
+      const queueHeading = await reviewerPage.getByRole("heading", { name: /^Recuperação de contas/u }).textContent().catch(() => null);
+      return [
+        `requestPending=${requestState?.status === "PENDING"}`,
+        `emailVerified=${Boolean(requestState?.emailVerifiedAt)}`,
+        `requestUnexpired=${Boolean(requestState && requestState.expiresAt > new Date())}`,
+        `targetAdminActive=${Boolean(requestState?.user.role === "ADMIN" && requestState.user.isActive && requestState.user.accountStatus === "ACTIVE")}`,
+        `reviewerSessionMatchesFixture=${reviewerSession?.userId === fixture.recoveryReviewer.id}`,
+        `reviewerSessionActive=${Boolean(reviewerSession && !reviewerSession.revokedAt && reviewerSession.expiresAt > new Date())}`,
+        `reviewerDistinctFromTarget=${Boolean(reviewerSession && reviewerSession.userId !== requestState?.userId)}`,
+        `queryIncludesRequest=${Boolean(queueMatch)}`,
+        `matchingDomRows=${await recoveryRow.count()}`,
+        `queueHeading=${queueHeading ?? "missing"}`
+      ].join(";");
+    };
+    const queueBeforeElevation = await recoveryQueueSnapshot();
+
     const elevationSection = reviewerPage.locator("section.surface").filter({ has: reviewerPage.getByRole("heading", { name: "Elevação temporária", exact: true }) });
     const elevationForm = elevationSection.locator("form").first();
     await elevationForm.locator('select[name="scope"]').selectOption("ACCOUNT_STATE_CHANGE");
@@ -461,8 +508,11 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await elevationVerificationForm.getByLabel("Código", { exact: true }).fill(elevationCode);
     await elevationVerificationForm.getByRole("button", { name: "Ativar elevação", exact: true }).click();
     await expect(reviewerPage).toHaveURL(`${hubUrl}/admin/security?status=elevation#admin-content`);
-    const recoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.admin.email });
-    await expect(recoveryRow).toBeVisible();
+    try {
+      await expect(recoveryRow).toBeVisible();
+    } catch {
+      throw new Error(`E2E ADMIN recovery queue omitted the verified target after reviewer elevation (before-elevation: ${queueBeforeElevation}; after-elevation: ${await recoveryQueueSnapshot()}).`);
+    }
     await recoveryRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click();
     await expect(reviewerPage).toHaveURL(`${hubUrl}/admin/security?status=recovery#admin-content`);
 
