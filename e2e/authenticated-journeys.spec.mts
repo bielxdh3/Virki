@@ -245,7 +245,24 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await elevationVerificationForm.getByLabel("Código", { exact: true }).fill(elevationCode);
     await elevationVerificationForm.getByRole("button", { name: "Ativar elevação", exact: true }).click();
     await expect(page).toHaveURL(hubUrl + "/admin/security?status=elevation#admin-content");
-    await expect(elevationSection.locator("article").filter({ hasText: "Gerenciar conexões" })).toBeVisible();
+    const connectionElevationArticle = elevationSection.locator("article").filter({ hasText: "Gerenciar conexões" });
+    try {
+      await expect(connectionElevationArticle).toBeVisible();
+    } catch {
+      const [verifiedElevation, authenticatedSession, renderedScopes] = await Promise.all([
+        prisma.securityElevation.findUnique({
+          where: { requestKey: elevationRequestKey },
+          select: { status: true, scope: true, userId: true, sessionId: true, expiresAt: true, manualUntilRevoked: true }
+        }),
+        prisma.session.findUnique({ where: { tokenHash: hashSessionToken(sessionCookie.value) }, select: { id: true, userId: true, revokedAt: true, expiresAt: true } }),
+        elevationSection.locator("article:visible .row-main strong").allTextContents()
+      ]);
+      const sessionMatches = Boolean(verifiedElevation && authenticatedSession && verifiedElevation.sessionId === authenticatedSession.id);
+      const sessionUserMatches = authenticatedSession?.userId === fixture.admin.id;
+      const elevationIsValid = Boolean(verifiedElevation && verifiedElevation.status === "ACTIVE" && (verifiedElevation.manualUntilRevoked || verifiedElevation.expiresAt > new Date()));
+      const sessionIsValid = Boolean(authenticatedSession && !authenticatedSession.revokedAt && authenticatedSession.expiresAt > new Date());
+      throw new Error(`E2E active elevation was not rendered (dbStatus=${verifiedElevation?.status ?? "missing"}; dbScope=${verifiedElevation?.scope ?? "missing"}; adminMatches=${verifiedElevation?.userId === fixture.admin.id}; sessionUserMatches=${sessionUserMatches}; sessionMatches=${sessionMatches}; elevationValid=${elevationIsValid}; sessionValid=${sessionIsValid}; renderedScopes=${renderedScopes.join("|") || "none"}).`);
+    }
 
     await page.getByRole("link", { name: "Conexões", exact: true }).click();
     await expect(page).toHaveURL(hubUrl + "/admin/connections");
