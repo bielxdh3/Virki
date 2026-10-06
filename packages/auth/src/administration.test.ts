@@ -4,8 +4,22 @@ import {
   ELEVATION_SCOPES,
   ELEVATION_SCOPE_ACTIONS,
   UI_ELEVATION_SCOPES,
+  isElevationCeremonyOpen,
   resolveElevationDuration
 } from "./administration";
+
+test("an elevation email code expires after ten minutes even when the elevation itself is long-lived", () => {
+  const sentAt = new Date("2026-08-01T10:00:00.000Z");
+  const manual = resolveElevationDuration({ kind: "MANUAL", confirmed: true }, sentAt);
+  const day = resolveElevationDuration({ kind: "TIMED", minutes: 1440 }, sentAt);
+  for (const { expiresAt } of [manual, day]) {
+    const ceremony = { createdAt: sentAt, expiresAt };
+    assert.equal(isElevationCeremonyOpen(ceremony, new Date("2026-08-01T10:09:59.000Z")), true);
+    assert.equal(isElevationCeremonyOpen(ceremony, new Date("2026-08-01T10:10:00.000Z")), false);
+    assert.equal(isElevationCeremonyOpen(ceremony, new Date("2026-08-02T09:00:00.000Z")), false);
+  }
+  assert.equal(isElevationCeremonyOpen({ createdAt: sentAt, expiresAt: new Date("2026-08-01T10:05:00.000Z") }, new Date("2026-08-01T10:06:00.000Z")), false);
+});
 
 test("elevation duration requires explicit bounded or confirmed manual mode", () => {
   const now = new Date("2026-08-01T10:00:00.000Z");

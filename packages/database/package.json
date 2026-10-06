@@ -7,17 +7,19 @@
   "types": "src/index.ts",
   "scripts": {
     "prisma:generate": "prisma generate && node scripts/copy-prisma-client.mjs",
-    "prisma:push": "prisma db push",
+    "prisma:push": "node scripts/prisma-migrate.mjs push",
     "prisma:validate": "cross-env DATABASE_URL=postgresql://bielos_app:local-validation-only@validation.invalid/bielos prisma validate --schema prisma/schema.prisma",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
-    "prisma:migrate:status": "prisma migrate status --schema prisma/schema.prisma",
+    "prisma:migrate": "node scripts/prisma-migrate.mjs dev",
+    "prisma:migrate:deploy": "node scripts/prisma-migrate.mjs deploy",
+    "prisma:migrate:status": "node scripts/prisma-migrate.mjs status",
+    "prisma:migrate:resolve-baseline": "node scripts/prisma-migrate.mjs resolve-baseline",
+    "prisma:migrate:verify-schema": "node scripts/prisma-migrate.mjs verify-schema",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@prisma/client": "6.19.3"
   },
   "devDependencies": {
-    "prisma": "7.10.0"
+    "prisma": "6.19.3"
   }
 }

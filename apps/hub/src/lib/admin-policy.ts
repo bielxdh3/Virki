@@ -4,6 +4,10 @@ export function isAdminRequestAllowed(surface: Surface, cloudflareAccessValid: b
   return surface === "hub" && cloudflareAccessValid;
 }
 
+export function isHubAdminMutationSurface(surface: Surface): surface is "hub" {
+  return surface === "hub";
+}
+
 export function isAdminRole(role: string | null | undefined): boolean {
   return role === "ADMIN";
 }

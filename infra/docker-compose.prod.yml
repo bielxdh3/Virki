@@ -1,16 +1,18 @@
-x-bielos-build: &bielos-build
-  context: ..
-  dockerfile: infra/Dockerfile.prod
-  args:
-    BIELOS_BUILD_REVISION: ${BIELOS_BUILD_REVISION:-}
-
 services:
   public-site:
-    build: *bielos-build
+    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
+      BIELOS_PORTAL_URL: ${BIELOS_PORTAL_URL:-}
     ports:
       - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
     command: npm run start --workspace @bielos/public-site
@@ -21,27 +23,36 @@ services:
       retries: 3
 
   hub:
-    build: *bielos-build
+    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m
     depends_on:
       postgres:
         condition: service_healthy
       oidc-issuer:
         condition: service_healthy
     env_file:
-      - path: ../.env
+      - path: ../.env.oidc-data
         required: true
-      - path: ../.env.oidc
-        required: false
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:-https://hub.biel.dev.br}
-      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
+      BIELOS_HUB_URL: ${BIELOS_HUB_URL:-https://hub.biel.dev.br}
+      BIELOS_PORTAL_URL: ${BIELOS_PORTAL_URL:-}
       BIELOS_HUB_HOSTNAME: ${BIELOS_HUB_HOSTNAME:-hub.biel.dev.br}
       BIELOS_PORTAL_HOSTNAME: ${BIELOS_PORTAL_HOSTNAME:-portal.biel.dev.br}
       BIELOS_OIDC_PROXY_URL: http://oidc-issuer:3003
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
+      BIELOS_AUDIT_HASH_SECRET: ${BIELOS_AUDIT_HASH_SECRET:?BIELOS_AUDIT_HASH_SECRET must be set in local .env}
+      BIELOS_CSRF_SIGNING_KEY: ${BIELOS_CSRF_SIGNING_KEY:?BIELOS_CSRF_SIGNING_KEY must be set in local .env}
+      BIELOS_CSRF_SIGNING_KEY_PREVIOUS: ${BIELOS_CSRF_SIGNING_KEY_PREVIOUS:-}
       BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
       BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
       CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
@@ -57,21 +68,28 @@ services:
       retries: 3
 
   oidc-issuer:
-    build: *bielos-build
+    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     depends_on:
       postgres:
         condition: service_healthy
     env_file:
-      - path: ../.env
-        required: true
       - path: ../.env.oidc
-        required: false
+        required: true
+      - path: ../.env.oidc-data
+        required: true
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
+      BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
       OIDC_ISSUER_PORT: 3003
-      BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
     command: npm run start --workspace @bielos/issuer
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/.well-known/openid-configuration').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -80,46 +98,75 @@ services:
       retries: 3
 
   migrate:
-    build:
-      <<: *bielos-build
-      target: migrator
+    image: ${BIELOS_MIGRATOR_IMAGE:?BIELOS_MIGRATOR_IMAGE must be set in local .env}
+    pull_policy: never
     profiles: ["migration"]
-    env_file:
-      - path: ../.env
-        required: true
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     environment:
       NODE_ENV: production
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set in local .env}
     depends_on:
       postgres:
         condition: service_healthy
     command: npm run prisma:migrate:deploy
 
   session-cleanup:
-    build: *bielos-build
+    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
     restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - path: ../.env
-        required: true
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       SESSION_CLEANUP_INTERVAL_SECONDS: ${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}
       AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
-    command: ["sh", "-c", "while true; do npm run sessions:cleanup --workspace @bielos/auth && npm run audit:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"]
+    command: ["sh", "-c", "while true; do npm run sessions:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"]
 
-  email-worker:
-    build: *bielos-build
-    restart: unless-stopped
+  audit-maintenance:
+    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
+    profiles: ["maintenance"]
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - path: ../.env
-        required: true
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${AUDIT_MAINTENANCE_DATABASE_URL:?AUDIT_MAINTENANCE_DATABASE_URL must be set in local .env}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
+    command: npm run audit:cleanup --workspace @bielos/auth
+
+  email-worker:
+    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
+    restart: unless-stopped
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
@@ -135,16 +182,20 @@ services:
     command: npm run email:worker --workspace @bielos/auth
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bielos}
-      POSTGRES_USER: ${POSTGRES_USER:-bielos_app}
+      POSTGRES_USER: ${POSTGRES_USER:-bielos_bootstrap}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in local .env}
+      BIELOS_RUNTIME_DB_PASSWORD: ${BIELOS_RUNTIME_DB_PASSWORD:?BIELOS_RUNTIME_DB_PASSWORD must be set in local .env}
+      BIELOS_MIGRATOR_DB_PASSWORD: ${BIELOS_MIGRATOR_DB_PASSWORD:?BIELOS_MIGRATOR_DB_PASSWORD must be set in local .env}
+      BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD: ${BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD:?BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD must be set in local .env}
     volumes:
       - bielos_postgres_data:/var/lib/postgresql/data
+      - ./postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -1,53 +1,114 @@
 "use server";
 
-import { consumeApprovedAccountRecovery, approveAccountRecovery, requestAccountRecovery, verifyAccountRecoveryEmail } from "@bielos/auth/security";
+import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@bielos/auth/security";
 import { requireSecurityElevation } from "@bielos/auth/administration";
-import { hashPassword } from "@bielos/auth";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
-import { getSurface } from "../../lib/surface";
+import { getSurface, hasSameOrigin } from "../../lib/surface";
+import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
 
 export async function requestRecoveryAction(formData: FormData) {
-  await requireAccess(formData, "account-recovery-request");
-  try { await requestAccountRecovery(read(formData, "email"), "pt-BR"); } catch { /* generic response */ }
+  const { requestHeaders } = await requireRecoveryAccess(formData, "recovery-request", "portal");
+  try {
+    await requestAccountRecovery(read(formData, "email"), "pt-BR", new Date(), requestHeaders.get("cf-connecting-ip")?.trim());
+  } catch {
+    // Keep account existence and mail-delivery state private.
+  }
   redirect("/recover?sent=1");
 }
 
-export async function verifyRecoveryAction(formData: FormData) {
-  await requireAccess(formData, "account-recovery-verify");
+export async function requestAdministrativeRecoveryAction(formData: FormData) {
+  const { requestHeaders } = await requireRecoveryAccess(formData, "recovery-admin-request", "hub");
+  try {
+    await requestAdministrativeAccountRecovery(read(formData, "email"), "pt-BR", new Date(), requestHeaders.get("cf-connecting-ip")?.trim());
+  } catch {
+    // Keep account existence and mail-delivery state private.
+  }
+  redirect("/recover?sent=1");
+}
+
+export async function openRecoveryAction(formData: FormData) {
+  const { expectedRole } = await requireRecoveryAccess(formData, "recovery-open");
   const requestKey = read(formData, "requestKey");
-  try { await verifyAccountRecoveryEmail(requestKey, read(formData, "code")); } catch { redirect(`/recover?request=${encodeURIComponent(requestKey)}&error=1`); }
-  redirect(`/recover?request=${encodeURIComponent(requestKey)}&verified=1`);
+  const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
+  if (!recovery) redirect("/recover?error=1");
+  const cookieStore = await cookies();
+  cookieStore.set(RECOVERY_COOKIE_NAME, requestKey, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/recover",
+    expires: recovery.expiresAt
+  });
+  redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
+}
+
+export type RecoveryVerificationActionState = { status: "idle" | "error" | "verified" };
+
+export async function verifyRecoveryAction(_state: RecoveryVerificationActionState, formData: FormData): Promise<RecoveryVerificationActionState> {
+  const { expectedRole } = await requireRecoveryAccess(formData, "recovery-verify");
+  const requestId = read(formData, "requestId");
+  const requestKey = (await cookies()).get(RECOVERY_COOKIE_NAME)?.value;
+  if (!requestKey) return { status: "error" };
+  try {
+    await verifyAccountRecoveryEmail(requestId, requestKey, read(formData, "code"), new Date(), expectedRole);
+  } catch {
+    return { status: "error" };
+  }
+  return { status: "verified" };
 }
 
 export async function completeRecoveryAction(formData: FormData) {
-  await requireAccess(formData, "account-recovery-complete");
-  const requestKey = read(formData, "requestKey");
-  try { await consumeApprovedAccountRecovery(requestKey, await hashPassword(read(formData, "newPassword"))); } catch { redirect(`/recover?request=${encodeURIComponent(requestKey)}&error=1`); }
+  const { expectedRole } = await requireRecoveryAccess(formData, "recovery-complete");
+  const requestId = read(formData, "requestId");
+  const requestKey = (await cookies()).get(RECOVERY_COOKIE_NAME)?.value;
+  if (!requestKey) redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
+  try {
+    await consumeApprovedAccountRecovery(requestId, requestKey, readRaw(formData, "newPassword"), new Date(), expectedRole);
+  } catch {
+    redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
+  }
+  (await cookies()).delete(RECOVERY_COOKIE_NAME);
   redirect("/login?recovered=1");
 }
 
 export async function approveRecoveryAction(formData: FormData) {
-  await requireAccess(formData, "account-recovery-approve");
+  const requestHeaders = await headers();
+  if (!hasSameOrigin(requestHeaders) || getSurface(requestHeaders) !== "hub" || !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery-approve")) || !validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "admin-security" }).valid) redirect("/login");
   const session = await getCurrentSession();
   if (!session || session.user.role !== "ADMIN") redirect("/login");
   try {
     await requireSecurityElevation(session.user.id, session.id, "ACCOUNT_STATE_CHANGE");
-    await approveAccountRecovery(session.user, read(formData, "requestKey"));
+    await approveAccountRecovery(session.user, read(formData, "requestId"));
   } catch {
-    redirect("/admin/security?error=recovery");
+    redirect("/admin/security?error=recovery#admin-content");
   }
-  redirect("/admin/security?status=recovery");
+  redirect("/admin/security?status=recovery#admin-content");
 }
 
-async function requireAccess(formData: FormData, source: string) {
+async function requireRecoveryAccess(formData: FormData, csrfScope: string, requiredSurface?: "hub" | "portal"): Promise<{ requestHeaders: Headers; expectedRole: "ADMIN" | "USER" }> {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
-  if (surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) redirect("/login");
-  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME)).valid) redirect("/login");
+  const expectedSurface = surface === "portal" || surface === "hub"
+    ? surface
+    : surface === "local" && process.env.NODE_ENV !== "production"
+      ? "portal"
+      : "unknown";
+  const recoverySurfaceAllowed = expectedSurface !== "unknown" && (!requiredSurface || expectedSurface === requiredSurface);
+  if (!hasSameOrigin(requestHeaders) || !recoverySurfaceAllowed || !validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: csrfScope }).valid) redirect("/login");
+  if (expectedSurface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery"))) redirect("/login");
+  return { requestHeaders, expectedRole: expectedSurface === "hub" ? "ADMIN" : "USER" };
 }
 
-function read(formData: FormData, key: string): string { const value = formData.get(key); return typeof value === "string" ? value.trim() : ""; }
+function read(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readRaw(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : "";
+}

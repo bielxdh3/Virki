@@ -5,7 +5,7 @@ services:
       dockerfile: infra/Dockerfile
     environment:
       NODE_ENV: development
-      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
+      BIELOS_PORTAL_URL: ${BIELOS_PORTAL_URL:-}
     ports:
       - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
     command: npm run dev --workspace @bielos/public-site
@@ -19,22 +19,31 @@ services:
         condition: service_healthy
       oidc-issuer:
         condition: service_started
-    env_file:
-      - path: ../.env
-        required: true
     environment:
       NODE_ENV: development
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
-      NEXT_PUBLIC_HUB_URL: ${NEXT_PUBLIC_HUB_URL:-https://hub.biel.dev.br}
-      NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://portal.biel.dev.br}
+      BIELOS_HUB_URL: ${BIELOS_HUB_URL:-https://hub.biel.dev.br}
+      BIELOS_PORTAL_URL: ${BIELOS_PORTAL_URL:-}
       BIELOS_HUB_HOSTNAME: ${BIELOS_HUB_HOSTNAME:-hub.biel.dev.br}
       BIELOS_PORTAL_HOSTNAME: ${BIELOS_PORTAL_HOSTNAME:-portal.biel.dev.br}
       BIELOS_OIDC_PROXY_URL: http://oidc-issuer:3003
       CLOUDFLARE_ACCESS_JWT_REQUIRED: "false"
       BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
+      BIELOS_AUDIT_HASH_SECRET: ${BIELOS_AUDIT_HASH_SECRET:?BIELOS_AUDIT_HASH_SECRET must be set in local .env}
+      BIELOS_CSRF_SIGNING_KEY: ${BIELOS_CSRF_SIGNING_KEY:?BIELOS_CSRF_SIGNING_KEY must be set in local .env}
+      BIELOS_CSRF_SIGNING_KEY_PREVIOUS: ${BIELOS_CSRF_SIGNING_KEY_PREVIOUS:-}
       BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
       BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
       BIELOS_OIDC_ADAPTER_KEY: ${BIELOS_OIDC_ADAPTER_KEY:?BIELOS_OIDC_ADAPTER_KEY must be set in local .env}
+      BIELOS_OIDC_ADAPTER_KEY_PREVIOUS: ${BIELOS_OIDC_ADAPTER_KEY_PREVIOUS:-}
+      BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
+      BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
+      BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
+      BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}
+      BIELOS_EMAIL_SMTP_USER: ${BIELOS_EMAIL_SMTP_USER:-}
+      BIELOS_EMAIL_SMTP_PASSWORD: ${BIELOS_EMAIL_SMTP_PASSWORD:-}
+      BIELOS_EMAIL_FROM: ${BIELOS_EMAIL_FROM:-no-reply@example.invalid}
+      BIELOS_EMAIL_REPLY_TO: ${BIELOS_EMAIL_REPLY_TO:-}
     ports:
       - "127.0.0.1:${HUB_PORT:-3001}:3001"
     command: npm run dev --workspace @bielos/hub
@@ -46,9 +55,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - path: ../.env
-        required: true
     environment:
       NODE_ENV: development
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
@@ -57,19 +63,26 @@ services:
       BIELOS_OIDC_SIGNING_JWKS: ${BIELOS_OIDC_SIGNING_JWKS:?BIELOS_OIDC_SIGNING_JWKS must be set in local .env}
       BIELOS_OIDC_COOKIE_KEY: ${BIELOS_OIDC_COOKIE_KEY:?BIELOS_OIDC_COOKIE_KEY must be set in local .env}
       BIELOS_OIDC_ADAPTER_KEY: ${BIELOS_OIDC_ADAPTER_KEY:?BIELOS_OIDC_ADAPTER_KEY must be set in local .env}
+      BIELOS_OIDC_ADAPTER_KEY_PREVIOUS: ${BIELOS_OIDC_ADAPTER_KEY_PREVIOUS:-}
+      BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
     command: npm run start --workspace @bielos/issuer
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bielos}
-      POSTGRES_USER: ${POSTGRES_USER:-bielos_app}
+      POSTGRES_USER: ${POSTGRES_USER:-bielos_bootstrap}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in local .env}
+      BIELOS_RUNTIME_DB_PASSWORD: ${BIELOS_RUNTIME_DB_PASSWORD:?BIELOS_RUNTIME_DB_PASSWORD must be set in local .env}
+      BIELOS_MIGRATOR_DB_PASSWORD: ${BIELOS_MIGRATOR_DB_PASSWORD:?BIELOS_MIGRATOR_DB_PASSWORD must be set in local .env}
+      BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD: ${BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD:?BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD must be set in local .env}
+      BIELOS_LOCAL_MIGRATOR_CREATEDB: "true"
     volumes:
       - bielos_postgres_data:/var/lib/postgresql/data
+      - ./postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5

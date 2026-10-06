@@ -9,47 +9,30 @@ function copy(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-test("accepts only the exact Prisma tooling advisory path", () => {
+test("accepts a clean Prisma tooling audit at the pinned versions", () => {
   const result = evaluateToolingAudit(accepted, { versions: EXPECTED_TOOLING_VERSIONS });
   assert.equal(result.ok, true);
   assert.equal(result.status, "passed");
 });
 
-test("rejects production reachability even for the accepted advisory", () => {
+test("rejects production reachability", () => {
   const result = evaluateToolingAudit(accepted, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: true });
   assert.equal(result.ok, false);
 });
 
-test("rejects an unrelated or second advisory", () => {
+test("rejects any tooling advisory", () => {
   const unrelated = copy(accepted);
   unrelated.vulnerabilities["other-package"] = { name: "other-package", severity: "high", isDirect: false, via: [], effects: [], range: "<1.0.0", nodes: ["node_modules/other-package"], fixAvailable: false };
-  unrelated.metadata.vulnerabilities.high = 4;
-  unrelated.metadata.vulnerabilities.total = 4;
+  unrelated.metadata.vulnerabilities.high = 1;
+  unrelated.metadata.vulnerabilities.total = 1;
   assert.equal(evaluateToolingAudit(unrelated, { versions: EXPECTED_TOOLING_VERSIONS }).ok, false);
-
-  const second = copy(accepted);
-  second.vulnerabilities["deepmerge-ts"].via.push({ source: 999999, name: "deepmerge-ts", dependency: "deepmerge-ts", title: "Second advisory", url: "https://github.com/advisories/GHSA-test", severity: "high", cwe: [], cvss: { score: 0, vectorString: null }, range: "<8.0.0" });
-  assert.equal(evaluateToolingAudit(second, { versions: EXPECTED_TOOLING_VERSIONS }).ok, false);
 });
 
-test("rejects count, path, and version drift", () => {
+test("rejects count and version drift", () => {
   const countDrift = copy(accepted);
   countDrift.metadata.vulnerabilities.high = 2;
   assert.equal(evaluateToolingAudit(countDrift, { versions: EXPECTED_TOOLING_VERSIONS }).ok, false);
 
-  const pathDrift = copy(accepted);
-  pathDrift.vulnerabilities.prisma.nodes = ["packages/database/node_modules/prisma"];
-  assert.equal(evaluateToolingAudit(pathDrift, { versions: EXPECTED_TOOLING_VERSIONS }).ok, false);
-
-  const versionDrift = { ...EXPECTED_TOOLING_VERSIONS, "deepmerge-ts": "8.0.0" };
+  const versionDrift = { ...EXPECTED_TOOLING_VERSIONS, "deepmerge-ts": "8.0.1" };
   assert.equal(evaluateToolingAudit(accepted, { versions: versionDrift }).ok, false);
-});
-
-test("signals removal when the audit becomes clean", () => {
-  const clean = copy(accepted);
-  clean.vulnerabilities = {};
-  clean.metadata.vulnerabilities = { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 };
-  const result = evaluateToolingAudit(clean, { versions: { prisma: "7.0.0" } });
-  assert.equal(result.ok, true);
-  assert.equal(result.status, "exception-no-longer-needed");
 });

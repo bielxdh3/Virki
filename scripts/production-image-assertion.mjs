@@ -9,6 +9,7 @@ if (!image) {
 const assertion = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");
+const runtimeUid = typeof process.getuid === "function" ? process.getuid() : -1;
 const forbidden = ["prisma", "@prisma/config", "deepmerge-ts"];
 const moduleRoots = findNodeModulesRoots("/app");
 const forbiddenFound = moduleRoots.flatMap((root) => forbidden.filter((name) => fs.existsSync(packagePath(root, name))));
@@ -42,7 +43,7 @@ const generatedClient = [
   "/app/apps/hub/node_modules/.prisma/client",
   "/app/node_modules/.prisma/client"
 ].some((root) => fs.existsSync(path.join(root, "default.js")) && (fs.existsSync(path.join(root, "client.js")) || fs.existsSync(path.join(root, "index.js"))));
-if (forbiddenFound.length > 0 || prismaBinaryFound || !requiredClient || !oidcProvider || !generatedClient || !runtimeClosure || !linuxBinary) process.exit(1);
+if (runtimeUid !== 1000 || forbiddenFound.length > 0 || prismaBinaryFound || !requiredClient || !oidcProvider || !generatedClient || !runtimeClosure || !linuxBinary) process.exit(1);
 function packagePath(root, name) { return path.join(root, ...name.split("/")); }
 function findNodeModulesRoots(root) {
   const roots = [];
@@ -63,7 +64,7 @@ function findNodeModulesRoots(root) {
 }
 `;
 
-const result = spawnSync("docker", ["run", "--rm", "--entrypoint", "node", image, "-e", assertion], {
+const result = spawnSync("docker", ["run", "--rm", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m", "--entrypoint", "node", image, "-e", assertion], {
   encoding: "utf8",
   windowsHide: true,
   timeout: 120_000,

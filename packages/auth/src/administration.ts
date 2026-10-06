@@ -1,7 +1,7 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
-import { generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode } from "./security";
-import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashPassword, verifyPassword, writeAuditLog } from "./index";
+import { generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode, verifySecurityCode } from "./security";
+import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashPassword, verifyPassword, writeAuditLogInTransaction, type AuditLogInput } from "./index";
 import { prisma, type Prisma } from "@bielos/database";
 import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
 
@@ -33,6 +33,7 @@ export async function startAdministrativeCredentialSetup(input: {
 }): Promise<string> {
   const now = input.now ?? new Date();
   const admin = await requireAdminSession(input.actor, input.sessionId, now);
+  await consumeAdminCredentialSetupStartAttempt(input.actor.id, now);
   if (!admin.passwordHash || !await verifyPassword(admin.passwordHash, input.normalPassword) || !admin.emailVerifiedAt) throw new AdministrationMutationError();
   const existing = await prisma.administrativeCredential.findUnique({ where: { userId: input.actor.id }, select: { status: true } });
   if (existing?.status === "ACTIVE") throw new AdministrationMutationError();
@@ -50,19 +51,45 @@ export async function completeAdministrativeCredentialSetup(input: {
   const now = input.now ?? new Date();
   await requireAdminSession(input.actor, input.sessionId, now);
   assertAdminPassword(input.newPassword);
+  await consumeAdministrativeProofAttempts(input.actor.id, input.requestKey, now);
   const passwordHash = await hashPassword(input.newPassword);
   const recoveryCodes = await prisma.$transaction(async (transaction) => {
+    const lockedAdmin = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "User"
+      WHERE "id" = ${input.actor.id}
+        AND "role" = 'ADMIN'::"UserRole"
+        AND "isActive" = TRUE
+      FOR UPDATE
+    `;
+    if (lockedAdmin.length !== 1) throw new AdministrationMutationError();
+    const credential = await transaction.administrativeCredential.findUnique({ where: { userId: input.actor.id }, select: { status: true } });
+    if (credential?.status === "ACTIVE") throw new AdministrationMutationError();
+
     const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_SETUP_SCOPE, now);
-    if (!safeEqual(hashSecurityCode(input.code), ceremony.challengeHash)) throw new AdministrationMutationError();
+    if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
     const consumed = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING" }, data: { status: "CONSUMED", consumedAt: now } });
     if (consumed.count !== 1) throw new AdministrationMutationError();
+    await transaction.securityElevation.updateMany({
+      where: { userId: input.actor.id, scope: ADMIN_CREDENTIAL_SETUP_SCOPE, status: "PENDING", id: { not: ceremony.id } },
+      data: { status: "REVOKED", revokedAt: now }
+    });
+
     const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
-    await transaction.administrativeCredential.upsert({ where: { userId: input.actor.id }, update: { passwordHash, status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null }, create: { userId: input.actor.id, passwordHash, status: "ACTIVE" } });
+    if (credential) {
+      const activated = await transaction.administrativeCredential.updateMany({
+        where: { userId: input.actor.id, status: { in: ["NOT_CONFIGURED", "REVOKED"] } },
+        data: { passwordHash, status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null }
+      });
+      if (activated.count !== 1) throw new AdministrationMutationError();
+    } else {
+      await transaction.administrativeCredential.create({ data: { userId: input.actor.id, passwordHash, status: "ACTIVE" } });
+    }
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
+    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.admin", message: "Administrative credential configured." });
     return recoveryCodes;
-  });
-  await writeAuditLog({ eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.admin", message: "Administrative credential configured." });
+  }, { isolationLevel: "Serializable" });
   return recoveryCodes;
 }
 
@@ -78,27 +105,28 @@ export async function startSecurityElevation(input: {
 }): Promise<{ requestKey: string; manualUntilRevoked: boolean; expiresAt: Date }> {
   const now = input.now ?? new Date();
   const admin = await requireAdminSession(input.actor, input.sessionId, now);
+  await consumeAdminElevationStartAttempt(input.actor.id, now);
   assertScope(input.scope);
   const duration = resolveElevationDuration(input.duration, now);
   if (!admin.emailVerifiedAt) throw new AdministrationMutationError();
   const credential = await prisma.administrativeCredential.findUnique({ where: { userId: input.actor.id }, select: { passwordHash: true, status: true } });
   if (!admin.passwordHash || !await verifyPassword(admin.passwordHash, input.normalPassword) || credential?.status !== "ACTIVE" || !await verifyPassword(credential.passwordHash, input.administrativePassword)) throw new AdministrationMutationError();
-  const requestKey = await createEmailElevationCeremony({ userId: input.actor.id, sessionId: input.sessionId, scope: input.scope, kind: "ADMIN_EMAIL_VERIFICATION", recipientEmail: admin.email, displayName: admin.displayName, locale: input.locale, now, expiresAt: duration.expiresAt, manualUntilRevoked: duration.manualUntilRevoked });
-  await writeAuditLog({ eventType: "ADMIN_ELEVATION_STARTED", result: "INFO", actorUserId: input.actor.id, resource: "identity.elevation", message: "Administrative elevation started.", metadata: { requestRef: hashAuditIdentifier(requestKey), scope: input.scope } });
+  const requestKey = await createEmailElevationCeremony({ userId: input.actor.id, sessionId: input.sessionId, scope: input.scope, kind: "ADMIN_EMAIL_VERIFICATION", recipientEmail: admin.email, displayName: admin.displayName, locale: input.locale, now, expiresAt: duration.expiresAt, manualUntilRevoked: duration.manualUntilRevoked, audit: { eventType: "ADMIN_ELEVATION_STARTED", result: "INFO", actorUserId: input.actor.id, resource: "identity.elevation", message: "Administrative elevation started.", metadata: { scope: input.scope } } });
   return { requestKey, manualUntilRevoked: duration.manualUntilRevoked, expiresAt: duration.expiresAt };
 }
 
 export async function verifySecurityElevation(input: { actor: { id: string; role: string }; sessionId: string; requestKey: string; code: string; now?: Date }): Promise<void> {
   const now = input.now ?? new Date();
   await requireAdminSession(input.actor, input.sessionId, now);
+  await consumeAdministrativeProofAttempts(input.actor.id, input.requestKey, now);
   await prisma.$transaction(async (transaction) => {
     const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, undefined, now);
     if (!isAllowedScope(ceremony.scope)) throw new AdministrationMutationError();
-    if (!safeEqual(hashSecurityCode(input.code), ceremony.challengeHash)) throw new AdministrationMutationError();
-    const updated = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: now } }, data: { status: "ACTIVE", activatedAt: now } });
+    if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
+    const updated = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: now }, createdAt: { gt: getElevationCeremonyOpenedAfter(now) } }, data: { status: "ACTIVE", activatedAt: now } });
     if (updated.count !== 1) throw new AdministrationMutationError();
+    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_ACTIVATED", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.elevation", message: "Administrative elevation activated.", metadata: { requestRef: hashAuditIdentifier(input.requestKey) } });
   });
-  await writeAuditLog({ eventType: "ADMIN_ELEVATION_ACTIVATED", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.elevation", message: "Administrative elevation activated.", metadata: { requestRef: hashAuditIdentifier(input.requestKey) } });
 }
 
 export async function listActiveSecurityElevations(actor: { id: string; role: string }, sessionId: string, now = new Date()) {
@@ -128,8 +156,10 @@ export async function requireSecurityElevation(userId: string, sessionId: string
 export async function revokeSecurityElevation(actor: { id: string; role: string }, sessionId: string, requestKey?: string, now = new Date()): Promise<void> {
   await requireAdminSession(actor, sessionId, now);
   if (requestKey && !isRequestKey(requestKey)) throw new AdministrationMutationError();
-  await prisma.securityElevation.updateMany({ where: { userId: actor.id, sessionId, status: "ACTIVE", ...(requestKey ? { requestKey } : {}) }, data: { status: "REVOKED", revokedAt: now } });
-  await writeAuditLog({ eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: requestKey ? hashAuditIdentifier(requestKey) : null } });
+  await prisma.$transaction(async (transaction) => {
+    await transaction.securityElevation.updateMany({ where: { userId: actor.id, sessionId, status: "ACTIVE", ...(requestKey ? { requestKey } : {}) }, data: { status: "REVOKED", revokedAt: now } });
+    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: requestKey ? hashAuditIdentifier(requestKey) : null } });
+  });
 }
 
 export async function expireSecurityElevations(now = new Date()): Promise<number> {
@@ -140,11 +170,12 @@ export async function expireSecurityElevations(now = new Date()): Promise<number
 export async function changeAdministrativePassword(actor: { id: string; role: string }, sessionId: string, newPassword: string, now = new Date()): Promise<void> {
   await requireSecurityElevation(actor.id, sessionId, "ADMIN_CREDENTIAL_CHANGE", now);
   assertAdminPassword(newPassword);
-  await prisma.$transaction([
-    prisma.administrativeCredential.update({ where: { userId: actor.id }, data: { passwordHash: await hashPassword(newPassword), status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null } }),
-    prisma.securityElevation.updateMany({ where: { userId: actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } })
-  ]);
-  await writeAuditLog({ eventType: "ADMIN_CREDENTIAL_CHANGED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.admin", message: "Administrative credential changed." });
+  const passwordHash = await hashPassword(newPassword);
+  await prisma.$transaction(async (transaction) => {
+    await transaction.administrativeCredential.update({ where: { userId: actor.id }, data: { passwordHash, status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null } });
+    await transaction.securityElevation.updateMany({ where: { userId: actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
+    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_CHANGED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.admin", message: "Administrative credential changed." });
+  });
 }
 
 export async function regenerateAdministrativeRecoveryCodes(actor: { id: string; role: string }, sessionId: string, now = new Date()): Promise<string[]> {
@@ -153,8 +184,8 @@ export async function regenerateAdministrativeRecoveryCodes(actor: { id: string;
   await prisma.$transaction(async (transaction) => {
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: actor.id, codeHash: hashRecoveryCode(value) })) });
+    await writeAuditLogInTransaction(transaction, { eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.admin", message: "Administrative recovery codes regenerated." });
   });
-  await writeAuditLog({ eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.admin", message: "Administrative recovery codes regenerated." });
   return recoveryCodes;
 }
 
@@ -181,29 +212,65 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
     await transaction.securityElevation.updateMany({ where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
+    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.admin", message: "Administrative credential recovered." });
     return recoveryCodes;
   });
-  await writeAuditLog({ eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS", actorUserId: input.actor.id, resource: "identity.admin", message: "Administrative credential recovered." });
   return recoveryCodes;
 }
 
-async function createEmailElevationCeremony(input: { userId: string; sessionId: string; scope: string; kind: "ADMIN_EMAIL_VERIFICATION"; recipientEmail: string; displayName: string | null; locale: EmailLocale; now: Date; expiresAt?: Date; manualUntilRevoked?: boolean }): Promise<string> {
+async function createEmailElevationCeremony(input: { userId: string; sessionId: string; scope: string; kind: "ADMIN_EMAIL_VERIFICATION"; recipientEmail: string; displayName: string | null; locale: EmailLocale; now: Date; expiresAt?: Date; manualUntilRevoked?: boolean; audit?: AuditLogInput }): Promise<string> {
+  const sendAttempt = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `admin-email-ceremony:${input.userId}`, input.now, 10));
+  if (!sendAttempt.allowed) throw new AdministrationMutationError();
   const requestKey = randomBytes(24).toString("base64url");
   const code = generateNumericCode();
   const expiresAt = input.expiresAt ?? new Date(input.now.getTime() + ELEVATION_CEREMONY_TTL_MS);
   await prisma.$transaction(async (transaction) => {
     await transaction.securityElevation.updateMany({ where: { userId: input.userId, sessionId: input.sessionId, status: "PENDING" }, data: { status: "REVOKED", revokedAt: input.now } });
-    await transaction.securityElevation.create({ data: { requestKey, userId: input.userId, sessionId: input.sessionId, protocolVersion: ELEVATION_PROTOCOL_VERSION, scope: input.scope, challengeHash: hashSecurityCode(code), status: "PENDING", manualUntilRevoked: input.manualUntilRevoked ?? false, expiresAt } });
+    await transaction.securityElevation.create({ data: { requestKey, userId: input.userId, sessionId: input.sessionId, protocolVersion: ELEVATION_PROTOCOL_VERSION, scope: input.scope, challengeHash: hashSecurityCode(code), status: "PENDING", manualUntilRevoked: input.manualUntilRevoked ?? false, expiresAt, createdAt: input.now } });
     await enqueueEmailMessageForClient(transaction, { idempotencyKey: `admin-elevation:${requestKey}`, kind: input.kind, recipientEmail: input.recipientEmail, locale: input.locale, payload: { publicValues: { displayName: input.displayName ?? "" }, protectedValues: { code } } });
+    if (input.audit) await writeAuditLogInTransaction(transaction, { ...input.audit, metadata: { ...input.audit.metadata, requestRef: hashAuditIdentifier(requestKey) } });
   });
   return requestKey;
 }
 
 async function getPendingCeremony(transaction: Prisma.TransactionClient, requestKey: string, userId: string, sessionId: string, scope: string | undefined, now: Date) {
   if (!isRequestKey(requestKey)) throw new AdministrationMutationError();
-  const ceremony = await transaction.securityElevation.findUnique({ where: { requestKey }, select: { id: true, challengeHash: true, scope: true, status: true, expiresAt: true, userId: true, sessionId: true } });
-  if (!ceremony || ceremony.status !== "PENDING" || ceremony.userId !== userId || ceremony.sessionId !== sessionId || (scope && ceremony.scope !== scope) || ceremony.expiresAt <= now) throw new AdministrationMutationError();
+  const ceremony = await transaction.securityElevation.findUnique({ where: { requestKey }, select: { id: true, challengeHash: true, scope: true, status: true, expiresAt: true, createdAt: true, userId: true, sessionId: true } });
+  if (!ceremony || ceremony.status !== "PENDING" || ceremony.userId !== userId || ceremony.sessionId !== sessionId || (scope && ceremony.scope !== scope) || !isElevationCeremonyOpen(ceremony, now)) throw new AdministrationMutationError();
   return ceremony;
+}
+
+// expiresAt is the lifetime of the elevation once activated (up to 24h, or forever for MANUAL);
+// the emailed code itself is only accepted for ELEVATION_CEREMONY_TTL_MS after it was sent.
+export function isElevationCeremonyOpen(ceremony: { createdAt: Date; expiresAt: Date }, now: Date): boolean {
+  return ceremony.expiresAt > now && ceremony.createdAt > getElevationCeremonyOpenedAfter(now) && ceremony.createdAt <= now;
+}
+
+function getElevationCeremonyOpenedAfter(now: Date): Date {
+  return new Date(now.getTime() - ELEVATION_CEREMONY_TTL_MS);
+}
+
+async function consumeAdministrativeProofAttempts(userId: string, requestKey: string, now: Date): Promise<void> {
+  if (!isDatabaseId(userId) || !isRequestKey(requestKey)) throw new AdministrationMutationError();
+  const result = await prisma.$transaction(async (transaction) => {
+    const account = await consumeRateLimitAttemptInTransaction(transaction, `admin-proof-user:${userId}`, now);
+    if (!account.allowed) return false;
+    const ceremony = await consumeRateLimitAttemptInTransaction(transaction, `admin-proof-ceremony:${requestKey}`, now);
+    return ceremony.allowed;
+  });
+  if (!result) throw new AdministrationMutationError();
+}
+
+async function consumeAdminCredentialSetupStartAttempt(userId: string, now: Date): Promise<void> {
+  if (!isDatabaseId(userId)) throw new AdministrationMutationError();
+  const result = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `admin-credential-setup-start:${userId}`, now));
+  if (!result.allowed) throw new AdministrationMutationError();
+}
+
+async function consumeAdminElevationStartAttempt(userId: string, now: Date): Promise<void> {
+  if (!isDatabaseId(userId)) throw new AdministrationMutationError();
+  const result = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `admin-elevation-start:${userId}`, now));
+  if (!result.allowed) throw new AdministrationMutationError();
 }
 
 async function requireAdminSession(actor: { id: string; role: string }, sessionId: string, now: Date) {
@@ -230,8 +297,3 @@ function assertScope(value: string): asserts value is ElevationScope { if (!isAl
 function isAllowedScope(value: string): value is ElevationScope { return (ELEVATION_SCOPES as readonly string[]).includes(value); }
 function isRequestKey(value: string): boolean { return /^[A-Za-z0-9_-]{32,100}$/.test(value); }
 function isDatabaseId(value: string): boolean { return /^[A-Za-z0-9_-]{8,80}$/.test(value); }
-function safeEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left, "utf8");
-  const b = Buffer.from(right, "utf8");
-  return a.length === b.length && timingSafeEqual(a, b);
-}

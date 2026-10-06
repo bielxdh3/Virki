@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createLoginAccountRateLimitIdentifierHash,
+  createLoginAttemptRateLimitIdentifierHash,
   createLoginRateLimitIdentifierHash,
-  getLoginRateLimitConfigurationState
+  getLoginRateLimitRefundState,
+  getLoginRateLimitConfigurationState,
+  isTrustedClientAddress
 } from "./rate-limit-config";
 
 const syntheticDatabaseUrl = "postgresql://example.invalid/synthetic-test";
@@ -88,4 +92,53 @@ test("an explicit non-production key overrides the synthetic fallback", () => {
     { available: true, source: "environment" }
   );
   assert.notEqual(configuredHash, fallbackHash);
+});
+
+test("login attempt limits are HMAC-scoped to both normalized email and source address", () => {
+  const env = { NODE_ENV: "test", BIELOS_RATE_LIMIT_HASH_SECRET: syntheticSecret };
+  const first = createLoginAttemptRateLimitIdentifierHash("Member@example.invalid", "203.0.113.10", env);
+
+  assert.equal(first, createLoginAttemptRateLimitIdentifierHash(" member@example.invalid ", "203.0.113.10", env));
+  assert.notEqual(first, createLoginAttemptRateLimitIdentifierHash("member@example.invalid", "203.0.113.11", env));
+  assert.notEqual(first, createLoginRateLimitIdentifierHash("member@example.invalid", env));
+  assert.match(first, /^[a-f0-9]{64}$/);
+});
+
+test("login account limit identifiers are normalized and independent of source address", () => {
+  const env = { NODE_ENV: "test", BIELOS_RATE_LIMIT_HASH_SECRET: syntheticSecret };
+  const accountHash = createLoginAccountRateLimitIdentifierHash("Member@example.invalid", env);
+
+  assert.equal(accountHash, createLoginAccountRateLimitIdentifierHash(" member@example.invalid ", env));
+  assert.notEqual(accountHash, createLoginAttemptRateLimitIdentifierHash("member@example.invalid", "203.0.113.10", env));
+  assert.notEqual(accountHash, createLoginAccountRateLimitIdentifierHash("other@example.invalid", env));
+});
+
+test("a successful login refunds only its reservation in the same source window", () => {
+  const windowStartedAt = new Date("2026-10-03T05:00:00.000Z");
+  const blockedUntil = new Date("2026-10-03T05:15:00.000Z");
+
+  assert.deepEqual(
+    getLoginRateLimitRefundState(
+      { attempts: 30, windowStartedAt, blockedUntil },
+      windowStartedAt,
+      30
+    ),
+    { attempts: 29, blockedUntil: null }
+  );
+  assert.equal(
+    getLoginRateLimitRefundState(
+      { attempts: 10, windowStartedAt, blockedUntil: null },
+      new Date("2026-10-03T05:15:00.000Z"),
+      30
+    ),
+    null
+  );
+});
+
+test("trusted client addresses reject ambiguous forwarding values", () => {
+  assert.equal(isTrustedClientAddress("203.0.113.10"), true);
+  assert.equal(isTrustedClientAddress("2001:db8::1"), true);
+  assert.equal(isTrustedClientAddress("203.0.113.10, 203.0.113.11"), false);
+  assert.equal(isTrustedClientAddress(" 203.0.113.10"), false);
+  assert.equal(isTrustedClientAddress("example.invalid"), false);
 });

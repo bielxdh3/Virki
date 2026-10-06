@@ -1,22 +1,59 @@
+import { createHash } from "node:crypto";
+
 export class ConnectionInputError extends Error {
   constructor() {
     super("Invalid project connection.");
   }
 }
 
+export function projectConnectionConfigurationRevision(connection: {
+  id: string;
+  name: string;
+  slug: string;
+  origin: string;
+  launchUrl: string | null;
+  redirectUris: readonly string[];
+}): string {
+  const configuration = [
+    connection.id,
+    connection.name,
+    connection.slug,
+    connection.origin,
+    connection.launchUrl,
+    connection.redirectUris,
+  ];
+  return createHash("sha256").update(JSON.stringify(configuration)).digest("base64url");
+}
+
 export function validateProjectConnectionInput(input: {
   name: string;
   slug: string;
   origin: string;
+  launchUrl?: string;
   redirectUris: string;
 }) {
   const name = input.name.trim();
   const slug = input.slug.trim().toLowerCase();
   const origin = requireCanonicalHttpsUrl(input.origin.trim(), true);
+  const launchUrl = validateProjectLaunchUrl(origin, input.launchUrl ?? "");
   if (!name || name.length > 80 || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(slug)) throw new ConnectionInputError();
   const redirectUris = input.redirectUris.split(/\r?\n/u).map((value) => requireCanonicalHttpsUrl(value.trim(), false));
   if (redirectUris.length < 1 || redirectUris.length > 10 || new Set(redirectUris).size !== redirectUris.length) throw new ConnectionInputError();
-  return { name, slug, origin, redirectUris };
+  return { name, slug, origin, launchUrl, redirectUris };
+}
+
+export function validateProjectLaunchUrl(origin: string, value: string): string | null {
+  const input = value.trim();
+  if (!input) return null;
+  if (input.length > 2048) throw new ConnectionInputError();
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new ConnectionInputError();
+  }
+  if (url.protocol !== "https:" || url.origin !== origin || url.username || url.password || url.search || url.hash) throw new ConnectionInputError();
+  return url.toString();
 }
 
 export function isExactRedirectUriAllowed(allowlist: readonly string[], candidate: string): boolean {

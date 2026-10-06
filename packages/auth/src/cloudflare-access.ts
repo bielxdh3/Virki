@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { isIP } from "node:net";
 
 export type CloudflareAccessJwtStatus =
   | "disabled"
@@ -9,6 +10,7 @@ export type CloudflareAccessJwtStatus =
 
 export type CloudflareAccessJwtReason =
   | "missing-cloudflare-access-config"
+  | "invalid-cloudflare-access-config"
   | "missing-cloudflare-access-jwt"
   | "invalid-cloudflare-access-jwt"
   | "expired-cloudflare-access-jwt"
@@ -29,6 +31,7 @@ type CloudflareAccessConfig = {
   required: boolean;
   audience: string;
   teamDomain: string;
+  configurationReason?: "missing-cloudflare-access-config" | "invalid-cloudflare-access-config";
 };
 
 const CF_ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
@@ -51,12 +54,12 @@ export async function validateCloudflareAccessJwt(
     };
   }
 
-  if (!config.audience || !config.teamDomain) {
+  if (config.configurationReason || !config.audience || !config.teamDomain) {
     return {
       allowed: false,
       required: true,
       status: "misconfigured",
-      reason: "missing-cloudflare-access-config"
+      reason: config.configurationReason ?? "missing-cloudflare-access-config"
     };
   }
 
@@ -74,7 +77,8 @@ export async function validateCloudflareAccessJwt(
   try {
     await jwtVerify(token, getJwks(config.teamDomain), {
       audience: config.audience,
-      issuer: config.teamDomain
+      issuer: config.teamDomain,
+      algorithms: ["RS256"]
     });
 
     return {
@@ -129,27 +133,49 @@ export function classifyCloudflareAccessJwtError(error: unknown): CloudflareAcce
 export function isCloudflareAccessJwtRequired(
   env: NodeJS.ProcessEnv = process.env
 ): boolean {
-  return env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true";
+  return env.NODE_ENV === "production" || env.CLOUDFLARE_ACCESS_JWT_REQUIRED === "true";
 }
 
 function getCloudflareAccessConfig(env: NodeJS.ProcessEnv): CloudflareAccessConfig {
+  const rawTeamDomain = env.CLOUDFLARE_TEAM_DOMAIN;
+  const teamDomain = normalizeTeamDomain(rawTeamDomain, env.NODE_ENV === "production");
   return {
     required: isCloudflareAccessJwtRequired(env),
     audience: env.CLOUDFLARE_ACCESS_AUDIENCE?.trim() ?? "",
-    teamDomain: normalizeTeamDomain(env.CLOUDFLARE_TEAM_DOMAIN)
+    teamDomain,
+    ...(rawTeamDomain?.trim() && !teamDomain
+      ? { configurationReason: "invalid-cloudflare-access-config" as const }
+      : !rawTeamDomain?.trim() ? { configurationReason: "missing-cloudflare-access-config" as const } : {})
   };
 }
 
-function normalizeTeamDomain(value: string | undefined): string {
+function normalizeTeamDomain(value: string | undefined, production: boolean): string {
   const trimmed = value?.trim();
-
   if (!trimmed) {
     return "";
   }
-
-  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-
-  return withProtocol.replace(/\/+$/, "");
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return "";
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/gu, "");
+  const ipAddress = isIP(hostname) !== 0;
+  const loopback = hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "127.0.0.1" || hostname === "::1";
+  const labels = hostname.split(".");
+  const validDnsName = hostname.length <= 253 && labels.length >= 2 && labels.every((label) =>
+    label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
+  );
+  if (
+    url.username || url.password || url.search || url.hash || (url.pathname !== "" && url.pathname !== "/") ||
+    url.hostname.endsWith(".") || !hostname ||
+    (url.protocol !== "https:" && !(url.protocol === "http:" && !production && loopback)) ||
+    (production && (ipAddress || loopback || !validDnsName || url.port !== "")) ||
+    (!production && url.protocol === "http:" && !loopback)
+  ) return "";
+  return url.origin;
 }
 
 function getJwks(teamDomain: string): ReturnType<typeof createRemoteJWKSet> {

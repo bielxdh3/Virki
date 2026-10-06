@@ -4,13 +4,14 @@ import {
   completeAdministrativeCredentialSetup,
   changeAdministrativePassword,
   regenerateAdministrativeRecoveryCodes,
+  recoverAdministrativeCredential,
   startAdministrativeCredentialSetup,
   startSecurityElevation,
   verifySecurityElevation,
   type ElevationDuration,
   type ElevationScope
 } from "@bielos/auth/administration";
-import { writeAuditLog } from "@bielos/auth";
+import { hashAuditIdentifier, writeAuditLogInTransaction } from "@bielos/auth";
 import { prisma } from "@bielos/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -48,32 +49,41 @@ export async function startElevationAction(_state: SecurityFormState, formData: 
   } catch { return { status: "error", scope }; }
 }
 
-export async function verifyElevationAction(formData: FormData): Promise<void> {
+export async function verifyElevationAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   const session = await requireAdminMutation(formData, "admin-elevation-verify");
   try {
     await verifySecurityElevation({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code") });
     revalidatePath("/admin/security");
-  } catch { redirect("/admin/security?error=elevation"); }
-  redirect("/admin/security?status=elevation");
+    return { status: "complete" };
+  } catch {
+    return { status: "error" };
+  }
 }
 
 export async function revokeElevationAction(formData: FormData): Promise<void> {
   const session = await requireAdminMutation(formData, "admin-elevation-revoke");
   const requestKey = readFormString(formData, "requestKey");
-  const elevation = await prisma.securityElevation.findFirst({ where: { requestKey, userId: session.user.id, sessionId: session.id, status: "ACTIVE" }, select: { id: true } });
-  if (!elevation) redirect("/admin/security?error=elevation");
-  await prisma.securityElevation.update({ where: { id: elevation.id }, data: { status: "REVOKED", revokedAt: new Date() } });
-  await writeAuditLog({ eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "identity.elevation", message: "Administrative elevation revoked." });
+  const revoked = await prisma.$transaction(async (transaction) => {
+    const elevation = await transaction.securityElevation.findFirst({ where: { requestKey, userId: session.user.id, sessionId: session.id, status: "ACTIVE" }, select: { id: true } });
+    if (!elevation) return false;
+    const result = await transaction.securityElevation.updateMany({ where: { id: elevation.id, status: "ACTIVE" }, data: { status: "REVOKED", revokedAt: new Date() } });
+    if (result.count !== 1) return false;
+    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
+    return true;
+  });
+  if (!revoked) redirect("/admin/security?error=elevation#admin-content");
   revalidatePath("/admin/security");
-  redirect("/admin/security?status=revoked");
+  redirect("/admin/security?status=revoked#admin-content");
 }
 
 export async function revokeOtherSessionsAction(formData: FormData): Promise<void> {
   const session = await requireAdminMutation(formData, "admin-sessions-revoke");
-  const result = await prisma.session.updateMany({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null }, data: { revokedAt: new Date() } });
-  await writeAuditLog({ eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other active admin sessions revoked.", metadata: { revokedCount: result.count } });
+  await prisma.$transaction(async (transaction) => {
+    const result = await transaction.session.updateMany({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null }, data: { revokedAt: new Date() } });
+    if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other active admin sessions revoked.", metadata: { revokedCount: result.count } });
+  });
   revalidatePath("/admin/security");
-  redirect("/admin/security?status=sessions");
+  redirect("/admin/security?status=sessions#admin-content");
 }
 
 export async function changeAdminPasswordAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
@@ -91,4 +101,20 @@ export async function regenerateAdminRecoveryCodesAction(_state: SecurityFormSta
     const recoveryCodes = await regenerateAdministrativeRecoveryCodes(session.user, session.id);
     return { status: "complete", recoveryCodes };
   } catch { return { status: "error" }; }
+}
+
+export async function recoverAdminCredentialAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  const session = await requireAdminMutation(formData, "admin-credential-recovery");
+  try {
+    const recoveryCodes = await recoverAdministrativeCredential({
+      actor: session.user,
+      normalPassword: readFormRawString(formData, "normalPassword"),
+      recoveryCode: readFormString(formData, "recoveryCode"),
+      newPassword: readFormRawString(formData, "newPassword")
+    });
+    revalidatePath("/admin/security");
+    return { status: "complete", recoveryCodes };
+  } catch {
+    return { status: "error" };
+  }
 }

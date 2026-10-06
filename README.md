@@ -32,19 +32,22 @@ Register each external project through **Hub → Conexões** with its canonical 
 
 ## Production operations
 
-Production runs only on the configured remote Windows host. Operator connection values live in the ignored `.production.operator.json` file or `BIELOS_PRODUCTION_*` environment variables. Run the SSH preflight before changing production.
+The next canonical production host is native Linux reached over SSH. The previous host is unavailable and the native Linux host has not been verified; do not deploy until its identity and existing BielOS data are confirmed. The scripts reject WSL, require a pre-provisioned host marker, and never create that marker during first contact. Operator connection values live in the ignored `.production.operator.json` file or `BIELOS_PRODUCTION_*` environment variables. Run the SSH preflight only when the native Linux host is available.
 
 | Command | Purpose |
 |---|---|
-| `npm run preflight:prod` | Verify SSH stability, production identity, and remote Docker. |
-| `npm run deploy:prod` | Back up, restore-verify, migrate, deploy, and verify the exact clean `main` revision. |
-| `npm run backup:prod` | Create and restore-verify a production backup against the current migration plan. |
+| `npm run preflight:prod` | Require eight stable SSH probes, the expected native Linux host, its pre-provisioned identity marker, private remote environment files, and Docker Compose. |
+| `npm run deploy:prod` | Require clean `main` at `origin/main` and green exact-SHA CI, then backup, restore-test migrations, enter maintenance, migrate, start, and health-check. |
+| `npm run backup:prod` | Create a backup outside source releases and validate all committed migrations against a restored copy. |
 | `npm run status:prod` | Show BielOS service status. |
 | `npm run revision:prod` | Verify running service image revisions. |
-| `npm run health:prod` | Check public, portal OIDC, ADMIN boundary, and loopback health. |
+| `npm run health:prod` | Check public and hub health, portal OIDC discovery, Hub denial without Access, and loopback bindings. |
 | `npm run logs:prod` | Return sanitized log availability only. |
+| `node scripts/production-remote.mjs start-tunnel` | Start the Cloudflare Tunnel connector after application health checks pass. |
+| `node scripts/production-remote.mjs maintenance-on` | Stop routed app, worker, and Tunnel services while preserving PostgreSQL and named data. |
+| `node scripts/production-remote.mjs maintenance-off` | Resume services only when the source and migration status are verified. |
 
-Production changes require exact-SHA CI success. Never use `prisma db push`, delete production volumes, weaken ADMIN Cloudflare Access, or touch deManage. See [docs/deployment.md](docs/deployment.md) and [docs/operations.md](docs/operations.md).
+Production secrets stay on the remote Linux host in private `.env`, `.env.oidc`, and `.env.oidc-data` files; deployment transfers the accepted Git archive and the matching images produced by exact-SHA CI, never an environment file. Compose runs those preloaded revision-tagged images without rebuilding or pulling them. The main `.env` is used for interpolation, the issuer signing and cookie keys go only to the issuer, and the OIDC data-encryption key goes only to the Hub and issuer. Each remote operation requires a clean accepted `main` revision with green exact-SHA CI. Never use `prisma db push`, remove production volumes, weaken ADMIN Cloudflare Access, or touch deManage. See [docs/deployment.md](docs/deployment.md) and [docs/operations.md](docs/operations.md).
 
 ## Validation
 
@@ -62,4 +65,4 @@ npm run test:production-revision
 npm run build
 ```
 
-CI also checks production dependencies, the Docker image boundary, Compose configuration, and the exact revision label. See [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md), and [docs/operations.md](docs/operations.md).
+CI also checks production dependencies, the Docker image boundary, Compose configuration, and exact revision labels. Successful main pushes build, smoke-test, and retain runtime and migration images for both supported Linux architectures for 14 days. See [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md), and [docs/operations.md](docs/operations.md).

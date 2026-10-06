@@ -1,22 +1,71 @@
 import { spawnSync } from "node:child_process";
-import { PRODUCTION_CONFIG, isValidProductionConfig } from "./lib/production-config.mjs";
+import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
 
 export const SSH_OPTIONS = [
-  "-o",
-  "BatchMode=yes",
-  "-o",
-  "StrictHostKeyChecking=yes",
-  "-o",
-  "ConnectTimeout=10",
-  "-o",
-  "ConnectionAttempts=1",
-  "-o",
-  "ServerAliveInterval=5",
-  "-o",
-  "ServerAliveCountMax=2",
+  "-o", "BatchMode=yes",
+  "-o", "StrictHostKeyChecking=yes",
+  "-o", "ConnectTimeout=10",
+  "-o", "ConnectionAttempts=1",
+  "-o", "ServerAliveInterval=5",
+  "-o", "ServerAliveCountMax=2",
 ];
 
 const PROBE_COUNT = 8;
+const PROBE_SCRIPT = `
+set -eu
+root=$2
+fail() { exit 1; }
+[[ "$(uname -s)" == Linux ]] || fail
+kernel=$(tr '[:upper:]' '[:lower:]' < /proc/sys/kernel/osrelease)
+[[ "$kernel" != *microsoft* && "$kernel" != *wsl* ]] || fail
+[[ -d "$root" && ! -L "$root" && "$(stat -c '%a' -- "$root")" == 700 && "$(stat -c '%u' -- "$root")" == "$(id -u)" ]] || fail
+[[ "$(readlink -f -- "$root")" == "$root" ]] || fail
+for name in .deploy-tmp releases backups; do
+  directory="$root/$name"
+  [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%a' -- "$directory")" == 700 && "$(stat -c '%u' -- "$directory")" == "$(id -u)" ]] || fail
+done
+marker="$root/.bielos-production-host"
+[[ -f "$marker" && ! -L "$marker" && "$(stat -c '%a' -- "$marker")" == 600 && "$(stat -c '%u' -- "$marker")" == "$(id -u)" && "$(wc -l < "$marker")" -eq 4 ]] || fail
+host=$(hostname -s)
+grep -Fxq 'role=production' "$marker" || fail
+grep -Fxq 'protocol=2' "$marker" || fail
+grep -Fxq "hostname=$host" "$marker" || fail
+grep -Fxq "path=$root" "$marker" || fail
+for name in .env .env.oidc .env.oidc-data; do
+  file="$root/$name"
+  [[ -f "$file" && ! -L "$file" && "$(stat -c '%a' -- "$file")" == 600 && "$(stat -c '%u' -- "$file")" == "$(id -u)" ]] || fail
+done
+printf 'BIELOS_PROBE_ID=%s\\n' "$host"
+printf 'BIELOS_PROBE_WD=%s\\n' "$root"
+printf 'BIELOS_PROBE_PLATFORM=linux-native\\n'
+printf 'BIELOS_PROBE_MARKER=valid\\n'
+`;
+
+const DOCKER_SCRIPT = `
+set -eu
+root=$2
+version=$(docker version --format '{{.Server.Version}}')
+info=$(docker info --format '{{.ServerVersion}}')
+compose=$(docker compose version --short)
+docker_os=$(docker info --format '{{.OSType}}')
+docker_arch=$(docker info --format '{{.Architecture}}')
+command -v flock >/dev/null 2>&1
+free=$(df -Pk -- "$root" | awk 'NR == 2 { printf "%.1f", $4 / 1024 / 1024 }')
+demanage=$(docker ps --format '{{.Names}}' | awk 'tolower($0) ~ /demanage/ { count++ } END { print count + 0 }')
+case "$docker_arch" in
+  x86_64|amd64) docker_arch=amd64 ;;
+  aarch64|arm64) docker_arch=arm64 ;;
+  *) exit 1 ;;
+esac
+[[ "$docker_os" == linux && -n "$version" && -n "$info" && -n "$compose" && "$free" =~ ^[0-9]+([.][0-9]+)?$ && "$demanage" =~ ^[0-9]+$ ]]
+printf 'BIELOS_DOCKER_VERSION=%s\\n' "$version"
+printf 'BIELOS_DOCKER_INFO=%s\\n' "$info"
+printf 'BIELOS_COMPOSE_VERSION=%s\\n' "$compose"
+printf 'BIELOS_PLATFORM=linux/%s\\n' "$docker_arch"
+printf 'BIELOS_FLOCK=available\\n'
+printf 'BIELOS_DISK_FREE_GB=%s\\n' "$free"
+printf 'BIELOS_DEMANAGE_COUNT=%s\\n' "$demanage"
+`;
 
 export class ProductionPreflightError extends Error {
   constructor(code, message = code) {
@@ -26,13 +75,14 @@ export class ProductionPreflightError extends Error {
   }
 }
 
-function run(command, args) {
+function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
+    input: options.input,
     shell: false,
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: options.input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
   });
 
   if (result.error) return { status: 1, stdout: "", stderr: "" };
@@ -56,59 +106,21 @@ export function parseSshConfig(output) {
   };
 }
 
-export function buildSshArgs(remoteArguments, config = PRODUCTION_CONFIG) {
+export function buildSshArgs(remoteCommand, config = readProductionConfig(), input = "") {
   if (!isValidProductionConfig(config)) throw new ProductionPreflightError("OPERATOR_CONFIG_INVALID");
-  return [...SSH_OPTIONS, config.sshAlias, ...remoteArguments];
+  return {
+    args: [...SSH_OPTIONS, config.sshAlias, remoteCommand],
+    input,
+  };
 }
 
-function encodePowerShell(script) {
-  return Buffer.from(script, "utf16le").toString("base64");
+function sshRemoteCommand(scriptName, root) {
+  return `bash -s -- ${scriptName} ${root}`;
 }
 
-function probeScript() {
-  return [
-    "$ErrorActionPreference='Stop'",
-    "$id=[Environment]::MachineName",
-    "$wd=(Get-Location).Path",
-    "$pw=(Get-Command powershell.exe -ErrorAction Stop).Source",
-    "$dk=(Get-Command docker.exe -ErrorAction Stop).Source",
-    "if(-not (Test-Path -LiteralPath 'C:\\')){throw 'filesystem unavailable'}",
-    "Write-Output ('BIELOS_PROBE_ID=' + $id)",
-    "Write-Output ('BIELOS_PROBE_WD=' + $wd)",
-    "Write-Output ('BIELOS_PROBE_POWERSHELL=' + $pw)",
-    "Write-Output ('BIELOS_PROBE_DOCKER=' + $dk)",
-  ].join(";");
-}
-
-function dockerScript() {
-  return [
-    "$ErrorActionPreference='Stop'",
-    "$version=(docker version --format '{{.Server.Version}}').Trim()",
-    "$info=(docker info --format '{{.ServerVersion}}').Trim()",
-    "$compose=(docker compose version --short).Trim()",
-    "$free=[math]::Round((Get-PSDrive -Name C).Free/1GB,1)",
-    "$names=@(docker ps --format '{{.Names}}')",
-    "$dem=@($names | Where-Object {$_ -match 'demanage'})",
-    "Write-Output ('BIELOS_DOCKER_VERSION=' + $version)",
-    "Write-Output ('BIELOS_DOCKER_INFO=' + $info)",
-    "Write-Output ('BIELOS_COMPOSE_VERSION=' + $compose)",
-    "Write-Output ('BIELOS_DISK_FREE_GB=' + $free)",
-    "Write-Output ('BIELOS_DEMANAGE_COUNT=' + $dem.Count)",
-  ].join(";");
-}
-
-function runPowerShell(script, execute = run, config = PRODUCTION_CONFIG) {
-  return execute(
-    "ssh",
-    buildSshArgs([
-      "powershell.exe",
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-EncodedCommand",
-      encodePowerShell(script),
-    ], config),
-  );
+function runRemoteScript(script, scriptName, execute, config) {
+  const { args, input } = buildSshArgs(sshRemoteCommand(scriptName, config.root), config, script);
+  return execute("ssh", args, { input });
 }
 
 function lineValue(output, prefix) {
@@ -117,70 +129,71 @@ function lineValue(output, prefix) {
 }
 
 function probeIsValid(result) {
-  return (
-    result.status === 0 &&
+  return result.status === 0 &&
     lineValue(result.stdout, "BIELOS_PROBE_ID=").length > 0 &&
     lineValue(result.stdout, "BIELOS_PROBE_WD=").length > 0 &&
-    lineValue(result.stdout, "BIELOS_PROBE_POWERSHELL=").length > 0 &&
-    lineValue(result.stdout, "BIELOS_PROBE_DOCKER=").length > 0
-  );
+    lineValue(result.stdout, "BIELOS_PROBE_PLATFORM=") === "linux-native" &&
+    lineValue(result.stdout, "BIELOS_PROBE_MARKER=") === "valid";
 }
 
-export async function runProductionPreflight({ execute = run, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), config: operatorConfig = PRODUCTION_CONFIG } = {}) {
+export async function runProductionPreflight({
+  execute = run,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  config: operatorConfig = readProductionConfig(),
+} = {}) {
   if (!isValidProductionConfig(operatorConfig)) {
     return { status: 1, lines: ["Private production operator configuration is missing or invalid."] };
   }
-  const config = execute("ssh", ["-G", operatorConfig.sshAlias]);
-  if (config.status !== 0) {
+  const resolvedConfig = execute("ssh", ["-G", operatorConfig.sshAlias]);
+  if (resolvedConfig.status !== 0) {
     return { status: 1, lines: ["SSH configuration could not be resolved."] };
   }
 
-  const resolved = parseSshConfig(config.stdout);
-  if (resolved.hostname.toLowerCase() !== operatorConfig.host.toLowerCase() || resolved.port !== String(operatorConfig.port) || !resolved.user) {
+  const resolved = parseSshConfig(resolvedConfig.stdout);
+  if (
+    resolved.hostname.toLowerCase() !== operatorConfig.host.toLowerCase() ||
+    resolved.port !== String(operatorConfig.port) ||
+    !resolved.user
+  ) {
     return { status: 1, lines: ["SSH target does not match the canonical BielOS production server."] };
   }
 
   let identity = "";
   const lines = [];
   for (let attempt = 1; attempt <= PROBE_COUNT; attempt += 1) {
-    const result = execute(
-      "ssh",
-      buildSshArgs([
-        "powershell.exe",
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-EncodedCommand",
-        encodePowerShell(probeScript()),
-      ], operatorConfig),
-    );
+    const result = runRemoteScript(PROBE_SCRIPT, "probe", execute, operatorConfig);
     if (!probeIsValid(result)) {
-      return { status: 1, lines: [`SSH preflight failed on probe ${attempt}.`] };
+      return { status: 1, lines: [`SSH preflight failed on probe ${attempt}; native Linux identity or production marker was not verified.`] };
     }
 
-    const observed = lineValue(result.stdout, "BIELOS_PROBE_ID=");
+    const observed = `${lineValue(result.stdout, "BIELOS_PROBE_ID=")}\n${lineValue(result.stdout, "BIELOS_PROBE_WD=")}`;
     if (identity && identity !== observed) {
-      return { status: 1, lines: ["SSH preflight observed inconsistent server identity."] };
+      return { status: 1, lines: ["SSH preflight observed inconsistent native Linux server identity."] };
     }
     identity = observed;
-    lines.push(`SSH probe ${attempt}/${PROBE_COUNT}: ok`);
+    lines.push(`SSH probe ${attempt}/${PROBE_COUNT}: native Linux identity and pre-provisioned marker verified`);
     if (attempt < PROBE_COUNT) await sleep(1000);
   }
 
-  const docker = runPowerShell(dockerScript(), execute, operatorConfig);
+  const docker = runRemoteScript(DOCKER_SCRIPT, "docker", execute, operatorConfig);
   if (
     docker.status !== 0 ||
     !lineValue(docker.stdout, "BIELOS_DOCKER_VERSION=") ||
     !lineValue(docker.stdout, "BIELOS_DOCKER_INFO=") ||
-    !lineValue(docker.stdout, "BIELOS_COMPOSE_VERSION=")
+    !lineValue(docker.stdout, "BIELOS_COMPOSE_VERSION=") ||
+    !/^linux\/(?:amd64|arm64)$/u.test(lineValue(docker.stdout, "BIELOS_PLATFORM=")) ||
+    lineValue(docker.stdout, "BIELOS_FLOCK=") !== "available" ||
+    !/^\d+(?:\.\d+)?$/u.test(lineValue(docker.stdout, "BIELOS_DISK_FREE_GB=")) ||
+    !/^\d+$/u.test(lineValue(docker.stdout, "BIELOS_DEMANAGE_COUNT="))
   ) {
-    return { status: 1, lines: [...lines, "Remote Docker preflight failed."] };
+    return { status: 1, lines: [...lines, "Remote Docker, Compose, locking, or disk preflight failed."] };
   }
 
-  lines.push("SSH preflight passed with a stable server identity.");
+  lines.push("SSH preflight passed with a stable native Linux identity.");
   lines.push(`Remote Docker ${lineValue(docker.stdout, "BIELOS_DOCKER_VERSION=")} / Compose ${lineValue(docker.stdout, "BIELOS_COMPOSE_VERSION=")}.`);
-  lines.push(`Remote free disk ${lineValue(docker.stdout, "BIELOS_DISK_FREE_GB=")} GB; deManage containers ${lineValue(docker.stdout, "BIELOS_DEMANAGE_COUNT=")}.`);
-  return { status: 0, lines };
+  lines.push(`Remote Docker platform ${lineValue(docker.stdout, "BIELOS_PLATFORM=")}.`);
+  lines.push(`Remote free disk ${lineValue(docker.stdout, "BIELOS_DISK_FREE_GB=")} GB; deManage container names observed ${lineValue(docker.stdout, "BIELOS_DEMANAGE_COUNT=")}.`);
+  return { status: 0, lines, platform: lineValue(docker.stdout, "BIELOS_PLATFORM=") };
 }
 
 if (process.argv[1] && process.argv[1].endsWith("production-preflight.mjs")) {

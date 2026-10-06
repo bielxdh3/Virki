@@ -13,6 +13,6 @@
     "oidc-provider": "9.12.2"
   },
   "devDependencies": {
-    "@types/oidc-provider": "^9.12.1"
+    "@types/oidc-provider": "^8.8.0"
   }
 }

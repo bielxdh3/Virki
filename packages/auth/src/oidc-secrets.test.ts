@@ -20,3 +20,26 @@ test("OIDC identifiers are irreversibly indexed with SHA-256", () => {
   assert.match(hashOidcIdentifier("client-secret"), /^[a-f0-9]{64}$/u);
   assert.notEqual(hashOidcIdentifier("client-secret"), "client-secret");
 });
+
+
+test("OIDC encrypted values remain readable during one-key rotation overlap", () => {
+  const previousKey = "34".repeat(32);
+  const currentKey = "56".repeat(32);
+  const oldSecret = encryptOidcClientSecret("legacy-secret", { BIELOS_OIDC_ADAPTER_KEY: previousKey });
+  const oldPayload = encryptOidcPayload("{\"legacy\":true}", { BIELOS_OIDC_ADAPTER_KEY: previousKey });
+  const rotatingEnv = {
+    BIELOS_OIDC_ADAPTER_KEY: currentKey,
+    BIELOS_OIDC_ADAPTER_KEY_PREVIOUS: previousKey
+  };
+
+  assert.equal(decryptOidcClientSecret(oldSecret, rotatingEnv), "legacy-secret");
+  assert.equal(decryptOidcPayload(oldPayload, rotatingEnv), "{\"legacy\":true}");
+
+  const newSecret = encryptOidcClientSecret("current-secret", rotatingEnv);
+  assert.equal(decryptOidcClientSecret(newSecret, { BIELOS_OIDC_ADAPTER_KEY: currentKey }), "current-secret");
+  assert.throws(() => decryptOidcClientSecret(oldSecret, { BIELOS_OIDC_ADAPTER_KEY: currentKey }));
+  assert.throws(() => decryptOidcPayload(oldPayload, {
+    BIELOS_OIDC_ADAPTER_KEY: currentKey,
+    BIELOS_OIDC_ADAPTER_KEY_PREVIOUS: "not-a-valid-key"
+  }));
+});

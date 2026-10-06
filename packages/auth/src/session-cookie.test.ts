@@ -5,6 +5,7 @@ import {
   getExpiredSessionCookieOptions,
   getSessionCookieOptions
 } from "./index";
+import { getDeviceCookieName, getSessionCookieName } from "./constants";
 
 const originalNodeEnv = process.env.NODE_ENV;
 
@@ -35,6 +36,19 @@ test("session cookies omit Secure only outside production", () => {
     false
   );
   assert.equal(getExpiredSessionCookieOptions().secure, false);
+});
+
+test("production authentication cookie names enforce host-only prefix requirements", () => {
+  assert.equal(getSessionCookieName({ NODE_ENV: "production" }), "__Host-bielos_session");
+  assert.equal(getDeviceCookieName({ NODE_ENV: "production" }), "__Host-bielos_device");
+  assert.equal(getSessionCookieName({ NODE_ENV: "test" }), "bielos_session");
+  assert.equal(getDeviceCookieName({ NODE_ENV: "test" }), "bielos_device");
+
+  setNodeEnv("production");
+  const options = getSessionCookieOptions(new Date("2026-07-14T13:00:00.000Z"));
+  assert.equal(options.secure, true);
+  assert.equal(options.path, "/");
+  assert.equal("domain" in options, false);
 });
 
 function restoreNodeEnv(value: string | undefined): void {

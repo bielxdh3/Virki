@@ -18,16 +18,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.20.0
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify Prisma dependency tree
+        run: |
+          node --version
+          npm --version
+          npm ls @prisma/config deepmerge-ts --all
 
       - name: Audit Prisma tooling policy
         run: node scripts/tooling-audit-policy.mjs
@@ -41,10 +47,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.20.0
           cache: npm
@@ -61,10 +67,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.20.0
           cache: npm
@@ -77,6 +83,14 @@ jobs:
 
       - name: Production control tests
         run: npm run test:production-revision
+
+      - name: Native Linux production operations tests
+        run: |
+          bash -n scripts/production-server.sh
+          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs
+
+      - name: Read-only backup inventory tests
+        run: npm run test:backup:inventory
 
       - name: Lint
         run: npm run lint
@@ -96,6 +110,9 @@ jobs:
       - name: Validate clean migration baseline or transition plan
         run: npm run test:migration
 
+      - name: Test isolated PostgreSQL role separation
+        run: npm run test:database:roles
+
       - name: Validate database backup and restore
         run: npm run test:backup:restore
 
@@ -103,9 +120,11 @@ jobs:
         run: npm run build
 
       - name: Build production Docker image
+        if: github.event_name == 'pull_request'
         run: docker build --build-arg BIELOS_BUILD_REVISION=${{ github.sha }} --tag bielos-production-ci:${{ github.sha }} -f infra/Dockerfile.prod .
 
       - name: Verify production Docker revision label
+        if: github.event_name == 'pull_request'
         run: |
           observed="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' bielos-production-ci:${{ github.sha }})"
           if [ "$observed" != "${{ github.sha }}" ]; then
@@ -114,26 +133,206 @@ jobs:
           fi
 
       - name: Assert production image dependency boundary
+        if: github.event_name == 'pull_request'
         env:
           BIELOS_RUNTIME_IMAGE: bielos-production-ci:${{ github.sha }}
         run: node scripts/production-image-assertion.mjs
 
       - name: Production runtime smoke
+        if: github.event_name == 'pull_request'
         env:
           BIELOS_RUNTIME_IMAGE: bielos-production-ci:${{ github.sha }}
         run: npm run test:production:runtime
 
       - name: Validate production Compose config
         env:
-          DATABASE_URL: postgresql://bielos_app:local-validation-only@postgres:5432/bielos
           BIELOS_RATE_LIMIT_HASH_SECRET: replace-with-test-secret
           BIELOS_BUILD_REVISION: 0123456789abcdef0123456789abcdef01234567
-          POSTGRES_PASSWORD: local-validation-only
-          NEXT_PUBLIC_HUB_URL: https://hub.example.invalid
-          NEXT_PUBLIC_PORTAL_URL: https://portal.example.invalid
+          BIELOS_PRODUCTION_IMAGE: bielos-production-ci:0123456789abcdef0123456789abcdef01234567
+          BIELOS_MIGRATOR_IMAGE: bielos-migrator-ci:0123456789abcdef0123456789abcdef01234567
+          BIELOS_HUB_URL: https://hub.example.invalid
+          BIELOS_PORTAL_URL: https://portal.example.invalid
           CLOUDFLARE_ACCESS_AUDIENCE: ci-test-audience
           CLOUDFLARE_TEAM_DOMAIN: team.example.invalid
           CLOUDFLARE_TUNNEL_TOKEN: placeholder
         run: |
           cp .env.example .env
+          touch .env.oidc .env.oidc-data
           docker compose --env-file .env -f infra/docker-compose.prod.yml -f infra/docker-compose.cloudflare.yml config --no-env-resolution --quiet
+
+  production-images:
+    name: Build tested production images (${{ matrix.arch }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [validate, authenticated-e2e]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify native build architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          case "$(uname -m)" in
+            x86_64) observed_arch=amd64 ;;
+            aarch64|arm64) observed_arch=arm64 ;;
+            *) echo "Unsupported production build architecture." >&2; exit 1 ;;
+          esac
+          test "$observed_arch" = "$EXPECTED_ARCH"
+
+      - name: Build production and migrator images
+        run: |
+          docker build --build-arg BIELOS_BUILD_REVISION=${{ github.sha }} --target production --tag bielos-production-ci:${{ github.sha }} -f infra/Dockerfile.prod .
+          docker build --build-arg BIELOS_BUILD_REVISION=${{ github.sha }} --target migrator --tag bielos-migrator-ci:${{ github.sha }} -f infra/Dockerfile.prod .
+
+      - name: Verify image revisions and runtime dependency boundary
+        env:
+          BIELOS_RUNTIME_IMAGE: bielos-production-ci:${{ github.sha }}
+        run: |
+          runtime_revision="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$BIELOS_RUNTIME_IMAGE")"
+          migrator_revision="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' "bielos-migrator-ci:${{ github.sha }}")"
+          test "$runtime_revision" = "${{ github.sha }}"
+          test "$migrator_revision" = "${{ github.sha }}"
+          node scripts/production-image-assertion.mjs
+
+      - name: Production runtime smoke
+        env:
+          BIELOS_RUNTIME_IMAGE: bielos-production-ci:${{ github.sha }}
+        run: node scripts/production-runtime-smoke.mjs
+
+      - name: Production migrator image smoke
+        env:
+          BIELOS_MIGRATOR_IMAGE: bielos-migrator-ci:${{ github.sha }}
+        run: node scripts/production-migrator-smoke.mjs
+
+      - name: Save tested production images
+        run: |
+          docker save --output "$RUNNER_TEMP/bielos-production-images.tar" "bielos-production-ci:${{ github.sha }}" "bielos-migrator-ci:${{ github.sha }}"
+          gzip -1 "$RUNNER_TEMP/bielos-production-images.tar"
+
+      - name: Upload exact-revision images
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bielos-production-images-${{ github.sha }}-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bielos-production-images.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  authenticated-e2e:
+    name: Authenticated browser E2E
+    runs-on: ubuntu-latest
+    env:
+      BIELOS_CORE_TEST_DATABASE_CONFIRM: disposable
+      BIELOS_E2E_ACCESS_DIAGNOSTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start least-privilege disposable PostgreSQL
+        shell: bash
+        run: |
+          container_name="bielos-e2e-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bootstrap_password="$(openssl rand -hex 32)"
+          runtime_password="$(openssl rand -hex 32)"
+          migrator_password="$(openssl rand -hex 32)"
+          audit_maintenance_password="$(openssl rand -hex 32)"
+          e2e_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$bootstrap_password"
+          echo "::add-mask::$runtime_password"
+          echo "::add-mask::$migrator_password"
+          echo "::add-mask::$audit_maintenance_password"
+          echo "::add-mask::$e2e_password"
+          docker run --detach --rm --name "$container_name" \
+            --publish 127.0.0.1::5432 \
+            --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m \
+            --health-cmd 'pg_isready -h 127.0.0.1 -U bielos_bootstrap -d bielos_e2e_test' \
+            --health-interval 1s --health-timeout 3s --health-retries 90 \
+            --env POSTGRES_DB=bielos_e2e_test \
+            --env POSTGRES_USER=bielos_bootstrap \
+            --env "POSTGRES_PASSWORD=$bootstrap_password" \
+            --env "BIELOS_RUNTIME_DB_PASSWORD=$runtime_password" \
+            --env "BIELOS_MIGRATOR_DB_PASSWORD=$migrator_password" \
+            --env "BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD=$audit_maintenance_password" \
+            --volume "$GITHUB_WORKSPACE/infra/postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro" \
+            --env "BIELOS_E2E_DATABASE_PASSWORD=$e2e_password" \
+            --volume "$GITHUB_WORKSPACE/scripts/e2e/20-bielos-e2e-runtime-test-role.sh:/docker-entrypoint-initdb.d/20-bielos-e2e-runtime-test-role.sh:ro" \
+            postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 >/dev/null
+          for attempt in $(seq 1 90); do
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$container_name" 2>/dev/null || true)"
+            if [ "$health" = healthy ]; then break; fi
+            if [ "$health" = unhealthy ]; then echo 'Disposable PostgreSQL initialization failed.' >&2; exit 1; fi
+            sleep 1
+          done
+          if [ "$(docker inspect --format='{{.State.Health.Status}}' "$container_name")" != healthy ]; then
+            echo 'Disposable PostgreSQL did not become healthy.' >&2
+            exit 1
+          fi
+          mapped_port="$(docker port "$container_name" 5432/tcp)"
+          case "$mapped_port" in 127.0.0.1:*) ;; *) echo 'Disposable PostgreSQL port is not loopback-bound.' >&2; exit 1 ;; esac
+          host_port="${mapped_port##*:}"
+          database_protocol=postgresql
+          runtime_role=bielos_runtime
+          migrator_role=bielos_migrator
+          e2e_test_role=bielos_runtime_test
+          audit_cleanup_role=bielos_audit_maintenance
+          audit_cleanup_url_file="$(mktemp "$RUNNER_TEMP/bielos-e2e-audit-cleanup-url.XXXXXX")"
+          chmod 600 "$audit_cleanup_url_file"
+          printf 'BIELOS_E2E_AUDIT_CLEANUP_URL_FILE=%s\n' "$audit_cleanup_url_file" >> "$GITHUB_ENV"
+          printf '%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public' "$database_protocol" "$audit_cleanup_role" "$audit_maintenance_password" "$host_port" > "$audit_cleanup_url_file"
+          printf 'BIELOS_E2E_DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$e2e_test_role" "$e2e_password" "$host_port" >> "$GITHUB_ENV"
+          printf 'DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$runtime_role" "$runtime_password" "$host_port" >> "$GITHUB_ENV"
+          printf 'MIGRATION_DATABASE_URL=%s://%s:%s@127.0.0.1:%s/bielos_e2e_test?schema=public\n' "$database_protocol" "$migrator_role" "$migrator_password" "$host_port" >> "$GITHUB_ENV"
+
+      - name: Install Chromium certificate trust tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libnss3-tools
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Guard disposable E2E database target
+        run: npx tsx scripts/e2e/global-setup.mts --validate-database
+
+      - name: Apply committed Prisma migrations to disposable PostgreSQL
+        run: npm run prisma:migrate:deploy
+
+      - name: Grant fixture-scoped audit cleanup to disposable maintenance role
+        run: |
+          container_name="bielos-e2e-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker exec "$container_name" psql -U bielos_bootstrap -d bielos_e2e_test \
+            --command='GRANT SELECT ("actorUserId") ON TABLE public."AuditLog" TO bielos_audit_maintenance'
+
+      - name: Run browser E2E
+        run: |
+          cleanup_url="$(cat "$BIELOS_E2E_AUDIT_CLEANUP_URL_FILE")"
+          trap 'unset cleanup_url; rm -f -- "$BIELOS_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
+          BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e
+
+      - name: Remove disposable PostgreSQL
+        if: always()
+        shell: bash
+        run: |
+          container_name="bielos-e2e-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container_id="$(docker ps --all --quiet --filter "name=^/${container_name}$")"
+          if [ -n "$container_id" ]; then docker rm --force "$container_id" >/dev/null; fi
+          if [ -n "${BIELOS_E2E_AUDIT_CLEANUP_URL_FILE:-}" ]; then rm -f -- "$BIELOS_E2E_AUDIT_CLEANUP_URL_FILE"; fi

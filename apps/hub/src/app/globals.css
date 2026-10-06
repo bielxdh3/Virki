@@ -4,6 +4,7 @@
   --surface: #171d1f;
   --surface-raised: #1d2528;
   --line: #394448;
+  --control-border: #607074;
   --text: #f4f7f7;
   --muted: #c2cdcf;
   --accent: #8ce2d4;
@@ -26,6 +27,8 @@ button:hover { border-color: var(--accent); }
 .button-primary { color: #061b17; border-color: var(--accent); background: var(--accent); font-weight: 700; }
 .button-secondary { display: inline-flex; align-items: center; justify-content: center; color: var(--text); background: var(--surface); text-decoration: none; }
 .button-danger { color: var(--danger); border-color: #80534e; }
+details > summary.button-danger { padding: 0.55rem 0.9rem; border: 1px solid #80534e; border-radius: 0.35rem; background: var(--surface-raised); }
+details > summary.button-danger:hover { border-color: var(--danger); }
 .admin-shell { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 100vh; }
 .admin-sidebar { display: flex; flex-direction: column; gap: 1.5rem; padding: 1.25rem; border-right: 1px solid var(--line); background: var(--surface); }
 .brand { color: var(--text); font-weight: 750; text-decoration: none; letter-spacing: 0.02em; }
@@ -48,13 +51,25 @@ button:hover { border-color: var(--accent); }
 .eyebrow { margin: 0 0 0.5rem; letter-spacing: 0.04em; text-transform: uppercase; }
 .form-stack { display: grid; gap: 0.9rem; max-width: 540px; margin: 1rem 0; }
 .form-stack label { display: grid; gap: 0.4rem; color: var(--muted); }
-.form-stack input, .form-stack select, .form-stack textarea { width: 100%; min-height: 44px; padding: 0.6rem; color: var(--text); border: 1px solid var(--line); border-radius: 0.3rem; background: #0d1113; }
+.form-stack input, .form-stack select, .form-stack textarea { width: 100%; min-height: 44px; padding: 0.6rem; color: var(--text); border: 1px solid var(--control-border); border-radius: 0.3rem; background: #0d1113; }
 .form-stack textarea { min-height: 88px; }
+.password-control { display: grid; gap: 0.4rem; }
+.password-field { display: flex; align-items: stretch; gap: 0.5rem; }
+.password-field input { flex: 1; min-width: 0; }
 .form-error { color: var(--danger); }
 .form-success { color: var(--accent); overflow-wrap: anywhere; }
 .auth-page, .public-page { display: grid; min-height: 100vh; place-items: center; padding: 1.25rem; }
 .auth-panel { width: min(100%, 420px); padding: clamp(1.2rem, 4vw, 2rem); border: 1px solid var(--line); border-radius: 0.5rem; background: var(--surface); }
-.subtle-link { display: inline-block; margin-top: 0.8rem; }
+.subtle-link { display: inline-flex; align-items: center; min-height: 44px; margin-top: 0.8rem; }
+.auth-link-list { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-top: 0.8rem; }
+.auth-link-list .subtle-link { margin-top: 0; }
+.conflict-summary { max-width: 540px; padding: 0.75rem; border: 1px solid var(--line); border-radius: 0.3rem; }
+.conflict-summary h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+.conflict-summary dl { display: grid; gap: 0.6rem; margin: 0 0 1rem; }
+.conflict-summary dt { color: var(--muted); font-size: 0.88rem; }
+.conflict-summary dd { margin: 0; overflow-wrap: anywhere; }
+.conflict-summary ul { margin: 0; padding-left: 1.2rem; }
+.conflict-summary li { overflow-wrap: anywhere; }
 .public-panel { width: min(100%, 620px); padding: clamp(1.5rem, 5vw, 3rem); }
 .public-panel h1 { margin: 0 0 0.75rem; font-size: clamp(2rem, 7vw, 3.5rem); }
 .project-list { display: grid; gap: 0.25rem; margin: 1.5rem 0; }

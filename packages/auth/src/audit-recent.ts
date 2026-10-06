@@ -1,4 +1,5 @@
 import { prisma } from "@bielos/database";
+import { formatAuditEmailReference } from "./audit";
 import { runAuthCommand } from "./command-output";
 
 const DEFAULT_LIMIT = 20;
@@ -34,7 +35,7 @@ async function main() {
         log.resource ?? "-",
         log.message ?? "-",
         log.actorUserId ? `user:${log.actorUserId}` : "-",
-        log.actorEmailHash ? `emailHash:${log.actorEmailHash.slice(0, 16)}` : "-"
+        log.actorEmailHash ? `emailHash:${formatAuditEmailReference(log.actorEmailHash)}` : "-"
       ].join(" | ")
     );
   }

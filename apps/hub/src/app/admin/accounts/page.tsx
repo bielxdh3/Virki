@@ -1,17 +1,19 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
 import { prisma } from "@bielos/database";
+import { requireAdminPage } from "../../../lib/admin-page";
 import { createAccountAction, setAccountStateAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
 export default async function AccountsPage({ searchParams }: { searchParams: Promise<{ status?: string; error?: string }> }) {
+  await requireAdminPage();
   const params = await searchParams;
   const [users, csrf] = await Promise.all([
     prisma.user.findMany({ where: { role: "USER" }, select: { id: true, email: true, displayName: true, isActive: true, accountStatus: true, secondFactorMethod: true, createdAt: true, _count: { select: { sessions: true, projectGrants: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 }),
-    Promise.resolve(createCsrfToken())
+    Promise.resolve(createCsrfToken({ scope: "admin-accounts" }))
   ]);
 
-  return <main className="admin-main">
+  return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Contas</h1><p>Provisione e suspenda contas USER. A suspensão encerra todas as sessões.</p></div></header>
     {params.status && <p className="form-success" role="status">Alteração concluída.</p>}
     {params.error && <p className="form-error" role="alert">A ação não foi concluída. Verifique os dados e a elevação de segurança.</p>}
