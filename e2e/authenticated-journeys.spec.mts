@@ -71,14 +71,18 @@ test("USER can sign in and sees only the granted enabled project", async ({ brow
 test("ADMIN can sign in to a protected page, navigate, and have the session revoked on logout", async ({ browser }) => {
   const context = await browser.newContext();
   const prisma = createE2ePrismaClient();
-  let hydrationMismatch = false;
+  let firstHydrationMismatchPhase: string | undefined;
+  let adminJourneyPhase = "initialization";
   try {
     await rememberDevice(context, hubUrl, fixture.admin.deviceToken);
     const page = await context.newPage();
     page.on("console", (message) => {
-      if (/hydration|server-rendered html/iu.test(message.text())) hydrationMismatch = true;
+      if (/hydration|server-rendered html/iu.test(message.text())) {
+        firstHydrationMismatchPhase ??= adminJourneyPhase;
+      }
     });
     await addCloudflareAccessHeader(page);
+    adminJourneyPhase = "initial-admin-page-and-login";
     await page.goto(`${hubUrl}/admin/accounts`);
     await expect(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
     await signIn(page, fixture.admin);
@@ -95,6 +99,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page.getByText(`E2E User → ${fixture.projectName}`, { exact: true })).toBeVisible();
     await assertAdminSkipLink(page);
 
+    adminJourneyPhase = "connection-edit-without-elevation";
     await page.getByRole("link", { name: "Conexões", exact: true }).click();
     await expect(page).toHaveURL(`${hubUrl}/admin/connections`);
     await assertAdminSkipLink(page);
@@ -118,6 +123,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
     await assertAdminSkipLink(page);
 
+    adminJourneyPhase = "administrative-credential-verification";
     const credentialSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Credencial administrativa", exact: true }) });
     const credentialForm = credentialSection.locator("form").first();
     const administrativePassword = randomBytes(32).toString("base64url");
@@ -169,6 +175,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
 
     const elevationSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Elevação temporária", exact: true }) });
     const elevationForm = elevationSection.locator("form").first();
+    adminJourneyPhase = "security-elevation";
     await elevationForm.locator('select[name="scope"]').selectOption("PROJECT_CONNECTION_MANAGE");
     await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(administrativePassword);
@@ -192,6 +199,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const activeRedirectUrisInput = activeEditDetails.locator('textarea[name="redirectUris"]');
     const saveButton = activeEditDetails.getByRole("button", { name: "Salvar configuração", exact: true });
 
+    adminJourneyPhase = "connection-invalid-origin-csrf-conflict-and-save";
     await originInput.fill("http://project.e2e.invalid");
     await activeRedirectUrisInput.fill("https://project.e2e.invalid/callback");
     expect(await originInput.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(true);
@@ -245,6 +253,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const updatedConnection = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true, origin: true } });
     expect(updatedConnection).toEqual({ name: "Draft preserved after authorization rejection", origin: "https://project.e2e.invalid" });
 
+    adminJourneyPhase = "expired-elevation-denial";
     const expiryProjectRow = page.locator("article").filter({ hasText: "Draft preserved after authorization rejection" });
     const expiryEditDetails = expiryProjectRow.locator("details").filter({ hasText: "Editar configuração" });
     await expiryEditDetails.getByText("Editar configuração", { exact: true }).click();
@@ -261,8 +270,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(expiryNameInput).toHaveValue("Draft preserved after elevation expires");
     const unchangedAfterExpiry = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true } });
     expect(unchangedAfterExpiry?.name).toBe("Draft preserved after authorization rejection");
-    expect(hydrationMismatch).toBe(false);
-
+    adminJourneyPhase = "admin-navigation-and-audit";
     await page.getByRole("link", { name: "Segurança", exact: true }).click();
     await expect(page).toHaveURL(`${hubUrl}/admin/security`);
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
@@ -272,6 +280,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page.getByRole("heading", { level: 1, name: "Auditoria", exact: true })).toBeVisible();
     await assertAdminSkipLink(page);
 
+    adminJourneyPhase = "access-boundary-and-logout-revocation";
     const accesslessContext = await browser.newContext();
     try {
       await accesslessContext.addCookies([{
@@ -302,12 +311,15 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     }]);
     await page.goto(`${hubUrl}/admin/accounts`);
     await expect(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+    adminJourneyPhase = "final-hydration-check";
+    expect(firstHydrationMismatchPhase, `Hydration mismatch first occurred during ${firstHydrationMismatchPhase ?? "no phase"}`).toBeUndefined();
+    adminJourneyPhase = "complete";
   } finally {
-    try {
-      await context.close();
-    } finally {
-      await prisma.$disconnect();
+    if (adminJourneyPhase !== "complete") {
+      console.error(`E2E ADMIN journey stopped during phase=${adminJourneyPhase}; firstHydrationMismatchPhase=${firstHydrationMismatchPhase ?? "none"}.`);
     }
+    await context.close().catch(() => undefined);
+    await prisma.$disconnect();
   }
 });
 
@@ -381,7 +393,24 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await expect(requestCode).toBeVisible();
     await requestCode.fill(requestMessage.code!);
     await hubPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
-    await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+    try {
+      await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+    } catch {
+      const verificationUrl = new URL(hubPage.url());
+      const recoveryState = await prisma.accountRecoveryRequest.findUnique({
+        where: { id: recovery.id },
+        select: { status: true, emailVerifiedAt: true }
+      });
+      const outcome = verificationUrl.searchParams.has("error")
+        ? "error"
+        : verificationUrl.searchParams.has("verified")
+          ? "verified"
+          : verificationUrl.pathname === "/login"
+            ? "login-redirect"
+            : "no-outcome-flag";
+      const alertVisible = await hubPage.getByRole("alert").isVisible().catch(() => false);
+      throw new Error(`E2E ADMIN recovery verification status is unavailable (outcome=${outcome}; state=${recoveryState?.status ?? "missing"}; emailVerified=${Boolean(recoveryState?.emailVerifiedAt)}; alertVisible=${alertVisible}).`);
+    }
 
     await targetPage.goto(`${hubUrl}/admin/security`);
     await expect(targetPage.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();

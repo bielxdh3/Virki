@@ -19,6 +19,15 @@ const platformEnvironment = {
   ]
 };
 
+const chromiumPlatformEnvironment = {
+  posix: ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"],
+  windows: [
+    "PATH", "PATHEXT", "SystemRoot", "WINDIR", "ComSpec", "TEMP", "TMP",
+    "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+    "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "SYSTEMDRIVE"
+  ]
+};
+
 const serviceEnvironment = {
   jwks: ["BIELOS_E2E_JWKS_REGISTRATION_TOKEN"],
   "public-site": ["NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_PORTAL_URL"],
@@ -62,6 +71,15 @@ export function buildServiceEnvironment(service, source = process.env, platform 
     throw new Error("JWKS E2E registration configuration is incomplete.");
   }
 
+  return result;
+}
+
+export function buildChromiumEnvironment(source = process.env, platform = process.platform, privateHome) {
+  const keys = platform === "win32" ? chromiumPlatformEnvironment.windows : chromiumPlatformEnvironment.posix;
+  const result = Object.fromEntries(keys
+    .filter((key) => typeof source[key] === "string")
+    .map((key) => [key, source[key]]));
+  if (platform === "linux" && privateHome) result.HOME = privateHome;
   return result;
 }
 

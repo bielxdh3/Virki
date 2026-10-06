@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
+import { buildChromiumEnvironment } from "./scripts/e2e/isolated-service.mjs";
 import { reuseE2eEmailOutboxKey, reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
 
 // @ts-expect-error This JavaScript safety helper has no declaration file.
@@ -142,7 +143,7 @@ export default defineConfig({
   use: {
     browserName: "chromium",
     launchOptions: {
-      env: process.platform === "linux" ? { ...process.env, HOME: chromiumHomePath } : undefined,
+      env: buildChromiumEnvironment(process.env, process.platform, chromiumHomePath),
       args: [
         "--disable-background-networking",
         "--disable-component-update",

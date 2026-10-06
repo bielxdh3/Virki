@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildServiceEnvironment, getServiceCommand, platformEnvironmentVariableNames } from "./isolated-service.mjs";
+import { buildChromiumEnvironment, buildServiceEnvironment, getServiceCommand, platformEnvironmentVariableNames } from "./isolated-service.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -248,5 +248,53 @@ test("service children receive only their E2E allowlist and required OS paths", 
   const posixEnvironment = buildServiceEnvironment("public-site", source, "linux");
   for (const key of platformEnvironmentVariableNames.posix) {
     if (source[key] !== undefined) assert.equal(posixEnvironment[key], source[key], `${key} is preserved on POSIX`);
+  }
+});
+
+test("Chromium receives only required platform variables and never BielOS secrets", () => {
+  const source = {
+    PATH: "safe-system-path",
+    PATHEXT: ".EXE;.CMD;.BAT",
+    HOME: "caller-home",
+    TMPDIR: "caller-tmpdir",
+    TEMP: "caller-temp",
+    TMP: "caller-tmp",
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    SystemRoot: "C:\\Windows",
+    WINDIR: "C:\\Windows",
+    ComSpec: "C:\\Windows\\System32\\cmd.exe",
+    USERPROFILE: "C:\\Users\\e2e",
+    HOMEDRIVE: "C:",
+    HOMEPATH: "\\Users\\e2e",
+    APPDATA: "C:\\Users\\e2e\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\e2e\\AppData\\Local",
+    ProgramFiles: "C:\\Program Files",
+    "ProgramFiles(x86)": "C:\\Program Files (x86)",
+    ProgramW6432: "C:\\Program Files",
+    SYSTEMDRIVE: "C:",
+    NODE_OPTIONS: "--require caller-controlled-preload.cjs",
+    NODE_EXTRA_CA_CERTS: "private-test-ca.pem",
+    DATABASE_URL: "postgresql://must-not-reach-browser",
+    BIELOS_CSRF_SIGNING_KEY: "must-not-reach-browser",
+    BIELOS_TOTP_ENCRYPTION_KEY: "must-not-reach-browser",
+    BIELOS_EMAIL_OUTBOX_KEY: "must-not-reach-browser",
+    BIELOS_E2E_ACCESS_SIGNING_KEY_FILE: "private-signing-key.json"
+  };
+
+  const linux = buildChromiumEnvironment(source, "linux", "/private/e2e/chromium-home");
+  assert.equal(linux.HOME, "/private/e2e/chromium-home");
+  assert.equal(linux.PATH, source.PATH);
+  assert.equal(linux.TMPDIR, source.TMPDIR);
+
+  const windows = buildChromiumEnvironment(source, "win32");
+  assert.equal(windows.PATH, source.PATH);
+  assert.equal(windows.SystemRoot, source.SystemRoot);
+  assert.equal(windows.USERPROFILE, source.USERPROFILE);
+
+  for (const environment of [linux, windows]) {
+    for (const name of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "DATABASE_URL", "BIELOS_CSRF_SIGNING_KEY", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_E2E_ACCESS_SIGNING_KEY_FILE"]) {
+      assert.equal(Object.hasOwn(environment, name), false, `${name} is excluded from Chromium`);
+    }
   }
 });
