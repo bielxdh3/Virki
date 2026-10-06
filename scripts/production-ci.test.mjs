@@ -36,12 +36,15 @@ test("release policy independently classifies exact-SHA CI and CodeQL outcomes",
     ci: { status: "PASS", runId: 12345 },
     codeql: { status: "PASS", runId: 67890 },
   });
+  assert.equal(evaluateExactShaRelease([run({ conclusion: "failure" })], [run({ databaseId: 67890 })], revision).status, "FAIL");
   assert.equal(evaluateExactShaRelease([run()], [run({ conclusion: "failure" })], revision).status, "FAIL");
   assert.equal(evaluateExactShaRelease([run()], [run({ conclusion: "skipped" })], revision).status, "SKIPPED");
   assert.equal(evaluateExactShaRelease([run()], [run({ status: "in_progress", conclusion: null })], revision).status, "PENDING");
   assert.equal(evaluateExactShaRelease([run()], [], revision).status, "BLOCKED");
   assert.equal(classifyExactShaWorkflow([run({ event: "schedule" })], revision).status, "BLOCKED");
   assert.equal(evaluateExactShaRelease([run({ headSha: "f".repeat(40) })], [run()], revision).status, "BLOCKED");
+  assert.equal(evaluateExactShaRelease([run()], [run({ headSha: "f".repeat(40) })], revision).status, "BLOCKED");
+  assert.equal(evaluateExactShaRelease([run()], [run({ event: "pull_request" })], revision).status, "BLOCKED");
 });
 
 test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed", () => {
@@ -119,10 +122,13 @@ test("authenticated E2E uses the real PostgreSQL role initializer and scoped dis
   assert.doesNotMatch(e2e, /services:\r?\n\x20+postgres:/u);
 });
 
-test("CodeQL workflow pins supported actions to immutable verified commits and keeps scan permissions narrow", () => {
+test("CodeQL analyzes without Code Scanning upload and preserves SARIF as a pinned artifact", () => {
   assert.match(codeqlWorkflow, /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/u);
   assert.match(codeqlWorkflow, /uses: github\/codeql-action\/(?:init|analyze)@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4\.38\.2/u);
   assert.doesNotMatch(codeqlWorkflow, /uses: [^\s]+@v\d/u);
-  assert.match(codeqlWorkflow, /security-events: write/u);
+  assert.match(codeqlWorkflow, /queries: security-extended/u);
+  assert.match(codeqlWorkflow, /output: codeql-results[\s\S]*?upload: never/u);
+  assert.match(codeqlWorkflow, /Store CodeQL SARIF artifact[\s\S]*?uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1[\s\S]*?path: codeql-results[\s\S]*?if-no-files-found: error/u);
+  assert.doesNotMatch(codeqlWorkflow, /security-events: write/u);
   assert.match(codeqlWorkflow, /contents: read/u);
 });

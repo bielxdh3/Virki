@@ -21,6 +21,7 @@ import {
   lockActiveRecoveryAccountInTransaction,
   lockAndExpireSiblingAccountRecoveriesInTransaction,
   revokeUserAuthenticationProofsInTransaction,
+  resolveLoginDeviceToken,
   verifySecurityCode,
   verifyTotpCode
 } from "./security";
@@ -36,6 +37,28 @@ test("TOTP secrets are encrypted and never returned from ciphertext", () => {
   assert.notEqual(encrypted, secret);
   assert.equal(decryptTotpSecret(encrypted, { NODE_ENV: "test" }), secret);
   assert.match(hashDeviceToken("opaque-device-token"), /^[a-f0-9]{64}$/);
+});
+
+test("login replaces an unknown caller-selected device token before it can be trusted", () => {
+  const attackerToken = "A".repeat(48);
+  const resolved = resolveLoginDeviceToken(attackerToken, null);
+
+  assert.equal(resolved.isTrusted, false);
+  assert.notEqual(resolved.deviceToken, attackerToken);
+  assert.match(resolved.deviceToken, /^[A-Za-z0-9_-]{32,100}$/u);
+});
+
+test("login replaces revoked or malformed device tokens and reuses only an active trusted device", () => {
+  const knownToken = "T".repeat(48);
+  const revoked = resolveLoginDeviceToken(knownToken, { status: "TRUSTED", revokedAt: new Date() });
+  const malformed = resolveLoginDeviceToken("bad", { status: "TRUSTED", revokedAt: null });
+  const trusted = resolveLoginDeviceToken(knownToken, { status: "TRUSTED", revokedAt: null });
+
+  assert.equal(revoked.isTrusted, false);
+  assert.notEqual(revoked.deviceToken, knownToken);
+  assert.equal(malformed.isTrusted, false);
+  assert.notEqual(malformed.deviceToken, "bad");
+  assert.deepEqual(trusted, { deviceToken: knownToken, isTrusted: true });
 });
 
 test("TOTP confirmation accepts the RFC vector and rejects same-window replay", () => {

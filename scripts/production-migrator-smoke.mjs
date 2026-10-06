@@ -18,6 +18,7 @@ const databaseName = "bielos_validation";
 const bootstrapPassword = randomBytes(32).toString("hex");
 const runtimePassword = randomBytes(32).toString("hex");
 const migratorPassword = randomBytes(32).toString("hex");
+const auditMaintenancePassword = randomBytes(32).toString("hex");
 const migrationUrl = `postgresql://bielos_migrator:${migratorPassword}@${databaseHost}:5432/${databaseName}?schema=public`;
 const roleSetupPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "infra", "postgres-init", "10-bielos-database-roles.sh");
 const postgresImage = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
@@ -34,7 +35,7 @@ try {
     "--network", network, "--network-alias", databaseHost,
     "--label", `org.bielos.validation=${id}`,
     "--env", "POSTGRES_USER", "--env", "POSTGRES_PASSWORD", "--env", "POSTGRES_DB",
-    "--env", "BIELOS_RUNTIME_DB_PASSWORD", "--env", "BIELOS_MIGRATOR_DB_PASSWORD",
+    "--env", "BIELOS_RUNTIME_DB_PASSWORD", "--env", "BIELOS_MIGRATOR_DB_PASSWORD", "--env", "BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD",
     "--volume", `${roleSetupPath}:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro`,
     postgresImage,
   ], {
@@ -45,6 +46,7 @@ try {
       POSTGRES_DB: databaseName,
       BIELOS_RUNTIME_DB_PASSWORD: runtimePassword,
       BIELOS_MIGRATOR_DB_PASSWORD: migratorPassword,
+      BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD: auditMaintenancePassword,
     },
   });
   databaseCreated = true;

@@ -23,6 +23,7 @@ async function verifyDatabaseRoles(kind) {
   const runtimePassword = randomBytes(32).toString("hex");
   let migratorPassword = randomBytes(32).toString("hex");
   if (migratorPassword === runtimePassword) migratorPassword = randomBytes(32).toString("hex");
+  const auditMaintenancePassword = randomBytes(32).toString("hex");
   const e2ePassword = randomBytes(32).toString("hex");
 
   const args = [
@@ -36,6 +37,7 @@ async function verifyDatabaseRoles(kind) {
     `--env=POSTGRES_PASSWORD=${bootstrapPassword}`,
     `--env=BIELOS_RUNTIME_DB_PASSWORD=${runtimePassword}`,
     `--env=BIELOS_MIGRATOR_DB_PASSWORD=${migratorPassword}`,
+    `--env=BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD=${auditMaintenancePassword}`,
     `--env=BIELOS_E2E_DATABASE_PASSWORD=${e2ePassword}`
   ];
   if (kind === "fresh") {
@@ -77,6 +79,7 @@ async function verifyDatabaseRoles(kind) {
         "exec",
         `--env=BIELOS_RUNTIME_DB_PASSWORD=${runtimePassword}`,
         `--env=BIELOS_MIGRATOR_DB_PASSWORD=${migratorPassword}`,
+        `--env=BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD=${auditMaintenancePassword}`,
         name,
         "sh", "/test/10-bielos-database-roles.sh"
       ], "reject unreviewed SECURITY DEFINER routine", { allowFailure: true });
@@ -87,6 +90,7 @@ async function verifyDatabaseRoles(kind) {
         "exec",
         `--env=BIELOS_RUNTIME_DB_PASSWORD=${runtimePassword}`,
         `--env=BIELOS_MIGRATOR_DB_PASSWORD=${migratorPassword}`,
+        `--env=BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD=${auditMaintenancePassword}`,
         name,
         "sh", "/test/10-bielos-database-roles.sh"
       ], "transition populated disposable fixture");
@@ -127,6 +131,7 @@ async function verifyDatabaseRoles(kind) {
       "exec",
       `--env=BIELOS_RUNTIME_DB_PASSWORD=${runtimePassword}`,
       `--env=BIELOS_MIGRATOR_DB_PASSWORD=${migratorPassword}`,
+      `--env=BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD=${auditMaintenancePassword}`,
       name,
       "sh", roleSetupContainerPath
     ], "repeat database role transition");
@@ -140,34 +145,38 @@ async function verifyDatabaseRoles(kind) {
     assert.equal(repeatE2eRole.status, 0, "Isolated E2E runtime role provisioning must be safe to repeat.");
     runPsql(name, "bielos_migrator", migratorPassword, "BEGIN; ALTER TABLE public.\"User\" ADD COLUMN \"__bielosRoleProbe\" TEXT; ALTER TABLE public.\"User\" DROP COLUMN \"__bielosRoleProbe\"; ROLLBACK;", "migrator can alter migrated objects");
 
-    const rolePolicy = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT count(*) = 3 AND bool_and(NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit) FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test');`, "inspect restricted database roles");
-    assert.equal(rolePolicy.trim(), "t", "Runtime, migrator, and isolated E2E roles must not have privileged attributes or inheritance.");
+    const rolePolicy = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT count(*) = 4 AND bool_and(NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit) FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test', 'bielos_audit_maintenance');`, "inspect restricted database roles");
+    assert.equal(rolePolicy.trim(), "t", "Runtime, migrator, isolated E2E, and audit-maintenance roles must not have privileged attributes or inheritance.");
 
-    const memberships = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT count(*) = 0 FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test'));`, "inspect role memberships");
-    assert.equal(memberships.trim(), "t", "Runtime, migrator, and isolated E2E roles must not have role memberships.");
+    const memberships = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT count(*) = 0 FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test', 'bielos_audit_maintenance')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_runtime_test', 'bielos_audit_maintenance'));`, "inspect role memberships");
+    assert.equal(memberships.trim(), "t", "Application roles must not have role memberships.");
 
     const publicConnect = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_database_privilege('bielos_connect_probe', current_database(), 'CONNECT') AND NOT has_table_privilege('bielos_connect_probe', 'public."User"', 'TRUNCATE') AND NOT EXISTS (SELECT 1 FROM pg_database AS db_entry CROSS JOIN LATERAL aclexplode(COALESCE(db_entry.datacl, acldefault('d', db_entry.datdba))) AS privilege WHERE db_entry.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CONNECT');`, "inspect public database connectivity");
-    assert.equal(publicConnect.trim(), "t", "Only the bootstrap, runtime, and migrator roles may connect to the application database.");
+    assert.equal(publicConnect.trim(), "t", "Only explicitly provisioned BielOS roles and the bootstrap role may connect to the application database.");
 
-    const migratorDatabaseDdl = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_migrator', current_database(), 'CONNECT') AND has_database_privilege('bielos_migrator', current_database(), 'CREATE') AND has_database_privilege('bielos_migrator', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_migrator', 'public', 'CREATE') AND NOT has_database_privilege('bielos_runtime', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT EXISTS (SELECT 1 FROM pg_database AS db_entry CROSS JOIN LATERAL aclexplode(COALESCE(db_entry.datacl, acldefault('d', db_entry.datdba))) AS privilege WHERE db_entry.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE');`, "inspect database and schema migration privileges");
-    assert.equal(migratorDatabaseDdl.trim(), "t", "The one-shot migrator needs database CREATE for the committed baseline migration; runtime roles and PUBLIC must not have it.");
+    const migratorDatabaseDdl = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_migrator', current_database(), 'CONNECT') AND has_database_privilege('bielos_migrator', current_database(), 'CREATE') AND has_database_privilege('bielos_migrator', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_migrator', 'public', 'CREATE') AND NOT has_database_privilege('bielos_runtime', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_audit_maintenance', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_audit_maintenance', current_database(), 'TEMPORARY') AND NOT EXISTS (SELECT 1 FROM pg_database AS db_entry CROSS JOIN LATERAL aclexplode(COALESCE(db_entry.datacl, acldefault('d', db_entry.datdba))) AS privilege WHERE db_entry.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE');`, "inspect database and schema migration privileges");
+    assert.equal(migratorDatabaseDdl.trim(), "t", "Only the one-shot migrator receives database/schema DDL; runtime roles and PUBLIC do not.");
 
     const sharedApplicationPassword = randomBytes(32).toString("hex");
     const passwordReuseCases = [
       { label: "runtime password reuses bootstrap", runtimePassword: bootstrapPassword, migratorPassword },
       { label: "migrator password reuses bootstrap", runtimePassword, migratorPassword: bootstrapPassword },
-      { label: "runtime and migrator passwords match", runtimePassword: sharedApplicationPassword, migratorPassword: sharedApplicationPassword }
+      { label: "runtime and migrator passwords match", runtimePassword: sharedApplicationPassword, migratorPassword: sharedApplicationPassword },
+      { label: "audit maintenance password reuses runtime", runtimePassword, migratorPassword, auditMaintenancePassword: runtimePassword },
+      { label: "audit maintenance password reuses migrator", runtimePassword, migratorPassword, auditMaintenancePassword: migratorPassword },
+      { label: "audit maintenance password reuses bootstrap", runtimePassword, migratorPassword, auditMaintenancePassword: bootstrapPassword }
     ];
-    for (const { label, runtimePassword: candidateRuntimePassword, migratorPassword: candidateMigratorPassword } of passwordReuseCases) {
+    for (const { label, runtimePassword: candidateRuntimePassword, migratorPassword: candidateMigratorPassword, auditMaintenancePassword: candidateAuditMaintenancePassword = auditMaintenancePassword } of passwordReuseCases) {
       const rejected = docker([
         "exec",
         `--env=BIELOS_RUNTIME_DB_PASSWORD=${candidateRuntimePassword}`,
         `--env=BIELOS_MIGRATOR_DB_PASSWORD=${candidateMigratorPassword}`,
+        `--env=BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD=${candidateAuditMaintenancePassword}`,
         name,
         "sh", roleSetupContainerPath
       ], `reject ${label}`, { allowFailure: true });
       assert.notEqual(rejected.status, 0, `Role provisioning must reject when ${label}.`);
-      assert.match(rejected.stderr ?? "", /bootstrap, runtime, and migrator database passwords must differ/u, `Role provisioning must reject ${label} before executing SQL.`);
+      assert.match(rejected.stderr ?? "", /bootstrap, runtime, migrator, and audit-maintenance database passwords must differ/u, `Role provisioning must reject ${label} before executing SQL.`);
     }
 
     const ownership = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public."User"'::regclass;`, "inspect application table owner");
@@ -181,7 +190,9 @@ async function verifyDatabaseRoles(kind) {
 
     const runtimePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_runtime', current_database(), 'CONNECT') AND NOT has_database_privilege('bielos_runtime', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_runtime', 'public', 'USAGE') AND NOT has_schema_privilege('bielos_runtime', 'public', 'CREATE') AND has_table_privilege('bielos_runtime', 'public."User"', 'SELECT') AND has_table_privilege('bielos_runtime', 'public."User"', 'INSERT') AND has_table_privilege('bielos_runtime', 'public."User"', 'UPDATE') AND has_table_privilege('bielos_runtime', 'public."User"', 'DELETE') AND NOT has_table_privilege('bielos_runtime', 'public."User"', 'TRUNCATE') AND NOT has_table_privilege('bielos_runtime', 'public."User"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime', 'public."User"', 'TRIGGER') AND has_type_privilege('bielos_runtime', 'public."UserRole"', 'USAGE') AND NOT has_function_privilege('bielos_runtime', 'public.digest(text,text)', 'EXECUTE');`, "inspect runtime grants");
     assert.equal(runtimePrivileges.trim(), "t", "Runtime grants must permit application DML while denying database and schema DDL.");
-    const e2ePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_runtime_test', current_database(), 'CONNECT') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_runtime_test', 'public', 'USAGE') AND NOT has_schema_privilege('bielos_runtime_test', 'public', 'CREATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'SELECT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'INSERT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'UPDATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'DELETE') AND has_type_privilege('bielos_runtime_test', 'public."UserRole"', 'USAGE');`, "inspect isolated E2E role grants");
+    const auditPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_table_privilege('bielos_runtime', 'public."AuditLog"', 'SELECT') AND has_table_privilege('bielos_runtime', 'public."AuditLog"', 'INSERT') AND NOT has_table_privilege('bielos_runtime', 'public."AuditLog"', 'UPDATE') AND NOT has_table_privilege('bielos_runtime', 'public."AuditLog"', 'DELETE') AND NOT has_table_privilege('bielos_runtime', 'public."AuditLog"', 'TRUNCATE') AND NOT has_table_privilege('bielos_audit_maintenance', 'public."AuditLog"', 'SELECT') AND has_column_privilege('bielos_audit_maintenance', 'public."AuditLog"', 'createdAt', 'SELECT') AND NOT has_column_privilege('bielos_audit_maintenance', 'public."AuditLog"', 'message', 'SELECT') AND has_table_privilege('bielos_audit_maintenance', 'public."AuditLog"', 'INSERT') AND has_table_privilege('bielos_audit_maintenance', 'public."AuditLog"', 'DELETE') AND NOT has_table_privilege('bielos_audit_maintenance', 'public."AuditLog"', 'UPDATE') AND NOT has_table_privilege('bielos_audit_maintenance', 'public."AuditLog"', 'TRUNCATE') AND NOT has_any_column_privilege('bielos_audit_maintenance', 'public."User"', 'SELECT') AND NOT has_table_privilege('bielos_audit_maintenance', 'public."User"', 'DELETE') AND has_database_privilege('bielos_audit_maintenance', current_database(), 'CONNECT') AND has_schema_privilege('bielos_audit_maintenance', 'public', 'USAGE') AND NOT has_schema_privilege('bielos_audit_maintenance', 'public', 'CREATE');`, "inspect audit-specific role grants");
+    assert.equal(auditPrivileges.trim(), "t", "Runtime may append/read audit records but cannot modify/delete them; maintenance may append/delete and read only the expiration column.");
+    const e2ePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_runtime_test', current_database(), 'CONNECT') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime_test', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_runtime_test', 'public', 'USAGE') AND NOT has_schema_privilege('bielos_runtime_test', 'public', 'CREATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'SELECT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'INSERT') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'UPDATE') AND has_table_privilege('bielos_runtime_test', 'public."User"', 'DELETE') AND has_type_privilege('bielos_runtime_test', 'public."UserRole"', 'USAGE') AND NOT has_table_privilege('bielos_runtime_test', 'public."AuditLog"', 'UPDATE') AND NOT has_table_privilege('bielos_runtime_test', 'public."AuditLog"', 'DELETE');`, "inspect isolated E2E role grants");
     assert.equal(e2ePrivileges.trim(), "t", "The isolated E2E role must support fixture DML without database or schema DDL.");
     runPsql(name, "bielos_migrator", migratorPassword, "CREATE TABLE public.__bielos_role_probe (id integer PRIMARY KEY, value text NOT NULL); ALTER TABLE public.__bielos_role_probe ADD COLUMN changed boolean NOT NULL DEFAULT false;", "create objects with migration role");
     const newObjectPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_table_privilege('bielos_runtime', 'public.__bielos_role_probe', 'TRUNCATE');`, "inspect future runtime grants");
@@ -198,6 +209,23 @@ async function verifyDatabaseRoles(kind) {
     assert.match(pgcryptoMigrationAccess, /^[a-f0-9]{64}$/mu, "The migration role must be able to use the pgcrypto digest function required by the committed migration.");
     const runtimeCrud = runPsql(name, "bielos_runtime", runtimePassword, "INSERT INTO public.__bielos_role_probe (id, value) VALUES (1, 'before'); UPDATE public.__bielos_role_probe SET value = 'after' WHERE id = 1; SELECT value FROM public.__bielos_role_probe WHERE id = 1; DELETE FROM public.__bielos_role_probe WHERE id = 1;", "application CRUD with runtime role");
     assert.match(runtimeCrud, /after/u, "The runtime role must complete application reads and writes.");
+    runPsql(name, "bielos_runtime", runtimePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "createdAt") VALUES ('runtime-audit-probe', 'probe', 'INFO', '2000-01-01T00:00:00Z');`, "append audit row with runtime role");
+    for (const [label, sql] of [
+      ["update", `UPDATE public."AuditLog" SET "message" = 'changed' WHERE "id" = 'runtime-audit-probe';`],
+      ["delete", `DELETE FROM public."AuditLog" WHERE "id" = 'runtime-audit-probe';`],
+      ["delete unrelated user", `DELETE FROM public."User" WHERE false;`]
+    ]) {
+      const deniedAuditMutation = runPsql(name, "bielos_runtime", runtimePassword, sql, `deny runtime audit ${label}`, { allowFailure: true });
+      assert.notEqual(deniedAuditMutation.status, 0, `Runtime must not ${label} audit records or use audit-maintenance authority on other tables.`);
+      assert.match(deniedAuditMutation.stderr ?? "", /permission denied/u, `Runtime ${label} must fail due to PostgreSQL privileges.`);
+    }
+    const maintenanceAuditInsert = runPsql(name, "bielos_audit_maintenance", auditMaintenancePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "metadata") VALUES ('maintenance-audit-probe', 'AUTH_AUDIT_LOG_CLEANUP', 'SUCCESS', '{}'::jsonb);`, "append maintenance audit event without reading a row");
+    assert.match(maintenanceAuditInsert, /INSERT 0 1/u, "Maintenance may append the cleanup audit event without SELECT or RETURNING privileges.");
+    const maintainedAudit = runPsql(name, "bielos_audit_maintenance", auditMaintenancePassword, `DELETE FROM public."AuditLog" WHERE "createdAt" < '2001-01-01T00:00:00Z';`, "delete expired audit probe with maintenance role");
+    assert.match(maintainedAudit, /DELETE 1/u, "Audit-maintenance may delete audit rows.");
+    const deniedMaintenanceUserDelete = runPsql(name, "bielos_audit_maintenance", auditMaintenancePassword, `DELETE FROM public."User" WHERE false;`, "deny maintenance access to User", { allowFailure: true });
+    assert.notEqual(deniedMaintenanceUserDelete.status, 0, "Audit-maintenance must not have access to unrelated application tables.");
+    assert.match(deniedMaintenanceUserDelete.stderr ?? "", /permission denied/u, "Audit-maintenance access to User must fail due to PostgreSQL privileges.");
     const e2eCrud = runPsql(name, "bielos_runtime_test", e2ePassword, "INSERT INTO public.__bielos_role_probe (id, value) VALUES (2, 'fixture'); UPDATE public.__bielos_role_probe SET value = 'fixture-updated' WHERE id = 2; SELECT value FROM public.__bielos_role_probe WHERE id = 2; DELETE FROM public.__bielos_role_probe WHERE id = 2;", "isolated E2E fixture CRUD");
     assert.match(e2eCrud, /fixture-updated/u, "The isolated E2E role must complete fixture reads and writes.");
 

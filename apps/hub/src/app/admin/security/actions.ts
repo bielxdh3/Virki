@@ -4,6 +4,7 @@ import {
   completeAdministrativeCredentialSetup,
   changeAdministrativePassword,
   regenerateAdministrativeRecoveryCodes,
+  recoverAdministrativeCredential,
   startAdministrativeCredentialSetup,
   startSecurityElevation,
   verifySecurityElevation,
@@ -97,4 +98,20 @@ export async function regenerateAdminRecoveryCodesAction(_state: SecurityFormSta
     const recoveryCodes = await regenerateAdministrativeRecoveryCodes(session.user, session.id);
     return { status: "complete", recoveryCodes };
   } catch { return { status: "error" }; }
+}
+
+export async function recoverAdminCredentialAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  const session = await requireAdminMutation(formData, "admin-credential-recovery");
+  try {
+    const recoveryCodes = await recoverAdministrativeCredential({
+      actor: session.user,
+      normalPassword: readFormRawString(formData, "normalPassword"),
+      recoveryCode: readFormString(formData, "recoveryCode"),
+      newPassword: readFormRawString(formData, "newPassword")
+    });
+    revalidatePath("/admin/security");
+    return { status: "complete", recoveryCodes };
+  } catch {
+    return { status: "error" };
+  }
 }

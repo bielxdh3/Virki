@@ -3,7 +3,7 @@
 import { useActionState, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ElevationScope } from "@bielos/auth/administration";
-import { changeAdminPasswordAction, completeCredentialSetupAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
+import { changeAdminPasswordAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
 const initialState: SecurityFormState = { status: "idle" };
 const scopes: Array<[ElevationScope, string]> = [
@@ -19,6 +19,7 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
   const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
   const [start, startAction, starting] = useActionState(startCredentialSetupAction, initialState);
   const [complete, completeAction, completing] = useActionState(completeCredentialSetupAction, initialState);
+  const [recovery, recoveryAction, recovering] = useActionState(recoverAdminCredentialAction, initialState);
   const showRecoveryCodes = Boolean(complete.recoveryCodes && !recoveryCodesAcknowledged);
   return (
     <section className="surface">
@@ -33,6 +34,18 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
         <>
           <p>Ativa · versão {activeCredential.keyVersion} · atualizada em {activeCredential.updatedAt}</p>
           <p><a href="/account/security">Gerenciar MFA, códigos de recuperação e sessões da conta</a></p>
+          <h3>Recuperar credencial administrativa</h3>
+          <p>Use sua senha normal e um código administrativo de uso único. A recuperação revoga elevações ativas e emite novos códigos.</p>
+          {recovery.recoveryCodes ? <RecoveryCodes codes={recovery.recoveryCodes} /> : (
+            <form action={recoveryAction} className="form-stack">
+              <input type="hidden" name="csrfToken" value={csrf} />
+              <label>Senha normal atual<input name="normalPassword" type="password" autoComplete="current-password" required /></label>
+              <label>Código de recuperação administrativa<input name="recoveryCode" autoComplete="one-time-code" maxLength={32} required /></label>
+              <label>Nova senha administrativa (16 caracteres ou mais)<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
+              <button type="submit" disabled={recovering}>{recovering ? "Recuperando…" : "Recuperar credencial"}</button>
+              {recovery.status === "error" && <p className="form-error" role="alert">Não foi possível recuperar a credencial. Confira a senha e o código de uso único.</p>}
+            </form>
+          )}
         </>
       ) : start.requestKey ? (
         <form action={completeAction} className="form-stack">

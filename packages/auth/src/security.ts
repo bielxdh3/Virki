@@ -103,6 +103,16 @@ export function hashDeviceToken(deviceToken: string): string {
   return createHash("sha256").update(deviceToken, "utf8").digest("hex");
 }
 
+export function resolveLoginDeviceToken(
+  candidate: string | undefined,
+  trustedDevice: { status: string; revokedAt: Date | null } | null
+): { deviceToken: string; isTrusted: boolean } {
+  if (candidate && isDeviceToken(candidate) && trustedDevice?.status === "TRUSTED" && trustedDevice.revokedAt === null) {
+    return { deviceToken: candidate, isTrusted: true };
+  }
+  return { deviceToken: generateDeviceToken(), isTrusted: false };
+}
+
 export function generateNumericCode(): string {
   return String(randomBytes(4).readUInt32BE(0) % 1_000_000).padStart(6, "0");
 }
@@ -268,8 +278,7 @@ export async function startLoginCeremony(
   forceFreshProof = false,
   expectedRole?: RequiredLoginRole
 ): Promise<LoginCeremonyStart> {
-  const token = deviceToken && /^[A-Za-z0-9_-]{32,100}$/.test(deviceToken) ? deviceToken : generateDeviceToken();
-  const deviceIdHash = hashDeviceToken(token);
+  const candidateToken = deviceToken && isDeviceToken(deviceToken) ? deviceToken : undefined;
   let stage: LoginCeremonyFailureStage = "transaction-start";
   try {
     return await prisma.$transaction(async (transaction) => {
@@ -284,8 +293,12 @@ export async function startLoginCeremony(
         throw new SecurityMutationError();
       }
       stage = "trusted-device-lookup";
-      const trusted = await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } });
-      const isTrusted = trusted?.status === "TRUSTED" && trusted.revokedAt === null;
+      const candidateHash = candidateToken ? hashDeviceToken(candidateToken) : undefined;
+      const trusted = candidateHash ? await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash: candidateHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } }) : null;
+      const resolvedDevice = resolveLoginDeviceToken(candidateToken, trusted);
+      const resolvedDeviceToken = resolvedDevice.deviceToken;
+      const deviceIdHash = hashDeviceToken(resolvedDeviceToken);
+      const isTrusted = resolvedDevice.isTrusted;
       const requiresTotp = user.secondFactorMethod === "TOTP" && user.totpFactor?.status === "ACTIVE";
       const hasRememberedGrant = Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
 
@@ -297,7 +310,7 @@ export async function startLoginCeremony(
         stage = "transaction-commit";
         return {
           kind: "SESSION",
-          deviceToken: token,
+          deviceToken: resolvedDeviceToken,
           session
         };
       }
@@ -322,7 +335,7 @@ export async function startLoginCeremony(
         });
       }
       stage = "transaction-commit";
-      return { kind: "CEREMONY", ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: token };
+      return { kind: "CEREMONY", ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
     }, { isolationLevel: "Serializable" });
   } catch {
     throw new LoginCeremonyStartError(stage);

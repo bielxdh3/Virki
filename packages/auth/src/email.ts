@@ -12,11 +12,10 @@ export type EmailMessageKind =
   | "ADMIN_EMAIL_VERIFICATION"
   | "ADMIN_CREDENTIAL_CHANGED"
   | "ELEVATION_CHANGED";
-type OutboxMessageStatus = "QUEUED" | "RETRYABLE_FAILURE";
-
 const EMAIL_OUTBOX_PAYLOAD_VERSION = 1;
 const EMAIL_OUTBOX_KEY_BYTES = 32;
 const MAX_EMAIL_ATTEMPTS = 5;
+const EMAIL_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 
 export type EmailLocale = "pt-BR" | "en";
 
@@ -127,12 +126,18 @@ function prepareEmailMessage(input: EmailMessageInput) {
   };
 }
 
-export async function claimNextEmailMessage(now = new Date()) {
-  return prisma.$transaction(async (transaction) => {
+export function getEmailProcessingLeaseExpiresAt(now: Date): Date {
+  return new Date(now.getTime() + EMAIL_PROCESSING_LEASE_MS);
+}
+
+export async function claimNextEmailMessage(now = new Date(), database: typeof prisma = prisma) {
+  return database.$transaction(async (transaction) => {
     const candidate = await transaction.emailOutboxMessage.findFirst({
       where: {
-        status: { in: ["QUEUED", "RETRYABLE_FAILURE"] },
-        availableAt: { lte: now }
+        OR: [
+          { status: { in: ["QUEUED", "RETRYABLE_FAILURE"] }, availableAt: { lte: now } },
+          { status: "PROCESSING", processingLeaseExpiresAt: { lte: now } }
+        ]
       },
       orderBy: [{ availableAt: "asc" }, { createdAt: "asc" }]
     });
@@ -141,35 +146,50 @@ export async function claimNextEmailMessage(now = new Date()) {
       return null;
     }
 
+    const interrupted = candidate.status === "PROCESSING";
+    const exhausted = candidate.attemptCount >= MAX_EMAIL_ATTEMPTS;
     const claimed = await transaction.emailOutboxMessage.updateMany({
       where: {
         id: candidate.id,
-        status: candidate.status as OutboxMessageStatus
+        status: candidate.status,
+        attemptCount: candidate.attemptCount,
+        ...(interrupted
+          ? { processingLeaseExpiresAt: { lte: now } }
+          : { availableAt: { lte: now } })
       },
-      data: {
-        status: "PROCESSING",
-        attemptCount: { increment: 1 },
-        updatedAt: now
-      }
+      data: exhausted
+        ? { status: "TERMINAL_FAILURE", terminalFailedAt: now, processingLeaseExpiresAt: null, updatedAt: now }
+        : { status: "PROCESSING", attemptCount: { increment: 1 }, processingLeaseExpiresAt: getEmailProcessingLeaseExpiresAt(now), terminalFailedAt: null, updatedAt: now }
     });
 
     if (claimed.count !== 1) {
       return null;
     }
 
-    return { ...candidate, attemptCount: candidate.attemptCount + 1 };
+    if (interrupted && candidate.attemptCount > 0) {
+      await transaction.emailDeliveryAttempt.create({
+        data: { messageId: candidate.id, attempt: candidate.attemptCount, status: "FAILED", errorCode: "worker-interrupted", attemptedAt: now }
+      });
+    }
+
+    if (exhausted) return null;
+
+    return { ...candidate, status: "PROCESSING" as const, attemptCount: candidate.attemptCount + 1, processingLeaseExpiresAt: getEmailProcessingLeaseExpiresAt(now) };
   });
 }
 
 export async function processNextEmailMessage(
   transport: EmailTransport,
-  now = new Date()
+  now = new Date(),
+  database: typeof prisma = prisma
 ): Promise<"idle" | "sent" | "retryable-failure" | "terminal-failure"> {
-  const message = await claimNextEmailMessage(now);
+  const processingStartedAtMs = Date.now();
+  const message = await claimNextEmailMessage(now, database);
   if (!message) {
     return "idle";
   }
 
+  let sent = false;
   try {
     const payload = decryptEmailPayload(message.payload, process.env);
     await transport.send(
@@ -178,36 +198,41 @@ export async function processNextEmailMessage(
         recipientEmail: message.recipientEmail
       })
     );
-    await prisma.emailOutboxMessage.update({
-      where: { id: message.id },
-      data: { status: "SENT", sentAt: now, updatedAt: now }
-    });
-    await prisma.emailDeliveryAttempt.create({
-      data: { messageId: message.id, attempt: message.attemptCount, status: "SENT", attemptedAt: now }
-    });
-    return "sent";
+    sent = true;
   } catch {
-    const terminal = message.attemptCount >= MAX_EMAIL_ATTEMPTS;
-    await prisma.emailOutboxMessage.update({
-      where: { id: message.id },
-      data: {
-        status: terminal ? "TERMINAL_FAILURE" : "RETRYABLE_FAILURE",
-        terminalFailedAt: terminal ? now : null,
-        availableAt: terminal ? now : new Date(now.getTime() + retryDelayMs(message.attemptCount)),
-        updatedAt: now
-      }
-    });
-    await prisma.emailDeliveryAttempt.create({
-      data: {
-        messageId: message.id,
-        attempt: message.attemptCount,
-        status: "FAILED",
-        errorCode: "transport-failure",
-        attemptedAt: now
-      }
-    });
-    return terminal ? "terminal-failure" : "retryable-failure";
+    sent = false;
   }
+
+  const completedAt = new Date(now.getTime() + Math.max(0, Date.now() - processingStartedAtMs));
+  const terminal = !sent && message.attemptCount >= MAX_EMAIL_ATTEMPTS;
+  return database.$transaction(async (transaction) => {
+    const finalized = await transaction.emailOutboxMessage.updateMany({
+      where: { id: message.id, status: "PROCESSING", attemptCount: message.attemptCount },
+      data: sent
+        ? { status: "SENT", sentAt: completedAt, processingLeaseExpiresAt: null, updatedAt: completedAt }
+        : {
+            status: terminal ? "TERMINAL_FAILURE" : "RETRYABLE_FAILURE",
+            terminalFailedAt: terminal ? completedAt : null,
+            availableAt: terminal ? completedAt : new Date(completedAt.getTime() + retryDelayMs(message.attemptCount)),
+            processingLeaseExpiresAt: null,
+            updatedAt: completedAt
+          }
+    });
+    if (finalized.count !== 1) return "idle";
+
+    await transaction.emailDeliveryAttempt.create({
+      data: sent
+        ? { messageId: message.id, attempt: message.attemptCount, status: "SENT", attemptedAt: completedAt }
+        : {
+            messageId: message.id,
+            attempt: message.attemptCount,
+            status: "FAILED",
+            errorCode: "transport-failure",
+            attemptedAt: completedAt
+          }
+    });
+    return sent ? "sent" : terminal ? "terminal-failure" : "retryable-failure";
+  });
 }
 
 export function createDeterministicTestTransport() {

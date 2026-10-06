@@ -209,12 +209,13 @@ test("routed services start only after app checks, and failure cleanup preserves
 
 test("restore clone and migration runner use an isolated password-protected internal network", () => {
   assert.match(serverScript, /docker network create --internal --label "bielos\.restore\.operation=\$isolation_id" "\$db_network"/u);
-  assert.match(serverScript, /local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="\$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="\$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="\$migrator_password"[\s\S]*?--env POSTGRES_PASSWORD/u);
+  assert.match(serverScript, /local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="\$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="\$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="\$migrator_password" BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD="\$audit_maintenance_password"[\s\S]*?--env POSTGRES_PASSWORD/u);
   assert.match(serverScript, /bootstrap_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
   assert.match(serverScript, /runtime_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
   assert.match(serverScript, /migrator_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
-  assert.match(serverScript, /\$bootstrap_password" != "\$runtime_password" && "\$bootstrap_password" != "\$migrator_password" && "\$runtime_password" != "\$migrator_password/u);
-  assert.match(serverScript, /--env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD/u);
+  assert.match(serverScript, /audit_maintenance_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
+  assert.match(serverScript, /\$bootstrap_password" != "\$runtime_password" && "\$bootstrap_password" != "\$migrator_password" && "\$runtime_password" != "\$migrator_password" && "\$audit_maintenance_password" != "\$bootstrap_password" && "\$audit_maintenance_password" != "\$runtime_password" && "\$audit_maintenance_password" != "\$migrator_password/u);
+  assert.match(serverScript, /--env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD --env BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD/u);
   assert.match(serverScript, /services:[\s\S]*?migrate:[\s\S]*?networks:[\s\S]*?- restore/u);
   assert.match(serverScript, /external: true[\s\S]*?name: %s/u);
   assert.match(serverScript, /compose_with_override "\$override" --profile migration run --rm --no-deps --name "\$migration_container" --label "bielos\.restore\.operation=\$isolation_id"/u);
@@ -311,6 +312,11 @@ test("production migration reconciles only exact baseline histories and verifies
   const applyEnd = serverScript.indexOf("\nassert_no_maintenance()", applyStart);
   const apply = serverScript.slice(applyStart, applyEnd);
   assert.ok(apply.indexOf("assert_backup_verified") < apply.indexOf("normalize_migration_history"));
+  assert.ok(apply.indexOf("assert_backup_verified") < apply.indexOf("compose up --detach --force-recreate postgres"));
+  assert.ok(apply.indexOf("compose up --detach --force-recreate postgres") < apply.indexOf("pg_isready"));
+  assert.ok(apply.indexOf("pg_isready") < apply.indexOf("10-bielos-database-roles.sh"));
+  assert.ok(apply.indexOf("10-bielos-database-roles.sh") < apply.indexOf("compose --profile migration run --rm --no-deps migrate"));
+  assert.doesNotMatch(apply, /compose (?:down|rm)[\s\S]*?postgres|--volumes/u);
   assert.ok(apply.indexOf("normalize_migration_history") < apply.indexOf("compose --profile migration run --rm --no-deps migrate"));
   assert.ok(apply.indexOf("compose --profile migration run --rm --no-deps migrate") < apply.indexOf("run_migration_status"));
   assert.ok(apply.indexOf("run_migration_status") < apply.indexOf("verify_migration_schema"));

@@ -6,8 +6,9 @@ set -eu
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
 : "${BIELOS_RUNTIME_DB_PASSWORD:?BIELOS_RUNTIME_DB_PASSWORD is required}"
 : "${BIELOS_MIGRATOR_DB_PASSWORD:?BIELOS_MIGRATOR_DB_PASSWORD is required}"
+: "${BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD:?BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD is required}"
 
-for secret in "$BIELOS_RUNTIME_DB_PASSWORD" "$BIELOS_MIGRATOR_DB_PASSWORD"; do
+for secret in "$BIELOS_RUNTIME_DB_PASSWORD" "$BIELOS_MIGRATOR_DB_PASSWORD" "$BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD"; do
   if [ "${#secret}" -ne 64 ]; then
     echo 'BielOS database role passwords must be 64 hexadecimal characters.' >&2
     exit 1
@@ -22,17 +23,21 @@ done
 
 if [ "$BIELOS_RUNTIME_DB_PASSWORD" = "$BIELOS_MIGRATOR_DB_PASSWORD" ] || \
   [ "$BIELOS_RUNTIME_DB_PASSWORD" = "$POSTGRES_PASSWORD" ] || \
-  [ "$BIELOS_MIGRATOR_DB_PASSWORD" = "$POSTGRES_PASSWORD" ]; then
-  echo 'BielOS bootstrap, runtime, and migrator database passwords must differ.' >&2
+  [ "$BIELOS_MIGRATOR_DB_PASSWORD" = "$POSTGRES_PASSWORD" ] || \
+  [ "$BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD" = "$POSTGRES_PASSWORD" ] || \
+  [ "$BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD" = "$BIELOS_RUNTIME_DB_PASSWORD" ] || \
+  [ "$BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD" = "$BIELOS_MIGRATOR_DB_PASSWORD" ]; then
+  echo 'BielOS bootstrap, runtime, migrator, and audit-maintenance database passwords must differ.' >&2
   exit 1
 fi
 
-export BIELOS_RUNTIME_DB_PASSWORD BIELOS_MIGRATOR_DB_PASSWORD
+export BIELOS_RUNTIME_DB_PASSWORD BIELOS_MIGRATOR_DB_PASSWORD BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD
 
 psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 <<'SQL'
 \getenv database_name POSTGRES_DB
 \getenv runtime_password BIELOS_RUNTIME_DB_PASSWORD
 \getenv migrator_password BIELOS_MIGRATOR_DB_PASSWORD
+\getenv audit_pwd BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD
 
 DO $$
 BEGIN
@@ -102,8 +107,13 @@ SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLIC
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bielos_migrator')
 \gexec
 
+SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT', 'bielos_audit_maintenance')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bielos_audit_maintenance')
+\gexec
+
 ALTER ROLE bielos_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'runtime_password';
 ALTER ROLE bielos_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'migrator_password';
+ALTER ROLE bielos_audit_maintenance LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'audit_pwd';
 
 DO $$
 DECLARE
@@ -114,20 +124,21 @@ BEGIN
     FROM pg_auth_members AS role_membership
     JOIN pg_roles AS granted_role ON granted_role.oid = role_membership.roleid
     JOIN pg_roles AS member_role ON member_role.oid = role_membership.member
-    WHERE granted_role.rolname IN ('bielos_runtime', 'bielos_migrator')
-       OR member_role.rolname IN ('bielos_runtime', 'bielos_migrator')
+    WHERE granted_role.rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_audit_maintenance')
+       OR member_role.rolname IN ('bielos_runtime', 'bielos_migrator', 'bielos_audit_maintenance')
   LOOP
     EXECUTE format('REVOKE %I FROM %I', membership.granted_role_name, membership.member_role_name);
   END LOOP;
 END
 $$;
 
-GRANT CONNECT ON DATABASE :"database_name" TO bielos_runtime, bielos_migrator;
+GRANT CONNECT ON DATABASE :"database_name" TO bielos_runtime, bielos_migrator, bielos_audit_maintenance;
 -- The committed 0_init migration starts with CREATE SCHEMA IF NOT EXISTS public.
 -- PostgreSQL requires database CREATE for that statement, even though public exists.
 GRANT CREATE ON DATABASE :"database_name" TO bielos_migrator;
 REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE :"database_name" FROM PUBLIC;
 REVOKE CREATE, TEMPORARY ON DATABASE :"database_name" FROM bielos_runtime;
+REVOKE CREATE, TEMPORARY ON DATABASE :"database_name" FROM bielos_audit_maintenance;
 GRANT TEMPORARY ON DATABASE :"database_name" TO bielos_migrator;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -135,6 +146,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 ALTER SCHEMA public OWNER TO bielos_migrator;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC, bielos_runtime;
 GRANT USAGE ON SCHEMA public TO bielos_runtime;
+GRANT USAGE ON SCHEMA public TO bielos_audit_maintenance;
 GRANT CREATE, USAGE ON SCHEMA public TO bielos_migrator;
 
 DO $$
@@ -205,6 +217,18 @@ $$;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bielos_runtime;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bielos_runtime;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM bielos_audit_maintenance;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM bielos_audit_maintenance;
+REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public FROM bielos_audit_maintenance;
+DO $$
+BEGIN
+  IF to_regclass('public."AuditLog"') IS NOT NULL THEN
+    EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public."AuditLog" FROM bielos_runtime';
+    EXECUTE 'GRANT INSERT, DELETE ON TABLE public."AuditLog" TO bielos_audit_maintenance';
+    EXECUTE 'GRANT SELECT ("createdAt") ON TABLE public."AuditLog" TO bielos_audit_maintenance';
+  END IF;
+END
+$$;
 GRANT EXECUTE ON FUNCTION public.digest(text, text) TO bielos_migrator;
 
 DO $$
@@ -267,6 +291,18 @@ ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
   REVOKE USAGE ON TYPES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bielos_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator
+  REVOKE ALL PRIVILEGES ON TABLES FROM bielos_audit_maintenance;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
+  REVOKE ALL PRIVILEGES ON TABLES FROM bielos_audit_maintenance;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator
+  REVOKE ALL PRIVILEGES ON SEQUENCES FROM bielos_audit_maintenance;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
+  REVOKE ALL PRIVILEGES ON SEQUENCES FROM bielos_audit_maintenance;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator
+  REVOKE ALL PRIVILEGES ON ROUTINES FROM bielos_audit_maintenance;
+ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
+  REVOKE ALL PRIVILEGES ON ROUTINES FROM bielos_audit_maintenance;
 ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO bielos_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public

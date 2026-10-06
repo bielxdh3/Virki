@@ -235,11 +235,13 @@ model EmailOutboxMessage {
   availableAt      DateTime            @default(now())
   sentAt           DateTime?
   terminalFailedAt DateTime?
+  processingLeaseExpiresAt DateTime?
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
   deliveryAttempts EmailDeliveryAttempt[]
 
   @@index([status, availableAt])
+  @@index([status, processingLeaseExpiresAt])
 }
 
 model EmailDeliveryAttempt {

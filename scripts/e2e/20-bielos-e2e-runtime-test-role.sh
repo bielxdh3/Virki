@@ -54,6 +54,13 @@ REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM bielos_runtime_test
 REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public FROM bielos_runtime_test;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bielos_runtime_test;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bielos_runtime_test;
+DO $$
+BEGIN
+  IF to_regclass('public."AuditLog"') IS NOT NULL THEN
+    EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public."AuditLog" FROM bielos_runtime_test';
+  END IF;
+END
+$$;
 
 DO $$
 BEGIN

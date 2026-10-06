@@ -1,11 +1,11 @@
 import { prisma } from "@bielos/database";
-import { cleanupExpiredAuditLogs, writeAuditLog } from "./audit";
+import { cleanupExpiredAuditLogs, writeAuditLogForMaintenanceRequired } from "./audit";
 import { runAuthCommand } from "./command-output";
 
 async function main() {
   const result = await cleanupExpiredAuditLogs();
 
-  await writeAuditLog({
+  await writeAuditLogForMaintenanceRequired({
     eventType: "AUTH_AUDIT_LOG_CLEANUP",
     result: "SUCCESS",
     resource: "audit-log",

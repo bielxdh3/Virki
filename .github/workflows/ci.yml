@@ -254,10 +254,12 @@ jobs:
           bootstrap_password="$(openssl rand -hex 32)"
           runtime_password="$(openssl rand -hex 32)"
           migrator_password="$(openssl rand -hex 32)"
+          audit_maintenance_password="$(openssl rand -hex 32)"
           e2e_password="$(openssl rand -hex 32)"
           echo "::add-mask::$bootstrap_password"
           echo "::add-mask::$runtime_password"
           echo "::add-mask::$migrator_password"
+          echo "::add-mask::$audit_maintenance_password"
           echo "::add-mask::$e2e_password"
           docker run --detach --rm --name "$container_name" \
             --publish 127.0.0.1::5432 \
@@ -269,6 +271,7 @@ jobs:
             --env "POSTGRES_PASSWORD=$bootstrap_password" \
             --env "BIELOS_RUNTIME_DB_PASSWORD=$runtime_password" \
             --env "BIELOS_MIGRATOR_DB_PASSWORD=$migrator_password" \
+            --env "BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD=$audit_maintenance_password" \
             --volume "$GITHUB_WORKSPACE/infra/postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro" \
             --env "BIELOS_E2E_DATABASE_PASSWORD=$e2e_password" \
             --volume "$GITHUB_WORKSPACE/scripts/e2e/20-bielos-e2e-runtime-test-role.sh:/docker-entrypoint-initdb.d/20-bielos-e2e-runtime-test-role.sh:ro" \

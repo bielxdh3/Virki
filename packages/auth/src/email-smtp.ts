@@ -4,7 +4,7 @@ import type { EmailTransport, EmailTransportMessage } from "./email";
 const DEFAULT_SMTP_PORT = 587;
 const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
 const SMTP_GREETING_TIMEOUT_MS = 10_000;
-const SMTP_SOCKET_TIMEOUT_MS = 20_000;
+const SMTP_SOCKET_TIMEOUT_MS = 120_000;
 
 type SmtpEnvironment = NodeJS.ProcessEnv;
 

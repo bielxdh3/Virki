@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatAuditEmailReference, hashAuditEmail, sanitizeAuditMetadata, writeAuditLogInTransaction, type AuditMetadata, type AuditLogInput } from "./audit";
+import { formatAuditEmailReference, hashAuditEmail, sanitizeAuditMetadata, writeAuditLogForMaintenanceRequired, writeAuditLogInTransaction, type AuditMetadata, type AuditLogInput } from "./audit";
 
 test("audit email references use keyed, versioned pseudonyms and preserve legacy display", () => {
   const firstKey = "11".repeat(32);
@@ -132,4 +132,25 @@ test("transactional audit persistence sanitizes metadata and propagates storage 
     }
   } as unknown as Parameters<typeof writeAuditLogInTransaction>[0];
   await assert.rejects(writeAuditLogInTransaction(failedTransaction, input), (error) => error === failure);
+});
+
+test("maintenance audit append is parameterized, sanitized, and does not read or return AuditLog rows", async () => {
+  let query: { sql: string; values: unknown[] } | undefined;
+  await writeAuditLogForMaintenanceRequired({
+    eventType: "AUTH_AUDIT_LOG_CLEANUP",
+    result: "SUCCESS",
+    message: "Cleanup complete.",
+    metadata: { source: "audit-log-cleanup", token: "synthetic-secret" }
+  }, async (statement) => {
+    query = statement;
+    return 1;
+  });
+
+  assert.ok(query);
+  assert.match(query.sql, /INSERT INTO "AuditLog"/u);
+  assert.doesNotMatch(query.sql, /SELECT|RETURNING/u);
+  const serializedMetadata = query.values.find((value) => typeof value === "string" && value.includes("audit-log-cleanup"));
+  assert.equal(typeof serializedMetadata, "string");
+  assert.equal(JSON.parse(String(serializedMetadata)).token, "[REDACTED]");
+  assert.ok(query.values.includes("AUTH_AUDIT_LOG_CLEANUP"));
 });

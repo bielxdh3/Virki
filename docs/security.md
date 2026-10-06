@@ -13,8 +13,10 @@
 - Passwords use Argon2id. Authentication failures are generic and rate-limited.
 - Session tokens are opaque, stored as hashes, rotated on authentication, and revocable.
 - Cookies are host-only, HttpOnly, SameSite=Lax, and Secure in production.
+- A remembered-browser grant lasts at most seven days after strong verification. It may skip a repeat email/TOTP login ceremony on that trusted browser; it never substitutes for Cloudflare Access on the ADMIN host, an active ADMIN session, or action-scoped elevation. Remembered grants are revocable and are cleared by account recovery/deactivation.
 - TOTP seeds and protected email/OIDC payloads are encrypted at rest with environment-held keys.
 - TOTP setup, confirmation, disablement, recovery-code rotation, and account recovery use single-use or replay-protected proofs. High-risk ADMIN actions require current elevation where their action policy defines it.
+- The separate ADMIN credential can be recovered only from an active ADMIN session using the normal account password and an unused one-time administrative recovery code. That flow rotates its ten replacement codes and revokes pending/active elevations. Cross-account recovery requires a different active ADMIN; the sole-ADMIN lockout case has no in-product operator bypass and is documented as a stop-and-escalate operational blocker.
 - The one-time `20260922090000_total_identity_security_rebaseline` transition invalidated active sessions and temporary elevations and revoked remembered devices while retaining credentials and MFA material. The current `20261001000000_security_polish` migration is additive: it revokes pending or verified device challenges and transforms recovery data, but does not revoke existing sessions, elevations, or remembered devices. Production migration history is reconciled only for the exact verified legacy ledger described in the deployment runbook; an unknown history fails closed.
 
 ## Authorization
@@ -24,6 +26,8 @@
 - A USER receives only explicit project-entry grants. Disabled accounts, connections, or revoked grants deny authorization.
 - Redirect URIs are exact HTTPS allowlist matches. Wildcards, credentials, fragments, and noncanonical values are rejected.
 - Authorization state is rechecked by the issuer when it completes the OIDC interaction.
+- Login and recovery throttles are keyed, persistent counters. Source-address limits can affect unrelated users sharing a NAT/proxy; trusted forwarding must be configured correctly and limits must not be weakened to hide that operational tradeoff.
+- Public recovery responses are generic but not promised constant-time. Eligible accounts perform extra transactional work and queue mail; unknown/ineligible accounts return earlier. This remains a timing side channel and generic wording alone is not proof against account enumeration.
 
 ## OIDC profile
 

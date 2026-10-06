@@ -133,7 +133,26 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       SESSION_CLEANUP_INTERVAL_SECONDS: ${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}
       AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
-    command: ["sh", "-c", "while true; do npm run sessions:cleanup --workspace @bielos/auth && npm run audit:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"]
+    command: ["sh", "-c", "while true; do npm run sessions:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"]
+
+  audit-maintenance:
+    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
+    profiles: ["maintenance"]
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${AUDIT_MAINTENANCE_DATABASE_URL:?AUDIT_MAINTENANCE_DATABASE_URL must be set in local .env}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
+    command: npm run audit:cleanup --workspace @bielos/auth
 
   email-worker:
     image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
@@ -171,6 +190,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in local .env}
       BIELOS_RUNTIME_DB_PASSWORD: ${BIELOS_RUNTIME_DB_PASSWORD:?BIELOS_RUNTIME_DB_PASSWORD must be set in local .env}
       BIELOS_MIGRATOR_DB_PASSWORD: ${BIELOS_MIGRATOR_DB_PASSWORD:?BIELOS_MIGRATOR_DB_PASSWORD must be set in local .env}
+      BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD: ${BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD:?BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD must be set in local .env}
     volumes:
       - bielos_postgres_data:/var/lib/postgresql/data
       - ./postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro

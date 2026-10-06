@@ -1,5 +1,6 @@
-import { createHash, createHmac } from "node:crypto";
-import { prisma, type Prisma } from "@bielos/database";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { Prisma, prisma } from "@bielos/database";
+import type { Prisma as PrismaTypes } from "@bielos/database";
 
 export type AuditEventType =
   | "AUTH_LOGIN_SUCCESS"
@@ -91,8 +92,19 @@ export async function writeAuditLogRequired(input: AuditLogInput): Promise<void>
   await prisma.auditLog.create({ data: createAuditLogData(input) });
 }
 
+export async function writeAuditLogForMaintenanceRequired(
+  input: AuditLogInput,
+  execute: (query: ReturnType<typeof Prisma.sql>) => Promise<number> = (query) => prisma.$executeRaw(query)
+): Promise<void> {
+  const data = createAuditLogData(input);
+  await execute(Prisma.sql`
+    INSERT INTO "AuditLog" ("id", "eventType", "actorUserId", "actorEmailHash", "result", "resource", "message", "metadata", "createdAt")
+    VALUES (${randomUUID()}, ${data.eventType}, ${data.actorUserId ?? null}, ${data.actorEmailHash ?? null}, ${data.result}, ${data.resource ?? null}, ${data.message ?? null}, ${JSON.stringify(data.metadata ?? null)}::jsonb, CURRENT_TIMESTAMP)
+  `);
+}
+
 export async function writeAuditLogInTransaction(
-  transaction: Prisma.TransactionClient,
+  transaction: PrismaTypes.TransactionClient,
   input: AuditLogInput
 ): Promise<void> {
   await transaction.auditLog.create({ data: createAuditLogData(input) });

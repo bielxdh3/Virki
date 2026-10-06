@@ -639,7 +639,7 @@ cleanup_failed_backup_verification() {
 }
 
 create_verified_backup() {
-  local stamp isolation_id backup_path partial_backup_path container db_network alias database_url override migration_container bootstrap_password runtime_password migrator_password verification_tmp backup_verified=false
+  local stamp isolation_id backup_path partial_backup_path container db_network alias database_url override migration_container bootstrap_password runtime_password migrator_password audit_maintenance_password verification_tmp backup_verified=false
   stamp="$(date -u +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
   isolation_id=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
   [[ "$isolation_id" =~ ^[a-f0-9]{24}$ ]] || fail 'Could not create a unique restore isolation identifier.'
@@ -656,9 +656,10 @@ create_verified_backup() {
   bootstrap_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
   runtime_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
   migrator_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
-  [[ "$bootstrap_password" =~ ^[a-f0-9]{64}$ && "$runtime_password" =~ ^[a-f0-9]{64}$ && "$migrator_password" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not create isolated PostgreSQL role credentials.'
-  [[ "$bootstrap_password" != "$runtime_password" && "$bootstrap_password" != "$migrator_password" && "$runtime_password" != "$migrator_password" ]] || fail 'Isolated PostgreSQL role credentials are not distinct.'
-  local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="$migrator_password"
+  audit_maintenance_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  [[ "$bootstrap_password" =~ ^[a-f0-9]{64}$ && "$runtime_password" =~ ^[a-f0-9]{64}$ && "$migrator_password" =~ ^[a-f0-9]{64}$ && "$audit_maintenance_password" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not create isolated PostgreSQL role credentials.'
+  [[ "$bootstrap_password" != "$runtime_password" && "$bootstrap_password" != "$migrator_password" && "$runtime_password" != "$migrator_password" && "$audit_maintenance_password" != "$bootstrap_password" && "$audit_maintenance_password" != "$runtime_password" && "$audit_maintenance_password" != "$migrator_password" ]] || fail 'Isolated PostgreSQL role credentials are not distinct.'
+  local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="$migrator_password" BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD="$audit_maintenance_password"
   database_url="postgresql://bielos_migrator:$migrator_password@$alias:5432/bielos_restore?schema=public"
   verification_tmp="$verification_path.tmp.$$"
   [[ ! -e "$backup_path" && ! -L "$backup_path" && ! -e "$partial_backup_path" && ! -L "$partial_backup_path" ]] || fail 'A production backup path already exists.'
@@ -682,13 +683,13 @@ create_verified_backup() {
   chmod 600 -- "$override"
   docker run --detach --name "$container" --label "bielos.restore.operation=$isolation_id" --network "$db_network" --network-alias "$alias" \
     --env POSTGRES_DB=bielos_restore --env POSTGRES_USER --env POSTGRES_PASSWORD \
-    --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD \
+    --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD --env BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD \
     --volume "$source_dir/infra/postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro" \
     --health-cmd 'pg_isready -h 127.0.0.1 -U bielos_bootstrap -d bielos_restore' --health-interval 1s --health-timeout 3s --health-retries 60 \
     postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 >/dev/null || fail 'Disposable PostgreSQL restore target could not start.'
   wait_for_clone "$container"
   docker exec --interactive --user postgres "$container" pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges -U bielos_bootstrap -d bielos_restore < "$partial_backup_path" >/dev/null
-  docker exec --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD "$container" sh /docker-entrypoint-initdb.d/10-bielos-database-roles.sh || fail 'Restored database role separation could not be applied.'
+  docker exec --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD --env BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD "$container" sh /docker-entrypoint-initdb.d/10-bielos-database-roles.sh || fail 'Restored database role separation could not be applied.'
 
   local before_identity before_recovery after_identity after_recovery
   before_identity=$(identity_snapshot "$container")
@@ -748,6 +749,9 @@ apply_production_migrations() {
   assert_backup_verified
   [[ -f "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'Production migration requires maintenance mode.'
   local before_identity before_recovery after_identity after_recovery
+  compose up --detach --force-recreate postgres >/dev/null || fail 'Production PostgreSQL could not be restarted with the verified maintenance-role configuration.'
+  compose exec -T postgres sh -lc 'for attempt in $(seq 1 60); do pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1' || fail 'Production PostgreSQL did not become ready after its protected restart.'
+  compose exec -T postgres sh -s < "$source_dir/infra/postgres-init/10-bielos-database-roles.sh" >/dev/null || fail 'Production database role transition could not be applied after backup verification.'
   before_identity=$(identity_snapshot)
   before_recovery=$(recovery_snapshot "" before_migrations)
   normalize_migration_history '' '' '' '' ''
@@ -1023,7 +1027,7 @@ case "$action" in
     printf 'Remote sanitized audit rows available: %s.\n' "$rows"
     ;;
   audit-cleanup)
-    compose exec -T hub npm run audit:cleanup --workspace @bielos/auth >/dev/null
+    compose --profile maintenance run --rm audit-maintenance >/dev/null
     printf 'Remote audit cleanup completed.\n'
     ;;
   sessions-cleanup)

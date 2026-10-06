@@ -129,7 +129,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     adminJourneyPhase = "administrative-credential-verification";
     const credentialSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Credencial administrativa", exact: true }) });
     const credentialForm = credentialSection.locator("form").first();
-    const administrativePassword = randomBytes(32).toString("base64url");
+    let administrativePassword = randomBytes(32).toString("base64url");
     await credentialForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await credentialForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
     const confirmationCodeInput = credentialForm.getByLabel("Código enviado por e-mail", { exact: true });
@@ -174,7 +174,25 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
       const recoveryCodeCount = await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id } });
       throw new Error(`E2E ADMIN recovery-code view is unavailable (credential=${credentialState?.status ?? "missing"}; ceremony=${ceremonyState?.status ?? "missing"}; storedCodeCount=${recoveryCodeCount}).`);
     }
+    const initialAdministrativeRecoveryCode = (await credentialSection.locator("ul li").first().textContent())?.trim();
+    if (!initialAdministrativeRecoveryCode) throw new Error("E2E ADMIN recovery code is unavailable for the recovery journey.");
     await credentialSection.getByRole("button", { name: "Continuar para elevação", exact: true }).click();
+
+    const recoveryForm = credentialSection.locator("form").filter({ has: credentialSection.getByLabel("Código de recuperação administrativa", { exact: true }) });
+    await expect(recoveryForm).toBeVisible();
+    const recoveredAdministrativePassword = randomBytes(32).toString("base64url");
+    await recoveryForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await recoveryForm.getByLabel("Código de recuperação administrativa", { exact: true }).fill("invalid-one-time-code");
+    await recoveryForm.getByLabel("Nova senha administrativa (16 caracteres ou mais)", { exact: true }).fill(recoveredAdministrativePassword);
+    await recoveryForm.getByRole("button", { name: "Recuperar credencial", exact: true }).click();
+    await expect(recoveryForm.getByRole("alert")).toContainText("Não foi possível recuperar a credencial");
+    await recoveryForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await recoveryForm.getByLabel("Código de recuperação administrativa", { exact: true }).fill(initialAdministrativeRecoveryCode);
+    await recoveryForm.getByLabel("Nova senha administrativa (16 caracteres ou mais)", { exact: true }).fill(recoveredAdministrativePassword);
+    await recoveryForm.getByRole("button", { name: "Recuperar credencial", exact: true }).click();
+    await expect(credentialSection.getByRole("heading", { name: /Códigos de recuperação/u })).toBeVisible();
+    await expect(credentialSection.locator("ul li")).toHaveCount(10);
+    administrativePassword = recoveredAdministrativePassword;
 
     const elevationSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Elevação temporária", exact: true }) });
     const elevationForm = elevationSection.locator("form").first();
