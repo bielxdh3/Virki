@@ -50,7 +50,13 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
           <p><a href="/account/security">Gerenciar MFA, códigos de recuperação e sessões da conta</a></p>
           <h3>Recuperar credencial administrativa</h3>
           <p>Use sua senha normal e um código administrativo de uso único. A recuperação revoga elevações ativas e emite novos códigos.</p>
-          {recovery.recoveryCodes ? <RecoveryCodes codes={recovery.recoveryCodes} /> : (
+          {recovery.recoveryCodes ? (
+            <OneTimeRecoveryCodes
+              codes={recovery.recoveryCodes}
+              destination="/admin/security?status=recovered#admin-content"
+              label="Já guardei os novos códigos"
+            />
+          ) : (
             <form action={recoveryAction} className="form-stack">
               <input type="hidden" name="csrfToken" value={csrf} />
               <label>Senha normal atual<input name="normalPassword" type="password" autoComplete="current-password" required /></label>
@@ -91,8 +97,39 @@ export function ElevationControls({ csrf, credentialReady, active }: { csrf: str
     {state.requestKey && <form action={verifyElevationAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><input type="hidden" name="requestKey" value={state.requestKey} /><p>Digite o código enviado por e-mail para ativar “{scopes.find(([scope]) => scope === state.scope)?.[1]}”.</p><label>Código<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required /></label><button type="submit">Ativar elevação</button></form>}
     <h3>Elevações ativas nesta sessão</h3>{active.length === 0 ? <p className="muted">Nenhuma elevação ativa.</p> : <div className="row-list">{active.map((item) => <article className="list-row" key={item.requestKey}><div className="row-main"><strong>{scopes.find(([scope]) => scope === item.scope)?.[1] ?? "Permissão"}</strong><span>{item.manualUntilRevoked ? "Até revogação" : `Expira ${new Date(item.expiresAt).toLocaleString("pt-BR")}`}</span></div><form action={revokeElevationAction}><input type="hidden" name="csrfToken" value={csrf} /><input type="hidden" name="requestKey" value={item.requestKey} /><button type="submit">Revogar</button></form></article>)}</div>}
     <form action={revokeOtherSessionsAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><button className="button-danger" type="submit">Revogar outras sessões deste admin</button></form>
-    {credentialReady && <><h3>Recuperação da credencial</h3><form action={passwordAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><label>Nova senha administrativa<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label><button type="submit" disabled={passwordPending}>Alterar senha administrativa</button>{passwordState.status === "error" && <p className="form-error" role="alert">A alteração requer elevação ativa para essa ação.</p>}{passwordState.status === "complete" && <p className="form-success">Senha alterada. Elevações anteriores foram revogadas.</p>}</form><form action={recoveryAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><button type="submit" disabled={recoveryPending}>Gerar novos códigos de recuperação administrativa</button>{recoveryState.status === "error" && <p className="form-error" role="alert">A ação requer elevação ativa para códigos de recuperação.</p>}{recoveryState.recoveryCodes && <RecoveryCodes codes={recoveryState.recoveryCodes} />}</form></>}
+    {credentialReady && <><h3>Recuperação da credencial</h3><form action={passwordAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><label>Nova senha administrativa<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label><button type="submit" disabled={passwordPending}>Alterar senha administrativa</button>{passwordState.status === "error" && <p className="form-error" role="alert">A alteração requer elevação ativa para essa ação.</p>}{passwordState.status === "complete" && <p className="form-success">Senha alterada. Elevações anteriores foram revogadas.</p>}</form><form action={recoveryAction} className="form-stack"><input type="hidden" name="csrfToken" value={csrf} /><button type="submit" disabled={recoveryPending}>Gerar novos códigos de recuperação administrativa</button>{recoveryState.status === "error" && <p className="form-error" role="alert">A ação requer elevação ativa para códigos de recuperação.</p>}{recoveryState.recoveryCodes && (
+  <OneTimeRecoveryCodes
+    codes={recoveryState.recoveryCodes}
+    destination="/admin/security?status=recovery-codes#admin-content"
+    label="Já guardei os novos códigos"
+  />
+)}</form></>}
   </section>;
+}
+
+function OneTimeRecoveryCodes({ codes, destination, label }: { codes: string[]; destination: string; label: string }) {
+  const [acknowledged, setAcknowledged] = useState(false);
+  const acknowledging = useRef(false);
+  if (acknowledged) return null;
+  return (
+    <>
+      <RecoveryCodes codes={codes} />
+      <a
+        className="button-secondary"
+        href={destination}
+        onClick={(event) => {
+          event.preventDefault();
+          if (acknowledging.current) return;
+          acknowledging.current = true;
+          const target = event.currentTarget.href;
+          flushSync(() => setAcknowledged(true));
+          window.location.replace(target);
+        }}
+      >
+        {label}
+      </a>
+    </>
+  );
 }
 
 function RecoveryCodes({ codes }: { codes: string[] }) {
