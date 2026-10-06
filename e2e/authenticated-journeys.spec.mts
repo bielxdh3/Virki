@@ -265,7 +265,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     adminJourneyPhase = "expired-elevation-denial";
     const expiryProjectRow = page.locator("article").filter({ hasText: "Draft preserved after authorization rejection" });
     const expiryEditDetails = expiryProjectRow.locator("details").filter({ hasText: "Editar configuração" });
-    await expiryEditDetails.getByText("Editar configuração", { exact: true }).click();
+    await expect(expiryEditDetails).toHaveAttribute("open", "");
     const expiryNameInput = expiryEditDetails.locator('input[name="name"]');
     await expiryNameInput.fill("Draft preserved after elevation expires");
     const expiredElevation = await prisma.securityElevation.updateMany({
@@ -403,7 +403,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await expect(requestCode).toBeVisible();
     await requestCode.fill(requestMessage.code === "000000" ? "000001" : "000000");
     await hubPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
-    await expect(hubPage.getByRole("alert")).toContainText("Não foi possível validar o código");
+    await expect(hubPage.locator('p.form-error[role="alert"]')).toContainText("Não foi possível validar o código");
     await expect(hubPage.getByLabel("Código de verificação", { exact: true })).toBeVisible();
     const rejectedRecovery = await prisma.accountRecoveryRequest.findUnique({ where: { id: recovery.id }, select: { emailVerifiedAt: true } });
     expect(rejectedRecovery?.emailVerifiedAt).toBeNull();
