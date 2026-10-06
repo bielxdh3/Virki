@@ -123,9 +123,11 @@ END
 $$;
 
 GRANT CONNECT ON DATABASE :"database_name" TO bielos_runtime, bielos_migrator;
+-- The committed 0_init migration starts with CREATE SCHEMA IF NOT EXISTS public.
+-- PostgreSQL requires database CREATE for that statement, even though public exists.
+GRANT CREATE ON DATABASE :"database_name" TO bielos_migrator;
 REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE :"database_name" FROM PUBLIC;
 REVOKE CREATE, TEMPORARY ON DATABASE :"database_name" FROM bielos_runtime;
-REVOKE CREATE ON DATABASE :"database_name" FROM bielos_migrator;
 GRANT TEMPORARY ON DATABASE :"database_name" TO bielos_migrator;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
