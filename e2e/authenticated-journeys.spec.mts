@@ -191,6 +191,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await page.evaluate(() => { window.location.hash = "recovery-code-acknowledgment"; });
     await expect(page).toHaveURL(`${hubUrl}/admin/security#recovery-code-acknowledgment`);
     await expect(credentialSection.locator("ul li code")).toHaveCount(10);
+    const recoveryCodeDisplayUrl = page.url();
     const acknowledgeRecoveryCodes = credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true });
     const recoveryCodeInput = credentialSection.getByLabel("Código de recuperação administrativa", { exact: true });
     const recoveryForm = recoveryCodeInput.locator("xpath=ancestor::form");
@@ -201,10 +202,11 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(acknowledgeRecoveryCodes).toHaveCount(0);
     await expect(recoveryCodeInput).toBeVisible();
     await page.goBack();
-    await expect(page).toHaveURL(predecessorUrl);
+    await expect(page).toHaveURL(recoveryCodeDisplayUrl);
     await expect(credentialSection.locator("ul li code")).toHaveCount(0);
     await expect(acknowledgeRecoveryCodes).toHaveCount(0);
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    await expect(recoveryForm).toBeVisible();
     await page.goForward();
     await expect(page).toHaveURL(acknowledgementUrl);
     await expect(page.getByRole("status")).toContainText("Credencial administrativa configurada");
