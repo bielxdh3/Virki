@@ -49,13 +49,15 @@ export async function startElevationAction(_state: SecurityFormState, formData: 
   } catch { return { status: "error", scope }; }
 }
 
-export async function verifyElevationAction(formData: FormData): Promise<void> {
+export async function verifyElevationAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   const session = await requireAdminMutation(formData, "admin-elevation-verify");
   try {
     await verifySecurityElevation({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code") });
     revalidatePath("/admin/security");
-  } catch { redirect("/admin/security?error=elevation#admin-content"); }
-  redirect("/admin/security?status=elevation#admin-content");
+    return { status: "complete" };
+  } catch {
+    return { status: "error" };
+  }
 }
 
 export async function revokeElevationAction(formData: FormData): Promise<void> {
