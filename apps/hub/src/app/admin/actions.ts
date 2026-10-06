@@ -29,7 +29,7 @@ export type ConnectionEditDraft = {
 
 export type ConnectionEditActionState =
   | { status: "idle" }
-  | { status: "error" | "invalid" | "authorization" | "elevation-required"; draft: ConnectionEditDraft }
+  | { status: "error" | "invalid" | "authorization" | "elevation-required" | "saved"; draft: ConnectionEditDraft }
   | {
       status: "conflict";
       draft: ConnectionEditDraft;
@@ -262,7 +262,20 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
     }
     revalidatePath("/admin/connections");
     revalidatePath("/");
-    redirect("/admin/connections?status=updated");
+    return {
+      status: "saved",
+      draft: {
+        ...draft,
+        expectedRevision: projectConnectionConfigurationRevision({
+          id: connectionId,
+          name: connection.name,
+          slug: connection.slug,
+          origin: connection.origin,
+          launchUrl: connection.launchUrl,
+          redirectUris: connection.redirectUris
+        })
+      }
+    };
   } catch (error) {
     if (error instanceof AdministrationMutationError) return { status: "elevation-required", draft };
     if (error instanceof ConnectionInputError) return { status: "invalid", draft };

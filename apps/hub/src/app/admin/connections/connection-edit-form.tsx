@@ -63,6 +63,7 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
       <label>Origem HTTPS<input name="origin" type="url" required value={draft.origin} onChange={(event) => setDraft((current) => ({ ...current, origin: event.target.value }))} /></label>
       <label>URL de entrada (opcional)<input name="launchUrl" type="url" value={draft.launchUrl} onChange={(event) => setDraft((current) => ({ ...current, launchUrl: event.target.value }))} /></label>
       <label>Redirect URIs exatas<textarea name="redirectUris" required value={draft.redirectUris} onChange={(event) => setDraft((current) => ({ ...current, redirectUris: event.target.value }))} /></label>
+      {state.status === "saved" && <p className="form-success" role="status">Configuração salva.</p>}
       {state.status === "invalid" && <p className="form-error" role="alert">Não foi possível salvar. Use uma origem HTTPS canônica, uma URL de entrada na mesma origem e de 1 a 10 redirect URIs HTTPS exatas, únicas e sem fragmentos; confira também o nome e o formato do slug. Os valores enviados foram mantidos.</p>}
       {state.status === "authorization" && <p className="form-error" role="alert">Não foi possível confirmar sua autorização para salvar. Atualize a página e autentique-se novamente. Os valores enviados foram mantidos.</p>}
       {state.status === "elevation-required" && <p className="form-error" role="alert">A elevação de segurança para gerenciar conexões expirou ou não está ativa. Solicite uma nova elevação antes de salvar. Os valores enviados foram mantidos.</p>}

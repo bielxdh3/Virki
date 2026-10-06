@@ -208,6 +208,17 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bielos_runtime;
 GRANT EXECUTE ON FUNCTION public.digest(text, text) TO bielos_migrator;
 
 DO $$
+BEGIN
+  IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM PUBLIC, bielos_runtime';
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bielos_runtime_test') THEN
+      EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM bielos_runtime_test';
+    END IF;
+  END IF;
+END
+$$;
+
+DO $$
 DECLARE
   item record;
 BEGIN

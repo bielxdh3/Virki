@@ -56,6 +56,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bielos_ru
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bielos_runtime_test;
 
 DO $$
+BEGIN
+  IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM PUBLIC, bielos_runtime_test';
+  END IF;
+END
+$$;
+
+DO $$
 DECLARE
   item record;
 BEGIN

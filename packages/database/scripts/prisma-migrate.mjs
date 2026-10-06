@@ -37,11 +37,34 @@ const result = spawnSync(process.execPath, [prismaCli, ...prismaArgs], {
   windowsHide: true
 });
 
+let exitCode = result.status ?? 1;
 if (result.error) {
   console.error("Prisma schema command could not start.");
-  process.exit(1);
+  exitCode = 1;
 }
-process.exitCode = result.status ?? 1;
+
+if (["dev", "deploy", "resolve-baseline"].includes(command)) {
+  const restrictMigrationLedger = spawnSync(process.execPath, [prismaCli, "db", "execute", "--stdin", "--schema", schemaPath], {
+    cwd: workspaceRoot,
+    env: { ...process.env, DATABASE_URL: migrationUrl },
+    input: `DO $bielos$ BEGIN
+  IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM PUBLIC, bielos_runtime';
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bielos_runtime_test') THEN
+      EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM bielos_runtime_test';
+    END IF;
+  END IF;
+END $bielos$;`,
+    stdio: ["pipe", "inherit", "inherit"],
+    windowsHide: true
+  });
+  if (restrictMigrationLedger.error || restrictMigrationLedger.status !== 0) {
+    console.error("Prisma migration ledger privileges could not be restricted after the schema command.");
+    exitCode = 1;
+  }
+}
+
+process.exitCode = exitCode;
 
 function isMigratorUrl(value) {
   try {

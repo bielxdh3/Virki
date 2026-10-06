@@ -5,7 +5,8 @@ import { getAccountRecoveryState } from "@bielos/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
-import { completeRecoveryAction, openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction, verifyRecoveryAction } from "./actions";
+import { completeRecoveryAction, openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction } from "./actions";
+import { RecoveryVerificationForm } from "./recovery-verification-form";
 
 export const dynamic = "force-dynamic";
 
@@ -62,12 +63,7 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
         {params?.requestId && !state ? <p className="form-error" role="alert">Este link de recuperação não é válido ou expirou. <a href="/recover">Solicite novas instruções.</a></p> : null}
         {state?.status === "PENDING" && !state.emailVerified ? <>
           <p>Informe o código enviado ao endereço cadastrado. Depois, um administrador analisará a solicitação.</p>
-          <form className="form-stack" action={verifyRecoveryAction}>
-            <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf.verify} />
-            <input type="hidden" name="requestId" value={state.id} />
-            <label>Código de verificação<input name="code" inputMode="numeric" pattern="[0-9]{6}" autoComplete="one-time-code" maxLength={6} required /></label>
-            <button className="button-primary" type="submit">Verificar e-mail</button>
-          </form>
+          <RecoveryVerificationForm csrf={csrf.verify} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={state.id} />
         </> : null}
         {state?.status === "PENDING" && state.emailVerified ? <p role="status">E-mail confirmado. Aguarde a análise administrativa; esta página será liberada para definir uma nova senha após a aprovação.</p> : null}
         {state?.status === "APPROVED" ? <>

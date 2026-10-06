@@ -46,17 +46,19 @@ export async function openRecoveryAction(formData: FormData) {
   redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
 }
 
-export async function verifyRecoveryAction(formData: FormData) {
+export type RecoveryVerificationActionState = { status: "idle" | "error" | "verified" };
+
+export async function verifyRecoveryAction(_state: RecoveryVerificationActionState, formData: FormData): Promise<RecoveryVerificationActionState> {
   const { expectedRole } = await requireRecoveryAccess(formData, "recovery-verify");
   const requestId = read(formData, "requestId");
   const requestKey = (await cookies()).get(RECOVERY_COOKIE_NAME)?.value;
-  if (!requestKey) redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
+  if (!requestKey) return { status: "error" };
   try {
     await verifyAccountRecoveryEmail(requestId, requestKey, read(formData, "code"), new Date(), expectedRole);
   } catch {
-    redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
+    return { status: "error" };
   }
-  redirect(`/recover?requestId=${encodeURIComponent(requestId)}&verified=1`);
+  return { status: "verified" };
 }
 
 export async function completeRecoveryAction(formData: FormData) {

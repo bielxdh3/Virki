@@ -246,18 +246,18 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await activeEditDetails.getByRole("button", { name: "Reaplicar meu rascunho sobre esta versão", exact: true }).click();
     await expect(saveButton).toBeEnabled();
     await saveButton.click();
-    await expect(page).toHaveURL(hubUrl + "/admin/connections?status=updated");
+    await expect(page).toHaveURL(hubUrl + "/admin/connections");
+    const savedProjectRow = page.locator("article.connection-row").filter({ hasText: "Draft preserved after authorization rejection" });
     try {
-      await expect(page.locator('p.form-success[role="status"]')).toContainText("Alteração concluída", { timeout: 15_000 });
+      await expect(savedProjectRow.getByRole("status")).toContainText("Configuração salva.", { timeout: 15_000 });
     } catch {
       const saved = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true } });
-      const savedRowVisible = await page.locator("article.connection-row").filter({ hasText: "Draft preserved after authorization rejection" }).isVisible().catch(() => false);
+      const savedRowVisible = await savedProjectRow.isVisible().catch(() => false);
       const errorVisible = await page.getByRole("alert").isVisible().catch(() => false);
-      const openEditorVisible = await activeEditDetails.isVisible().catch(() => false);
-      throw new Error(`E2E ADMIN connection update status is unavailable (redirect=updated; persistedDraft=${saved?.name === "Draft preserved after authorization rejection"}; updatedRowVisible=${savedRowVisible}; errorVisible=${errorVisible}; editorVisible=${openEditorVisible}; hubResponses=${await hubPageResponses()}).`);
+      throw new Error(`E2E ADMIN connection update status is unavailable (persistedDraft=${saved?.name === "Draft preserved after authorization rejection"}; updatedRowVisible=${savedRowVisible}; errorVisible=${errorVisible}; hubResponses=${await hubPageResponses()}).`);
     }
-    const savedProjectRow = page.locator("article.connection-row").filter({ hasText: "Draft preserved after authorization rejection" });
     await expect(savedProjectRow).toBeVisible();
+    await expect(savedProjectRow.getByRole("alert")).toHaveCount(0);
     await expect(savedProjectRow.locator("strong")).toContainText("Draft preserved after authorization rejection");
     const updatedConnection = await prisma.projectConnection.findUnique({ where: { id: fixture.projectConnectionId }, select: { name: true, origin: true } });
     expect(updatedConnection).toEqual({ name: "Draft preserved after authorization rejection", origin: "https://project.e2e.invalid" });
@@ -401,7 +401,14 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     expect(openedRecoveryUrl.searchParams.has("requestId")).toBe(true);
     const requestCode = hubPage.getByLabel("Código de verificação", { exact: true });
     await expect(requestCode).toBeVisible();
-    await requestCode.fill(requestMessage.code!);
+    await requestCode.fill(requestMessage.code === "000000" ? "000001" : "000000");
+    await hubPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
+    await expect(hubPage.getByRole("alert")).toContainText("Não foi possível validar o código");
+    await expect(hubPage.getByLabel("Código de verificação", { exact: true })).toBeVisible();
+    const rejectedRecovery = await prisma.accountRecoveryRequest.findUnique({ where: { id: recovery.id }, select: { emailVerifiedAt: true } });
+    expect(rejectedRecovery?.emailVerifiedAt).toBeNull();
+
+    await hubPage.getByLabel("Código de verificação", { exact: true }).fill(requestMessage.code!);
     await hubPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
     try {
       await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
@@ -414,15 +421,18 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
       const outcome = verificationUrl.searchParams.has("error")
         ? "error"
         : verificationUrl.searchParams.has("verified")
-          ? "verified"
+          ? "verified-redirect"
           : verificationUrl.pathname === "/login"
             ? "login-redirect"
-            : "no-outcome-flag";
+            : "no-action-feedback";
       const alertVisible = await hubPage.getByRole("alert").isVisible().catch(() => false);
       const verificationFormVisible = await hubPage.getByLabel("Código de verificação", { exact: true }).isVisible().catch(() => false);
       const verifiedStatusVisible = await hubPage.getByRole("status").isVisible().catch(() => false);
       throw new Error(`E2E ADMIN recovery verification status is unavailable (outcome=${outcome}; state=${recoveryState?.status ?? "missing"}; emailVerified=${Boolean(recoveryState?.emailVerifiedAt)}; alertVisible=${alertVisible}; verificationFormVisible=${verificationFormVisible}; verifiedStatusVisible=${verifiedStatusVisible}; hubResponses=${await hubRecoveryResponses()}).`);
     }
+    await expect(hubPage.getByLabel("Código de verificação", { exact: true })).toHaveCount(0);
+    await hubPage.reload();
+    await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
 
     await targetPage.goto(`${hubUrl}/admin/security`);
     await expect(targetPage.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();

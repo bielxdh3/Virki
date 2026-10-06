@@ -91,6 +91,7 @@ async function verifyDatabaseRoles(kind) {
         "sh", "/test/10-bielos-database-roles.sh"
       ], "transition populated disposable fixture");
       assert.equal(provision.status, 0, "Could not transition the populated disposable PostgreSQL fixture.");
+      assertMigrationLedgerReadDenied(name, "bielos_runtime", runtimePassword, "existing-volume runtime role after migration transition");
       const e2eRole = docker([
         "exec",
         `--env=BIELOS_E2E_DATABASE_PASSWORD=${e2ePassword}`,
@@ -98,6 +99,7 @@ async function verifyDatabaseRoles(kind) {
         "sh", "/test/20-bielos-e2e-runtime-test-role.sh"
       ], "provision isolated E2E runtime role");
       assert.equal(e2eRole.status, 0, "Could not provision the isolated E2E runtime role.");
+      assertMigrationLedgerReadDenied(name, "bielos_runtime_test", e2ePassword, "existing-volume E2E role after migration transition");
       runPsql(name, "bielos_bootstrap", bootstrapPassword, "GRANT bielos_role_parent TO bielos_runtime_test; GRANT bielos_runtime_test TO bielos_role_child; GRANT TRUNCATE, REFERENCES, TRIGGER ON TABLE public.\"User\" TO bielos_runtime_test; CREATE SEQUENCE public.__bielos_runtime_test_sequence; GRANT UPDATE ON SEQUENCE public.__bielos_runtime_test_sequence TO bielos_runtime_test; CREATE FUNCTION public.__bielos_runtime_test_exec_probe() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$; REVOKE ALL PRIVILEGES ON FUNCTION public.__bielos_runtime_test_exec_probe() FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.__bielos_runtime_test_exec_probe() TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator GRANT TRUNCATE ON TABLES TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public GRANT TRUNCATE ON TABLES TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator GRANT EXECUTE ON ROUTINES TO bielos_runtime_test; ALTER DEFAULT PRIVILEGES FOR ROLE bielos_migrator IN SCHEMA public GRANT EXECUTE ON ROUTINES TO bielos_runtime_test;", "seed stale isolated E2E role memberships and grants");
 
       const publicRoutinePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_function_privilege('bielos_connect_probe', 'public.__bielos_public_exec_probe()', 'EXECUTE');`, "inspect legacy public routine grants");
@@ -170,6 +172,12 @@ async function verifyDatabaseRoles(kind) {
 
     const ownership = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public."User"'::regclass;`, "inspect application table owner");
     assert.equal(ownership.trim(), "bielos_migrator", "The migrator must own the application tables.");
+
+    const migrationLedgerPrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT NOT has_table_privilege('bielos_runtime', 'public."_prisma_migrations"', 'SELECT') AND NOT has_table_privilege('bielos_runtime', 'public."_prisma_migrations"', 'INSERT') AND NOT has_table_privilege('bielos_runtime', 'public."_prisma_migrations"', 'UPDATE') AND NOT has_table_privilege('bielos_runtime', 'public."_prisma_migrations"', 'DELETE') AND NOT has_table_privilege('bielos_runtime', 'public."_prisma_migrations"', 'TRUNCATE') AND NOT has_table_privilege('bielos_runtime', 'public."_prisma_migrations"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime', 'public."_prisma_migrations"', 'TRIGGER') AND NOT has_any_column_privilege('bielos_runtime', 'public."_prisma_migrations"', 'SELECT') AND NOT has_any_column_privilege('bielos_runtime', 'public."_prisma_migrations"', 'INSERT') AND NOT has_any_column_privilege('bielos_runtime', 'public."_prisma_migrations"', 'UPDATE') AND NOT has_any_column_privilege('bielos_runtime', 'public."_prisma_migrations"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'SELECT') AND NOT has_table_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'INSERT') AND NOT has_table_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'UPDATE') AND NOT has_table_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'DELETE') AND NOT has_table_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'TRUNCATE') AND NOT has_table_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'TRIGGER') AND NOT has_any_column_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'SELECT') AND NOT has_any_column_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'INSERT') AND NOT has_any_column_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'UPDATE') AND NOT has_any_column_privilege('bielos_runtime_test', 'public."_prisma_migrations"', 'REFERENCES');`, "inspect migration ledger privileges");
+    assert.equal(migrationLedgerPrivileges.trim(), "t", "Application roles must not read or mutate Prisma migration history.");
+    for (const role of ["bielos_runtime", "bielos_runtime_test"]) {
+      assertMigrationLedgerReadDenied(name, role, role === "bielos_runtime" ? runtimePassword : e2ePassword, "final migration ledger privilege check");
+    }
 
     const runtimePrivileges = runPsql(name, "bielos_bootstrap", bootstrapPassword, `SELECT has_database_privilege('bielos_runtime', current_database(), 'CONNECT') AND NOT has_database_privilege('bielos_runtime', current_database(), 'CREATE') AND NOT has_database_privilege('bielos_runtime', current_database(), 'TEMPORARY') AND has_schema_privilege('bielos_runtime', 'public', 'USAGE') AND NOT has_schema_privilege('bielos_runtime', 'public', 'CREATE') AND has_table_privilege('bielos_runtime', 'public."User"', 'SELECT') AND has_table_privilege('bielos_runtime', 'public."User"', 'INSERT') AND has_table_privilege('bielos_runtime', 'public."User"', 'UPDATE') AND has_table_privilege('bielos_runtime', 'public."User"', 'DELETE') AND NOT has_table_privilege('bielos_runtime', 'public."User"', 'TRUNCATE') AND NOT has_table_privilege('bielos_runtime', 'public."User"', 'REFERENCES') AND NOT has_table_privilege('bielos_runtime', 'public."User"', 'TRIGGER') AND has_type_privilege('bielos_runtime', 'public."UserRole"', 'USAGE') AND NOT has_function_privilege('bielos_runtime', 'public.digest(text,text)', 'EXECUTE');`, "inspect runtime grants");
     assert.equal(runtimePrivileges.trim(), "t", "Runtime grants must permit application DML while denying database and schema DDL.");
@@ -246,14 +254,23 @@ function getMappedPort(name) {
   return Number(match[1]);
 }
 
-function runPsql(name, role, password, sql, label) {
+function runPsql(name, role, password, sql, label, { allowFailure = false } = {}) {
   const result = docker([
     "exec", `--env=PGPASSWORD=${password}`, name,
     "psql", "--no-psqlrc", "--host", "127.0.0.1", "--username", role,
     "--dbname", "bielos_roles_test", "--set", "ON_ERROR_STOP=1", "--tuples-only", "--no-align", "--command", sql
-  ], label);
-  assert.equal(result.status, 0, `${label} failed.`);
-  return result.stdout;
+  ], label, { allowFailure });
+  if (!allowFailure) {
+    assert.equal(result.status, 0, `${label} failed.`);
+    return result.stdout;
+  }
+  return result;
+}
+
+function assertMigrationLedgerReadDenied(name, role, password, context) {
+  const result = runPsql(name, role, password, `SELECT count(*) FROM public."_prisma_migrations";`, `${context}: ${role} read`, { allowFailure: true });
+  assert.notEqual(result.status, 0, `${role} must not read Prisma migration history (${context}).`);
+  assert.match(result.stderr ?? "", /permission denied for table _prisma_migrations/u, `${role} migration ledger read must fail due to PostgreSQL privileges (${context}).`);
 }
 
 function runMigrationsAsMigrator(databaseUrl, label) {
