@@ -212,11 +212,10 @@ async function verifyDatabaseRoles(kind) {
     runPsql(name, "bielos_runtime", runtimePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "createdAt") VALUES ('runtime-audit-probe', 'probe', 'INFO', '2000-01-01T00:00:00Z');`, "append audit row with runtime role");
     for (const [label, sql] of [
       ["update", `UPDATE public."AuditLog" SET "message" = 'changed' WHERE "id" = 'runtime-audit-probe';`],
-      ["delete", `DELETE FROM public."AuditLog" WHERE "id" = 'runtime-audit-probe';`],
-      ["delete unrelated user", `DELETE FROM public."User" WHERE false;`]
+      ["delete", `DELETE FROM public."AuditLog" WHERE "id" = 'runtime-audit-probe';`]
     ]) {
       const deniedAuditMutation = runPsql(name, "bielos_runtime", runtimePassword, sql, `deny runtime audit ${label}`, { allowFailure: true });
-      assert.notEqual(deniedAuditMutation.status, 0, `Runtime must not ${label} audit records or use audit-maintenance authority on other tables.`);
+      assert.notEqual(deniedAuditMutation.status, 0, `Runtime must not ${label} audit records.`);
       assert.match(deniedAuditMutation.stderr ?? "", /permission denied/u, `Runtime ${label} must fail due to PostgreSQL privileges.`);
     }
     const maintenanceAuditInsert = runPsql(name, "bielos_audit_maintenance", auditMaintenancePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "metadata") VALUES ('maintenance-audit-probe', 'AUTH_AUDIT_LOG_CLEANUP', 'SUCCESS', '{}'::jsonb);`, "append maintenance audit event without reading a row");

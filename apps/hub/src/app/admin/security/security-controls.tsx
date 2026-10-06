@@ -1,7 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useActionState } from "react";
 import type { ElevationScope } from "@bielos/auth/administration";
 import { changeAdminPasswordAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
@@ -15,12 +14,10 @@ const scopes: Array<[ElevationScope, string]> = [
 ];
 
 export function CredentialSetup({ csrf, activeCredential }: { csrf: string; activeCredential?: { keyVersion: number; updatedAt: string } }) {
-  const router = useRouter();
-  const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
   const [start, startAction, starting] = useActionState(startCredentialSetupAction, initialState);
   const [complete, completeAction, completing] = useActionState(completeCredentialSetupAction, initialState);
   const [recovery, recoveryAction, recovering] = useActionState(recoverAdminCredentialAction, initialState);
-  const showRecoveryCodes = Boolean(complete.recoveryCodes && !recoveryCodesAcknowledged);
+  const showRecoveryCodes = Boolean(complete.recoveryCodes);
   return (
     <section className="surface">
       <h2>Credencial administrativa</h2>
@@ -28,7 +25,7 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
       {showRecoveryCodes && complete.recoveryCodes ? (
         <>
           <RecoveryCodes codes={complete.recoveryCodes} />
-          <button type="button" onClick={() => { setRecoveryCodesAcknowledged(true); router.refresh(); }}>Continuar para elevação</button>
+          <button type="button" onClick={() => window.location.reload()}>Continuar para elevação</button>
         </>
       ) : activeCredential ? (
         <>
