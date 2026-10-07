@@ -100,12 +100,12 @@ test("development Hub and issuer receive only explicitly scoped environment vari
     "VIRKI_OIDC_ADAPTER_KEY_PREVIOUS",
     "VIRKI_OIDC_PROXY_URL", "VIRKI_PORTAL_HOSTNAME", "VIRKI_PORTAL_URL", "VIRKI_RATE_LIMIT_HASH_SECRET",
     "VIRKI_TOTP_ENCRYPTION_KEY", "CLOUDFLARE_ACCESS_JWT_REQUIRED", "DATABASE_URL", "NODE_ENV"
-  ]);
+  ].sort());
   assert.deepEqual(environmentKeys(issuer), [
     "VIRKI_OIDC_ADAPTER_KEY", "VIRKI_OIDC_ADAPTER_KEY_PREVIOUS", "VIRKI_OIDC_COOKIE_KEY",
     "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_SIGNING_JWKS",
     "VIRKI_RATE_LIMIT_HASH_SECRET", "DATABASE_URL", "NODE_ENV", "OIDC_ISSUER_PORT"
-  ]);
+  ].sort());
 });
 
 test("production services use preloaded exact-revision images without remote builds or pulls", () => {
