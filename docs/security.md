@@ -16,7 +16,7 @@
 - A remembered-browser grant lasts at most seven days after strong verification. It may skip a repeat email/TOTP login ceremony on that trusted browser; it never substitutes for Cloudflare Access on the ADMIN host, an active ADMIN session, or action-scoped elevation. Remembered grants are revocable and are cleared by account recovery/deactivation.
 - TOTP seeds and protected email/OIDC payloads are encrypted at rest with environment-held keys.
 - TOTP setup, confirmation, disablement, recovery-code rotation, and account recovery use single-use or replay-protected proofs. High-risk ADMIN actions require current elevation where their action policy defines it.
-- The separate ADMIN credential can be recovered only from an active ADMIN session using the normal account password and an unused one-time administrative recovery code. That flow rotates its ten replacement codes and revokes pending/active elevations. Cross-account recovery requires a different active ADMIN; the sole-ADMIN lockout case has no in-product operator bypass and is documented as a stop-and-escalate operational blocker.
+- The separate ADMIN credential can be recovered only from an active ADMIN session using the normal account password and an unused one-time administrative recovery code. That flow rotates its ten replacement codes and revokes pending/active elevations. Cross-account recovery requires a different active ADMIN. Sole-ADMIN lockout is a real operational recovery gap classified `HARDENING_POST_DEPLOY`, not a general deployment gate: there is no in-product operator bypass, and an actual lockout requires stopping privileged operations and escalating to the system owner.
 - The one-time `20260922090000_total_identity_security_rebaseline` transition invalidated active sessions and temporary elevations and revoked remembered devices while retaining credentials and MFA material. The current `20261001000000_security_polish` migration is additive: it revokes pending or verified device challenges and transforms recovery data, but does not revoke existing sessions, elevations, or remembered devices. Production migration history is reconciled only for the exact verified legacy ledger described in the deployment runbook; an unknown history fails closed.
 
 ## Authorization
@@ -42,6 +42,12 @@ The OIDC data-encryption key supports one bounded overlap key via `BIELOS_OIDC_A
 Audit entries contain event type, result, actor reference, resource, safe message, timestamp, and sanitized structured metadata. Connection/client references are hashed. Audit views use stable cursor pagination and event filters. Never record passwords, session values, cookies, TOTP seeds, recovery plaintext, client secrets, private keys, bearer tokens, or raw credential payloads.
 
 Operational logs are summarized without returning their contents. Secret scans run in CI and locally before publication or deployment.
+
+## Production hardening classifications
+
+These are repository-side classifications; they do not assert that the live production headers or host have been inspected. Stronger CSP nonce/hash directives are a `HARDENING_POST_DEPLOY` item: the current Hub, public-site, and issuer configurations set `frame-ancestors 'none'` but do not configure nonce/hash-based script or style policies. HSTS currently sets `max-age=31536000` without `includeSubDomains` or `preload`; those extensions are also `HARDENING_POST_DEPLOY` and require an owner review of every affected hostname before adoption.
+
+Account recovery bearer keys are already stored as SHA-256 `AccountRecoveryRequest.requestKeyHash` values, and the recovery flow hashes presented keys for lookup and comparison. The separate `SecurityElevation.requestKey` is stored in cleartext as a ceremony selector; it is bound to the current ADMIN user and session, limited to a pending and unexpired ceremony, and does not replace the emailed verification code. Hashing this distinct selector is bounded at-rest hardening classified `HARDENING_POST_DEPLOY`, not an evidenced authentication bypass or deployment gate. Do not describe account-recovery key hashing as missing or claim that all request-key fields are hashed.
 
 ## Verification limits
 
