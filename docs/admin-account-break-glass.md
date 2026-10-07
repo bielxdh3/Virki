@@ -2,6 +2,12 @@
 
 This is a fail-safe escalation procedure, not an application recovery feature. BielOS intentionally has no self-approval or hidden ADMIN-creation route.
 
+## Deployment classification
+
+Sole-ADMIN lockout is a real operational recovery gap classified as `HARDENING_POST_DEPLOY`, not a general deployment blocker. The deployment migration guard requires at least one ADMIN identity and preserves ADMIN/USER counts; it does not require multiple ADMIN accounts or provide an offline reset. A sole ADMIN who can still authenticate with the normal account password and an unused recovery code can use the supported in-product flow below. If that ADMIN becomes unable to authenticate, privileged changes must stop until the incident is safely resolved.
+
+The fail-safe behavior is intentional. A separately reviewed and rehearsed operator recovery mechanism remains desirable future hardening. Do not represent production as having that mechanism until one exists and has been validated, and do not use an unsafe emergency bypass in its place.
+
 ## Use the supported in-product recovery when possible
 
 An active ADMIN who can still sign in with the normal BielOS account password can recover a lost separate administrative credential from the Hub security page with one unused administrative recovery code. The operation replaces that credential, invalidates the used code set, displays ten new codes once, and revokes pending or active elevations. Store the replacement codes outside the application in the organization's approved credential store.
