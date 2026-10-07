@@ -38,7 +38,8 @@ grep -Fxq "hostname=$host" "$marker" || fail MARKER_CONTENT_INVALID
 grep -Fxq "path=$root" "$marker" || fail MARKER_CONTENT_INVALID
 for name in .env .env.oidc .env.oidc-data; do
   file="$root/$name"
-  [[ -f "$file" && ! -L "$file" && "$(stat -c '%a' -- "$file")" == 600 && "$(stat -c '%u' -- "$file")" == "$(id -u)" ]] || fail PROTECTED_ENV_METADATA_INVALID
+  [[ -f "$file" && ! -L "$file" ]] || fail "PROTECTED_ENV_FILE_MISSING_OR_UNSAFE:$name"
+  [[ "$(stat -c '%a' -- "$file")" == 600 && "$(stat -c '%u' -- "$file")" == "$(id -u)" ]] || fail "PROTECTED_ENV_METADATA_INVALID:$name"
 done
 printf 'BIELOS_PROBE_ID=%s\\n' "$host"
 printf 'BIELOS_PROBE_WD=%s\\n' "$root"
@@ -46,7 +47,7 @@ printf 'BIELOS_PROBE_PLATFORM=linux-native\\n'
 printf 'BIELOS_PROBE_MARKER=valid\\n'
 `;
 
-const DOCKER_SCRIPT = `
+export const DOCKER_SCRIPT = `
 set -eu
 root=$2
 version=$(docker version --format '{{.Server.Version}}')
@@ -56,7 +57,8 @@ docker_os=$(docker info --format '{{.OSType}}')
 docker_arch=$(docker info --format '{{.Architecture}}')
 command -v flock >/dev/null 2>&1
 free=$(df -Pk -- "$root" | awk 'NR == 2 { printf "%.1f", $4 / 1024 / 1024 }')
-demanage=$(docker ps --format '{{.Names}}' | awk 'tolower($0) ~ /demanage/ { count++ } END { print count + 0 }')
+container_names=$(docker ps --format '{{.Names}}')
+demanage=$(printf '%s\n' "$container_names" | awk 'tolower($0) ~ /demanage/ { count++ } END { print count + 0 }')
 case "$docker_arch" in
   x86_64|amd64) docker_arch=amd64 ;;
   aarch64|arm64) docker_arch=arm64 ;;
@@ -151,9 +153,16 @@ function describeProbeFailure(result) {
     DIRECTORY_METADATA_INVALID: "required production directory metadata is invalid.",
     MARKER_METADATA_INVALID: "production host marker is missing or has unsafe metadata.",
     MARKER_CONTENT_INVALID: "production host marker does not match the host and root.",
-    PROTECTED_ENV_METADATA_INVALID: "protected production environment file metadata is invalid.",
   };
   if (Object.hasOwn(hostCheckMessages, hostCheck)) return hostCheckMessages[hostCheck];
+  for (const name of [".env", ".env.oidc", ".env.oidc-data"]) {
+    if (hostCheck === `PROTECTED_ENV_FILE_MISSING_OR_UNSAFE:${name}`) {
+      return `protected production environment file ${name} is missing or is not a regular file.`;
+    }
+    if (hostCheck === `PROTECTED_ENV_METADATA_INVALID:${name}`) {
+      return `protected production environment file ${name} has unsafe ownership or permissions.`;
+    }
+  }
 
   const sshError = String(result.stderr ?? "").toLowerCase();
   if (/host key verification failed|remote host identification has changed|no .* host key is known/u.test(sshError)) {
