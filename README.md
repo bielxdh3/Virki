@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="apps/public-site/public/virki-mark.svg" alt="Virki" width="96" height="96" />
+</p>
+
 # Virki
 
 Virki provides identity, authentication and SSO, security, project entry access, and audit for external projects. It authenticates users and controls entry; each project owns its own experience and permissions.

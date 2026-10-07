@@ -31,7 +31,8 @@ details > summary.button-danger { padding: 0.55rem 0.9rem; border: 1px solid #80
 details > summary.button-danger:hover { border-color: var(--danger); }
 .admin-shell { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 100vh; }
 .admin-sidebar { display: flex; flex-direction: column; gap: 1.5rem; padding: 1.25rem; border-right: 1px solid var(--line); background: var(--surface); }
-.brand { color: var(--text); font-weight: 750; text-decoration: none; letter-spacing: 0.02em; }
+.brand { display: inline-flex; align-items: center; gap: 0.55rem; color: var(--text); font-weight: 750; text-decoration: none; letter-spacing: 0.02em; }
+.brand::before { content: ""; width: 28px; height: 28px; flex: 0 0 28px; background: url("/hub-mark.svg") center / contain no-repeat; filter: brightness(0) invert(1); }
 .admin-nav { display: grid; gap: 0.35rem; }
 .admin-nav a, .text-link { display: inline-flex; align-items: center; min-height: 44px; padding: 0.5rem 0.65rem; border-radius: 0.3rem; color: var(--text); text-decoration: none; }
 .admin-nav a:hover, .admin-nav a[aria-current="page"] { background: var(--surface-raised); }
@@ -60,6 +61,16 @@ details > summary.button-danger:hover { border-color: var(--danger); }
 .form-success { color: var(--accent); overflow-wrap: anywhere; }
 .auth-page, .public-page { display: grid; min-height: 100vh; place-items: center; padding: 1.25rem; }
 .auth-panel { width: min(100%, 420px); padding: clamp(1.2rem, 4vw, 2rem); border: 1px solid var(--line); border-radius: 0.5rem; background: var(--surface); }
+.auth-panel::before { content: ""; display: block; width: 48px; height: 48px; margin: 0 0 1rem; background: url("/hub-mark.svg") center / contain no-repeat; filter: brightness(0) invert(1); }
+.portal-brand { display: flex; align-items: center; gap: 0.75rem; }
+.portal-brand > img { width: 42px; height: 42px; flex: 0 0 42px; filter: brightness(0) invert(1); }
+.portal-brand h1 { margin-bottom: 0; }
+.login-screen { display: grid; min-height: 100vh; place-items: center; padding: 1.25rem; }
+.login-window { width: min(100%, 460px); padding: clamp(1.2rem, 4vw, 2rem); border: 1px solid var(--line); border-radius: 0.5rem; background: var(--surface); }
+.login-brand { display: flex; align-items: center; gap: 0.8rem; }
+.login-brand img { width: 48px; height: 48px; flex: 0 0 48px; filter: brightness(0) invert(1); }
+.login-brand h1 { margin: 0; }
+.login-note { color: var(--muted); }
 .subtle-link { display: inline-flex; align-items: center; min-height: 44px; margin-top: 0.8rem; }
 .auth-link-list { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-top: 0.8rem; }
 .auth-link-list .subtle-link { margin-top: 0; }
