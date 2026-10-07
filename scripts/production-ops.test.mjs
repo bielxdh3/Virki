@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { deployProduction } from "./deploy-production.mjs";
 import { isValidProductionConfig } from "./lib/production-config.mjs";
-import { runProductionPreflight } from "./production-preflight.mjs";
+import { runAcceptedProductionPreflight, runProductionPreflight } from "./production-preflight.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const config = {
@@ -51,6 +51,46 @@ test("native Linux preflight requires eight stable probes, the marker, and Docke
   assert.ok(result.lines.some((line) => line.includes("8/8")));
   assert.ok(result.lines.every((line) => !line.includes(config.host)));
   assert.equal(isValidProductionConfig({ ...config, root: "C:\\BielOS" }), false);
+});
+
+test("standalone preflight binds host contact to the exact accepted source gate", async () => {
+  const calls = [];
+  const result = await runAcceptedProductionPreflight({
+    config,
+    inspectSource: ({ repositoryRoot }) => {
+      calls.push("source");
+      assert.ok(repositoryRoot.endsWith("BielOS"));
+      return { branch: "main", revision };
+    },
+    verifyCi: ({ revision: observed }) => {
+      calls.push("gate:" + observed);
+      return { ok: true, lines: ["exact static-analysis gate passed"] };
+    },
+    preflight: async ({ config: observed }) => {
+      calls.push("preflight");
+      assert.deepEqual(observed, config);
+      return { status: 0, lines: ["native host checks passed"] };
+    }
+  });
+  assert.deepEqual(calls, ["source", "gate:" + revision, "preflight"]);
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.lines, ["exact static-analysis gate passed", "native host checks passed"]);
+});
+
+test("standalone preflight blocks before SSH when exact-SHA release evidence is unavailable", async () => {
+  let preflightCalls = 0;
+  const result = await runAcceptedProductionPreflight({
+    config,
+    inspectSource: () => ({ branch: "main", revision }),
+    verifyCi: () => ({ ok: false, lines: ["exact-SHA SARIF evidence unavailable"] }),
+    preflight: async () => {
+      preflightCalls += 1;
+      return { status: 0, lines: [] };
+    }
+  });
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.lines, ["exact-SHA SARIF evidence unavailable"]);
+  assert.equal(preflightCalls, 0);
 });
 
 test("preflight stops at a missing native host marker without trying Docker", async () => {
