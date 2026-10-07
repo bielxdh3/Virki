@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { deployProduction } from "./deploy-production.mjs";
 import { isValidProductionConfig } from "./lib/production-config.mjs";
-import { runAcceptedProductionPreflight, runProductionPreflight } from "./production-preflight.mjs";
+import { DOCKER_SCRIPT, runAcceptedProductionPreflight, runProductionPreflight } from "./production-preflight.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const config = {
@@ -52,6 +52,44 @@ test("native Linux preflight requires eight stable probes, the marker, and Docke
   assert.ok(result.lines.some((line) => line.includes("8/8")));
   assert.ok(result.lines.every((line) => !line.includes(config.host)));
   assert.equal(isValidProductionConfig({ ...config, root: "C:\\BielOS" }), false);
+});
+
+test("Docker preflight fails closed when container-name visibility is unavailable", { skip: process.platform !== "linux" }, () => {
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "bielos-docker-preflight-"));
+  const binDirectory = path.join(temporaryDirectory, "bin");
+  const root = path.join(temporaryDirectory, "root");
+  try {
+    mkdirSync(binDirectory);
+    mkdirSync(root);
+    const docker = path.join(binDirectory, "docker");
+    writeFileSync(docker, `#!/bin/sh
+if [ "$1" = version ]; then printf '29.8.1\\n'; exit 0; fi
+if [ "$1" = compose ]; then printf '5.5.1\\n'; exit 0; fi
+if [ "$1" = info ]; then
+  case "$3" in
+    '{{.ServerVersion}}') printf '29.8.1\\n' ;;
+    '{{.OSType}}') printf 'linux\\n' ;;
+    '{{.Architecture}}') printf 'x86_64\\n' ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+if [ "$1" = ps ]; then exit 42; fi
+exit 2
+`);
+    chmodSync(docker, 0o700);
+
+    const result = spawnSync("bash", ["-s", "--", "docker", root], {
+      encoding: "utf8",
+      input: DOCKER_SCRIPT,
+      env: { ...process.env, PATH: `${binDirectory}${path.delimiter}${process.env.PATH ?? ""}` },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout ?? "", /BIELOS_DEMANAGE_COUNT=0/u);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("standalone preflight binds host contact to the exact accepted source gate", async () => {
@@ -118,14 +156,14 @@ test("preflight reports a sanitized remote host-check category", async () => {
       if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
       return {
         status: 1,
-        stdout: "BIELOS_PROBE_FAILURE=PROTECTED_ENV_METADATA_INVALID\n",
+        stdout: "BIELOS_PROBE_FAILURE=PROTECTED_ENV_METADATA_INVALID:.env\n",
         stderr: "private-value=must-not-be-returned",
       };
     },
   });
 
   assert.equal(result.status, 1);
-  assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; protected production environment file metadata is invalid."]);
+  assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; protected production environment file .env has unsafe ownership or permissions."]);
   assert.doesNotMatch(result.lines.join(" "), /private-value|must-not-be-returned/u);
 });
 
@@ -174,7 +212,7 @@ test("native shell probe emits the sanitized protected environment metadata cate
       chmodSync(file, name === ".env.oidc-data" ? 0o644 : 0o600);
     }
 
-    const result = await runProductionPreflight({
+    const runProbe = () => runProductionPreflight({
       config: { ...config, root },
       sleep: async () => {},
       execute: (command, args, options = {}) => {
@@ -184,9 +222,16 @@ test("native shell probe emits the sanitized protected environment metadata cate
       },
     });
 
-    assert.equal(result.status, 1);
-    assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; protected production environment file metadata is invalid."]);
-    assert.doesNotMatch(result.lines.join(" "), /placeholder|must-not-be-returned/u);
+    const unsafeMetadata = await runProbe();
+    assert.equal(unsafeMetadata.status, 1);
+    assert.deepEqual(unsafeMetadata.lines, ["SSH preflight failed on probe 1; protected production environment file .env.oidc-data has unsafe ownership or permissions."]);
+    assert.doesNotMatch(unsafeMetadata.lines.join(" "), /placeholder|must-not-be-returned/u);
+
+    rmSync(path.join(root, ".env.oidc-data"));
+    const missingFile = await runProbe();
+    assert.equal(missingFile.status, 1);
+    assert.deepEqual(missingFile.lines, ["SSH preflight failed on probe 1; protected production environment file .env.oidc-data is missing or is not a regular file."]);
+    assert.doesNotMatch(missingFile.lines.join(" "), /placeholder|must-not-be-returned/u);
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
