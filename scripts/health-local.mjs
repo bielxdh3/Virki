@@ -53,9 +53,9 @@ async function checkEndpoint(check) {
 const results = await Promise.all(checks.map(checkEndpoint));
 
 if (results.every(Boolean)) {
-  console.log("Local BielOS health checks passed.");
+  console.log("Local Virki health checks passed.");
   process.exit(0);
 }
 
-console.error("One or more local BielOS health checks failed.");
+console.error("One or more local Virki health checks failed.");
 process.exit(1);

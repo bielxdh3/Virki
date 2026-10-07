@@ -1,9 +1,9 @@
 export function getSessionCookieName(env: { NODE_ENV?: string } = process.env): string {
-  return env.NODE_ENV === "production" ? "__Host-bielos_session" : "bielos_session";
+  return env.NODE_ENV === "production" ? "__Host-virki_session" : "virki_session";
 }
 
 export function getDeviceCookieName(env: { NODE_ENV?: string } = process.env): string {
-  return env.NODE_ENV === "production" ? "__Host-bielos_device" : "bielos_device";
+  return env.NODE_ENV === "production" ? "__Host-virki_device" : "virki_device";
 }
 
 export const SESSION_COOKIE_NAME = getSessionCookieName();

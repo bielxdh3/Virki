@@ -1,9 +1,9 @@
 "use server";
 
-import { verifyPassword, writeAuditLogInTransaction } from "@bielos/auth";
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
-import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt } from "@bielos/auth/security";
-import { prisma } from "@bielos/database";
+import { verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
+import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt } from "@virki/auth/security";
+import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";

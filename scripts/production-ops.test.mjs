@@ -14,7 +14,7 @@ const config = {
   sshAlias: "test-production",
   host: "production.example.invalid",
   port: "2222",
-  root: "/srv/bielos",
+  root: "/srv/virki",
 };
 const preflightScript = readFileSync(new URL("./production-preflight.mjs", import.meta.url), "utf8");
 const serverScript = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
@@ -40,9 +40,9 @@ test("native Linux preflight requires eight stable probes, the marker, and Docke
       if (remoteCalls <= 8) {
         assert.ok(options.input.includes("protocol=2"));
         assert.ok(options.input.includes("*microsoft*"));
-        return { status: 0, stdout: "BIELOS_PROBE_ID=host\nBIELOS_PROBE_WD=/srv/bielos\nBIELOS_PROBE_PLATFORM=linux-native\nBIELOS_PROBE_MARKER=valid\n" };
+        return { status: 0, stdout: "VIRKI_PROBE_ID=host\nVIRKI_PROBE_WD=/srv/virki\nVIRKI_PROBE_PLATFORM=linux-native\nVIRKI_PROBE_MARKER=valid\n" };
       }
-      return { status: 0, stdout: "BIELOS_DOCKER_VERSION=29\nBIELOS_DOCKER_INFO=29\nBIELOS_COMPOSE_VERSION=2\nBIELOS_PLATFORM=linux/amd64\nBIELOS_FLOCK=available\nBIELOS_DISK_FREE_GB=100\nBIELOS_DEMANAGE_COUNT=2\n" };
+      return { status: 0, stdout: "VIRKI_DOCKER_VERSION=29\nVIRKI_DOCKER_INFO=29\nVIRKI_COMPOSE_VERSION=2\nVIRKI_PLATFORM=linux/amd64\nVIRKI_FLOCK=available\nVIRKI_DISK_FREE_GB=100\nVIRKI_DEMANAGE_COUNT=2\n" };
     },
   });
 
@@ -51,11 +51,11 @@ test("native Linux preflight requires eight stable probes, the marker, and Docke
   assert.equal(remoteCalls, 9);
   assert.ok(result.lines.some((line) => line.includes("8/8")));
   assert.ok(result.lines.every((line) => !line.includes(config.host)));
-  assert.equal(isValidProductionConfig({ ...config, root: "C:\\BielOS" }), false);
+  assert.equal(isValidProductionConfig({ ...config, root: "C:\\Virki" }), false);
 });
 
 test("Docker preflight fails closed when container-name visibility is unavailable", { skip: process.platform !== "linux" }, () => {
-  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "bielos-docker-preflight-"));
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "virki-docker-preflight-"));
   const binDirectory = path.join(temporaryDirectory, "bin");
   const root = path.join(temporaryDirectory, "root");
   try {
@@ -86,7 +86,7 @@ exit 2
     });
 
     assert.notEqual(result.status, 0);
-    assert.doesNotMatch(result.stdout ?? "", /BIELOS_DEMANAGE_COUNT=0/u);
+    assert.doesNotMatch(result.stdout ?? "", /VIRKI_DEMANAGE_COUNT=0/u);
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
@@ -98,7 +98,7 @@ test("standalone preflight binds host contact to the exact accepted source gate"
     config,
     inspectSource: ({ repositoryRoot }) => {
       calls.push("source");
-      assert.ok(repositoryRoot.endsWith("BielOS"));
+      assert.ok(repositoryRoot.endsWith("Virki"));
       return { branch: "main", revision };
     },
     verifyCi: ({ revision: observed }) => {
@@ -140,7 +140,7 @@ test("preflight stops at a missing native host marker without trying Docker", as
     execute: (command, args) => {
       if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
       remoteCalls += 1;
-      return { status: 1, stdout: "BIELOS_PROBE_FAILURE=MARKER_METADATA_INVALID\n" };
+      return { status: 1, stdout: "VIRKI_PROBE_FAILURE=MARKER_METADATA_INVALID\n" };
     },
   });
   assert.equal(result.status, 1);
@@ -156,7 +156,7 @@ test("preflight reports a sanitized remote host-check category", async () => {
       if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
       return {
         status: 1,
-        stdout: "BIELOS_PROBE_FAILURE=PROTECTED_ENV_METADATA_INVALID:.env\n",
+        stdout: "VIRKI_PROBE_FAILURE=PROTECTED_ENV_METADATA_INVALID:.env\n",
         stderr: "private-value=must-not-be-returned",
       };
     },
@@ -173,7 +173,7 @@ test("preflight treats inherited remote category names as unknown", async () => 
     sleep: async () => {},
     execute: (command, args) => {
       if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
-      return { status: 1, stdout: "BIELOS_PROBE_FAILURE=toString\n", stderr: "" };
+      return { status: 1, stdout: "VIRKI_PROBE_FAILURE=toString\n", stderr: "" };
     },
   });
 
@@ -197,13 +197,13 @@ test("preflight identifies strict host-key rejection without returning SSH diagn
 });
 
 test("native shell probe emits the sanitized protected environment metadata category", { skip: process.platform !== "linux" }, async () => {
-  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "bielos-native-probe-"));
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "virki-native-probe-"));
   const root = path.join(temporaryDirectory, "root");
   try {
     mkdirSync(root, { mode: 0o700 });
     for (const name of [".deploy-tmp", "releases", "backups"]) mkdirSync(path.join(root, name), { mode: 0o700 });
     const hostname = spawnSync("hostname", ["-s"], { encoding: "utf8" }).stdout.trim();
-    const marker = path.join(root, ".bielos-production-host");
+    const marker = path.join(root, ".virki-production-host");
     writeFileSync(marker, `role=production\nprotocol=2\nhostname=${hostname}\npath=${root}\n`, { mode: 0o600 });
     chmodSync(marker, 0o600);
     for (const name of [".env", ".env.oidc", ".env.oidc-data"]) {
@@ -246,9 +246,9 @@ test("preflight fails closed when the host cannot serialize state-changing opera
       if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
       remoteCalls += 1;
       if (remoteCalls <= 8) {
-        return { status: 0, stdout: "BIELOS_PROBE_ID=host\nBIELOS_PROBE_WD=/srv/bielos\nBIELOS_PROBE_PLATFORM=linux-native\nBIELOS_PROBE_MARKER=valid\n" };
+        return { status: 0, stdout: "VIRKI_PROBE_ID=host\nVIRKI_PROBE_WD=/srv/virki\nVIRKI_PROBE_PLATFORM=linux-native\nVIRKI_PROBE_MARKER=valid\n" };
       }
-      return { status: 0, stdout: "BIELOS_DOCKER_VERSION=29\nBIELOS_DOCKER_INFO=29\nBIELOS_COMPOSE_VERSION=2\nBIELOS_PLATFORM=linux/amd64\nBIELOS_DISK_FREE_GB=100\nBIELOS_DEMANAGE_COUNT=2\n" };
+      return { status: 0, stdout: "VIRKI_DOCKER_VERSION=29\nVIRKI_DOCKER_INFO=29\nVIRKI_COMPOSE_VERSION=2\nVIRKI_PLATFORM=linux/amd64\nVIRKI_DISK_FREE_GB=100\nVIRKI_DEMANAGE_COUNT=2\n" };
     },
   });
   assert.equal(result.status, 1);
@@ -258,7 +258,7 @@ test("preflight fails closed when the host cannot serialize state-changing opera
 
 test("Linux source lifecycle keeps host identity pre-provisioned and secrets remote-only", () => {
   assert.match(serverScript, /grep -Fxq 'protocol=2' "\$marker_path"/u);
-  assert.doesNotMatch(serverScript, /printf .{0,100}role=production.{0,100}protocol=2|Set-Content.*bielos-production-host/u);
+  assert.doesNotMatch(serverScript, /printf .{0,100}role=production.{0,100}protocol=2|Set-Content.*virki-production-host/u);
   assert.match(serverScript, /ln -s "\$root\/.env" "\$stage\/.env"/u);
   assert.match(serverScript, /ln -s "\$root\/.env\.oidc" "\$stage\/.env\.oidc"/u);
   assert.match(serverScript, /ln -s "\$root\/.env\.oidc-data" "\$stage\/.env\.oidc-data"/u);
@@ -269,18 +269,18 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(serverScript, /assert_active_source/u);
   assert.match(serverScript, /activate_source/u);
   assert.match(serverScript, /compose up --detach --force-recreate "\$\{application_services\[@\]\}"/u);
-  assert.match(serverScript, /prisma:migrate:status --workspace @bielos\/database/u);
+  assert.match(serverScript, /prisma:migrate:status --workspace @virki\/database/u);
   assert.match(serverScript, /encrypted recovery outbox payload or delivery-attempt metadata/u);
   assert.match(serverScript, /docker rm --force --volumes "\$container_id"/u);
   assert.doesNotMatch(serverScript, /\bcompose[^\n]*\bdown\b|docker volume rm|prisma db push|powershell/i);
-  assert.match(serverScript, /readonly lock_path="\$root\/\.bielos-operations\.lock"/u);
+  assert.match(serverScript, /readonly lock_path="\$root\/\.virki-operations\.lock"/u);
   assert.match(serverScript, /flock -n "\$state_lock_fd"/u);
   assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
   assert.match(serverScript, /tar --list --verbose --quoting-style=c --file "\$archive"/u);
-  assert.match(serverScript, /local role_script="\$release\/infra\/postgres-init\/10-bielos-database-roles\.sh"[\s\S]*?chmod 644 -- "\$role_script"[\s\S]*?stat -c '%a' -- "\$role_script"/u);
+  assert.match(serverScript, /local role_script="\$release\/infra\/postgres-init\/10-virki-database-roles\.sh"[\s\S]*?chmod 644 -- "\$role_script"[\s\S]*?stat -c '%a' -- "\$role_script"/u);
   assert.match(serverScript, /Source archive contains a link or unsupported filesystem entry/u);
   assert.match(serverScript, /find "\$stage" -type l -print -quit/u);
-  assert.match(serverScript, /current .bielos-release .bielos-production-host/u);
+  assert.match(serverScript, /current .virki-release .virki-production-host/u);
   const cleanupDispatch = serverScript.indexOf('if [[ "$action" == cleanup-deploy-staging ]]; then');
   assert.ok(cleanupDispatch >= 0);
   assert.match(serverScript.slice(cleanupDispatch), /verify_cleanup_target \|\| fail[\s\S]*?acquire_state_lock[\s\S]*?cleanup_deploy_staging "\$revision" "\$archive_id"/u);
@@ -316,12 +316,12 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
 test("production Compose uses the exact loaded runtime and migration image tags", () => {
   assert.match(serverScript, /--project-directory "\$source_dir\/infra"/u);
   const compose = readFileSync(new URL("../infra/docker-compose.prod.yml", import.meta.url), "utf8");
-  assert.match(compose, /image: \$\{BIELOS_PRODUCTION_IMAGE:\?/u);
-  assert.match(compose, /image: \$\{BIELOS_MIGRATOR_IMAGE:\?/u);
+  assert.match(compose, /image: \$\{VIRKI_PRODUCTION_IMAGE:\?/u);
+  assert.match(compose, /image: \$\{VIRKI_MIGRATOR_IMAGE:\?/u);
   assert.match(compose, /pull_policy: never/u);
   assert.doesNotMatch(compose, /^\s+build:/mu);
-  assert.match(serverScript, /export BIELOS_PRODUCTION_IMAGE="bielos-production-ci:\$revision"/u);
-  assert.match(serverScript, /export BIELOS_MIGRATOR_IMAGE="bielos-migrator-ci:\$revision"/u);
+  assert.match(serverScript, /export VIRKI_PRODUCTION_IMAGE="virki-production-ci:\$revision"/u);
+  assert.match(serverScript, /export VIRKI_MIGRATOR_IMAGE="virki-migrator-ci:\$revision"/u);
 });
 
 test("routed services start only after app checks, and failure cleanup preserves PostgreSQL", () => {
@@ -376,23 +376,23 @@ test("routed services start only after app checks, and failure cleanup preserves
 });
 
 test("restore clone and migration runner use an isolated password-protected internal network", () => {
-  assert.match(serverScript, /docker network create --internal --label "bielos\.restore\.operation=\$isolation_id" "\$db_network"/u);
-  assert.match(serverScript, /local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="\$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="\$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="\$migrator_password" BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD="\$audit_maintenance_password"[\s\S]*?--env POSTGRES_PASSWORD/u);
+  assert.match(serverScript, /docker network create --internal --label "virki\.restore\.operation=\$isolation_id" "\$db_network"/u);
+  assert.match(serverScript, /local -x POSTGRES_USER=virki_bootstrap POSTGRES_PASSWORD="\$bootstrap_password" VIRKI_RUNTIME_DB_PASSWORD="\$runtime_password" VIRKI_MIGRATOR_DB_PASSWORD="\$migrator_password" VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD="\$audit_maintenance_password"[\s\S]*?--env POSTGRES_PASSWORD/u);
   assert.match(serverScript, /bootstrap_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
   assert.match(serverScript, /runtime_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
   assert.match(serverScript, /migrator_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
   assert.match(serverScript, /audit_maintenance_password=\$\(od -An -N32 -tx1 \/dev\/urandom/u);
   assert.match(serverScript, /\$bootstrap_password" != "\$runtime_password" && "\$bootstrap_password" != "\$migrator_password" && "\$runtime_password" != "\$migrator_password" && "\$audit_maintenance_password" != "\$bootstrap_password" && "\$audit_maintenance_password" != "\$runtime_password" && "\$audit_maintenance_password" != "\$migrator_password/u);
-  assert.match(serverScript, /--env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD --env BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD/u);
+  assert.match(serverScript, /--env VIRKI_RUNTIME_DB_PASSWORD --env VIRKI_MIGRATOR_DB_PASSWORD --env VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD/u);
   assert.match(serverScript, /services:[\s\S]*?migrate:[\s\S]*?networks:[\s\S]*?- restore/u);
   assert.match(serverScript, /external: true[\s\S]*?name: %s/u);
-  assert.match(serverScript, /compose_with_override "\$override" --profile migration run --rm --no-deps --name "\$migration_container" --label "bielos\.restore\.operation=\$isolation_id"/u);
-  assert.doesNotMatch(serverScript, /bielos-prod_default|POSTGRES_HOST_AUTH_METHOD=trust/u);
+  assert.match(serverScript, /compose_with_override "\$override" --profile migration run --rm --no-deps --name "\$migration_container" --label "virki\.restore\.operation=\$isolation_id"/u);
+  assert.doesNotMatch(serverScript, /virki-prod_default|POSTGRES_HOST_AUTH_METHOD=trust/u);
 
-  assert.match(serverScript, /verify_clone_cleanup\(\)[\s\S]*?docker ps --all --filter "label=bielos\.restore\.operation=\$isolation_id"[\s\S]*?docker network ls --filter "label=bielos\.restore\.operation=\$isolation_id"/u);
+  assert.match(serverScript, /verify_clone_cleanup\(\)[\s\S]*?docker ps --all --filter "label=virki\.restore\.operation=\$isolation_id"[\s\S]*?docker network ls --filter "label=virki\.restore\.operation=\$isolation_id"/u);
   const backup = serverScript.slice(serverScript.indexOf("create_verified_backup() {"), serverScript.indexOf("\nassert_backup_verified() {"));
   const cloneCleanup = serverScript.slice(serverScript.indexOf("cleanup_clone() {"), serverScript.indexOf("\nverify_clone_cleanup() {"));
-  assert.match(cloneCleanup, /docker ps --all --quiet --filter "label=bielos\.restore\.operation=\$isolation_id"[\s\S]*?docker rm --force --volumes "\$container_id"[\s\S]*?docker network rm "\$network_id"[\s\S]*?return "\$cleanup_failed"/u);
+  assert.match(cloneCleanup, /docker ps --all --quiet --filter "label=virki\.restore\.operation=\$isolation_id"[\s\S]*?docker rm --force --volumes "\$container_id"[\s\S]*?docker network rm "\$network_id"[\s\S]*?return "\$cleanup_failed"/u);
   assert.doesNotMatch(cloneCleanup, /\|\| true/u);
   assert.match(backup, /docker exec --interactive --user postgres "\$container" pg_restore[^\n]*< "\$partial_backup_path" >\/dev\/null/u);
   assert.doesNotMatch(backup, /docker cp/u);
@@ -464,9 +464,9 @@ test("production migration reconciles only exact baseline histories and verifies
   assert.ok(resolve >= 0 && exactResolvedState > resolve && guardedPrune >= 0 && deleteRows > guardedPrune);
   assert.match(normalizer, /run_migration_prisma .* resolve-baseline/u);
   assert.match(prune, /clone_migration_query "\$container" "\$sql"/u);
-  assert.match(prune, /PGPASSWORD="\$BIELOS_MIGRATOR_DB_PASSWORD" psql --host 127\.0\.0\.1 -U bielos_migrator/u);
+  assert.match(prune, /PGPASSWORD="\$VIRKI_MIGRATOR_DB_PASSWORD" psql --host 127\.0\.0\.1 -U virki_migrator/u);
   assert.doesNotMatch(prune, /database_query "\$sql"|\$POSTGRES_USER/u);
-  assert.ok(prune.includes("DO \\$bielos\\$"));
+  assert.ok(prune.includes("DO \\$virki\\$"));
   assert.match(prune, /"finished_at" IS NULL OR "rolled_back_at" IS NOT NULL/u);
 
   const cloneStart = serverScript.indexOf("run_clone_migrations() {");
@@ -482,8 +482,8 @@ test("production migration reconciles only exact baseline histories and verifies
   assert.ok(apply.indexOf("assert_backup_verified") < apply.indexOf("normalize_migration_history"));
   assert.ok(apply.indexOf("assert_backup_verified") < apply.indexOf("compose up --detach --force-recreate postgres"));
   assert.ok(apply.indexOf("compose up --detach --force-recreate postgres") < apply.indexOf("pg_isready"));
-  assert.ok(apply.indexOf("pg_isready") < apply.indexOf("10-bielos-database-roles.sh"));
-  assert.ok(apply.indexOf("10-bielos-database-roles.sh") < apply.indexOf("compose --profile migration run --rm --no-deps migrate"));
+  assert.ok(apply.indexOf("pg_isready") < apply.indexOf("10-virki-database-roles.sh"));
+  assert.ok(apply.indexOf("10-virki-database-roles.sh") < apply.indexOf("compose --profile migration run --rm --no-deps migrate"));
   assert.doesNotMatch(apply, /compose (?:down|rm)[\s\S]*?postgres|--volumes/u);
   assert.ok(apply.indexOf("normalize_migration_history") < apply.indexOf("compose --profile migration run --rm --no-deps migrate"));
   assert.ok(apply.indexOf("compose --profile migration run --rm --no-deps migrate") < apply.indexOf("run_migration_status"));
@@ -575,10 +575,10 @@ test("deployment downloads the exact-SHA tested images after preflight and trans
       }
       if (command === "gh" && args[0] === "run" && args[1] === "download") {
         assert.equal(args[2], "54321");
-        assert.equal(args[args.indexOf("--repo") + 1], "bielxdh3/BielOS");
-        assert.equal(args[args.indexOf("--name") + 1], `bielos-production-images-${revision}-linux-amd64`);
+        assert.equal(args[args.indexOf("--repo") + 1], "bielxdh3/Virki");
+        assert.equal(args[args.indexOf("--name") + 1], `virki-production-images-${revision}-linux-amd64`);
         const targetDirectory = args[args.indexOf("--dir") + 1];
-        imageArchivePath = path.join(targetDirectory, "bielos-production-images.tar.gz");
+        imageArchivePath = path.join(targetDirectory, "virki-production-images.tar.gz");
         writeFileSync(imageArchivePath, "gzip image archive");
         return { status: 0, stdout: "" };
       }
@@ -652,7 +652,7 @@ test("failed transfers and remote deploys invoke cleanup for only their unique s
           if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
           if (command === "gh") {
             const targetDirectory = args[args.indexOf("--dir") + 1];
-            imageArchivePath = path.join(targetDirectory, "bielos-production-images.tar.gz");
+            imageArchivePath = path.join(targetDirectory, "virki-production-images.tar.gz");
             writeFileSync(imageArchivePath, "gzip image archive");
             return { status: 0, stdout: "" };
           }
@@ -698,7 +698,7 @@ test("sensitive files in the Git tree block transfer and production contact", as
     "infra/cloudflare/account.json",
     "Infra/Cloudflare/account.JSON",
     "keys/client.key",
-    "database/bielos-dump.zip",
+    "database/virki-dump.zip",
     "infra/backups/production.dump",
     "exports/production.dump.gz",
     "database/cache.sqlite-wal",
@@ -799,7 +799,7 @@ test("a release-marker symlink in the Git tree blocks transfer and production co
         return { status: 0, stdout: "" };
       }
       if (command === "git" && args[0] === "ls-tree") {
-        return { status: 0, stdout: "120000 blob " + revision + "\t.bielos-release\0" };
+        return { status: 0, stdout: "120000 blob " + revision + "\t.virki-release\0" };
       }
       if (command === "git" && args[0] === "show") return { status: 0, stdout: serverScript };
       productionContact = true;
@@ -865,9 +865,9 @@ test("production migration uses the protected Compose URL when no disposable ove
   const pruneStart = serverScript.indexOf("prune_legacy_migration_history() {");
   const pruneEnd = serverScript.indexOf("\nnormalize_migration_history() {", pruneStart);
   const prune = serverScript.slice(pruneStart, pruneEnd);
-  assert.match(prune, /clone_migration_query "\$container" "\$sql"[\s\S]*?else\s+compose exec -T postgres sh -lc 'PGPASSWORD="\$BIELOS_MIGRATOR_DB_PASSWORD" psql --host 127\.0\.0\.1 -U bielos_migrator -d "\$POSTGRES_DB"/u);
+  assert.match(prune, /clone_migration_query "\$container" "\$sql"[\s\S]*?else\s+compose exec -T postgres sh -lc 'PGPASSWORD="\$VIRKI_MIGRATOR_DB_PASSWORD" psql --host 127\.0\.0\.1 -U virki_migrator -d "\$POSTGRES_DB"/u);
   assert.doesNotMatch(prune, /compose exec -T -e MIGRATION_DATABASE_URL/u);
-  assert.match(serverScript, /--health-cmd 'pg_isready -h 127\.0\.0\.1 -U bielos_bootstrap -d bielos_restore'/u);
+  assert.match(serverScript, /--health-cmd 'pg_isready -h 127\.0\.0\.1 -U virki_bootstrap -d virki_restore'/u);
 });
 
 test("production migration wrapper refuses schema development and db push commands before Prisma runs", () => {
@@ -905,12 +905,12 @@ test("production health checks use validated configured hosts and the configured
     `${"a.".repeat(126)}aa`,
     "valid.example.com\r\nInjected: yes",
   ];
-  const bash = spawnSync("bash", ["-c", `${validator}\nfor hostname in "$@"; do if is_valid_dns_hostname "$hostname"; then printf 'Y\\n'; else printf 'N\\n'; fi; done`, "bielos-hostname-test", ...hostnames], { encoding: "utf8" });
+  const bash = spawnSync("bash", ["-c", `${validator}\nfor hostname in "$@"; do if is_valid_dns_hostname "$hostname"; then printf 'Y\\n'; else printf 'N\\n'; fi; done`, "virki-hostname-test", ...hostnames], { encoding: "utf8" });
   assert.equal(bash.status, 0, bash.stderr);
   assert.deepEqual(bash.stdout.trim().split(/\r?\n/u), ["Y", "Y", "N", "N", "N", "N", "N", "N"]);
-  assert.match(health, /BIELOS_PORTAL_HOSTNAME/u);
-  assert.match(health, /BIELOS_HUB_HOSTNAME/u);
-  assert.match(health, /BIELOS_OIDC_ISSUER/u);
+  assert.match(health, /VIRKI_PORTAL_HOSTNAME/u);
+  assert.match(health, /VIRKI_HUB_HOSTNAME/u);
+  assert.match(health, /VIRKI_OIDC_ISSUER/u);
   assert.match(health, /"https:\/\/\$portal_hostname"/u);
   assert.match(health, /Host: \$portal_hostname/u);
   assert.match(health, /Host: \$hub_hostname/u);

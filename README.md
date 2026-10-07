@@ -1,14 +1,14 @@
-# BielOS
+# Virki
 
-BielOS provides identity, authentication and SSO, security, project entry access, and audit for external projects. It authenticates users and controls entry; each project owns its own experience and permissions.
+Virki provides identity, authentication and SSO, security, project entry access, and audit for external projects. It authenticates users and controls entry; each project owns its own experience and permissions.
 
 ## Surfaces
 
 - `biel.dev.br` — minimal public page and portal entry.
 - `portal.biel.dev.br` — authenticated USER portal and OIDC issuer. Users see only projects granted to them.
-- `hub.biel.dev.br` — ADMIN control plane behind Cloudflare Access and BielOS authentication.
+- `hub.biel.dev.br` — ADMIN control plane behind Cloudflare Access and Virki authentication.
 
-The ADMIN navigation is Contas, Acessos, Segurança, Auditoria, and Conexões. Stored roles are ADMIN and USER. Project access is granted explicitly to users; BielOS has no project roles.
+The ADMIN navigation is Contas, Acessos, Segurança, Auditoria, and Conexões. Stored roles are ADMIN and USER. Project access is granted explicitly to users; Virki has no project roles.
 
 ## Local development
 
@@ -32,14 +32,14 @@ Register each external project through **Hub → Conexões** with its canonical 
 
 ## Production operations
 
-The next canonical production host is native Linux reached over SSH. The previous host is unavailable and the native Linux host has not been verified; do not deploy until its identity and existing BielOS data are confirmed. The scripts reject WSL, require a pre-provisioned host marker, and never create that marker during first contact. Operator connection values live in the ignored `.production.operator.json` file or `BIELOS_PRODUCTION_*` environment variables. Run the SSH preflight only when the native Linux host is available.
+The next canonical production host is native Linux reached over SSH. The previous host is unavailable and the native Linux host has not been verified; do not deploy until its identity and existing Virki data are confirmed. The scripts reject WSL, require a pre-provisioned host marker, and never create that marker during first contact. Operator connection values live in the ignored `.production.operator.json` file or `VIRKI_PRODUCTION_*` environment variables. Run the SSH preflight only when the native Linux host is available.
 
 | Command | Purpose |
 |---|---|
 | `npm run preflight:prod` | Require eight stable SSH probes, the expected native Linux host, its pre-provisioned identity marker, private remote environment files, and Docker Compose. |
 | `npm run deploy:prod` | Require clean `main` at `origin/main` and green exact-SHA CI, then backup, restore-test migrations, enter maintenance, migrate, start, and health-check. |
 | `npm run backup:prod` | Create a backup outside source releases and validate all committed migrations against a restored copy. |
-| `npm run status:prod` | Show BielOS service status. |
+| `npm run status:prod` | Show Virki service status. |
 | `npm run revision:prod` | Verify running service image revisions. |
 | `npm run health:prod` | Check public and hub health, portal OIDC discovery, Hub denial without Access, and loopback bindings. |
 | `npm run logs:prod` | Return sanitized log availability only. |

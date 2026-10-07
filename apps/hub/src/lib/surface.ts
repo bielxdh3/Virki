@@ -1,6 +1,6 @@
 export type Surface = "hub" | "portal" | "local" | "unknown";
 
-export const TRUSTED_REQUEST_PATH_HEADER = "x-bielos-request-path";
+export const TRUSTED_REQUEST_PATH_HEADER = "x-virki-request-path";
 
 export function requestHost(headers: Pick<Headers, "get">): string {
   const host = headers.get("host")?.trim() ?? "";
@@ -89,7 +89,7 @@ export function getSurfaceBaseUrl(headers: Pick<Headers, "get">, fallback: strin
 
   const hostname = surfaceHostname(surface, env);
   if (!hostname) return null;
-  const configured = surface === "hub" ? env.BIELOS_HUB_URL : env.BIELOS_PORTAL_URL;
+  const configured = surface === "hub" ? env.VIRKI_HUB_URL : env.VIRKI_PORTAL_URL;
   if (!configured?.trim()) {
     if (env.NODE_ENV !== "production") return safeFallbackUrl(fallback);
     return new URL(`https://${hostname}/`);
@@ -116,8 +116,8 @@ export function getSurfaceBaseUrl(headers: Pick<Headers, "get">, fallback: strin
 
 function surfaceHostname(surface: "hub" | "portal", env: NodeJS.ProcessEnv): string | null {
   const configured = surface === "hub"
-    ? env.BIELOS_HUB_HOSTNAME ?? "hub.biel.dev.br"
-    : env.BIELOS_PORTAL_HOSTNAME ?? "portal.biel.dev.br";
+    ? env.VIRKI_HUB_HOSTNAME ?? "hub.biel.dev.br"
+    : env.VIRKI_PORTAL_HOSTNAME ?? "portal.biel.dev.br";
   if (configured !== configured.trim()) return null;
   const hostname = configured.toLowerCase().replace(/\.$/u, "");
   const labels = hostname.split(".");

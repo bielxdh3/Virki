@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 
-const image = process.env.BIELOS_RUNTIME_IMAGE?.trim();
+const image = process.env.VIRKI_RUNTIME_IMAGE?.trim();
 if (!image) {
-  console.log(JSON.stringify({ status: "failed", errors: ["BIELOS_RUNTIME_IMAGE is required."] }));
+  console.log(JSON.stringify({ status: "failed", errors: ["VIRKI_RUNTIME_IMAGE is required."] }));
   process.exit(1);
 }
 
@@ -27,7 +27,7 @@ const argon2PlatformDirectory = [
 let argon2Loadable = false;
 try {
   const argon2 = require("/app/node_modules/@node-rs/argon2");
-  const digest = typeof argon2.hashSync === "function" ? argon2.hashSync("bielos-runtime-boundary-check") : null;
+  const digest = typeof argon2.hashSync === "function" ? argon2.hashSync("virki-runtime-boundary-check") : null;
   argon2Loadable = typeof digest === "string" && digest.length > 0;
 } catch {}
 const runtimeClosure = [

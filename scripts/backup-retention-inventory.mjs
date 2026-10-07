@@ -4,8 +4,8 @@ import { lstat, open, readdir, realpath, statfs } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const backupNamePattern = /^bielos-\d{8}-\d{6}-[a-f0-9]{6}\.dump$/u;
-const markerName = ".bielos-migration-verification";
+const backupNamePattern = /^virki-\d{8}-\d{6}-[a-f0-9]{6}\.dump$/u;
+const markerName = ".virki-migration-verification";
 const minimumFreePercent = 15;
 
 function parseMarker(contents) {

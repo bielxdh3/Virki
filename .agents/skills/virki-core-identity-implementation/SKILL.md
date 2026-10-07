@@ -1,11 +1,11 @@
 ---
-name: bielos-core-identity-implementation
-description: Implement BielOS identity, authentication, account security, recovery, project entry grants, or OIDC integration.
+name: virki-core-identity-implementation
+description: Implement Virki identity, authentication, account security, recovery, project entry grants, or OIDC integration.
 ---
 
-# BielOS identity implementation
+# Virki identity implementation
 
-BielOS is an identity, authentication/SSO, security, project-entry-access, and audit gateway. It authenticates users and controls entry to external relying applications; each application owns its experience and internal authorization.
+Virki is an identity, authentication/SSO, security, project-entry-access, and audit gateway. It authenticates users and controls entry to external relying applications; each application owns its experience and internal authorization.
 
 ## Workflow
 
@@ -20,9 +20,9 @@ BielOS is an identity, authentication/SSO, security, project-entry-access, and a
 
 ## Required invariants
 
-- Project access is an explicit USER-to-external-project grant. BielOS stores no project-internal roles or permissions.
+- Project access is an explicit USER-to-external-project grant. Virki stores no project-internal roles or permissions.
 - OIDC uses Authorization Code with required PKCE S256, exact HTTPS redirect allowlists, short-lived one-time codes, client binding, state, and nonce for OpenID requests.
-- Project clients never receive the central BielOS session cookie.
+- Project clients never receive the central Virki session cookie.
 - Authentication failures are generic; sensitive routes use CSRF, rate limiting, replay protection, and server-side checks.
 - High-risk ADMIN actions require fresh proof according to their action policy.
 - Audit metadata is sanitized and never contains credentials, secrets, bearer material, or raw tokens.

@@ -2,15 +2,15 @@ services:
   core-test-postgres:
     image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     environment:
-      POSTGRES_DB: bielos_core_test
-      POSTGRES_USER: bielos_test
+      POSTGRES_DB: virki_core_test
+      POSTGRES_USER: virki_test
       POSTGRES_PASSWORD: local-validation-only
     ports:
       - "127.0.0.1:${CORE_TEST_DB_PORT:?CORE_TEST_DB_PORT is required}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bielos_test -d bielos_core_test"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U virki_test -d virki_core_test"]
       interval: 1s
       timeout: 3s
       retries: 30

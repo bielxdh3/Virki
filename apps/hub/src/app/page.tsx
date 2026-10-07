@@ -1,5 +1,5 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import { prisma } from "@bielos/database";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { prisma } from "@virki/database";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../lib/auth";
@@ -34,7 +34,7 @@ export default async function HomePage() {
       <a className="skip-link" href="#main-content">Ir para o conteúdo</a>
       <main className="admin-main">
       <header className="page-header">
-        <div><p className="eyebrow">BielOS</p><h1>Projetos</h1></div>
+        <div><p className="eyebrow">Virki</p><h1>Projetos</h1></div>
         <div><a className="text-link" href="/account/security">Minha conta</a>
           <form action="/api/logout" method="post"><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><button type="submit">Sair</button></form>
         </div>

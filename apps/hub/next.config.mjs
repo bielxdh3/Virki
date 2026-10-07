@@ -11,7 +11,7 @@ const nextConfig = {
   },
   outputFileTracingRoot: workspaceRoot,
   serverExternalPackages: ["@node-rs/argon2", "@prisma/client"],
-  transpilePackages: ["@bielos/auth", "@bielos/database"],
+  transpilePackages: ["@virki/auth", "@virki/database"],
   async headers() {
     const headers = [
       { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
@@ -24,8 +24,8 @@ const nextConfig = {
     return [{ source: "/:path*", headers }];
   },
   async rewrites() {
-    const issuer = process.env.BIELOS_OIDC_PROXY_URL ?? "http://oidc-issuer:3003";
-    const portalHost = process.env.BIELOS_PORTAL_HOSTNAME ?? "portal.biel.dev.br";
+    const issuer = process.env.VIRKI_OIDC_PROXY_URL ?? "http://oidc-issuer:3003";
+    const portalHost = process.env.VIRKI_PORTAL_HOSTNAME ?? "portal.biel.dev.br";
     const paths = ["/.well-known/:path*", "/auth", "/auth/:uid", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/interaction/:path*", "/resume/:path*"];
     return paths.map((source) => ({ source, has: [{ type: "host", value: portalHost }], destination: `${issuer}${source}` }));
   },

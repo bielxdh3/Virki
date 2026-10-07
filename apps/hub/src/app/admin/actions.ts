@@ -1,11 +1,11 @@
 "use server";
 
 import { randomBytes } from "node:crypto";
-import { hashPassword, normalizeEmail, hashAuditEmail, writeAuditLogInTransaction } from "@bielos/auth";
-import { revokeUserAuthenticationProofsInTransaction } from "@bielos/auth/security";
-import { encryptOidcClientSecret, hashOidcIdentifier } from "@bielos/auth/oidc-secrets";
-import { AdministrationMutationError, requireSecurityElevation } from "@bielos/auth/administration";
-import { prisma } from "@bielos/database";
+import { hashPassword, normalizeEmail, hashAuditEmail, writeAuditLogInTransaction } from "@virki/auth";
+import { revokeUserAuthenticationProofsInTransaction } from "@virki/auth/security";
+import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
+import { AdministrationMutationError, requireSecurityElevation } from "@virki/auth/administration";
+import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../lib/admin-mutation";

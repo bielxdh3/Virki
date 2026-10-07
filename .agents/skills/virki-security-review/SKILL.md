@@ -1,9 +1,9 @@
 ---
-name: bielos-security-review
-description: Review BielOS authentication, authorization, OIDC, Cloudflare Access, sessions, CSRF, audit, deployment, or data-migration security.
+name: virki-security-review
+description: Review Virki authentication, authorization, OIDC, Cloudflare Access, sessions, CSRF, audit, deployment, or data-migration security.
 ---
 
-# BielOS security review
+# Virki security review
 
 Keep findings evidence-based and scoped. Do not print secrets or private production values. A review in a single-agent task is a fresh pass by the same agent; never imply independent review provenance.
 
@@ -11,14 +11,14 @@ Keep findings evidence-based and scoped. Do not print secrets or private product
 
 1. Public page and unauthenticated protocol metadata.
 2. USER portal session and explicit project grant.
-3. ADMIN Cloudflare Access assertion and BielOS ADMIN session.
+3. ADMIN Cloudflare Access assertion and Virki ADMIN session.
 4. External relying application and its own local session.
 5. Private Compose network, database, and remote production host.
 
 ## Review checklist
 
 - Unknown hosts and anonymous protected routes fail closed.
-- ADMIN routes verify the Access JWT and BielOS role server-side; missing or invalid Access is forbidden.
+- ADMIN routes verify the Access JWT and Virki role server-side; missing or invalid Access is forbidden.
 - USER access never inherits an ADMIN-only Access policy.
 - Session values are opaque, hashed at rest, host-only in cookies, revocable, and absent from logs.
 - Mutable actions enforce CSRF and fresh proof where required.

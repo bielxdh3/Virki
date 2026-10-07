@@ -14,12 +14,12 @@ function getPortalUrl(value: string | undefined): string | null {
 }
 
 export default function PublicLandingPage() {
-  const portalUrl = getPortalUrl(process.env.BIELOS_PORTAL_URL);
+  const portalUrl = getPortalUrl(process.env.VIRKI_PORTAL_URL);
   return (
     <main className="public-page">
-      <section className="public-panel" aria-labelledby="bielos-title">
+      <section className="public-panel" aria-labelledby="virki-title">
         <p className="eyebrow">Identidade e acesso</p>
-        <h1 id="bielos-title">BielOS</h1>
+        <h1 id="virki-title">Virki</h1>
         <p>Identidade e acesso para projetos privados.</p>
         {portalUrl ? <a className="button-primary" href={portalUrl}>Entrar</a> : <p className="muted" role="status">A entrada ao portal está temporariamente indisponível. Tente novamente mais tarde.</p>}
       </section>

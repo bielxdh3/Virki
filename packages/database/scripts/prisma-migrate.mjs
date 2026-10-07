@@ -26,7 +26,7 @@ if (process.env.NODE_ENV === "production" && !["deploy", "status", "resolve-base
 }
 const migrationUrl = process.env.MIGRATION_DATABASE_URL?.trim();
 if (!migrationUrl || !isMigratorUrl(migrationUrl)) {
-  console.error("MIGRATION_DATABASE_URL must use the bielos_migrator database role.");
+  console.error("MIGRATION_DATABASE_URL must use the virki_migrator database role.");
   process.exit(1);
 }
 const prismaArgs = command === "verify-schema" ? args : [...args, "--schema", schemaPath];
@@ -47,14 +47,14 @@ if (["dev", "deploy", "resolve-baseline"].includes(command)) {
   const restrictMigrationLedger = spawnSync(process.execPath, [prismaCli, "db", "execute", "--stdin", "--schema", schemaPath], {
     cwd: workspaceRoot,
     env: { ...process.env, DATABASE_URL: migrationUrl },
-    input: `DO $bielos$ BEGIN
+    input: `DO $virki$ BEGIN
   IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
-    EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM PUBLIC, bielos_runtime';
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bielos_runtime_test') THEN
-      EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM bielos_runtime_test';
+    EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM PUBLIC, virki_runtime';
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_runtime_test') THEN
+      EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public."_prisma_migrations" FROM virki_runtime_test';
     END IF;
   END IF;
-END $bielos$;`,
+END $virki$;`,
     stdio: ["pipe", "inherit", "inherit"],
     windowsHide: true
   });
@@ -69,7 +69,7 @@ process.exitCode = exitCode;
 function isMigratorUrl(value) {
   try {
     const url = new URL(value);
-    return ["postgres:", "postgresql:"].includes(url.protocol) && decodeURIComponent(url.username) === "bielos_migrator" && Boolean(url.password && url.hostname && url.pathname.length > 1);
+    return ["postgres:", "postgresql:"].includes(url.protocol) && decodeURIComponent(url.username) === "virki_migrator" && Boolean(url.password && url.hostname && url.pathname.length > 1);
   } catch {
     return false;
   }

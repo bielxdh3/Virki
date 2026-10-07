@@ -4,23 +4,23 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-const image = process.env.BIELOS_MIGRATOR_IMAGE?.trim();
-if (!image || !/^bielos-migrator-ci:[0-9a-f]{40}$/u.test(image)) {
+const image = process.env.VIRKI_MIGRATOR_IMAGE?.trim();
+if (!image || !/^virki-migrator-ci:[0-9a-f]{40}$/u.test(image)) {
   throw new Error("Migrator smoke requires an exact-revision CI image.");
 }
 
 const id = randomUUID();
-const network = `bielos-migrator-smoke-${id}`;
-const databaseContainer = `bielos-migrator-db-${id}`;
+const network = `virki-migrator-smoke-${id}`;
+const databaseContainer = `virki-migrator-db-${id}`;
 const databaseHost = `database-${id}`;
-const databaseUser = "bielos_bootstrap";
-const databaseName = "bielos_validation";
+const databaseUser = "virki_bootstrap";
+const databaseName = "virki_validation";
 const bootstrapPassword = randomBytes(32).toString("hex");
 const runtimePassword = randomBytes(32).toString("hex");
 const migratorPassword = randomBytes(32).toString("hex");
 const auditMaintenancePassword = randomBytes(32).toString("hex");
-const migrationUrl = `postgresql://bielos_migrator:${migratorPassword}@${databaseHost}:5432/${databaseName}?schema=public`;
-const roleSetupPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "infra", "postgres-init", "10-bielos-database-roles.sh");
+const migrationUrl = `postgresql://virki_migrator:${migratorPassword}@${databaseHost}:5432/${databaseName}?schema=public`;
+const roleSetupPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "infra", "postgres-init", "10-virki-database-roles.sh");
 const postgresImage = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
 let networkCreated = false;
 let databaseCreated = false;
@@ -33,10 +33,10 @@ try {
   requireDocker([
     "run", "--detach", "--name", databaseContainer,
     "--network", network, "--network-alias", databaseHost,
-    "--label", `org.bielos.validation=${id}`,
+    "--label", `org.virki.validation=${id}`,
     "--env", "POSTGRES_USER", "--env", "POSTGRES_PASSWORD", "--env", "POSTGRES_DB",
-    "--env", "BIELOS_RUNTIME_DB_PASSWORD", "--env", "BIELOS_MIGRATOR_DB_PASSWORD", "--env", "BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD",
-    "--volume", `${roleSetupPath}:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro`,
+    "--env", "VIRKI_RUNTIME_DB_PASSWORD", "--env", "VIRKI_MIGRATOR_DB_PASSWORD", "--env", "VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD",
+    "--volume", `${roleSetupPath}:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro`,
     postgresImage,
   ], {
     env: {
@@ -44,9 +44,9 @@ try {
       POSTGRES_USER: databaseUser,
       POSTGRES_PASSWORD: bootstrapPassword,
       POSTGRES_DB: databaseName,
-      BIELOS_RUNTIME_DB_PASSWORD: runtimePassword,
-      BIELOS_MIGRATOR_DB_PASSWORD: migratorPassword,
-      BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD: auditMaintenancePassword,
+      VIRKI_RUNTIME_DB_PASSWORD: runtimePassword,
+      VIRKI_MIGRATOR_DB_PASSWORD: migratorPassword,
+      VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD: auditMaintenancePassword,
     },
   });
   databaseCreated = true;

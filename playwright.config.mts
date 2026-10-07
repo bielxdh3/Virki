@@ -12,9 +12,9 @@ import { CORE_TEST_DATABASE_CONFIRMATION } from "./scripts/core-test-database-sa
 
 const portalUrl = "https://portal.localhost:3001";
 const accessTeamDomain = "http://127.0.0.1:3010";
-const accessAudience = "bielos-e2e-access-audience";
-const registrationTokenEnv = "BIELOS_E2E_JWKS_REGISTRATION_TOKEN";
-const registrationTokenInitializedEnv = "BIELOS_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED";
+const accessAudience = "virki-e2e-access-audience";
+const registrationTokenEnv = "VIRKI_E2E_JWKS_REGISTRATION_TOKEN";
+const registrationTokenInitializedEnv = "VIRKI_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED";
 const initializedRegistrationToken = process.env[registrationTokenInitializedEnv] === "true"
   ? process.env[registrationTokenEnv]
   : undefined;
@@ -22,9 +22,9 @@ if (process.env[registrationTokenInitializedEnv] === "true" && !initializedRegis
   throw new Error("E2E JWKS registration token initialization is incomplete.");
 }
 const jwksRegistrationToken = initializedRegistrationToken ?? randomBytes(32).toString("base64url");
-const e2eDatabaseUrl = process.env.BIELOS_E2E_DATABASE_URL;
-const runtimeReady = process.env.BIELOS_E2E_RUNTIME_READY === "true";
-const inheritedTotpEncryptionKey = runtimeReady ? process.env.BIELOS_TOTP_ENCRYPTION_KEY : undefined;
+const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL;
+const runtimeReady = process.env.VIRKI_E2E_RUNTIME_READY === "true";
+const inheritedTotpEncryptionKey = runtimeReady ? process.env.VIRKI_TOTP_ENCRYPTION_KEY : undefined;
 if (runtimeReady && (!inheritedTotpEncryptionKey || !/^[0-9a-f]{64}$/iu.test(inheritedTotpEncryptionKey))) {
   throw new Error("Inherited E2E TOTP encryption key is invalid.");
 }
@@ -33,7 +33,7 @@ const csrfSigningKey = randomBytes(32).toString("hex");
 const inheritedTlsDirectory = reuseE2eRuntimeDirectory(process.env);
 if (runtimeReady && !inheritedTlsDirectory) throw new Error("Inherited E2E runtime artifacts are incomplete or outside the private temp directory.");
 const ownsRuntimeArtifacts = !runtimeReady;
-const tlsDirectory = inheritedTlsDirectory ?? mkdtempSync(join(tmpdir(), "bielos-e2e-tls-"));
+const tlsDirectory = inheritedTlsDirectory ?? mkdtempSync(join(tmpdir(), "virki-e2e-tls-"));
 const tlsKeyPath = join(tlsDirectory, "server-key.pem");
 const tlsCertificatePath = join(tlsDirectory, "server-cert.pem");
 const tlsCaKeyPath = join(tlsDirectory, "test-ca-key.pem");
@@ -67,8 +67,8 @@ try {
       execFileSync("certutil", ["-N", "--empty-password", "-d", database], { stdio: "ignore" });
     }
     const certificates = execFileSync("certutil", ["-L", "-d", database], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    if (!certificates.includes("BielOS E2E Test CA")) {
-      execFileSync("certutil", ["-A", "-d", database, "-n", "BielOS E2E Test CA", "-t", "C,,", "-i", tlsCaCertificatePath], { stdio: "ignore" });
+    if (!certificates.includes("Virki E2E Test CA")) {
+      execFileSync("certutil", ["-A", "-d", database, "-n", "Virki E2E Test CA", "-t", "C,,", "-i", tlsCaCertificatePath], { stdio: "ignore" });
     }
   }
   if (ownsRuntimeArtifacts) {
@@ -89,49 +89,49 @@ const localOnlyEnv = {
   NODE_PATH: "",
   NODE_ENV: "development",
   NEXT_TELEMETRY_DISABLED: "1",
-  BIELOS_HUB_HOSTNAME: "hub.localhost",
-  BIELOS_PORTAL_HOSTNAME: "portal.localhost",
-  BIELOS_HUB_URL: "https://hub.localhost:3001",
-  BIELOS_PORTAL_URL: portalUrl,
-  BIELOS_OIDC_PROXY_URL: "http://127.0.0.1:3003",
+  VIRKI_HUB_HOSTNAME: "hub.localhost",
+  VIRKI_PORTAL_HOSTNAME: "portal.localhost",
+  VIRKI_HUB_URL: "https://hub.localhost:3001",
+  VIRKI_PORTAL_URL: portalUrl,
+  VIRKI_OIDC_PROXY_URL: "http://127.0.0.1:3003",
   CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
   CLOUDFLARE_ACCESS_AUDIENCE: accessAudience,
   CLOUDFLARE_TEAM_DOMAIN: accessTeamDomain,
-  BIELOS_E2E_ACCESS_DIAGNOSTICS: "true",
-  BIELOS_TOTP_ENCRYPTION_KEY: totpEncryptionKey,
-  BIELOS_CSRF_SIGNING_KEY: csrfSigningKey,
+  VIRKI_E2E_ACCESS_DIAGNOSTICS: "true",
+  VIRKI_TOTP_ENCRYPTION_KEY: totpEncryptionKey,
+  VIRKI_CSRF_SIGNING_KEY: csrfSigningKey,
   NODE_EXTRA_CA_CERTS: tlsCaCertificatePath,
-  BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "",
-  BIELOS_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
-  BIELOS_EMAIL_OUTBOX_KEY: emailOutboxKey,
-  BIELOS_CORE_TEST_DATABASE_CONFIRM: CORE_TEST_DATABASE_CONFIRMATION,
-  DATABASE_URL: e2eDatabaseUrl ?? "postgresql://127.0.0.1:1/bielos_e2e_test?connect_timeout=1"
+  VIRKI_E2E_JWKS_REGISTRATION_TOKEN: "",
+  VIRKI_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
+  VIRKI_EMAIL_OUTBOX_KEY: emailOutboxKey,
+  VIRKI_CORE_TEST_DATABASE_CONFIRM: CORE_TEST_DATABASE_CONFIRMATION,
+  DATABASE_URL: e2eDatabaseUrl ?? "postgresql://127.0.0.1:1/virki_e2e_test?connect_timeout=1"
 };
 const publicSiteEnv = {
   NODE_OPTIONS: "",
   NODE_PATH: "",
-  BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
+  VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
   NODE_ENV: "development",
   NEXT_TELEMETRY_DISABLED: "1",
-  BIELOS_PORTAL_URL: portalUrl
+  VIRKI_PORTAL_URL: portalUrl
 };
 const hubEnv = {
   ...localOnlyEnv,
-  BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
-  BIELOS_E2E_TLS_KEY_PATH: tlsKeyPath,
-  BIELOS_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath
+  VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
+  VIRKI_E2E_TLS_KEY_PATH: tlsKeyPath,
+  VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath
 };
-process.env.BIELOS_E2E_ACCESS_AUDIENCE = accessAudience;
-process.env.BIELOS_E2E_ACCESS_ISSUER = accessTeamDomain;
-process.env.BIELOS_TOTP_ENCRYPTION_KEY = totpEncryptionKey;
-process.env.BIELOS_E2E_TLS_KEY_PATH = tlsKeyPath;
-process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
-process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH = tlsCaCertificatePath;
-process.env.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE = oidcPrivateConfigPath;
-process.env.BIELOS_E2E_ACCESS_SIGNING_KEY_FILE = accessSigningKeyPath;
-process.env.BIELOS_EMAIL_OUTBOX_KEY = emailOutboxKey;
-process.env.BIELOS_E2E_RUNTIME_DIRECTORY = tlsDirectory;
-process.env.BIELOS_E2E_RUNTIME_READY = "true";
+process.env.VIRKI_E2E_ACCESS_AUDIENCE = accessAudience;
+process.env.VIRKI_E2E_ACCESS_ISSUER = accessTeamDomain;
+process.env.VIRKI_TOTP_ENCRYPTION_KEY = totpEncryptionKey;
+process.env.VIRKI_E2E_TLS_KEY_PATH = tlsKeyPath;
+process.env.VIRKI_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
+process.env.VIRKI_E2E_TLS_CA_CERTIFICATE_PATH = tlsCaCertificatePath;
+process.env.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE = oidcPrivateConfigPath;
+process.env.VIRKI_E2E_ACCESS_SIGNING_KEY_FILE = accessSigningKeyPath;
+process.env.VIRKI_EMAIL_OUTBOX_KEY = emailOutboxKey;
+process.env.VIRKI_E2E_RUNTIME_DIRECTORY = tlsDirectory;
+process.env.VIRKI_E2E_RUNTIME_READY = "true";
 process.env[registrationTokenEnv] = jwksRegistrationToken;
 process.env[registrationTokenInitializedEnv] = "true";
 
@@ -166,8 +166,8 @@ export default defineConfig({
       env: {
         NODE_OPTIONS: "",
         NODE_PATH: "",
-        BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
-        BIELOS_E2E_JWKS_REGISTRATION_TOKEN: jwksRegistrationToken
+        VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
+        VIRKI_E2E_JWKS_REGISTRATION_TOKEN: jwksRegistrationToken
       }
     },
     {
@@ -207,7 +207,7 @@ function generateLocalTlsPair(keyPath: string, certificatePath: string, caKeyPat
       "-out", caCertificatePath,
       "-days", "1",
       "-sha256",
-      "-subj", "/CN=BielOS E2E Root CA",
+      "-subj", "/CN=Virki E2E Root CA",
       "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
       "-addext", "keyUsage=critical,keyCertSign,cRLSign",
       "-addext", "subjectKeyIdentifier=hash"
@@ -250,7 +250,7 @@ function generateLocalTlsPair(keyPath: string, certificatePath: string, caKeyPat
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
 $rootRsa = [System.Security.Cryptography.RSA]::Create(2048)
-$rootRequest = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=BielOS E2E Root CA', $rootRsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$rootRequest = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=Virki E2E Root CA', $rootRsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $rootRequest.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
 $rootRequest.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign -bor [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::CrlSign, $true))
 $rootCertificate = $rootRequest.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddDays(1))
@@ -273,9 +273,9 @@ $serial[0] = $serial[0] -band 0x7f
 $serial[15] = $serial[15] -bor 1
 $signatureGenerator = [System.Security.Cryptography.X509Certificates.X509SignatureGenerator]::CreateForRSA($rootRsa, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $certificate = $request.Create($rootCertificate.SubjectName, $signatureGenerator, [DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddDays(1), $serial)
-[System.IO.File]::WriteAllText($env:BIELOS_E2E_CERT_PATH, $certificate.ExportCertificatePem(), [System.Text.Encoding]::ASCII)
-[System.IO.File]::WriteAllText($env:BIELOS_E2E_KEY_PATH, $rsa.ExportPkcs8PrivateKeyPem(), [System.Text.Encoding]::ASCII)
-[System.IO.File]::WriteAllText($env:BIELOS_E2E_CA_CERT_PATH, $rootCertificate.ExportCertificatePem(), [System.Text.Encoding]::ASCII)
+[System.IO.File]::WriteAllText($env:VIRKI_E2E_CERT_PATH, $certificate.ExportCertificatePem(), [System.Text.Encoding]::ASCII)
+[System.IO.File]::WriteAllText($env:VIRKI_E2E_KEY_PATH, $rsa.ExportPkcs8PrivateKeyPem(), [System.Text.Encoding]::ASCII)
+[System.IO.File]::WriteAllText($env:VIRKI_E2E_CA_CERT_PATH, $rootCertificate.ExportCertificatePem(), [System.Text.Encoding]::ASCII)
 $certificate.Dispose()
 $rootCertificate.Dispose()
 $rootRsa.Dispose()
@@ -284,7 +284,7 @@ $rsa.Dispose()
 `;
 
   execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
-    env: { ...process.env, BIELOS_E2E_CERT_PATH: certificatePath, BIELOS_E2E_KEY_PATH: keyPath, BIELOS_E2E_CA_CERT_PATH: caCertificatePath },
+    env: { ...process.env, VIRKI_E2E_CERT_PATH: certificatePath, VIRKI_E2E_KEY_PATH: keyPath, VIRKI_E2E_CA_CERT_PATH: caCertificatePath },
     stdio: "ignore"
   });
 }

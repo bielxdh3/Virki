@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAccountRecoveryRequestId } from "@bielos/auth/security";
+import { getAccountRecoveryRequestId } from "@virki/auth/security";
 import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { RECOVERY_COOKIE_NAME } from "../../../lib/recovery";

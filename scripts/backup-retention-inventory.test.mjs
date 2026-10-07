@@ -7,10 +7,10 @@ import test from "node:test";
 import { inventoryBackupDirectory } from "./backup-retention-inventory.mjs";
 
 const revision = "a".repeat(40);
-const backupName = "bielos-20261003-120000-a1b2c3.dump";
+const backupName = "virki-20261003-120000-a1b2c3.dump";
 
 async function withInventoryFixture(callback) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "bielos-backup-inventory-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "virki-backup-inventory-"));
   try {
     await callback(root);
   } finally {
@@ -27,10 +27,10 @@ test("inventory preserves every backup and identifies only a hash-matching curre
     const contents = Buffer.from("disposable backup fixture");
     const digest = createHash("sha256").update(contents).digest("hex");
     await writeFile(path.join(root, backupName), contents, { mode: 0o600 });
-    await writeFile(path.join(root, "bielos-20261002-120000-d4e5f6.dump"), "older backup", { mode: 0o600 });
-    await writeFile(path.join(root, ".bielos-partial.dump.partial"), "partial", { mode: 0o600 });
+    await writeFile(path.join(root, "virki-20261002-120000-d4e5f6.dump"), "older backup", { mode: 0o600 });
+    await writeFile(path.join(root, ".virki-partial.dump.partial"), "partial", { mode: 0o600 });
     await writeFile(path.join(root, "operator-note.txt"), "unknown files remain untouched", { mode: 0o600 });
-    await writeFile(path.join(root, ".bielos-migration-verification"), [
+    await writeFile(path.join(root, ".virki-migration-verification"), [
       `revision=${revision}`,
       `backup_name=${backupName}`,
       `backup_sha256=${digest}`,
@@ -66,7 +66,7 @@ test("stale, mismatched and malformed verification evidence never makes a backup
   await withInventoryFixture(async (root) => {
     await writeFile(path.join(root, backupName), "unmatched bytes", { mode: 0o600 });
     const wrongDigest = "b".repeat(64);
-    await writeFile(path.join(root, ".bielos-migration-verification"), [
+    await writeFile(path.join(root, ".virki-migration-verification"), [
       `revision=${revision}`,
       `backup_name=${backupName}`,
       `backup_sha256=${wrongDigest}`,
@@ -87,7 +87,7 @@ test("a stale but hash-matching record stays retained and is flagged as unsuitab
     const contents = "previously restore-validated fixture";
     const digest = createHash("sha256").update(contents).digest("hex");
     await writeFile(path.join(root, backupName), contents, { mode: 0o600 });
-    await writeFile(path.join(root, ".bielos-migration-verification"), [
+    await writeFile(path.join(root, ".virki-migration-verification"), [
       `revision=${revision}`,
       `backup_name=${backupName}`,
       `backup_sha256=${digest}`,
@@ -107,8 +107,8 @@ test("symlinks and backup candidates whose verification restore was not complete
   await withInventoryFixture(async (root) => {
     const external = path.join(root, "outside.txt");
     await writeFile(external, "outside fixture");
-    await symlink(external, path.join(root, "bielos-20261003-120001-abcdef.dump"));
-    await writeFile(path.join(root, "bielos-20261003-120002-abcdef.dump"), "backup without marker", { mode: 0o600 });
+    await symlink(external, path.join(root, "virki-20261003-120001-abcdef.dump"));
+    await writeFile(path.join(root, "virki-20261003-120002-abcdef.dump"), "backup without marker", { mode: 0o600 });
 
     const inventory = await inventoryBackupDirectory(root, { getStatfs: fakeStatfs(60) });
     assert.ok(inventory.files.some((file) => file.classification === "symlink" && file.action === "PRESERVE"));
@@ -131,7 +131,7 @@ test("inventory rejects relative directories, symlink roots and unsafe marker fi
   await assert.rejects(inventoryBackupDirectory("relative/backups"), /absolute backup inventory directory/u);
   await withInventoryFixture(async (root) => {
     await mkdir(path.join(root, "folder.dump"));
-    const markerPath = path.join(root, ".bielos-migration-verification");
+    const markerPath = path.join(root, ".virki-migration-verification");
     await writeFile(markerPath, [
       `revision=${revision}`,
       `backup_name=${backupName}`,
@@ -162,7 +162,7 @@ test("inventory rejects a symlink root", { skip: process.platform === "win32" ? 
 test("inventory rejects a symlink verification marker", { skip: process.platform === "win32" ? "Creating filesystem symlinks requires Windows privilege or Developer Mode." : false }, async () => {
   await withInventoryFixture(async (root) => {
     await mkdir(path.join(root, "folder.dump"));
-    await symlink(path.join(root, "folder.dump"), path.join(root, ".bielos-migration-verification"), "file");
+    await symlink(path.join(root, "folder.dump"), path.join(root, ".virki-migration-verification"), "file");
     const inventory = await inventoryBackupDirectory(root, { getStatfs: fakeStatfs(60) });
     assert.equal(inventory.verificationMarker.status, "unsafe");
     assert.deepEqual(inventory.retentionPlan.plannedDeletions, []);

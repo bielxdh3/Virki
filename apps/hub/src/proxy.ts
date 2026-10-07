@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { SESSION_COOKIE_NAME } from "@bielos/auth/constants";
-import { validateCloudflareAccessJwt } from "@bielos/auth/cloudflare-access";
+import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
+import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
 
 const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";
@@ -41,10 +41,10 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);
     if (!access.allowed) {
       const headers = new Headers({ "Cache-Control": "no-store" });
-      if (env.NODE_ENV === "development" && env.BIELOS_E2E_ACCESS_DIAGNOSTICS === "true" && access.reason) {
-        headers.set("x-bielos-e2e-access-reason", access.reason);
+      if (env.NODE_ENV === "development" && env.VIRKI_E2E_ACCESS_DIAGNOSTICS === "true" && access.reason) {
+        headers.set("x-virki-e2e-access-reason", access.reason);
         const kid = readE2eAccessKeyId(request.headers.get("cf-access-jwt-assertion"));
-        if (kid) headers.set("x-bielos-e2e-access-kid", kid);
+        if (kid) headers.set("x-virki-e2e-access-kid", kid);
       }
       return new NextResponse("Forbidden", { status: 403, headers });
     }

@@ -1,6 +1,6 @@
 services:
   public-site:
-    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
     user: node:node
@@ -12,10 +12,10 @@ services:
       - /app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m
     environment:
       NODE_ENV: production
-      BIELOS_PORTAL_URL: ${BIELOS_PORTAL_URL:-}
+      VIRKI_PORTAL_URL: ${VIRKI_PORTAL_URL:-}
     ports:
       - "127.0.0.1:${PUBLIC_SITE_PORT:-3000}:3000"
-    command: npm run start --workspace @bielos/public-site
+    command: npm run start --workspace @virki/public-site
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -23,7 +23,7 @@ services:
       retries: 3
 
   hub:
-    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
     user: node:node
@@ -43,24 +43,24 @@ services:
         required: true
     environment:
       NODE_ENV: production
-      BIELOS_HUB_URL: ${BIELOS_HUB_URL:-https://hub.biel.dev.br}
-      BIELOS_PORTAL_URL: ${BIELOS_PORTAL_URL:-}
-      BIELOS_HUB_HOSTNAME: ${BIELOS_HUB_HOSTNAME:-hub.biel.dev.br}
-      BIELOS_PORTAL_HOSTNAME: ${BIELOS_PORTAL_HOSTNAME:-portal.biel.dev.br}
-      BIELOS_OIDC_PROXY_URL: http://oidc-issuer:3003
+      VIRKI_HUB_URL: ${VIRKI_HUB_URL:-https://hub.biel.dev.br}
+      VIRKI_PORTAL_URL: ${VIRKI_PORTAL_URL:-}
+      VIRKI_HUB_HOSTNAME: ${VIRKI_HUB_HOSTNAME:-hub.biel.dev.br}
+      VIRKI_PORTAL_HOSTNAME: ${VIRKI_PORTAL_HOSTNAME:-portal.biel.dev.br}
+      VIRKI_OIDC_PROXY_URL: http://oidc-issuer:3003
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
-      BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
-      BIELOS_AUDIT_HASH_SECRET: ${BIELOS_AUDIT_HASH_SECRET:?BIELOS_AUDIT_HASH_SECRET must be set in local .env}
-      BIELOS_CSRF_SIGNING_KEY: ${BIELOS_CSRF_SIGNING_KEY:?BIELOS_CSRF_SIGNING_KEY must be set in local .env}
-      BIELOS_CSRF_SIGNING_KEY_PREVIOUS: ${BIELOS_CSRF_SIGNING_KEY_PREVIOUS:-}
-      BIELOS_TOTP_ENCRYPTION_KEY: ${BIELOS_TOTP_ENCRYPTION_KEY:?BIELOS_TOTP_ENCRYPTION_KEY must be set in local .env}
-      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
+      VIRKI_RATE_LIMIT_HASH_SECRET: ${VIRKI_RATE_LIMIT_HASH_SECRET:?VIRKI_RATE_LIMIT_HASH_SECRET must be set in local .env}
+      VIRKI_AUDIT_HASH_SECRET: ${VIRKI_AUDIT_HASH_SECRET:?VIRKI_AUDIT_HASH_SECRET must be set in local .env}
+      VIRKI_CSRF_SIGNING_KEY: ${VIRKI_CSRF_SIGNING_KEY:?VIRKI_CSRF_SIGNING_KEY must be set in local .env}
+      VIRKI_CSRF_SIGNING_KEY_PREVIOUS: ${VIRKI_CSRF_SIGNING_KEY_PREVIOUS:-}
+      VIRKI_TOTP_ENCRYPTION_KEY: ${VIRKI_TOTP_ENCRYPTION_KEY:?VIRKI_TOTP_ENCRYPTION_KEY must be set in local .env}
+      VIRKI_EMAIL_OUTBOX_KEY: ${VIRKI_EMAIL_OUTBOX_KEY:?VIRKI_EMAIL_OUTBOX_KEY must be set in local .env}
       CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
       CLOUDFLARE_ACCESS_AUDIENCE: ${CLOUDFLARE_ACCESS_AUDIENCE:?CLOUDFLARE_ACCESS_AUDIENCE must be set in local .env}
       CLOUDFLARE_TEAM_DOMAIN: ${CLOUDFLARE_TEAM_DOMAIN:?CLOUDFLARE_TEAM_DOMAIN must be set in local .env}
     ports:
       - "127.0.0.1:${HUB_PORT:-3001}:3001"
-    command: npm run start --workspace @bielos/hub
+    command: npm run start --workspace @virki/hub
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -68,7 +68,7 @@ services:
       retries: 3
 
   oidc-issuer:
-    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
     user: node:node
@@ -88,9 +88,9 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
-      BIELOS_RATE_LIMIT_HASH_SECRET: ${BIELOS_RATE_LIMIT_HASH_SECRET:?BIELOS_RATE_LIMIT_HASH_SECRET must be set in local .env}
+      VIRKI_RATE_LIMIT_HASH_SECRET: ${VIRKI_RATE_LIMIT_HASH_SECRET:?VIRKI_RATE_LIMIT_HASH_SECRET must be set in local .env}
       OIDC_ISSUER_PORT: 3003
-    command: npm run start --workspace @bielos/issuer
+    command: npm run start --workspace @virki/issuer
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/.well-known/openid-configuration').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -98,7 +98,7 @@ services:
       retries: 3
 
   migrate:
-    image: ${BIELOS_MIGRATOR_IMAGE:?BIELOS_MIGRATOR_IMAGE must be set in local .env}
+    image: ${VIRKI_MIGRATOR_IMAGE:?VIRKI_MIGRATOR_IMAGE must be set in local .env}
     pull_policy: never
     profiles: ["migration"]
     user: node:node
@@ -116,7 +116,7 @@ services:
     command: npm run prisma:migrate:deploy
 
   session-cleanup:
-    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
     user: node:node
@@ -133,10 +133,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       SESSION_CLEANUP_INTERVAL_SECONDS: ${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}
       AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
-    command: ["sh", "-c", "while true; do npm run sessions:cleanup --workspace @bielos/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"]
+    command: ["sh", "-c", "while true; do npm run sessions:cleanup --workspace @virki/auth || exit 1; sleep \"$${SESSION_CLEANUP_INTERVAL_SECONDS:-3600}\"; done"]
 
   audit-maintenance:
-    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     profiles: ["maintenance"]
     user: node:node
@@ -152,10 +152,10 @@ services:
       NODE_ENV: production
       DATABASE_URL: ${AUDIT_MAINTENANCE_DATABASE_URL:?AUDIT_MAINTENANCE_DATABASE_URL must be set in local .env}
       AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
-    command: npm run audit:cleanup --workspace @bielos/auth
+    command: npm run audit:cleanup --workspace @virki/auth
 
   email-worker:
-    image: ${BIELOS_PRODUCTION_IMAGE:?BIELOS_PRODUCTION_IMAGE must be set in local .env}
+    image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never
     restart: unless-stopped
     user: node:node
@@ -170,30 +170,30 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
-      BIELOS_EMAIL_TRANSPORT: ${BIELOS_EMAIL_TRANSPORT:-}
-      BIELOS_EMAIL_OUTBOX_KEY: ${BIELOS_EMAIL_OUTBOX_KEY:?BIELOS_EMAIL_OUTBOX_KEY must be set in local .env}
-      BIELOS_EMAIL_SMTP_HOST: ${BIELOS_EMAIL_SMTP_HOST:-}
-      BIELOS_EMAIL_SMTP_PORT: ${BIELOS_EMAIL_SMTP_PORT:-587}
-      BIELOS_EMAIL_SMTP_SECURE: ${BIELOS_EMAIL_SMTP_SECURE:-false}
-      BIELOS_EMAIL_SMTP_USER: ${BIELOS_EMAIL_SMTP_USER:-}
-      BIELOS_EMAIL_SMTP_PASSWORD: ${BIELOS_EMAIL_SMTP_PASSWORD:-}
-      BIELOS_EMAIL_FROM: ${BIELOS_EMAIL_FROM:-}
-      BIELOS_EMAIL_REPLY_TO: ${BIELOS_EMAIL_REPLY_TO:-}
-    command: npm run email:worker --workspace @bielos/auth
+      VIRKI_EMAIL_TRANSPORT: ${VIRKI_EMAIL_TRANSPORT:-}
+      VIRKI_EMAIL_OUTBOX_KEY: ${VIRKI_EMAIL_OUTBOX_KEY:?VIRKI_EMAIL_OUTBOX_KEY must be set in local .env}
+      VIRKI_EMAIL_SMTP_HOST: ${VIRKI_EMAIL_SMTP_HOST:-}
+      VIRKI_EMAIL_SMTP_PORT: ${VIRKI_EMAIL_SMTP_PORT:-587}
+      VIRKI_EMAIL_SMTP_SECURE: ${VIRKI_EMAIL_SMTP_SECURE:-false}
+      VIRKI_EMAIL_SMTP_USER: ${VIRKI_EMAIL_SMTP_USER:-}
+      VIRKI_EMAIL_SMTP_PASSWORD: ${VIRKI_EMAIL_SMTP_PASSWORD:-}
+      VIRKI_EMAIL_FROM: ${VIRKI_EMAIL_FROM:-}
+      VIRKI_EMAIL_REPLY_TO: ${VIRKI_EMAIL_REPLY_TO:-}
+    command: npm run email:worker --workspace @virki/auth
 
   postgres:
     image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-bielos}
-      POSTGRES_USER: ${POSTGRES_USER:-bielos_bootstrap}
+      POSTGRES_DB: ${POSTGRES_DB:-virki}
+      POSTGRES_USER: ${POSTGRES_USER:-virki_bootstrap}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in local .env}
-      BIELOS_RUNTIME_DB_PASSWORD: ${BIELOS_RUNTIME_DB_PASSWORD:?BIELOS_RUNTIME_DB_PASSWORD must be set in local .env}
-      BIELOS_MIGRATOR_DB_PASSWORD: ${BIELOS_MIGRATOR_DB_PASSWORD:?BIELOS_MIGRATOR_DB_PASSWORD must be set in local .env}
-      BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD: ${BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD:?BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD must be set in local .env}
+      VIRKI_RUNTIME_DB_PASSWORD: ${VIRKI_RUNTIME_DB_PASSWORD:?VIRKI_RUNTIME_DB_PASSWORD must be set in local .env}
+      VIRKI_MIGRATOR_DB_PASSWORD: ${VIRKI_MIGRATOR_DB_PASSWORD:?VIRKI_MIGRATOR_DB_PASSWORD must be set in local .env}
+      VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD: ${VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD:?VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD must be set in local .env}
     volumes:
-      - bielos_postgres_data:/var/lib/postgresql/data
-      - ./postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro
+      - virki_postgres_data:/var/lib/postgresql/data
+      - ./postgres-init/10-virki-database-roles.sh:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -201,4 +201,4 @@ services:
       retries: 5
 
 volumes:
-  bielos_postgres_data:
+  virki_postgres_data:

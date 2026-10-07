@@ -1,4 +1,4 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
@@ -24,7 +24,7 @@ export default async function LoginPage({ searchParams }: { searchParams?: Promi
   return (
     <main className="auth-page">
       <section className="auth-panel" aria-labelledby="login-title">
-        <p className="eyebrow">BielOS</p>
+        <p className="eyebrow">Virki</p>
         <h1 id="login-title">{reauth ? "Confirmar identidade" : "Entrar"}</h1>
         {reauth ? <p>Entre novamente para continuar com a confirmação de segurança solicitada pelo projeto.</p> : null}
         {params?.recovered ? <p className="form-success" role="status">A senha foi atualizada. Entre com sua nova senha.</p> : null}

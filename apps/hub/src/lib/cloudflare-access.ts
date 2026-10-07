@@ -1,11 +1,11 @@
-import { validateCloudflareAccessJwt, type CloudflareAccessJwtResult } from "@bielos/auth/cloudflare-access";
+import { validateCloudflareAccessJwt, type CloudflareAccessJwtResult } from "@virki/auth/cloudflare-access";
 import {
   createAuditRequestMetadata,
   writeAuditLog,
   type AuditEventType,
   type AuditMetadata,
   type AuditResult
-} from "@bielos/auth";
+} from "@virki/auth";
 
 export async function validateHubCloudflareAccess(
   headers: Pick<Headers, "get">,

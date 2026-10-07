@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import type { ElevationScope } from "@bielos/auth/administration";
+import type { ElevationScope } from "@virki/auth/administration";
 import { changeAdminPasswordAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
 const initialState: SecurityFormState = { status: "idle" };

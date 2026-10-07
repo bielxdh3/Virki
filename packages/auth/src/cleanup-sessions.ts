@@ -1,4 +1,4 @@
-import { prisma } from "@bielos/database";
+import { prisma } from "@virki/database";
 import { cleanupExpiredLoginRateLimits, cleanupInactiveSessions } from "./index";
 import { writeAuditLog } from "./audit";
 import { runAuthCommand } from "./command-output";

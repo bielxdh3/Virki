@@ -55,7 +55,7 @@ dumps/
 infra/backups/*
 !infra/backups/
 !infra/backups/.gitkeep
-.bielos-mission-tmp/
+.virki-mission-tmp/
 playwright-report/
 /.dual_codex/
 /.dual-codex-task-*.md

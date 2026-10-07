@@ -21,18 +21,18 @@ test("production email is unavailable without a real transport or outbox key", (
     reason: "transport-missing"
   });
   assert.deepEqual(
-    getEmailTransportStatus({ NODE_ENV: "production", BIELOS_EMAIL_TRANSPORT: "smtp" }),
+    getEmailTransportStatus({ NODE_ENV: "production", VIRKI_EMAIL_TRANSPORT: "smtp" }),
     { state: "unavailable", reason: "outbox-key-missing" }
   );
   assert.deepEqual(
     getEmailTransportStatus({
       NODE_ENV: "production",
-      BIELOS_EMAIL_TRANSPORT: "smtp",
-      BIELOS_EMAIL_OUTBOX_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
-      BIELOS_EMAIL_SMTP_HOST: "smtp-relay.brevo.com",
-      BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
-      BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
-      BIELOS_EMAIL_FROM: "no-reply@biel.dev.br"
+      VIRKI_EMAIL_TRANSPORT: "smtp",
+      VIRKI_EMAIL_OUTBOX_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
+      VIRKI_EMAIL_SMTP_HOST: "smtp-relay.brevo.com",
+      VIRKI_EMAIL_SMTP_USER: "smtp-user@example.invalid",
+      VIRKI_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
+      VIRKI_EMAIL_FROM: "no-reply@biel.dev.br"
     }),
     { state: "configured" }
   );
@@ -41,25 +41,25 @@ test("production email is unavailable without a real transport or outbox key", (
 test("SMTP configuration is fail-closed without contacting the provider", () => {
   const configured = {
     NODE_ENV: "production",
-    BIELOS_EMAIL_SMTP_HOST: "smtp-relay.brevo.com",
-    BIELOS_EMAIL_SMTP_PORT: "587",
-    BIELOS_EMAIL_SMTP_SECURE: "false",
-    BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
-    BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
-    BIELOS_EMAIL_FROM: "no-reply@biel.dev.br"
+    VIRKI_EMAIL_SMTP_HOST: "smtp-relay.brevo.com",
+    VIRKI_EMAIL_SMTP_PORT: "587",
+    VIRKI_EMAIL_SMTP_SECURE: "false",
+    VIRKI_EMAIL_SMTP_USER: "smtp-user@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
+    VIRKI_EMAIL_FROM: "no-reply@biel.dev.br"
   };
 
   assert.equal(isSmtpEmailTransportConfigured(configured), true);
   assert.equal(
-    isSmtpEmailTransportConfigured({ ...configured, BIELOS_EMAIL_FROM: "invalid" }),
+    isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_FROM: "invalid" }),
     false
   );
   assert.equal(
-    isSmtpEmailTransportConfigured({ ...configured, BIELOS_EMAIL_SMTP_PORT: "70000" }),
+    isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_SMTP_PORT: "70000" }),
     false
   );
   assert.equal(
-    isSmtpEmailTransportConfigured({ ...configured, BIELOS_EMAIL_SMTP_SECURE: "sometimes" }),
+    isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_SMTP_SECURE: "sometimes" }),
     false
   );
 });
@@ -73,12 +73,12 @@ test("SMTP delivery failures are redacted without contacting an external provide
     const address = server.address();
     assert.ok(address && typeof address !== "string");
     const transport = createSmtpEmailTransport({
-      BIELOS_EMAIL_SMTP_HOST: "127.0.0.1",
-      BIELOS_EMAIL_SMTP_PORT: String(address.port),
-      BIELOS_EMAIL_SMTP_SECURE: "false",
-      BIELOS_EMAIL_SMTP_USER: "smtp-user@example.invalid",
-      BIELOS_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
-      BIELOS_EMAIL_FROM: "no-reply@biel.dev.br"
+      VIRKI_EMAIL_SMTP_HOST: "127.0.0.1",
+      VIRKI_EMAIL_SMTP_PORT: String(address.port),
+      VIRKI_EMAIL_SMTP_SECURE: "false",
+      VIRKI_EMAIL_SMTP_USER: "smtp-user@example.invalid",
+      VIRKI_EMAIL_SMTP_PASSWORD: "smtp-password-placeholder",
+      VIRKI_EMAIL_FROM: "no-reply@biel.dev.br"
     });
 
     await assert.rejects(
@@ -388,16 +388,16 @@ function createMockOutboxDatabase(initialMessage: Record<string, unknown>, optio
 }
 
 function encryptedTestEmailPayload() {
-  return protectEmailPayload({ publicValues: {}, protectedValues: {} }, { BIELOS_EMAIL_OUTBOX_KEY: "a".repeat(64) });
+  return protectEmailPayload({ publicValues: {}, protectedValues: {} }, { VIRKI_EMAIL_OUTBOX_KEY: "a".repeat(64) });
 }
 
 async function withTestOutboxKey(run: () => Promise<void>) {
-  const previous = process.env.BIELOS_EMAIL_OUTBOX_KEY;
-  process.env.BIELOS_EMAIL_OUTBOX_KEY = "a".repeat(64);
+  const previous = process.env.VIRKI_EMAIL_OUTBOX_KEY;
+  process.env.VIRKI_EMAIL_OUTBOX_KEY = "a".repeat(64);
   try {
     await run();
   } finally {
-    if (previous === undefined) delete process.env.BIELOS_EMAIL_OUTBOX_KEY;
-    else process.env.BIELOS_EMAIL_OUTBOX_KEY = previous;
+    if (previous === undefined) delete process.env.VIRKI_EMAIL_OUTBOX_KEY;
+    else process.env.VIRKI_EMAIL_OUTBOX_KEY = previous;
   }
 }

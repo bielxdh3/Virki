@@ -2,8 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 
 const KEY_BYTES = 32;
 type OidcSecretEnvironment = {
-  BIELOS_OIDC_ADAPTER_KEY?: string;
-  BIELOS_OIDC_ADAPTER_KEY_PREVIOUS?: string;
+  VIRKI_OIDC_ADAPTER_KEY?: string;
+  VIRKI_OIDC_ADAPTER_KEY_PREVIOUS?: string;
   [key: string]: string | undefined;
 };
 
@@ -12,7 +12,7 @@ export function hashOidcIdentifier(value: string): string {
 }
 
 export function encryptOidcClientSecret(secret: string, env: OidcSecretEnvironment = process.env): string {
-  const key = readKey(env.BIELOS_OIDC_ADAPTER_KEY);
+  const key = readKey(env.VIRKI_OIDC_ADAPTER_KEY);
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ciphertext = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
@@ -24,7 +24,7 @@ export function decryptOidcClientSecret(value: string, env: OidcSecretEnvironmen
 }
 
 export function encryptOidcPayload(value: string, env: OidcSecretEnvironment = process.env): string {
-  const key = readKey(env.BIELOS_OIDC_ADAPTER_KEY);
+  const key = readKey(env.VIRKI_OIDC_ADAPTER_KEY);
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
@@ -54,9 +54,9 @@ function decryptOidcValue(value: string, env: OidcSecretEnvironment, invalidMess
 }
 
 function readDecryptionKeys(env: OidcSecretEnvironment): Buffer[] {
-  const current = readKey(env.BIELOS_OIDC_ADAPTER_KEY);
-  if (!env.BIELOS_OIDC_ADAPTER_KEY_PREVIOUS) return [current];
-  const previous = readKey(env.BIELOS_OIDC_ADAPTER_KEY_PREVIOUS);
+  const current = readKey(env.VIRKI_OIDC_ADAPTER_KEY);
+  if (!env.VIRKI_OIDC_ADAPTER_KEY_PREVIOUS) return [current];
+  const previous = readKey(env.VIRKI_OIDC_ADAPTER_KEY_PREVIOUS);
   return previous.equals(current) ? [current] : [current, previous];
 }
 

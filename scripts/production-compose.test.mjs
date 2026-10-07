@@ -10,7 +10,7 @@ const developmentCompose = readFileSync(path.join(repositoryRoot, "infra", "dock
 const cloudflareCompose = readFileSync(path.join(repositoryRoot, "infra", "docker-compose.cloudflare.yml"), "utf8");
 const cloudflareTemplate = readFileSync(path.join(repositoryRoot, "infra", "cloudflare", "config.example.yml"), "utf8");
 const environmentTemplate = readFileSync(path.join(repositoryRoot, ".env.example"), "utf8");
-const databaseRoleSetup = readFileSync(path.join(repositoryRoot, "infra", "postgres-init", "10-bielos-database-roles.sh"), "utf8");
+const databaseRoleSetup = readFileSync(path.join(repositoryRoot, "infra", "postgres-init", "10-virki-database-roles.sh"), "utf8");
 
 function serviceBlock(compose, service) {
   compose = compose.replace(/\r\n/gu, "\n");
@@ -33,7 +33,7 @@ test("production exposes only the public site and loopback application surfaces"
     assert.doesNotMatch(serviceBlock(productionCompose, service), /ports:/u);
   }
   assert.doesNotMatch(productionCompose, /^\x20{2}intake:/mu);
-  assert.doesNotMatch(productionCompose, /BIELOS_INTAKE|apps\/intake/iu);
+  assert.doesNotMatch(productionCompose, /VIRKI_INTAKE|apps\/intake/iu);
 });
 
 test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared environment", () => {
@@ -47,10 +47,10 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
   assert.match(issuer, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
   assert.match(issuer, /path: \.\.\/\.env\.oidc-data/u);
   assert.match(issuer, /required: true/u);
-  assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET:\s*\$\{BIELOS_RATE_LIMIT_HASH_SECRET:\?/u);
-  assert.match(hub, /BIELOS_AUDIT_HASH_SECRET:\s*\$\{BIELOS_AUDIT_HASH_SECRET:\?/u);
-  assert.match(hub, /BIELOS_CSRF_SIGNING_KEY:\s*\$\{BIELOS_CSRF_SIGNING_KEY:\?/u);
-  assert.doesNotMatch(productionCompose, /BIELOS_OIDC_SIGNING_JWKS:\s*\$\{/u);
+  assert.match(issuer, /VIRKI_RATE_LIMIT_HASH_SECRET:\s*\$\{VIRKI_RATE_LIMIT_HASH_SECRET:\?/u);
+  assert.match(hub, /VIRKI_AUDIT_HASH_SECRET:\s*\$\{VIRKI_AUDIT_HASH_SECRET:\?/u);
+  assert.match(hub, /VIRKI_CSRF_SIGNING_KEY:\s*\$\{VIRKI_CSRF_SIGNING_KEY:\?/u);
+  assert.doesNotMatch(productionCompose, /VIRKI_OIDC_SIGNING_JWKS:\s*\$\{/u);
   assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
 });
 
@@ -66,11 +66,11 @@ test("production containers receive only their scoped secret files", () => {
   assert.doesNotMatch(hub, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
   assert.match(issuer, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
   assert.match(issuer, /path: \.\.\/\.env\.oidc-data/u);
-  assert.doesNotMatch(hub, /BIELOS_OIDC_SIGNING_JWKS|BIELOS_OIDC_COOKIE_KEY|BIELOS_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
-  assert.doesNotMatch(issuer, /BIELOS_TOTP_ENCRYPTION_KEY|BIELOS_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
-  assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET/u);
-  assert.match(hub, /BIELOS_AUDIT_HASH_SECRET/u);
-  assert.match(hub, /BIELOS_CSRF_SIGNING_KEY/u);
+  assert.doesNotMatch(hub, /VIRKI_OIDC_SIGNING_JWKS|VIRKI_OIDC_COOKIE_KEY|VIRKI_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.doesNotMatch(issuer, /VIRKI_TOTP_ENCRYPTION_KEY|VIRKI_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.match(issuer, /VIRKI_RATE_LIMIT_HASH_SECRET/u);
+  assert.match(hub, /VIRKI_AUDIT_HASH_SECRET/u);
+  assert.match(hub, /VIRKI_CSRF_SIGNING_KEY/u);
   assert.match(tunnel, /TUNNEL_TOKEN:\s*\$\{CLOUDFLARE_TUNNEL_TOKEN/u);
 });
 
@@ -80,53 +80,53 @@ test("development Hub and issuer receive only explicitly scoped environment vari
   const issuer = serviceBlock(developmentCompose, "oidc-issuer");
   const postgres = serviceBlock(developmentCompose, "postgres");
 
-  assert.match(hub, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
-  assert.match(publicSite, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
-  assert.doesNotMatch(`${hub}\n${publicSite}`, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-https:\/\/portal\.biel\.dev\.br\}/u);
+  assert.match(hub, /VIRKI_PORTAL_URL: \$\{VIRKI_PORTAL_URL:-\}/u);
+  assert.match(publicSite, /VIRKI_PORTAL_URL: \$\{VIRKI_PORTAL_URL:-\}/u);
+  assert.doesNotMatch(`${hub}\n${publicSite}`, /VIRKI_PORTAL_URL: \$\{VIRKI_PORTAL_URL:-https:\/\/portal\.biel\.dev\.br\}/u);
   assert.doesNotMatch(hub, /env_file:/u);
   assert.doesNotMatch(issuer, /env_file:/u);
-  assert.match(hub, /BIELOS_EMAIL_SMTP_PASSWORD:/u);
-  assert.match(hub, /BIELOS_EMAIL_OUTBOX_KEY:/u);
-  assert.match(issuer, /BIELOS_OIDC_SIGNING_JWKS:/u);
-  assert.match(issuer, /BIELOS_RATE_LIMIT_HASH_SECRET:/u);
-  assert.doesNotMatch(hub, /BIELOS_OIDC_SIGNING_JWKS|BIELOS_OIDC_COOKIE_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
-  assert.doesNotMatch(issuer, /BIELOS_TOTP_ENCRYPTION_KEY|BIELOS_EMAIL_SMTP_PASSWORD|BIELOS_EMAIL_OUTBOX_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
-  assert.doesNotMatch(`${publicSite}\n${postgres}`, /BIELOS_OIDC_ADAPTER_KEY(?:_PREVIOUS)?/u);
+  assert.match(hub, /VIRKI_EMAIL_SMTP_PASSWORD:/u);
+  assert.match(hub, /VIRKI_EMAIL_OUTBOX_KEY:/u);
+  assert.match(issuer, /VIRKI_OIDC_SIGNING_JWKS:/u);
+  assert.match(issuer, /VIRKI_RATE_LIMIT_HASH_SECRET:/u);
+  assert.doesNotMatch(hub, /VIRKI_OIDC_SIGNING_JWKS|VIRKI_OIDC_COOKIE_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.doesNotMatch(issuer, /VIRKI_TOTP_ENCRYPTION_KEY|VIRKI_EMAIL_SMTP_PASSWORD|VIRKI_EMAIL_OUTBOX_KEY|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.doesNotMatch(`${publicSite}\n${postgres}`, /VIRKI_OIDC_ADAPTER_KEY(?:_PREVIOUS)?/u);
   assert.deepEqual(environmentKeys(hub), [
-    "BIELOS_AUDIT_HASH_SECRET", "BIELOS_CSRF_SIGNING_KEY", "BIELOS_CSRF_SIGNING_KEY_PREVIOUS",
-    "BIELOS_EMAIL_FROM", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_EMAIL_REPLY_TO", "BIELOS_EMAIL_SMTP_HOST",
-    "BIELOS_EMAIL_SMTP_PASSWORD", "BIELOS_EMAIL_SMTP_PORT", "BIELOS_EMAIL_SMTP_SECURE", "BIELOS_EMAIL_SMTP_USER",
-    "BIELOS_EMAIL_TRANSPORT", "BIELOS_HUB_HOSTNAME", "BIELOS_HUB_URL", "BIELOS_OIDC_ADAPTER_KEY",
-    "BIELOS_OIDC_ADAPTER_KEY_PREVIOUS",
-    "BIELOS_OIDC_PROXY_URL", "BIELOS_PORTAL_HOSTNAME", "BIELOS_PORTAL_URL", "BIELOS_RATE_LIMIT_HASH_SECRET",
-    "BIELOS_TOTP_ENCRYPTION_KEY", "CLOUDFLARE_ACCESS_JWT_REQUIRED", "DATABASE_URL", "NODE_ENV"
-  ]);
+    "VIRKI_AUDIT_HASH_SECRET", "VIRKI_CSRF_SIGNING_KEY", "VIRKI_CSRF_SIGNING_KEY_PREVIOUS",
+    "VIRKI_EMAIL_FROM", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_EMAIL_REPLY_TO", "VIRKI_EMAIL_SMTP_HOST",
+    "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_SMTP_PORT", "VIRKI_EMAIL_SMTP_SECURE", "VIRKI_EMAIL_SMTP_USER",
+    "VIRKI_EMAIL_TRANSPORT", "VIRKI_HUB_HOSTNAME", "VIRKI_HUB_URL", "VIRKI_OIDC_ADAPTER_KEY",
+    "VIRKI_OIDC_ADAPTER_KEY_PREVIOUS",
+    "VIRKI_OIDC_PROXY_URL", "VIRKI_PORTAL_HOSTNAME", "VIRKI_PORTAL_URL", "VIRKI_RATE_LIMIT_HASH_SECRET",
+    "VIRKI_TOTP_ENCRYPTION_KEY", "CLOUDFLARE_ACCESS_JWT_REQUIRED", "DATABASE_URL", "NODE_ENV"
+  ].sort());
   assert.deepEqual(environmentKeys(issuer), [
-    "BIELOS_OIDC_ADAPTER_KEY", "BIELOS_OIDC_ADAPTER_KEY_PREVIOUS", "BIELOS_OIDC_COOKIE_KEY",
-    "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_SIGNING_JWKS",
-    "BIELOS_RATE_LIMIT_HASH_SECRET", "DATABASE_URL", "NODE_ENV", "OIDC_ISSUER_PORT"
-  ]);
+    "VIRKI_OIDC_ADAPTER_KEY", "VIRKI_OIDC_ADAPTER_KEY_PREVIOUS", "VIRKI_OIDC_COOKIE_KEY",
+    "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_SIGNING_JWKS",
+    "VIRKI_RATE_LIMIT_HASH_SECRET", "DATABASE_URL", "NODE_ENV", "OIDC_ISSUER_PORT"
+  ].sort());
 });
 
 test("production services use preloaded exact-revision images without remote builds or pulls", () => {
   for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup", "email-worker"]) {
     const block = serviceBlock(productionCompose, service);
-    assert.match(block, /image:\s*\$\{BIELOS_PRODUCTION_IMAGE:\?/u);
+    assert.match(block, /image:\s*\$\{VIRKI_PRODUCTION_IMAGE:\?/u);
     assert.match(block, /pull_policy:\s*never/u);
     assert.doesNotMatch(block, /build:/u);
   }
   const migrator = serviceBlock(productionCompose, "migrate");
-  assert.match(migrator, /image:\s*\$\{BIELOS_MIGRATOR_IMAGE:\?/u);
+  assert.match(migrator, /image:\s*\$\{VIRKI_MIGRATOR_IMAGE:\?/u);
   assert.match(migrator, /pull_policy:\s*never/u);
   assert.doesNotMatch(migrator, /build:/u);
 });
 
 test("portal host reaches the hub OIDC proxy and Cloudflare tunnel uses no www alias", () => {
   const hub = serviceBlock(productionCompose, "hub");
-  assert.match(hub, /BIELOS_PORTAL_HOSTNAME:.*portal\.biel\.dev\.br/u);
-  assert.match(serviceBlock(productionCompose, "public-site"), /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
-  assert.match(hub, /BIELOS_PORTAL_URL: \$\{BIELOS_PORTAL_URL:-\}/u);
-  assert.doesNotMatch(productionCompose, /BIELOS_PORTAL_URL:\s*\$\{BIELOS_PORTAL_URL:-https:\/\/portal\.biel\.dev\.br\}/u);
+  assert.match(hub, /VIRKI_PORTAL_HOSTNAME:.*portal\.biel\.dev\.br/u);
+  assert.match(serviceBlock(productionCompose, "public-site"), /VIRKI_PORTAL_URL: \$\{VIRKI_PORTAL_URL:-\}/u);
+  assert.match(hub, /VIRKI_PORTAL_URL: \$\{VIRKI_PORTAL_URL:-\}/u);
+  assert.doesNotMatch(productionCompose, /VIRKI_PORTAL_URL:\s*\$\{VIRKI_PORTAL_URL:-https:\/\/portal\.biel\.dev\.br\}/u);
   assert.match(cloudflareCompose, /- oidc-issuer/u);
   assert.match(cloudflareTemplate, /hostname: portal\.biel\.dev\.br\s+service: http:\/\/hub:3001/u);
   assert.doesNotMatch(cloudflareTemplate, /hostname: www\./u);
@@ -138,7 +138,7 @@ test("production workers and database retain restart policy without published po
     assert.match(block, /restart:\s*unless-stopped/u);
     assert.doesNotMatch(block, /ports:/u);
   }
-  assert.match(serviceBlock(productionCompose, "postgres"), /bielos_postgres_data:\/var\/lib\/postgresql\/data/u);
+  assert.match(serviceBlock(productionCompose, "postgres"), /virki_postgres_data:\/var\/lib\/postgresql\/data/u);
   assert.match(serviceBlock(productionCompose, "postgres"), /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
   assert.match(serviceBlock(cloudflareCompose, "cloudflared"), /cloudflare\/cloudflared:2026\.9\.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c/u);
   assert.match(readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8"), /node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402/u);
@@ -151,24 +151,24 @@ test("runtime, migrator, and PostgreSQL bootstrap credentials stay separated", (
   const applicationServices = ["hub", "oidc-issuer", "session-cleanup", "email-worker"]
     .map((service) => serviceBlock(productionCompose, service));
 
-  assert.match(postgres, /POSTGRES_USER:\s*\$\{POSTGRES_USER:-bielos_bootstrap\}/u);
-  assert.match(postgres, /BIELOS_RUNTIME_DB_PASSWORD:\s*\$\{BIELOS_RUNTIME_DB_PASSWORD:\?/u);
-  assert.match(postgres, /BIELOS_MIGRATOR_DB_PASSWORD:\s*\$\{BIELOS_MIGRATOR_DB_PASSWORD:\?/u);
-  assert.doesNotMatch(postgres, /BIELOS_LOCAL_MIGRATOR_CREATEDB/u);
-  assert.match(developmentPostgres, /BIELOS_LOCAL_MIGRATOR_CREATEDB:\s*"true"/u);
-  assert.match(databaseRoleSetup, /case "\$\{BIELOS_LOCAL_MIGRATOR_CREATEDB:-false\}" in\s+false\) ;;\s+true\)[\s\S]*?ALTER ROLE bielos_migrator CREATEDB/u);
-  assert.match(postgres, /\.\/postgres-init\/10-bielos-database-roles\.sh:[^\n]*:ro/u);
+  assert.match(postgres, /POSTGRES_USER:\s*\$\{POSTGRES_USER:-virki_bootstrap\}/u);
+  assert.match(postgres, /VIRKI_RUNTIME_DB_PASSWORD:\s*\$\{VIRKI_RUNTIME_DB_PASSWORD:\?/u);
+  assert.match(postgres, /VIRKI_MIGRATOR_DB_PASSWORD:\s*\$\{VIRKI_MIGRATOR_DB_PASSWORD:\?/u);
+  assert.doesNotMatch(postgres, /VIRKI_LOCAL_MIGRATOR_CREATEDB/u);
+  assert.match(developmentPostgres, /VIRKI_LOCAL_MIGRATOR_CREATEDB:\s*"true"/u);
+  assert.match(databaseRoleSetup, /case "\$\{VIRKI_LOCAL_MIGRATOR_CREATEDB:-false\}" in\s+false\) ;;\s+true\)[\s\S]*?ALTER ROLE virki_migrator CREATEDB/u);
+  assert.match(postgres, /\.\/postgres-init\/10-virki-database-roles\.sh:[^\n]*:ro/u);
   assert.match(postgres, /pg_isready -h 127\.0\.0\.1/u);
   assert.match(developmentPostgres, /pg_isready -h 127\.0\.0\.1/u);
   assert.match(migrator, /MIGRATION_DATABASE_URL:\s*\$\{MIGRATION_DATABASE_URL:\?/u);
   assert.doesNotMatch(migrator, /^\s+DATABASE_URL:/mu);
   assert.ok(applicationServices.every((block) => /DATABASE_URL:\s*\$\{DATABASE_URL:\?/u.test(block)));
-  assert.ok(applicationServices.every((block) => !/MIGRATION_DATABASE_URL|POSTGRES_PASSWORD|BIELOS_RUNTIME_DB_PASSWORD|BIELOS_MIGRATOR_DB_PASSWORD/u.test(block)));
-  assert.match(environmentTemplate, /^POSTGRES_USER=bielos_bootstrap$/mu);
-  assert.match(environmentTemplate, /^DATABASE_URL=postgresql:\/\/bielos_runtime:/mu);
-  assert.match(environmentTemplate, /^MIGRATION_DATABASE_URL=postgresql:\/\/bielos_migrator:/mu);
-  assert.match(environmentTemplate, /^BIELOS_RUNTIME_DB_PASSWORD=replace-with-64-hex-character-secret$/mu);
-  assert.match(environmentTemplate, /^BIELOS_MIGRATOR_DB_PASSWORD=replace-with-a-different-64-hex-character-secret$/mu);
+  assert.ok(applicationServices.every((block) => !/MIGRATION_DATABASE_URL|POSTGRES_PASSWORD|VIRKI_RUNTIME_DB_PASSWORD|VIRKI_MIGRATOR_DB_PASSWORD/u.test(block)));
+  assert.match(environmentTemplate, /^POSTGRES_USER=virki_bootstrap$/mu);
+  assert.match(environmentTemplate, /^DATABASE_URL=postgresql:\/\/virki_runtime:/mu);
+  assert.match(environmentTemplate, /^MIGRATION_DATABASE_URL=postgresql:\/\/virki_migrator:/mu);
+  assert.match(environmentTemplate, /^VIRKI_RUNTIME_DB_PASSWORD=replace-with-64-hex-character-secret$/mu);
+  assert.match(environmentTemplate, /^VIRKI_MIGRATOR_DB_PASSWORD=replace-with-a-different-64-hex-character-secret$/mu);
 });
 
 test("database CLI routes schema mutations through the migrator identity", () => {
@@ -179,8 +179,8 @@ test("database CLI routes schema mutations through the migrator identity", () =>
   assert.match(databasePackage.scripts["prisma:migrate:deploy"], /scripts\/prisma-migrate\.mjs deploy/u);
   assert.match(databasePackage.scripts["prisma:migrate:status"], /scripts\/prisma-migrate\.mjs status/u);
   assert.match(databasePackage.scripts["prisma:push"], /scripts\/prisma-migrate\.mjs push/u);
-  assert.match(migrationRunner, /MIGRATION_DATABASE_URL must use the bielos_migrator database role/u);
-  assert.match(migrationRunner, /decodeURIComponent\(url\.username\) === "bielos_migrator"/u);
+  assert.match(migrationRunner, /MIGRATION_DATABASE_URL must use the virki_migrator database role/u);
+  assert.match(migrationRunner, /decodeURIComponent\(url\.username\) === "virki_migrator"/u);
   assert.match(migrationRunner, /env: \{ \.\.\.process\.env, DATABASE_URL: migrationUrl \}/u);
 });
 

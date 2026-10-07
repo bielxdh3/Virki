@@ -16,10 +16,10 @@ export function readProductionConfig({ env = process.env, configPath = privateCo
   }
 
   return {
-    sshAlias: env.BIELOS_PRODUCTION_SSH_ALIAS ?? fileConfig.sshAlias ?? "",
-    host: env.BIELOS_PRODUCTION_HOST ?? fileConfig.host ?? "",
-    port: env.BIELOS_PRODUCTION_PORT ?? fileConfig.port ?? "",
-    root: env.BIELOS_PRODUCTION_ROOT ?? fileConfig.root ?? "",
+    sshAlias: env.VIRKI_PRODUCTION_SSH_ALIAS ?? fileConfig.sshAlias ?? "",
+    host: env.VIRKI_PRODUCTION_HOST ?? fileConfig.host ?? "",
+    port: env.VIRKI_PRODUCTION_PORT ?? fileConfig.port ?? "",
+    root: env.VIRKI_PRODUCTION_ROOT ?? fileConfig.root ?? "",
   };
 }
 

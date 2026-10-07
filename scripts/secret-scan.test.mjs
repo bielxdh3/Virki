@@ -10,7 +10,7 @@ const MAX_TEXT_FILE_BYTES = 1024 * 1024;
 const scannerPath = fileURLToPath(new URL("./secret-scan.mjs", import.meta.url));
 
 test("secret scan fails closed on oversized NUL-free text without printing its contents", () => {
-  const repository = mkdtempSync(path.join(tmpdir(), "bielos-secret-scan-"));
+  const repository = mkdtempSync(path.join(tmpdir(), "virki-secret-scan-"));
   const credentialField = ["pass", "word"].join("") + "=";
   const syntheticValue = ["local", "fixture", "value", "0123456789abcdef"].join("-");
 
@@ -31,7 +31,7 @@ test("secret scan fails closed on oversized NUL-free text without printing its c
 });
 
 test("exact-revision secret scan blocks credential paths and secret assignments without printing values", () => {
-  const repository = mkdtempSync(path.join(tmpdir(), "bielos-secret-revision-"));
+  const repository = mkdtempSync(path.join(tmpdir(), "virki-secret-revision-"));
   const value = ["test-fixture", "0123456789abcdef", "fedcba9876543210"].join("-");
 
   try {
@@ -83,7 +83,7 @@ test("exact-revision secret scan blocks credential paths and secret assignments 
 });
 
 test("exact-revision secret scan accepts safe tracked files and migration SQL", () => {
-  const repository = mkdtempSync(path.join(tmpdir(), "bielos-secret-revision-safe-"));
+  const repository = mkdtempSync(path.join(tmpdir(), "virki-secret-revision-safe-"));
 
   try {
     execFileSync("git", ["init", "--quiet"], { cwd: repository });

@@ -28,19 +28,19 @@ fi
 
 readonly release_dir="$root/releases"
 readonly current_link="$root/current"
-readonly lock_path="$root/.bielos-operations.lock"
+readonly lock_path="$root/.virki-operations.lock"
 source_dir=
 readonly temp_dir="$root/.deploy-tmp"
 readonly backup_dir="$root/backups"
-readonly marker_path="$root/.bielos-production-host"
-readonly revision_path="$root/.bielos-deploy-revision"
-readonly source_state_path="$root/.bielos-source-state"
-readonly verification_path="$root/.bielos-migration-verification"
-readonly maintenance_path="$root/.bielos-maintenance"
+readonly marker_path="$root/.virki-production-host"
+readonly revision_path="$root/.virki-deploy-revision"
+readonly source_state_path="$root/.virki-source-state"
+readonly verification_path="$root/.virki-migration-verification"
+readonly maintenance_path="$root/.virki-maintenance"
 readonly migration_schema='packages/database/prisma/schema.prisma'
 readonly migration_directory='packages/database/prisma/migrations'
 readonly transition_migration_name='20260922090000_total_identity_security_rebaseline'
-readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @bielos/database)
+readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @virki/database)
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
 readonly state_changing_actions=' install-source cleanup-deploy-staging deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
 readonly -a legacy_transition_migrations=(
@@ -136,8 +136,8 @@ verify_revision() {
   grep -Fxq "revision=$revision" "$source_state_path" || fail 'Production source state does not match the requested revision.'
   archive_hash=$(awk -F= '$1 == "archive_sha256" { print substr($0, index($0, "=") + 1) }' "$source_state_path")
   [[ "$archive_hash" =~ ^[0-9a-f]{64}$ ]] || fail 'Production source archive marker is invalid.'
-  grep -Fxq "revision=$revision" "$release/.bielos-release" || fail 'Production release marker is invalid.'
-  grep -Fxq "archive_sha256=$archive_hash" "$release/.bielos-release" || fail 'Production release marker does not match its archive.'
+  grep -Fxq "revision=$revision" "$release/.virki-release" || fail 'Production release marker is invalid.'
+  grep -Fxq "archive_sha256=$archive_hash" "$release/.virki-release" || fail 'Production release marker does not match its archive.'
   [[ -d "$source_dir" && -f "$source_dir/infra/docker-compose.prod.yml" && -f "$source_dir/infra/docker-compose.cloudflare.yml" ]] || fail 'Accepted production source is incomplete.'
   [[ -L "$source_dir/.env" && "$(readlink -- "$source_dir/.env")" == "$root/.env" ]] || fail 'Production source does not use the remote environment file.'
   [[ -L "$source_dir/.env.oidc" && "$(readlink -- "$source_dir/.env.oidc")" == "$root/.env.oidc" ]] || fail 'Production source does not use the remote OIDC environment file.'
@@ -178,7 +178,7 @@ load_production_images() {
     rm -f -- "$archive" || printf '%s\n' 'Could not remove the rejected production image archive.' >&2
     fail 'Exact-revision production images could not be loaded.'
   }
-  for image in "bielos-production-ci:$revision" "bielos-migrator-ci:$revision"; do
+  for image in "virki-production-ci:$revision" "virki-migrator-ci:$revision"; do
     observed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image") || {
       rm -f -- "$archive" || printf '%s\n' 'Could not remove the rejected production image archive.' >&2
       fail 'Exact-revision production image is missing.'
@@ -194,7 +194,7 @@ load_production_images() {
 compose_args() {
   printf '%s\0' \
     --progress quiet \
-    --project-name bielos-prod \
+    --project-name virki-prod \
     --project-directory "$source_dir/infra" \
     --env-file "$root/.env" \
     -f "$source_dir/infra/docker-compose.prod.yml" \
@@ -250,9 +250,9 @@ assert_health() {
   public_binding=$(compose port public-site 3000)
   hub_binding=$(compose port hub 3001)
   [[ "$public_binding" =~ ^127\.0\.0\.1:[0-9]+$ && "$hub_binding" =~ ^127\.0\.0\.1:[0-9]+$ ]] || fail 'Production application port binding is not loopback-only.'
-  portal_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.BIELOS_PORTAL_HOSTNAME ?? "")') || fail 'Configured portal host could not be read.'
-  hub_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.BIELOS_HUB_HOSTNAME ?? "")') || fail 'Configured Hub host could not be read.'
-  oidc_issuer=$(compose exec -T oidc-issuer node -e 'process.stdout.write(process.env.BIELOS_OIDC_ISSUER ?? "")') || fail 'Configured OIDC issuer could not be read.'
+  portal_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_PORTAL_HOSTNAME ?? "")') || fail 'Configured portal host could not be read.'
+  hub_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_HOSTNAME ?? "")') || fail 'Configured Hub host could not be read.'
+  oidc_issuer=$(compose exec -T oidc-issuer node -e 'process.stdout.write(process.env.VIRKI_OIDC_ISSUER ?? "")') || fail 'Configured OIDC issuer could not be read.'
   is_valid_dns_hostname "$portal_hostname" && is_valid_dns_hostname "$hub_hostname" && [[ "$oidc_issuer" == "https://$portal_hostname" ]] || fail 'Configured application hosts or OIDC issuer are invalid.'
   public_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://$public_binding") || fail 'Public site health request failed.'
   hub_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://$hub_binding/api/health") || fail 'Hub health request failed.'
@@ -270,14 +270,14 @@ database_query() {
 
 clone_query() {
   local container=$1 sql=$2
-  docker exec -i "$container" psql -U bielos_runtime -d bielos_restore -At -v ON_ERROR_STOP=1 <<< "$sql"
+  docker exec -i "$container" psql -U virki_runtime -d virki_restore -At -v ON_ERROR_STOP=1 <<< "$sql"
 }
 
 clone_migration_query() {
   local container=$1 sql=$2
   [[ "${migrator_password:-}" =~ ^[a-f0-9]{64}$ ]] || fail 'Disposable migration role credential is unavailable.'
   local -x PGPASSWORD="$migrator_password"
-  docker exec -i --env PGPASSWORD "$container" psql --host 127.0.0.1 -U bielos_migrator -d bielos_restore -At -v ON_ERROR_STOP=1 <<< "$sql"
+  docker exec -i --env PGPASSWORD "$container" psql --host 127.0.0.1 -U virki_migrator -d virki_restore -At -v ON_ERROR_STOP=1 <<< "$sql"
 }
 
 current_migration_names() {
@@ -397,16 +397,16 @@ run_migration_prisma() {
     unset MIGRATION_DATABASE_URL
   fi
   if [[ -n "$override" ]]; then
-    compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate npm run "prisma:migrate:$operation" --workspace @bielos/database
+    compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "virki.restore.operation=$isolation_id" migrate npm run "prisma:migrate:$operation" --workspace @virki/database
   else
-    compose --profile migration run --rm --no-deps migrate npm run "prisma:migrate:$operation" --workspace @bielos/database
+    compose --profile migration run --rm --no-deps migrate npm run "prisma:migrate:$operation" --workspace @virki/database
   fi
 }
 
 prune_legacy_migration_history() {
   local container=$1 expected_names=$2 sql
   sql=$(cat <<SQL
-DO \$bielos\$
+DO \$virki\$
 DECLARE actual_names text;
 BEGIN
   SELECT COALESCE(string_agg("migration_name", ',' ORDER BY "migration_name" COLLATE "C"), '')
@@ -425,13 +425,13 @@ BEGIN
     RAISE EXCEPTION 'Migration history did not converge to the clean baseline';
   END IF;
 END
-\$bielos\$;
+\$virki\$;
 SQL
 )
   if [[ -n "$container" ]]; then
     clone_migration_query "$container" "$sql" >/dev/null
   else
-    compose exec -T postgres sh -lc 'PGPASSWORD="$BIELOS_MIGRATOR_DB_PASSWORD" psql --host 127.0.0.1 -U bielos_migrator -d "$POSTGRES_DB" -At -v ON_ERROR_STOP=1' <<< "$sql" >/dev/null
+    compose exec -T postgres sh -lc 'PGPASSWORD="$VIRKI_MIGRATOR_DB_PASSWORD" psql --host 127.0.0.1 -U virki_migrator -d "$POSTGRES_DB" -At -v ON_ERROR_STOP=1' <<< "$sql" >/dev/null
   fi
 }
 
@@ -537,21 +537,21 @@ run_clone_migrations() {
   local database_url=$1 override=$2 migration_container=$3 isolation_id=$4 database_container=$5
   local -x MIGRATION_DATABASE_URL="$database_url"
   normalize_migration_history "$database_url" "$database_container" "$override" "$migration_container" "$isolation_id"
-  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate
-  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "bielos.restore.operation=$isolation_id" migrate npm run prisma:migrate:status --workspace @bielos/database
+  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "virki.restore.operation=$isolation_id" migrate
+  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "virki.restore.operation=$isolation_id" migrate npm run prisma:migrate:status --workspace @virki/database
   verify_migration_schema "$database_url" "$override" "$migration_container" "$isolation_id"
 }
 
 cleanup_clone() {
   local isolation_id=$1 override=$2 containers networks container_id network_id owned cleanup_failed=0
-  containers=$(docker ps --all --quiet --filter "label=bielos.restore.operation=$isolation_id") || {
+  containers=$(docker ps --all --quiet --filter "label=virki.restore.operation=$isolation_id") || {
     printf '%s\n' 'Could not list disposable restore containers during cleanup.' >&2
     cleanup_failed=1
     containers=
   }
   while IFS= read -r container_id; do
     [[ -n "$container_id" ]] || continue
-    owned=$(docker inspect --format '{{index .Config.Labels "bielos.restore.operation"}}' "$container_id") || {
+    owned=$(docker inspect --format '{{index .Config.Labels "virki.restore.operation"}}' "$container_id") || {
       printf '%s\n' 'Could not inspect a disposable restore container during cleanup.' >&2
       cleanup_failed=1
       continue
@@ -567,14 +567,14 @@ cleanup_clone() {
     }
   done <<< "$containers"
 
-  networks=$(docker network ls --quiet --filter "label=bielos.restore.operation=$isolation_id") || {
+  networks=$(docker network ls --quiet --filter "label=virki.restore.operation=$isolation_id") || {
     printf '%s\n' 'Could not list the disposable restore network during cleanup.' >&2
     cleanup_failed=1
     networks=
   }
   while IFS= read -r network_id; do
     [[ -n "$network_id" ]] || continue
-    owned=$(docker network inspect --format '{{index .Labels "bielos.restore.operation"}}' "$network_id") || {
+    owned=$(docker network inspect --format '{{index .Labels "virki.restore.operation"}}' "$network_id") || {
       printf '%s\n' 'Could not inspect the disposable restore network during cleanup.' >&2
       cleanup_failed=1
       continue
@@ -599,7 +599,7 @@ cleanup_clone() {
 
 verify_clone_cleanup() {
   local isolation_id=$1 override=$2 containers networks
-  containers=$(docker ps --all --filter "label=bielos.restore.operation=$isolation_id" --format '{{.Names}}') || {
+  containers=$(docker ps --all --filter "label=virki.restore.operation=$isolation_id" --format '{{.Names}}') || {
     printf '%s\n' 'Could not confirm disposable restore containers were removed.' >&2
     return 1
   }
@@ -607,7 +607,7 @@ verify_clone_cleanup() {
     printf '%s\n' 'Disposable restore containers remain after migration validation.' >&2
     return 1
   }
-  networks=$(docker network ls --filter "label=bielos.restore.operation=$isolation_id" --format '{{.Name}}') || {
+  networks=$(docker network ls --filter "label=virki.restore.operation=$isolation_id" --format '{{.Name}}') || {
     printf '%s\n' 'Could not confirm the disposable restore network was removed.' >&2
     return 1
   }
@@ -643,15 +643,15 @@ create_verified_backup() {
   stamp="$(date -u +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
   isolation_id=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
   [[ "$isolation_id" =~ ^[a-f0-9]{24}$ ]] || fail 'Could not create a unique restore isolation identifier.'
-  backup_path="$backup_dir/bielos-$stamp.dump"
+  backup_path="$backup_dir/virki-$stamp.dump"
   partial_backup_path="$backup_dir/.${backup_path##*/}.$$.partial"
   local -a postgres_ids=()
   mapfile -t postgres_ids < <(compose ps -q postgres)
   ((${#postgres_ids[@]} == 1)) || fail 'Production PostgreSQL service is not running exactly once.'
-  container="bielos-restore-$isolation_id"
+  container="virki-restore-$isolation_id"
   alias="$container"
-  db_network="bielos-restore-net-$isolation_id"
-  migration_container="bielos-restore-migrate-$isolation_id"
+  db_network="virki-restore-net-$isolation_id"
+  migration_container="virki-restore-migrate-$isolation_id"
   override="$temp_dir/restore-$isolation_id.compose.yml"
   bootstrap_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
   runtime_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
@@ -659,8 +659,8 @@ create_verified_backup() {
   audit_maintenance_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
   [[ "$bootstrap_password" =~ ^[a-f0-9]{64}$ && "$runtime_password" =~ ^[a-f0-9]{64}$ && "$migrator_password" =~ ^[a-f0-9]{64}$ && "$audit_maintenance_password" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not create isolated PostgreSQL role credentials.'
   [[ "$bootstrap_password" != "$runtime_password" && "$bootstrap_password" != "$migrator_password" && "$runtime_password" != "$migrator_password" && "$audit_maintenance_password" != "$bootstrap_password" && "$audit_maintenance_password" != "$runtime_password" && "$audit_maintenance_password" != "$migrator_password" ]] || fail 'Isolated PostgreSQL role credentials are not distinct.'
-  local -x POSTGRES_USER=bielos_bootstrap POSTGRES_PASSWORD="$bootstrap_password" BIELOS_RUNTIME_DB_PASSWORD="$runtime_password" BIELOS_MIGRATOR_DB_PASSWORD="$migrator_password" BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD="$audit_maintenance_password"
-  database_url="postgresql://bielos_migrator:$migrator_password@$alias:5432/bielos_restore?schema=public"
+  local -x POSTGRES_USER=virki_bootstrap POSTGRES_PASSWORD="$bootstrap_password" VIRKI_RUNTIME_DB_PASSWORD="$runtime_password" VIRKI_MIGRATOR_DB_PASSWORD="$migrator_password" VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD="$audit_maintenance_password"
+  database_url="postgresql://virki_migrator:$migrator_password@$alias:5432/virki_restore?schema=public"
   verification_tmp="$verification_path.tmp.$$"
   [[ ! -e "$backup_path" && ! -L "$backup_path" && ! -e "$partial_backup_path" && ! -L "$partial_backup_path" ]] || fail 'A production backup path already exists.'
   rm -f -- "$verification_path" "$verification_tmp"
@@ -669,7 +669,7 @@ create_verified_backup() {
   chmod 600 -- "$partial_backup_path"
   [[ -s "$partial_backup_path" ]] || fail 'Production PostgreSQL backup is empty.'
 
-  docker network create --internal --label "bielos.restore.operation=$isolation_id" "$db_network" >/dev/null || fail 'Isolated restore network could not be created.'
+  docker network create --internal --label "virki.restore.operation=$isolation_id" "$db_network" >/dev/null || fail 'Isolated restore network could not be created.'
   {
     printf 'services:\n'
     printf '  migrate:\n'
@@ -681,15 +681,15 @@ create_verified_backup() {
     printf '    name: %s\n' "$db_network"
   } > "$override"
   chmod 600 -- "$override"
-  docker run --detach --name "$container" --label "bielos.restore.operation=$isolation_id" --network "$db_network" --network-alias "$alias" \
-    --env POSTGRES_DB=bielos_restore --env POSTGRES_USER --env POSTGRES_PASSWORD \
-    --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD --env BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD \
-    --volume "$source_dir/infra/postgres-init/10-bielos-database-roles.sh:/docker-entrypoint-initdb.d/10-bielos-database-roles.sh:ro" \
-    --health-cmd 'pg_isready -h 127.0.0.1 -U bielos_bootstrap -d bielos_restore' --health-interval 1s --health-timeout 3s --health-retries 60 \
+  docker run --detach --name "$container" --label "virki.restore.operation=$isolation_id" --network "$db_network" --network-alias "$alias" \
+    --env POSTGRES_DB=virki_restore --env POSTGRES_USER --env POSTGRES_PASSWORD \
+    --env VIRKI_RUNTIME_DB_PASSWORD --env VIRKI_MIGRATOR_DB_PASSWORD --env VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD \
+    --volume "$source_dir/infra/postgres-init/10-virki-database-roles.sh:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro" \
+    --health-cmd 'pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_restore' --health-interval 1s --health-timeout 3s --health-retries 60 \
     postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 >/dev/null || fail 'Disposable PostgreSQL restore target could not start.'
   wait_for_clone "$container"
-  docker exec --interactive --user postgres "$container" pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges -U bielos_bootstrap -d bielos_restore < "$partial_backup_path" >/dev/null
-  docker exec --env BIELOS_RUNTIME_DB_PASSWORD --env BIELOS_MIGRATOR_DB_PASSWORD --env BIELOS_AUDIT_MAINTENANCE_DB_PASSWORD "$container" sh /docker-entrypoint-initdb.d/10-bielos-database-roles.sh || fail 'Restored database role separation could not be applied.'
+  docker exec --interactive --user postgres "$container" pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges -U virki_bootstrap -d virki_restore < "$partial_backup_path" >/dev/null
+  docker exec --env VIRKI_RUNTIME_DB_PASSWORD --env VIRKI_MIGRATOR_DB_PASSWORD --env VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD "$container" sh /docker-entrypoint-initdb.d/10-virki-database-roles.sh || fail 'Restored database role separation could not be applied.'
 
   local before_identity before_recovery after_identity after_recovery
   before_identity=$(identity_snapshot "$container")
@@ -727,7 +727,7 @@ assert_backup_verified() {
   backup_name=$(awk -F= '$1 == "backup_name" { print substr($0, index($0, "=") + 1) }' "$verification_path")
   backup_hash=$(awk -F= '$1 == "backup_sha256" { print substr($0, index($0, "=") + 1) }' "$verification_path")
   verified_at=$(awk -F= '$1 == "verified_at" { print substr($0, index($0, "=") + 1) }' "$verification_path")
-  [[ "$marked_revision" == "$revision" && "$backup_name" =~ ^bielos-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}\.dump$ && "$backup_hash" =~ ^[a-f0-9]{64}$ ]] || fail 'Verified backup marker does not match this source revision.'
+  [[ "$marked_revision" == "$revision" && "$backup_name" =~ ^virki-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}\.dump$ && "$backup_hash" =~ ^[a-f0-9]{64}$ ]] || fail 'Verified backup marker does not match this source revision.'
   backup_path="$backup_dir/$backup_name"
   [[ -f "$backup_path" && ! -L "$backup_path" ]] || fail 'Verified production backup file is missing.'
   actual_hash=$(sha256sum -- "$backup_path" | awk '{print $1}')
@@ -751,7 +751,7 @@ apply_production_migrations() {
   local before_identity before_recovery after_identity after_recovery
   compose up --detach --force-recreate postgres >/dev/null || fail 'Production PostgreSQL could not be restarted with the verified maintenance-role configuration.'
   compose exec -T postgres sh -lc 'for attempt in $(seq 1 60); do pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1' || fail 'Production PostgreSQL did not become ready after its protected restart.'
-  compose exec -T postgres sh -s < "$source_dir/infra/postgres-init/10-bielos-database-roles.sh" >/dev/null || fail 'Production database role transition could not be applied after backup verification.'
+  compose exec -T postgres sh -s < "$source_dir/infra/postgres-init/10-virki-database-roles.sh" >/dev/null || fail 'Production database role transition could not be applied after backup verification.'
   before_identity=$(identity_snapshot)
   before_recovery=$(recovery_snapshot "" before_migrations)
   normalize_migration_history '' '' '' '' ''
@@ -781,7 +781,7 @@ maintenance_on() {
   trap 'stop_routed_services' EXIT
   compose stop cloudflared >/dev/null
   compose stop "${application_services[@]}" >/dev/null
-  printf 'BielOS application and Tunnel services are in maintenance; PostgreSQL and persistent data remain available.\n'
+  printf 'Virki application and Tunnel services are in maintenance; PostgreSQL and persistent data remain available.\n'
 }
 
 stop_routed_services() {
@@ -826,13 +826,13 @@ install_source() {
   local release="$release_dir/$revision"
   if [[ -e "$release" || -L "$release" ]]; then
     [[ -d "$release" && ! -L "$release" ]] || fail 'Existing production release path is unsafe.'
-    grep -Fxq "revision=$revision" "$release/.bielos-release" || fail 'Existing production release does not match the requested revision.'
-    grep -Fxq "archive_sha256=$archive_hash" "$release/.bielos-release" || fail 'Existing production release has a different source archive.'
+    grep -Fxq "revision=$revision" "$release/.virki-release" || fail 'Existing production release does not match the requested revision.'
+    grep -Fxq "archive_sha256=$archive_hash" "$release/.virki-release" || fail 'Existing production release has a different source archive.'
   else
     mkdir -m 700 -- "$stage"
     tar --extract --file "$archive" --directory "$stage" --no-same-owner --no-same-permissions
     [[ -f "$stage/scripts/production-server.sh" && -f "$stage/infra/docker-compose.prod.yml" && -f "$stage/infra/docker-compose.cloudflare.yml" ]] || fail 'Source archive is incomplete.'
-    for reserved in .env .env.oidc .env.oidc-data backups releases current .bielos-release .bielos-production-host; do
+    for reserved in .env .env.oidc .env.oidc-data backups releases current .virki-release .virki-production-host; do
       [[ ! -e "$stage/$reserved" && ! -L "$stage/$reserved" ]] || fail 'Source archive contains a reserved production path.'
     done
     [[ -z "$(find "$stage" -type l -print -quit)" ]] || fail 'Source archive contains a symbolic link.'
@@ -842,11 +842,11 @@ install_source() {
     {
       printf 'revision=%s\n' "$revision"
       printf 'archive_sha256=%s\n' "$archive_hash"
-    } > "$stage/.bielos-release"
-    chmod 600 -- "$stage/.bielos-release"
+    } > "$stage/.virki-release"
+    chmod 600 -- "$stage/.virki-release"
     mv -- "$stage" "$release"
   fi
-  local role_script="$release/infra/postgres-init/10-bielos-database-roles.sh"
+  local role_script="$release/infra/postgres-init/10-virki-database-roles.sh"
   [[ -f "$role_script" && ! -L "$role_script" ]] || fail 'PostgreSQL role initializer is missing or unsafe.'
   chmod 644 -- "$role_script"
   [[ "$(stat -c '%a' -- "$role_script")" == 644 ]] || fail 'PostgreSQL role initializer is not readable by the database container.'
@@ -934,8 +934,8 @@ if [[ "$action" == deploy ]]; then
 fi
 verify_revision
 
-export BIELOS_PRODUCTION_IMAGE="bielos-production-ci:$revision"
-export BIELOS_MIGRATOR_IMAGE="bielos-migrator-ci:$revision"
+export VIRKI_PRODUCTION_IMAGE="virki-production-ci:$revision"
+export VIRKI_MIGRATOR_IMAGE="virki-migrator-ci:$revision"
 
 case "$action" in
   deploy)
@@ -992,7 +992,7 @@ case "$action" in
     ;;
   stop)
     compose stop >/dev/null
-    printf 'BielOS services stopped; persistent volumes were preserved.\n'
+    printf 'Virki services stopped; persistent volumes were preserved.\n'
     ;;
   maintenance-on)
     maintenance_on
@@ -1023,7 +1023,7 @@ case "$action" in
     run_migration_status
     ;;
   audit-recent)
-    rows=$(compose exec -T hub npm run audit:recent --workspace @bielos/auth | wc -l)
+    rows=$(compose exec -T hub npm run audit:recent --workspace @virki/auth | wc -l)
     printf 'Remote sanitized audit rows available: %s.\n' "$rows"
     ;;
   audit-cleanup)
@@ -1031,7 +1031,7 @@ case "$action" in
     printf 'Remote audit cleanup completed.\n'
     ;;
   sessions-cleanup)
-    compose exec -T hub npm run sessions:cleanup --workspace @bielos/auth >/dev/null
+    compose exec -T hub npm run sessions:cleanup --workspace @virki/auth >/dev/null
     printf 'Remote session cleanup completed.\n'
     ;;
   config)

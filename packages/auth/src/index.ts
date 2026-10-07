@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
-import { prisma, type Prisma } from "@bielos/database";
+import { prisma, type Prisma } from "@virki/database";
 import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
 import { createLoginAccountRateLimitIdentifierHash, createLoginAttemptRateLimitIdentifierHash, createLoginRateLimitIdentifierHash, createRateLimitIdentifierHash, getLoginRateLimitRefundState, isTrustedClientAddress, scopeLoginRateLimitEmail } from "./rate-limit-config";
 

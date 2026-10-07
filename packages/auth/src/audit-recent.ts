@@ -1,4 +1,4 @@
-import { prisma } from "@bielos/database";
+import { prisma } from "@virki/database";
 import { formatAuditEmailReference } from "./audit";
 import { runAuthCommand } from "./command-output";
 
@@ -42,7 +42,7 @@ async function main() {
 }
 
 function getLimit(): number {
-  const raw = Number(process.env.BIELOS_AUDIT_RECENT_LIMIT ?? DEFAULT_LIMIT);
+  const raw = Number(process.env.VIRKI_AUDIT_RECENT_LIMIT ?? DEFAULT_LIMIT);
 
   if (!Number.isFinite(raw) || raw < 1) {
     return DEFAULT_LIMIT;

@@ -1,5 +1,5 @@
-import { formatAuditEmailReference } from "@bielos/auth";
-import { prisma } from "@bielos/database";
+import { formatAuditEmailReference } from "@virki/auth";
+import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
 
 export const dynamic = "force-dynamic";

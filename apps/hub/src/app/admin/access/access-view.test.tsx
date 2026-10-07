@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import React from "react";
 import test from "node:test";
-import { prisma } from "@bielos/database";
+import { prisma } from "@virki/database";
 import { AccessView } from "./access-view";
 
 function collectText(node: unknown): string {

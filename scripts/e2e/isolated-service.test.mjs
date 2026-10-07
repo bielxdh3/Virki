@@ -12,25 +12,25 @@ const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)))
 
 test("audit cleanup database uses the exact validated disposable target and maintenance role", () => {
   const previousNodeEnv = process.env.NODE_ENV;
-  const previousConfirmation = process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM;
-  const runtimeDatabaseUrl = ["postgresql:/", "/bielos_runtime_test:", "runtime-only@127.0.0.1:55432/bielos_e2e_test?schema=public"].join("");
-  const cleanupDatabaseUrl = ["postgresql:/", "/bielos_audit_maintenance:", "maintenance-only@127.0.0.1:55432/bielos_e2e_test?schema=public"].join("");
+  const previousConfirmation = process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM;
+  const runtimeDatabaseUrl = ["postgresql:/", "/virki_runtime_test:", "runtime-only@127.0.0.1:55432/virki_e2e_test?schema=public"].join("");
+  const cleanupDatabaseUrl = ["postgresql:/", "/virki_audit_maintenance:", "maintenance-only@127.0.0.1:55432/virki_e2e_test?schema=public"].join("");
   process.env.NODE_ENV = "test";
-  process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM = "disposable";
+  process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM = "disposable";
   try {
     const target = validateAuditCleanupDatabase(cleanupDatabaseUrl, runtimeDatabaseUrl);
     assert.equal(target.protocol, "postgresql:");
-    assert.equal(target.username, "bielos_audit_maintenance");
+    assert.equal(target.username, "virki_audit_maintenance");
     assert.equal(target.hostname, "127.0.0.1");
     assert.equal(target.port, "55432");
-    assert.equal(target.pathname, "/bielos_e2e_test");
+    assert.equal(target.pathname, "/virki_e2e_test");
     assert.equal(target.search, "?schema=public");
 
     const mismatches = [
-      cleanupDatabaseUrl.replace("bielos_audit_maintenance", "bielos_runtime_test"),
+      cleanupDatabaseUrl.replace("virki_audit_maintenance", "virki_runtime_test"),
       cleanupDatabaseUrl.replace("127.0.0.1:55432", "localhost:55432"),
       cleanupDatabaseUrl.replace(":55432/", ":55433/"),
-      cleanupDatabaseUrl.replace("/bielos_e2e_test", "/bielos_other_test"),
+      cleanupDatabaseUrl.replace("/virki_e2e_test", "/virki_other_test"),
       cleanupDatabaseUrl.replace("schema=public", "schema=other"),
       cleanupDatabaseUrl.replace(":maintenance-only@", "@"),
       cleanupDatabaseUrl.replace("?schema=public", "?schema=public#fragment")
@@ -48,8 +48,8 @@ test("audit cleanup database uses the exact validated disposable target and main
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
-    if (previousConfirmation === undefined) delete process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM;
-    else process.env.BIELOS_CORE_TEST_DATABASE_CONFIRM = previousConfirmation;
+    if (previousConfirmation === undefined) delete process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM;
+    else process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM = previousConfirmation;
   }
 });
 
@@ -70,7 +70,7 @@ test("fixture cleanup runs in order and reports fixed labels without raw errors"
 });
 
 test("Playwright loads E2E config, setup, and OIDC spec through their ESM entrypoints", () => {
-  const temporaryDirectory = mkdtempSync(join(tmpdir(), "bielos-playwright-loader-"));
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "virki-playwright-loader-"));
   try {
     const configPath = join(temporaryDirectory, "playwright.config.mjs");
     const config = {
@@ -112,7 +112,7 @@ test("Playwright loads E2E config, setup, and OIDC spec through their ESM entryp
 });
 
 test("Hub Next dev receives the private E2E CA for its server worker", () => {
-  const tlsDirectory = mkdtempSync(join(tmpdir(), "bielos-e2e-next-tls-"));
+  const tlsDirectory = mkdtempSync(join(tmpdir(), "virki-e2e-next-tls-"));
   const keyPath = join(tlsDirectory, "server-key.pem");
   const certificatePath = join(tlsDirectory, "server-cert.pem");
   const caCertificatePath = join(tlsDirectory, "test-ca-cert.pem");
@@ -122,8 +122,8 @@ test("Hub Next dev receives the private E2E CA for its server worker", () => {
     }
 
     const { args } = getServiceCommand("hub", {
-      BIELOS_E2E_TLS_KEY_PATH: keyPath,
-      BIELOS_E2E_TLS_CERTIFICATE_PATH: certificatePath,
+      VIRKI_E2E_TLS_KEY_PATH: keyPath,
+      VIRKI_E2E_TLS_CERTIFICATE_PATH: certificatePath,
       NODE_EXTRA_CA_CERTS: caCertificatePath
     });
     assert.deepEqual(args.slice(-7), [
@@ -165,48 +165,48 @@ test("service children receive only their E2E allowlist and required OS paths", 
     NODE_OPTIONS: "--require caller-controlled-preload.cjs",
     NODE_PATH: "caller-controlled-module-path",
     CALLER_SECRET_SENTINEL: "must-not-reach-service",
-    BIELOS_E2E_DATABASE_URL: "must-stay-in-the-runner",
-    BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "maintenance-must-stay-in-global-setup",
-    BIELOS_CORE_TEST_DATABASE_CONFIRM: "disposable",
-    BIELOS_E2E_JWKS_REGISTRATION_TOKEN: "fixture-registration-token",
-    BIELOS_PORTAL_URL: "https://portal.localhost:3001",
-    BIELOS_HUB_HOSTNAME: "hub.localhost",
-    BIELOS_PORTAL_HOSTNAME: "portal.localhost",
-    BIELOS_HUB_URL: "https://hub.localhost:3001",
-    DATABASE_URL: "postgresql://e2e_test@127.0.0.1:5432/bielos_test",
-    BIELOS_OIDC_PROXY_URL: "http://127.0.0.1:3003",
-    BIELOS_OIDC_ISSUER: "https://portal.localhost:3001",
-    BIELOS_OIDC_BIND_ADDRESS: "127.0.0.1",
+    VIRKI_E2E_DATABASE_URL: "must-stay-in-the-runner",
+    VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "maintenance-must-stay-in-global-setup",
+    VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
+    VIRKI_E2E_JWKS_REGISTRATION_TOKEN: "fixture-registration-token",
+    VIRKI_PORTAL_URL: "https://portal.localhost:3001",
+    VIRKI_HUB_HOSTNAME: "hub.localhost",
+    VIRKI_PORTAL_HOSTNAME: "portal.localhost",
+    VIRKI_HUB_URL: "https://hub.localhost:3001",
+    DATABASE_URL: "postgresql://e2e_test@127.0.0.1:5432/virki_test",
+    VIRKI_OIDC_PROXY_URL: "http://127.0.0.1:3003",
+    VIRKI_OIDC_ISSUER: "https://portal.localhost:3001",
+    VIRKI_OIDC_BIND_ADDRESS: "127.0.0.1",
     OIDC_ISSUER_PORT: "3003",
-    BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE: "C:\\Temp\\issuer-config.json",
-    BIELOS_OIDC_ADAPTER_KEY: "must-stay-in-private-config",
-    BIELOS_OIDC_COOKIE_KEY: "must-stay-in-private-config",
-    BIELOS_OIDC_SIGNING_JWKS: "must-stay-in-private-config",
+    VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: "C:\\Temp\\issuer-config.json",
+    VIRKI_OIDC_ADAPTER_KEY: "must-stay-in-private-config",
+    VIRKI_OIDC_COOKIE_KEY: "must-stay-in-private-config",
+    VIRKI_OIDC_SIGNING_JWKS: "must-stay-in-private-config",
     CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
     CLOUDFLARE_ACCESS_AUDIENCE: "fixture-audience",
     CLOUDFLARE_TEAM_DOMAIN: "http://127.0.0.1:3010",
-    BIELOS_E2E_ACCESS_DIAGNOSTICS: "true",
-    BIELOS_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
-    BIELOS_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem",
-    BIELOS_CSRF_SIGNING_KEY: "a".repeat(64),
+    VIRKI_E2E_ACCESS_DIAGNOSTICS: "true",
+    VIRKI_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
+    VIRKI_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem",
+    VIRKI_CSRF_SIGNING_KEY: "a".repeat(64),
     NODE_EXTRA_CA_CERTS: join(tmpdir(), "fixture-ca-cert.pem"),
-    BIELOS_TOTP_ENCRYPTION_KEY: "e2e-totp-key-sentinel",
-    BIELOS_EMAIL_OUTBOX_KEY: "e2e-email-key-sentinel"
+    VIRKI_TOTP_ENCRYPTION_KEY: "e2e-totp-key-sentinel",
+    VIRKI_EMAIL_OUTBOX_KEY: "e2e-email-key-sentinel"
   };
 
   const services = [
-    { name: "jwks", allowed: ["BIELOS_E2E_JWKS_REGISTRATION_TOKEN"] },
-    { name: "public-site", allowed: ["NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_PORTAL_URL"] },
+    { name: "jwks", allowed: ["VIRKI_E2E_JWKS_REGISTRATION_TOKEN"] },
+    { name: "public-site", allowed: ["NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_PORTAL_URL"] },
     {
       name: "hub",
       allowed: [
-        "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_HUB_HOSTNAME", "BIELOS_PORTAL_HOSTNAME",
-        "BIELOS_HUB_URL", "BIELOS_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
-        "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_E2E_ACCESS_DIAGNOSTICS", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_OIDC_PROXY_URL", "BIELOS_E2E_TLS_KEY_PATH",
-        "BIELOS_E2E_TLS_CERTIFICATE_PATH", "BIELOS_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "BIELOS_EMAIL_OUTBOX_KEY"
+        "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_HUB_HOSTNAME", "VIRKI_PORTAL_HOSTNAME",
+        "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+        "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
+        "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY"
       ]
     },
-    { name: "issuer", allowed: ["DATABASE_URL", "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"] }
+    { name: "issuer", allowed: ["DATABASE_URL", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"] }
   ];
 
   for (const service of services) {
@@ -249,32 +249,32 @@ test("service children receive only their E2E allowlist and required OS paths", 
 
     if (service.name === "hub" || service.name === "issuer") {
       assert.equal(environment.DATABASE_URL, source.DATABASE_URL, `${service.name} keeps the validated database URL`);
-      assert.equal(result.keys.includes("BIELOS_CORE_TEST_DATABASE_CONFIRM"), false, `${service.name} does not receive the test marker`);
+      assert.equal(result.keys.includes("VIRKI_CORE_TEST_DATABASE_CONFIRM"), false, `${service.name} does not receive the test marker`);
     }
     if (service.name === "hub") {
-      assert.equal(environment.BIELOS_CSRF_SIGNING_KEY, source.BIELOS_CSRF_SIGNING_KEY, "all Hub dev workers receive the same E2E-only CSRF key");
+      assert.equal(environment.VIRKI_CSRF_SIGNING_KEY, source.VIRKI_CSRF_SIGNING_KEY, "all Hub dev workers receive the same E2E-only CSRF key");
       assert.equal(environment.NODE_EXTRA_CA_CERTS, source.NODE_EXTRA_CA_CERTS, "the Hub trusts only the E2E runtime CA bundle");
     } else {
-      assert.equal(result.keys.includes("BIELOS_CSRF_SIGNING_KEY"), false, `${service.name} does not receive the Hub CSRF key`);
+      assert.equal(result.keys.includes("VIRKI_CSRF_SIGNING_KEY"), false, `${service.name} does not receive the Hub CSRF key`);
       assert.equal(result.keys.includes("NODE_EXTRA_CA_CERTS"), false, `${service.name} does not receive the Hub CA bundle`);
     }
   }
 
   assert.throws(
-    () => buildServiceEnvironment("hub", { ...source, BIELOS_CSRF_SIGNING_KEY: "invalid" }, process.platform),
+    () => buildServiceEnvironment("hub", { ...source, VIRKI_CSRF_SIGNING_KEY: "invalid" }, process.platform),
     /configuration is incomplete/u,
     "the Hub rejects an invalid shared E2E CSRF key"
   );
 
   assert.throws(
-    () => buildServiceEnvironment("issuer", { ...source, BIELOS_OIDC_BIND_ADDRESS: "0.0.0.0" }, process.platform),
+    () => buildServiceEnvironment("issuer", { ...source, VIRKI_OIDC_BIND_ADDRESS: "0.0.0.0" }, process.platform),
     /configuration is incomplete/u,
     "the isolated issuer cannot listen on every network interface"
   );
 
   const remoteDatabase = {
     ...source,
-    DATABASE_URL: "postgresql://production_user@remote.example.invalid:5432/bielos"
+    DATABASE_URL: "postgresql://production_user@remote.example.invalid:5432/virki"
   };
   for (const service of ["hub", "issuer"]) {
     assert.throws(
@@ -290,10 +290,10 @@ test("service children receive only their E2E allowlist and required OS paths", 
       ...Object.fromEntries(platformKeys.filter((key) => typeof source[key] === "string").map((key) => [key, source[key]])),
       NODE_ENV: "development",
       DATABASE_URL: remoteDatabase.DATABASE_URL,
-      BIELOS_CORE_TEST_DATABASE_CONFIRM: "disposable",
-      BIELOS_OIDC_PROXY_URL: "http://127.0.0.1:3003",
-      BIELOS_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
-      BIELOS_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem"
+      VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
+      VIRKI_OIDC_PROXY_URL: "http://127.0.0.1:3003",
+      VIRKI_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
+      VIRKI_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem"
     },
     encoding: "utf8",
     windowsHide: true
@@ -312,7 +312,7 @@ test("service children receive only their E2E allowlist and required OS paths", 
   }
 });
 
-test("Chromium receives only required platform variables and never BielOS secrets", () => {
+test("Chromium receives only required platform variables and never Virki secrets", () => {
   const source = {
     PATH: "safe-system-path",
     PATHEXT: ".EXE;.CMD;.BAT",
@@ -337,11 +337,11 @@ test("Chromium receives only required platform variables and never BielOS secret
     NODE_OPTIONS: "--require caller-controlled-preload.cjs",
     NODE_EXTRA_CA_CERTS: "private-test-ca.pem",
     DATABASE_URL: "postgresql://must-not-reach-browser",
-    BIELOS_CSRF_SIGNING_KEY: "must-not-reach-browser",
-    BIELOS_TOTP_ENCRYPTION_KEY: "must-not-reach-browser",
-    BIELOS_EMAIL_OUTBOX_KEY: "must-not-reach-browser",
-    BIELOS_E2E_ACCESS_SIGNING_KEY_FILE: "private-signing-key.json",
-    BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL: "maintenance-must-not-reach-browser"
+    VIRKI_CSRF_SIGNING_KEY: "must-not-reach-browser",
+    VIRKI_TOTP_ENCRYPTION_KEY: "must-not-reach-browser",
+    VIRKI_EMAIL_OUTBOX_KEY: "must-not-reach-browser",
+    VIRKI_E2E_ACCESS_SIGNING_KEY_FILE: "private-signing-key.json",
+    VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "maintenance-must-not-reach-browser"
   };
 
   const linux = buildChromiumEnvironment(source, "linux", "/private/e2e/chromium-home");
@@ -355,7 +355,7 @@ test("Chromium receives only required platform variables and never BielOS secret
   assert.equal(windows.USERPROFILE, source.USERPROFILE);
 
   for (const environment of [linux, windows]) {
-    for (const name of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "DATABASE_URL", "BIELOS_CSRF_SIGNING_KEY", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_EMAIL_OUTBOX_KEY", "BIELOS_E2E_ACCESS_SIGNING_KEY_FILE", "BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL"]) {
+    for (const name of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "DATABASE_URL", "VIRKI_CSRF_SIGNING_KEY", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_E2E_ACCESS_SIGNING_KEY_FILE", "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL"]) {
       assert.equal(Object.hasOwn(environment, name), false, `${name} is excluded from Chromium`);
     }
   }

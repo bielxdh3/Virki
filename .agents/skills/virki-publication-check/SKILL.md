@@ -1,9 +1,9 @@
 ---
-name: bielos-publication-check
-description: Assess BielOS source, history, and repository metadata before any public release or access change.
+name: virki-publication-check
+description: Assess Virki source, history, and repository metadata before any public release or access change.
 ---
 
-# BielOS publication check
+# Virki publication check
 
 This skill assesses publication readiness; it never changes repository visibility. Keep the repository private unless the owner explicitly authorizes a separate visibility change.
 

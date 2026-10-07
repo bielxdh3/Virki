@@ -17,13 +17,13 @@ function getSmtpConfig(env: SmtpEnvironment): {
   from: string;
   replyTo?: string;
 } | null {
-  const host = env.BIELOS_EMAIL_SMTP_HOST?.trim();
-  const user = env.BIELOS_EMAIL_SMTP_USER?.trim();
-  const credential = env.BIELOS_EMAIL_SMTP_PASSWORD?.trim();
-  const from = env.BIELOS_EMAIL_FROM?.trim();
-  const replyTo = env.BIELOS_EMAIL_REPLY_TO?.trim();
-  const port = Number(env.BIELOS_EMAIL_SMTP_PORT ?? DEFAULT_SMTP_PORT);
-  const secureValue = env.BIELOS_EMAIL_SMTP_SECURE?.trim().toLowerCase();
+  const host = env.VIRKI_EMAIL_SMTP_HOST?.trim();
+  const user = env.VIRKI_EMAIL_SMTP_USER?.trim();
+  const credential = env.VIRKI_EMAIL_SMTP_PASSWORD?.trim();
+  const from = env.VIRKI_EMAIL_FROM?.trim();
+  const replyTo = env.VIRKI_EMAIL_REPLY_TO?.trim();
+  const port = Number(env.VIRKI_EMAIL_SMTP_PORT ?? DEFAULT_SMTP_PORT);
+  const secureValue = env.VIRKI_EMAIL_SMTP_SECURE?.trim().toLowerCase();
   const secure =
     secureValue === undefined ? false : secureValue === "true" ? true : secureValue === "false" ? false : null;
 

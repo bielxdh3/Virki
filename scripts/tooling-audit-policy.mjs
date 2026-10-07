@@ -27,8 +27,8 @@ export function evaluateToolingAudit(audit, { versions = EXPECTED_TOOLING_VERSIO
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const audit = process.env.BIELOS_TOOLING_AUDIT_JSON
-    ? JSON.parse(readFileSync(process.env.BIELOS_TOOLING_AUDIT_JSON, "utf8"))
+  const audit = process.env.VIRKI_TOOLING_AUDIT_JSON
+    ? JSON.parse(readFileSync(process.env.VIRKI_TOOLING_AUDIT_JSON, "utf8"))
     : runAudit();
   const versions = readCurrentVersions();
   const result = evaluateToolingAudit(audit, { versions });

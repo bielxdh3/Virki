@@ -15,7 +15,7 @@ test("migration diagnostics retain stage, stable context and codes while redacti
   const diagnostic = describeBackupMigrationFailure({
     status: 1,
     stdout: `Error: P3018\n${privateDetails}`,
-    stderr: `Migration name: 20261006120000_audit_log_role_boundaries\nDatabase error code: P0001\nERROR: bielos_audit_maintenance must be provisioned before applying AuditLog privilege boundaries\n${privateDetails}`,
+    stderr: `Migration name: 20261006120000_audit_log_role_boundaries\nDatabase error code: P0001\nERROR: virki_audit_maintenance must be provisioned before applying AuditLog privilege boundaries\n${privateDetails}`,
     error: { code: "ETIMEDOUT", message: privateDetails, cause: new Error(privateDetails) },
   }, "source-transition");
 

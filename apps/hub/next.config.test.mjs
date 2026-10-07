@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 test("OIDC rewrites default to Compose DNS for builds and allow loopback for direct development", async () => {
-  const previousIssuer = process.env.BIELOS_OIDC_PROXY_URL;
-  const previousPortal = process.env.BIELOS_PORTAL_HOSTNAME;
+  const previousIssuer = process.env.VIRKI_OIDC_PROXY_URL;
+  const previousPortal = process.env.VIRKI_PORTAL_HOSTNAME;
   const previousNodeEnv = process.env.NODE_ENV;
-  delete process.env.BIELOS_OIDC_PROXY_URL;
-  process.env.BIELOS_PORTAL_HOSTNAME = "portal.example.test";
+  delete process.env.VIRKI_OIDC_PROXY_URL;
+  process.env.VIRKI_PORTAL_HOSTNAME = "portal.example.test";
 
   try {
     const { default: config } = await import("./next.config.mjs");
@@ -25,11 +25,11 @@ test("OIDC rewrites default to Compose DNS for builds and allow loopback for dir
       assert.deepEqual(route.has, [{ type: "host", value: "portal.example.test" }]);
     }
 
-    process.env.BIELOS_OIDC_PROXY_URL = "http://127.0.0.1:3003";
+    process.env.VIRKI_OIDC_PROXY_URL = "http://127.0.0.1:3003";
     const localRewrite = await getDiscoveryRewrite();
     assert.equal(localRewrite.destination, "http://127.0.0.1:3003/.well-known/:path*");
 
-    process.env.BIELOS_OIDC_PROXY_URL = "http://oidc-issuer:3003";
+    process.env.VIRKI_OIDC_PROXY_URL = "http://oidc-issuer:3003";
     const composeRewrite = await getDiscoveryRewrite();
     assert.equal(composeRewrite.destination, "http://oidc-issuer:3003/.well-known/:path*");
 
@@ -45,10 +45,10 @@ test("OIDC rewrites default to Compose DNS for builds and allow loopback for dir
       assert.equal(headerMap["strict-transport-security"], "max-age=31536000");
     }
   } finally {
-    if (previousIssuer === undefined) delete process.env.BIELOS_OIDC_PROXY_URL;
-    else process.env.BIELOS_OIDC_PROXY_URL = previousIssuer;
-    if (previousPortal === undefined) delete process.env.BIELOS_PORTAL_HOSTNAME;
-    else process.env.BIELOS_PORTAL_HOSTNAME = previousPortal;
+    if (previousIssuer === undefined) delete process.env.VIRKI_OIDC_PROXY_URL;
+    else process.env.VIRKI_OIDC_PROXY_URL = previousIssuer;
+    if (previousPortal === undefined) delete process.env.VIRKI_PORTAL_HOSTNAME;
+    else process.env.VIRKI_PORTAL_HOSTNAME = previousPortal;
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
   }

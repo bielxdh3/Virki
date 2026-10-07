@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
 import { generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode, verifySecurityCode } from "./security";
 import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashPassword, verifyPassword, writeAuditLogInTransaction, type AuditLogInput } from "./index";
-import { prisma, type Prisma } from "@bielos/database";
+import { prisma, type Prisma } from "@virki/database";
 import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
 
 export { ELEVATION_SCOPES, ELEVATION_SCOPE_ACTIONS, UI_ELEVATION_SCOPES } from "./elevation-scopes";

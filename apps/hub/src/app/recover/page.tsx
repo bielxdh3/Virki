@@ -1,7 +1,7 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { cookies, headers } from "next/headers";
 import { forbidden } from "next/navigation";
-import { getAccountRecoveryState } from "@bielos/auth/security";
+import { getAccountRecoveryState } from "@virki/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
@@ -39,7 +39,7 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
   return (
     <main className="auth-page">
       <section className="auth-panel" aria-labelledby="recover-title">
-        <p className="eyebrow">BielOS</p>
+        <p className="eyebrow">Virki</p>
         <h1 id="recover-title">{expectedRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta"}</h1>
         {legacyRequestKey ? <>
           <p>Este link precisa ser aberto em uma etapa segura antes de continuar.</p>

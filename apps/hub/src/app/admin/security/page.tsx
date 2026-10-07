@@ -1,7 +1,7 @@
-import { getAdministrativeCredentialState, listActiveSecurityElevations } from "@bielos/auth/administration";
-import { listPendingAccountRecoveries } from "@bielos/auth/security";
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import { prisma } from "@bielos/database";
+import { getAdministrativeCredentialState, listActiveSecurityElevations } from "@virki/auth/administration";
+import { listPendingAccountRecoveries } from "@virki/auth/security";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
 import { approveRecoveryAction } from "../../recover/actions";
 import { CredentialSetup, ElevationControls } from "./security-controls";

@@ -11,9 +11,9 @@ const repositoryRoot = process.cwd();
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
 const baselineName = "0_init";
 const transitionName = "20260922090000_total_identity_security_rebaseline";
-const containerName = `bielos-migration-validation-${process.pid}`;
-const databaseName = "bielos_migration_validation";
-const databaseUser = "bielos_validation";
+const containerName = `virki-migration-validation-${process.pid}`;
+const databaseName = "virki_migration_validation";
+const databaseUser = "virki_validation";
 const databasePassword = "migration-validation-only";
 let containerStarted = false;
 let temporaryDirectory;
@@ -45,9 +45,9 @@ try {
   const port = readPublishedPort();
   const databaseUrl = buildDatabaseUrl(port);
 
-  runSql("CREATE ROLE bielos_audit_maintenance NOLOGIN");
+  runSql("CREATE ROLE virki_audit_maintenance NOLOGIN");
 
-  temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "bielos-migration-validation-"));
+  temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "virki-migration-validation-"));
   const temporaryPrismaDirectory = path.join(temporaryDirectory, "prisma");
   const temporaryMigrationsDirectory = path.join(temporaryPrismaDirectory, "migrations");
   await mkdir(temporaryMigrationsDirectory, { recursive: true });
@@ -253,8 +253,8 @@ async function verifyRemovedProductSchema() {
     SELECT
       to_regclass('"AccountApplication"') IS NULL AS intake_removed,
       to_regclass('"IntakePublicModuleCatalog"') IS NULL AS intake_view_removed,
-      to_regprocedure('bielos_intake_activate_application(text,text,text,timestamp without time zone)') IS NULL AS intake_activation_function_removed,
-      to_regprocedure('bielos_intake_enqueue_email_message(text,text,text,jsonb,timestamp without time zone)') IS NULL AS intake_email_function_removed,
+      to_regprocedure('virki_intake_activate_application(text,text,text,timestamp without time zone)') IS NULL AS intake_activation_function_removed,
+      to_regprocedure('virki_intake_enqueue_email_message(text,text,text,jsonb,timestamp without time zone)') IS NULL AS intake_email_function_removed,
       to_regclass('"ModuleCatalog"') IS NULL AS modules_removed,
       to_regclass('"GymForgeParticipant"') IS NULL AS gymforge_removed,
       to_regclass('"Project"') IS NULL AS old_project_model_removed,

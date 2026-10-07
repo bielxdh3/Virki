@@ -8,9 +8,9 @@ import {
   SESSION_COOKIE_NAME,
   writeAuditLog,
   writeAuditLogRequired
-} from "@bielos/auth";
-import { DEVICE_COOKIE_NAME, getLoginCeremonyFailureStage, startLoginCeremony } from "@bielos/auth/security";
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
+} from "@virki/auth";
+import { DEVICE_COOKIE_NAME, getLoginCeremonyFailureStage, startLoginCeremony } from "@virki/auth/security";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, sameOriginFailureReason } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
@@ -175,8 +175,8 @@ function loginForbiddenResponse(reason: string): NextResponse {
 }
 
 function addE2eLoginDiagnostic(response: NextResponse, reason: string): NextResponse {
-  if (process.env.NODE_ENV === "development" && process.env.BIELOS_E2E_ACCESS_DIAGNOSTICS === "true") {
-    response.headers.set("x-bielos-e2e-login-reason", reason);
+  if (process.env.NODE_ENV === "development" && process.env.VIRKI_E2E_ACCESS_DIAGNOSTICS === "true") {
+    response.headers.set("x-virki-e2e-login-reason", reason);
   }
   return response;
 }

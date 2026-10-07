@@ -13,7 +13,7 @@ export function assertDisposableCoreTestDatabase(databaseUrl, environment = proc
     throw new Error("Core database tests refuse production mode.");
   }
 
-  if (environment.BIELOS_CORE_TEST_DATABASE_CONFIRM !== CORE_TEST_DATABASE_CONFIRMATION) {
+  if (environment.VIRKI_CORE_TEST_DATABASE_CONFIRM !== CORE_TEST_DATABASE_CONFIRMATION) {
     throw new Error("Core database tests require an explicit disposable-database marker.");
   }
 

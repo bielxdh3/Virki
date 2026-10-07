@@ -8,8 +8,8 @@ import {
   createAuditRequestMetadata,
   hashAuditEmail,
   writeAuditLog
-} from "@bielos/auth";
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
+} from "@virki/auth";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
@@ -68,9 +68,9 @@ export async function POST(request: NextRequest) {
   let redirectUrl: URL;
   try {
     const configuredBaseUrl = surface === "hub"
-      ? process.env.BIELOS_HUB_URL
+      ? process.env.VIRKI_HUB_URL
       : surface === "portal"
-        ? process.env.BIELOS_PORTAL_URL
+        ? process.env.VIRKI_PORTAL_URL
         : undefined;
     const redirectBase = getSurfaceBaseUrl(request.headers, request.url);
     if (!redirectBase) throw new Error("Logout redirect origin is unavailable.");

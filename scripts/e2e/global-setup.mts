@@ -3,20 +3,20 @@ import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdtemp, rmdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { hashPassword } from "@bielos/auth";
-import { encryptOidcClientSecret, hashOidcIdentifier } from "@bielos/auth/oidc-secrets";
-import { hashDeviceToken } from "@bielos/auth/security";
-import { Prisma, PrismaClient } from "@bielos/database";
+import { hashPassword } from "@virki/auth";
+import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
+import { hashDeviceToken } from "@virki/auth/security";
+import { Prisma, PrismaClient } from "@virki/database";
 
 // @ts-expect-error This existing JavaScript safety helper has no declaration file.
 import { assertDisposableCoreTestDatabase } from "../core-test-database-safety.mjs";
 // @ts-expect-error The isolated E2E service runner is JavaScript without a declaration file.
 import { startIsolatedService } from "./isolated-service.mjs";
 
-const E2E_DATABASE_ENV = "BIELOS_E2E_DATABASE_URL";
-const AUDIT_CLEANUP_DATABASE_ENV = "BIELOS_E2E_AUDIT_CLEANUP_DATABASE_URL";
-const FIXTURE_FILE_ENV = "BIELOS_E2E_AUTH_FIXTURE_FILE";
-const OIDC_PRIVATE_CONFIG_ENV = "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE";
+const E2E_DATABASE_ENV = "VIRKI_E2E_DATABASE_URL";
+const AUDIT_CLEANUP_DATABASE_ENV = "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL";
+const FIXTURE_FILE_ENV = "VIRKI_E2E_AUTH_FIXTURE_FILE";
+const OIDC_PRIVATE_CONFIG_ENV = "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE";
 
 type AccountFixture = {
   id: string;
@@ -112,7 +112,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   let seeded: FixtureState | undefined;
   let setupStage = "temporary-fixture-storage";
   try {
-    temporaryDirectory = await mkdtemp(join(tmpdir(), "bielos-e2e-auth-"));
+    temporaryDirectory = await mkdtemp(join(tmpdir(), "virki-e2e-auth-"));
     fixtureFile = join(temporaryDirectory, "fixture.json");
     await restrictTemporaryDirectory(temporaryDirectory);
 
@@ -129,7 +129,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     const oidcSecret = randomBytes(48).toString("base64url");
     const oidcEncryptionKey = randomBytes(32).toString("hex");
     const clientSecretCiphertext = encryptOidcClientSecret(oidcSecret, {
-      BIELOS_OIDC_ADAPTER_KEY: oidcEncryptionKey
+      VIRKI_OIDC_ADAPTER_KEY: oidcEncryptionKey
     });
     const signingKey = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" });
     const signingKeyId = randomUUID();
@@ -302,9 +302,9 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     const startedOidcIssuer = startIsolatedService("issuer", {
       ...process.env,
       DATABASE_URL: databaseUrl,
-      BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE: oidcPrivateConfigFile,
-      BIELOS_OIDC_ISSUER: "https://portal.localhost:3001",
-      BIELOS_OIDC_BIND_ADDRESS: "127.0.0.1",
+      VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: oidcPrivateConfigFile,
+      VIRKI_OIDC_ISSUER: "https://portal.localhost:3001",
+      VIRKI_OIDC_BIND_ADDRESS: "127.0.0.1",
       OIDC_ISSUER_PORT: "3003"
     }, { manageProcessLifecycle: false }) as ChildProcess;
     oidcIssuerProcess = startedOidcIssuer;
@@ -359,7 +359,7 @@ export function validateAuditCleanupDatabase(cleanupDatabaseUrl: string | undefi
     const cleanup = new URL(cleanupDatabaseUrl);
     if (cleanup.protocol !== target.protocol || cleanup.hostname !== target.hostname || cleanup.port !== target.port ||
       cleanup.pathname !== target.pathname || cleanup.search !== target.search || cleanup.hash ||
-      decodeURIComponent(cleanup.username) !== "bielos_audit_maintenance" || !cleanup.password) throw new Error();
+      decodeURIComponent(cleanup.username) !== "virki_audit_maintenance" || !cleanup.password) throw new Error();
     return cleanup;
   } catch {
     throw new Error("E2E audit cleanup requires the maintenance role on the exact validated disposable database.");

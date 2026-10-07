@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { Prisma, prisma } from "@bielos/database";
-import type { Prisma as PrismaTypes } from "@bielos/database";
+import { Prisma, prisma } from "@virki/database";
+import type { Prisma as PrismaTypes } from "@virki/database";
 
 export type AuditEventType =
   | "AUTH_LOGIN_SUCCESS"
@@ -125,8 +125,8 @@ function createAuditLogData(input: AuditLogInput) {
 export function hashAuditEmail(email: string, env: NodeJS.ProcessEnv = process.env): string {
   const key = getAuditHashKey(env);
   if (!key) throw new Error("Audit pseudonymization key is unavailable.");
-  const keyId = createHash("sha256").update("bielos-audit-key-id\0").update(key).digest("hex").slice(0, 16);
-  const digest = createHmac("sha256", key).update("bielos-audit-email-v1\0").update(email.trim().toLowerCase(), "utf8").digest("hex");
+  const keyId = createHash("sha256").update("virki-audit-key-id\0").update(key).digest("hex").slice(0, 16);
+  const digest = createHmac("sha256", key).update("virki-audit-email-v1\0").update(email.trim().toLowerCase(), "utf8").digest("hex");
   return `hmac-v1:${keyId}:${digest}`;
 }
 
@@ -137,9 +137,9 @@ export function formatAuditEmailReference(value: string): string {
 }
 
 function getAuditHashKey(env: NodeJS.ProcessEnv): Buffer | null {
-  const value = env.BIELOS_AUDIT_HASH_SECRET;
+  const value = env.VIRKI_AUDIT_HASH_SECRET;
   if (value === undefined && env.NODE_ENV !== "production") {
-    return createHash("sha256").update("bielos synthetic non-production audit key", "utf8").digest();
+    return createHash("sha256").update("virki synthetic non-production audit key", "utf8").digest();
   }
   if (!value || !/^[a-f0-9]{64}$/iu.test(value)) return null;
   return Buffer.from(value, "hex");

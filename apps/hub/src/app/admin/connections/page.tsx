@@ -1,5 +1,5 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import { prisma } from "@bielos/database";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
 import { ConnectionForm } from "./connection-form";
 import { ConnectionEditForm } from "./connection-edit-form";
@@ -17,7 +17,7 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
     Promise.resolve(createCsrfToken({ scope: "admin-connections" }))
   ]);
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
-    <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Conexões</h1><p>Clientes OIDC externos. BielOS não armazena nem hospeda suas experiências.</p></div></header>
+    <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Conexões</h1><p>Clientes OIDC externos. Virki não armazena nem hospeda suas experiências.</p></div></header>
     {params.status && <p className="form-success" role="status">Alteração concluída.</p>}
     {params.error && <p className="form-error" role="alert">A ação não foi concluída. Revise as conexões e a elevação de segurança.</p>}
     <section className="surface"><h2>Registrar projeto externo</h2><ConnectionForm csrf={csrf} /></section>

@@ -2,11 +2,11 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
-import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
-import { hashSessionToken, verifyPassword } from "@bielos/auth";
-import { decryptEmailPayload } from "@bielos/auth/email";
-import { getPendingAccountRecoveryQueueWhere } from "@bielos/auth/security";
-import { PrismaClient } from "@bielos/database";
+import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@virki/auth/constants";
+import { hashSessionToken, verifyPassword } from "@virki/auth";
+import { decryptEmailPayload } from "@virki/auth/email";
+import { getPendingAccountRecoveryQueueWhere } from "@virki/auth/security";
+import { PrismaClient } from "@virki/database";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 // @ts-expect-error This JavaScript safety helper has no declaration file.
@@ -14,8 +14,8 @@ import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-
 
 const portalUrl = "https://portal.localhost:3001";
 const hubUrl = "https://hub.localhost:3001";
-const e2eDatabaseUrl = process.env.BIELOS_E2E_DATABASE_URL?.trim();
-const fixturePath = process.env.BIELOS_E2E_AUTH_FIXTURE_FILE;
+const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
+const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
 const hasFixture = Boolean(fixturePath && existsSync(fixturePath));
 
 test.skip(!e2eDatabaseUrl || !hasFixture, "Authenticated E2E requires an explicit disposable E2E database and its global-setup fixture.");
@@ -667,7 +667,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
 });
 
 function createE2ePrismaClient(): PrismaClient {
-  const databaseUrl = process.env.BIELOS_E2E_DATABASE_URL?.trim();
+  const databaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("Authenticated E2E requires the explicit disposable database fixture.");
   assertDisposableCoreTestDatabase(databaseUrl, process.env);
   return new PrismaClient({ datasources: { db: { url: databaseUrl } } });
@@ -751,7 +751,7 @@ function observeHubPageResponses(page: import("@playwright/test").Page, pathname
     if (responseUrl.origin !== hubUrl || responseUrl.pathname !== pathname) return;
     if (!["document", "fetch"].includes(response.request().resourceType())) return;
     const responseStatus = response.status();
-    pending.push(response.headerValue("x-bielos-e2e-access-reason").then((reason) => {
+    pending.push(response.headerValue("x-virki-e2e-access-reason").then((reason) => {
       const safeReason = reason && allowedAccessReasons.has(reason) ? reason : "none";
       return `${pathname}:${responseStatus}:access-${safeReason}`;
     }).catch(() => `${pathname}:${responseStatus}:access-unavailable`));
@@ -820,7 +820,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "role-mismatch",
     "security-ceremony-unavailable"
   ]);
-  const routeReason = headers["x-bielos-e2e-login-reason"];
+  const routeReason = headers["x-virki-e2e-login-reason"];
   if (routeReason) {
     const stage = routeReason.startsWith("security-ceremony-unavailable-")
       ? routeReason.slice("security-ceremony-unavailable-".length)
@@ -828,7 +828,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     const recognized = allowedReasons.has(routeReason) || ceremonyStages.has(stage);
     return `login-route:${recognized ? routeReason : "unrecognized"}`;
   }
-  const proxyReason = headers["x-bielos-e2e-access-reason"];
+  const proxyReason = headers["x-virki-e2e-access-reason"];
   if (proxyReason) {
     const stage = proxyReason.startsWith("security-ceremony-unavailable-")
       ? proxyReason.slice("security-ceremony-unavailable-".length)
