@@ -153,7 +153,7 @@ function describeProbeFailure(result) {
     MARKER_CONTENT_INVALID: "production host marker does not match the host and root.",
     PROTECTED_ENV_METADATA_INVALID: "protected production environment file metadata is invalid.",
   };
-  if (hostCheckMessages[hostCheck]) return hostCheckMessages[hostCheck];
+  if (Object.hasOwn(hostCheckMessages, hostCheck)) return hostCheckMessages[hostCheck];
 
   const sshError = String(result.stderr ?? "").toLowerCase();
   if (/host key verification failed|remote host identification has changed|no .* host key is known/u.test(sshError)) {

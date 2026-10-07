@@ -129,6 +129,20 @@ test("preflight reports a sanitized remote host-check category", async () => {
   assert.doesNotMatch(result.lines.join(" "), /private-value|must-not-be-returned/u);
 });
 
+test("preflight treats inherited remote category names as unknown", async () => {
+  const result = await runProductionPreflight({
+    config,
+    sleep: async () => {},
+    execute: (command, args) => {
+      if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
+      return { status: 1, stdout: "BIELOS_PROBE_FAILURE=toString\n", stderr: "" };
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; SSH transport or remote probe did not return a verifiable result."]);
+});
+
 test("preflight identifies strict host-key rejection without returning SSH diagnostics", async () => {
   const result = await runProductionPreflight({
     config,
