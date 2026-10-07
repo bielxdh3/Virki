@@ -1,8 +1,8 @@
 "use server";
 
-import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@bielos/auth/security";
-import { requireSecurityElevation } from "@bielos/auth/administration";
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
+import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@virki/auth/security";
+import { requireSecurityElevation } from "@virki/auth/administration";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";

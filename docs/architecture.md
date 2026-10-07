@@ -2,15 +2,15 @@
 
 ## Responsibility
 
-BielOS owns identity, authentication and SSO, security, project entry decisions, and audit. Projects are external relying applications and own their internal sessions and permissions.
+Virki owns identity, authentication and SSO, security, project entry decisions, and audit. Projects are external relying applications and own their internal sessions and permissions.
 
 ## Request surfaces
 
 | Host | Surface | Access |
 |---|---|---|
 | `biel.dev.br` | Minimal public page with portal entry | Public |
-| `portal.biel.dev.br` | USER portal and OIDC endpoints | Public OIDC metadata and protocol endpoints; account pages require a BielOS session |
-| `hub.biel.dev.br` | ADMIN control plane | Cloudflare Access JWT plus active BielOS ADMIN session |
+| `portal.biel.dev.br` | USER portal and OIDC endpoints | Public OIDC metadata and protocol endpoints; account pages require a Virki session |
+| `hub.biel.dev.br` | ADMIN control plane | Cloudflare Access JWT plus active Virki ADMIN session |
 
 The portal displays only enabled external connections with an active grant for the current USER. The admin routes are `/admin/accounts`, `/admin/access`, `/admin/security`, `/admin/audit`, and `/admin/connections`. `/admin` redirects to the account list.
 
@@ -27,7 +27,7 @@ The portal displays only enabled external connections with an active grant for t
 
 Stored roles are ADMIN and USER. Anonymous traffic is untrusted. A project connection stores its name, canonical HTTPS origin, OIDC client identity, encrypted secret, exact redirect URI allowlist, enabled state, and timestamps. `UserProjectGrant` records explicit entry grants. The issuer rechecks the account, connection, and grant before completing authorization.
 
-No project experience, internal project roles, or project permissions are represented in BielOS.
+No project experience, internal project roles, or project permissions are represented in Virki.
 
 ## Persistence
 

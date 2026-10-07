@@ -9,7 +9,7 @@ const CSRF_SECRET_BYTES = 32;
 const CSRF_CLOCK_SKEW_MS = 30_000;
 
 const globalForCsrf = globalThis as unknown as {
-  bielosCsrfSecret?: Buffer;
+  virkiCsrfSecret?: Buffer;
 };
 
 export type CsrfValidationResult =
@@ -80,8 +80,8 @@ export function validateCsrfToken(
 }
 
 function getCsrfKeys(env: NodeJS.ProcessEnv): { current: Buffer; previous?: Buffer } | null {
-  const currentText = env.BIELOS_CSRF_SIGNING_KEY;
-  const previousText = env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
+  const currentText = env.VIRKI_CSRF_SIGNING_KEY;
+  const previousText = env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
   const production = env.NODE_ENV === "production";
   if (currentText !== undefined || previousText !== undefined) {
     const current = parseSecret(currentText);
@@ -90,8 +90,8 @@ function getCsrfKeys(env: NodeJS.ProcessEnv): { current: Buffer; previous?: Buff
     return { current, ...(previous ? { previous } : {}) };
   }
   if (production) return null;
-  globalForCsrf.bielosCsrfSecret ??= randomBytes(CSRF_SECRET_BYTES);
-  return { current: globalForCsrf.bielosCsrfSecret };
+  globalForCsrf.virkiCsrfSecret ??= randomBytes(CSRF_SECRET_BYTES);
+  return { current: globalForCsrf.virkiCsrfSecret };
 }
 
 function parseSecret(value: string | undefined): Buffer | null {
@@ -100,11 +100,11 @@ function parseSecret(value: string | undefined): Buffer | null {
 }
 
 function getKeyId(key: Buffer): string {
-  return createHash("sha256").update("bielos-csrf-key-id\0").update(key).digest("hex");
+  return createHash("sha256").update("virki-csrf-key-id\0").update(key).digest("hex");
 }
 
 function signCsrfPayload(payload: string, key: Buffer): string {
-  return createHmac("sha256", key).update("bielos-csrf-token\0").update(payload, "utf8").digest("base64url");
+  return createHmac("sha256", key).update("virki-csrf-token\0").update(payload, "utf8").digest("base64url");
 }
 
 function isValidScope(scope: string): boolean {

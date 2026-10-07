@@ -1,7 +1,7 @@
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CANONICAL_BIELOS_REPOSITORY, normalizeRevision, ProductionRevisionError } from "./production-revision.mjs";
+import { CANONICAL_VIRKI_REPOSITORY, normalizeRevision, ProductionRevisionError } from "./production-revision.mjs";
 import { evaluateCodeqlSarif, readSarifDirectory } from "../codeql-sarif-policy.mjs";
 
 const RUN_FIELDS = "databaseId,headSha,status,conclusion,event,headBranch,createdAt";
@@ -9,7 +9,7 @@ const WORKFLOWS = ["ci.yml", "codeql.yml"];
 
 function buildRunArgs(workflow, revision) {
   return [
-    "run", "list", "--repo", CANONICAL_BIELOS_REPOSITORY,
+    "run", "list", "--repo", CANONICAL_VIRKI_REPOSITORY,
     "--workflow", workflow, "--commit", revision,
     "--json", RUN_FIELDS, "--limit", "100"
   ];
@@ -69,11 +69,11 @@ export function evaluateExactShaRelease(ciRuns, codeqlRuns, expectedRevision) {
 
 function verifyExactShaSarifArtifact({ revision, runId, execute, repositoryRoot }) {
   const artifactName = "codeql-sarif-" + revision;
-  const directory = mkdtempSync(path.join(os.tmpdir(), "bielos-codeql-sarif-"));
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-codeql-sarif-"));
   try {
     const result = execute("gh", [
       "run", "download", String(runId),
-      "--repo", CANONICAL_BIELOS_REPOSITORY,
+      "--repo", CANONICAL_VIRKI_REPOSITORY,
       "--name", artifactName,
       "--dir", directory
     ], { cwd: repositoryRoot });

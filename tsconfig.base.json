@@ -16,13 +16,13 @@
     "incremental": true,
     "baseUrl": ".",
     "paths": {
-      "@bielos/auth": ["packages/auth/src"],
-      "@bielos/auth/cloudflare-access": ["packages/auth/src/cloudflare-access"],
-      "@bielos/auth/constants": ["packages/auth/src/constants"],
-      "@bielos/auth/oidc-secrets": ["packages/auth/src/oidc-secrets"],
-      "@bielos/auth/security": ["packages/auth/src/security"],
-      "@bielos/auth/administration": ["packages/auth/src/administration"],
-      "@bielos/database": ["packages/database/src"]
+      "@virki/auth": ["packages/auth/src"],
+      "@virki/auth/cloudflare-access": ["packages/auth/src/cloudflare-access"],
+      "@virki/auth/constants": ["packages/auth/src/constants"],
+      "@virki/auth/oidc-secrets": ["packages/auth/src/oidc-secrets"],
+      "@virki/auth/security": ["packages/auth/src/security"],
+      "@virki/auth/administration": ["packages/auth/src/administration"],
+      "@virki/database": ["packages/database/src"]
     }
   }
 }

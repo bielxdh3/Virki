@@ -3,7 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 
 const publicKeys = new Map();
 const MAX_BODY_BYTES = 16 * 1024;
-const registrationToken = process.env.BIELOS_E2E_JWKS_REGISTRATION_TOKEN;
+const registrationToken = process.env.VIRKI_E2E_JWKS_REGISTRATION_TOKEN;
 let diagnosticSequence = 0;
 
 if (!registrationToken) throw new Error("E2E JWKS registration token is required.");

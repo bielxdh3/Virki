@@ -1,5 +1,5 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
-import { prisma } from "@bielos/database";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { prisma } from "@virki/database";
 import { grantProjectAccessAction, revokeProjectAccessAction } from "../actions";
 
 // Callers must run requireAdminPage() first; see ./page.tsx.

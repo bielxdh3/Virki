@@ -3,7 +3,7 @@ import {
   getSessionByToken,
   SESSION_COOKIE_NAME,
   type AuthenticatedSession
-} from "@bielos/auth";
+} from "@virki/auth";
 
 export async function getCurrentSession(): Promise<AuthenticatedSession | null> {
   const cookieStore = await cookies();

@@ -29,15 +29,15 @@ const chromiumPlatformEnvironment = {
 };
 
 const serviceEnvironment = {
-  jwks: ["BIELOS_E2E_JWKS_REGISTRATION_TOKEN"],
-  "public-site": ["NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_PORTAL_URL"],
+  jwks: ["VIRKI_E2E_JWKS_REGISTRATION_TOKEN"],
+  "public-site": ["NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_PORTAL_URL"],
   hub: [
-    "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "BIELOS_HUB_HOSTNAME", "BIELOS_PORTAL_HOSTNAME",
-    "BIELOS_HUB_URL", "BIELOS_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
-    "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "BIELOS_E2E_ACCESS_DIAGNOSTICS", "BIELOS_TOTP_ENCRYPTION_KEY", "BIELOS_OIDC_PROXY_URL", "BIELOS_E2E_TLS_KEY_PATH",
-    "BIELOS_E2E_TLS_CERTIFICATE_PATH", "BIELOS_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "BIELOS_EMAIL_OUTBOX_KEY"
+    "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_HUB_HOSTNAME", "VIRKI_PORTAL_HOSTNAME",
+    "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
+    "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY"
   ],
-  issuer: ["DATABASE_URL", "BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE", "BIELOS_OIDC_ISSUER", "BIELOS_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"]
+  issuer: ["DATABASE_URL", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"]
 };
 
 export function buildServiceEnvironment(service, source = process.env, platform = process.platform) {
@@ -55,10 +55,10 @@ export function buildServiceEnvironment(service, source = process.env, platform 
     result.NODE_ENV = "development";
     result.NEXT_TELEMETRY_DISABLED = "1";
   }
-  if (service === "hub" && (!result.DATABASE_URL || !result.BIELOS_OIDC_PROXY_URL || !result.BIELOS_E2E_TLS_KEY_PATH || !result.BIELOS_E2E_TLS_CERTIFICATE_PATH || !/^[a-f0-9]{64}$/iu.test(result.BIELOS_CSRF_SIGNING_KEY ?? "") || !result.NODE_EXTRA_CA_CERTS || !isAbsolute(result.NODE_EXTRA_CA_CERTS))) {
+  if (service === "hub" && (!result.DATABASE_URL || !result.VIRKI_OIDC_PROXY_URL || !result.VIRKI_E2E_TLS_KEY_PATH || !result.VIRKI_E2E_TLS_CERTIFICATE_PATH || !/^[a-f0-9]{64}$/iu.test(result.VIRKI_CSRF_SIGNING_KEY ?? "") || !result.NODE_EXTRA_CA_CERTS || !isAbsolute(result.NODE_EXTRA_CA_CERTS))) {
     throw new Error("Hub E2E configuration is incomplete.");
   }
-  if (service === "issuer" && (!result.DATABASE_URL || !result.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE || !result.BIELOS_OIDC_ISSUER || result.BIELOS_OIDC_BIND_ADDRESS !== "127.0.0.1" || !result.OIDC_ISSUER_PORT)) {
+  if (service === "issuer" && (!result.DATABASE_URL || !result.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE || !result.VIRKI_OIDC_ISSUER || result.VIRKI_OIDC_BIND_ADDRESS !== "127.0.0.1" || !result.OIDC_ISSUER_PORT)) {
     throw new Error("OIDC issuer E2E configuration is incomplete.");
   }
   if (service === "hub" || service === "issuer") {
@@ -67,7 +67,7 @@ export function buildServiceEnvironment(service, source = process.env, platform 
     assertDisposableCoreTestDatabase(databaseUrl, source);
     result.DATABASE_URL = databaseUrl;
   }
-  if (service === "jwks" && !result.BIELOS_E2E_JWKS_REGISTRATION_TOKEN) {
+  if (service === "jwks" && !result.VIRKI_E2E_JWKS_REGISTRATION_TOKEN) {
     throw new Error("JWKS E2E registration configuration is incomplete.");
   }
 
@@ -133,8 +133,8 @@ export function getServiceCommand(service, source) {
   const args = [nextCli, "dev", "--webpack", "-p", service === "hub" ? "3001" : "3000", "--hostname", "127.0.0.1"];
 
   if (service === "hub") {
-    const keyPath = source.BIELOS_E2E_TLS_KEY_PATH;
-    const certificatePath = source.BIELOS_E2E_TLS_CERTIFICATE_PATH;
+    const keyPath = source.VIRKI_E2E_TLS_KEY_PATH;
+    const certificatePath = source.VIRKI_E2E_TLS_CERTIFICATE_PATH;
     const caCertificatePath = source.NODE_EXTRA_CA_CERTS;
     const expectedCaCertificatePath = certificatePath ? join(dirname(certificatePath), "test-ca-cert.pem") : undefined;
     if (!keyPath || !certificatePath || !isAbsolute(keyPath) || !isAbsolute(certificatePath) || !existsSync(keyPath) || !existsSync(certificatePath) || !caCertificatePath || !isAbsolute(caCertificatePath) || !existsSync(caCertificatePath) || !expectedCaCertificatePath || resolve(caCertificatePath) !== resolve(expectedCaCertificatePath)) {
@@ -147,7 +147,7 @@ export function getServiceCommand(service, source) {
 }
 
 function loadIssuerPrivateConfiguration(environment) {
-  const file = environment.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE;
+  const file = environment.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE;
   if (!file || !isAbsolute(file) || !existsSync(file)) throw new Error("OIDC issuer private E2E configuration is unavailable.");
   const config = JSON.parse(readFileSync(file, "utf8"));
   if (!config || typeof config !== "object" || Array.isArray(config) ||
@@ -156,10 +156,10 @@ function loadIssuerPrivateConfiguration(environment) {
     !config.signingJwks || !Array.isArray(config.signingJwks.keys) || !config.signingJwks.keys.length) {
     throw new Error("OIDC issuer private E2E configuration is invalid.");
   }
-  environment.BIELOS_OIDC_ADAPTER_KEY = config.adapterKey;
-  environment.BIELOS_OIDC_COOKIE_KEY = config.cookieKey;
-  environment.BIELOS_OIDC_SIGNING_JWKS = JSON.stringify(config.signingJwks);
-  delete environment.BIELOS_E2E_OIDC_PRIVATE_CONFIG_FILE;
+  environment.VIRKI_OIDC_ADAPTER_KEY = config.adapterKey;
+  environment.VIRKI_OIDC_COOKIE_KEY = config.cookieKey;
+  environment.VIRKI_OIDC_SIGNING_JWKS = JSON.stringify(config.signingJwks);
+  delete environment.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

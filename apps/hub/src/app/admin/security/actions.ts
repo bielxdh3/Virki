@@ -10,9 +10,9 @@ import {
   verifySecurityElevation,
   type ElevationDuration,
   type ElevationScope
-} from "@bielos/auth/administration";
-import { hashAuditIdentifier, writeAuditLogInTransaction } from "@bielos/auth";
-import { prisma } from "@bielos/database";
+} from "@virki/auth/administration";
+import { hashAuditIdentifier, writeAuditLogInTransaction } from "@virki/auth";
+import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../../lib/admin-mutation";

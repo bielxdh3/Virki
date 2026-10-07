@@ -19,7 +19,7 @@ const PROBE_COUNT = 8;
 const PROBE_SCRIPT = `
 set -eu
 root=$2
-fail() { printf 'BIELOS_PROBE_FAILURE=%s\\n' "$1"; exit 1; }
+fail() { printf 'VIRKI_PROBE_FAILURE=%s\\n' "$1"; exit 1; }
 [[ "$(uname -s)" == Linux ]] || fail NOT_LINUX
 kernel=$(tr '[:upper:]' '[:lower:]' < /proc/sys/kernel/osrelease)
 [[ "$kernel" != *microsoft* && "$kernel" != *wsl* ]] || fail WSL
@@ -29,7 +29,7 @@ for name in .deploy-tmp releases backups; do
   directory="$root/$name"
   [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%a' -- "$directory")" == 700 && "$(stat -c '%u' -- "$directory")" == "$(id -u)" ]] || fail DIRECTORY_METADATA_INVALID
 done
-marker="$root/.bielos-production-host"
+marker="$root/.virki-production-host"
 [[ -f "$marker" && ! -L "$marker" && "$(stat -c '%a' -- "$marker")" == 600 && "$(stat -c '%u' -- "$marker")" == "$(id -u)" && "$(wc -l < "$marker")" -eq 4 ]] || fail MARKER_METADATA_INVALID
 host=$(hostname -s)
 grep -Fxq 'role=production' "$marker" || fail MARKER_CONTENT_INVALID
@@ -41,10 +41,10 @@ for name in .env .env.oidc .env.oidc-data; do
   [[ -f "$file" && ! -L "$file" ]] || fail "PROTECTED_ENV_FILE_MISSING_OR_UNSAFE:$name"
   [[ "$(stat -c '%a' -- "$file")" == 600 && "$(stat -c '%u' -- "$file")" == "$(id -u)" ]] || fail "PROTECTED_ENV_METADATA_INVALID:$name"
 done
-printf 'BIELOS_PROBE_ID=%s\\n' "$host"
-printf 'BIELOS_PROBE_WD=%s\\n' "$root"
-printf 'BIELOS_PROBE_PLATFORM=linux-native\\n'
-printf 'BIELOS_PROBE_MARKER=valid\\n'
+printf 'VIRKI_PROBE_ID=%s\\n' "$host"
+printf 'VIRKI_PROBE_WD=%s\\n' "$root"
+printf 'VIRKI_PROBE_PLATFORM=linux-native\\n'
+printf 'VIRKI_PROBE_MARKER=valid\\n'
 `;
 
 export const DOCKER_SCRIPT = `
@@ -65,13 +65,13 @@ case "$docker_arch" in
   *) exit 1 ;;
 esac
 [[ "$docker_os" == linux && -n "$version" && -n "$info" && -n "$compose" && "$free" =~ ^[0-9]+([.][0-9]+)?$ && "$demanage" =~ ^[0-9]+$ ]]
-printf 'BIELOS_DOCKER_VERSION=%s\\n' "$version"
-printf 'BIELOS_DOCKER_INFO=%s\\n' "$info"
-printf 'BIELOS_COMPOSE_VERSION=%s\\n' "$compose"
-printf 'BIELOS_PLATFORM=linux/%s\\n' "$docker_arch"
-printf 'BIELOS_FLOCK=available\\n'
-printf 'BIELOS_DISK_FREE_GB=%s\\n' "$free"
-printf 'BIELOS_DEMANAGE_COUNT=%s\\n' "$demanage"
+printf 'VIRKI_DOCKER_VERSION=%s\\n' "$version"
+printf 'VIRKI_DOCKER_INFO=%s\\n' "$info"
+printf 'VIRKI_COMPOSE_VERSION=%s\\n' "$compose"
+printf 'VIRKI_PLATFORM=linux/%s\\n' "$docker_arch"
+printf 'VIRKI_FLOCK=available\\n'
+printf 'VIRKI_DISK_FREE_GB=%s\\n' "$free"
+printf 'VIRKI_DEMANAGE_COUNT=%s\\n' "$demanage"
 `;
 
 export class ProductionPreflightError extends Error {
@@ -137,14 +137,14 @@ function lineValue(output, prefix) {
 
 function probeIsValid(result) {
   return result.status === 0 &&
-    lineValue(result.stdout, "BIELOS_PROBE_ID=").length > 0 &&
-    lineValue(result.stdout, "BIELOS_PROBE_WD=").length > 0 &&
-    lineValue(result.stdout, "BIELOS_PROBE_PLATFORM=") === "linux-native" &&
-    lineValue(result.stdout, "BIELOS_PROBE_MARKER=") === "valid";
+    lineValue(result.stdout, "VIRKI_PROBE_ID=").length > 0 &&
+    lineValue(result.stdout, "VIRKI_PROBE_WD=").length > 0 &&
+    lineValue(result.stdout, "VIRKI_PROBE_PLATFORM=") === "linux-native" &&
+    lineValue(result.stdout, "VIRKI_PROBE_MARKER=") === "valid";
 }
 
 function describeProbeFailure(result) {
-  const hostCheck = lineValue(result.stdout, "BIELOS_PROBE_FAILURE=");
+  const hostCheck = lineValue(result.stdout, "VIRKI_PROBE_FAILURE=");
   const hostCheckMessages = {
     NOT_LINUX: "target is not native Linux.",
     WSL: "target is running under WSL.",
@@ -194,7 +194,7 @@ export async function runProductionPreflight({
     resolved.port !== String(operatorConfig.port) ||
     !resolved.user
   ) {
-    return { status: 1, lines: ["SSH target does not match the canonical BielOS production server."] };
+    return { status: 1, lines: ["SSH target does not match the canonical Virki production server."] };
   }
 
   let identity = "";
@@ -205,7 +205,7 @@ export async function runProductionPreflight({
       return { status: 1, lines: [`SSH preflight failed on probe ${attempt}; ${describeProbeFailure(result)}`] };
     }
 
-    const observed = `${lineValue(result.stdout, "BIELOS_PROBE_ID=")}\n${lineValue(result.stdout, "BIELOS_PROBE_WD=")}`;
+    const observed = `${lineValue(result.stdout, "VIRKI_PROBE_ID=")}\n${lineValue(result.stdout, "VIRKI_PROBE_WD=")}`;
     if (identity && identity !== observed) {
       return { status: 1, lines: ["SSH preflight observed inconsistent native Linux server identity."] };
     }
@@ -217,22 +217,22 @@ export async function runProductionPreflight({
   const docker = runRemoteScript(DOCKER_SCRIPT, "docker", execute, operatorConfig);
   if (
     docker.status !== 0 ||
-    !lineValue(docker.stdout, "BIELOS_DOCKER_VERSION=") ||
-    !lineValue(docker.stdout, "BIELOS_DOCKER_INFO=") ||
-    !lineValue(docker.stdout, "BIELOS_COMPOSE_VERSION=") ||
-    !/^linux\/(?:amd64|arm64)$/u.test(lineValue(docker.stdout, "BIELOS_PLATFORM=")) ||
-    lineValue(docker.stdout, "BIELOS_FLOCK=") !== "available" ||
-    !/^\d+(?:\.\d+)?$/u.test(lineValue(docker.stdout, "BIELOS_DISK_FREE_GB=")) ||
-    !/^\d+$/u.test(lineValue(docker.stdout, "BIELOS_DEMANAGE_COUNT="))
+    !lineValue(docker.stdout, "VIRKI_DOCKER_VERSION=") ||
+    !lineValue(docker.stdout, "VIRKI_DOCKER_INFO=") ||
+    !lineValue(docker.stdout, "VIRKI_COMPOSE_VERSION=") ||
+    !/^linux\/(?:amd64|arm64)$/u.test(lineValue(docker.stdout, "VIRKI_PLATFORM=")) ||
+    lineValue(docker.stdout, "VIRKI_FLOCK=") !== "available" ||
+    !/^\d+(?:\.\d+)?$/u.test(lineValue(docker.stdout, "VIRKI_DISK_FREE_GB=")) ||
+    !/^\d+$/u.test(lineValue(docker.stdout, "VIRKI_DEMANAGE_COUNT="))
   ) {
     return { status: 1, lines: [...lines, "Remote Docker, Compose, locking, or disk preflight failed."] };
   }
 
   lines.push("SSH preflight passed with a stable native Linux identity.");
-  lines.push(`Remote Docker ${lineValue(docker.stdout, "BIELOS_DOCKER_VERSION=")} / Compose ${lineValue(docker.stdout, "BIELOS_COMPOSE_VERSION=")}.`);
-  lines.push(`Remote Docker platform ${lineValue(docker.stdout, "BIELOS_PLATFORM=")}.`);
-  lines.push(`Remote free disk ${lineValue(docker.stdout, "BIELOS_DISK_FREE_GB=")} GB; deManage container names observed ${lineValue(docker.stdout, "BIELOS_DEMANAGE_COUNT=")}.`);
-  return { status: 0, lines, platform: lineValue(docker.stdout, "BIELOS_PLATFORM=") };
+  lines.push(`Remote Docker ${lineValue(docker.stdout, "VIRKI_DOCKER_VERSION=")} / Compose ${lineValue(docker.stdout, "VIRKI_COMPOSE_VERSION=")}.`);
+  lines.push(`Remote Docker platform ${lineValue(docker.stdout, "VIRKI_PLATFORM=")}.`);
+  lines.push(`Remote free disk ${lineValue(docker.stdout, "VIRKI_DISK_FREE_GB=")} GB; deManage container names observed ${lineValue(docker.stdout, "VIRKI_DEMANAGE_COUNT=")}.`);
+  return { status: 0, lines, platform: lineValue(docker.stdout, "VIRKI_PLATFORM=") };
 }
 
 export async function runAcceptedProductionPreflight({

@@ -1,4 +1,4 @@
-# Cloudflare Tunnel local-management template for BielOS.
+# Cloudflare Tunnel local-management template for Virki.
 # Template only: do not put real tunnel IDs or credentials in Git.
 
 tunnel: <CLOUDFLARE_TUNNEL_ID>

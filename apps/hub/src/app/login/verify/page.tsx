@@ -1,4 +1,4 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../../lib/auth";
@@ -28,7 +28,7 @@ export default async function LoginVerificationPage({ searchParams }: { searchPa
   return (
     <main className="auth-page">
       <section className="auth-panel" aria-labelledby="verify-title">
-        <p className="eyebrow">BielOS</p>
+        <p className="eyebrow">Virki</p>
         <h1 id="verify-title">Verificação de segurança</h1>
         <p>{factor === "totp" ? "Informe o código do aplicativo autenticador." : factor === "recovery" ? "Use um código de recuperação de uso único. Depois, será necessário configurar o autenticador novamente." : "Informe o código enviado ao e-mail da conta."}</p>
         <form className="form-stack" action="/api/login/verify" method="post">

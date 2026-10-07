@@ -3,9 +3,9 @@ FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
-ARG BIELOS_BUILD_REVISION
+ARG VIRKI_BUILD_REVISION
 ARG TARGETARCH
-RUN node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1] ?? "")) process.exit(1)' "$BIELOS_BUILD_REVISION"
+RUN node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1] ?? "")) process.exit(1)' "$VIRKI_BUILD_REVISION"
 
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
@@ -45,7 +45,7 @@ FROM build AS migrator
 ENV NODE_ENV=production
 ENV HOME=/tmp/node-home
 ENV NPM_CONFIG_CACHE=/tmp/npm-cache
-LABEL org.opencontainers.image.revision="${BIELOS_BUILD_REVISION}"
+LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}"
 USER node:node
 CMD ["npm", "run", "prisma:migrate:deploy"]
 
@@ -63,8 +63,8 @@ FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-ARG BIELOS_BUILD_REVISION
-LABEL org.opencontainers.image.revision="${BIELOS_BUILD_REVISION}"
+ARG VIRKI_BUILD_REVISION
+LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}"
 
 COPY --from=production-dependencies /app/package.json ./package.json
 COPY --from=production-dependencies /app/apps/public-site/package.json ./apps/public-site/package.json
@@ -102,4 +102,4 @@ ENV HOME=/tmp/node-home
 ENV NPM_CONFIG_CACHE=/tmp/npm-cache
 USER node:node
 EXPOSE 3000 3001 3003
-CMD ["npm", "run", "start", "--workspace", "@bielos/hub"]
+CMD ["npm", "run", "start", "--workspace", "@virki/hub"]

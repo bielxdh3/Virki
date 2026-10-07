@@ -14,7 +14,7 @@ const operatorConfig = {
   sshAlias: "test-production",
   host: "production.example.invalid",
   port: "2222",
-  root: "/srv/bielos",
+  root: "/srv/virki",
 };
 
 test("remote Linux Bash script uses LF line endings", () => {
@@ -27,9 +27,9 @@ test("production configuration accepts only safe absolute Linux roots", () => {
   assert.equal(isValidProductionConfig({ ...operatorConfig, sshAlias: "-oProxyCommand=touch /tmp/pwned" }), false);
   assert.equal(isValidProductionConfig({ ...operatorConfig, sshAlias: "--help" }), false);
   assert.equal(isValidProductionConfig({ ...operatorConfig, sshAlias: "safe-production" }), true);
-  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "C:\\BielOS" }), false);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "C:\\Virki" }), false);
   assert.equal(isValidProductionConfig({ ...operatorConfig, root: "/srv/../unsafe" }), false);
-  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "/srv/bielos;touch" }), false);
+  assert.equal(isValidProductionConfig({ ...operatorConfig, root: "/srv/virki;touch" }), false);
   assert.equal(isValidProductionConfig({ ...operatorConfig, root: "/" }), false);
 });
 

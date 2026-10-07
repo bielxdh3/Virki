@@ -1,19 +1,19 @@
-# BielOS contributor guide
+# Virki contributor guide
 
-BielOS has five responsibilities: identity, authentication and SSO, security, project entry access, and audit. It authenticates people and decides whether a person may enter an external project. Project behavior and permissions stay with that project.
+Virki has five responsibilities: identity, authentication and SSO, security, project entry access, and audit. It authenticates people and decides whether a person may enter an external project. Project behavior and permissions stay with that project.
 
 ## Surfaces
 
 - `biel.dev.br` is a minimal public page with a portal entry.
 - `portal.biel.dev.br` is the authenticated USER portal and OIDC issuer surface. A user sees only enabled projects with an active explicit grant.
-- `hub.biel.dev.br` is the ADMIN control plane. Cloudflare Access is the outer boundary; BielOS authentication and authorization are the inner boundary.
+- `hub.biel.dev.br` is the ADMIN control plane. Cloudflare Access is the outer boundary; Virki authentication and authorization are the inner boundary.
 - The administration navigation contains only Contas, Acessos, Segurança, Auditoria, and Conexões.
 
 ## Identity and authorization
 
 - Stored roles are `ADMIN` and `USER` only. Unauthenticated requests are untrusted and denied by default.
-- There are no BielOS project roles. Access is an explicit USER-to-project grant.
-- Projects are external OIDC relying parties. BielOS does not host their experiences or manage their internal permissions.
+- There are no Virki project roles. Access is an explicit USER-to-project grant.
+- Projects are external OIDC relying parties. Virki does not host their experiences or manage their internal permissions.
 - Do not add a project unless an ADMIN registers its canonical origin, exact redirect URI allowlist, and client credentials.
 - Recheck account, project, and grant state when authorizing. Client supplied roles or grants are never authoritative.
 
@@ -36,7 +36,7 @@ BielOS has five responsibilities: identity, authentication and SSO, security, pr
 ## Production operations
 
 - Local use is limited to development, builds, and disposable validation databases. Production runs only on the configured remote native Linux host; Windows and WSL are not production targets.
-- Production host values come from the ignored `.production.operator.json` file or `BIELOS_PRODUCTION_*` environment variables. Never add machine-specific host, path, or Cloudflare values to tracked files.
+- Production host values come from the ignored `.production.operator.json` file or `VIRKI_PRODUCTION_*` environment variables. Never add machine-specific host, path, or Cloudflare values to tracked files.
 - Run `npm run preflight:prod` before any production mutation. Require stable SSH probes, the expected host, remote Docker, the production identity marker, and the exact accepted revision. Do not use a local or WSL fallback.
 - Deploy only a clean `main` revision matching `origin/main` after exact-SHA CI is green.
 - Before a database change, create a production backup outside the repository, restore it to a disposable database, and validate the migration plan against that restore. Apply committed Prisma migrations; never use `prisma db push` in production.

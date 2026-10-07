@@ -6,14 +6,14 @@ const key = "12".repeat(32);
 
 test("OIDC client secrets and artifact payloads are authenticated encrypted values", () => {
   const secret = "one-time-project-secret";
-  const ciphertext = encryptOidcClientSecret(secret, { BIELOS_OIDC_ADAPTER_KEY: key });
+  const ciphertext = encryptOidcClientSecret(secret, { VIRKI_OIDC_ADAPTER_KEY: key });
   assert.equal(ciphertext.includes(secret), false);
-  assert.equal(decryptOidcClientSecret(ciphertext, { BIELOS_OIDC_ADAPTER_KEY: key }), secret);
+  assert.equal(decryptOidcClientSecret(ciphertext, { VIRKI_OIDC_ADAPTER_KEY: key }), secret);
   const payload = JSON.stringify({ code: "one-time-auth-code", clientId: "client-a" });
-  const encrypted = encryptOidcPayload(payload, { BIELOS_OIDC_ADAPTER_KEY: key });
+  const encrypted = encryptOidcPayload(payload, { VIRKI_OIDC_ADAPTER_KEY: key });
   assert.equal(encrypted.includes("one-time-auth-code"), false);
-  assert.equal(decryptOidcPayload(encrypted, { BIELOS_OIDC_ADAPTER_KEY: key }), payload);
-  assert.throws(() => decryptOidcPayload(encrypted, { BIELOS_OIDC_ADAPTER_KEY: "34".repeat(32) }));
+  assert.equal(decryptOidcPayload(encrypted, { VIRKI_OIDC_ADAPTER_KEY: key }), payload);
+  assert.throws(() => decryptOidcPayload(encrypted, { VIRKI_OIDC_ADAPTER_KEY: "34".repeat(32) }));
 });
 
 test("OIDC identifiers are irreversibly indexed with SHA-256", () => {
@@ -25,21 +25,21 @@ test("OIDC identifiers are irreversibly indexed with SHA-256", () => {
 test("OIDC encrypted values remain readable during one-key rotation overlap", () => {
   const previousKey = "34".repeat(32);
   const currentKey = "56".repeat(32);
-  const oldSecret = encryptOidcClientSecret("legacy-secret", { BIELOS_OIDC_ADAPTER_KEY: previousKey });
-  const oldPayload = encryptOidcPayload("{\"legacy\":true}", { BIELOS_OIDC_ADAPTER_KEY: previousKey });
+  const oldSecret = encryptOidcClientSecret("legacy-secret", { VIRKI_OIDC_ADAPTER_KEY: previousKey });
+  const oldPayload = encryptOidcPayload("{\"legacy\":true}", { VIRKI_OIDC_ADAPTER_KEY: previousKey });
   const rotatingEnv = {
-    BIELOS_OIDC_ADAPTER_KEY: currentKey,
-    BIELOS_OIDC_ADAPTER_KEY_PREVIOUS: previousKey
+    VIRKI_OIDC_ADAPTER_KEY: currentKey,
+    VIRKI_OIDC_ADAPTER_KEY_PREVIOUS: previousKey
   };
 
   assert.equal(decryptOidcClientSecret(oldSecret, rotatingEnv), "legacy-secret");
   assert.equal(decryptOidcPayload(oldPayload, rotatingEnv), "{\"legacy\":true}");
 
   const newSecret = encryptOidcClientSecret("current-secret", rotatingEnv);
-  assert.equal(decryptOidcClientSecret(newSecret, { BIELOS_OIDC_ADAPTER_KEY: currentKey }), "current-secret");
-  assert.throws(() => decryptOidcClientSecret(oldSecret, { BIELOS_OIDC_ADAPTER_KEY: currentKey }));
+  assert.equal(decryptOidcClientSecret(newSecret, { VIRKI_OIDC_ADAPTER_KEY: currentKey }), "current-secret");
+  assert.throws(() => decryptOidcClientSecret(oldSecret, { VIRKI_OIDC_ADAPTER_KEY: currentKey }));
   assert.throws(() => decryptOidcPayload(oldPayload, {
-    BIELOS_OIDC_ADAPTER_KEY: currentKey,
-    BIELOS_OIDC_ADAPTER_KEY_PREVIOUS: "not-a-valid-key"
+    VIRKI_OIDC_ADAPTER_KEY: currentKey,
+    VIRKI_OIDC_ADAPTER_KEY_PREVIOUS: "not-a-valid-key"
   }));
 });

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CANONICAL_BIELOS_REPOSITORY,
+  CANONICAL_VIRKI_REPOSITORY,
   inspectProductionSource,
   ProductionRevisionError,
   runCommand,
@@ -20,8 +20,8 @@ const backupDirectorySentinel = "infra/backups/.gitkeep";
 const reservedArchiveSegments = new Set([
   ".env",
   ".production.operator.json",
-  ".bielos-release",
-  ".bielos-production-host",
+  ".virki-release",
+  ".virki-production-host",
   ".npmrc",
   ".dev.vars",
   "backups",
@@ -82,7 +82,7 @@ function sourceScript(revision, execute) {
 }
 
 function makeArchive(revision, execute) {
-  const directory = mkdtempSync(path.join(os.tmpdir(), "bielos-production-"));
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-production-"));
   try {
     const archivePath = path.join(directory, "source.tar");
     const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
@@ -209,20 +209,20 @@ async function downloadProductionImages({ runId, revision, platform, execute }) 
   if (!Number.isSafeInteger(runId) || runId <= 0 || !["linux/amd64", "linux/arm64"].includes(platform)) {
     throw new ProductionRevisionError("COMMAND_FAILED");
   }
-  const directory = mkdtempSync(path.join(os.tmpdir(), "bielos-production-images-"));
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-production-images-"));
   try {
     const platformName = platform.replace("/", "-");
-    const artifactName = `bielos-production-images-${revision}-${platformName}`;
+    const artifactName = `virki-production-images-${revision}-${platformName}`;
     requireSuccess(
       execute("gh", [
         "run", "download", String(runId),
-        "--repo", CANONICAL_BIELOS_REPOSITORY,
+        "--repo", CANONICAL_VIRKI_REPOSITORY,
         "--name", artifactName,
         "--dir", directory,
       ], { cwd: repositoryRoot }),
       "Exact-revision production images could not be downloaded from CI.",
     );
-    const archiveName = "bielos-production-images.tar.gz";
+    const archiveName = "virki-production-images.tar.gz";
     const entries = readdirSync(directory);
     const archivePath = path.join(directory, archiveName);
     if (entries.length !== 1 || entries[0] !== archiveName || !lstatSync(archivePath).isFile()) {

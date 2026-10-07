@@ -38,17 +38,17 @@ test("OIDC state is required and nonce is required for OpenID requests", () => {
 });
 
 test("OIDC authentication claims report the persisted methods and assurance level", () => {
-  assert.deepEqual(OIDC_SUPPORTED_ACR_VALUES, ["urn:bielos:loa:1", "urn:bielos:loa:2"]);
+  assert.deepEqual(OIDC_SUPPORTED_ACR_VALUES, ["urn:virki:loa:1", "urn:virki:loa:2"]);
   assert.deepEqual(OIDC_DISCOVERY_CONFIGURATION.acrValues, OIDC_SUPPORTED_ACR_VALUES);
   assert.deepEqual(OIDC_DISCOVERY_CONFIGURATION.features.claimsParameter, { enabled: true });
-  assert.deepEqual(getOidcAuthenticationContext(["pwd"]), { acr: "urn:bielos:loa:1", amr: ["pwd"] });
-  assert.deepEqual(getOidcAuthenticationContext(["pwd", "otp", "mfa"]), { acr: "urn:bielos:loa:2", amr: ["pwd", "otp", "mfa"] });
-  assert.deepEqual(getOidcAuthenticationContext(["pwd", "mfa", "not allowed!"]), { acr: "urn:bielos:loa:2", amr: ["pwd", "mfa"] });
-  assert.deepEqual(getOidcAuthenticationContext(["pwd", "otp", "mfa"], ["urn:bielos:loa:1"]), { acr: "urn:bielos:loa:1", amr: ["pwd", "otp", "mfa"] });
-  assert.equal(supportsEssentialOidcAcrValues(["urn:bielos:loa:3"]), false);
-  assert.equal(supportsEssentialOidcAcrValues(["urn:bielos:loa:3", "urn:bielos:loa:2"]), true);
-  assert.equal(satisfiesEssentialOidcAcrValues(["urn:bielos:loa:1"], ["pwd", "otp", "mfa"]), true);
-  assert.equal(satisfiesEssentialOidcAcrValues(["urn:bielos:loa:2"], ["pwd"]), false);
+  assert.deepEqual(getOidcAuthenticationContext(["pwd"]), { acr: "urn:virki:loa:1", amr: ["pwd"] });
+  assert.deepEqual(getOidcAuthenticationContext(["pwd", "otp", "mfa"]), { acr: "urn:virki:loa:2", amr: ["pwd", "otp", "mfa"] });
+  assert.deepEqual(getOidcAuthenticationContext(["pwd", "mfa", "not allowed!"]), { acr: "urn:virki:loa:2", amr: ["pwd", "mfa"] });
+  assert.deepEqual(getOidcAuthenticationContext(["pwd", "otp", "mfa"], ["urn:virki:loa:1"]), { acr: "urn:virki:loa:1", amr: ["pwd", "otp", "mfa"] });
+  assert.equal(supportsEssentialOidcAcrValues(["urn:virki:loa:3"]), false);
+  assert.equal(supportsEssentialOidcAcrValues(["urn:virki:loa:3", "urn:virki:loa:2"]), true);
+  assert.equal(satisfiesEssentialOidcAcrValues(["urn:virki:loa:1"], ["pwd", "otp", "mfa"]), true);
+  assert.equal(satisfiesEssentialOidcAcrValues(["urn:virki:loa:2"], ["pwd"]), false);
 });
 
 test("OIDC provider session assurance, methods, and auth time must match the current central session", () => {
@@ -56,35 +56,35 @@ test("OIDC provider session assurance, methods, and auth time must match the cur
   const currentLoginTs = Math.floor(authenticatedAt.getTime() / 1_000);
 
   assert.equal(isCurrentOidcAuthenticationContext({
-    currentAcr: "urn:bielos:loa:2",
+    currentAcr: "urn:virki:loa:2",
     currentAmr: ["pwd", "otp", "mfa"],
     currentLoginTs,
     authenticationMethods: ["pwd", "otp", "mfa"],
     authenticatedAt
   }), true);
   assert.equal(isCurrentOidcAuthenticationContext({
-    currentAcr: "urn:bielos:loa:1",
+    currentAcr: "urn:virki:loa:1",
     currentAmr: ["pwd", "otp", "mfa"],
     currentLoginTs,
     authenticationMethods: ["pwd", "otp", "mfa"],
     authenticatedAt
   }), true, "the provider may persist loa1 when the client requires loa1, even with current MFA methods");
   assert.equal(isCurrentOidcAuthenticationContext({
-    currentAcr: "urn:bielos:loa:2",
+    currentAcr: "urn:virki:loa:2",
     currentAmr: ["pwd", "otp", "mfa"],
     currentLoginTs: currentLoginTs - 60,
     authenticationMethods: ["pwd"],
     authenticatedAt
   }), false, "a same-user password-only session must not reuse old MFA claims");
   assert.equal(isCurrentOidcAuthenticationContext({
-    currentAcr: "urn:bielos:loa:1",
+    currentAcr: "urn:virki:loa:1",
     currentAmr: ["pwd"],
     currentLoginTs,
     authenticationMethods: ["pwd"],
     authenticatedAt
   }), true);
   assert.equal(isCurrentOidcAuthenticationContext({
-    currentAcr: "urn:bielos:loa:1",
+    currentAcr: "urn:virki:loa:1",
     currentAmr: ["pwd"],
     currentLoginTs: currentLoginTs - 1,
     authenticationMethods: ["pwd"],
@@ -93,10 +93,10 @@ test("OIDC provider session assurance, methods, and auth time must match the cur
 });
 
 test("OIDC ACR loa:2 creates an interaction unless the provider session has current MFA assurance", () => {
-  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:bielos:loa:2", currentAcr: "urn:bielos:loa:1", authenticationMethods: ["pwd", "otp", "mfa"] }), true);
-  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:bielos:loa:2", currentAcr: "urn:bielos:loa:2", authenticationMethods: ["pwd", "otp", "mfa"] }), false);
-  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:bielos:loa:2", currentAcr: "urn:bielos:loa:1", authenticationMethods: ["pwd"] }), true);
-  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:bielos:loa:1", currentAcr: "urn:bielos:loa:1", authenticationMethods: ["pwd"] }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd", "otp", "mfa"] }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:2", authenticationMethods: ["pwd", "otp", "mfa"] }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:1", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
 });
 
 test("OIDC authentication request markers bind proof timestamps to one interaction", () => {
@@ -128,7 +128,7 @@ test("OIDC prompt=login and max_age require recent central authentication", () =
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: "30", requestStartedAtMs: now.getTime() + 900, authenticatedAt: new Date(now.getTime() + 1_100), authenticationMethods, now }), false, "proof completed after the request remains fresh across a second boundary");
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: 30, requestStartedAtMs, authenticatedAt: new Date(now.getTime() - 31_000), authenticationMethods, now }), true, "numeric default_max_age values are enforced");
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: "invalid", requestStartedAtMs, authenticatedAt: now, authenticationMethods, now }), true);
-  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:bielos:loa:2", requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
-  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:bielos:loa:2", requestStartedAtMs, authenticatedAt: new Date(now.getTime() + 1), authenticationMethods: ["pwd"], now }), true, "MFA assurance is required even when a password-only session is new");
-  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requiredAcrValues: ["urn:bielos:loa:2"], requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
+  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
+  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: new Date(now.getTime() + 1), authenticationMethods: ["pwd"], now }), true, "MFA assurance is required even when a password-only session is new");
+  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requiredAcrValues: ["urn:virki:loa:2"], requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
 });

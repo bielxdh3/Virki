@@ -12,7 +12,7 @@ test("surfaces use the verified Host header and exact configured hostnames", () 
 
 test("return targets remain relative and reject protocol-relative or auth-loop destinations", () => {
   assert.equal(safeReturnTo("/interaction/abcdefgh?x=1"), "/interaction/abcdefgh?x=1");
-  assert.equal(safeReturnTo("/interaction/abcdefgh?bielos_auth_request=opaque.marker", "portal", "USER"), "/interaction/abcdefgh?bielos_auth_request=opaque.marker");
+  assert.equal(safeReturnTo("/interaction/abcdefgh?virki_auth_request=opaque.marker", "portal", "USER"), "/interaction/abcdefgh?virki_auth_request=opaque.marker");
   for (const value of ["https://attacker.invalid", "//attacker.invalid", "/\\attacker.invalid", "/api/logout", "/login", "/a\u0000b", "/" + "x".repeat(2048)]) assert.equal(safeReturnTo(value), null);
 });
 
@@ -47,16 +47,16 @@ test("production redirect origins use canonical surface hosts, never the interna
   const headers = new Headers({ host: "portal.biel.dev.br", "x-forwarded-host": "attacker.invalid" });
   const base = getSurfaceBaseUrl(headers, "http://hub:3001/login", {
     NODE_ENV: "production",
-    BIELOS_PORTAL_HOSTNAME: "portal.biel.dev.br"
+    VIRKI_PORTAL_HOSTNAME: "portal.biel.dev.br"
   });
   assert.equal(base?.origin, "https://portal.biel.dev.br");
   assert.equal(getSurfaceBaseUrl(headers, "http://hub:3001/login", {
     NODE_ENV: "production",
-    BIELOS_PORTAL_HOSTNAME: "portal.biel.dev.br",
-    BIELOS_PORTAL_URL: "https://attacker.invalid"
+    VIRKI_PORTAL_HOSTNAME: "portal.biel.dev.br",
+    VIRKI_PORTAL_URL: "https://attacker.invalid"
   }), null);
   assert.equal(getSurfaceBaseUrl(headers, "http://hub:3001/login", {
     NODE_ENV: "production",
-    BIELOS_PORTAL_HOSTNAME: "portal.biel.dev.br/path"
+    VIRKI_PORTAL_HOSTNAME: "portal.biel.dev.br/path"
   }), null);
 });

@@ -1,7 +1,7 @@
 import { createPrivateKey, type KeyObject } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { SignJWT } from "jose";
-import { validateCloudflareAccessJwt } from "@bielos/auth/cloudflare-access";
+import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
 import type { Page } from "@playwright/test";
 
 const HUB_URL = "https://hub.localhost:3001";
@@ -23,8 +23,8 @@ export async function addCloudflareAccessHeader(page: Page): Promise<void> {
 }
 
 async function createCloudflareAccessToken(): Promise<string> {
-  const audience = process.env.BIELOS_E2E_ACCESS_AUDIENCE;
-  const issuer = process.env.BIELOS_E2E_ACCESS_ISSUER;
+  const audience = process.env.VIRKI_E2E_ACCESS_AUDIENCE;
+  const issuer = process.env.VIRKI_E2E_ACCESS_ISSUER;
   if (!audience || !issuer) throw new Error("Synthetic E2E Cloudflare Access signing configuration is unavailable.");
 
   const { kid, privateKey } = await getRegisteredSigningKey(issuer);
@@ -56,7 +56,7 @@ async function getRegisteredSigningKey(issuer: string): Promise<RegisteredSignin
 }
 
 async function registerSigningKey(issuer: string): Promise<RegisteredSigningKey> {
-  const keyFile = process.env.BIELOS_E2E_ACCESS_SIGNING_KEY_FILE;
+  const keyFile = process.env.VIRKI_E2E_ACCESS_SIGNING_KEY_FILE;
   if (!keyFile) throw new Error("Synthetic E2E Cloudflare Access signing key is unavailable.");
   let key: unknown;
   try {
@@ -70,7 +70,7 @@ async function registerSigningKey(issuer: string): Promise<RegisteredSigningKey>
 }
 
 async function registerTestSigningKey(issuer: string, jwk: Record<string, unknown>): Promise<void> {
-  const registrationToken = process.env.BIELOS_E2E_JWKS_REGISTRATION_TOKEN;
+  const registrationToken = process.env.VIRKI_E2E_JWKS_REGISTRATION_TOKEN;
   if (!registrationToken) throw new Error("Synthetic E2E Cloudflare Access registration token is unavailable.");
 
   const response = await fetch(`${issuer}/__test__/keys`, {

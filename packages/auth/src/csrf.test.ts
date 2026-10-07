@@ -7,8 +7,8 @@ const secondKey = "22".repeat(32);
 const issuedAt = 1_800_000_000_000;
 
 test("CSRF tokens validate across app instances with a shared configured key and bind to their form scope", () => {
-  const appA = { NODE_ENV: "production", BIELOS_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
-  const appB = { NODE_ENV: "production", BIELOS_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
+  const appA = { NODE_ENV: "production", VIRKI_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
+  const appB = { NODE_ENV: "production", VIRKI_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
   const token = createCsrfToken({ env: appA, now: issuedAt, scope: "account-security" });
 
   assert.deepEqual(validateCsrfToken(token, { env: appB, now: issuedAt + 1, scope: "account-security" }), { valid: true });
@@ -17,26 +17,26 @@ test("CSRF tokens validate across app instances with a shared configured key and
 
 test("CSRF key rotation accepts the previous key only while it is explicitly configured", () => {
   const previousToken = createCsrfToken({
-    env: { NODE_ENV: "production", BIELOS_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv,
+    env: { NODE_ENV: "production", VIRKI_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv,
     now: issuedAt,
     scope: "login"
   });
   const rotatingApp = {
     NODE_ENV: "production",
-    BIELOS_CSRF_SIGNING_KEY: secondKey,
-    BIELOS_CSRF_SIGNING_KEY_PREVIOUS: firstKey
+    VIRKI_CSRF_SIGNING_KEY: secondKey,
+    VIRKI_CSRF_SIGNING_KEY_PREVIOUS: firstKey
   } as NodeJS.ProcessEnv;
 
   assert.deepEqual(validateCsrfToken(previousToken, { env: rotatingApp, now: issuedAt + 1, scope: "login" }), { valid: true });
   assert.deepEqual(validateCsrfToken(previousToken, {
-    env: { NODE_ENV: "production", BIELOS_CSRF_SIGNING_KEY: secondKey } as NodeJS.ProcessEnv,
+    env: { NODE_ENV: "production", VIRKI_CSRF_SIGNING_KEY: secondKey } as NodeJS.ProcessEnv,
     now: issuedAt + 1,
     scope: "login"
   }), { valid: false, reason: "invalid" });
 });
 
 test("CSRF rejects malformed, expired, future-dated and unconfigured production tokens", () => {
-  const env = { NODE_ENV: "production", BIELOS_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
+  const env = { NODE_ENV: "production", VIRKI_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
   const token = createCsrfToken({ env, now: issuedAt, scope: "login" });
 
   assert.deepEqual(validateCsrfToken("v2.malformed", { env, now: issuedAt, scope: "login" }), { valid: false, reason: "malformed" });

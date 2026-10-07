@@ -79,14 +79,14 @@ function git(cwd, ...args) {
 }
 
 function createTestRepository() {
-  const root = mkdtempSync(path.join(os.tmpdir(), "bielos-revision-"));
+  const root = mkdtempSync(path.join(os.tmpdir(), "virki-revision-"));
   const remote = path.join(root, "remote.git");
   const work = path.join(root, "work");
 
   git(root, "init", "--bare", remote);
   git(root, "init", work);
   git(work, "config", "user.email", "test@example.invalid");
-  git(work, "config", "user.name", "BielOS Test");
+  git(work, "config", "user.name", "Virki Test");
   writeFileSync(path.join(work, "tracked.txt"), "initial\n");
   git(work, "add", "tracked.txt");
   git(work, "commit", "-m", "initial");

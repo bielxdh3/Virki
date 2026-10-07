@@ -2,8 +2,8 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 export const REVISION_LABEL = "org.opencontainers.image.revision";
-export const CANONICAL_BIELOS_REPOSITORY = "bielxdh3/BielOS";
-export const CANONICAL_BIELOS_REMOTE = `https://github.com/${CANONICAL_BIELOS_REPOSITORY}.git`;
+export const CANONICAL_VIRKI_REPOSITORY = "bielxdh3/Virki";
+export const CANONICAL_VIRKI_REMOTE = `https://github.com/${CANONICAL_VIRKI_REPOSITORY}.git`;
 export const PRODUCTION_SERVICES = [
   "public-site",
   "hub",
@@ -21,7 +21,7 @@ const ERROR_MESSAGES = Object.freeze({
   SOURCE_DIRTY_STAGED: "Working tree has staged changes.",
   SOURCE_DIRTY_UNTRACKED: "Working tree has untracked files.",
   SOURCE_BRANCH_MISMATCH: "Active branch is not main.",
-  SOURCE_REPOSITORY_MISMATCH: "Origin is not the canonical BielOS repository.",
+  SOURCE_REPOSITORY_MISMATCH: "Origin is not the canonical Virki repository.",
   SOURCE_REMOTE_MISMATCH: "Local and origin revisions do not match.",
   ARGUMENT_INVALID: "Production command arguments are invalid.",
   REMOTE_REQUIRED: "Production commands must target the canonical remote server.",
@@ -88,7 +88,7 @@ function pathsMatch(left, right) {
   return normalizedLeft === normalizedRight;
 }
 
-export function inspectProductionSource({ repositoryRoot, execute = runCommand, canonicalRemoteUrl = CANONICAL_BIELOS_REMOTE }) {
+export function inspectProductionSource({ repositoryRoot, execute = runCommand, canonicalRemoteUrl = CANONICAL_VIRKI_REMOTE }) {
   const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
   const git = (args) => execute("git", args, { cwd: repositoryRoot, env: gitEnvironment });
   const resolvedRoot = requireSuccess(git(["rev-parse", "--show-toplevel"]));

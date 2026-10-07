@@ -4,8 +4,8 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
-import { SESSION_COOKIE_NAME } from "@bielos/auth";
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
+import { SESSION_COOKIE_NAME } from "@virki/auth";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 
 import { POST } from "./route";
 
@@ -13,11 +13,11 @@ test("logout redirects to the configured public hub origin", async () => {
   const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
   const originalAccessAudience = process.env.CLOUDFLARE_ACCESS_AUDIENCE;
   const originalTeamDomain = process.env.CLOUDFLARE_TEAM_DOMAIN;
-  const originalHubUrl = process.env.BIELOS_HUB_URL;
-  const originalHubHostname = process.env.BIELOS_HUB_HOSTNAME;
+  const originalHubUrl = process.env.VIRKI_HUB_URL;
+  const originalHubHostname = process.env.VIRKI_HUB_HOSTNAME;
   const originalNodeEnv = process.env.NODE_ENV;
-  const originalCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY;
-  const originalPreviousCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
+  const originalCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY;
+  const originalPreviousCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
   let access: ProductionAccessAssertion | undefined;
 
   try {
@@ -25,10 +25,10 @@ test("logout redirects to the configured public hub origin", async () => {
     process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "true";
     process.env.CLOUDFLARE_ACCESS_AUDIENCE = access.audience;
     process.env.CLOUDFLARE_TEAM_DOMAIN = access.teamDomain;
-    process.env.BIELOS_HUB_URL = "https://hub.example.invalid";
-    process.env.BIELOS_HUB_HOSTNAME = "hub.example.invalid";
-    process.env.BIELOS_CSRF_SIGNING_KEY = "11".repeat(32);
-    delete process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
+    process.env.VIRKI_HUB_URL = "https://hub.example.invalid";
+    process.env.VIRKI_HUB_HOSTNAME = "hub.example.invalid";
+    process.env.VIRKI_CSRF_SIGNING_KEY = "11".repeat(32);
+    delete process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
     setEnvironmentVariable("NODE_ENV", "production");
     const formData = new FormData();
     formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "logout" }));
@@ -50,10 +50,10 @@ test("logout redirects to the configured public hub origin", async () => {
     restoreEnvironmentVariable("CLOUDFLARE_ACCESS_JWT_REQUIRED", originalAccessRequired);
     restoreEnvironmentVariable("CLOUDFLARE_ACCESS_AUDIENCE", originalAccessAudience);
     restoreEnvironmentVariable("CLOUDFLARE_TEAM_DOMAIN", originalTeamDomain);
-    restoreEnvironmentVariable("BIELOS_HUB_URL", originalHubUrl);
-    restoreEnvironmentVariable("BIELOS_HUB_HOSTNAME", originalHubHostname);
-    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY", originalCsrfKey);
-    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
+    restoreEnvironmentVariable("VIRKI_HUB_URL", originalHubUrl);
+    restoreEnvironmentVariable("VIRKI_HUB_HOSTNAME", originalHubHostname);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY", originalCsrfKey);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
     restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   }
 });
@@ -62,11 +62,11 @@ test("production logout redirects to the canonical host when the explicit public
   const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
   const originalAccessAudience = process.env.CLOUDFLARE_ACCESS_AUDIENCE;
   const originalTeamDomain = process.env.CLOUDFLARE_TEAM_DOMAIN;
-  const originalHubUrl = process.env.BIELOS_HUB_URL;
-  const originalHubHostname = process.env.BIELOS_HUB_HOSTNAME;
+  const originalHubUrl = process.env.VIRKI_HUB_URL;
+  const originalHubHostname = process.env.VIRKI_HUB_HOSTNAME;
   const originalNodeEnv = process.env.NODE_ENV;
-  const originalCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY;
-  const originalPreviousCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
+  const originalCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY;
+  const originalPreviousCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
   let access: ProductionAccessAssertion | undefined;
 
   try {
@@ -74,11 +74,11 @@ test("production logout redirects to the canonical host when the explicit public
     process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "true";
     process.env.CLOUDFLARE_ACCESS_AUDIENCE = access.audience;
     process.env.CLOUDFLARE_TEAM_DOMAIN = access.teamDomain;
-    process.env.BIELOS_CSRF_SIGNING_KEY = "11".repeat(32);
-    delete process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
+    process.env.VIRKI_CSRF_SIGNING_KEY = "11".repeat(32);
+    delete process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
     setEnvironmentVariable("NODE_ENV", "production");
-    delete process.env.BIELOS_HUB_URL;
-    process.env.BIELOS_HUB_HOSTNAME = "hub.biel.dev.br";
+    delete process.env.VIRKI_HUB_URL;
+    process.env.VIRKI_HUB_HOSTNAME = "hub.biel.dev.br";
     const formData = new FormData();
     formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "logout" }));
 
@@ -105,10 +105,10 @@ test("production logout redirects to the canonical host when the explicit public
     restoreEnvironmentVariable("CLOUDFLARE_ACCESS_JWT_REQUIRED", originalAccessRequired);
     restoreEnvironmentVariable("CLOUDFLARE_ACCESS_AUDIENCE", originalAccessAudience);
     restoreEnvironmentVariable("CLOUDFLARE_TEAM_DOMAIN", originalTeamDomain);
-    restoreEnvironmentVariable("BIELOS_HUB_URL", originalHubUrl);
-    restoreEnvironmentVariable("BIELOS_HUB_HOSTNAME", originalHubHostname);
-    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY", originalCsrfKey);
-    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
+    restoreEnvironmentVariable("VIRKI_HUB_URL", originalHubUrl);
+    restoreEnvironmentVariable("VIRKI_HUB_HOSTNAME", originalHubHostname);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY", originalCsrfKey);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
     restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   }
 });
@@ -117,11 +117,11 @@ test("invalid production redirect configuration clears the cookie without an ext
   const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
   const originalAccessAudience = process.env.CLOUDFLARE_ACCESS_AUDIENCE;
   const originalTeamDomain = process.env.CLOUDFLARE_TEAM_DOMAIN;
-  const originalHubUrl = process.env.BIELOS_HUB_URL;
-  const originalHubHostname = process.env.BIELOS_HUB_HOSTNAME;
+  const originalHubUrl = process.env.VIRKI_HUB_URL;
+  const originalHubHostname = process.env.VIRKI_HUB_HOSTNAME;
   const originalNodeEnv = process.env.NODE_ENV;
-  const originalCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY;
-  const originalPreviousCsrfKey = process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
+  const originalCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY;
+  const originalPreviousCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
   let access: ProductionAccessAssertion | undefined;
 
   try {
@@ -129,10 +129,10 @@ test("invalid production redirect configuration clears the cookie without an ext
     process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "true";
     process.env.CLOUDFLARE_ACCESS_AUDIENCE = access.audience;
     process.env.CLOUDFLARE_TEAM_DOMAIN = access.teamDomain;
-    process.env.BIELOS_HUB_URL = "https://attacker.invalid";
-    process.env.BIELOS_HUB_HOSTNAME = "hub.biel.dev.br";
-    process.env.BIELOS_CSRF_SIGNING_KEY = "11".repeat(32);
-    delete process.env.BIELOS_CSRF_SIGNING_KEY_PREVIOUS;
+    process.env.VIRKI_HUB_URL = "https://attacker.invalid";
+    process.env.VIRKI_HUB_HOSTNAME = "hub.biel.dev.br";
+    process.env.VIRKI_CSRF_SIGNING_KEY = "11".repeat(32);
+    delete process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
     setEnvironmentVariable("NODE_ENV", "production");
     const formData = new FormData();
     formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "logout" }));
@@ -157,10 +157,10 @@ test("invalid production redirect configuration clears the cookie without an ext
     restoreEnvironmentVariable("CLOUDFLARE_ACCESS_JWT_REQUIRED", originalAccessRequired);
     restoreEnvironmentVariable("CLOUDFLARE_ACCESS_AUDIENCE", originalAccessAudience);
     restoreEnvironmentVariable("CLOUDFLARE_TEAM_DOMAIN", originalTeamDomain);
-    restoreEnvironmentVariable("BIELOS_HUB_URL", originalHubUrl);
-    restoreEnvironmentVariable("BIELOS_HUB_HOSTNAME", originalHubHostname);
-    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY", originalCsrfKey);
-    restoreEnvironmentVariable("BIELOS_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
+    restoreEnvironmentVariable("VIRKI_HUB_URL", originalHubUrl);
+    restoreEnvironmentVariable("VIRKI_HUB_HOSTNAME", originalHubHostname);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY", originalCsrfKey);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
     restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   }
 });

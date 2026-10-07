@@ -10,10 +10,10 @@ import { describeBackupMigrationFailure } from "./lib/backup-migration-diagnosti
 const repositoryRoot = process.cwd();
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
 const transitionName = "20260922090000_total_identity_security_rebaseline";
-const containerName = `bielos-backup-validation-${process.pid}`;
-const databaseName = "bielos_backup_test";
-const restoreDatabaseName = "bielos_restore_test";
-const databaseUser = "bielos_backup_test";
+const containerName = `virki-backup-validation-${process.pid}`;
+const databaseName = "virki_backup_test";
+const restoreDatabaseName = "virki_restore_test";
+const databaseUser = "virki_backup_test";
 const databasePassword = "backup-validation-only";
 let containerStarted = false;
 let temporaryDirectory;
@@ -32,7 +32,7 @@ try {
   ]);
   containerStarted = true;
   await waitForDatabase();
-  runSql("CREATE ROLE bielos_audit_maintenance NOLOGIN");
+  runSql("CREATE ROLE virki_audit_maintenance NOLOGIN");
 
   const port = readPublishedPort();
   const sourceUrl = buildDatabaseUrl(port, databaseName);
@@ -41,7 +41,7 @@ try {
   const baselinePresent = migrations.some((entry) => entry.isDirectory() && entry.name === "0_init");
 
   if (transitionPresent) {
-    temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "bielos-backup-validation-"));
+    temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "virki-backup-validation-"));
     const temporaryPrismaDirectory = path.join(temporaryDirectory, "prisma");
     const temporaryMigrationsDirectory = path.join(temporaryPrismaDirectory, "migrations");
     await mkdir(temporaryMigrationsDirectory, { recursive: true });
@@ -66,8 +66,8 @@ try {
   const expectedMigrations = await readMigrations(sourceClient);
   assert.ok(expectedMigrations.length > 0);
 
-  temporaryDirectory ??= await mkdtemp(path.join(os.tmpdir(), "bielos-backup-validation-"));
-  const dumpPath = path.join(temporaryDirectory, "bielos-validation.dump");
+  temporaryDirectory ??= await mkdtemp(path.join(os.tmpdir(), "virki-backup-validation-"));
+  const dumpPath = path.join(temporaryDirectory, "virki-validation.dump");
   const dump = runDockerBinary(["exec", "-i", containerName, "pg_dump", "-U", databaseUser, "-d", databaseName, "--format=custom", "--no-owner", "--no-privileges"]);
   assert.ok(dump.length > 0);
   await writeFile(dumpPath, dump, { mode: 0o600 });

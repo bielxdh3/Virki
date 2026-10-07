@@ -19,7 +19,7 @@ import {
   lockRateLimitIdentifierInTransaction,
   writeAuditLogInTransaction
 } from "./index";
-import { prisma, type Prisma } from "@bielos/database";
+import { prisma, type Prisma } from "@virki/database";
 
 export { DEVICE_COOKIE_NAME } from "./constants";
 export const SECURITY_CEREMONY_TTL_MS = 10 * 60 * 1000;
@@ -119,7 +119,7 @@ export function generateNumericCode(): string {
 }
 
 export function hashSecurityCode(code: string, env: NodeJS.ProcessEnv = process.env): string {
-  const key = createHmac("sha256", getTotpKey(env)).update("BielOS security code hash v2", "utf8").digest();
+  const key = createHmac("sha256", getTotpKey(env)).update("Virki security code hash v2", "utf8").digest();
   return `h2:${createHmac("sha256", key).update(code.trim(), "utf8").digest("hex")}`;
 }
 
@@ -142,7 +142,7 @@ export function createTotpSecret(): string {
 }
 
 export function createTotpUri(email: string, secret: string): string {
-  return `otpauth://totp/BielOS:${encodeURIComponent(email)}?secret=${secret}&issuer=BielOS&algorithm=SHA1&digits=6&period=30`;
+  return `otpauth://totp/Virki:${encodeURIComponent(email)}?secret=${secret}&issuer=Virki&algorithm=SHA1&digits=6&period=30`;
 }
 
 export function encryptTotpSecret(secret: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -761,9 +761,9 @@ function isRememberedGrantActive(
 }
 
 function getTotpKey(env: NodeJS.ProcessEnv): Buffer {
-  const configured = env.BIELOS_TOTP_ENCRYPTION_KEY?.trim();
+  const configured = env.VIRKI_TOTP_ENCRYPTION_KEY?.trim();
   if (configured && /^[0-9a-f]{64}$/i.test(configured)) return Buffer.from(configured, "hex");
-  if (env.NODE_ENV === "test") return createHash("sha256").update("bielos-test-totp-key", "utf8").digest();
+  if (env.NODE_ENV === "test") return createHash("sha256").update("virki-test-totp-key", "utf8").digest();
   throw new SecurityMutationError();
 }
 
@@ -841,11 +841,11 @@ function isTrustedClientAddress(value: string | undefined): value is string {
 }
 
 function getRecoveryActionBaseUrl(role: AccountRecoveryRole): URL | null {
-  const configured = (role === "ADMIN" ? process.env.BIELOS_HUB_URL : process.env.BIELOS_PORTAL_URL)?.trim();
+  const configured = (role === "ADMIN" ? process.env.VIRKI_HUB_URL : process.env.VIRKI_PORTAL_URL)?.trim();
   if (!configured) return null;
   try {
     const url = new URL(configured);
-    const expectedHost = (role === "ADMIN" ? process.env.BIELOS_HUB_HOSTNAME ?? "hub.biel.dev.br" : process.env.BIELOS_PORTAL_HOSTNAME ?? "portal.biel.dev.br").toLowerCase();
+    const expectedHost = (role === "ADMIN" ? process.env.VIRKI_HUB_HOSTNAME ?? "hub.biel.dev.br" : process.env.VIRKI_PORTAL_HOSTNAME ?? "portal.biel.dev.br").toLowerCase();
     const production = process.env.NODE_ENV === "production";
     if ((url.protocol !== "https:" && (production || url.protocol !== "http:")) || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "") || (production && (url.hostname.toLowerCase() !== expectedHost || url.port !== ""))) return null;
     return url;

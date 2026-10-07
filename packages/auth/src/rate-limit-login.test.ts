@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { prisma, type Prisma } from "@bielos/database";
+import { prisma, type Prisma } from "@virki/database";
 import { authenticateUserWithRateLimit, hashPassword } from "./index";
 import { createLoginAccountRateLimitIdentifierHash, createRateLimitIdentifierHash, scopeLoginRateLimitEmail } from "./rate-limit-config";
 

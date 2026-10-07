@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 const issuer = "http://127.0.0.1:3010";
 
 test("E2E JWKS accepts only this run's public test keys", async () => {
-  const registrationToken = process.env.BIELOS_E2E_JWKS_REGISTRATION_TOKEN;
+  const registrationToken = process.env.VIRKI_E2E_JWKS_REGISTRATION_TOKEN;
   expect(registrationToken).toBeTruthy();
   if (!registrationToken) throw new Error("E2E JWKS registration token is unavailable.");
 

@@ -17,7 +17,7 @@ test("production requires a dedicated non-empty rate-limit key", () => {
   assert.deepEqual(
     getLoginRateLimitConfigurationState({
       NODE_ENV: "production",
-      BIELOS_RATE_LIMIT_HASH_SECRET: syntheticSecret
+      VIRKI_RATE_LIMIT_HASH_SECRET: syntheticSecret
     }),
     { available: true, source: "environment" }
   );
@@ -28,7 +28,7 @@ test("production requires a dedicated non-empty rate-limit key", () => {
   assert.deepEqual(
     getLoginRateLimitConfigurationState({
       NODE_ENV: "production",
-      BIELOS_RATE_LIMIT_HASH_SECRET: "   "
+      VIRKI_RATE_LIMIT_HASH_SECRET: "   "
     }),
     { available: false, source: "missing-production-secret" }
   );
@@ -51,7 +51,7 @@ test("production never derives the rate-limit key from the database target", () 
       const message = error instanceof Error ? error.message : String(error);
       assert.equal(message, "Login rate limiter configuration unavailable.");
       assert.equal(message.includes(syntheticDatabaseUrl), false);
-      assert.equal(message.includes("BIELOS_RATE_LIMIT_HASH_SECRET"), false);
+      assert.equal(message.includes("VIRKI_RATE_LIMIT_HASH_SECRET"), false);
       return true;
     }
   );
@@ -78,7 +78,7 @@ test("development and test use a deterministic synthetic fallback", () => {
 test("an explicit non-production key overrides the synthetic fallback", () => {
   const configuredHash = createLoginRateLimitIdentifierHash("member@example.invalid", {
     NODE_ENV: "test",
-    BIELOS_RATE_LIMIT_HASH_SECRET: syntheticSecret
+    VIRKI_RATE_LIMIT_HASH_SECRET: syntheticSecret
   });
   const fallbackHash = createLoginRateLimitIdentifierHash("member@example.invalid", {
     NODE_ENV: "test"
@@ -87,7 +87,7 @@ test("an explicit non-production key overrides the synthetic fallback", () => {
   assert.deepEqual(
     getLoginRateLimitConfigurationState({
       NODE_ENV: "development",
-      BIELOS_RATE_LIMIT_HASH_SECRET: syntheticSecret
+      VIRKI_RATE_LIMIT_HASH_SECRET: syntheticSecret
     }),
     { available: true, source: "environment" }
   );
@@ -95,7 +95,7 @@ test("an explicit non-production key overrides the synthetic fallback", () => {
 });
 
 test("login attempt limits are HMAC-scoped to both normalized email and source address", () => {
-  const env = { NODE_ENV: "test", BIELOS_RATE_LIMIT_HASH_SECRET: syntheticSecret };
+  const env = { NODE_ENV: "test", VIRKI_RATE_LIMIT_HASH_SECRET: syntheticSecret };
   const first = createLoginAttemptRateLimitIdentifierHash("Member@example.invalid", "203.0.113.10", env);
 
   assert.equal(first, createLoginAttemptRateLimitIdentifierHash(" member@example.invalid ", "203.0.113.10", env));
@@ -105,7 +105,7 @@ test("login attempt limits are HMAC-scoped to both normalized email and source a
 });
 
 test("login account limit identifiers are normalized and independent of source address", () => {
-  const env = { NODE_ENV: "test", BIELOS_RATE_LIMIT_HASH_SECRET: syntheticSecret };
+  const env = { NODE_ENV: "test", VIRKI_RATE_LIMIT_HASH_SECRET: syntheticSecret };
   const accountHash = createLoginAccountRateLimitIdentifierHash("Member@example.invalid", env);
 
   assert.equal(accountHash, createLoginAccountRateLimitIdentifierHash(" member@example.invalid ", env));

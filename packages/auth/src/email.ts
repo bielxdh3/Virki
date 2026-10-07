@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { prisma, type Prisma } from "@bielos/database";
+import { prisma, type Prisma } from "@virki/database";
 import { isSmtpEmailTransportConfigured } from "./email-smtp";
 
 export type EmailMessageKind =
@@ -64,7 +64,7 @@ export function getEmailTransportStatus(
   env: NodeJS.ProcessEnv = process.env
 ): EmailTransportStatus {
   if (env.NODE_ENV === "production") {
-    if (!env.BIELOS_EMAIL_TRANSPORT?.trim()) {
+    if (!env.VIRKI_EMAIL_TRANSPORT?.trim()) {
       return { state: "unavailable", reason: "transport-missing" };
     }
 
@@ -73,7 +73,7 @@ export function getEmailTransportStatus(
     }
 
     if (
-      env.BIELOS_EMAIL_TRANSPORT.trim().toLowerCase() !== "smtp" ||
+      env.VIRKI_EMAIL_TRANSPORT.trim().toLowerCase() !== "smtp" ||
       !isSmtpEmailTransportConfigured(env)
     ) {
       return { state: "unavailable", reason: "adapter-unavailable" };
@@ -256,7 +256,7 @@ export function renderEmailMessage(
 ): EmailTransportMessage {
   const subjectByKind: Record<EmailMessageKind, { "pt-BR": string; en: string }> = {
     NEW_DEVICE_VERIFICATION: { "pt-BR": "Verifique este dispositivo", en: "Verify this device" },
-    EMAIL_TWO_FACTOR: { "pt-BR": "Seu código BielOS", en: "Your BielOS code" },
+    EMAIL_TWO_FACTOR: { "pt-BR": "Seu código Virki", en: "Your Virki code" },
     PASSWORD_CHANGED: { "pt-BR": "Senha alterada", en: "Password changed" },
     SESSION_TERMINATED: { "pt-BR": "Sessão encerrada", en: "Session terminated" },
     ACCOUNT_RECOVERY: { "pt-BR": "Recuperação de conta", en: "Account recovery" },
@@ -265,7 +265,7 @@ export function renderEmailMessage(
     ADMIN_CREDENTIAL_CHANGED: { "pt-BR": "Credencial administrativa atualizada", en: "Administrative credential updated" },
     ELEVATION_CHANGED: { "pt-BR": "Elevação de segurança atualizada", en: "Security elevation updated" }
   };
-  const greeting = payload.displayName ? `${payload.displayName},` : "BielOS,";
+  const greeting = payload.displayName ? `${payload.displayName},` : "Virki,";
   const action = payload.actionUrl ? `\n${payload.actionUrl}` : "";
   const code = payload.code ? `\nCódigo: ${payload.code}` : "";
 
@@ -351,14 +351,14 @@ function normalizeEmail(email: string): string {
 }
 
 function getOutboxKey(env: NodeJS.ProcessEnv): Buffer | null {
-  const configured = env.BIELOS_EMAIL_OUTBOX_KEY?.trim();
+  const configured = env.VIRKI_EMAIL_OUTBOX_KEY?.trim();
   if (configured) {
     const decoded = Buffer.from(configured, /^[0-9a-f]{64}$/i.test(configured) ? "hex" : "base64url");
     return decoded.length === EMAIL_OUTBOX_KEY_BYTES ? decoded : null;
   }
 
   return env.NODE_ENV === "test"
-    ? createHash("sha256").update("bielos-test-email-outbox-key", "utf8").digest()
+    ? createHash("sha256").update("virki-test-email-outbox-key", "utf8").digest()
     : null;
 }
 

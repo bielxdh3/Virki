@@ -98,8 +98,8 @@ takeout-*.tar.gz
 **/.DS_Store
 Thumbs.db
 **/Thumbs.db
-.bielos-mission-tmp
-**/.bielos-mission-tmp
+.virki-mission-tmp
+**/.virki-mission-tmp
 out
 **/out
 prisma/generated

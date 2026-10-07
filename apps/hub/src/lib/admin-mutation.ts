@@ -1,4 +1,4 @@
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { forbidden } from "next/navigation";
 import { headers } from "next/headers";
 import { getCurrentSession } from "./auth";

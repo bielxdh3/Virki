@@ -1,9 +1,9 @@
 ---
-name: bielos-phase-review
-description: Check a completed BielOS change or milestone against its requested scope, security boundaries, and validation evidence.
+name: virki-phase-review
+description: Check a completed Virki change or milestone against its requested scope, security boundaries, and validation evidence.
 ---
 
-# BielOS phase review
+# Virki phase review
 
 Compare the completed change with the user request and current `AGENTS.md`. Inspect relevant code paths, migration/data effects, deleted-scope completeness, documentation, and validation evidence. Treat commit output and CI as evidence only after checking the actual SHA and run result.
 

@@ -84,7 +84,7 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   assert.equal(calls.length, 3);
   for (const call of calls.slice(0, 2)) {
     assert.equal(call.command, "gh");
-    assert.equal(call.args[call.args.indexOf("--repo") + 1], "bielxdh3/BielOS");
+    assert.equal(call.args[call.args.indexOf("--repo") + 1], "bielxdh3/Virki");
     assert.ok(call.args.includes("--commit"));
     assert.ok(call.args.includes(revision));
     assert.ok(call.args.includes("databaseId,headSha,status,conclusion,event,headBranch,createdAt"));
@@ -96,7 +96,7 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   assert.equal(download.command, "gh");
   assert.deepEqual(download.args.slice(0, 3), ["run", "download", "67890"]);
   assert.equal(download.args[download.args.indexOf("--name") + 1], "codeql-sarif-" + revision);
-  assert.equal(download.args[download.args.indexOf("--repo") + 1], "bielxdh3/BielOS");
+  assert.equal(download.args[download.args.indexOf("--repo") + 1], "bielxdh3/Virki");
   assert.equal(existsSync(download.args[download.args.indexOf("--dir") + 1]), false);
 
   const unavailable = verifyExactShaCi({
@@ -161,8 +161,8 @@ test("production images are uploaded only after exact main-push builds pass on b
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
   assert.match(workflow, /needs: \[validate, authenticated-e2e\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
   assert.match(workflow, /--target production[\s\S]*?--target migrator/u);
-  assert.match(workflow, /BIELOS_BUILD_REVISION=\$\{\{ github\.sha \}\}[\s\S]*?docker image inspect[\s\S]*?node scripts\/production-runtime-smoke\.mjs/u);
-  assert.match(workflow, /Production migrator image smoke[\s\S]*?BIELOS_MIGRATOR_IMAGE: bielos-migrator-ci:\$\{\{ github\.sha \}\}[\s\S]*?node scripts\/production-migrator-smoke\.mjs[\s\S]*?Save tested production images/u);
+  assert.match(workflow, /VIRKI_BUILD_REVISION=\$\{\{ github\.sha \}\}[\s\S]*?docker image inspect[\s\S]*?node scripts\/production-runtime-smoke\.mjs/u);
+  assert.match(workflow, /Production migrator image smoke[\s\S]*?VIRKI_MIGRATOR_IMAGE: virki-migrator-ci:\$\{\{ github\.sha \}\}[\s\S]*?node scripts\/production-migrator-smoke\.mjs[\s\S]*?Save tested production images/u);
   assert.match(workflow, /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1/u);
   assert.match(workflow, /retention-days: 14/u);
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
@@ -172,17 +172,17 @@ test("authenticated E2E uses the real PostgreSQL role initializer and scoped dis
   const e2e = workflow.match(/authenticated-e2e:[\s\S]*?(?=\n\x20{2}[a-z-]+:|$)/u)?.[0] ?? "";
   assert.ok(e2e);
   assert.match(e2e, /Start least-privilege disposable PostgreSQL/u);
-  assert.match(e2e, /BIELOS_E2E_ACCESS_DIAGNOSTICS: "true"/u);
-  assert.match(e2e, /--health-cmd 'pg_isready -h 127\.0\.0\.1 -U bielos_bootstrap -d bielos_e2e_test'/u);
-  assert.match(e2e, /infra\/postgres-init\/10-bielos-database-roles\.sh[^\n]*:ro/u);
-  assert.match(e2e, /scripts\/e2e\/20-bielos-e2e-runtime-test-role\.sh[^\n]*:ro/u);
+  assert.match(e2e, /VIRKI_E2E_ACCESS_DIAGNOSTICS: "true"/u);
+  assert.match(e2e, /--health-cmd 'pg_isready -h 127\.0\.0\.1 -U virki_bootstrap -d virki_e2e_test'/u);
+  assert.match(e2e, /infra\/postgres-init\/10-virki-database-roles\.sh[^\n]*:ro/u);
+  assert.match(e2e, /scripts\/e2e\/20-virki-e2e-runtime-test-role\.sh[^\n]*:ro/u);
   assert.match(e2e, /--tmpfs \/var\/lib\/postgresql\/data:[^\n]*/u);
-  assert.match(e2e, /BIELOS_E2E_DATABASE_URL=%s:\/\/%s:%s@127\.0\.0\.1:%s/u);
+  assert.match(e2e, /VIRKI_E2E_DATABASE_URL=%s:\/\/%s:%s@127\.0\.0\.1:%s/u);
   assert.match(e2e, /DATABASE_URL=%s:\/\/%s:%s@127\.0\.0\.1:%s/u);
   assert.match(e2e, /MIGRATION_DATABASE_URL=%s:\/\/%s:%s@127\.0\.0\.1:%s/u);
-  assert.match(e2e, /runtime_role=bielos_runtime/u);
-  assert.match(e2e, /migrator_role=bielos_migrator/u);
-  assert.match(e2e, /e2e_test_role=bielos_runtime_test/u);
+  assert.match(e2e, /runtime_role=virki_runtime/u);
+  assert.match(e2e, /migrator_role=virki_migrator/u);
+  assert.match(e2e, /e2e_test_role=virki_runtime_test/u);
   assert.match(e2e, /Guard disposable E2E database target[\s\S]*?Apply committed Prisma migrations to disposable PostgreSQL/u);
   const cleanup = e2e.slice(e2e.indexOf("- name: Remove disposable PostgreSQL"));
   assert.match(cleanup, /if: always\(\)[\s\S]*?docker ps --all --quiet[\s\S]*?docker rm --force/u);

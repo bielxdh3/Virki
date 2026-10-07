@@ -1,5 +1,5 @@
 {
-  "name": "@bielos/auth",
+  "name": "@virki/auth",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@bielos/database": "0.1.0",
+    "@virki/database": "0.1.0",
     "@node-rs/argon2": "^2.2.1",
     "jose": "^6.2.3",
     "nodemailer": "^10.0.10"

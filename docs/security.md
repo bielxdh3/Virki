@@ -3,10 +3,10 @@
 ## Boundaries
 
 - Unknown hosts and unauthenticated protected routes fail closed.
-- The ADMIN host requires Cloudflare Access and then validates the Access JWT and BielOS ADMIN session server-side.
+- The ADMIN host requires Cloudflare Access and then validates the Access JWT and Virki ADMIN session server-side.
 - The USER portal does not require the ADMIN Access assertion.
 - Application ports bind to loopback. PostgreSQL and the OIDC issuer have no host-published ports.
-- A project receives its own OIDC result, never the BielOS session cookie.
+- A project receives its own OIDC result, never the Virki session cookie.
 
 ## Authentication and sessions
 
@@ -22,7 +22,7 @@
 ## Authorization
 
 - Roles are ADMIN and USER only. Anonymous visitors have no stored authority.
-- Every protected ADMIN page checks Cloudflare Access, the current BielOS session, and the current role on the server. Mutating actions also check request origin and CSRF; fresh proof is required when the action policy specifies it.
+- Every protected ADMIN page checks Cloudflare Access, the current Virki session, and the current role on the server. Mutating actions also check request origin and CSRF; fresh proof is required when the action policy specifies it.
 - A USER receives only explicit project-entry grants. Disabled accounts, connections, or revoked grants deny authorization.
 - Redirect URIs are exact HTTPS allowlist matches. Wildcards, credentials, fragments, and noncanonical values are rejected.
 - Authorization state is rechecked by the issuer when it completes the OIDC interaction.
@@ -31,11 +31,11 @@
 
 ## OIDC profile
 
-BielOS uses `oidc-provider` with Authorization Code, PKCE S256 required, short-lived one-time authorization codes, client binding, required state, and nonce for OpenID requests. It exposes only `openid`, `profile`, and `email` claims. Refresh tokens, client credentials, dynamic registration, request objects, device flow, and introspection are disabled; token revocation is supported.
+Virki uses `oidc-provider` with Authorization Code, PKCE S256 required, short-lived one-time authorization codes, client binding, required state, and nonce for OpenID requests. It exposes only `openid`, `profile`, and `email` claims. Refresh tokens, client credentials, dynamic registration, request objects, device flow, and introspection are disabled; token revocation is supported.
 
 Signing keys and the OIDC cookie key are private runtime configuration. Public JWKs are published by standard discovery/JWKS endpoints. Never place private JWK values in source, browser bundles, logs, or audit metadata. Keep stable key IDs and rotate keys through a tested overlap window that covers the maximum issued token lifetime.
 
-The OIDC data-encryption key supports one bounded overlap key via `BIELOS_OIDC_ADAPTER_KEY_PREVIOUS`. New ciphertext is always written with `BIELOS_OIDC_ADAPTER_KEY`; reads may fall back to the previous key only during rotation. Operators should introduce the new current key while retaining the old value as previous, allow short-lived OIDC artifacts to expire and rotate stored project client secrets through the supported application flow, then remove the previous key. Do not keep an indefinite key ring.
+The OIDC data-encryption key supports one bounded overlap key via `VIRKI_OIDC_ADAPTER_KEY_PREVIOUS`. New ciphertext is always written with `VIRKI_OIDC_ADAPTER_KEY`; reads may fall back to the previous key only during rotation. Operators should introduce the new current key while retaining the old value as previous, allow short-lived OIDC artifacts to expire and rotate stored project client secrets through the supported application flow, then remove the previous key. Do not keep an indefinite key ring.
 
 ## Audit and redaction
 

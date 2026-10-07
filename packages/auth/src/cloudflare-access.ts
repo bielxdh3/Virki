@@ -37,7 +37,7 @@ type CloudflareAccessConfig = {
 const CF_ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
 
 const globalForCloudflareAccess = globalThis as unknown as {
-  bielosCloudflareAccessJwks?: Map<string, ReturnType<typeof createRemoteJWKSet>>;
+  virkiCloudflareAccessJwks?: Map<string, ReturnType<typeof createRemoteJWKSet>>;
 };
 
 export async function validateCloudflareAccessJwt(
@@ -192,8 +192,8 @@ function getJwks(teamDomain: string): ReturnType<typeof createRemoteJWKSet> {
 }
 
 function getJwksCache(): Map<string, ReturnType<typeof createRemoteJWKSet>> {
-  globalForCloudflareAccess.bielosCloudflareAccessJwks ??= new Map();
-  return globalForCloudflareAccess.bielosCloudflareAccessJwks;
+  globalForCloudflareAccess.virkiCloudflareAccessJwks ??= new Map();
+  return globalForCloudflareAccess.virkiCloudflareAccessJwks;
 }
 
 function isJoseError(error: unknown): error is { code: string; claim?: string } {

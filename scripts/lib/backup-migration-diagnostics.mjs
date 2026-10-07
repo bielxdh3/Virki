@@ -36,7 +36,7 @@ function summarizeOutput(output) {
   // output can contain connection strings, SQL data, and operator-specific paths.
   const prismaCode = output.match(/^\s*(?:Error(?: code)?:\s*)?(P\d{4})\b/mu)?.[1];
   const sqlState = output.match(/^\s*(?:Database error code:|SQLSTATE[\s:]+)\s*([0-9A-Z]{5})\b/imu)?.[1];
-  const missingRole = output.includes("bielos_audit_maintenance must be provisioned before applying AuditLog privilege boundaries");
+  const missingRole = output.includes("virki_audit_maintenance must be provisioned before applying AuditLog privilege boundaries");
   return [
     prismaCode && `Prisma=${prismaCode}`,
     sqlState && `SQLSTATE=${sqlState.toUpperCase()}`,

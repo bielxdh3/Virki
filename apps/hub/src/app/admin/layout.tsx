@@ -1,4 +1,4 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@bielos/auth/csrf";
+import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { headers } from "next/headers";
 import { getSurface, trustedReturnTo } from "../../lib/surface";
 import { requireAdminPage } from "../../lib/admin-page";
@@ -25,7 +25,7 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
     <div className="admin-shell">
       <a className="skip-link" href="#admin-content">Ir para o conteúdo</a>
       <aside className="admin-sidebar">
-        <a className="brand" href="/admin/accounts">BielOS · Admin</a>
+        <a className="brand" href="/admin/accounts">Virki · Admin</a>
         <nav className="admin-nav" aria-label="Admin">
           {navigation.map(([href, label]) => <a href={href} key={href} aria-current={currentPathname === href || currentPathname?.startsWith(`${href}/`) ? "page" : undefined}>{label}</a>)}
         </nav>

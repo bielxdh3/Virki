@@ -3,15 +3,15 @@ import { spawnSync } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 
-const image = process.env.BIELOS_RUNTIME_IMAGE?.trim();
-if (!image) throw new Error("Runtime smoke requires BIELOS_RUNTIME_IMAGE.");
+const image = process.env.VIRKI_RUNTIME_IMAGE?.trim();
+if (!image) throw new Error("Runtime smoke requires VIRKI_RUNTIME_IMAGE.");
 
 const suffix = `${process.pid}-${Date.now()}`;
-const network = `bielos-runtime-${suffix}`;
+const network = `virki-runtime-${suffix}`;
 const containers = {
-  publicSite: `bielos-runtime-public-${suffix}`,
-  hub: `bielos-runtime-hub-${suffix}`,
-  issuer: `bielos-runtime-issuer-${suffix}`,
+  publicSite: `virki-runtime-public-${suffix}`,
+  hub: `virki-runtime-hub-${suffix}`,
+  issuer: `virki-runtime-issuer-${suffix}`,
 };
 const publicHost = "portal.biel.dev.br";
 const hubHost = "hub.biel.dev.br";
@@ -29,38 +29,38 @@ try {
   runDocker([
     "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.publicSite, "--network", network,
     "--publish", "127.0.0.1::3000", "--env", "NODE_ENV=production",
-    "--env", `BIELOS_PORTAL_URL=https://${publicHost}`,
-    image, "npm", "run", "start", "--workspace", "@bielos/public-site",
+    "--env", `VIRKI_PORTAL_URL=https://${publicHost}`,
+    image, "npm", "run", "start", "--workspace", "@virki/public-site",
   ]);
   const publicPort = readLoopbackPort(containers.publicSite, "3000/tcp");
 
   runDocker([
     "run", ...runtimeSafetyArgs, "--detach", "--name", containers.issuer, "--network", network,
     "--network-alias", "oidc-issuer", "--env", "NODE_ENV=production",
-    "--env", "OIDC_ISSUER_PORT=3003", "--env", `BIELOS_OIDC_ISSUER=https://${publicHost}`,
-    "--env", `BIELOS_OIDC_SIGNING_JWKS=${signingJwks}`,
-    "--env", `BIELOS_OIDC_COOKIE_KEY=${cookieKey}`,
-    "--env", `BIELOS_OIDC_ADAPTER_KEY=${adapterKey}`,
-    "--env", `BIELOS_TOTP_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
-    "--env", "DATABASE_URL=postgresql://bielos_app:local-validation-only@database:5432/bielos",
-    image, "npm", "run", "start", "--workspace", "@bielos/issuer",
+    "--env", "OIDC_ISSUER_PORT=3003", "--env", `VIRKI_OIDC_ISSUER=https://${publicHost}`,
+    "--env", `VIRKI_OIDC_SIGNING_JWKS=${signingJwks}`,
+    "--env", `VIRKI_OIDC_COOKIE_KEY=${cookieKey}`,
+    "--env", `VIRKI_OIDC_ADAPTER_KEY=${adapterKey}`,
+    "--env", `VIRKI_TOTP_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
+    "--env", "DATABASE_URL=postgresql://virki_app:local-validation-only@database:5432/virki",
+    image, "npm", "run", "start", "--workspace", "@virki/issuer",
   ]);
 
   runDocker([
     "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.hub, "--network", network,
     "--publish", "127.0.0.1::3001", "--env", "NODE_ENV=production",
-    "--env", `BIELOS_HUB_URL=https://${hubHost}`,
-    "--env", `BIELOS_PORTAL_URL=https://${publicHost}`,
-    "--env", `BIELOS_HUB_HOSTNAME=${hubHost}`,
-    "--env", `BIELOS_PORTAL_HOSTNAME=${publicHost}`,
-    "--env", "BIELOS_OIDC_PROXY_URL=http://oidc-issuer:3003",
-    "--env", "DATABASE_URL=postgresql://bielos_app:local-validation-only@database:5432/bielos",
-    "--env", `BIELOS_RATE_LIMIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
-    "--env", `BIELOS_AUDIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
-    "--env", `BIELOS_CSRF_SIGNING_KEY=${randomBytes(32).toString("hex")}`,
-    "--env", `BIELOS_TOTP_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
-    "--env", `BIELOS_EMAIL_OUTBOX_KEY=${randomBytes(32).toString("hex")}`,
-    "--env", `BIELOS_OIDC_ADAPTER_KEY=${adapterKey}`,
+    "--env", `VIRKI_HUB_URL=https://${hubHost}`,
+    "--env", `VIRKI_PORTAL_URL=https://${publicHost}`,
+    "--env", `VIRKI_HUB_HOSTNAME=${hubHost}`,
+    "--env", `VIRKI_PORTAL_HOSTNAME=${publicHost}`,
+    "--env", "VIRKI_OIDC_PROXY_URL=http://oidc-issuer:3003",
+    "--env", "DATABASE_URL=postgresql://virki_app:local-validation-only@database:5432/virki",
+    "--env", `VIRKI_RATE_LIMIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_AUDIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_CSRF_SIGNING_KEY=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_TOTP_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_EMAIL_OUTBOX_KEY=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_OIDC_ADAPTER_KEY=${adapterKey}`,
     "--env", "CLOUDFLARE_ACCESS_JWT_REQUIRED=true",
     "--env", "CLOUDFLARE_ACCESS_AUDIENCE=runtime-smoke-audience",
     "--env", "CLOUDFLARE_TEAM_DOMAIN=runtime.example.invalid",

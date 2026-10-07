@@ -4,18 +4,18 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest, createServer as createHttpsServer } from "node:https";
 import { TLSSocket } from "node:tls";
-import { DEVICE_COOKIE_NAME } from "@bielos/auth/constants";
-import { PrismaClient } from "@bielos/database";
+import { DEVICE_COOKIE_NAME } from "@virki/auth/constants";
+import { PrismaClient } from "@virki/database";
 import { expect, test, type BrowserContext } from "@playwright/test";
 
 // @ts-expect-error This existing JavaScript safety helper has no declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 
 const portalUrl = "https://portal.localhost:3001";
-const fixturePath = process.env.BIELOS_E2E_AUTH_FIXTURE_FILE;
+const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
 const hasFixture = Boolean(fixturePath && existsSync(fixturePath));
 
-test.skip(!process.env.BIELOS_E2E_DATABASE_URL?.trim() || !hasFixture, "OIDC E2E requires the explicit disposable database fixture.");
+test.skip(!process.env.VIRKI_E2E_DATABASE_URL?.trim() || !hasFixture, "OIDC E2E requires the explicit disposable database fixture.");
 
 type OidcFixture = {
   user: { id: string; email: string; password: string; deviceToken: string };
@@ -35,9 +35,9 @@ test.beforeAll(async () => {
 });
 
 test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and cannot replay the code", async ({ browser }) => {
-  const keyPath = process.env.BIELOS_E2E_TLS_KEY_PATH;
-  const certificatePath = process.env.BIELOS_E2E_TLS_CERTIFICATE_PATH;
-  const caCertificatePath = process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH;
+  const keyPath = process.env.VIRKI_E2E_TLS_KEY_PATH;
+  const certificatePath = process.env.VIRKI_E2E_TLS_CERTIFICATE_PATH;
+  const caCertificatePath = process.env.VIRKI_E2E_TLS_CA_CERTIFICATE_PATH;
   if (!keyPath || !certificatePath || !caCertificatePath) throw new Error("OIDC E2E loopback TLS material is unavailable.");
   const [key, certificate, caCertificate] = await Promise.all([readFile(keyPath), readFile(certificatePath), readFile(caCertificatePath)]);
   const serverCertificate = new X509Certificate(certificate);
@@ -309,7 +309,7 @@ function requestHub(path: string, options: {
       const peerSubject = safeCommonName(peer?.subject);
       const peerIssuer = safeCommonName(peer?.issuer);
       const peerChain = safeCertificateChain(peer);
-      const opensslPeerChain = safeOpenSslPeerChain(process.env.BIELOS_E2E_TLS_CA_CERTIFICATE_PATH);
+      const opensslPeerChain = safeOpenSslPeerChain(process.env.VIRKI_E2E_TLS_CA_CERTIFICATE_PATH);
       const expectedFingerprint = options.expectedCertificate ? new X509Certificate(options.expectedCertificate).fingerprint256 : "unavailable";
       const caFingerprint = new X509Certificate(options.ca).fingerprint256;
       const authorizationError = socket?.authorizationError ? String(socket.authorizationError).replace(/[^A-Z0-9_-]/giu, "").slice(0, 80) : "none";
@@ -372,7 +372,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "role-mismatch",
     "security-ceremony-unavailable"
   ]);
-  const routeReason = headers["x-bielos-e2e-login-reason"];
+  const routeReason = headers["x-virki-e2e-login-reason"];
   if (routeReason) {
     const stage = routeReason.startsWith("security-ceremony-unavailable-")
       ? routeReason.slice("security-ceremony-unavailable-".length)
@@ -380,7 +380,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     const recognized = allowedReasons.has(routeReason) || ceremonyStages.has(stage);
     return `login-route:${recognized ? routeReason : "unrecognized"}`;
   }
-  const proxyReason = headers["x-bielos-e2e-access-reason"];
+  const proxyReason = headers["x-virki-e2e-access-reason"];
   if (proxyReason) {
     const stage = proxyReason.startsWith("security-ceremony-unavailable-")
       ? proxyReason.slice("security-ceremony-unavailable-".length)
@@ -547,7 +547,7 @@ function sanitizeDiagnosticText(value: string): string {
 }
 
 async function registerRedirectUri(redirectUri: string): Promise<void> {
-  const databaseUrl = process.env.BIELOS_E2E_DATABASE_URL?.trim();
+  const databaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("OIDC E2E requires the explicit disposable database fixture.");
   assertDisposableCoreTestDatabase(databaseUrl, process.env);
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });

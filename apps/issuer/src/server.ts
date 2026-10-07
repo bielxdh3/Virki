@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
-import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAttemptInTransaction, getSessionByToken, hashAuditIdentifier, isTrustedClientAddress, writeAuditLogRequired } from "@bielos/auth";
-import { prisma } from "@bielos/database";
+import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAttemptInTransaction, getSessionByToken, hashAuditIdentifier, isTrustedClientAddress, writeAuditLogRequired } from "@virki/auth";
+import { prisma } from "@virki/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
@@ -8,15 +8,15 @@ import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const issuer = readIssuer(process.env);
-const signingJwks = readSigningJwks(process.env.BIELOS_OIDC_SIGNING_JWKS);
-const cookieKey = readCookieKey(process.env.BIELOS_OIDC_COOKIE_KEY);
+const signingJwks = readSigningJwks(process.env.VIRKI_OIDC_SIGNING_JWKS);
+const cookieKey = readCookieKey(process.env.VIRKI_OIDC_COOKIE_KEY);
 const policy = interactionPolicy.base();
 const consentPrompt = policy.get("consent");
 if (!consentPrompt) throw new Error("OIDC consent policy is unavailable.");
 
-policy.add(new interactionPolicy.Prompt({ name: "bielos_session" }, new interactionPolicy.Check(
+policy.add(new interactionPolicy.Prompt({ name: "virki_session" }, new interactionPolicy.Check(
   "central_session_required",
-  "A current BielOS portal session is required.",
+  "A current Virki portal session is required.",
   async (rawContext) => {
     const context = rawContext as KoaContextWithOIDC;
     const accountId = context.oidc.session?.accountId;
@@ -34,7 +34,7 @@ policy.add(new interactionPolicy.Prompt({ name: "bielos_session" }, new interact
   }
 )), 0);
 
-policy.add(new interactionPolicy.Prompt({ name: "bielos_project_access" }, new interactionPolicy.Check(
+policy.add(new interactionPolicy.Prompt({ name: "virki_project_access" }, new interactionPolicy.Check(
   "active_project_grant",
   "Project access is not enabled.",
   "access_denied",
@@ -48,7 +48,7 @@ policy.add(new interactionPolicy.Prompt({ name: "bielos_project_access" }, new i
   }
 )), 1);
 
-policy.add(new interactionPolicy.Prompt({ name: "bielos_assurance" }, new interactionPolicy.Check(
+policy.add(new interactionPolicy.Prompt({ name: "virki_assurance" }, new interactionPolicy.Check(
   "multi_factor_assurance_required",
   "Multi-factor authentication is required.",
   async (rawContext) => {
@@ -67,7 +67,7 @@ policy.add(new interactionPolicy.Prompt({ name: "bielos_assurance" }, new intera
 )), 2);
 
 consentPrompt.checks.add(new interactionPolicy.Check(
-  "bielos_project_grant",
+  "virki_project_grant",
   "Project access is not enabled.",
   "access_denied",
   async (rawContext) => {
@@ -127,7 +127,7 @@ const provider = new Provider(issuer, {
       const startedAtMs = authorizationRequestStartedAt.get(context);
       if (startedAtMs === undefined) return `/interaction/${interaction.uid}`;
       const marker = createOidcAuthRequestMarker(interaction.uid, startedAtMs, Buffer.from(cookieKey, "base64url"));
-      return `/interaction/${interaction.uid}?bielos_auth_request=${encodeURIComponent(marker)}`;
+      return `/interaction/${interaction.uid}?virki_auth_request=${encodeURIComponent(marker)}`;
     }
   },
   findAccount: async (_context, id): Promise<Account | undefined> => {
@@ -265,7 +265,7 @@ provider.on("grant.error", (rawContext) => {
 
 const port = Number(process.env.OIDC_ISSUER_PORT ?? "3003");
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("OIDC issuer port is invalid.");
-const bindAddress = process.env.BIELOS_OIDC_BIND_ADDRESS ?? "0.0.0.0";
+const bindAddress = process.env.VIRKI_OIDC_BIND_ADDRESS ?? "0.0.0.0";
 if (bindAddress !== "0.0.0.0" && bindAddress !== "127.0.0.1") throw new Error("OIDC issuer bind address is invalid.");
 const providerCallback = provider.callback();
 const server = createServer((request, response) => {
@@ -274,7 +274,7 @@ const server = createServer((request, response) => {
   providerCallback(request, response);
 });
 server.listen(port, bindAddress, () => {
-  console.log("BielOS OIDC issuer ready.");
+  console.log("Virki OIDC issuer ready.");
 });
 
 async function handleInteraction(context: KoaContextWithOIDC, uid: string): Promise<void> {
@@ -290,7 +290,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
     return;
   }
   const authRequestStartedAtMs = readOidcAuthRequestMarker(
-    getString(context.query.bielos_auth_request) ?? undefined,
+    getString(context.query.virki_auth_request) ?? undefined,
     uid,
     Buffer.from(cookieKey, "base64url")
   );
@@ -299,7 +299,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
 
   const interactionReturnTo = new URL(`/interaction/${uid}`, issuer);
   if (authRequestStartedAtMs !== null) {
-    interactionReturnTo.searchParams.set("bielos_auth_request", getString(context.query.bielos_auth_request) ?? "");
+    interactionReturnTo.searchParams.set("virki_auth_request", getString(context.query.virki_auth_request) ?? "");
   }
 
   if (!session) {
@@ -310,7 +310,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
     return;
   }
 
-  if (["login", "bielos_session", "bielos_assurance"].includes(interaction.prompt.name) && requiresFreshOidcAuthentication({
+  if (["login", "virki_session", "virki_assurance"].includes(interaction.prompt.name) && requiresFreshOidcAuthentication({
     prompt: getString(interaction.params.prompt) ?? undefined,
     maxAge: getStringOrNumber(interaction.params.max_age),
     requestedAcrValues: getString(interaction.params.acr_values) ?? undefined,
@@ -336,7 +336,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
     return;
   }
 
-  if (["login", "bielos_session", "bielos_assurance"].includes(interaction.prompt.name) || interaction.session?.accountId !== session.user.id) {
+  if (["login", "virki_session", "virki_assurance"].includes(interaction.prompt.name) || interaction.session?.accountId !== session.user.id) {
     const authentication = getOidcAuthenticationContext(session.authenticationMethods, essentialAcr.values);
     await provider.interactionFinished(context.req, context.res, {
       login: { accountId: session.user.id, ts: Math.floor(session.createdAt.getTime() / 1_000), ...authentication }
@@ -395,7 +395,7 @@ async function hasActiveProjectGrant(userId: string, clientId: string): Promise<
 }
 
 function readIssuer(env: NodeJS.ProcessEnv): string {
-  const issuerUrl = new URL(env.BIELOS_OIDC_ISSUER ?? "https://portal.biel.dev.br");
+  const issuerUrl = new URL(env.VIRKI_OIDC_ISSUER ?? "https://portal.biel.dev.br");
   if (issuerUrl.username || issuerUrl.password || issuerUrl.search || issuerUrl.hash || issuerUrl.pathname !== "/") throw new Error("OIDC issuer URL is invalid.");
   if (env.NODE_ENV === "production" && issuerUrl.protocol !== "https:") throw new Error("OIDC issuer requires HTTPS in production.");
   return issuerUrl.origin;

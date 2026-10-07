@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { SESSION_COOKIE_NAME } from "@bielos/auth/constants";
+import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 const publicUrl = "http://127.0.0.1:3000";
@@ -57,8 +57,8 @@ for (const viewport of [
       await page.goto(`${hubUrl}/admin/accounts`);
 
       expect(Boolean(adminResponse?.request().headers()["cf-access-jwt-assertion"])).toBe(true);
-      const accessReason = adminResponse?.headers()["x-bielos-e2e-access-reason"] ?? "not-reported";
-      const accessKid = adminResponse?.headers()["x-bielos-e2e-access-kid"] ?? "not-reported";
+      const accessReason = adminResponse?.headers()["x-virki-e2e-access-reason"] ?? "not-reported";
+      const accessKid = adminResponse?.headers()["x-virki-e2e-access-kid"] ?? "not-reported";
       await expect.soft(adminResponse?.status(), `Cloudflare Access rejected the E2E assertion (${accessReason}; kid=${accessKid}).`).toBe(307);
       await expect.soft(adminResponse?.headers().location).toBe(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
       await expect.soft(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);

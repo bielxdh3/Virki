@@ -39,10 +39,10 @@ test("session cookies omit Secure only outside production", () => {
 });
 
 test("production authentication cookie names enforce host-only prefix requirements", () => {
-  assert.equal(getSessionCookieName({ NODE_ENV: "production" }), "__Host-bielos_session");
-  assert.equal(getDeviceCookieName({ NODE_ENV: "production" }), "__Host-bielos_device");
-  assert.equal(getSessionCookieName({ NODE_ENV: "test" }), "bielos_session");
-  assert.equal(getDeviceCookieName({ NODE_ENV: "test" }), "bielos_device");
+  assert.equal(getSessionCookieName({ NODE_ENV: "production" }), "__Host-virki_session");
+  assert.equal(getDeviceCookieName({ NODE_ENV: "production" }), "__Host-virki_device");
+  assert.equal(getSessionCookieName({ NODE_ENV: "test" }), "virki_session");
+  assert.equal(getDeviceCookieName({ NODE_ENV: "test" }), "virki_device");
 
   setNodeEnv("production");
   const options = getSessionCookieOptions(new Date("2026-07-14T13:00:00.000Z"));

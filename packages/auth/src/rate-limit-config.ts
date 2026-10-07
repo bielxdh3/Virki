@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { isIP } from "node:net";
 
-const SYNTHETIC_NON_PRODUCTION_KEY = "bielos-synthetic-non-production-rate-limit-key";
+const SYNTHETIC_NON_PRODUCTION_KEY = "virki-synthetic-non-production-rate-limit-key";
 const CONFIGURATION_UNAVAILABLE_MESSAGE = "Login rate limiter configuration unavailable.";
 
 export type LoginRateLimitConfigurationState =
@@ -31,7 +31,7 @@ export function getLoginRateLimitRefundState(
 export function getLoginRateLimitConfigurationState(
   env: NodeJS.ProcessEnv = process.env
 ): LoginRateLimitConfigurationState {
-  const configuredKey = env.BIELOS_RATE_LIMIT_HASH_SECRET;
+  const configuredKey = env.VIRKI_RATE_LIMIT_HASH_SECRET;
 
   if (configuredKey && configuredKey.trim().length > 0) {
     return { available: true, source: "environment" };
@@ -96,6 +96,6 @@ function resolveLoginRateLimitHashKey(env: NodeJS.ProcessEnv): string {
   }
 
   return state.source === "environment"
-    ? (env.BIELOS_RATE_LIMIT_HASH_SECRET as string)
+    ? (env.VIRKI_RATE_LIMIT_HASH_SECRET as string)
     : SYNTHETIC_NON_PRODUCTION_KEY;
 }

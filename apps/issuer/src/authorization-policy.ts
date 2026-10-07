@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-const MULTI_FACTOR_ACR = "urn:bielos:loa:2";
-const PASSWORD_ACR = "urn:bielos:loa:1";
+const MULTI_FACTOR_ACR = "urn:virki:loa:2";
+const PASSWORD_ACR = "urn:virki:loa:1";
 const AUTH_REQUEST_MARKER_TTL_MS = 15 * 60 * 1_000;
 
 export const OIDC_SUPPORTED_ACR_VALUES = [PASSWORD_ACR, MULTI_FACTOR_ACR] as const;
@@ -105,7 +105,7 @@ export function createOidcAuthRequestMarker(uid: string, startedAtMs: number, ke
     throw new Error("Invalid OIDC authentication request marker input.");
   }
   const payload = Buffer.from(JSON.stringify({ uid, startedAtMs }), "utf8").toString("base64url");
-  const signature = createHmac("sha256", key).update("bielos-oidc-auth-request\0").update(payload).digest("base64url");
+  const signature = createHmac("sha256", key).update("virki-oidc-auth-request\0").update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }
 
@@ -122,7 +122,7 @@ export function readOidcAuthRequestMarker(
   const signatureText = value.slice(separator + 1);
   if (!/^[A-Za-z0-9_-]+$/u.test(payload) || !/^[A-Za-z0-9_-]{43}$/u.test(signatureText)) return null;
 
-  const expectedSignature = createHmac("sha256", key).update("bielos-oidc-auth-request\0").update(payload).digest();
+  const expectedSignature = createHmac("sha256", key).update("virki-oidc-auth-request\0").update(payload).digest();
   const suppliedSignature = Buffer.from(signatureText, "base64url");
   if (suppliedSignature.length !== expectedSignature.length || !timingSafeEqual(suppliedSignature, expectedSignature)) return null;
 

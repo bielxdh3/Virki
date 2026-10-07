@@ -23,9 +23,9 @@ test("completed login audit records the actor, surface, proof factor, and safe r
 });
 
 for (const { name, cookieName } of [
-  { name: "remembered-browser login", cookieName: "bielos-session" },
-  { name: "second-factor verification", cookieName: "bielos-session" },
-  { name: "password-accepted challenge", cookieName: "bielos-device" }
+  { name: "remembered-browser login", cookieName: "virki-session" },
+  { name: "second-factor verification", cookieName: "virki-session" },
+  { name: "password-accepted challenge", cookieName: "virki-device" }
 ]) {
   test(`${name} does not build a cookie response when required audit persistence fails`, async () => {
     let responseCookie: string | undefined;
@@ -56,12 +56,12 @@ test("login response cookie is created only after required audit persistence suc
     async () => { order.push("audit"); },
     () => {
       order.push("session-cookie");
-      return { cookie: "bielos-session=synthetic-proof" };
+      return { cookie: "virki-session=synthetic-proof" };
     }
   );
 
   assert.deepEqual(order, ["audit", "session-cookie"]);
-  assert.deepEqual(response, { cookie: "bielos-session=synthetic-proof" });
+  assert.deepEqual(response, { cookie: "virki-session=synthetic-proof" });
 });
 
 test("verification login returns a no-store 503 when its required audit fails", async () => {
@@ -71,7 +71,7 @@ test("verification login returns a no-store 503 when its required audit fails", 
     async () => { throw new Error("synthetic database error"); },
     () => {
       sessionCookieCreated = true;
-      return new Response("redirect", { status: 303, headers: { "set-cookie": "bielos-session=synthetic-proof" } });
+      return new Response("redirect", { status: 303, headers: { "set-cookie": "virki-session=synthetic-proof" } });
     },
     () => new Response("Service Unavailable", { status: 503, headers: { "cache-control": "no-store" } })
   );

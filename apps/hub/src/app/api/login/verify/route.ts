@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@bielos/auth/csrf";
-import { createAuditRequestMetadata, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@bielos/auth";
-import { DEVICE_COOKIE_NAME, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@bielos/auth/security";
+import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
+import { createAuditRequestMetadata, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@virki/auth";
+import { DEVICE_COOKIE_NAME, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@virki/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../../lib/surface";
 import { createLoginResponseAfterRequiredAudit, createVerifiedLoginAudit, type LoginSurface, type LoginVerificationFactor } from "../../../../lib/login-audit";
-import { SESSION_COOKIE_NAME, getSessionCookieOptions } from "@bielos/auth";
+import { SESSION_COOKIE_NAME, getSessionCookieOptions } from "@virki/auth";
 import { readBoundedFormData } from "../../../../lib/request-form";
 
 export const dynamic = "force-dynamic";

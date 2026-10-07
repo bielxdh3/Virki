@@ -1,6 +1,6 @@
 import type { Adapter, AdapterPayload } from "oidc-provider";
-import { decryptOidcClientSecret, decryptOidcPayload, encryptOidcPayload, hashOidcIdentifier } from "@bielos/auth/oidc-secrets";
-import { prisma, type PrismaClient } from "@bielos/database";
+import { decryptOidcClientSecret, decryptOidcPayload, encryptOidcPayload, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
+import { prisma, type PrismaClient } from "@virki/database";
 
 const grantBoundModels = new Set([
   "AccessToken",
