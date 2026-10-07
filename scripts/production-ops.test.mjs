@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -101,12 +102,94 @@ test("preflight stops at a missing native host marker without trying Docker", as
     execute: (command, args) => {
       if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
       remoteCalls += 1;
-      return { status: 1, stdout: "" };
+      return { status: 1, stdout: "BIELOS_PROBE_FAILURE=MARKER_METADATA_INVALID\n" };
     },
   });
   assert.equal(result.status, 1);
   assert.equal(remoteCalls, 1);
-  assert.ok(result.lines[0].includes("marker was not verified"));
+  assert.ok(result.lines[0].includes("production host marker is missing or has unsafe metadata"));
+});
+
+test("preflight reports a sanitized remote host-check category", async () => {
+  const result = await runProductionPreflight({
+    config,
+    sleep: async () => {},
+    execute: (command, args) => {
+      if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
+      return {
+        status: 1,
+        stdout: "BIELOS_PROBE_FAILURE=PROTECTED_ENV_METADATA_INVALID\n",
+        stderr: "private-value=must-not-be-returned",
+      };
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; protected production environment file metadata is invalid."]);
+  assert.doesNotMatch(result.lines.join(" "), /private-value|must-not-be-returned/u);
+});
+
+test("preflight treats inherited remote category names as unknown", async () => {
+  const result = await runProductionPreflight({
+    config,
+    sleep: async () => {},
+    execute: (command, args) => {
+      if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
+      return { status: 1, stdout: "BIELOS_PROBE_FAILURE=toString\n", stderr: "" };
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; SSH transport or remote probe did not return a verifiable result."]);
+});
+
+test("preflight identifies strict host-key rejection without returning SSH diagnostics", async () => {
+  const result = await runProductionPreflight({
+    config,
+    sleep: async () => {},
+    execute: (command, args) => {
+      if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
+      return { status: 255, stdout: "", stderr: "Host key verification failed. private-value=must-not-be-returned" };
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; strict host-key verification rejected the SSH target."]);
+  assert.doesNotMatch(result.lines.join(" "), /private-value|must-not-be-returned/u);
+});
+
+test("native shell probe emits the sanitized protected environment metadata category", { skip: process.platform !== "linux" }, async () => {
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "bielos-native-probe-"));
+  const root = path.join(temporaryDirectory, "root");
+  try {
+    mkdirSync(root, { mode: 0o700 });
+    for (const name of [".deploy-tmp", "releases", "backups"]) mkdirSync(path.join(root, name), { mode: 0o700 });
+    const hostname = spawnSync("hostname", ["-s"], { encoding: "utf8" }).stdout.trim();
+    const marker = path.join(root, ".bielos-production-host");
+    writeFileSync(marker, `role=production\nprotocol=2\nhostname=${hostname}\npath=${root}\n`, { mode: 0o600 });
+    chmodSync(marker, 0o600);
+    for (const name of [".env", ".env.oidc", ".env.oidc-data"]) {
+      const file = path.join(root, name);
+      writeFileSync(file, "placeholder=must-not-be-returned\n", { mode: name === ".env.oidc-data" ? 0o644 : 0o600 });
+      chmodSync(file, name === ".env.oidc-data" ? 0o644 : 0o600);
+    }
+
+    const result = await runProductionPreflight({
+      config: { ...config, root },
+      sleep: async () => {},
+      execute: (command, args, options = {}) => {
+        if (args[0] === "-G") return { status: 0, stdout: `user deploy\nhostname ${config.host}\nport ${config.port}\n` };
+        const probe = spawnSync("bash", ["-s", "--", "probe", root], { encoding: "utf8", input: options.input });
+        return { status: Number.isInteger(probe.status) ? probe.status : 1, stdout: probe.stdout ?? "", stderr: probe.stderr ?? "" };
+      },
+    });
+
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.lines, ["SSH preflight failed on probe 1; protected production environment file metadata is invalid."]);
+    assert.doesNotMatch(result.lines.join(" "), /placeholder|must-not-be-returned/u);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("preflight fails closed when the host cannot serialize state-changing operations", async () => {

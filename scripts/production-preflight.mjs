@@ -19,26 +19,26 @@ const PROBE_COUNT = 8;
 const PROBE_SCRIPT = `
 set -eu
 root=$2
-fail() { exit 1; }
-[[ "$(uname -s)" == Linux ]] || fail
+fail() { printf 'BIELOS_PROBE_FAILURE=%s\\n' "$1"; exit 1; }
+[[ "$(uname -s)" == Linux ]] || fail NOT_LINUX
 kernel=$(tr '[:upper:]' '[:lower:]' < /proc/sys/kernel/osrelease)
-[[ "$kernel" != *microsoft* && "$kernel" != *wsl* ]] || fail
-[[ -d "$root" && ! -L "$root" && "$(stat -c '%a' -- "$root")" == 700 && "$(stat -c '%u' -- "$root")" == "$(id -u)" ]] || fail
-[[ "$(readlink -f -- "$root")" == "$root" ]] || fail
+[[ "$kernel" != *microsoft* && "$kernel" != *wsl* ]] || fail WSL
+[[ -d "$root" && ! -L "$root" && "$(stat -c '%a' -- "$root")" == 700 && "$(stat -c '%u' -- "$root")" == "$(id -u)" ]] || fail ROOT_METADATA_INVALID
+[[ "$(readlink -f -- "$root")" == "$root" ]] || fail ROOT_NOT_CANONICAL
 for name in .deploy-tmp releases backups; do
   directory="$root/$name"
-  [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%a' -- "$directory")" == 700 && "$(stat -c '%u' -- "$directory")" == "$(id -u)" ]] || fail
+  [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%a' -- "$directory")" == 700 && "$(stat -c '%u' -- "$directory")" == "$(id -u)" ]] || fail DIRECTORY_METADATA_INVALID
 done
 marker="$root/.bielos-production-host"
-[[ -f "$marker" && ! -L "$marker" && "$(stat -c '%a' -- "$marker")" == 600 && "$(stat -c '%u' -- "$marker")" == "$(id -u)" && "$(wc -l < "$marker")" -eq 4 ]] || fail
+[[ -f "$marker" && ! -L "$marker" && "$(stat -c '%a' -- "$marker")" == 600 && "$(stat -c '%u' -- "$marker")" == "$(id -u)" && "$(wc -l < "$marker")" -eq 4 ]] || fail MARKER_METADATA_INVALID
 host=$(hostname -s)
-grep -Fxq 'role=production' "$marker" || fail
-grep -Fxq 'protocol=2' "$marker" || fail
-grep -Fxq "hostname=$host" "$marker" || fail
-grep -Fxq "path=$root" "$marker" || fail
+grep -Fxq 'role=production' "$marker" || fail MARKER_CONTENT_INVALID
+grep -Fxq 'protocol=2' "$marker" || fail MARKER_CONTENT_INVALID
+grep -Fxq "hostname=$host" "$marker" || fail MARKER_CONTENT_INVALID
+grep -Fxq "path=$root" "$marker" || fail MARKER_CONTENT_INVALID
 for name in .env .env.oidc .env.oidc-data; do
   file="$root/$name"
-  [[ -f "$file" && ! -L "$file" && "$(stat -c '%a' -- "$file")" == 600 && "$(stat -c '%u' -- "$file")" == "$(id -u)" ]] || fail
+  [[ -f "$file" && ! -L "$file" && "$(stat -c '%a' -- "$file")" == 600 && "$(stat -c '%u' -- "$file")" == "$(id -u)" ]] || fail PROTECTED_ENV_METADATA_INVALID
 done
 printf 'BIELOS_PROBE_ID=%s\\n' "$host"
 printf 'BIELOS_PROBE_WD=%s\\n' "$root"
@@ -141,6 +141,31 @@ function probeIsValid(result) {
     lineValue(result.stdout, "BIELOS_PROBE_MARKER=") === "valid";
 }
 
+function describeProbeFailure(result) {
+  const hostCheck = lineValue(result.stdout, "BIELOS_PROBE_FAILURE=");
+  const hostCheckMessages = {
+    NOT_LINUX: "target is not native Linux.",
+    WSL: "target is running under WSL.",
+    ROOT_METADATA_INVALID: "production root metadata is invalid.",
+    ROOT_NOT_CANONICAL: "production root is not canonical.",
+    DIRECTORY_METADATA_INVALID: "required production directory metadata is invalid.",
+    MARKER_METADATA_INVALID: "production host marker is missing or has unsafe metadata.",
+    MARKER_CONTENT_INVALID: "production host marker does not match the host and root.",
+    PROTECTED_ENV_METADATA_INVALID: "protected production environment file metadata is invalid.",
+  };
+  if (Object.hasOwn(hostCheckMessages, hostCheck)) return hostCheckMessages[hostCheck];
+
+  const sshError = String(result.stderr ?? "").toLowerCase();
+  if (/host key verification failed|remote host identification has changed|no .* host key is known/u.test(sshError)) {
+    return "strict host-key verification rejected the SSH target.";
+  }
+  if (/permission denied/u.test(sshError)) return "SSH authentication failed for the configured alias.";
+  if (/connection timed out|connection refused|no route to host|could not resolve hostname|connection reset/u.test(sshError)) {
+    return "SSH could not reach the configured host.";
+  }
+  return "SSH transport or remote probe did not return a verifiable result.";
+}
+
 export async function runProductionPreflight({
   execute = run,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -168,7 +193,7 @@ export async function runProductionPreflight({
   for (let attempt = 1; attempt <= PROBE_COUNT; attempt += 1) {
     const result = runRemoteScript(PROBE_SCRIPT, "probe", execute, operatorConfig);
     if (!probeIsValid(result)) {
-      return { status: 1, lines: [`SSH preflight failed on probe ${attempt}; native Linux identity or production marker was not verified.`] };
+      return { status: 1, lines: [`SSH preflight failed on probe ${attempt}; ${describeProbeFailure(result)}`] };
     }
 
     const observed = `${lineValue(result.stdout, "BIELOS_PROBE_ID=")}\n${lineValue(result.stdout, "BIELOS_PROBE_WD=")}`;
