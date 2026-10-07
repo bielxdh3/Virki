@@ -43,7 +43,8 @@
     "prisma:validate": "npm run prisma:validate --workspace @virki/database",
     "prisma:migrate": "npm run prisma:migrate --workspace @virki/database",
     "prisma:migrate:deploy": "npm run prisma:migrate:deploy --workspace @virki/database",
-    "prisma:migrate:status": "npm run prisma:migrate:status --workspace @virki/database"
+    "prisma:migrate:status": "npm run prisma:migrate:status --workspace @virki/database",
+    "identity:verify": "node scripts/verify-virki-identity.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
