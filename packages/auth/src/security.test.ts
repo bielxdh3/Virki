@@ -65,6 +65,7 @@ test("TOTP confirmation accepts the RFC vector and rejects same-window replay", 
   const secret = "JBSWY3DPEHPK3PXP";
   const now = new Date(0);
   assert.equal(verifyTotpCode(secret, "282760", now, null), 0);
+  assert.equal(verifyTotpCode(`${secret}====`, "282760", now, null), 0);
   assert.equal(verifyTotpCode(secret, "282760", now, 0), null);
   assert.equal(verifyTotpCode(secret, "000000", now, null), null);
 });
