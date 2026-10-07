@@ -1,4 +1,8 @@
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { CANONICAL_BIELOS_REPOSITORY, normalizeRevision, ProductionRevisionError } from "./production-revision.mjs";
+import { evaluateCodeqlSarif, readSarifDirectory } from "../codeql-sarif-policy.mjs";
 
 const RUN_FIELDS = "databaseId,headSha,status,conclusion,event,headBranch,createdAt";
 const WORKFLOWS = ["ci.yml", "codeql.yml"];
@@ -63,6 +67,34 @@ export function evaluateExactShaRelease(ciRuns, codeqlRuns, expectedRevision) {
   return { status, ci, codeql };
 }
 
+function verifyExactShaSarifArtifact({ revision, runId, execute, repositoryRoot }) {
+  const artifactName = "codeql-sarif-" + revision;
+  const directory = mkdtempSync(path.join(os.tmpdir(), "bielos-codeql-sarif-"));
+  try {
+    const result = execute("gh", [
+      "run", "download", String(runId),
+      "--repo", CANONICAL_BIELOS_REPOSITORY,
+      "--name", artifactName,
+      "--dir", directory
+    ], { cwd: repositoryRoot });
+    if (!result || result.status !== 0) return { status: "BLOCKED" };
+
+    const entries = readdirSync(directory, { withFileTypes: true });
+    if (entries.length === 0 || entries.some((entry) => !entry.isFile() || !entry.name.endsWith(".sarif"))) {
+      return { status: "BLOCKED" };
+    }
+
+    const policy = evaluateCodeqlSarif(readSarifDirectory(directory));
+    return policy.ok
+      ? { status: "PASS", artifactName, totalResults: policy.totalResults, violations: 0 }
+      : { status: "FAIL" };
+  } catch {
+    return { status: "BLOCKED" };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 export function verifyExactShaCi({ revision, execute, repositoryRoot }) {
   let expected;
   try {
@@ -95,11 +127,29 @@ export function verifyExactShaCi({ revision, execute, repositoryRoot }) {
     return { ok: false, status: release.status, lines };
   }
 
+  const sarif = verifyExactShaSarifArtifact({
+    revision: expected,
+    runId: release.codeql.runId,
+    execute,
+    repositoryRoot
+  });
+  if (sarif.status !== "PASS") {
+    return {
+      ok: false,
+      status: sarif.status,
+      lines: [sarif.status === "FAIL"
+        ? "Reviewed exact-SHA CodeQL SARIF policy did not pass."
+        : "Exact-SHA CodeQL SARIF artifact is missing, expired, or unavailable."]
+    };
+  }
+
   return {
     ok: true,
     status: "PASS",
     runId: release.ci.runId,
     codeqlRunId: release.codeql.runId,
-    lines: [`Exact-SHA CI and CodeQL release checks passed for ${expected}.`]
+    sarifArtifactName: sarif.artifactName,
+    sarifResults: sarif.totalResults,
+    lines: ["Exact-SHA CI, CodeQL, reviewed SARIF policy, and retained artifact checks passed for " + expected + "."]
   };
 }

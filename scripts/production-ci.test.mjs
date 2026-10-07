@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,19 @@ const revision = "0123456789abcdef0123456789abcdef01234567";
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
 const codeqlWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql.yml"), "utf8");
+const reviewedSarif = {
+  version: "2.1.0",
+  runs: [{
+    results: [{
+      ruleId: "js/file-access-to-http",
+      locations: [{ physicalLocation: { artifactLocation: { uri: "scripts/e2e/access-token.mts" } } }],
+      partialFingerprints: {
+        primaryLocationLineHash: "90e07734df8b1ab3:1",
+        primaryLocationStartColumnFingerprint: "6"
+      }
+    }]
+  }]
+};
 const run = (overrides = {}) => ({
   databaseId: 12345,
   headSha: revision,
@@ -54,6 +67,11 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
     repositoryRoot: "/repo",
     execute: (command, args, options) => {
       calls.push({ command, args, options });
+      if (args[0] === "run" && args[1] === "download") {
+        const directory = args[args.indexOf("--dir") + 1];
+        writeFileSync(path.join(directory, "javascript.sarif"), JSON.stringify(reviewedSarif));
+        return { status: 0, stdout: "" };
+      }
       const workflowName = args[args.indexOf("--workflow") + 1];
       return { status: 0, stdout: JSON.stringify([run({ databaseId: workflowName === "ci.yml" ? 12345 : 67890 })]) };
     },
@@ -61,8 +79,10 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   assert.equal(result.ok, true);
   assert.equal(result.runId, 12345);
   assert.equal(result.codeqlRunId, 67890);
-  assert.equal(calls.length, 2);
-  for (const call of calls) {
+  assert.equal(result.sarifArtifactName, "codeql-sarif-" + revision);
+  assert.equal(result.sarifResults, 1);
+  assert.equal(calls.length, 3);
+  for (const call of calls.slice(0, 2)) {
     assert.equal(call.command, "gh");
     assert.equal(call.args[call.args.indexOf("--repo") + 1], "bielxdh3/BielOS");
     assert.ok(call.args.includes("--commit"));
@@ -72,6 +92,12 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   }
   assert.ok(calls.some(({ args }) => args.includes("ci.yml")));
   assert.ok(calls.some(({ args }) => args.includes("codeql.yml")));
+  const download = calls[2];
+  assert.equal(download.command, "gh");
+  assert.deepEqual(download.args.slice(0, 3), ["run", "download", "67890"]);
+  assert.equal(download.args[download.args.indexOf("--name") + 1], "codeql-sarif-" + revision);
+  assert.equal(download.args[download.args.indexOf("--repo") + 1], "bielxdh3/BielOS");
+  assert.equal(existsSync(download.args[download.args.indexOf("--dir") + 1]), false);
 
   const unavailable = verifyExactShaCi({
     revision,
@@ -87,6 +113,48 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   });
   assert.equal(missingRunId.ok, false);
   assert.equal(missingRunId.status, "BLOCKED");
+});
+
+test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF policy", () => {
+  const runsResponse = (workflowName) => JSON.stringify([run({ databaseId: workflowName === "ci.yml" ? 12345 : 67890 })]);
+  const unavailable = verifyExactShaCi({
+    revision,
+    repositoryRoot: "/repo",
+    execute: (_command, args) => args[1] === "download"
+      ? { status: 1, stdout: "" }
+      : { status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) }
+  });
+  assert.deepEqual(unavailable, {
+    ok: false,
+    status: "BLOCKED",
+    lines: ["Exact-SHA CodeQL SARIF artifact is missing, expired, or unavailable."]
+  });
+
+  const unreviewed = {
+    version: "2.1.0",
+    runs: [{
+      results: [{
+        ruleId: "js/redos",
+        locations: [{ physicalLocation: { artifactLocation: { uri: "scripts/deploy-production.mjs" } } }]
+      }]
+    }]
+  };
+  const rejected = verifyExactShaCi({
+    revision,
+    repositoryRoot: "/repo",
+    execute: (_command, args) => {
+      if (args[1] === "download") {
+        writeFileSync(path.join(args[args.indexOf("--dir") + 1], "javascript.sarif"), JSON.stringify(unreviewed));
+        return { status: 0, stdout: "" };
+      }
+      return { status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) };
+    }
+  });
+  assert.deepEqual(rejected, {
+    ok: false,
+    status: "FAIL",
+    lines: ["Reviewed exact-SHA CodeQL SARIF policy did not pass."]
+  });
 });
 
 test("production images are uploaded only after exact main-push builds pass on both supported architectures", () => {

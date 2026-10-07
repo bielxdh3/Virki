@@ -1,6 +1,11 @@
 import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
+import { inspectProductionSource, ProductionRevisionError, runCommand } from "./lib/production-revision.mjs";
+import { verifyExactShaCi } from "./lib/production-ci.mjs";
 
+const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 export const SSH_OPTIONS = [
   "-o", "BatchMode=yes",
   "-o", "StrictHostKeyChecking=yes",
@@ -196,8 +201,51 @@ export async function runProductionPreflight({
   return { status: 0, lines, platform: lineValue(docker.stdout, "BIELOS_PLATFORM=") };
 }
 
-if (process.argv[1] && process.argv[1].endsWith("production-preflight.mjs")) {
-  runProductionPreflight().then((result) => {
+export async function runAcceptedProductionPreflight({
+  sourceExecute = runCommand,
+  execute = run,
+  inspectSource = inspectProductionSource,
+  verifyCi = verifyExactShaCi,
+  preflight = runProductionPreflight,
+  config = readProductionConfig(),
+} = {}) {
+  if (!isValidProductionConfig(config)) {
+    return { status: 1, lines: ["Private production operator configuration is missing or invalid."] };
+  }
+
+  let source;
+  try {
+    source = inspectSource({ repositoryRoot, execute: sourceExecute });
+  } catch (error) {
+    return {
+      status: 1,
+      lines: [error instanceof ProductionRevisionError
+        ? error.message
+        : "Production source state could not be verified."]
+    };
+  }
+
+  let gate;
+  try {
+    gate = verifyCi({ revision: source.revision, execute: sourceExecute, repositoryRoot });
+  } catch {
+    return { status: 1, lines: ["Exact-SHA release evidence could not be verified."] };
+  }
+  if (!gate?.ok) {
+    return {
+      status: 1,
+      lines: Array.isArray(gate?.lines) && gate.lines.length > 0
+        ? gate.lines
+        : ["Exact-SHA release evidence could not be verified."]
+    };
+  }
+
+  const result = await preflight({ execute, config });
+  return { ...result, lines: [...(gate.lines ?? []), ...(result.lines ?? [])] };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runAcceptedProductionPreflight().then((result) => {
     for (const line of result.lines) console.log(line);
     process.exitCode = result.status;
   });
