@@ -17,6 +17,7 @@ a { color: inherit; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .public-page { display: grid; min-height: 100vh; place-items: center; padding: 1.25rem; }
 .public-panel { width: min(100%, 600px); }
+.public-panel::before { content: ""; display: block; width: 64px; height: 64px; margin: 0 0 1rem; background: url("/virki-mark.svg") center / contain no-repeat; filter: brightness(0) invert(1); }
 .public-panel h1 { margin: 0 0 0.5rem; font-size: clamp(2rem, 7vw, 3.5rem); }
 .public-panel p:not(.eyebrow) { margin: 0 0 1.5rem; color: var(--muted); font-size: 1.1rem; }
 .eyebrow { margin: 0 0 0.5rem; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
