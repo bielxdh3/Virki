@@ -801,7 +801,11 @@ function decodeBase32(value: string): Buffer {
   let bits = 0;
   let buffer = 0;
   const bytes: number[] = [];
-  for (const char of value.replace(/=+$/, "").toUpperCase()) {
+  const normalized = value.toUpperCase();
+  let end = normalized.length;
+  while (end > 0 && normalized.charCodeAt(end - 1) === 61) end -= 1;
+  for (let index = 0; index < end; index += 1) {
+    const char = normalized[index];
     const index = alphabet.indexOf(char);
     if (index < 0) throw new SecurityMutationError();
     buffer = (buffer << 5) | index;
