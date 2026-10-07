@@ -1,7 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Virki Hub mark">
-  <rect width="64" height="64" rx="12" fill="#0f151d"/>
-  <path d="M13 16h38v32H13z" fill="#172230" stroke="#5bd7e8" stroke-width="2"/>
-  <path d="M18 24h13v5H18zM18 35h24v5H18z" fill="#73e2a7"/>
-  <path d="M47 16v32" stroke="#26313f" stroke-width="2"/>
-  <path d="M48 24l-7 8 7 8" fill="none" stroke="#e8b15b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Virki mark">
+  <defs>
+    <linearGradient id="virki-mark-gradient" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0d1723"/>
+      <stop offset="1" stop-color="#29415b"/>
+    </linearGradient>
+  </defs>
+  <path d="M6.1 7.9 6.1 14.5 22 58.3 27.2 59.8 27.2 29.8 28.4 26.9 31.9 24 35.2 26.5 36.8 30.1 36.7 59.7 41.7 57.5 57.9 14.5 57.9 7.9 53.2 6.5 53.2 10.4 50.4 9.6 49.9 5.4 45.1 4 41.5 7.1 41.3 11.8 39.4 13.4 39.2 9.4 36 12.5 35.8 22.4 32 19.8 28.1 22.4 27.9 12.6 24.7 9.4 24.5 13.5 22.5 11.7 22.3 7.1 18.9 4.1 14 5.4 14 9.4 11.1 10.4 10.6 6.5Z" fill="url(#virki-mark-gradient)"/>
 </svg>
