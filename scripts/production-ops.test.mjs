@@ -672,7 +672,38 @@ test("recovery snapshots account for the intended legacy-key migration and retai
   assert.match(serverScript, /after_recovery=\$\(recovery_snapshot "" after_migrations\)/u);
 });
 
-test("deployment downloads the exact-SHA tested images after preflight and transfers both verified artifacts", async () => {
+test("non-whitespace backup sentinel content blocks preflight and transfer", async () => {
+  let archivePath;
+  let preflightCalled = false;
+  await assert.rejects(deployProduction({
+    action: "install",
+    config,
+    inspectSource: () => ({ branch: "main", revision }),
+    verifyCi: () => ({ ok: true, lines: [] }),
+    preflight: async () => {
+      preflightCalled = true;
+      return { status: 0, lines: [] };
+    },
+    execute: (command, args, options = {}) => {
+      if (command === "git") assert.equal(options.env?.GIT_NO_REPLACE_OBJECTS, "1");
+      if (command === "git" && args[0] === "archive") {
+        archivePath = args.find((value) => value.startsWith("--output=")).slice("--output=".length);
+        writeFileSync(archivePath, "tracked source archive");
+        return { status: 0, stdout: "" };
+      }
+      if (command === "git" && args[0] === "ls-tree") {
+        return { status: 0, stdout: `100644 blob ${revision}\tinfra/backups/.gitkeep\0` };
+      }
+      if (command === "git" && args[0] === "cat-file" && args[1] === "-s") return { status: 0, stdout: "15\n" };
+      if (command === "git" && args[0] === "cat-file" && args[1] === "blob") return { status: 0, stdout: "not a sentinel\n" };
+      assert.fail(`Unexpected command: ${command} ${args.join(" ")}`);
+    },
+  }), /Production command failed/u);
+  assert.equal(preflightCalled, false);
+  assert.equal(existsSync(path.dirname(archivePath)), false);
+});
+
+test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA images", async () => {
   const sequence = [];
   let archivePath;
   let imageArchivePath;
@@ -720,7 +751,8 @@ test("deployment downloads the exact-SHA tested images after preflight and trans
         }
         return { status: 0, stdout: attributes.join("\0") + "\0" };
       }
-      if (command === "git" && args[0] === "cat-file" && args[1] === "-s") return { status: 0, stdout: "0\n" };
+      if (command === "git" && args[0] === "cat-file" && args[1] === "-s") return { status: 0, stdout: "1\n" };
+      if (command === "git" && args[0] === "cat-file" && args[1] === "blob") return { status: 0, stdout: "\n" };
       if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
       if (command === "tar") return { status: 0, stdout: "README.md\n.env.example\nscripts/production-server.sh\ninfra/backups/\ninfra/backups/.gitkeep\npackages/database/prisma/migrations/20261001000000_security_polish/migration.sql\n" };
       if (isSecretScanCommand(command, args)) {
@@ -767,7 +799,7 @@ test("deployment downloads the exact-SHA tested images after preflight and trans
   });
 
   assert.equal(result.status, 0);
-  assert.deepEqual(sequence.slice(0, 9), ["source", "ci", "git:archive", "git:ls-tree", "git:cat-file", "git:check-attr", "tar:-tf", "scanner-source", "secret-scan"]);
+  assert.deepEqual(sequence.slice(0, 10), ["source", "ci", "git:archive", "git:ls-tree", "git:cat-file", "git:cat-file", "git:check-attr", "tar:-tf", "scanner-source", "secret-scan"]);
   assert.ok(sequence.indexOf("preflight") < sequence.indexOf("gh:run"));
   assert.ok(sequence.indexOf("gh:run") < sequence.findIndex((item) => item.startsWith("scp:")));
   assert.equal(sequence.filter((item) => item.startsWith("scp:")).length, 2);

@@ -113,11 +113,17 @@ function makeArchive(revision, execute) {
         if (mode !== "100644" || type !== "blob" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(objectId ?? "")) {
           throw new ProductionRevisionError("COMMAND_FAILED");
         }
-        const sentinelSize = requireSuccess(
+        const sentinelSizeText = requireSuccess(
           execute("git", ["cat-file", "-s", objectId], { cwd: repositoryRoot, env: gitEnvironment }),
           "Production backup sentinel could not be inspected.",
         );
-        if (sentinelSize.trim() !== "0") throw new ProductionRevisionError("COMMAND_FAILED");
+        const sentinelSize = Number(sentinelSizeText.trim());
+        if (!Number.isSafeInteger(sentinelSize) || sentinelSize > 64) throw new ProductionRevisionError("COMMAND_FAILED");
+        const sentinelContents = requireSuccess(
+          execute("git", ["cat-file", "blob", objectId], { cwd: repositoryRoot, env: gitEnvironment }),
+          "Production backup sentinel could not be inspected.",
+        );
+        if (!/^[\t\r\n ]*$/u.test(sentinelContents)) throw new ProductionRevisionError("COMMAND_FAILED");
       }
       if (isSensitiveArchivePath(entry)) {
         throw new ProductionRevisionError("COMMAND_FAILED");
