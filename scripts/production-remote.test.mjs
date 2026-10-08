@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  buildInteractiveRemoteSshArgs,
   buildRemoteSshArgs,
   parseRemoteProductionCommand,
   runRemoteProductionCommand,
@@ -34,7 +35,7 @@ test("production configuration accepts only safe absolute Linux roots", () => {
 });
 
 test("remote actions use a fixed list and a non-interactive Linux Bash runner", () => {
-  for (const action of ["start", "stop", "status", "ports", "revision", "health", "logs", "backup-verify", "maintenance-on", "maintenance-off", "config"]) {
+  for (const action of ["stage", "start", "stop", "status", "ports", "revision", "health", "logs", "backup-verify", "maintenance-on", "maintenance-off", "config"]) {
     assert.equal(parseRemoteProductionCommand([action]), action);
   }
   assert.throws(
@@ -47,6 +48,16 @@ test("remote actions use a fixed list and a non-interactive Linux Bash runner", 
   assert.ok(args.includes("StrictHostKeyChecking=yes"));
   assert.equal(args.join(" ").includes("powershell"), false);
   assert.throws(() => buildRemoteSshArgs("status", "bad", operatorConfig), /Revision is invalid/u);
+});
+
+test("first ADMIN bootstrap uses a protected SSH TTY and carries no credential as an argument", () => {
+  assert.equal(parseRemoteProductionCommand(["first-admin-bootstrap"]), "first-admin-bootstrap");
+  const args = buildInteractiveRemoteSshArgs("first-admin-bootstrap", revision, operatorConfig);
+  assert.ok(args.includes("-tt"));
+  assert.equal(args.at(-1), `bash ${operatorConfig.root}/current/scripts/production-server.sh first-admin-bootstrap ${operatorConfig.root} ${revision}`);
+  assert.equal(args.join(" ").includes("password"), false);
+  assert.equal(args.some((value) => value.includes("@")), false);
+  assert.throws(() => buildInteractiveRemoteSshArgs("stage", revision, operatorConfig), (error) => error.code === "ARGUMENT_INVALID");
 });
 
 test("remote actions require exact main-source and CI gates before preflight and SSH", async () => {
@@ -93,4 +104,26 @@ test("an unverified CI result fails before contacting the production host", asyn
   });
   assert.equal(preflightCalls, 0);
   assert.deepEqual(result, { status: 1, lines: ["CI not green"] });
+});
+
+test("interactive first ADMIN bootstrap passes through the terminal without a script pipe", async () => {
+  const calls = [];
+  const result = await runRemoteProductionCommand(["first-admin-bootstrap"], {
+    config: operatorConfig,
+    inspectSource: () => ({ branch: "main", revision }),
+    verifyCi: () => ({ ok: true, lines: ["exact SHA green"] }),
+    preflight: async () => ({ status: 0, lines: ["preflight passed"] }),
+    execute: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: "" };
+    },
+  });
+
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.lines, ["preflight passed"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "ssh");
+  assert.equal(calls[0].options.interactive, true);
+  assert.equal(Object.hasOwn(calls[0].options, "input"), false);
+  assert.ok(calls[0].args.includes("-tt"));
 });

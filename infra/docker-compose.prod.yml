@@ -115,6 +115,23 @@ services:
         condition: service_healthy
     command: npm run prisma:migrate:deploy
 
+  first-admin-bootstrap:
+    image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
+    pull_policy: never
+    profiles: ["bootstrap"]
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    environment:
+      NODE_ENV: production
+      VIRKI_FIRST_INSTALL_BOOTSTRAP: ${VIRKI_FIRST_INSTALL_BOOTSTRAP:-}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
+      VIRKI_AUDIT_HASH_SECRET: ${VIRKI_AUDIT_HASH_SECRET:?VIRKI_AUDIT_HASH_SECRET must be set in local .env}
+    command: npm run bootstrap:first-admin --workspace @virki/auth
+
   session-cleanup:
     image: ${VIRKI_PRODUCTION_IMAGE:?VIRKI_PRODUCTION_IMAGE must be set in local .env}
     pull_policy: never

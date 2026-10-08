@@ -19,6 +19,7 @@
   "scripts": {
     "audit:recent": "tsx src/audit-recent.ts",
     "audit:cleanup": "tsx src/cleanup-audit-logs.ts",
+    "bootstrap:first-admin": "tsx src/bootstrap-first-admin.ts",
     "email:worker": "tsx src/email-worker.ts",
     "sessions:cleanup": "tsx src/cleanup-sessions.ts",
     "typecheck": "tsc --noEmit"

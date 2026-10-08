@@ -57,6 +57,7 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
 test("production containers receive only their scoped secret files", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
+  const bootstrap = serviceBlock(productionCompose, "first-admin-bootstrap");
   const tunnel = serviceBlock(cloudflareCompose, "cloudflared");
   const appServices = ["hub", "oidc-issuer", "migrate", "session-cleanup", "email-worker"]
     .map((service) => serviceBlock(productionCompose, service));
@@ -68,6 +69,15 @@ test("production containers receive only their scoped secret files", () => {
   assert.match(issuer, /path: \.\.\/\.env\.oidc-data/u);
   assert.doesNotMatch(hub, /VIRKI_OIDC_SIGNING_JWKS|VIRKI_OIDC_COOKIE_KEY|VIRKI_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
   assert.doesNotMatch(issuer, /VIRKI_TOTP_ENCRYPTION_KEY|VIRKI_EMAIL_SMTP_PASSWORD|CLOUDFLARE_TUNNEL_TOKEN/u);
+  assert.match(bootstrap, /profiles: \["bootstrap"\]/u);
+  assert.doesNotMatch(bootstrap, /env_file:|CLOUDFLARE|VIRKI_OIDC|VIRKI_CSRF|VIRKI_TOTP|VIRKI_EMAIL|POSTGRES_PASSWORD|MIGRATION_DATABASE_URL/u);
+  assert.deepEqual(environmentKeys(bootstrap), ["DATABASE_URL", "NODE_ENV", "VIRKI_AUDIT_HASH_SECRET", "VIRKI_FIRST_INSTALL_BOOTSTRAP"].sort());
+  assert.match(bootstrap, /user: node:node/u);
+  assert.match(bootstrap, /read_only: true/u);
+  assert.match(bootstrap, /cap_drop: \[ALL\]/u);
+  assert.match(bootstrap, /DATABASE_URL:\s*\$\{DATABASE_URL:\?/u);
+  assert.match(bootstrap, /npm run bootstrap:first-admin --workspace @virki\/auth/u);
+  assert.doesNotMatch(bootstrap, /depends_on:|ports:/u);
   assert.match(issuer, /VIRKI_RATE_LIMIT_HASH_SECRET/u);
   assert.match(hub, /VIRKI_AUDIT_HASH_SECRET/u);
   assert.match(hub, /VIRKI_CSRF_SIGNING_KEY/u);
@@ -109,7 +119,7 @@ test("development Hub and issuer receive only explicitly scoped environment vari
 });
 
 test("production services use preloaded exact-revision images without remote builds or pulls", () => {
-  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup", "email-worker"]) {
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup", "email-worker", "first-admin-bootstrap"]) {
     const block = serviceBlock(productionCompose, service);
     assert.match(block, /image:\s*\$\{VIRKI_PRODUCTION_IMAGE:\?/u);
     assert.match(block, /pull_policy:\s*never/u);
@@ -185,7 +195,7 @@ test("database CLI routes schema mutations through the migrator identity", () =>
 });
 
 test("production application, maintenance, and migration services run non-root with a read-only root filesystem", () => {
-  for (const service of ["public-site", "hub", "oidc-issuer", "migrate", "session-cleanup", "email-worker"]) {
+  for (const service of ["public-site", "hub", "oidc-issuer", "migrate", "first-admin-bootstrap", "session-cleanup", "email-worker"]) {
     const block = serviceBlock(productionCompose, service);
     assert.match(block, /^\s+user:\s*node:node$/mu, service);
     assert.match(block, /^\s+read_only:\s*true$/mu, service);

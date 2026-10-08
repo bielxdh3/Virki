@@ -56,7 +56,7 @@ export function runCommand(command, args, options = {}) {
     shell: false,
     windowsHide: true,
     maxBuffer: 64 * 1024 * 1024,
-    stdio: options.input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+    stdio: options.interactive ? "inherit" : options.input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
   });
 
   if (result.error) {

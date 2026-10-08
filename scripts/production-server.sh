@@ -18,7 +18,7 @@ fail() {
 [[ "$root" =~ ^/([A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$ ]] || fail 'Production root is invalid.'
 [[ "$root" != '/' && ! "$root" =~ (^|/)\.\.?(/|$) ]] || fail 'Production root is invalid.'
 
-allowed_actions=' install-source cleanup-deploy-staging deploy start restart start-tunnel stop maintenance-on maintenance-off status ports revision health logs backup-verify migration-status audit-recent audit-cleanup sessions-cleanup config '
+allowed_actions=' install-source cleanup-deploy-staging first-install deploy stage first-admin-bootstrap start restart start-tunnel stop maintenance-on maintenance-off status ports revision health logs backup-verify migration-status audit-recent audit-cleanup sessions-cleanup config '
 [[ "$allowed_actions" == *" $action "* ]] || fail 'Production action is not allowed.'
 
 if [[ "$action" == cleanup-deploy-staging ]]; then
@@ -37,12 +37,14 @@ readonly revision_path="$root/.virki-deploy-revision"
 readonly source_state_path="$root/.virki-source-state"
 readonly verification_path="$root/.virki-migration-verification"
 readonly maintenance_path="$root/.virki-maintenance"
+readonly first_install_path="$root/.virki-first-install"
+readonly first_install_volume='virki-prod_virki_postgres_data'
 readonly migration_schema='packages/database/prisma/schema.prisma'
 readonly migration_directory='packages/database/prisma/migrations'
 readonly transition_migration_name='20260922090000_total_identity_security_rebaseline'
 readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @virki/database)
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
-readonly state_changing_actions=' install-source cleanup-deploy-staging deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
+readonly state_changing_actions=' install-source cleanup-deploy-staging first-install stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
 readonly -a legacy_transition_migrations=(
   20260624190000_initial_schema
   20260624203000_add_login_rate_limit
@@ -60,6 +62,7 @@ readonly -a legacy_transition_migrations=(
   20260805120000_add_remembered_browser_grant
 )
 state_lock_fd=
+first_install_database_started=false
 
 verify_linux_host() {
   [[ "$(uname -s)" == Linux ]] || fail 'Production SSH target is not Linux.'
@@ -235,9 +238,120 @@ assert_loopback_ports() {
     port=3000
     [[ "$service" == hub ]] && port=3001
     binding=$(compose port "$service" "$port")
-    [[ "$binding" =~ ^127\.0\.0\.1: ]] || fail "Production service $service is not loopback-bound."
+    local expected_port=${PUBLIC_SITE_PORT:-3000}
+    [[ "$service" == hub ]] && expected_port=${HUB_PORT:-3001}
+    [[ "$binding" == "127.0.0.1:$expected_port" ]] || fail "Production service $service is not bound to its expected loopback port."
     printf '%s port is loopback-bound.\n' "$service"
   done
+}
+
+verify_fresh_install_target() {
+  local path entry source_marker_present=false revision_marker_present=false
+  [[ ! -e "$current_link" && ! -L "$current_link" ]] || fail 'First install refused because a current release is already active.'
+  [[ ! -e "$first_install_path" && ! -L "$first_install_path" ]] || fail 'First install has already been initialized or its marker path is occupied.'
+  [[ ! -e "$maintenance_path" && ! -L "$maintenance_path" && ! -e "$verification_path" && ! -L "$verification_path" ]] || fail 'First install refused because production state markers already exist.'
+
+  for entry in "$release_dir"/*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    fail 'First install refused because a release already exists.'
+  done
+
+  for path in "$source_state_path" "$revision_path"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      [[ -f "$path" && ! -L "$path" ]] || fail 'First install refused because a source state marker is unsafe.'
+      [[ "$path" == "$source_state_path" ]] && source_marker_present=true
+      [[ "$path" == "$revision_path" ]] && revision_marker_present=true
+    fi
+  done
+  [[ "$source_marker_present" == "$revision_marker_present" ]] || fail 'First install refused because source state is incomplete.'
+  [[ "$source_marker_present" == false ]] || verify_revision
+
+  local backup_entry
+  backup_entry=$(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) || fail 'First install could not inspect the backup directory.'
+  [[ -z "$backup_entry" ]] || fail 'First install refused because the backup directory is not empty.'
+
+  local project_containers project_volumes project_networks
+  project_containers=$(docker ps --all --quiet --filter 'label=com.docker.compose.project=virki-prod') || fail 'First install could not inspect Virki project containers.'
+  [[ -z "$project_containers" ]] || fail 'First install refused because Virki project containers already exist.'
+  project_volumes=$(docker volume ls --filter 'name=virki-prod_virki_postgres_data' --format '{{.Name}}') || fail 'First install could not inspect the Virki PostgreSQL volume.'
+  [[ -z "$project_volumes" ]] || fail 'First install refused because the Virki PostgreSQL volume already exists.'
+  project_networks=$(docker network ls --filter 'name=virki-prod_default' --format '{{.Name}}') || fail 'First install could not inspect the Virki project network.'
+  [[ -z "$project_networks" ]] || fail 'First install refused because the Virki project network already exists.'
+}
+
+verify_first_install_marker() {
+  [[ -f "$first_install_path" && ! -L "$first_install_path" && "$(stat -c '%a' -- "$first_install_path")" == 600 && "$(stat -c '%u' -- "$first_install_path")" == "$(id -u)" ]] || fail 'Virki first-install marker is missing or unsafe.'
+  local -a lines=()
+  mapfile -t lines < "$first_install_path"
+  [[ ${#lines[@]} -eq 4 && "${lines[0]}" == "revision=$revision" && "${lines[1]}" == 'compose_project=virki-prod' && "${lines[2]}" == "database_volume=$first_install_volume" && "${lines[3]}" == 'migrations=verified' ]] || fail 'Virki first-install marker does not match the accepted source and isolated database.'
+}
+
+verify_first_install_volume() {
+  local metadata
+  metadata=$(docker volume inspect --format '{{.Name}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}' "$first_install_volume") || fail 'Virki PostgreSQL volume could not be verified.'
+  [[ "$metadata" == "$first_install_volume|virki-prod|virki_postgres_data" ]] || fail 'Virki PostgreSQL volume identity does not match the isolated project.'
+}
+
+wait_for_virki_postgres() {
+  local attempt container health output
+  for ((attempt = 0; attempt < 60; attempt += 1)); do
+    output=$(compose ps -q postgres) || fail 'Virki PostgreSQL container could not be inspected.'
+    mapfile -t containers <<< "$output"
+    if ((${#containers[@]} == 1)) && [[ -n "${containers[0]}" ]]; then
+      container=${containers[0]}
+      health=$(docker inspect --format '{{.State.Health.Status}}' "$container") || fail 'Virki PostgreSQL health state could not be inspected.'
+      [[ "$health" == healthy ]] && return 0
+      [[ "$health" != unhealthy ]] || fail 'Fresh Virki PostgreSQL did not become healthy.'
+    fi
+    sleep 2
+  done
+  fail 'Fresh Virki PostgreSQL did not become healthy within the bounded wait.'
+}
+
+verify_first_install_role_contract() {
+  local role_attributes privileges
+  role_attributes=$(database_query "SELECT CASE WHEN count(*) = 3 AND bool_and(rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit) THEN 'valid' ELSE 'invalid' END FROM pg_roles WHERE rolname IN ('virki_runtime', 'virki_migrator', 'virki_audit_maintenance')")
+  [[ "$role_attributes" == valid ]] || fail 'Fresh Virki database role attributes do not match the least-privilege contract.'
+  privileges=$(database_query "SELECT CASE WHEN has_table_privilege('virki_runtime', 'public.\"User\"', 'INSERT') AND NOT has_database_privilege('virki_runtime', current_database(), 'CREATE') AND NOT has_schema_privilege('virki_runtime', 'public', 'CREATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'UPDATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'DELETE') AND (SELECT pg_get_userbyid(relowner) = 'virki_migrator' FROM pg_class WHERE oid = 'public.\"User\"'::regclass) AND has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'DELETE') AND has_column_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'createdAt', 'SELECT') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'SELECT') THEN 'valid' ELSE 'invalid' END")
+  [[ "$privileges" == valid ]] || fail 'Fresh Virki database grants do not match the least-privilege contract.'
+}
+
+write_first_install_marker() {
+  local temporary="$first_install_path.tmp.$$"
+  [[ ! -e "$first_install_path" && ! -L "$first_install_path" && ! -e "$temporary" && ! -L "$temporary" ]] || fail 'Virki first-install marker path is already occupied.'
+  {
+    printf 'revision=%s\n' "$revision"
+    printf 'compose_project=virki-prod\n'
+    printf 'database_volume=%s\n' "$first_install_volume"
+    printf 'migrations=verified\n'
+  } > "$temporary" || fail 'Virki first-install marker could not be written.'
+  chmod 600 -- "$temporary" || fail 'Virki first-install marker permissions could not be set.'
+  ln -- "$temporary" "$first_install_path" || fail 'Virki first-install marker could not be created without overwriting existing state.'
+  rm -- "$temporary" || fail 'Temporary Virki first-install marker could not be removed.'
+  verify_first_install_marker
+}
+
+assert_staging_ports_available() {
+  local port listeners
+  for port in 13000 13001; do
+    listeners=$(ss -H -ltn "sport = :$port") || fail 'Staging listener ports could not be inspected.'
+    [[ -z "$listeners" ]] || fail 'Virki staging loopback port is already occupied.'
+  done
+}
+
+assert_tunnel_stopped() {
+  local running
+  running=$(docker ps --filter 'label=com.docker.compose.project=virki-prod' --filter 'label=com.docker.compose.service=cloudflared' --quiet) || fail 'Virki Tunnel state could not be inspected.'
+  [[ -z "$running" ]] || fail 'Virki staging requires its Cloudflare Tunnel connector to remain stopped.'
+}
+
+stop_stage_after_failure() {
+  local original_status=$1
+  trap - EXIT
+  set +e
+  compose stop "${application_services[@]}" >/dev/null 2>&1
+  printf '%s\n' 'Virki staging health check failed; only Virki application services were stopped. Database volume and Tunnel state were preserved.' >&2
+  exit "$original_status"
 }
 
 is_valid_dns_hostname() {
@@ -905,6 +1019,21 @@ cleanup_failed_deploy() {
   exit "$original_status"
 }
 
+cleanup_failed_first_install() {
+  local original_status=$1 cleanup_failed=0
+  trap - EXIT
+  set +e
+  if [[ "$first_install_database_started" == true ]]; then
+    compose stop postgres >/dev/null || cleanup_failed=1
+  fi
+  verify_cleanup_target && cleanup_deploy_staging "$revision" "$archive_id" || cleanup_failed=1
+  if ((cleanup_failed)); then
+    printf '%s\n' 'First-install failure cleanup could not be confirmed; any new Virki database volume was preserved.' >&2
+    ((original_status != 0)) || original_status=1
+  fi
+  exit "$original_status"
+}
+
 activate_source() {
   local next_link="$root/.current-$revision-$$"
   ln -s "releases/$revision" "$next_link"
@@ -918,7 +1047,9 @@ if [[ "$action" == cleanup-deploy-staging ]]; then
   printf '%s\n' 'Failed deployment transfer staging was removed.'
   exit 0
 fi
-if [[ "$action" == install-source || "$action" == deploy ]]; then
+if [[ "$action" == first-install ]]; then
+  trap 'cleanup_failed_first_install "$?"' EXIT
+elif [[ "$action" == install-source || "$action" == deploy ]]; then
   trap 'cleanup_failed_deploy "$?"' EXIT
 fi
 verify_host
@@ -928,7 +1059,8 @@ if [[ "$action" == install-source ]]; then
   exit 0
 fi
 if [[ "$state_changing_actions" == *" $action "* ]]; then acquire_state_lock; fi
-if [[ "$action" == deploy ]]; then
+if [[ "$action" == deploy || "$action" == first-install ]]; then
+  [[ "$action" != first-install ]] || verify_fresh_install_target
   load_production_images
   install_source
 fi
@@ -938,6 +1070,50 @@ export VIRKI_PRODUCTION_IMAGE="virki-production-ci:$revision"
 export VIRKI_MIGRATOR_IMAGE="virki-migrator-ci:$revision"
 
 case "$action" in
+  first-install)
+    compose config --quiet
+    [[ ! -e "$first_install_path" && ! -L "$first_install_path" ]] || fail 'First install has already been initialized.'
+    first_install_database_started=true
+    compose up --detach postgres >/dev/null || fail 'Fresh Virki PostgreSQL could not be started.'
+    wait_for_virki_postgres
+    verify_first_install_volume
+    compose --profile migration run --rm --no-deps migrate >/dev/null || fail 'Committed Virki migrations could not be applied to the new database.'
+    run_migration_status
+    verify_migration_schema '' '' '' ''
+    verify_first_install_role_contract
+    activate_source
+    write_first_install_marker
+    trap - EXIT
+    printf 'Fresh Virki database and committed migrations initialized in isolated volume %s; legacy services were not changed.\n' "$first_install_volume"
+    ;;
+  stage)
+    assert_no_maintenance
+    assert_active_source
+    verify_first_install_marker
+    verify_first_install_volume
+    assert_tunnel_stopped
+    assert_staging_ports_available
+    export PUBLIC_SITE_PORT=13000
+    export HUB_PORT=13001
+    trap 'stop_stage_after_failure "$?"' EXIT
+    compose up --detach postgres >/dev/null || fail 'Virki staging PostgreSQL could not be started.'
+    wait_for_virki_postgres
+    compose up --detach "${application_services[@]}" >/dev/null || fail 'Virki staging application services could not be started.'
+    assert_revisions
+    assert_loopback_ports
+    assert_health
+    assert_tunnel_stopped
+    trap - EXIT
+    printf 'Virki staging is healthy on private loopback ports 13000 and 13001; Cloudflare Tunnel remains stopped.\n'
+    ;;
+  first-admin-bootstrap)
+    assert_no_maintenance
+    assert_active_source
+    verify_first_install_marker
+    verify_first_install_volume
+    assert_tunnel_stopped
+    compose --profile bootstrap run --rm --no-deps --interactive --tty --env VIRKI_FIRST_INSTALL_BOOTSTRAP=enabled first-admin-bootstrap
+    ;;
   deploy)
     compose config --quiet
     maintenance_on
