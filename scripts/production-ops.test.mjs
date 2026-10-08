@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -436,7 +436,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
       const result = runFirstInstall(target);
       assert.equal(result.status, 1);
       assert.match(result.output, /backup directory is not empty/u);
-      assert.deepEqual(result.dockerCalls.map((call) => call.split(" ")[0]), ["ps", "volume", "network"]);
+      assert.deepEqual(result.dockerCalls, []);
     });
 
     for (const collision of ["container", "volume", "network"]) {
