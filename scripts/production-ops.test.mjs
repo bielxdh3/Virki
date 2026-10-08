@@ -462,6 +462,8 @@ test("Virki staging is private, bounded, loopback-only, and does not start Tunne
   assert.doesNotMatch(stage, /compose up[^\n]*cloudflared/u);
   assert.ok(serverScript.includes('"127.0.0.1:$expected_port"'));
   const stageCleanup = serverScript.slice(serverScript.indexOf("stop_stage_after_failure() {"), serverScript.indexOf("is_valid_dns_hostname() {"));
+  assert.match(stageCleanup, /compose stop "\$\{application_services\[@\]\}"/u);
+  assert.doesNotMatch(stageCleanup, /compose stop (?:postgres|cloudflared)/u);
   assert.doesNotMatch(stageCleanup, /cloudflared/u);
 });
 
