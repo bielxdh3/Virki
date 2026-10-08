@@ -14,6 +14,8 @@ const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)
 const serverScript = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
 const allowedCommands = new Set([
   "start",
+  "stage",
+  "first-admin-bootstrap",
   "restart",
   "start-tunnel",
   "stop",
@@ -47,14 +49,25 @@ export function buildRemoteSshArgs(action, revision, config = readProductionConf
   return [...SSH_OPTIONS, config.sshAlias, remoteCommand];
 }
 
+export function buildInteractiveRemoteSshArgs(action, revision, config = readProductionConfig()) {
+  if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
+  if (action !== "first-admin-bootstrap") throw new ProductionRevisionError("ARGUMENT_INVALID");
+  if (!/^[0-9a-f]{40}$/u.test(revision)) throw new ProductionRevisionError("REVISION_INVALID");
+  const remoteCommand = `bash ${config.root}/current/scripts/production-server.sh ${action} ${config.root} ${revision}`;
+  return [...SSH_OPTIONS, "-tt", config.sshAlias, remoteCommand];
+}
+
 function runRemoteAction(action, revision, execute, config) {
-  const result = execute("ssh", buildRemoteSshArgs(action, revision, config), { input: serverScript });
+  const interactive = action === "first-admin-bootstrap";
+  const result = interactive
+    ? execute("ssh", buildInteractiveRemoteSshArgs(action, revision, config), { interactive: true })
+    : execute("ssh", buildRemoteSshArgs(action, revision, config), { input: serverScript });
   return {
     status: result.status,
     lines:
-      result.status === 0
+      result.status === 0 && !interactive
         ? result.stdout.trim().split(/\r?\n/u).filter(Boolean)
-        : ["Remote production command failed."],
+        : result.status === 0 ? [] : ["Remote production command failed."],
   };
 }
 

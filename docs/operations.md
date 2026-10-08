@@ -13,7 +13,7 @@ Use `npm run dev` only when PostgreSQL and development environment values are al
 
 ## Native Linux production target
 
-The next canonical production host is native Linux over SSH. The previous host is unavailable, and the new host and existing data have not been verified. Local preparation is allowed, but production commands must wait until a native Linux host and its database identity are available. WSL is rejected by preflight and is not an accepted production target.
+Production runs on the configured native Linux host over SSH. Windows and WSL are not production targets. Keep host, root, and Cloudflare-specific settings in the ignored operator configuration; before each production operation, verify the exact accepted source, host marker, protected environment metadata, Docker state, resource isolation, and the operation's own state guards. A fresh-install operation is only for an empty Virki target and its separate database resources; it does not imply that another active installation may be stopped or replaced.
 
 The operator configuration is `.production.operator.json` (ignored by Git) or these environment variables:
 
@@ -58,6 +58,9 @@ The deploy command creates a `git archive` from that exact commit with Git repla
 | Command | Purpose |
 |---|---|
 | `npm run preflight:prod` | Verify the native Linux target, stable SSH identity, pre-provisioned marker, remote private-file metadata, Docker/Compose, disk, `flock`, and report the deManage container-name count. |
+| `npm run first-install:prod` | Initialize only a verified empty Virki project and its new PostgreSQL volume from accepted exact-SHA CI images; do not use for an existing installation. |
+| `npm run stage:prod` | Start the accepted Virki application on private loopback staging ports `13000` and `13001`, with the Tunnel connector stopped. |
+| `npm run first-admin:prod` | Prompt over a protected SSH TTY to create the first ADMIN in the verified virgin Virki database. |
 | `npm run deploy:prod` | Stage the accepted source, verify backup and migration on a restore, migrate under maintenance, then health-check the release. |
 | `npm run backup:prod` | Create a custom-format PostgreSQL backup outside releases and test the current committed migrations against its restored copy. |
 | `npm run backup:inventory -- --directory <absolute-path>` | Read-only fixture or approved-directory inventory: list retained files, report the current verification marker, and alert below 15% free space. It cannot delete files; use disposable fixtures for validation. |
