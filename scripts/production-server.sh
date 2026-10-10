@@ -1531,14 +1531,17 @@ case "$action" in
     if [[ "$recovery_phase" == database-verified ]]; then
       [[ "$recovery_database_state" == migrated-candidate ]] || fail 'First-install recovery checkpoint says migrations completed but the database is not fully migrated.'
       assert_backup_verified
-      apply_first_install_database_roles
-      verify_migrator_tcp_authentication
+    elif [[ "$recovery_database_state" == migrated-candidate ]]; then
+      assert_backup_verified
+      printf 'Recovery found migrations applied before the prior checkpoint; validating the completed database before resuming.\n'
     else
       [[ "$recovery_database_state" == empty-partial ]] || fail 'First-install recovery stopped because an earlier attempt left migrations without a verified completion checkpoint.'
       report_first_install_migrator_pre_reconcile_state
       create_first_install_recovery_backup
-      apply_first_install_database_roles
-      verify_migrator_tcp_authentication
+    fi
+    apply_first_install_database_roles
+    verify_migrator_tcp_authentication
+    if [[ "$recovery_database_state" == empty-partial ]]; then
       compose --profile migration run --rm --no-deps migrate >/dev/null || fail 'Committed Virki migrations could not be applied to the recovered database.'
     fi
     run_migration_status

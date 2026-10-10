@@ -360,6 +360,8 @@ test("partial first-install recovery is typed, exact-resource-only, and checkpoi
   assert.match(serverScript, /first_install_volume='virki-prod_virki_postgres_data'/u);
   assert.match(projectGuard, /com\.docker\.compose\.project[\s\S]*?\$first_install_volume[\s\S]*?another container uses the Virki network/u);
   assert.match(databaseGuard, /current_database\(\) <> 'virki'[\s\S]*?datname NOT IN[\s\S]*?migrated-candidate/u);
+  assert.match(recovery, /elif \[\[ "\$recovery_database_state" == migrated-candidate \]\]; then[\s\S]*?assert_backup_verified[\s\S]*?Recovery found migrations applied before the prior checkpoint/u);
+  assert.match(recovery, /apply_first_install_database_roles[\s\S]*?verify_migrator_tcp_authentication[\s\S]*?if \[\[ "\$recovery_database_state" == empty-partial \]\]; then[\s\S]*?compose --profile migration run/u);
   assert.match(recovery, /verify_empty_first_install_recovery_database[\s\S]*?report_first_install_migrator_pre_reconcile_state[\s\S]*?apply_first_install_database_roles/u);
   assert.match(recovery, /verify_first_install_recovery_has_no_application_rows[\s\S]*?write_first_install_recovery_marker database-verified/u);
   assert.match(backup, /pg_dump[^\n]*--format=custom[\s\S]*?docker network create --internal[\s\S]*?pg_restore --exit-on-error/u);
