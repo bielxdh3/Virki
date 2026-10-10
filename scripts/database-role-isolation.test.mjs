@@ -38,6 +38,7 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
   const suffix = randomBytes(6).toString("hex");
   const name = `virki-role-${kind}-${suffix}`;
   const network = `${name}-net`;
+  const dataVolume = kind === "interrupted" ? `${name}-data` : null;
   const bootstrapPassword = randomBytes(32).toString("hex");
   const runtimePassword = randomBytes(32).toString("hex");
   let migratorPassword = randomBytes(32).toString("hex");
@@ -66,7 +67,6 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     "--label", `virki.role-test.run=${testRunId}`,
     "--label", `virki.role-test.fixture=${name}`,
     "--label", "virki.role-test.kind=postgres",
-    "--tmpfs", "/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m",
     "--health-cmd", "pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_roles_test",
     "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "60",
     "--env", "POSTGRES_DB=virki_roles_test",
@@ -77,7 +77,9 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     "--env=VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD",
     "--env=VIRKI_E2E_DATABASE_PASSWORD"
   ];
-  if (kind === "fresh") {
+  if (dataVolume) args.push("--mount", `type=volume,source=${dataVolume},target=/var/lib/postgresql/data`);
+  else args.push("--tmpfs", "/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m");
+  if (kind === "fresh" || kind === "interrupted") {
     args.push(
       "--volume", `${roleSetupPath}:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro`,
       "--volume", `${e2eRoleSetupPath}:/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh:ro`
@@ -89,10 +91,10 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     );
   }
   args.push(postgresImage);
-  const roleSetupContainerPath = kind === "fresh"
+  const roleSetupContainerPath = kind === "fresh" || kind === "interrupted"
     ? "/docker-entrypoint-initdb.d/10-virki-database-roles.sh"
     : "/test/10-virki-database-roles.sh";
-  const e2eRoleSetupContainerPath = kind === "fresh"
+  const e2eRoleSetupContainerPath = kind === "fresh" || kind === "interrupted"
     ? "/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh"
     : "/test/20-virki-e2e-runtime-test-role.sh";
 
@@ -106,35 +108,52 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     ], `create ${kind} isolated PostgreSQL fixture network`);
     assert.ok(networkStart.stdout.trim(), `Could not create the ${kind} isolated PostgreSQL fixture network.`);
     assertFixtureNetwork(network, testRunId, name);
+    if (dataVolume) {
+      const volumeStart = docker([
+        "volume", "create",
+        "--label", `virki.role-test.run=${testRunId}`,
+        "--label", `virki.role-test.fixture=${name}`,
+        dataVolume
+      ], `create ${kind} isolated PostgreSQL data volume`);
+      assert.equal(volumeStart.stdout.trim(), dataVolume, "The interrupted-init fixture must create only its uniquely named data volume.");
+      assertFixtureVolume(dataVolume, testRunId, name);
+    }
 
-    const start = docker(args, `start ${kind} PostgreSQL fixture`, { env: fixtureSecrets });
+    const initialSecrets = kind === "interrupted"
+      ? { ...fixtureSecrets, VIRKI_MIGRATOR_DB_PASSWORD: priorMigratorPassword }
+      : fixtureSecrets;
+    const start = docker(args, `start ${kind} PostgreSQL fixture`, { env: initialSecrets });
     assert.equal(start.status, 0, `Could not start the ${kind} disposable PostgreSQL fixture.`);
     assertFixtureContainer(name, network, testRunId, name, "postgres");
-    assertPostgresFixtureMounts(name, kind);
+    assertPostgresFixtureMounts(name, kind, dataVolume);
     await waitForHealthy(name);
     const bootstrapUrl = connectionUrl("virki_bootstrap", bootstrapPassword);
     const migratorUrl = connectionUrl("virki_migrator", migratorPassword);
     runPsql(name, "virki_bootstrap", bootstrapPassword, "CREATE ROLE virki_connect_probe NOLOGIN;", "prepare unprivileged database connection probe");
 
     if (kind === "interrupted") {
-      const priorRoleSetup = docker([
-        "exec",
-        "--env=VIRKI_RUNTIME_DB_PASSWORD",
-        "--env=VIRKI_MIGRATOR_DB_PASSWORD",
-        "--env=VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD",
-        name,
-        "sh", roleSetupContainerPath
-      ], "persist the prior migrator credential in the disposable volume", {
-        env: { ...fixtureSecrets, VIRKI_MIGRATOR_DB_PASSWORD: priorMigratorPassword }
-      });
-      assert.equal(priorRoleSetup.status, 0, "Could not initialize the earlier disposable migrator credential.");
       assert.equal(runPsql(name, "virki_migrator", priorMigratorPassword, "SELECT current_user;", "prove the prior migrator credential authenticates over TCP").trim(), "virki_migrator");
       runPsql(name, "virki_bootstrap", bootstrapPassword, "ALTER ROLE virki_runtime NOLOGIN;", "seed an interrupted role initializer state");
-      const restart = docker(["exec", "--user", "postgres", name, "pg_ctl", "restart", "--wait", "--timeout=60"], "restart PostgreSQL with initialized PGDATA");
-      assert.equal(restart.status, 0, "Could not restart the initialized PostgreSQL fixture.");
+      assertFixtureVolume(dataVolume, testRunId, name);
+      const stopped = docker(["stop", name], "stop the initialized PostgreSQL fixture before container recreation");
+      assert.equal(stopped.stdout.trim(), name, "The initialized PostgreSQL fixture must stop by its exact name.");
+      assertFixtureContainerIdentity(name, testRunId, name, "postgres");
+      const removed = docker(["rm", name], "remove only the initialized PostgreSQL fixture container");
+      assert.equal(removed.stdout.replace(/^\//u, "").trim(), name, "The exact initialized PostgreSQL fixture container must be removed while preserving its data volume.");
+      assert.equal(docker(["ps", "--all", "--quiet", "--filter", `name=^/${name}$`], "verify PostgreSQL fixture container removal").stdout.trim(), "", "The old PostgreSQL fixture container must be absent before recreation.");
+      assertFixtureVolume(dataVolume, testRunId, name);
+      assert.equal(docker(["ps", "--all", "--quiet", "--filter", `volume=${dataVolume}`], "verify persistent test volume has no consumer before recreation").stdout.trim(), "", "The retained PostgreSQL fixture volume must have no consumer before recreation.");
+      const recreated = docker(args, "recreate PostgreSQL fixture against initialized PGDATA", { env: fixtureSecrets });
+      assert.equal(recreated.status, 0, "Could not recreate the PostgreSQL fixture against its initialized data volume.");
+      assertFixtureContainer(name, network, testRunId, name, "postgres");
+      assertPostgresFixtureMounts(name, kind, dataVolume);
       await waitForHealthy(name);
       const partialRole = runPsql(name, "virki_bootstrap", bootstrapPassword, "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'virki_runtime';", "inspect partial runtime role");
       assert.equal(partialRole.trim(), "f", "The interrupted initializer fixture must retain its deliberately incomplete role.");
+      assert.equal(runPsql(name, "virki_migrator", priorMigratorPassword, "SELECT current_user;", "verify initialized PostgreSQL did not rerun its init hook").trim(), "virki_migrator");
+      const notYetConfigured = runPsql(name, "virki_migrator", migratorPassword, "SELECT current_user;", "reject the changed configured credential before explicit reconciliation", { allowFailure: true });
+      assert.notEqual(notYetConfigured.status, 0, "Recreating a container over initialized PGDATA must not silently rerun the init hook or change the stored migrator credential.");
+      assert.match(notYetConfigured.stderr ?? "", /password authentication failed/u, "The changed configured credential must fail at PostgreSQL TCP authentication before reconciliation.");
       const repair = docker([
         "exec",
         "--env=VIRKI_RUNTIME_DB_PASSWORD",
@@ -196,8 +215,10 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
 
     runMigrationsAsMigrator(migrationRunner, network, name, testRunId, migratorUrl, "apply Prisma migrations as migrator");
     if (kind === "interrupted") {
-      const restart = docker(["exec", "--user", "postgres", name, "pg_ctl", "restart", "--wait", "--timeout=60"], "restart PostgreSQL after migration bootstrap");
-      assert.equal(restart.status, 0, "Could not restart PostgreSQL after the migrator bootstrap.");
+      const stopped = docker(["stop", name], "stop PostgreSQL after migration bootstrap");
+      assert.equal(stopped.stdout.trim(), name, "The PostgreSQL fixture must stop by its exact name after migration bootstrap.");
+      const restarted = docker(["start", name], "restart PostgreSQL after migration bootstrap");
+      assert.equal(restarted.stdout.trim(), name, "The PostgreSQL fixture must restart by its exact name after migration bootstrap.");
       await waitForHealthy(name);
       assert.equal(runPsql(name, "virki_migrator", migratorPassword, "SELECT current_user;", "verify migrator TCP login after restart").trim(), "virki_migrator");
       runMigrationStatusAsMigrator(migrationRunner, network, name, testRunId, migratorUrl, "verify migration status after PostgreSQL restart");
@@ -341,7 +362,7 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
   }
 
   try {
-    cleanupFixture(name, network, testRunId);
+    cleanupFixture(name, network, testRunId, dataVolume);
   } catch (cleanupError) {
     failure = failure
       ? new AggregateError([failure, cleanupError], "PostgreSQL role validation and fixture cleanup both failed.")
@@ -452,14 +473,26 @@ function assertFixtureContainer(name, network, testRunId, fixtureName, kind) {
   assert.equal(metadata, `||${network}|${testRunId}|${fixtureName}|${kind}`, "The fixture container must have no actual published ports and only the isolated network.");
 }
 
-function assertPostgresFixtureMounts(name, kind) {
+function assertPostgresFixtureMounts(name, kind, dataVolume = null) {
   const pgdata = docker([
     "inspect", `--format={{index .HostConfig.Tmpfs "/var/lib/postgresql/data"}}`, name
   ], "verify disposable PostgreSQL data mount").stdout.trim();
-  assert.equal(pgdata, "rw,noexec,nosuid,nodev,size=512m", "PostgreSQL fixture data must use only a disposable tmpfs.");
+  if (dataVolume) {
+    assert.equal(pgdata, "", "The persistent interrupted-init fixture must not also use tmpfs for PGDATA.");
+    const mountedVolume = docker([
+      "inspect", `--format={{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}}|{{.Name}}|{{.Destination}}{{end}}{{end}}`, name
+    ], "verify exact persistent PostgreSQL fixture volume mount").stdout.trim();
+    assert.equal(mountedVolume, `volume|${dataVolume}|/var/lib/postgresql/data`, "The interrupted-init fixture must mount only its exact named test volume at PGDATA.");
+  } else {
+    assert.equal(pgdata, "rw,noexec,nosuid,nodev,size=512m", "PostgreSQL fixture data must use only a disposable tmpfs.");
+    const mountedVolume = docker([
+      "inspect", `--format={{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}}{{end}}{{end}}`, name
+    ], "reject persistent PostgreSQL data mount on disposable fixture").stdout.trim();
+    assert.equal(mountedVolume, "", "Fresh and populated PostgreSQL fixtures must not use a persistent data volume.");
+  }
   const bindCount = docker(["inspect", "--format={{len .HostConfig.Binds}}", name], "verify PostgreSQL fixture bind count").stdout.trim();
   assert.equal(bindCount, "2", "PostgreSQL fixture may bind only the two reviewed initializer files.");
-  const destinations = kind === "fresh"
+  const destinations = kind === "fresh" || kind === "interrupted"
     ? [
       ["/docker-entrypoint-initdb.d/10-virki-database-roles.sh", roleSetupPath],
       ["/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh", e2eRoleSetupPath]
@@ -474,7 +507,7 @@ function assertPostgresFixtureMounts(name, kind) {
     assert.ok(observedSource?.replaceAll("\\", "/").toLowerCase().endsWith(suffix), "The fixture must mount the reviewed initializer from this repository.");
     assert.equal(readOnly, "false", "The fixture initializer must be mounted read-only.");
   }
-  const unexpectedDestinations = kind === "fresh"
+  const unexpectedDestinations = kind === "fresh" || kind === "interrupted"
     ? ["/test/10-virki-database-roles.sh", "/test/20-virki-e2e-runtime-test-role.sh"]
     : ["/docker-entrypoint-initdb.d/10-virki-database-roles.sh", "/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh"];
   for (const destination of unexpectedDestinations) {
@@ -485,7 +518,21 @@ function assertPostgresFixtureMounts(name, kind) {
   }
 }
 
-function cleanupFixture(name, network, testRunId) {
+function assertFixtureContainerIdentity(name, testRunId, fixtureName, kind) {
+  const identity = docker([
+    "inspect", `--format={{.Name}}|{{index .Config.Labels "virki.role-test.run"}}|{{index .Config.Labels "virki.role-test.fixture"}}|{{index .Config.Labels "virki.role-test.kind"}}`, name
+  ], "verify exact PostgreSQL fixture container identity").stdout.trim();
+  assert.equal(identity, `/${name}|${testRunId}|${fixtureName}|${kind}`, "Refusing to change a PostgreSQL fixture container with unexpected identity or labels.");
+}
+
+function assertFixtureVolume(volume, testRunId, fixtureName) {
+  const metadata = docker([
+    "volume", "inspect", `--format={{.Name}}|{{.Driver}}|{{index .Labels "virki.role-test.run"}}|{{index .Labels "virki.role-test.fixture"}}`, volume
+  ], "verify exact PostgreSQL fixture data volume").stdout.trim();
+  assert.equal(metadata, `${volume}|local|${testRunId}|${fixtureName}`, "Refusing to use a PostgreSQL data volume with unexpected name, driver, or fixture labels.");
+}
+
+function cleanupFixture(name, network, testRunId, dataVolume = null) {
   const containers = docker([
     "ps", "--all", "--quiet", "--filter", `label=virki.role-test.run=${testRunId}`,
     "--filter", `label=virki.role-test.fixture=${name}`
@@ -507,6 +554,15 @@ function cleanupFixture(name, network, testRunId) {
     "--filter", `label=virki.role-test.fixture=${name}`
   ], "verify PostgreSQL fixture container cleanup").stdout.trim();
   assert.equal(remainingContainers, "", "PostgreSQL fixture containers remain after cleanup.");
+
+  if (dataVolume) {
+    assertFixtureVolume(dataVolume, testRunId, name);
+    const volumeConsumers = docker(["ps", "--all", "--quiet", "--filter", `volume=${dataVolume}`], "verify no container consumes the exact PostgreSQL test volume").stdout.trim();
+    assert.equal(volumeConsumers, "", "Refusing to remove a PostgreSQL test volume with any container consumer.");
+    docker(["volume", "rm", dataVolume], "remove only the exact disposable PostgreSQL fixture volume");
+    const remainingVolume = docker(["volume", "ls", "--quiet", "--filter", `name=^${dataVolume}$`], "verify PostgreSQL test volume cleanup").stdout.trim();
+    assert.equal(remainingVolume, "", "The disposable PostgreSQL fixture volume remains after cleanup.");
+  }
 
   const existingNetwork = docker(["network", "ls", "--quiet", "--filter", `name=^${network}$`], "find exact PostgreSQL fixture network").stdout.trim();
   if (existingNetwork) {
