@@ -130,7 +130,7 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
       assert.equal(priorRoleSetup.status, 0, "Could not initialize the earlier disposable migrator credential.");
       assert.equal(runPsql(name, "virki_migrator", priorMigratorPassword, "SELECT current_user;", "prove the prior migrator credential authenticates over TCP").trim(), "virki_migrator");
       runPsql(name, "virki_bootstrap", bootstrapPassword, "ALTER ROLE virki_runtime NOLOGIN;", "seed an interrupted role initializer state");
-      const restart = docker(["exec", name, "pg_ctl", "restart", "--wait", "--timeout=60"], "restart PostgreSQL with initialized PGDATA");
+      const restart = docker(["exec", "--user", "postgres", name, "pg_ctl", "restart", "--wait", "--timeout=60"], "restart PostgreSQL with initialized PGDATA");
       assert.equal(restart.status, 0, "Could not restart the initialized PostgreSQL fixture.");
       await waitForHealthy(name);
       const partialRole = runPsql(name, "virki_bootstrap", bootstrapPassword, "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'virki_runtime';", "inspect partial runtime role");
@@ -196,7 +196,7 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
 
     runMigrationsAsMigrator(migrationRunner, network, name, testRunId, migratorUrl, "apply Prisma migrations as migrator");
     if (kind === "interrupted") {
-      const restart = docker(["exec", name, "pg_ctl", "restart", "--wait", "--timeout=60"], "restart PostgreSQL after migration bootstrap");
+      const restart = docker(["exec", "--user", "postgres", name, "pg_ctl", "restart", "--wait", "--timeout=60"], "restart PostgreSQL after migration bootstrap");
       assert.equal(restart.status, 0, "Could not restart PostgreSQL after the migrator bootstrap.");
       await waitForHealthy(name);
       assert.equal(runPsql(name, "virki_migrator", migratorPassword, "SELECT current_user;", "verify migrator TCP login after restart").trim(), "virki_migrator");
