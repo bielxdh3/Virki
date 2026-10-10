@@ -119,9 +119,7 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
       assertFixtureVolume(dataVolume, testRunId, name);
     }
 
-    const initialSecrets = kind === "interrupted"
-      ? { ...fixtureSecrets, VIRKI_MIGRATOR_DB_PASSWORD: priorMigratorPassword }
-      : fixtureSecrets;
+    const initialSecrets = fixtureSecrets;
     const start = docker(args, `start ${kind} PostgreSQL fixture`, { env: initialSecrets });
     assert.equal(start.status, 0, `Could not start the ${kind} disposable PostgreSQL fixture.`);
     assertFixtureContainer(name, network, testRunId, name, "postgres");
@@ -132,7 +130,20 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     runPsql(name, "virki_bootstrap", bootstrapPassword, "CREATE ROLE virki_connect_probe NOLOGIN;", "prepare unprivileged database connection probe");
 
     if (kind === "interrupted") {
+      assert.equal(runPsql(name, "virki_migrator", migratorPassword, "SELECT current_user;", "verify configured migrator credential before seeding the stale-volume fixture").trim(), "virki_migrator");
+      const seedPriorCredential = docker([
+        "exec", "--interactive", "--env=VIRKI_TEST_MIGRATOR_PASSWORD", name,
+        "psql", "--no-psqlrc", "--username", "virki_bootstrap", "--dbname", "virki_roles_test",
+        "--set", "ON_ERROR_STOP=1"
+      ], "seed a stale persisted migrator credential in the disposable fixture", {
+        env: { VIRKI_TEST_MIGRATOR_PASSWORD: priorMigratorPassword },
+        input: "\\getenv prior_migrator_password VIRKI_TEST_MIGRATOR_PASSWORD\nALTER ROLE virki_migrator PASSWORD :'prior_migrator_password';\n"
+      });
+      assert.equal(seedPriorCredential.status, 0, "Could not seed the known stale migrator credential in the disposable fixture.");
       assert.equal(runPsql(name, "virki_migrator", priorMigratorPassword, "SELECT current_user;", "prove the prior migrator credential authenticates over TCP").trim(), "virki_migrator");
+      const configuredBeforeRecreate = runPsql(name, "virki_migrator", migratorPassword, "SELECT current_user;", "reject the configured migrator credential against the known stale database credential", { allowFailure: true });
+      assert.notEqual(configuredBeforeRecreate.status, 0, "The configured migrator credential must fail against the deliberately stale persisted credential.");
+      assert.match(configuredBeforeRecreate.stderr ?? "", /password authentication failed/u, "The stale configured credential must fail at PostgreSQL TCP authentication.");
       runPsql(name, "virki_bootstrap", bootstrapPassword, "ALTER ROLE virki_runtime NOLOGIN;", "seed an interrupted role initializer state");
       assertFixtureVolume(dataVolume, testRunId, name);
       const stopped = docker(["stop", name], "stop the initialized PostgreSQL fixture before container recreation");
@@ -589,7 +600,7 @@ function removeMigrationRunner(runner, testRunId) {
   assert.notEqual(remaining.status, 0, "The disposable migration runner image remains after cleanup.");
 }
 
-function docker(args, label, { allowFailure = false, env = {}, timeout = 120_000, maxBuffer = 10 * 1024 * 1024 } = {}) {
+function docker(args, label, { allowFailure = false, env = {}, input, timeout = 120_000, maxBuffer = 10 * 1024 * 1024 } = {}) {
   for (const [key, value] of Object.entries(env)) {
     if (/(?:password|secret|token|credential|database_url)/iu.test(key) && value && args.some((argument) => argument.includes(value))) {
       throw new Error(`${label} would expose ${key} in Docker process arguments.`);
@@ -598,6 +609,7 @@ function docker(args, label, { allowFailure = false, env = {}, timeout = 120_000
   const result = spawnSync("docker", args, {
     cwd: repositoryRoot,
     env: { ...process.env, ...env },
+    input,
     encoding: "utf8",
     windowsHide: true,
     timeout,
