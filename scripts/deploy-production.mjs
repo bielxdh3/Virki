@@ -284,7 +284,7 @@ export async function deployProduction({
   preflight = runProductionPreflight,
 } = {}) {
   if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
-  if (!["install", "deploy", "first-install"].includes(action)) throw new ProductionRevisionError("ARGUMENT_INVALID");
+  if (!["install", "deploy", "first-install", "first-install-recovery"].includes(action)) throw new ProductionRevisionError("ARGUMENT_INVALID");
 
   const source = inspectSource({ repositoryRoot, execute });
   const ci = verifyCi({ revision: source.revision, execute, repositoryRoot });
@@ -299,7 +299,7 @@ export async function deployProduction({
     const preflightResult = await preflight({ execute, config });
     if (preflightResult.status !== 0) return preflightResult;
 
-    if (action === "deploy" || action === "first-install") {
+    if (action === "deploy" || action === "first-install" || action === "first-install-recovery") {
       imageArchive = await downloadProductionImages({
         runId: ci.runId,
         revision: source.revision,
@@ -330,6 +330,8 @@ export async function deployProduction({
         runRemoteScript(action, source.revision, archive.archiveHash, archiveId, imageArchive.archiveHash, archiveId, sourceCode, config, execute),
         action === "first-install"
           ? "Fresh Virki initialization stopped; any new Virki database volume was preserved and legacy services were not changed."
+          : action === "first-install-recovery"
+            ? "Partial Virki first-install recovery stopped; existing Virki database and verified backups were preserved."
           : "Remote deployment stopped. Maintenance remains active if production mutation had begun.",
       );
     } catch (error) {

@@ -26,6 +26,7 @@
     "preflight:prod": "node scripts/production-preflight.mjs",
     "deploy:prod": "node scripts/deploy-production.mjs",
     "first-install:prod": "node scripts/deploy-production.mjs first-install",
+    "first-install:recover:prod": "node scripts/deploy-production.mjs first-install-recovery",
     "stage:prod": "node scripts/production-remote.mjs stage",
     "first-admin:prod": "node scripts/production-remote.mjs first-admin-bootstrap",
     "start:prod": "node scripts/production-remote.mjs start",

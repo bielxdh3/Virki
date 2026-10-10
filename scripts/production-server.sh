@@ -18,7 +18,7 @@ fail() {
 [[ "$root" =~ ^/([A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$ ]] || fail 'Production root is invalid.'
 [[ "$root" != '/' && ! "$root" =~ (^|/)\.\.?(/|$) ]] || fail 'Production root is invalid.'
 
-allowed_actions=' install-source cleanup-deploy-staging first-install deploy stage first-admin-bootstrap start restart start-tunnel stop maintenance-on maintenance-off status ports revision health logs backup-verify migration-status audit-recent audit-cleanup sessions-cleanup config '
+allowed_actions=' install-source cleanup-deploy-staging first-install first-install-recovery deploy stage first-admin-bootstrap start restart start-tunnel stop maintenance-on maintenance-off status ports revision health logs backup-verify migration-status audit-recent audit-cleanup sessions-cleanup config '
 [[ "$allowed_actions" == *" $action "* ]] || fail 'Production action is not allowed.'
 
 if [[ "$action" == cleanup-deploy-staging ]]; then
@@ -36,6 +36,7 @@ readonly marker_path="$root/.virki-production-host"
 readonly revision_path="$root/.virki-deploy-revision"
 readonly source_state_path="$root/.virki-source-state"
 readonly verification_path="$root/.virki-migration-verification"
+readonly recovery_path="$root/.virki-first-install-recovery"
 readonly maintenance_path="$root/.virki-maintenance"
 readonly first_install_path="$root/.virki-first-install"
 readonly first_install_volume='virki-prod_virki_postgres_data'
@@ -44,7 +45,7 @@ readonly migration_directory='packages/database/prisma/migrations'
 readonly transition_migration_name='20260922090000_total_identity_security_rebaseline'
 readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @virki/database)
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
-readonly state_changing_actions=' install-source cleanup-deploy-staging first-install stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
+readonly state_changing_actions=' install-source cleanup-deploy-staging first-install first-install-recovery stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
 readonly -a legacy_transition_migrations=(
   20260624190000_initial_schema
   20260624203000_add_login_rate_limit
@@ -63,6 +64,10 @@ readonly -a legacy_transition_migrations=(
 )
 state_lock_fd=
 first_install_database_started=false
+recovery_prior_revision=
+recovery_archive_hash=
+recovery_phase=
+recovery_database_state=
 
 verify_linux_host() {
   [[ "$(uname -s)" == Linux ]] || fail 'Production SSH target is not Linux.'
@@ -279,6 +284,169 @@ verify_fresh_install_target() {
   [[ -z "$project_networks" ]] || fail 'First install refused because the Virki project network already exists.'
 }
 
+verify_first_install_recovery_project() {
+  local expected_revision=$1 alternate_revision=${2:-} container_id container_identity mounts mount_count consumers volume network members role_script alternate_role_script role_mounts_valid=false
+  local state status exit_code running health
+  local -a containers=()
+  mapfile -t containers < <(docker ps --all --no-trunc --quiet --filter 'label=com.docker.compose.project=virki-prod') || fail 'First-install recovery could not inspect Virki containers.'
+  ((${#containers[@]} == 1)) || fail 'First-install recovery requires exactly the existing Virki PostgreSQL container.'
+  container_id=${containers[0]}
+  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || fail 'First-install PostgreSQL container identity is invalid.'
+  container_identity=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.Image}}|{{.State.Status}}|{{.State.ExitCode}}|{{.State.Running}}' "$container_id") || fail 'First-install PostgreSQL container could not be inspected.'
+  [[ "$container_identity" == 'virki-prod|postgres|sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|running|0|true' || "$container_identity" == 'virki-prod|postgres|sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|exited|0|false' ]] || fail 'First-install recovery PostgreSQL identity or stopped state does not match the approved partial install.'
+  IFS='|' read -r _ _ _ status exit_code running <<< "$container_identity"
+  if [[ "$running" == true ]]; then
+    health=$(docker inspect --format '{{.State.Health.Status}}' "$container_id") || fail 'First-install PostgreSQL health could not be inspected.'
+    [[ "$status" == running && "$health" == healthy ]] || fail 'First-install recovery requires its running PostgreSQL container to be healthy.'
+  else
+    [[ "$status" == exited && "$exit_code" == 0 ]] || fail 'First-install recovery only accepts its cleanly stopped PostgreSQL container.'
+  fi
+
+  mount_count=$(docker inspect --format '{{len .Mounts}}' "$container_id") || fail 'First-install PostgreSQL mount count could not be inspected.'
+  [[ "$mount_count" == 2 ]] || fail 'First-install recovery refused because the PostgreSQL container has an unexpected mount.'
+  mounts=$(docker inspect --format '{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Source}}|{{.Destination}}|{{.RW}};{{end}}' "$container_id") || fail 'First-install PostgreSQL mounts could not be inspected.'
+  role_script="$release_dir/$expected_revision/infra/postgres-init/10-virki-database-roles.sh"
+  [[ "$mounts" == *"bind||$role_script|/docker-entrypoint-initdb.d/10-virki-database-roles.sh|false;"* ]] && role_mounts_valid=true
+  if [[ -n "$alternate_revision" ]]; then
+    alternate_role_script="$release_dir/$alternate_revision/infra/postgres-init/10-virki-database-roles.sh"
+    [[ "$mounts" == *"bind||$alternate_role_script|/docker-entrypoint-initdb.d/10-virki-database-roles.sh|false;"* ]] && role_mounts_valid=true
+  fi
+  [[ "$role_mounts_valid" == true && "$mounts" == *"volume|$first_install_volume|/var/lib/docker/volumes/$first_install_volume/_data|/var/lib/postgresql/data|true;"* ]] || fail 'First-install recovery PostgreSQL mounts do not match the exact Virki release and database volume.'
+  consumers=$(docker ps --all --no-trunc --quiet --filter "volume=$first_install_volume") || fail 'First-install PostgreSQL volume consumers could not be inspected.'
+  [[ "$consumers" == "$container_id" ]] || fail 'First-install recovery refused because another container uses the PostgreSQL volume.'
+
+  volume=$(docker volume inspect --format '{{.Name}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}' "$first_install_volume") || fail 'First-install PostgreSQL volume could not be inspected.'
+  [[ "$volume" == "$first_install_volume|virki-prod|virki_postgres_data" ]] || fail 'First-install PostgreSQL volume labels do not match the isolated Virki project.'
+  network=$(docker network inspect --format '{{.Name}}|{{index .Labels "com.docker.compose.project"}}' virki-prod_default) || fail 'First-install Virki network could not be inspected.'
+  [[ "$network" == 'virki-prod_default|virki-prod' ]] || fail 'First-install Virki network labels do not match the isolated project.'
+  members=$(docker network inspect --format '{{range .Containers}}{{.Name}}|{{end}}' virki-prod_default) || fail 'First-install Virki network members could not be inspected.'
+  if [[ "$running" == true ]]; then
+    [[ "$members" == 'virki-prod-postgres-1|' ]] || fail 'First-install recovery refused because another container uses the Virki network.'
+  else
+    [[ -z "$members" || "$members" == 'virki-prod-postgres-1|' ]] || fail 'First-install recovery refused because another container uses the Virki network.'
+  fi
+}
+
+verify_first_install_recovery_release() {
+  local release_revision=$1 expected_hash=$2 release_marker="$release_dir/$release_revision/.virki-release"
+  [[ -d "$release_dir/$release_revision" && ! -L "$release_dir/$release_revision" ]] || fail 'First-install recovery release is missing or unsafe.'
+  [[ -f "$release_marker" && ! -L "$release_marker" && "$(stat -c '%a' -- "$release_marker")" == 600 && "$(stat -c '%u' -- "$release_marker")" == "$(id -u)" && "$(wc -l < "$release_marker")" -eq 2 ]] || fail 'First-install recovery release marker is missing or unsafe.'
+  grep -Fxq "revision=$release_revision" "$release_marker" && grep -Fxq "archive_sha256=$expected_hash" "$release_marker" || fail 'First-install recovery release marker does not match its source state.'
+  [[ -L "$release_dir/$release_revision/.env" && "$(readlink -- "$release_dir/$release_revision/.env")" == "$root/.env" ]] || fail 'First-install recovery release does not use the protected production environment.'
+  [[ -L "$release_dir/$release_revision/.env.oidc" && "$(readlink -- "$release_dir/$release_revision/.env.oidc")" == "$root/.env.oidc" ]] || fail 'First-install recovery release does not use the protected OIDC environment.'
+  [[ -L "$release_dir/$release_revision/.env.oidc-data" && "$(readlink -- "$release_dir/$release_revision/.env.oidc-data")" == "$root/.env.oidc-data" ]] || fail 'First-install recovery release does not use the protected OIDC data-key file.'
+}
+
+write_first_install_recovery_marker() {
+  local phase=$1 marker_tmp="$recovery_path.tmp.$$"
+  [[ "$phase" == prepared || "$phase" == database-verified ]] || fail 'First-install recovery checkpoint phase is invalid.'
+  [[ "$recovery_prior_revision" =~ ^[0-9a-f]{40}$ && "$revision" =~ ^[0-9a-f]{40}$ && "$recovery_archive_hash" =~ ^[0-9a-f]{64}$ ]] || fail 'First-install recovery checkpoint identity is invalid.'
+  if [[ -e "$recovery_path" || -L "$recovery_path" ]]; then
+    [[ -f "$recovery_path" && ! -L "$recovery_path" && "$(stat -c '%a' -- "$recovery_path")" == 600 && "$(stat -c '%u' -- "$recovery_path")" == "$(id -u)" ]] || fail 'First-install recovery checkpoint is unsafe.'
+  fi
+  [[ ! -e "$marker_tmp" && ! -L "$marker_tmp" ]] || fail 'First-install recovery checkpoint temporary path is already occupied.'
+  {
+    printf 'prior_revision=%s\n' "$recovery_prior_revision"
+    printf 'revision=%s\n' "$revision"
+    printf 'archive_sha256=%s\n' "$recovery_archive_hash"
+    printf 'phase=%s\n' "$phase"
+  } > "$marker_tmp"
+  chmod 600 -- "$marker_tmp"
+  mv -fT -- "$marker_tmp" "$recovery_path" || fail 'First-install recovery checkpoint could not be updated atomically.'
+}
+
+verify_first_install_recovery_target() {
+  local path= entry= source_revision= source_hash= state_hash= prior_hash= prior_release_marker= current_target= accepted_release_present=false progress_present=false
+  local -a releases=() root_entries=() checkpoint_lines=()
+  [[ ! -e "$first_install_path" && ! -L "$first_install_path" ]] || fail 'First-install recovery refused because its completion marker already exists.'
+  [[ ! -e "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'First-install recovery refused because maintenance is active.'
+  if [[ -e "$verification_path" || -L "$verification_path" ]]; then assert_backup_verified; fi
+  [[ -f "$source_state_path" && ! -L "$source_state_path" && -f "$revision_path" && ! -L "$revision_path" ]] || fail 'First-install recovery requires the exact retained partial-install source markers.'
+  [[ "$(stat -c '%a' -- "$source_state_path")" == 600 && "$(stat -c '%a' -- "$revision_path")" == 600 && "$(stat -c '%u' -- "$source_state_path")" == "$(id -u)" && "$(stat -c '%u' -- "$revision_path")" == "$(id -u)" ]] || fail 'First-install recovery source marker permissions are unsafe.'
+  source_revision=$(cat -- "$revision_path")
+  if [[ -e "$recovery_path" || -L "$recovery_path" ]]; then
+    [[ -f "$recovery_path" && ! -L "$recovery_path" && "$(stat -c '%a' -- "$recovery_path")" == 600 && "$(stat -c '%u' -- "$recovery_path")" == "$(id -u)" && "$(wc -l < "$recovery_path")" -eq 4 ]] || fail 'First-install recovery checkpoint is missing or unsafe.'
+    mapfile -t checkpoint_lines < "$recovery_path"
+    [[ "${checkpoint_lines[0]}" =~ ^prior_revision=([0-9a-f]{40})$ ]] || fail 'First-install recovery checkpoint has an invalid predecessor revision.'
+    recovery_prior_revision=${BASH_REMATCH[1]}
+    [[ "${checkpoint_lines[1]}" == "revision=$revision" && "${checkpoint_lines[2]}" =~ ^archive_sha256=([0-9a-f]{64})$ ]] || fail 'First-install recovery checkpoint does not match the accepted recovery source.'
+    recovery_archive_hash=${BASH_REMATCH[1]}
+    [[ "${checkpoint_lines[3]}" =~ ^phase=(prepared|database-verified)$ ]] || fail 'First-install recovery checkpoint phase is invalid.'
+    recovery_phase=${BASH_REMATCH[1]}
+    progress_present=true
+  else
+    recovery_prior_revision=$source_revision
+    recovery_archive_hash=$archive_hash
+    recovery_phase=prepared
+    [[ "$recovery_archive_hash" =~ ^[0-9a-f]{64}$ ]] || fail 'First-install recovery source archive identity is invalid.'
+  fi
+  [[ "$recovery_prior_revision" =~ ^[0-9a-f]{40}$ && "$recovery_prior_revision" != "$revision" ]] || fail 'First-install recovery source revision is invalid or already matches the requested revision.'
+  [[ "$source_revision" == "$recovery_prior_revision" || "$source_revision" == "$revision" ]] || fail 'First-install recovery source markers do not match the recorded transaction.'
+  [[ "$(wc -l < "$source_state_path")" -eq 6 ]] || fail 'First-install recovery source marker has an unexpected shape.'
+  grep -Fxq 'source=verified-archive' "$source_state_path" && grep -Fxq 'branch=main' "$source_state_path" && grep -Fxq 'clean=true' "$source_state_path" && grep -Fxq 'ci=success' "$source_state_path" || fail 'First-install recovery source marker does not identify an accepted source.'
+  if [[ "$source_revision" == "$recovery_prior_revision" ]]; then
+    grep -Fxq "revision=$recovery_prior_revision" "$source_state_path" || fail 'First-install recovery predecessor source marker is inconsistent.'
+    state_hash=$(awk -F= '$1 == "archive_sha256" { print substr($0, index($0, "=") + 1) }' "$source_state_path")
+    [[ "$state_hash" =~ ^[0-9a-f]{64}$ ]] || fail 'First-install recovery predecessor source archive marker is invalid.'
+  else
+    grep -Fxq "revision=$revision" "$source_state_path" || fail 'First-install recovery accepted source marker is inconsistent.'
+    source_hash=$(awk -F= '$1 == "archive_sha256" { print substr($0, index($0, "=") + 1) }' "$source_state_path")
+    [[ "$source_hash" == "$recovery_archive_hash" ]] || fail 'First-install recovery accepted archive marker differs from its checkpoint.'
+  fi
+  prior_release_marker="$release_dir/$recovery_prior_revision/.virki-release"
+  [[ -f "$prior_release_marker" && ! -L "$prior_release_marker" ]] || fail 'First-install recovery predecessor release marker is missing or unsafe.'
+  prior_hash=$(awk -F= '$1 == "archive_sha256" { print substr($0, index($0, "=") + 1) }' "$prior_release_marker")
+  [[ "$prior_hash" =~ ^[0-9a-f]{64}$ ]] || fail 'First-install recovery predecessor archive marker is invalid.'
+  verify_first_install_recovery_release "$recovery_prior_revision" "$prior_hash"
+  [[ "$source_revision" != "$recovery_prior_revision" || "$state_hash" == "$prior_hash" ]] || fail 'First-install recovery predecessor source and release markers differ.'
+  if [[ -d "$release_dir/$revision" || -L "$release_dir/$revision" ]]; then
+    verify_first_install_recovery_release "$revision" "$recovery_archive_hash"
+    accepted_release_present=true
+  fi
+  [[ "$source_revision" != "$revision" || "$accepted_release_present" == true ]] || fail 'First-install recovery accepted release is missing.'
+  if [[ -e "$current_link" || -L "$current_link" ]]; then
+    [[ "$progress_present" == true && -L "$current_link" && "$accepted_release_present" == true ]] || fail 'First-install recovery refused because a current release is active.'
+    current_target=$(readlink -f -- "$current_link") || fail 'First-install recovery current release link is invalid.'
+    [[ "$current_target" == "$release_dir/$revision" ]] || fail 'First-install recovery current release does not match its checkpoint.'
+  fi
+  mapfile -t releases < <(find "$release_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n') || fail 'First-install recovery release inventory failed.'
+  if [[ "$accepted_release_present" == true ]]; then
+    [[ ${#releases[@]} -eq 2 && " ${releases[*]} " == *" $recovery_prior_revision "* && " ${releases[*]} " == *" $revision "* ]] || fail 'First-install recovery refused because the release directory contains unexpected entries.'
+  else
+    [[ ${#releases[@]} -eq 1 && "${releases[0]}" == "$recovery_prior_revision" ]] || fail 'First-install recovery refused because the release directory contains unexpected entries.'
+  fi
+  entry=$(find "$release_dir" -mindepth 1 -maxdepth 1 ! -type d -print -quit) || fail 'First-install recovery release inventory failed.'
+  [[ -z "$entry" ]] || fail 'First-install recovery refused because the release directory contains a non-directory entry.'
+  mapfile -t root_entries < <(find "$root" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n') || fail 'First-install recovery production-root inventory failed.'
+  for entry in "${root_entries[@]}"; do
+    case "$entry" in
+      backups|releases|.deploy-tmp) ;;
+      current)
+        [[ "$progress_present" == true && "$accepted_release_present" == true ]] || fail 'First-install recovery refused because a current release exists without a verified checkpoint.'
+        ;;
+      *) fail 'First-install recovery refused because the production root contains an unexpected entry.' ;;
+    esac
+  done
+
+  for path in "$root"/.[!.]*; do
+    [[ -e "$path" || -L "$path" ]] || continue
+    case "${path##*/}" in
+      .env|.env.oidc|.env.oidc-data|.virki-production-host|.virki-deploy-revision|.virki-source-state|.virki-migration-verification|.virki-first-install-recovery|.virki-operations.lock|.deploy-tmp) ;;
+      .env.pre-external-reuse.*)
+        [[ -f "$path" && ! -L "$path" && "$(stat -c '%a' -- "$path")" == 600 && "$(stat -c '%u' -- "$path")" == "$(id -u)" ]] || fail 'First-install recovery found an unsafe protected backup file.'
+        ;;
+      *) fail 'First-install recovery refused because the production root contains an unexpected hidden entry.' ;;
+    esac
+  done
+  verify_first_install_recovery_project "$recovery_prior_revision" "$revision"
+  if [[ "$progress_present" == false ]]; then
+    verify_source_archive
+    verify_image_archive
+    write_first_install_recovery_marker prepared
+  fi
+  printf 'Verified the exact retained partial first-install target and its exclusive Virki PostgreSQL resources.\n'
+}
+
 verify_first_install_marker() {
   [[ -f "$first_install_path" && ! -L "$first_install_path" && "$(stat -c '%a' -- "$first_install_path")" == 600 && "$(stat -c '%u' -- "$first_install_path")" == "$(id -u)" ]] || fail 'Virki first-install marker is missing or unsafe.'
   local -a lines=()
@@ -299,9 +467,9 @@ wait_for_virki_postgres() {
     mapfile -t containers <<< "$output"
     if ((${#containers[@]} == 1)) && [[ -n "${containers[0]}" ]]; then
       container=${containers[0]}
-      health=$(docker inspect --format '{{.State.Health.Status}}' "$container") || fail 'Virki PostgreSQL health state could not be inspected.'
-      [[ "$health" == healthy ]] && return 0
-      [[ "$health" != unhealthy ]] || fail 'Fresh Virki PostgreSQL did not become healthy.'
+      health=$(docker inspect --format '{{.State.Running}}|{{.State.Status}}|{{.State.Health.Status}}' "$container") || fail 'Virki PostgreSQL health state could not be inspected.'
+      [[ "$health" == 'true|running|healthy' ]] && return 0
+      [[ "$health" != *'|unhealthy' ]] || fail 'Fresh Virki PostgreSQL did not become healthy.'
     fi
     sleep 2
   done
@@ -309,11 +477,86 @@ wait_for_virki_postgres() {
 }
 
 verify_first_install_role_contract() {
-  local role_attributes privileges
-  role_attributes=$(database_query "SELECT CASE WHEN count(*) = 3 AND bool_and(rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit) THEN 'valid' ELSE 'invalid' END FROM pg_roles WHERE rolname IN ('virki_runtime', 'virki_migrator', 'virki_audit_maintenance')")
+  local container=${1:-} role_attributes privileges sql
+  sql="SELECT CASE WHEN count(*) = 3 AND bool_and(rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit) THEN 'valid' ELSE 'invalid' END FROM pg_roles WHERE rolname IN ('virki_runtime', 'virki_migrator', 'virki_audit_maintenance')"
+  role_attributes=$(if [[ -n "$container" ]]; then clone_query "$container" "$sql"; else database_query "$sql"; fi)
   [[ "$role_attributes" == valid ]] || fail 'Fresh Virki database role attributes do not match the least-privilege contract.'
-  privileges=$(database_query "SELECT CASE WHEN has_table_privilege('virki_runtime', 'public.\"User\"', 'INSERT') AND NOT has_database_privilege('virki_runtime', current_database(), 'CREATE') AND NOT has_schema_privilege('virki_runtime', 'public', 'CREATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'UPDATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'DELETE') AND (SELECT pg_get_userbyid(relowner) = 'virki_migrator' FROM pg_class WHERE oid = 'public.\"User\"'::regclass) AND has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'DELETE') AND has_column_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'createdAt', 'SELECT') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'SELECT') THEN 'valid' ELSE 'invalid' END")
+  sql="SELECT CASE WHEN has_table_privilege('virki_runtime', 'public.\"User\"', 'INSERT') AND NOT has_database_privilege('virki_runtime', current_database(), 'CREATE') AND NOT has_schema_privilege('virki_runtime', 'public', 'CREATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'UPDATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'DELETE') AND (SELECT pg_get_userbyid(relowner) = 'virki_migrator' FROM pg_class WHERE oid = 'public.\"User\"'::regclass) AND has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'DELETE') AND has_column_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'createdAt', 'SELECT') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'SELECT') THEN 'valid' ELSE 'invalid' END"
+  privileges=$(if [[ -n "$container" ]]; then clone_query "$container" "$sql"; else database_query "$sql"; fi)
   [[ "$privileges" == valid ]] || fail 'Fresh Virki database grants do not match the least-privilege contract.'
+}
+
+apply_first_install_database_roles() {
+  local role_script="$source_dir/infra/postgres-init/10-virki-database-roles.sh"
+  [[ -f "$role_script" && ! -L "$role_script" && "$(stat -c '%a' -- "$role_script")" == 644 ]] || fail 'Accepted Virki PostgreSQL role initializer is missing or unsafe.'
+  compose exec -T postgres sh -s < "$role_script" >/dev/null 2>&1 || fail 'Virki database role initialization could not be applied to the accepted PostgreSQL cluster.'
+}
+
+verify_migrator_tcp_authentication() {
+  local result
+  result=$(migrator_network_authentication_result) || fail 'Virki migrator network authentication probe could not be run safely.'
+  [[ "$result" == AUTH=PASS ]] || fail 'Virki migrator could not authenticate to PostgreSQL over the isolated Docker network.'
+  printf 'Virki migrator authenticated over the isolated Docker network with the configured database credential.\n'
+}
+
+migrator_network_authentication_result() {
+  local result probe
+  probe=$(cat <<'JS'
+let client;
+function classify(error) {
+  const message = String(error?.message ?? "").toLowerCase();
+  if (error?.code === "P1000" || /password authentication failed|authentication failed|invalid credentials/u.test(message)) return "CREDENTIALS_REJECTED";
+  if (error?.code === "P1010" || /no pg_hba\.conf entry/u.test(message)) return "ACCESS_RULE_REJECTED";
+  if (error?.code === "P1001" || /econnrefused|connection refused|timed out|connect timeout/u.test(message)) return "TCP_UNAVAILABLE";
+  return "UNCLASSIFIED";
+}
+try {
+  const url = new URL(process.env.MIGRATION_DATABASE_URL);
+  if (url.protocol !== "postgresql:" || url.username !== "virki_migrator" || url.hostname !== "postgres" || url.port !== "5432" || url.pathname !== "/virki") {
+    process.stdout.write("AUTH=FAIL:TARGET_MISMATCH");
+  } else {
+    const { PrismaClient } = await import("@prisma/client");
+    client = new PrismaClient({ datasources: { db: { url: process.env.MIGRATION_DATABASE_URL } }, log: [] });
+    const rows = await client.$queryRaw`SELECT current_user AS role, current_database() AS database`;
+    process.stdout.write(rows.length === 1 && rows[0].role === "virki_migrator" && rows[0].database === "virki" ? "AUTH=PASS" : "AUTH=WRONG_ROLE");
+  }
+} catch (error) {
+  process.stdout.write(`AUTH=FAIL:${classify(error)}`);
+} finally {
+  if (client) await client.$disconnect().catch(() => {});
+}
+JS
+)
+  result=$(compose --profile migration run --rm --no-deps --entrypoint node migrate --input-type=module -e "$probe" 2>/dev/null) || fail 'Virki migrator network authentication probe could not be run safely.'
+  [[ "$result" == AUTH=PASS || "$result" == AUTH=WRONG_ROLE || "$result" =~ ^AUTH=FAIL:(TARGET_MISMATCH|CREDENTIALS_REJECTED|ACCESS_RULE_REJECTED|TCP_UNAVAILABLE|UNCLASSIFIED)$ ]] || fail 'Virki migrator network authentication probe returned an unexpected status.'
+  printf '%s\n' "$result"
+}
+
+report_first_install_migrator_pre_reconcile_state() {
+  local result role_state
+  result=$(migrator_network_authentication_result) || fail 'Pre-recovery migrator authentication state could not be classified safely.'
+  if [[ "$result" == AUTH=PASS ]]; then
+    printf 'Pre-recovery migrator diagnosis: configured credentials already authenticated over the Docker network.\n'
+    return 0
+  fi
+  role_state=$(database_query "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_migrator') THEN 'role-absent' WHEN NOT (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'virki_migrator') THEN 'role-no-login' WHEN NOT (SELECT rolpassword IS NOT NULL FROM pg_authid WHERE rolname = 'virki_migrator') THEN 'role-without-password' ELSE 'login-role-has-persisted-credential' END")
+  case "$result|$role_state" in
+    AUTH=FAIL:CREDENTIALS_REJECTED\|login-role-has-persisted-credential)
+      printf 'Pre-recovery migrator diagnosis: configured credential was rejected by PostgreSQL for an existing LOGIN role; the persisted role credential differed from the configured connection credential.\n'
+      ;;
+    AUTH=FAIL:CREDENTIALS_REJECTED\|role-no-login)
+      printf 'Pre-recovery migrator diagnosis: the persisted virki_migrator role did not allow LOGIN.\n'
+      ;;
+    AUTH=FAIL:CREDENTIALS_REJECTED\|role-absent)
+      printf 'Pre-recovery migrator diagnosis: the persisted virki_migrator role was absent.\n'
+      ;;
+    AUTH=FAIL:CREDENTIALS_REJECTED\|role-without-password)
+      printf 'Pre-recovery migrator diagnosis: the persisted virki_migrator role had no password credential.\n'
+      ;;
+    *)
+      printf 'Pre-recovery migrator diagnosis: network authentication failed with a non-credential status; role metadata=%s.\n' "$role_state"
+      ;;
+  esac
 }
 
 write_first_install_marker() {
@@ -360,7 +603,9 @@ is_valid_dns_hostname() {
 }
 
 assert_health() {
-  local public_status hub_status discovery access_status public_binding hub_binding portal_hostname hub_hostname oidc_issuer
+  local public_response hub_response discovery_response access_response
+  local public_status hub_status discovery_status access_status
+  local public_binding hub_binding portal_hostname hub_hostname oidc_issuer
   public_binding=$(compose port public-site 3000)
   hub_binding=$(compose port hub 3001)
   [[ "$public_binding" =~ ^127\.0\.0\.1:[0-9]+$ && "$hub_binding" =~ ^127\.0\.0\.1:[0-9]+$ ]] || fail 'Production application port binding is not loopback-only.'
@@ -368,18 +613,87 @@ assert_health() {
   hub_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_HOSTNAME ?? "")') || fail 'Configured Hub host could not be read.'
   oidc_issuer=$(compose exec -T oidc-issuer node -e 'process.stdout.write(process.env.VIRKI_OIDC_ISSUER ?? "")') || fail 'Configured OIDC issuer could not be read.'
   is_valid_dns_hostname "$portal_hostname" && is_valid_dns_hostname "$hub_hostname" && [[ "$oidc_issuer" == "https://$portal_hostname" ]] || fail 'Configured application hosts or OIDC issuer are invalid.'
-  public_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://$public_binding") || fail 'Public site health request failed.'
-  hub_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://$hub_binding/api/health") || fail 'Hub health request failed.'
-  discovery=$(curl --silent --show-error --max-time 10 --header "Host: $portal_hostname" "http://$hub_binding/.well-known/openid-configuration") || fail 'Portal OIDC discovery request failed.'
-  access_status=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' --header "Host: $hub_hostname" "http://$hub_binding/admin/accounts") || fail 'Hub Access boundary request failed.'
+  public_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' "http://$public_binding") || fail 'Public site health request failed.'
+  hub_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' --header "Host: $hub_hostname" "http://$hub_binding/api/health") || fail 'Hub health request failed.'
+  discovery_response=$(curl --silent --show-error --max-time 10 --dump-header - --write-out $'\nVIRKI_STATUS:%{http_code}' --header "Host: $portal_hostname" "http://$hub_binding/.well-known/openid-configuration") || fail 'Portal OIDC discovery request failed.'
+  access_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' --header "Host: $hub_hostname" --header 'cf-access-jwt-assertion: forged-staging-probe' "http://$hub_binding/admin/accounts") || fail 'Hub Access boundary request failed.'
+  public_status=${public_response##*$'\nVIRKI_STATUS:'}
+  hub_status=${hub_response##*$'\nVIRKI_STATUS:'}
+  discovery_status=${discovery_response##*$'\nVIRKI_STATUS:'}
+  access_status=${access_response##*$'\nVIRKI_STATUS:'}
   [[ "$public_status" == 200 && "$hub_status" == 200 && "$access_status" == 403 ]] || fail 'Production health or ADMIN boundary check failed.'
-  [[ "$discovery" == *"\"issuer\":\"$oidc_issuer\""* && "$discovery" == *'"S256"'* && "$discovery" == *'"code"'* ]] || fail 'Portal discovery profile does not match the expected OIDC issuer.'
-  printf 'Public site, hub health, portal OIDC discovery, and unauthenticated Hub denial are healthy.\n'
+  [[ "$discovery_status" == 200 ]] || fail 'Portal OIDC discovery request returned an unexpected status.'
+  [[ "$discovery_response" == *"\"issuer\":\"$oidc_issuer\""* && "$discovery_response" == *'"S256"'* && "$discovery_response" == *'"code"'* ]] || fail 'Portal discovery profile does not match the expected OIDC issuer.'
+  assert_production_response_headers "$public_response" 'no-referrer'
+  assert_production_response_headers "$hub_response" 'strict-origin'
+  assert_production_response_headers "$discovery_response" 'strict-origin'
+  assert_production_response_headers "$access_response" 'strict-origin'
+  printf 'Public site, Hub health, portal OIDC discovery, security headers, cookie boundary, and unauthenticated ADMIN denial are healthy.\n'
+}
+
+assert_production_response_headers() {
+  local response=$1 expected_referrer=$2 headers
+  headers=${response%$'\nVIRKI_STATUS:'*}
+  awk -F: -v expected_referrer="$expected_referrer" '
+    {
+      key = tolower($1)
+      value = substr($0, index($0, ":") + 1)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/\r$/, "", value)
+      if (key == "content-security-policy") { csp = value; csp_count++ }
+      else if (key == "permissions-policy") { permissions = value; permissions_count++ }
+      else if (key == "referrer-policy") { referrer = value; referrer_count++ }
+      else if (key == "strict-transport-security") { hsts = value; hsts_count++ }
+      else if (key == "x-content-type-options") { nosniff = value; nosniff_count++ }
+      else if (key == "x-frame-options") { frame = value; frame_count++ }
+    }
+    END {
+      exit !(csp == "frame-ancestors '\''none'\''" && csp_count == 1 &&
+        permissions == "camera=(), geolocation=(), microphone=()" && permissions_count == 1 &&
+        referrer == expected_referrer && referrer_count == 1 &&
+        hsts == "max-age=31536000" && hsts_count == 1 &&
+        nosniff == "nosniff" && nosniff_count == 1 && frame == "DENY" && frame_count == 1)
+    }
+  ' <<< "$headers" || fail 'Virki staging response security headers are missing, duplicated, or invalid.'
+  ! grep -Eiq '^set-cookie[[:space:]]*:' <<< "$headers" || fail 'Unauthenticated Virki staging response unexpectedly set a cookie.'
 }
 
 database_query() {
   local sql=$1
   compose exec -T postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -v ON_ERROR_STOP=1' <<< "$sql"
+}
+
+verify_empty_first_install_recovery_database() {
+  local state
+  state=$(database_query "SELECT CASE WHEN current_database() <> 'virki' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_bootstrap' AND rolsuper AND rolcreatedb AND rolcreaterole) OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname !~ '^pg_' AND rolname NOT IN ('postgres', 'virki_bootstrap', 'virki_runtime', 'virki_migrator', 'virki_audit_maintenance')) OR EXISTS (SELECT 1 FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'postgres', 'virki')) OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'public') AND nspname NOT LIKE 'pg_toast%') OR EXISTS (SELECT 1 FROM pg_extension WHERE extname NOT IN ('plpgsql', 'pgcrypto')) THEN 'unexpected-state' WHEN NOT EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) AND NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql') THEN 'empty-partial' WHEN EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relname = '_prisma_migrations' AND relation.relkind = 'r') THEN 'migrated-candidate' ELSE 'unexpected-state' END")
+  case "$state" in
+    empty-partial|migrated-candidate) recovery_database_state=$state ;;
+    *) fail 'First-install recovery refused because the Virki database contains an unknown or partially migrated state.' ;;
+  esac
+  if [[ "$state" == empty-partial ]]; then printf 'Verified the partial Virki database contains no application schema or user data.\n'; fi
+}
+
+verify_first_install_recovery_has_no_application_rows() {
+  local sql
+  sql=$(cat <<'SQL'
+DO $$
+DECLARE candidate record; contains_rows boolean;
+BEGIN
+  FOR candidate IN
+    SELECT tablename FROM pg_tables
+    WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
+  LOOP
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I.%I LIMIT 1)', 'public', candidate.tablename)
+      INTO contains_rows;
+    IF contains_rows THEN
+      RAISE EXCEPTION 'First-install recovery found application rows; manual review is required.';
+    END IF;
+  END LOOP;
+END
+$$;
+SQL
+)
+  database_query "$sql" >/dev/null || fail 'First-install recovery refused because the migrated Virki database contains application rows.'
 }
 
 clone_query() {
@@ -834,8 +1148,124 @@ create_verified_backup() {
   printf 'Remote production backup restored and all committed migrations validated outside the source tree.\n'
 }
 
+run_first_install_recovery_clone_migrations() {
+  local database_url=$1 override=$2 migration_container=$3 isolation_id=$4 database_container=$5
+  local -x MIGRATION_DATABASE_URL="$database_url"
+  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "virki.restore.operation=$isolation_id" migrate >/dev/null || fail 'Committed migrations failed against the restored partial-install backup.'
+  compose_with_override "$override" --profile migration run --rm --no-deps --name "$migration_container" --label "virki.restore.operation=$isolation_id" migrate npm run prisma:migrate:status --workspace @virki/database >/dev/null || fail 'Restored partial-install migration status could not be verified.'
+  verify_migration_schema "$database_url" "$override" "$migration_container" "$isolation_id"
+  verify_first_install_role_contract "$database_container"
+}
+
+cleanup_first_install_recovery_fixture() {
+  local original_status=$1 isolation_id=$2 override=$3 cleanup_failed=0
+  trap - EXIT
+  set +e
+  cleanup_clone "$isolation_id" "$override" || cleanup_failed=1
+  verify_clone_cleanup "$isolation_id" "$override" || cleanup_failed=1
+  if ((cleanup_failed)); then
+    printf '%s\n' 'First-install recovery could not confirm cleanup of its exact disposable restore fixture; the database backup was preserved.' >&2
+    ((original_status != 0)) || original_status=1
+  fi
+  exit "$original_status"
+}
+
+create_first_install_recovery_backup() {
+  local stamp isolation_id backup_path partial_backup_path container db_network alias database_url override migration_container
+  local bootstrap_password runtime_password migrator_password audit_maintenance_password backup_hash verified_at verification_tmp
+  if [[ -e "$verification_path" || -L "$verification_path" ]]; then
+    assert_backup_verified
+    printf 'Reusing the verified partial-install backup for the accepted recovery source.\n'
+    return 0
+  fi
+  stamp="$(date -u +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  isolation_id=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
+  [[ "$isolation_id" =~ ^[a-f0-9]{24}$ ]] || fail 'Could not create a unique first-install recovery identifier.'
+  backup_path="$backup_dir/virki-$stamp.dump"
+  partial_backup_path="$backup_dir/.${backup_path##*/}.$$.partial"
+  container="virki-restore-$isolation_id"
+  alias="$container"
+  db_network="virki-restore-net-$isolation_id"
+  migration_container="virki-restore-migrate-$isolation_id"
+  override="$temp_dir/restore-$isolation_id.compose.yml"
+  verification_tmp="$verification_path.tmp.$$"
+  [[ ! -e "$backup_path" && ! -L "$backup_path" && ! -e "$partial_backup_path" && ! -L "$partial_backup_path" ]] || fail 'First-install recovery backup path is already occupied.'
+  [[ ! -e "$override" && ! -L "$override" && ! -e "$verification_tmp" && ! -L "$verification_tmp" ]] || fail 'First-install recovery temporary path is already occupied.'
+  [[ ! -e "$verification_path" && ! -L "$verification_path" ]] || fail 'First-install recovery found an existing migration-verification marker.'
+  [[ -z "$(docker ps --all --filter "label=virki.restore.operation=$isolation_id" --format '{{.ID}}')" ]] || fail 'First-install recovery identifier collides with an existing restore container.'
+  [[ -z "$(docker network ls --filter "label=virki.restore.operation=$isolation_id" --format '{{.ID}}')" ]] || fail 'First-install recovery identifier collides with an existing restore network.'
+
+  bootstrap_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  runtime_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  migrator_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  audit_maintenance_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  [[ "$bootstrap_password" =~ ^[a-f0-9]{64}$ && "$runtime_password" =~ ^[a-f0-9]{64}$ && "$migrator_password" =~ ^[a-f0-9]{64}$ && "$audit_maintenance_password" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not create isolated PostgreSQL recovery credentials.'
+  [[ "$bootstrap_password" != "$runtime_password" && "$bootstrap_password" != "$migrator_password" && "$runtime_password" != "$migrator_password" && "$audit_maintenance_password" != "$bootstrap_password" && "$audit_maintenance_password" != "$runtime_password" && "$audit_maintenance_password" != "$migrator_password" ]] || fail 'Isolated PostgreSQL recovery credentials are not distinct.'
+  local -x POSTGRES_USER=virki_bootstrap POSTGRES_PASSWORD="$bootstrap_password" VIRKI_RUNTIME_DB_PASSWORD="$runtime_password" VIRKI_MIGRATOR_DB_PASSWORD="$migrator_password" VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD="$audit_maintenance_password"
+  database_url="postgresql://virki_migrator:$migrator_password@$alias:5432/virki_restore?schema=public"
+  trap 'cleanup_first_install_recovery_fixture "$?" "$isolation_id" "$override"' EXIT
+
+  compose exec -T postgres sh -lc 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' 2>/dev/null > "$partial_backup_path" || fail 'Partial Virki database backup could not be created.'
+  chmod 600 -- "$partial_backup_path"
+  [[ -s "$partial_backup_path" ]] || fail 'Partial Virki database backup is empty.'
+  docker network create --internal --label "virki.restore.operation=$isolation_id" "$db_network" >/dev/null || fail 'Isolated first-install backup restore network could not be created.'
+  local network_identity
+  network_identity=$(docker network inspect --format '{{.Name}}|{{.Internal}}|{{index .Labels "virki.restore.operation"}}|{{len .Containers}}' "$db_network") || fail 'Isolated first-install backup restore network could not be verified.'
+  [[ "$network_identity" == "$db_network|true|$isolation_id|0" ]] || fail 'First-install backup restore network does not match its isolated operation identity.'
+  {
+    printf 'services:\n'
+    printf '  migrate:\n'
+    printf '    networks:\n'
+    printf '      - restore\n'
+    printf 'networks:\n'
+    printf '  restore:\n'
+    printf '    external: true\n'
+    printf '    name: %s\n' "$db_network"
+  } > "$override"
+  chmod 600 -- "$override"
+  docker run --detach --name "$container" --label "virki.restore.operation=$isolation_id" --network "$db_network" --network-alias "$alias" \
+    --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m \
+    --env POSTGRES_DB=virki_restore --env POSTGRES_USER --env POSTGRES_PASSWORD \
+    --env VIRKI_RUNTIME_DB_PASSWORD --env VIRKI_MIGRATOR_DB_PASSWORD --env VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD \
+    --volume "$source_dir/infra/postgres-init/10-virki-database-roles.sh:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro" \
+    --health-cmd 'pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_restore' --health-interval 1s --health-timeout 3s --health-retries 60 \
+    postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 >/dev/null || fail 'Disposable PostgreSQL backup restore target could not start.'
+  local fixture_identity initializer_mount fixture_members
+  fixture_identity=$(docker inspect --format '{{.Config.Image}}|{{.HostConfig.NetworkMode}}|{{index .HostConfig.Tmpfs "/var/lib/postgresql/data"}}|{{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}published{{end}}{{end}}|{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}published{{end}}{{end}}' "$container") || fail 'Disposable PostgreSQL backup restore target metadata could not be inspected.'
+  [[ "$fixture_identity" == "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|$db_network|rw,noexec,nosuid,nodev,size=512m||" ]] || fail 'Disposable PostgreSQL backup restore target must use the internal network, tmpfs, and no published host ports.'
+  initializer_mount=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/docker-entrypoint-initdb.d/10-virki-database-roles.sh"}}{{.RW}}{{end}}{{end}}' "$container") || fail 'Disposable PostgreSQL role initializer mount could not be inspected.'
+  [[ "$initializer_mount" == false ]] || fail 'Disposable PostgreSQL role initializer must be mounted read-only.'
+  fixture_members=$(docker network inspect --format '{{range .Containers}}{{.Name}}|{{end}}' "$db_network") || fail 'Disposable PostgreSQL restore network membership could not be inspected.'
+  [[ "$fixture_members" == "$container|" ]] || fail 'Disposable PostgreSQL restore network has an unexpected member.'
+  wait_for_clone "$container"
+  docker exec --interactive --user postgres "$container" pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges -U virki_bootstrap -d virki_restore < "$partial_backup_path" >/dev/null 2>&1 || fail 'Partial Virki database backup could not be restored into the disposable validation database.'
+  docker exec --env VIRKI_RUNTIME_DB_PASSWORD --env VIRKI_MIGRATOR_DB_PASSWORD --env VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD "$container" sh /docker-entrypoint-initdb.d/10-virki-database-roles.sh >/dev/null 2>&1 || fail 'Database roles could not be reconciled on the restored partial-install copy.'
+  local -x PGPASSWORD="$migrator_password"
+  local recovered_role
+  recovered_role=$(docker exec --env=PGPASSWORD "$container" psql --no-psqlrc --host 127.0.0.1 --username virki_migrator --dbname virki_restore --tuples-only --no-align --set ON_ERROR_STOP=1 --command 'SELECT current_user' 2>/dev/null) || fail 'Restored Virki migrator could not authenticate over TCP.'
+  [[ "$recovered_role" == virki_migrator ]] || fail 'Restored Virki migrator TCP identity did not match its expected role.'
+  run_first_install_recovery_clone_migrations "$database_url" "$override" "$migration_container" "$isolation_id" "$container"
+  cleanup_clone "$isolation_id" "$override" || fail 'Disposable first-install recovery validation resources could not be removed.'
+  verify_clone_cleanup "$isolation_id" "$override" || fail 'Disposable first-install recovery validation cleanup could not be confirmed.'
+
+  mv -- "$partial_backup_path" "$backup_path"
+  backup_hash=$(sha256sum -- "$backup_path" | awk '{print $1}')
+  verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  {
+    printf 'revision=%s\n' "$revision"
+    printf 'backup_name=%s\n' "${backup_path##*/}"
+    printf 'backup_sha256=%s\n' "$backup_hash"
+    printf 'verified_at=%s\n' "$verified_at"
+  } > "$verification_tmp"
+  chmod 600 -- "$verification_tmp"
+  ln -- "$verification_tmp" "$verification_path" || fail 'First-install recovery backup verification marker could not be created without overwriting existing state.'
+  rm -- "$verification_tmp" || fail 'First-install recovery temporary backup marker could not be removed.'
+  trap - EXIT
+  printf 'Partial-install backup %s was restored and all committed migrations validated in a disposable PostgreSQL 17 database.\n' "${backup_path##*/}"
+}
+
 assert_backup_verified() {
-  [[ -f "$verification_path" && ! -L "$verification_path" ]] || fail 'Verified production backup marker is missing.'
+  [[ -f "$verification_path" && ! -L "$verification_path" && "$(stat -c '%a' -- "$verification_path")" == 600 && "$(stat -c '%u' -- "$verification_path")" == "$(id -u)" ]] || fail 'Verified production backup marker is missing or unsafe.'
   local marked_revision backup_name backup_hash verified_at backup_path actual_hash verified_epoch now_epoch
   marked_revision=$(awk -F= '$1 == "revision" { print substr($0, index($0, "=") + 1) }' "$verification_path")
   backup_name=$(awk -F= '$1 == "backup_name" { print substr($0, index($0, "=") + 1) }' "$verification_path")
@@ -843,7 +1273,7 @@ assert_backup_verified() {
   verified_at=$(awk -F= '$1 == "verified_at" { print substr($0, index($0, "=") + 1) }' "$verification_path")
   [[ "$marked_revision" == "$revision" && "$backup_name" =~ ^virki-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}\.dump$ && "$backup_hash" =~ ^[a-f0-9]{64}$ ]] || fail 'Verified backup marker does not match this source revision.'
   backup_path="$backup_dir/$backup_name"
-  [[ -f "$backup_path" && ! -L "$backup_path" ]] || fail 'Verified production backup file is missing.'
+  [[ -f "$backup_path" && ! -L "$backup_path" && "$(stat -c '%a' -- "$backup_path")" == 600 && "$(stat -c '%u' -- "$backup_path")" == "$(id -u)" ]] || fail 'Verified production backup file is missing or unsafe.'
   actual_hash=$(sha256sum -- "$backup_path" | awk '{print $1}')
   [[ "$actual_hash" == "$backup_hash" ]] || fail 'Verified production backup changed after restore validation.'
   verified_epoch=$(date -u -d "$verified_at" +%s 2>/dev/null) || fail 'Verified backup timestamp is invalid.'
@@ -1059,8 +1489,9 @@ if [[ "$action" == install-source ]]; then
   exit 0
 fi
 if [[ "$state_changing_actions" == *" $action "* ]]; then acquire_state_lock; fi
-if [[ "$action" == deploy || "$action" == first-install ]]; then
-  [[ "$action" != first-install ]] || verify_fresh_install_target
+if [[ "$action" == deploy || "$action" == first-install || "$action" == first-install-recovery ]]; then
+  if [[ "$action" == first-install ]]; then verify_fresh_install_target; fi
+  if [[ "$action" == first-install-recovery ]]; then verify_first_install_recovery_target; fi
   load_production_images
   install_source
 fi
@@ -1077,6 +1508,8 @@ case "$action" in
     compose up --detach postgres >/dev/null || fail 'Fresh Virki PostgreSQL could not be started.'
     wait_for_virki_postgres
     verify_first_install_volume
+    apply_first_install_database_roles
+    verify_migrator_tcp_authentication
     compose --profile migration run --rm --no-deps migrate >/dev/null || fail 'Committed Virki migrations could not be applied to the new database.'
     run_migration_status
     verify_migration_schema '' '' '' ''
@@ -1085,6 +1518,37 @@ case "$action" in
     write_first_install_marker
     trap - EXIT
     printf 'Fresh Virki database and committed migrations initialized in isolated volume %s; legacy services were not changed.\n' "$first_install_volume"
+    ;;
+  first-install-recovery)
+    compose config --quiet
+    verify_first_install_volume
+    verify_first_install_recovery_project "$recovery_prior_revision" "$revision"
+    compose up --detach postgres >/dev/null || fail 'Verified partial Virki PostgreSQL could not be started from the accepted recovery release.'
+    wait_for_virki_postgres
+    verify_first_install_volume
+    verify_first_install_recovery_project "$revision"
+    verify_empty_first_install_recovery_database
+    if [[ "$recovery_phase" == database-verified ]]; then
+      [[ "$recovery_database_state" == migrated-candidate ]] || fail 'First-install recovery checkpoint says migrations completed but the database is not fully migrated.'
+      assert_backup_verified
+      apply_first_install_database_roles
+      verify_migrator_tcp_authentication
+    else
+      [[ "$recovery_database_state" == empty-partial ]] || fail 'First-install recovery stopped because an earlier attempt left migrations without a verified completion checkpoint.'
+      report_first_install_migrator_pre_reconcile_state
+      create_first_install_recovery_backup
+      apply_first_install_database_roles
+      verify_migrator_tcp_authentication
+      compose --profile migration run --rm --no-deps migrate >/dev/null || fail 'Committed Virki migrations could not be applied to the recovered database.'
+    fi
+    run_migration_status
+    verify_migration_schema '' '' '' ''
+    verify_first_install_role_contract
+    verify_first_install_recovery_has_no_application_rows
+    write_first_install_recovery_marker database-verified
+    activate_source
+    write_first_install_marker
+    printf 'Partial Virki first install recovered in place; the verified database volume and all predecessor services were preserved.\n'
     ;;
   stage)
     assert_no_maintenance

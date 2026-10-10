@@ -58,7 +58,8 @@ The deploy command creates a `git archive` from that exact commit with Git repla
 | Command | Purpose |
 |---|---|
 | `npm run preflight:prod` | Verify the native Linux target, stable SSH identity, pre-provisioned marker, remote private-file metadata, Docker/Compose, disk, `flock`, and report the deManage container-name count. |
-| `npm run first-install:prod` | Initialize only a verified empty Virki project and its new PostgreSQL volume from accepted exact-SHA CI images; do not use for an existing installation. |
+| `npm run first-install:prod` | Initialize only a verified empty Virki project and its new PostgreSQL volume from accepted exact-SHA CI images. |
+| `npm run first-install:recover:prod` | Recover only the exact retained partial first install after database, container, network, volume, source, backup, restore, and checkpoint checks pass. |
 | `npm run stage:prod` | Start the accepted Virki application on private loopback staging ports `13000` and `13001`, with the Tunnel connector stopped. |
 | `npm run first-admin:prod` | Prompt over a protected SSH TTY to create the first ADMIN in the verified virgin Virki database. |
 | `npm run deploy:prod` | Stage the accepted source, verify backup and migration on a restore, migrate under maintenance, then health-check the release. |

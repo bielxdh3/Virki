@@ -276,7 +276,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.doesNotMatch(serverScript, /\bcompose[^\n]*\bdown\b|docker volume rm|prisma db push|powershell/i);
   assert.match(serverScript, /readonly lock_path="\$root\/\.virki-operations\.lock"/u);
   assert.match(serverScript, /flock -n "\$state_lock_fd"/u);
-  assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging first-install stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
+  assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging first-install first-install-recovery stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
   assert.match(serverScript, /tar --list --verbose --quoting-style=c --file "\$archive"/u);
   assert.match(serverScript, /local role_script="\$release\/infra\/postgres-init\/10-virki-database-roles\.sh"[\s\S]*?chmod 644 -- "\$role_script"[\s\S]*?stat -c '%a' -- "\$role_script"/u);
   assert.match(serverScript, /Source archive contains a link or unsupported filesystem entry/u);
@@ -302,7 +302,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(serverScript, /if \[\[ "\$action" == cleanup-deploy-staging \]\]; then[\s\S]*?cleanup_deploy_staging "\$revision" "\$archive_id"/u);
   assert.match(deploymentScript, /cleanupAfterFailure\(error, source\.revision, archiveId, sourceCode, config, execute\)/u);
   assert.equal((deploymentScript.match(/cleanupAfterFailure\(error, source\.revision, archiveId, sourceCode, config, execute\)/gu) ?? []).length, 2);
-  const deployStage = serverScript.indexOf('if [[ "$action" == deploy || "$action" == first-install ]]; then\n  [[ "$action" != first-install ]] || verify_fresh_install_target\n  load_production_images\n  install_source\nfi', stateLock);
+  const deployStage = serverScript.indexOf('if [[ "$action" == deploy || "$action" == first-install || "$action" == first-install-recovery ]]; then\n  if [[ "$action" == first-install ]]; then verify_fresh_install_target; fi\n  if [[ "$action" == first-install-recovery ]]; then verify_first_install_recovery_target; fi\n  load_production_images\n  install_source\nfi', stateLock);
   const imageValidation = serverScript.indexOf("load_production_images", deployStage);
   const sourceInstall = serverScript.indexOf("install_source", imageValidation);
   const acceptedRevision = serverScript.indexOf("verify_revision", deployStage);
@@ -327,6 +327,66 @@ test("first install requires an empty isolated Virki target and leaves legacy an
   assert.doesNotMatch(firstInstall, /maintenance_on|create_verified_backup|cloudflared/u);
   assert.match(serverScript, /cleanup_failed_first_install\(\)[\s\S]*?compose stop postgres[\s\S]*?new Virki database volume was preserved/u);
   assert.match(serverScript, /Virki staging requires its Cloudflare Tunnel connector to remain stopped/u);
+});
+
+test("first install reconciles roles and proves migrator TCP login before Prisma migrations", () => {
+  const firstInstall = serverScript.slice(serverScript.indexOf("  first-install)\n"), serverScript.indexOf("  first-install-recovery)\n"));
+  const probe = serverScript.slice(serverScript.indexOf("migrator_network_authentication_result() {"), serverScript.indexOf("\nreport_first_install_migrator_pre_reconcile_state() {"));
+  assert.match(firstInstall, /apply_first_install_database_roles[\s\S]*?verify_migrator_tcp_authentication[\s\S]*?compose --profile migration run --rm --no-deps migrate/u);
+  assert.match(probe, /compose --profile migration run --rm --no-deps --entrypoint node migrate --input-type=module/u);
+  assert.match(probe, /MIGRATION_DATABASE_URL[\s\S]*?SELECT current_user AS role/u);
+  assert.match(probe, /url\.hostname !== "postgres"[\s\S]*?url\.port !== "5432"[\s\S]*?url\.pathname !== "\/virki"/u);
+  assert.match(probe, /current_database\(\) AS database[\s\S]*?rows\[0\]\.database === "virki"/u);
+  assert.match(probe, /AUTH=FAIL:TARGET_MISMATCH/u);
+  assert.match(serverScript, /\[\[ "\$result" == AUTH=PASS \]\]/u);
+  assert.doesNotMatch(probe, /127\.0\.0\.1|PGPASSWORD/u);
+});
+
+test("partial first-install recovery is typed, exact-resource-only, and checkpointed", () => {
+  const recovery = serverScript.slice(serverScript.indexOf("  first-install-recovery)\n"), serverScript.indexOf("  stage)\n"));
+  const guard = serverScript.slice(serverScript.indexOf("verify_first_install_recovery_target() {"), serverScript.indexOf("\nverify_first_install_marker() {"));
+  const projectGuard = serverScript.slice(serverScript.indexOf("verify_first_install_recovery_project() {"), serverScript.indexOf("\nverify_first_install_recovery_release() {"));
+  const databaseGuard = serverScript.slice(serverScript.indexOf("verify_empty_first_install_recovery_database() {"), serverScript.indexOf("\nverify_first_install_recovery_has_no_application_rows() {"));
+  const backup = serverScript.slice(serverScript.indexOf("create_first_install_recovery_backup() {"), serverScript.indexOf("\nassert_backup_verified() {"));
+  assert.match(serverScript, /allowed_actions='[^']*first-install-recovery/u);
+  assert.match(serverScript, /state_changing_actions='[^']*first-install-recovery/u);
+  assert.match(guard, /exact retained partial-install source markers/u);
+  assert.match(guard, /completion marker already exists/u);
+  assert.match(guard, /unexpected hidden entry/u);
+  assert.match(guard, /phase=\(prepared\|database-verified\)/u);
+  assert.match(guard, /verify_first_install_recovery_project "\$recovery_prior_revision" "\$revision"[\s\S]*?verify_source_archive[\s\S]*?verify_image_archive[\s\S]*?write_first_install_recovery_marker prepared/u);
+  assert.match(guard, /\[\[ "\$current_target" == "\$release_dir\/\$revision" \]\]/u);
+  assert.match(guard, /current\)[\s\S]*?\[\[ "\$progress_present" == true && "\$accepted_release_present" == true \]\]/u);
+  assert.match(serverScript, /first_install_volume='virki-prod_virki_postgres_data'/u);
+  assert.match(projectGuard, /com\.docker\.compose\.project[\s\S]*?\$first_install_volume[\s\S]*?another container uses the Virki network/u);
+  assert.match(databaseGuard, /current_database\(\) <> 'virki'[\s\S]*?datname NOT IN[\s\S]*?migrated-candidate/u);
+  assert.match(recovery, /verify_empty_first_install_recovery_database[\s\S]*?report_first_install_migrator_pre_reconcile_state[\s\S]*?apply_first_install_database_roles/u);
+  assert.match(recovery, /verify_first_install_recovery_has_no_application_rows[\s\S]*?write_first_install_recovery_marker database-verified/u);
+  assert.match(backup, /pg_dump[^\n]*--format=custom[\s\S]*?docker network create --internal[\s\S]*?pg_restore --exit-on-error/u);
+  assert.doesNotMatch(recovery + backup, /docker volume rm|docker volume prune|compose (?:down|rm)|--volumes/u);
+});
+
+test("first-install recovery is a main-SHA CI-gated production mutation", async () => {
+  const calls = [];
+  const result = await deployProduction({
+    action: "first-install-recovery",
+    config,
+    inspectSource: () => {
+      calls.push("source");
+      return { branch: "main", revision };
+    },
+    verifyCi: ({ revision: observed }) => {
+      calls.push(`ci:${observed}`);
+      return { ok: false, lines: ["exact SHA gate blocked"] };
+    },
+    preflight: async () => assert.fail("Recovery preflight must not run before exact-SHA CI is green."),
+    execute: () => assert.fail("Recovery must not contact production before exact-SHA CI is green."),
+  });
+  assert.deepEqual(calls, ["source", `ci:${revision}`]);
+  assert.deepEqual(result, { status: 1, lines: ["exact SHA gate blocked"] });
+  assert.match(deploymentScript, /first-install-recovery/u);
+  assert.match(deploymentScript, /downloadProductionImages/u);
+  assert.match(deploymentScript, /runRemoteScript\(action, source\.revision/u);
 });
 
 test("Linux first-install shell guard accepts only a pristine Virki target before image or database work", { skip: process.platform !== "linux" }, async (suite) => {
@@ -394,7 +454,44 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
     };
   }
 
+  function runRecovery(target) {
+    const result = spawnSync("bash", [
+      scriptPath,
+      "first-install-recovery",
+      target.root,
+      revision,
+      "a".repeat(64),
+      "b".repeat(24),
+      "c".repeat(64),
+      "d".repeat(24),
+    ], {
+      cwd: rootDirectory,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${target.bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        DOCKER_CALLS_FILE: target.callsPath,
+        VIRKI_TEST_DOCKER_MODE: "empty",
+      },
+      timeout: 10_000,
+    });
+    return {
+      status: result.status,
+      output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+      dockerCalls: existsSync(target.callsPath) ? readFileSync(target.callsPath, "utf8").trim().split(/\r?\n/u).filter(Boolean) : [],
+    };
+  }
+
   try {
+    await suite.test("recovery refuses a root without retained install source markers before Docker access", () => {
+      const target = fixture("recovery-missing-source");
+      const result = runRecovery(target);
+      assert.equal(result.status, 1);
+      assert.match(result.output, /exact retained partial-install source markers/u);
+      assert.deepEqual(result.dockerCalls, []);
+      assert.equal(existsSync(path.join(target.root, ".virki-first-install-recovery")), false);
+    });
+
     await suite.test("pristine root passes all collision checks before missing-image failure", () => {
       const target = fixture();
       const result = runFirstInstall(target);

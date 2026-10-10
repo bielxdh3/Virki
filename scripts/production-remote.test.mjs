@@ -38,6 +38,7 @@ test("remote actions use a fixed list and a non-interactive Linux Bash runner", 
   for (const action of ["stage", "start", "stop", "status", "ports", "revision", "health", "logs", "backup-verify", "maintenance-on", "maintenance-off", "config"]) {
     assert.equal(parseRemoteProductionCommand([action]), action);
   }
+  assert.throws(() => parseRemoteProductionCommand(["first-install-recovery"]), (error) => error.code === "ARGUMENT_INVALID");
   assert.throws(
     () => parseRemoteProductionCommand(["bash", "-c", "whoami"]),
     (error) => error instanceof ProductionRevisionError && error.code === "ARGUMENT_INVALID",
