@@ -69,6 +69,8 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     "--label", "virki.role-test.kind=postgres",
     "--health-cmd", "pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_roles_test",
     "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "60",
+    "--env", "POSTGRES_HOST_AUTH_METHOD=scram-sha-256",
+    "--env", "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256",
     "--env", "POSTGRES_DB=virki_roles_test",
     "--env", "POSTGRES_USER=virki_bootstrap",
     "--env=POSTGRES_PASSWORD",
@@ -125,6 +127,9 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     assertFixtureContainer(name, network, testRunId, name, "postgres");
     assertPostgresFixtureMounts(name, kind, dataVolume);
     await waitForHealthy(name);
+    const hostAuthMethods = runPsql(name, "virki_bootstrap", bootstrapPassword, "SELECT string_agg(auth_method, ',' ORDER BY line_number) FROM pg_hba_file_rules WHERE type = 'host';", "verify PostgreSQL fixture uses password authentication for TCP");
+    assert.match(hostAuthMethods.trim(), /(?:^|,)scram-sha-256(?:,|$)/u, "PostgreSQL fixture must exercise SCRAM password authentication over TCP.");
+    assert.doesNotMatch(hostAuthMethods.trim(), /(?:^|,)trust(?:,|$)/u, "PostgreSQL fixture must never accept unauthenticated TCP connections.");
     const bootstrapUrl = connectionUrl("virki_bootstrap", bootstrapPassword);
     const migratorUrl = connectionUrl("virki_migrator", migratorPassword);
     runPsql(name, "virki_bootstrap", bootstrapPassword, "CREATE ROLE virki_connect_probe NOLOGIN;", "prepare unprivileged database connection probe");
