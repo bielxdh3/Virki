@@ -596,7 +596,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
       const result = runRecovery(target);
       assert.equal(result.status, 1);
       assert.match(result.output, /Verified the exact retained partial first-install target/u);
-      assert.match(result.output, /Verified production image archive is missing/u);
+      assert.match(result.output, /Verified GHCR provenance manifest is missing or unsafe/u);
       assert.ok(result.dockerCalls.some((call) => call.includes(".Config.Image")));
 
       writeFileSync(path.join(target.backups, "extra.dump"), "unexpected", { mode: 0o600 });
@@ -615,7 +615,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
         const result = runRecovery(target);
         assert.equal(result.status, 1);
         assert.match(result.output, /Verified the exact retained partial first-install target/u);
-        assert.match(result.output, /Verified production image archive is missing/u);
+        assert.match(result.output, /Verified GHCR provenance manifest is missing or unsafe/u);
         assert.ok(result.dockerCalls.some((call) => call.includes(".Config.Image")));
         assert.equal(readFileSync(checkpointPath, "utf8"), checkpoint);
       }
@@ -633,7 +633,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
         const result = runRecovery(target, variant);
         assert.equal(result.status, 1);
         assert.match(result.output, reason);
-        assert.ok(!result.output.includes("Verified production image archive is missing"));
+        assert.ok(!result.output.includes("Verified GHCR provenance manifest is missing or unsafe"));
         assert.ok(!result.dockerCalls.some((call) => call.includes("compose up")));
       });
     }
@@ -671,7 +671,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
       const target = fixture();
       const result = runFirstInstall(target);
       assert.equal(result.status, 1);
-      assert.match(result.output, /Verified production image archive is missing/u);
+      assert.match(result.output, /Verified GHCR provenance manifest is missing or unsafe/u);
       assert.deepEqual(result.dockerCalls.map((call) => call.split(" ")[0]), ["ps", "volume", "network"]);
       assert.ok(!result.dockerCalls.some((call) => call.includes("compose up")));
     });
@@ -717,7 +717,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
         const result = runFirstInstall(target, collision);
         assert.equal(result.status, 1);
         assert.match(result.output, new RegExp(`${collision === "container" ? "project containers" : collision === "volume" ? "PostgreSQL volume" : "project network"} already exist`, "u"));
-        assert.ok(!result.output.includes("Verified production image archive is missing"));
+        assert.ok(!result.output.includes("Verified GHCR provenance manifest is missing or unsafe"));
         assert.ok(!result.dockerCalls.some((call) => call.includes("compose up")));
       });
     }
