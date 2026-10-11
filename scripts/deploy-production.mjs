@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -202,17 +202,6 @@ function copyImageArchive(archivePath, revision, archiveId, config, execute) {
   ]);
 }
 
-async function hashFile(filePath) {
-  const hash = createHash("sha256");
-  await new Promise((resolve, reject) => {
-    const stream = createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", resolve);
-  });
-  return hash.digest("hex");
-}
-
 async function downloadProductionImages({ runId, revision, platform, execute }) {
   if (!Number.isSafeInteger(runId) || runId <= 0 || !["linux/amd64", "linux/arm64"].includes(platform)) {
     throw new ProductionRevisionError("COMMAND_FAILED");
@@ -233,14 +222,28 @@ async function downloadProductionImages({ runId, revision, platform, execute }) 
     const archiveName = "virki-production-images.manifest";
     const entries = readdirSync(directory);
     const archivePath = path.join(directory, archiveName);
-    if (entries.length !== 1 || entries[0] !== archiveName || !lstatSync(archivePath).isFile()) {
+    if (entries.length !== 1 || entries[0] !== archiveName) {
       throw new ProductionRevisionError("COMMAND_FAILED");
     }
-    verifyImageProvenance(readFileSync(archivePath, "utf8"), { revision, runId, platform });
+    // Validate and hash the same opened file; refuse links and file replacement.
+    const fd = openSync(archivePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let manifest;
+    try {
+      const opened = fstatSync(fd);
+      const entry = lstatSync(archivePath);
+      if (!opened.isFile() || !entry.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size > 512) {
+        throw new ProductionRevisionError("COMMAND_FAILED");
+      }
+      manifest = readFileSync(fd);
+      if (manifest.length > 512) throw new ProductionRevisionError("COMMAND_FAILED");
+      verifyImageProvenance(manifest.toString("utf8"), { revision, runId, platform });
+    } finally {
+      closeSync(fd);
+    }
     return {
       archivePath,
       directory,
-      archiveHash: await hashFile(archivePath),
+      archiveHash: createHash("sha256").update(manifest).digest("hex"),
     };
   } catch (error) {
     rmSync(directory, { recursive: true, force: true });

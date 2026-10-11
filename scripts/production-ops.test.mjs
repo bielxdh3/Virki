@@ -1080,6 +1080,54 @@ test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA G
   assert.equal(existsSync(path.dirname(imageArchivePath)), false);
 });
 
+test("deployment rejects nonregular, symlinked, and oversized GHCR artifact entries before remote copy", async (suite) => {
+  for (const entryKind of ["directory", "oversized", ...(process.platform === "linux" ? ["symlink"] : [])]) {
+    await suite.test(entryKind, async () => {
+      let stagingTouched = false;
+      let artifactDirectory;
+      await assert.rejects(deployProduction({
+        action: "deploy",
+        config,
+        inspectSource: () => ({ branch: "main", revision }),
+        verifyCi: () => ({ ok: true, runId: 54321, lines: [] }),
+        preflight: async () => ({ status: 0, platform: "linux/amd64", lines: [] }),
+        execute: (command, args) => {
+          if (command === "git" && args[0] === "archive") {
+            writeFileSync(args.find((arg) => arg.startsWith("--output=")).slice(9), "archive");
+            return { status: 0, stdout: "" };
+          }
+          if (command === "git" && args[0] === "ls-tree") {
+            return { status: 0, stdout: `100644 blob ${revision}\tREADME.md\0` };
+          }
+          if (command === "git" && args[0] === "check-attr") {
+            return { status: 0, stdout: "README.md\0export-ignore\0unspecified\0README.md\0export-subst\0unspecified\0" };
+          }
+          if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
+          if (command === "tar") return { status: 0, stdout: "README.md\n" };
+          if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
+          if (command === "gh" && args[0] === "run" && args[1] === "download") {
+            artifactDirectory = args[args.indexOf("--dir") + 1];
+            const candidate = path.join(artifactDirectory, "virki-production-images.manifest");
+            if (entryKind === "directory") mkdirSync(candidate);
+            if (entryKind === "oversized") writeFileSync(candidate, provenanceFixture.padEnd(513, "x"));
+            if (entryKind === "symlink") {
+              symlinkSync(secretScannerPath, candidate);
+            }
+            return { status: 0, stdout: "" };
+          }
+          if (command === "ssh" || command === "scp") {
+            stagingTouched = true;
+            return { status: 1, stdout: "" };
+          }
+          assert.fail(`Unexpected command: ${command}`);
+        }
+      }));
+      assert.equal(stagingTouched, false, "Untrusted artifact must never be transferred to production.");
+      assert.equal(existsSync(artifactDirectory), false, "Local artifact staging must be removed on failure.");
+    });
+  }
+});
+
 test("first-install uses the exact-SHA CI GHCR provenance and invokes only the guarded fresh-install action", async () => {
   const calls = [];
   let sourceArchivePath;
