@@ -418,6 +418,16 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
       "#!/bin/sh",
       "set -eu",
       'printf \'%s\\n\' "$*" >> "$DOCKER_CALLS_FILE"',
+      'if [ "$VIRKI_TEST_DOCKER_MODE" = recovery ]; then',
+      '  case "$1" in',
+      '    ps) case "$*" in *"label=com.docker.compose.project=virki-prod"*) printf "%s\\n" "$VIRKI_TEST_CONTAINER_ID" ;; *"volume=virki-prod_virki_postgres_data"*) if [ "$VIRKI_TEST_DOCKER_VARIANT" = consumer ]; then printf "%s\\n" "$VIRKI_TEST_OTHER_CONTAINER_ID"; fi; printf "%s\\n" "$VIRKI_TEST_CONTAINER_ID" ;; *) exit 2 ;; esac ;;',
+      '    inspect) case "$3" in *".Config.Image"*) if [ "$VIRKI_TEST_DOCKER_VARIANT" = project ]; then printf "virki-other|postgres|postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|exited|0|false\\n"; else printf "virki-prod|postgres|postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|exited|0|false\\n"; fi ;; "{{len .Mounts}}") printf "2\\n" ;; *".Mounts"*) printf "bind||%s/releases/%s/infra/postgres-init/10-virki-database-roles.sh|/docker-entrypoint-initdb.d/10-virki-database-roles.sh|false;volume|virki-prod_virki_postgres_data|/var/lib/docker/volumes/virki-prod_virki_postgres_data/_data|/var/lib/postgresql/data|true;\\n" "$VIRKI_TEST_ROOT" "$VIRKI_TEST_PRIOR_REVISION" ;; *) exit 2 ;; esac ;;',
+      '    volume) if [ "$VIRKI_TEST_DOCKER_VARIANT" = volume-label ]; then printf "virki-prod_virki_postgres_data|virki-other|virki_postgres_data\\n"; else printf "virki-prod_virki_postgres_data|virki-prod|virki_postgres_data\\n"; fi ;;',
+      '    network) case "$4" in *".Containers"*) if [ "$VIRKI_TEST_DOCKER_VARIANT" = network-member ]; then printf "virki-prod-postgres-1|unexpected-service|\\n"; fi ;; *) if [ "$VIRKI_TEST_DOCKER_VARIANT" = network-label ]; then printf "virki-prod_default|virki-other\\n"; else printf "virki-prod_default|virki-prod\\n"; fi ;; esac ;;',
+      '    *) exit 2 ;;',
+      '  esac',
+      '  exit 0',
+      'fi',
       'if [ "$VIRKI_TEST_DOCKER_MODE" = container ] && [ "$1" = ps ]; then printf \'existing-container\\n\'; fi',
       'if [ "$VIRKI_TEST_DOCKER_MODE" = volume ] && [ "$1" = volume ]; then printf \'virki-prod_virki_postgres_data\\n\'; fi',
       'if [ "$VIRKI_TEST_DOCKER_MODE" = network ] && [ "$1" = network ]; then printf \'virki-prod_default\\n\'; fi',
@@ -456,7 +466,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
     };
   }
 
-  function runRecovery(target) {
+  function runRecovery(target, dockerVariant = "valid") {
     const result = spawnSync("bash", [
       scriptPath,
       "first-install-recovery",
@@ -473,7 +483,12 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
         ...process.env,
         PATH: `${target.bin}${path.delimiter}${process.env.PATH ?? ""}`,
         DOCKER_CALLS_FILE: target.callsPath,
-        VIRKI_TEST_DOCKER_MODE: "empty",
+        VIRKI_TEST_DOCKER_MODE: "recovery",
+        VIRKI_TEST_DOCKER_VARIANT: dockerVariant,
+        VIRKI_TEST_CONTAINER_ID: "a".repeat(64),
+        VIRKI_TEST_OTHER_CONTAINER_ID: "b".repeat(64),
+        VIRKI_TEST_ROOT: target.root,
+        VIRKI_TEST_PRIOR_REVISION: target.priorRevision ?? "e".repeat(40),
       },
       timeout: 10_000,
     });
@@ -484,6 +499,37 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
     };
   }
 
+  function partialRecoveryFixture(mode, configure = () => {}) {
+    const priorRevision = "e".repeat(40);
+    const priorArchiveHash = "1".repeat(64);
+    const acceptedArchiveHash = "a".repeat(64);
+    const target = fixture(mode, ({ root, releases, backups }) => {
+      const priorRelease = path.join(releases, priorRevision);
+      mkdirSync(priorRelease, { mode: 0o700 });
+      writeFileSync(path.join(priorRelease, ".virki-release"), `revision=${priorRevision}\narchive_sha256=${priorArchiveHash}\n`, { mode: 0o600 });
+      for (const name of [".env", ".env.oidc", ".env.oidc-data"]) symlinkSync(path.join(root, name), path.join(priorRelease, name));
+      writeFileSync(path.join(root, ".virki-source-state"), [
+        `revision=${priorRevision}`,
+        "source=verified-archive",
+        "branch=main",
+        "clean=true",
+        "ci=success",
+        `archive_sha256=${priorArchiveHash}`,
+        "",
+      ].join("\n"), { mode: 0o600 });
+      writeFileSync(path.join(root, ".virki-deploy-revision"), `${priorRevision}\n`, { mode: 0o600 });
+      writeFileSync(path.join(root, ".virki-first-install-recovery"), [
+        `prior_revision=${priorRevision}`,
+        `revision=${revision}`,
+        `archive_sha256=${acceptedArchiveHash}`,
+        "phase=prepared",
+        "",
+      ].join("\n"), { mode: 0o600 });
+      configure({ root, releases, backups, priorRevision, priorArchiveHash, acceptedArchiveHash });
+    });
+    return { ...target, priorRevision, priorArchiveHash, acceptedArchiveHash };
+  }
+
   try {
     await suite.test("recovery refuses a root without retained install source markers before Docker access", () => {
       const target = fixture("recovery-missing-source");
@@ -492,6 +538,101 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
       assert.match(result.output, /exact retained partial-install source markers/u);
       assert.deepEqual(result.dockerCalls, []);
       assert.equal(existsSync(path.join(target.root, ".virki-first-install-recovery")), false);
+    });
+
+    await suite.test("recovery refuses unverified backup files before inspecting or starting PostgreSQL", () => {
+      const target = partialRecoveryFixture("recovery-backup", ({ backups }) => writeFileSync(path.join(backups, "unclassified.dump"), "fixture", { mode: 0o600 }));
+      const checkpoint = readFileSync(path.join(target.root, ".virki-first-install-recovery"), "utf8");
+      const result = runRecovery(target);
+      assert.equal(result.status, 1);
+      assert.match(result.output, /backup directory contains unverified artifacts/u);
+      assert.deepEqual(result.dockerCalls, []);
+      assert.equal(readFileSync(path.join(target.root, ".virki-first-install-recovery"), "utf8"), checkpoint);
+    });
+
+    await suite.test("recovery accepts one current verified backup and rejects every other backup entry", () => {
+      const backupName = "virki-20261010-120000-abcdef.dump";
+      const target = partialRecoveryFixture("recovery-verified-backup", ({ root, backups }) => {
+        writeFileSync(path.join(backups, backupName), "", { mode: 0o600 });
+        writeFileSync(path.join(root, ".virki-migration-verification"), [
+          `revision=${revision}`,
+          `backup_name=${backupName}`,
+          "backup_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          `verified_at=${new Date().toISOString()}`,
+          "",
+        ].join("\n"), { mode: 0o600 });
+      });
+      const result = runRecovery(target);
+      assert.equal(result.status, 1);
+      assert.match(result.output, /Verified the exact retained partial first-install target/u);
+      assert.match(result.output, /Verified production image archive is missing/u);
+      assert.ok(result.dockerCalls.some((call) => call.includes(".Config.Image")));
+
+      writeFileSync(path.join(target.backups, "extra.dump"), "unexpected", { mode: 0o600 });
+      const contaminated = runRecovery(target);
+      assert.equal(contaminated.status, 1);
+      assert.match(contaminated.output, /backup directory contains unverified artifacts/u);
+      assert.deepEqual(contaminated.dockerCalls, []);
+    });
+
+    await suite.test("recovery accepts the pinned PostgreSQL image reference and safely repeats a prepared checkpoint", () => {
+      const target = partialRecoveryFixture("recovery-valid");
+      const checkpointPath = path.join(target.root, ".virki-first-install-recovery");
+      const checkpoint = readFileSync(checkpointPath, "utf8");
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = runRecovery(target);
+        assert.equal(result.status, 1);
+        assert.match(result.output, /Verified the exact retained partial first-install target/u);
+        assert.match(result.output, /Verified production image archive is missing/u);
+        assert.ok(result.dockerCalls.some((call) => call.includes(".Config.Image")));
+        assert.equal(readFileSync(checkpointPath, "utf8"), checkpoint);
+      }
+    });
+
+    for (const [variant, reason] of [
+      ["project", /identity or stopped state does not match/u],
+      ["consumer", /another container uses the PostgreSQL volume/u],
+      ["volume-label", /volume labels do not match/u],
+      ["network-label", /network labels do not match/u],
+      ["network-member", /another container uses the Virki network/u],
+    ]) {
+      await suite.test(`recovery refuses ${variant} identity collisions before image or database work`, () => {
+        const target = partialRecoveryFixture(`recovery-${variant}`);
+        const result = runRecovery(target, variant);
+        assert.equal(result.status, 1);
+        assert.match(result.output, reason);
+        assert.ok(!result.output.includes("Verified production image archive is missing"));
+        assert.ok(!result.dockerCalls.some((call) => call.includes("compose up")));
+      });
+    }
+
+    await suite.test("recovery refuses a checkpoint bound to a different accepted SHA before Docker access", () => {
+      const target = partialRecoveryFixture("recovery-sha");
+      const checkpointPath = path.join(target.root, ".virki-first-install-recovery");
+      writeFileSync(checkpointPath, readFileSync(checkpointPath, "utf8").replace(`revision=${revision}`, `revision=${"f".repeat(40)}`), { mode: 0o600 });
+      const result = runRecovery(target);
+      assert.equal(result.status, 1);
+      assert.match(result.output, /does not match the accepted recovery source/u);
+      assert.deepEqual(result.dockerCalls, []);
+    });
+
+    await suite.test("recovery refuses a symlinked production root before Docker access", () => {
+      const target = partialRecoveryFixture("recovery-root-symlink");
+      const alias = path.join(rootDirectory, "recovery-root-alias");
+      symlinkSync(target.root, alias, "dir");
+      const result = runRecovery({ ...target, root: alias });
+      assert.equal(result.status, 1);
+      assert.match(result.output, /Pre-provisioned production root does not match/u);
+      assert.deepEqual(result.dockerCalls, []);
+    });
+
+    await suite.test("recovery refuses an unexpected release symlink before Docker access", () => {
+      const target = partialRecoveryFixture("recovery-release-symlink");
+      symlinkSync(path.join(target.root, ".env"), path.join(target.releases, "unexpected-release-link"));
+      const result = runRecovery(target);
+      assert.equal(result.status, 1);
+      assert.match(result.output, /release directory contains a non-directory entry/u);
+      assert.deepEqual(result.dockerCalls, []);
     });
 
     await suite.test("pristine root passes all collision checks before missing-image failure", () => {

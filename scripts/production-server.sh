@@ -292,8 +292,8 @@ verify_first_install_recovery_project() {
   ((${#containers[@]} == 1)) || fail 'First-install recovery requires exactly the existing Virki PostgreSQL container.'
   container_id=${containers[0]}
   [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || fail 'First-install PostgreSQL container identity is invalid.'
-  container_identity=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.Image}}|{{.State.Status}}|{{.State.ExitCode}}|{{.State.Running}}' "$container_id") || fail 'First-install PostgreSQL container could not be inspected.'
-  [[ "$container_identity" == 'virki-prod|postgres|sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|running|0|true' || "$container_identity" == 'virki-prod|postgres|sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|exited|0|false' ]] || fail 'First-install recovery PostgreSQL identity or stopped state does not match the approved partial install.'
+  container_identity=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.Config.Image}}|{{.State.Status}}|{{.State.ExitCode}}|{{.State.Running}}' "$container_id") || fail 'First-install PostgreSQL container could not be inspected.'
+  [[ "$container_identity" == 'virki-prod|postgres|postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|running|0|true' || "$container_identity" == 'virki-prod|postgres|postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|exited|0|false' ]] || fail 'First-install recovery PostgreSQL identity or stopped state does not match the approved partial install.'
   IFS='|' read -r _ _ _ status exit_code running <<< "$container_identity"
   if [[ "$running" == true ]]; then
     health=$(docker inspect --format '{{.State.Health.Status}}' "$container_id") || fail 'First-install PostgreSQL health could not be inspected.'
@@ -360,7 +360,7 @@ verify_first_install_recovery_target() {
   local -a releases=() root_entries=() checkpoint_lines=()
   [[ ! -e "$first_install_path" && ! -L "$first_install_path" ]] || fail 'First-install recovery refused because its completion marker already exists.'
   [[ ! -e "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'First-install recovery refused because maintenance is active.'
-  if [[ -e "$verification_path" || -L "$verification_path" ]]; then assert_backup_verified; fi
+  verify_first_install_recovery_backups
   [[ -f "$source_state_path" && ! -L "$source_state_path" && -f "$revision_path" && ! -L "$revision_path" ]] || fail 'First-install recovery requires the exact retained partial-install source markers.'
   [[ "$(stat -c '%a' -- "$source_state_path")" == 600 && "$(stat -c '%a' -- "$revision_path")" == 600 && "$(stat -c '%u' -- "$source_state_path")" == "$(id -u)" && "$(stat -c '%u' -- "$revision_path")" == "$(id -u)" ]] || fail 'First-install recovery source marker permissions are unsafe.'
   source_revision=$(cat -- "$revision_path")
@@ -1279,6 +1279,19 @@ assert_backup_verified() {
   verified_epoch=$(date -u -d "$verified_at" +%s 2>/dev/null) || fail 'Verified backup timestamp is invalid.'
   now_epoch=$(date -u +%s)
   ((now_epoch - verified_epoch <= 86400 && verified_epoch <= now_epoch + 300)) || fail 'Verified backup is stale.'
+}
+
+verify_first_install_recovery_backups() {
+  local backup_name backup_count
+  [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || fail 'First-install recovery backup directory is missing or unsafe.'
+  backup_count=$(find "$backup_dir" -mindepth 1 -maxdepth 1 -printf x | wc -c) || fail 'First-install recovery backup inventory failed.'
+  if [[ -e "$verification_path" || -L "$verification_path" ]]; then
+    assert_backup_verified
+    backup_name=$(awk -F= '$1 == "backup_name" { print substr($0, index($0, "=") + 1) }' "$verification_path")
+    [[ "$backup_count" == 1 && -f "$backup_dir/$backup_name" && ! -L "$backup_dir/$backup_name" ]] || fail 'First-install recovery backup directory contains unverified artifacts.'
+  else
+    [[ "$backup_count" == 0 ]] || fail 'First-install recovery backup directory contains unverified artifacts.'
+  fi
 }
 
 run_migration_status() {
