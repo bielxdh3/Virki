@@ -103,7 +103,7 @@ jobs:
       - name: Native Linux production operations tests
         run: |
           bash -n scripts/production-server.sh
-          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs
+          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs
 
       - name: Read-only backup inventory tests
         run: npm run test:backup:inventory

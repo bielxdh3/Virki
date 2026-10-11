@@ -317,6 +317,20 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(preflightScript, /stat -c '%a' -- "\$marker".*600/u);
 });
 
+test("native Linux role initialization scripts remain LF-only after Windows checkout", () => {
+  const attributes = readFileSync(new URL("../.gitattributes", import.meta.url), "utf8");
+  assert.match(attributes, /^\*\.sh text eol=lf$/mu);
+  for (const relative of [
+    "../infra/postgres-init/10-virki-database-roles.sh",
+    "./e2e/20-virki-e2e-runtime-test-role.sh",
+    "./production-server.sh",
+  ]) {
+    const source = readFileSync(new URL(relative, import.meta.url), "utf8");
+    assert.ok(source.startsWith("#!"), `${relative} needs an executable shebang`);
+    assert.ok(!source.includes("\r"), `${relative} cannot contain CRLF for Docker/Linux execution`);
+  }
+});
+
 test("private GHCR transport requires CI-run-bound exact digests and isolates the pull credential", () => {
   const transport = serverScript.slice(serverScript.indexOf("verify_image_manifest() {"), serverScript.indexOf("\ncompose_args() {"));
   assert.match(transport, /sha256sum[\s\S]*?\$image_hash/u);
@@ -327,7 +341,8 @@ test("private GHCR transport requires CI-run-bound exact digests and isolates th
   assert.match(transport, /mktemp -d[\s\S]*?DOCKER_CONFIG[\s\S]*?--password-stdin < "\$token"/u);
   assert.match(transport, /docker pull "\$image@\$digest"/u);
   assert.match(transport, /org\.opencontainers\.image\.revision[\s\S]*?org\.opencontainers\.image\.source/u);
-  assert.match(transport, /docker image tag "\$image@\$digest" "\$local_tag"/u);
+  assert.match(transport, /docker image tag "ghcr\.io\/bielxdh3\/virki-runtime@[\s\S]*?" "virki-production-ci:/u);
+  assert.match(transport, /docker image tag "ghcr\.io\/bielxdh3\/virki-migrator@[\s\S]*?" "virki-migrator-ci:/u);
   assert.doesNotMatch(transport, /docker build|docker load|--password=|docker system prune/u);
   assert.match(preflightScript, /for name in \.env \.env\.oidc \.env\.oidc-data \.ghcr-read-token/u);
 });

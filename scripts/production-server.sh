@@ -202,14 +202,16 @@ load_production_images() {
     docker login ghcr.io --username bielxdh3 --password-stdin < "$token" >/dev/null 2>&1 || fail 'Private GHCR login failed.'
     for role in runtime migrator; do
       case "$role" in
-        runtime) image='ghcr.io/bielxdh3/virki-runtime'; digest=${fields[3]#runtime_digest=}; local_tag="virki-production-ci:$revision" ;;
-        migrator) image='ghcr.io/bielxdh3/virki-migrator'; digest=${fields[4]#migrator_digest=}; local_tag="virki-migrator-ci:$revision" ;;
+        runtime) image='ghcr.io/bielxdh3/virki-runtime'; digest=${fields[3]#runtime_digest=} ;;
+        migrator) image='ghcr.io/bielxdh3/virki-migrator'; digest=${fields[4]#migrator_digest=} ;;
       esac
       docker pull "$image@$digest" >/dev/null 2>&1 || fail 'Exact-digest GHCR image pull failed.'
       observed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source"}}|{{.Os}}/{{.Architecture}}' "$image@$digest") || fail 'Exact-digest GHCR image identity could not be inspected.'
       [[ "$observed" == "$revision|https://github.com/bielxdh3/Virki|$expected_platform" ]] || fail 'GHCR image labels or architecture differ from accepted CI evidence.'
-      docker image tag "$image@$digest" "$local_tag" || fail 'Could not stage verified local image alias.'
     done
+    # Check both images before changing either accepted local alias.
+    docker image tag "ghcr.io/bielxdh3/virki-runtime@${fields[3]#runtime_digest=}" "virki-production-ci:$revision" || fail 'Could not stage verified runtime image alias.'
+    docker image tag "ghcr.io/bielxdh3/virki-migrator@${fields[4]#migrator_digest=}" "virki-migrator-ci:$revision" || fail 'Could not stage verified migrator image alias.'
   ) || fail 'Private GHCR image verification or credential cleanup failed.'
   rm -- "$manifest" || fail 'Verified GHCR provenance manifest could not be removed.'
 }
