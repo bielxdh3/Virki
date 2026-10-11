@@ -171,32 +171,47 @@ verify_source_archive() {
   done <<< "$listing"
 }
 
-verify_image_archive() {
-  [[ "$revision" =~ ^[0-9a-f]{40}$ && "$image_hash" =~ ^[0-9a-f]{64}$ && "$image_id" =~ ^[0-9a-f]{24}$ ]] || fail 'Production image archive identity is invalid.'
-  local archive="$temp_dir/images-$revision-$image_id.tar.gz"
-  [[ -f "$archive" && ! -L "$archive" ]] || fail 'Verified production image archive is missing.'
-  [[ "$(sha256sum -- "$archive" | awk '{print $1}')" == "$image_hash" ]] || fail 'Production image archive checksum does not match.'
-  gzip --test -- "$archive" || fail 'Production image archive is corrupt.'
+verify_image_manifest() {
+  [[ "$revision" =~ ^[0-9a-f]{40}$ && "$image_hash" =~ ^[0-9a-f]{64}$ && "$image_id" =~ ^[0-9a-f]{24}$ ]] || fail 'GHCR provenance identity is invalid.'
+  local manifest="$temp_dir/images-$revision-$image_id.manifest"
+  [[ -f "$manifest" && ! -L "$manifest" && "$(wc -c < "$manifest")" -le 512 ]] || fail 'Verified GHCR provenance manifest is missing or unsafe.'
+  [[ "$(sha256sum -- "$manifest" | awk '{print $1}')" == "$image_hash" ]] || fail 'GHCR provenance manifest checksum does not match.'
+  local -a fields=()
+  mapfile -t fields < "$manifest"
+  ((${#fields[@]} == 5)) || fail 'GHCR provenance manifest has an unexpected field count.'
+  [[ "${fields[0]}" == "revision=$revision" && "${fields[1]}" =~ ^run_id=[1-9][0-9]*$ ]] || fail 'GHCR provenance source identity is invalid.'
+  case "$(uname -m)" in
+    x86_64) [[ "${fields[2]}" == 'platform=linux/amd64' ]] || fail 'GHCR provenance architecture mismatch.' ;;
+    aarch64|arm64) [[ "${fields[2]}" == 'platform=linux/arm64' ]] || fail 'GHCR provenance architecture mismatch.' ;;
+    *) fail 'Unsupported GHCR production architecture.' ;;
+  esac
+  [[ "${fields[3]}" =~ ^runtime_digest=sha256:[0-9a-f]{64}$ && "${fields[4]}" =~ ^migrator_digest=sha256:[0-9a-f]{64}$ ]] || fail 'GHCR provenance digest is invalid.'
 }
 
 load_production_images() {
-  verify_image_archive
-  local archive="$temp_dir/images-$revision-$image_id.tar.gz" image observed
-  docker load --input "$archive" >/dev/null || {
-    rm -f -- "$archive" || printf '%s\n' 'Could not remove the rejected production image archive.' >&2
-    fail 'Exact-revision production images could not be loaded.'
-  }
-  for image in "virki-production-ci:$revision" "virki-migrator-ci:$revision"; do
-    observed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image") || {
-      rm -f -- "$archive" || printf '%s\n' 'Could not remove the rejected production image archive.' >&2
-      fail 'Exact-revision production image is missing.'
-    }
-    if [[ "$observed" != "$revision" ]]; then
-      rm -f -- "$archive" || printf '%s\n' 'Could not remove the rejected production image archive.' >&2
-      fail 'Production image revision does not match the accepted source.'
-    fi
-  done
-  rm -f -- "$archive" || fail 'Loaded production image archive could not be removed.'
+  verify_image_manifest
+  local manifest="$temp_dir/images-$revision-$image_id.manifest" auth_dir token="$root/.ghcr-read-token" image digest observed expected_platform role
+  local -a fields=()
+  mapfile -t fields < "$manifest"
+  [[ -f "$token" && ! -L "$token" && "$(stat -c '%a' -- "$token")" == 600 && "$(stat -c '%u' -- "$token")" == "$(id -u)" ]] || fail 'Private GHCR read-only credential is missing or unsafe.'
+  expected_platform=${fields[2]#platform=}
+  auth_dir=$(mktemp -d "$temp_dir/.ghcr-auth.XXXXXXXX") || fail 'Could not allocate isolated registry credential directory.'
+  (
+    export DOCKER_CONFIG="$auth_dir"
+    trap 'rm -f -- "$auth_dir/config.json"; rmdir -- "$auth_dir"' EXIT
+    docker login ghcr.io --username bielxdh3 --password-stdin < "$token" >/dev/null 2>&1 || fail 'Private GHCR login failed.'
+    for role in runtime migrator; do
+      case "$role" in
+        runtime) image='ghcr.io/bielxdh3/virki-runtime'; digest=${fields[3]#runtime_digest=}; local_tag="virki-production-ci:$revision" ;;
+        migrator) image='ghcr.io/bielxdh3/virki-migrator'; digest=${fields[4]#migrator_digest=}; local_tag="virki-migrator-ci:$revision" ;;
+      esac
+      docker pull "$image@$digest" >/dev/null 2>&1 || fail 'Exact-digest GHCR image pull failed.'
+      observed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source"}}|{{.Os}}/{{.Architecture}}' "$image@$digest") || fail 'Exact-digest GHCR image identity could not be inspected.'
+      [[ "$observed" == "$revision|https://github.com/bielxdh3/Virki|$expected_platform" ]] || fail 'GHCR image labels or architecture differ from accepted CI evidence.'
+      docker image tag "$image@$digest" "$local_tag" || fail 'Could not stage verified local image alias.'
+    done
+  ) || fail 'Private GHCR image verification or credential cleanup failed.'
+  rm -- "$manifest" || fail 'Verified GHCR provenance manifest could not be removed.'
 }
 
 compose_args() {
@@ -432,7 +447,7 @@ verify_first_install_recovery_target() {
   for path in "$root"/.[!.]*; do
     [[ -e "$path" || -L "$path" ]] || continue
     case "${path##*/}" in
-      .env|.env.oidc|.env.oidc-data|.virki-production-host|.virki-deploy-revision|.virki-source-state|.virki-migration-verification|.virki-first-install-recovery|.virki-operations.lock|.deploy-tmp) ;;
+      .env|.env.oidc|.env.oidc-data|.ghcr-read-token|.virki-production-host|.virki-deploy-revision|.virki-source-state|.virki-migration-verification|.virki-first-install-recovery|.virki-operations.lock|.deploy-tmp) ;;
       .env.pre-external-reuse.*)
         [[ -f "$path" && ! -L "$path" && "$(stat -c '%a' -- "$path")" == 600 && "$(stat -c '%u' -- "$path")" == "$(id -u)" ]] || fail 'First-install recovery found an unsafe protected backup file.'
         ;;
@@ -442,7 +457,7 @@ verify_first_install_recovery_target() {
   verify_first_install_recovery_project "$recovery_prior_revision" "$revision"
   if [[ "$progress_present" == false ]]; then
     verify_source_archive
-    verify_image_archive
+    verify_image_manifest
     write_first_install_recovery_marker prepared
   fi
   printf 'Verified the exact retained partial first-install target and its exclusive Virki PostgreSQL resources.\n'
@@ -1433,7 +1448,7 @@ cleanup_deploy_staging() {
   }
   for path in \
     "$temp_dir/source-$expected_revision-$staging_id.tar" \
-    "$temp_dir/images-$expected_revision-$staging_id.tar.gz"; do
+    "$temp_dir/images-$expected_revision-$staging_id.manifest"; do
     if [[ -e "$path" || -L "$path" ]]; then
       if [[ -f "$path" && ! -L "$path" ]]; then
         rm -f -- "$path" || cleanup_failed=1
@@ -1445,7 +1460,7 @@ cleanup_deploy_staging() {
   done
   for path in \
     "$temp_dir/source-$expected_revision-$staging_id.tar" \
-    "$temp_dir/images-$expected_revision-$staging_id.tar.gz"; do
+    "$temp_dir/images-$expected_revision-$staging_id.manifest"; do
     [[ ! -e "$path" && ! -L "$path" ]] || cleanup_failed=1
   done
   ((cleanup_failed == 0))

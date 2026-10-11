@@ -12,6 +12,7 @@ import {
 import { verifyExactShaCi } from "./lib/production-ci.mjs";
 import { SSH_OPTIONS, runProductionPreflight } from "./production-preflight.mjs";
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
+import { verifyImageProvenance } from "./lib/production-image-provenance.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const serverScriptPath = "scripts/production-server.sh";
@@ -19,6 +20,7 @@ const secretScannerRelativePath = "scripts/secret-scan.mjs";
 const backupDirectorySentinel = "infra/backups/.gitkeep";
 const reservedArchiveSegments = new Set([
   ".env",
+  ".ghcr-read-token",
   ".production.operator.json",
   ".virki-release",
   ".virki-production-host",
@@ -192,7 +194,7 @@ function copyArchive(archivePath, revision, archiveId, config, execute) {
 }
 
 function copyImageArchive(archivePath, revision, archiveId, config, execute) {
-  const remotePath = `${config.root}/.deploy-tmp/images-${revision}-${archiveId}.tar.gz`;
+  const remotePath = `${config.root}/.deploy-tmp/images-${revision}-${archiveId}.manifest`;
   return execute("scp", [
     ...SSH_OPTIONS,
     archivePath,
@@ -218,7 +220,7 @@ async function downloadProductionImages({ runId, revision, platform, execute }) 
   const directory = mkdtempSync(path.join(os.tmpdir(), "virki-production-images-"));
   try {
     const platformName = platform.replace("/", "-");
-    const artifactName = `virki-production-images-${revision}-${platformName}`;
+    const artifactName = `virki-image-provenance-${revision}-${platformName}`;
     requireSuccess(
       execute("gh", [
         "run", "download", String(runId),
@@ -228,12 +230,13 @@ async function downloadProductionImages({ runId, revision, platform, execute }) 
       ], { cwd: repositoryRoot }),
       "Exact-revision production images could not be downloaded from CI.",
     );
-    const archiveName = "virki-production-images.tar.gz";
+    const archiveName = "virki-production-images.manifest";
     const entries = readdirSync(directory);
     const archivePath = path.join(directory, archiveName);
     if (entries.length !== 1 || entries[0] !== archiveName || !lstatSync(archivePath).isFile()) {
       throw new ProductionRevisionError("COMMAND_FAILED");
     }
+    verifyImageProvenance(readFileSync(archivePath, "utf8"), { revision, runId, platform });
     return {
       archivePath,
       directory,

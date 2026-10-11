@@ -10,6 +10,7 @@ import { isValidProductionConfig } from "./lib/production-config.mjs";
 import { DOCKER_SCRIPT, runAcceptedProductionPreflight, runProductionPreflight } from "./production-preflight.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
+const provenanceFixture = `revision=${revision}\nrun_id=54321\nplatform=linux/amd64\nruntime_digest=sha256:${"a".repeat(64)}\nmigrator_digest=sha256:${"b".repeat(64)}\n`;
 const config = {
   sshAlias: "test-production",
   host: "production.example.invalid",
@@ -207,7 +208,7 @@ test("native shell probe emits the sanitized protected environment metadata cate
     const marker = path.join(root, ".virki-production-host");
     writeFileSync(marker, `role=production\nprotocol=2\nhostname=${hostname}\npath=${root}\n`, { mode: 0o600 });
     chmodSync(marker, 0o600);
-    for (const name of [".env", ".env.oidc", ".env.oidc-data"]) {
+    for (const name of [".env", ".env.oidc", ".env.oidc-data", ".ghcr-read-token"]) {
       const file = path.join(root, name);
       writeFileSync(file, "placeholder=must-not-be-returned\n", { mode: name === ".env.oidc-data" ? 0o644 : 0o600 });
       chmodSync(file, name === ".env.oidc-data" ? 0o644 : 0o600);
@@ -297,7 +298,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   ].join("\n")));
   const stateLock = serverScript.indexOf('if [[ "$state_changing_actions" == *" $action "* ]]; then acquire_state_lock; fi', dispatch);
   const stagingCleanup = serverScript.slice(serverScript.indexOf("cleanup_deploy_staging() {"), serverScript.indexOf("\ncleanup_failed_deploy() {"));
-  assert.match(stagingCleanup, /source-\$expected_revision-\$staging_id\.tar[\s\S]*?images-\$expected_revision-\$staging_id\.tar\.gz[\s\S]*?\[\[ -f "\$path" && ! -L "\$path" \]\][\s\S]*?\(\(cleanup_failed == 0\)\)/u);
+  assert.match(stagingCleanup, /source-\$expected_revision-\$staging_id\.tar[\s\S]*?images-\$expected_revision-\$staging_id\.manifest[\s\S]*?\[\[ -f "\$path" && ! -L "\$path" \]\][\s\S]*?\(\(cleanup_failed == 0\)\)/u);
   assert.match(serverScript, /cleanup_failed_deploy\(\)[\s\S]*?cleanup_deploy_staging "\$revision" "\$archive_id"[\s\S]*?Deployment staging cleanup could not be confirmed/u);
   assert.match(serverScript, /if \[\[ "\$action" == cleanup-deploy-staging \]\]; then[\s\S]*?cleanup_deploy_staging "\$revision" "\$archive_id"/u);
   assert.match(deploymentScript, /cleanupAfterFailure\(error, source\.revision, archiveId, sourceCode, config, execute\)/u);
@@ -314,6 +315,21 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(preflightScript, /stat -c '%u' -- "\$file".*id -u/u);
   assert.match(preflightScript, /stat -c '%a' -- "\$root".*700/u);
   assert.match(preflightScript, /stat -c '%a' -- "\$marker".*600/u);
+});
+
+test("private GHCR transport requires CI-run-bound exact digests and isolates the pull credential", () => {
+  const transport = serverScript.slice(serverScript.indexOf("verify_image_manifest() {"), serverScript.indexOf("\ncompose_args() {"));
+  assert.match(transport, /sha256sum[\s\S]*?\$image_hash/u);
+  assert.match(transport, /run_id=\[1-9\]/u);
+  assert.ok(transport.includes("^runtime_digest=sha256:[0-9a-f]{64}$"));
+  assert.ok(transport.includes("^migrator_digest=sha256:[0-9a-f]{64}$"));
+  assert.match(transport, /\.ghcr-read-token[\s\S]*?stat -c '%a'[\s\S]*?== 600/u);
+  assert.match(transport, /mktemp -d[\s\S]*?DOCKER_CONFIG[\s\S]*?--password-stdin < "\$token"/u);
+  assert.match(transport, /docker pull "\$image@\$digest"/u);
+  assert.match(transport, /org\.opencontainers\.image\.revision[\s\S]*?org\.opencontainers\.image\.source/u);
+  assert.match(transport, /docker image tag "\$image@\$digest" "\$local_tag"/u);
+  assert.doesNotMatch(transport, /docker build|docker load|--password=|docker system prune/u);
+  assert.match(preflightScript, /for name in \.env \.env\.oidc \.env\.oidc-data \.ghcr-read-token/u);
 });
 
 test("first install requires an empty isolated Virki target and leaves legacy and Tunnel state untouched", () => {
@@ -354,7 +370,7 @@ test("partial first-install recovery is typed, exact-resource-only, and checkpoi
   assert.match(guard, /completion marker already exists/u);
   assert.match(guard, /unexpected hidden entry/u);
   assert.match(guard, /phase=\(prepared\|database-verified\)/u);
-  assert.match(guard, /verify_first_install_recovery_project "\$recovery_prior_revision" "\$revision"[\s\S]*?verify_source_archive[\s\S]*?verify_image_archive[\s\S]*?write_first_install_recovery_marker prepared/u);
+  assert.match(guard, /verify_first_install_recovery_project "\$recovery_prior_revision" "\$revision"[\s\S]*?verify_source_archive[\s\S]*?verify_image_manifest[\s\S]*?write_first_install_recovery_marker prepared/u);
   assert.match(guard, /\[\[ "\$current_target" == "\$release_dir\/\$revision" \]\]/u);
   assert.match(guard, /current\)[\s\S]*?\[\[ "\$progress_present" == true && "\$accepted_release_present" == true \]\]/u);
   assert.match(serverScript, /first_install_volume='virki-prod_virki_postgres_data'/u);
@@ -944,7 +960,7 @@ test("non-whitespace backup sentinel content blocks preflight and transfer", asy
   assert.equal(existsSync(path.dirname(archivePath)), false);
 });
 
-test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA images", async () => {
+test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA GHCR provenance", async () => {
   const sequence = [];
   let archivePath;
   let imageArchivePath;
@@ -1004,10 +1020,10 @@ test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA i
       if (command === "gh" && args[0] === "run" && args[1] === "download") {
         assert.equal(args[2], "54321");
         assert.equal(args[args.indexOf("--repo") + 1], "bielxdh3/Virki");
-        assert.equal(args[args.indexOf("--name") + 1], `virki-production-images-${revision}-linux-amd64`);
+        assert.equal(args[args.indexOf("--name") + 1], `virki-image-provenance-${revision}-linux-amd64`);
         const targetDirectory = args[args.indexOf("--dir") + 1];
-        imageArchivePath = path.join(targetDirectory, "virki-production-images.tar.gz");
-        writeFileSync(imageArchivePath, "gzip image archive");
+        imageArchivePath = path.join(targetDirectory, "virki-production-images.manifest");
+        writeFileSync(imageArchivePath, provenanceFixture);
         return { status: 0, stdout: "" };
       }
       if (command === "scp") {
@@ -1019,7 +1035,7 @@ test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA i
         } else {
           assert.equal(args.at(-2), imageArchivePath);
           const remotePath = args.at(-1).split(":").at(-1);
-          assert.match(remotePath, new RegExp(`images-${revision}-${archiveId}\\.tar\\.gz$`, "u"));
+          assert.match(remotePath, new RegExp(`images-${revision}-${archiveId}\\.manifest$`, "u"));
         }
         assert.equal(args.some((value) => value.endsWith("/.env")), false);
         return { status: 0, stdout: "" };
@@ -1049,7 +1065,7 @@ test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA i
   assert.equal(existsSync(path.dirname(imageArchivePath)), false);
 });
 
-test("first-install uses the exact-SHA CI images and invokes only the guarded fresh-install action", async () => {
+test("first-install uses the exact-SHA CI GHCR provenance and invokes only the guarded fresh-install action", async () => {
   const calls = [];
   let sourceArchivePath;
   let imageArchivePath;
@@ -1090,9 +1106,9 @@ test("first-install uses the exact-SHA CI images and invokes only the guarded fr
       if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
       if (command === "gh" && args[0] === "run" && args[1] === "download") {
         assert.equal(args[2], "54321");
-        assert.equal(args[args.indexOf("--name") + 1], `virki-production-images-${revision}-linux-amd64`);
-        imageArchivePath = path.join(args[args.indexOf("--dir") + 1], "virki-production-images.tar.gz");
-        writeFileSync(imageArchivePath, "exact SHA image artifact");
+        assert.equal(args[args.indexOf("--name") + 1], `virki-image-provenance-${revision}-linux-amd64`);
+        imageArchivePath = path.join(args[args.indexOf("--dir") + 1], "virki-production-images.manifest");
+        writeFileSync(imageArchivePath, provenanceFixture);
         return { status: 0, stdout: "" };
       }
       if (command === "scp") {
@@ -1101,7 +1117,7 @@ test("first-install uses the exact-SHA CI images and invokes only the guarded fr
           assert.ok(stagingId);
         } else {
           assert.equal(args.at(-2), imageArchivePath);
-          assert.match(args.at(-1), new RegExp(`images-${revision}-${stagingId}\\.tar\\.gz$`, "u"));
+          assert.match(args.at(-1), new RegExp(`images-${revision}-${stagingId}\\.manifest$`, "u"));
         }
         return { status: 0, stdout: "" };
       }
@@ -1154,8 +1170,8 @@ test("failed transfers and remote deploys invoke cleanup for only their unique s
           if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
           if (command === "gh") {
             const targetDirectory = args[args.indexOf("--dir") + 1];
-            imageArchivePath = path.join(targetDirectory, "virki-production-images.tar.gz");
-            writeFileSync(imageArchivePath, "gzip image archive");
+            imageArchivePath = path.join(targetDirectory, "virki-production-images.manifest");
+            writeFileSync(imageArchivePath, provenanceFixture);
             return { status: 0, stdout: "" };
           }
           if (command === "scp") {
@@ -1166,7 +1182,7 @@ test("failed transfers and remote deploys invoke cleanup for only their unique s
               return { status: 0, stdout: "" };
             }
             assert.equal(args.at(-2), imageArchivePath);
-            assert.match(args.at(-1), new RegExp(`images-${revision}-${archiveId}\\.tar\\.gz$`, "u"));
+            assert.match(args.at(-1), new RegExp(`images-${revision}-${archiveId}\\.manifest$`, "u"));
             return { status: failureStage === "image-transfer" ? 1 : 0, stdout: "" };
           }
           if (command === "ssh") {

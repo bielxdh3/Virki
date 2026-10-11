@@ -36,7 +36,7 @@ grep -Fxq 'role=production' "$marker" || fail MARKER_CONTENT_INVALID
 grep -Fxq 'protocol=2' "$marker" || fail MARKER_CONTENT_INVALID
 grep -Fxq "hostname=$host" "$marker" || fail MARKER_CONTENT_INVALID
 grep -Fxq "path=$root" "$marker" || fail MARKER_CONTENT_INVALID
-for name in .env .env.oidc .env.oidc-data; do
+for name in .env .env.oidc .env.oidc-data .ghcr-read-token; do
   file="$root/$name"
   [[ -f "$file" && ! -L "$file" ]] || fail "PROTECTED_ENV_FILE_MISSING_OR_UNSAFE:$name"
   [[ "$(stat -c '%a' -- "$file")" == 600 && "$(stat -c '%u' -- "$file")" == "$(id -u)" ]] || fail "PROTECTED_ENV_METADATA_INVALID:$name"
@@ -155,7 +155,7 @@ function describeProbeFailure(result) {
     MARKER_CONTENT_INVALID: "production host marker does not match the host and root.",
   };
   if (Object.hasOwn(hostCheckMessages, hostCheck)) return hostCheckMessages[hostCheck];
-  for (const name of [".env", ".env.oidc", ".env.oidc-data"]) {
+  for (const name of [".env", ".env.oidc", ".env.oidc-data", ".ghcr-read-token"]) {
     if (hostCheck === `PROTECTED_ENV_FILE_MISSING_OR_UNSAFE:${name}`) {
       return `protected production environment file ${name} is missing or is not a regular file.`;
     }

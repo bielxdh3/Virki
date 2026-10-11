@@ -157,12 +157,18 @@ test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF 
   });
 });
 
-test("production images are uploaded only after exact main-push builds pass on both supported architectures", () => {
+test("private GHCR images publish only after exact main-push builds pass on both architectures", () => {
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
   assert.match(workflow, /needs: \[validate, authenticated-e2e\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
   assert.match(workflow, /--target production[\s\S]*?--target migrator/u);
   assert.match(workflow, /VIRKI_BUILD_REVISION=\$\{\{ github\.sha \}\}[\s\S]*?docker image inspect[\s\S]*?node scripts\/production-runtime-smoke\.mjs/u);
-  assert.match(workflow, /Production migrator image smoke[\s\S]*?VIRKI_MIGRATOR_IMAGE: virki-migrator-ci:\$\{\{ github\.sha \}\}[\s\S]*?node scripts\/production-migrator-smoke\.mjs[\s\S]*?Save tested production images/u);
+  assert.match(workflow, /Production migrator image smoke[\s\S]*?VIRKI_MIGRATOR_IMAGE: virki-migrator-ci:\$\{\{ github\.sha \}\}[\s\S]*?node scripts\/production-migrator-smoke\.mjs[\s\S]*?Publish tested private GHCR images/u);
+  assert.match(workflow, /packages: write/u);
+  assert.match(workflow, /ghcr\.io\/bielxdh3\/virki-runtime[\s\S]*?ghcr\.io\/bielxdh3\/virki-migrator/u);
+  assert.match(workflow, /docker login ghcr\.io[\s\S]*?docker push/u);
+  assert.match(workflow, /visibility.*private[\s\S]*?virki-production-images\.manifest/u);
+  assert.match(workflow, /virki-image-provenance-\$\{\{ github\.sha \}\}-linux-\$\{\{ matrix\.arch \}\}/u);
+  assert.doesNotMatch(workflow, /docker save|virki-production-images\.tar\.gz/u);
   assert.match(workflow, /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1/u);
   assert.match(workflow, /retention-days: 14/u);
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
