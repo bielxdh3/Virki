@@ -19,7 +19,8 @@ function fixture(mode = "valid", kind = "codeql") {
     calls.push({ command, args, env: options.env ? "isolated" : "none" });
     if (command === "gh") {
       if (args[1] === "token") return { status: 0, stdout: "DUMMY-TEST-TOKEN" };
-      if (args[0] === "run") return { status: 0, stdout: mode === "missing-log" ? "unrelated" : logProof(kind, mode === "wrong-log-sha" ? "f".repeat(40) : revision) };
+      if (args[0] === "run") return { status: 0, stdout: mode === "missing-log" ? "unrelated"
+        : logProof(kind, mode === "wrong-log-sha" ? "f".repeat(40) : revision).replace("platform=linux/amd64", mode === "valid-arm64" ? "platform=linux/arm64" : "platform=linux/amd64") };
       return { status: 0, stdout: mode === "public" ? JSON.stringify({ ...JSON.parse(validPackage), visibility: "public" }) : validPackage };
     }
     if (args[0] === "login") {
@@ -29,7 +30,8 @@ function fixture(mode = "valid", kind = "codeql") {
     }
     if (args[0] === "pull") return { status: mode === "pull-failed" ? 1 : 0, stdout: "" };
     if (args[0] === "image") {
-      const fields = ["https://github.com/bielxdh3/Virki", revision, "67890", kind, kind === "codeql" ? "none" : "linux/amd64", "linux/amd64"];
+      const arch = kind === "codeql" ? "amd64" : (mode === "valid-arm64" ? "arm64" : "amd64");
+      const fields = ["https://github.com/bielxdh3/Virki", revision, "67890", kind, kind === "codeql" ? "none" : `linux/${arch}`, `linux/${arch}`];
       if (mode === "foreign-run") fields[2] = "67891";
       if (mode === "wrong-arch") fields[5] = "linux/arm64";
       return { status: 0, stdout: fields.join("|") };
@@ -55,6 +57,10 @@ test("private OCI evidence requires exact SHA, run, kind and architecture", () =
   assert.equal(evidenceDigestFromRunLog(logProof("codeql"), { revision, runId: 67890, kind: "codeql" }), digest);
   assert.equal(evidenceDigestFromRunLog(logProof("codeql").replace("Store reviewed CodeQL SARIF in private GHCR evidence", "UNKNOWN STEP"), { revision, runId: 67890, kind: "codeql" }), digest);
   assert.equal(evidenceDigestFromRunLog(logProof("images"), { revision, runId: 67890, kind: "images", platform: "amd64" }), digest);
+  const dualArchLog = logProof("images") + logProof("images").replace("platform=linux/amd64", "platform=linux/arm64");
+  assert.equal(evidenceDigestFromRunLog(dualArchLog, { revision, runId: 67890, kind: "images", platform: "amd64" }), digest);
+  assert.equal(evidenceDigestFromRunLog(dualArchLog, { revision, runId: 67890, kind: "images", platform: "arm64" }), digest);
+  assert.throws(() => evidenceDigestFromRunLog(dualArchLog + logProof("images"), { revision, runId: 67890, kind: "images", platform: "amd64" }));
   for (const malicious of ["", logProof("codeql", "f".repeat(40)), logProof("codeql") + logProof("codeql")]) {
     assert.throws(() => evidenceDigestFromRunLog(malicious, { revision, runId: 67890, kind: "codeql" }));
   }
@@ -82,6 +88,13 @@ for (const kind of ["codeql", "images"]) {
     }
   });
 }
+
+test("arm64 OCI evidence is validated against native ARM runner architecture", () => {
+  const { execute } = fixture("valid-arm64", "images");
+  const evidence = downloadGhcrEvidence({ revision, runId: 67890, kind: "images", platform: "arm64", execute, repositoryRoot: "/repo" });
+  try { assert.ok(existsSync(evidence.contents)); }
+  finally { rmSync(evidence.directory, { recursive: true, force: true }); }
+});
 
 for (const mode of ["public", "missing-log", "wrong-log-sha", "login-failed", "pull-failed", "foreign-run", "wrong-arch", "empty", "symlink"]) {
   test(`GHCR ${mode} fails closed without persistent credentials or unsafe execution`, () => {

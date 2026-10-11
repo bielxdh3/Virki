@@ -18,9 +18,12 @@ export function evidenceDigestFromRunLog(log, { revision, runId, kind, platform 
     if (columns.length < 3 || (columns[1] !== step && columns[1] !== "UNKNOWN STEP")) continue;
     const found = /\bVIRKI_EVIDENCE_DIGEST revision=([0-9a-f]{40}) run=([1-9][0-9]*) kind=(codeql|images) platform=(none|linux\/(?:amd64|arm64)) digest=(sha256:[0-9a-f]{64})(?:\s|$)/u.exec(columns.slice(2).join("\t"));
     if (found) {
-      if (found[1] !== revision || found[2] !== String(runId) || found[3] !== kind || found[4] !== expectedPlatform) {
+      if (found[1] !== revision || found[2] !== String(runId) || found[3] !== kind) {
         throw new ProductionRevisionError("COMMAND_FAILED");
       }
+      // The successful image job has both architecture proofs in the same run log.
+      if (found[4] !== expectedPlatform && kind === "images" && ["linux/amd64", "linux/arm64"].includes(found[4])) continue;
+      if (found[4] !== expectedPlatform) throw new ProductionRevisionError("COMMAND_FAILED");
       matches.push(found[5]);
     }
   }
@@ -69,7 +72,8 @@ export function downloadGhcrEvidence({ revision, runId, kind, platform = "", exe
     docker(["pull", reference]);
     const fields = docker(["image", "inspect", reference, "--format", '{{index .Config.Labels "org.opencontainers.image.source"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "virki.evidence.run-id"}}|{{index .Config.Labels "virki.evidence.kind"}}|{{index .Config.Labels "virki.evidence.platform"}}|{{.Os}}/{{.Architecture}}']).split("|");
     if (fields.length !== 6 || fields[0] !== SOURCE || fields[1] !== revision || fields[2] !== String(runId)
-      || fields[3] !== kind || fields[4] !== (platform ? `linux/${platform}` : "none") || fields[5] !== "linux/amd64") {
+      || fields[3] !== kind || fields[4] !== (platform ? `linux/${platform}` : "none")
+      || fields[5] !== (kind === "images" ? `linux/${platform}` : "linux/amd64")) {
       throw new ProductionRevisionError("COMMAND_FAILED");
     }
     const id = docker(["create", "--entrypoint", "/never-execute", reference]);
