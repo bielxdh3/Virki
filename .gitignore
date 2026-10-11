@@ -66,3 +66,6 @@ infra/cloudflare/cert.pem
 
 prisma/generated/
 packages/database/generated/
+
+# Private registry pull credential; provision only on the production host.
+.ghcr-read-token

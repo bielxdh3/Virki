@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,14 @@ const reviewedSarif = {
     }]
   }]
 };
+const fakeEvidence = (document = reviewedSarif) => () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-test-ghcr-evidence-"));
+  const contents = path.join(directory, "contents");
+  mkdirSync(contents);
+  writeFileSync(path.join(contents, "javascript.sarif"), JSON.stringify(document));
+  return { directory, contents };
+};
+
 const run = (overrides = {}) => ({
   databaseId: 12345,
   headSha: revision,
@@ -65,13 +74,14 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   const result = verifyExactShaCi({
     revision,
     repositoryRoot: "/repo",
+    retrieveEvidence: ({ revision: observed, runId, kind }) => {
+      assert.equal(observed, revision);
+      assert.equal(runId, 67890);
+      assert.equal(kind, "codeql");
+      return fakeEvidence()();
+    },
     execute: (command, args, options) => {
       calls.push({ command, args, options });
-      if (args[0] === "run" && args[1] === "download") {
-        const directory = args[args.indexOf("--dir") + 1];
-        writeFileSync(path.join(directory, "javascript.sarif"), JSON.stringify(reviewedSarif));
-        return { status: 0, stdout: "" };
-      }
       const workflowName = args[args.indexOf("--workflow") + 1];
       return { status: 0, stdout: JSON.stringify([run({ databaseId: workflowName === "ci.yml" ? 12345 : 67890 })]) };
     },
@@ -79,9 +89,9 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   assert.equal(result.ok, true);
   assert.equal(result.runId, 12345);
   assert.equal(result.codeqlRunId, 67890);
-  assert.equal(result.sarifArtifactName, "codeql-sarif-" + revision);
+  assert.equal(result.sarifArtifactName, `virki-evidence:${revision}-67890-codeql`);
   assert.equal(result.sarifResults, 1);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 2);
   for (const call of calls.slice(0, 2)) {
     assert.equal(call.command, "gh");
     assert.equal(call.args[call.args.indexOf("--repo") + 1], "bielxdh3/Virki");
@@ -92,12 +102,6 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
   }
   assert.ok(calls.some(({ args }) => args.includes("ci.yml")));
   assert.ok(calls.some(({ args }) => args.includes("codeql.yml")));
-  const download = calls[2];
-  assert.equal(download.command, "gh");
-  assert.deepEqual(download.args.slice(0, 3), ["run", "download", "67890"]);
-  assert.equal(download.args[download.args.indexOf("--name") + 1], "codeql-sarif-" + revision);
-  assert.equal(download.args[download.args.indexOf("--repo") + 1], "bielxdh3/Virki");
-  assert.equal(existsSync(download.args[download.args.indexOf("--dir") + 1]), false);
 
   const unavailable = verifyExactShaCi({
     revision,
@@ -120,14 +124,13 @@ test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF 
   const unavailable = verifyExactShaCi({
     revision,
     repositoryRoot: "/repo",
-    execute: (_command, args) => args[1] === "download"
-      ? { status: 1, stdout: "" }
-      : { status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) }
+    retrieveEvidence: () => { throw new Error("registry inaccessible"); },
+    execute: (_command, args) => ({ status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) })
   });
   assert.deepEqual(unavailable, {
     ok: false,
     status: "BLOCKED",
-    lines: ["Exact-SHA CodeQL SARIF artifact is missing, expired, or unavailable."]
+    lines: ["Exact-SHA private GHCR CodeQL SARIF evidence is missing, inaccessible, or invalid."]
   });
 
   const unreviewed = {
@@ -142,13 +145,8 @@ test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF 
   const rejected = verifyExactShaCi({
     revision,
     repositoryRoot: "/repo",
-    execute: (_command, args) => {
-      if (args[1] === "download") {
-        writeFileSync(path.join(args[args.indexOf("--dir") + 1], "javascript.sarif"), JSON.stringify(unreviewed));
-        return { status: 0, stdout: "" };
-      }
-      return { status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) };
-    }
+    retrieveEvidence: fakeEvidence(unreviewed),
+    execute: (_command, args) => ({ status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) })
   });
   assert.deepEqual(rejected, {
     ok: false,
@@ -157,14 +155,29 @@ test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF 
   });
 });
 
-test("production images are uploaded only after exact main-push builds pass on both supported architectures", () => {
+test("private GHCR images publish only after exact main-push builds pass on both architectures", () => {
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
   assert.match(workflow, /needs: \[validate, authenticated-e2e\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
   assert.match(workflow, /--target production[\s\S]*?--target migrator/u);
   assert.match(workflow, /VIRKI_BUILD_REVISION=\$\{\{ github\.sha \}\}[\s\S]*?docker image inspect[\s\S]*?node scripts\/production-runtime-smoke\.mjs/u);
-  assert.match(workflow, /Production migrator image smoke[\s\S]*?VIRKI_MIGRATOR_IMAGE: virki-migrator-ci:\$\{\{ github\.sha \}\}[\s\S]*?node scripts\/production-migrator-smoke\.mjs[\s\S]*?Save tested production images/u);
-  assert.match(workflow, /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1/u);
-  assert.match(workflow, /retention-days: 14/u);
+  const migratorSmoke = workflow.indexOf("name: Production migrator image smoke");
+  const publishStep = workflow.indexOf("name: Publish tested private GHCR images and record exact manifest digests");
+  assert.ok(migratorSmoke >= 0 && publishStep > migratorSmoke);
+  assert.ok(workflow.includes("VIRKI_MIGRATOR_IMAGE: virki-migrator-ci:${{ github.sha }}"));
+  assert.ok(workflow.includes("node scripts/production-migrator-smoke.mjs"));
+  assert.ok(workflow.includes("packages: write"));
+  const runtimePackage = workflow.indexOf("runtime=ghcr.io/bielxdh3/virki-runtime");
+  const migratorPackage = workflow.indexOf("migrator=ghcr.io/bielxdh3/virki-migrator");
+  assert.ok(runtimePackage >= 0 && migratorPackage > runtimePackage);
+  const privacyCheck = workflow.indexOf('test "$visibility" = private');
+  const registryLogin = workflow.indexOf("docker login ghcr.io");
+  const registryPush = workflow.indexOf("docker push");
+  const manifest = workflow.indexOf("virki-production-images.manifest");
+  assert.ok(privacyCheck > publishStep && privacyCheck < registryLogin && registryLogin < registryPush && registryPush < manifest);
+  assert.ok(workflow.includes("$ACCEPTED_SHA-$ACCEPTED_RUN_ID-images-$EXPECTED_ARCH"));
+  assert.ok(!workflow.includes("docker save") && !workflow.includes("virki-production-images.tar.gz"));
+  assert.ok(workflow.includes("Store exact-run image digests in private GHCR evidence"));
+  assert.ok(!workflow.includes("actions/upload-artifact"));
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
 });
 
@@ -196,7 +209,10 @@ test("CodeQL analyzes without Code Scanning upload and preserves SARIF as a pinn
   assert.doesNotMatch(codeqlWorkflow, /uses: [^\s]+@v\d/u);
   assert.match(codeqlWorkflow, /queries: security-extended/u);
   assert.match(codeqlWorkflow, /output: codeql-results[\s\S]*?upload: never/u);
-  assert.match(codeqlWorkflow, /Store CodeQL SARIF artifact[\s\S]*?uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1[\s\S]*?path: codeql-results[\s\S]*?if-no-files-found: error/u);
+  assert.ok(codeqlWorkflow.includes("Store reviewed CodeQL SARIF in private GHCR evidence"));
+  assert.ok(codeqlWorkflow.includes('docker push "$ref"'));
+  assert.ok(codeqlWorkflow.includes("packages: write"));
+  assert.ok(!codeqlWorkflow.includes("actions/upload-artifact"));
   assert.doesNotMatch(codeqlWorkflow, /security-events: write/u);
   assert.match(codeqlWorkflow, /contents: read/u);
 });

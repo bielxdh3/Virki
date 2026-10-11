@@ -45,7 +45,8 @@ FROM build AS migrator
 ENV NODE_ENV=production
 ENV HOME=/tmp/node-home
 ENV NPM_CONFIG_CACHE=/tmp/npm-cache
-LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}"
+LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}" \
+      org.opencontainers.image.source="https://github.com/bielxdh3/Virki"
 USER node:node
 CMD ["npm", "run", "prisma:migrate:deploy"]
 
@@ -64,7 +65,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ARG VIRKI_BUILD_REVISION
-LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}"
+LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}" \
+      org.opencontainers.image.source="https://github.com/bielxdh3/Virki"
 
 COPY --from=production-dependencies /app/package.json ./package.json
 COPY --from=production-dependencies /app/apps/public-site/package.json ./apps/public-site/package.json

@@ -1,0 +1,12 @@
+# Private, non-executable CodeQL/provenance evidence container; no application runtime.
+FROM scratch
+ARG VIRKI_BUILD_REVISION
+ARG VIRKI_EVIDENCE_RUN_ID
+ARG VIRKI_EVIDENCE_KIND
+ARG VIRKI_EVIDENCE_PLATFORM
+LABEL org.opencontainers.image.source="https://github.com/bielxdh3/Virki"
+LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}"
+LABEL virki.evidence.run-id="${VIRKI_EVIDENCE_RUN_ID}"
+LABEL virki.evidence.kind="${VIRKI_EVIDENCE_KIND}"
+LABEL virki.evidence.platform="${VIRKI_EVIDENCE_PLATFORM}"
+COPY evidence/ /evidence/

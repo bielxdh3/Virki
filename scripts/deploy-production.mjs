@@ -1,10 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CANONICAL_VIRKI_REPOSITORY,
   inspectProductionSource,
   ProductionRevisionError,
   runCommand,
@@ -12,6 +11,8 @@ import {
 import { verifyExactShaCi } from "./lib/production-ci.mjs";
 import { SSH_OPTIONS, runProductionPreflight } from "./production-preflight.mjs";
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
+import { verifyImageProvenance } from "./lib/production-image-provenance.mjs";
+import { downloadGhcrEvidence } from "./lib/ghcr-evidence.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const serverScriptPath = "scripts/production-server.sh";
@@ -19,6 +20,7 @@ const secretScannerRelativePath = "scripts/secret-scan.mjs";
 const backupDirectorySentinel = "infra/backups/.gitkeep";
 const reservedArchiveSegments = new Set([
   ".env",
+  ".ghcr-read-token",
   ".production.operator.json",
   ".virki-release",
   ".virki-production-host",
@@ -192,7 +194,7 @@ function copyArchive(archivePath, revision, archiveId, config, execute) {
 }
 
 function copyImageArchive(archivePath, revision, archiveId, config, execute) {
-  const remotePath = `${config.root}/.deploy-tmp/images-${revision}-${archiveId}.tar.gz`;
+  const remotePath = `${config.root}/.deploy-tmp/images-${revision}-${archiveId}.manifest`;
   return execute("scp", [
     ...SSH_OPTIONS,
     archivePath,
@@ -200,45 +202,33 @@ function copyImageArchive(archivePath, revision, archiveId, config, execute) {
   ]);
 }
 
-async function hashFile(filePath) {
-  const hash = createHash("sha256");
-  await new Promise((resolve, reject) => {
-    const stream = createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", resolve);
-  });
-  return hash.digest("hex");
-}
-
-async function downloadProductionImages({ runId, revision, platform, execute }) {
+async function downloadProductionImages({ runId, revision, platform, execute, retrieveEvidence }) {
   if (!Number.isSafeInteger(runId) || runId <= 0 || !["linux/amd64", "linux/arm64"].includes(platform)) {
     throw new ProductionRevisionError("COMMAND_FAILED");
   }
-  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-production-images-"));
+  const retrieved = retrieveEvidence({ revision, runId, kind: "images", platform: platform.slice(6), execute, repositoryRoot });
+  const { directory, contents } = retrieved;
   try {
-    const platformName = platform.replace("/", "-");
-    const artifactName = `virki-production-images-${revision}-${platformName}`;
-    requireSuccess(
-      execute("gh", [
-        "run", "download", String(runId),
-        "--repo", CANONICAL_VIRKI_REPOSITORY,
-        "--name", artifactName,
-        "--dir", directory,
-      ], { cwd: repositoryRoot }),
-      "Exact-revision production images could not be downloaded from CI.",
-    );
-    const archiveName = "virki-production-images.tar.gz";
-    const entries = readdirSync(directory);
-    const archivePath = path.join(directory, archiveName);
-    if (entries.length !== 1 || entries[0] !== archiveName || !lstatSync(archivePath).isFile()) {
-      throw new ProductionRevisionError("COMMAND_FAILED");
+    const archiveName = "virki-production-images.manifest";
+    const entries = readdirSync(contents);
+    const archivePath = path.join(contents, archiveName);
+    if (entries.length !== 1 || entries[0] !== archiveName) throw new ProductionRevisionError("COMMAND_FAILED");
+    // Validate and hash the same opened file; refuse links and file replacement.
+    const fd = openSync(archivePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let manifest;
+    try {
+      const opened = fstatSync(fd);
+      const entry = lstatSync(archivePath);
+      if (!opened.isFile() || !entry.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size > 512) {
+        throw new ProductionRevisionError("COMMAND_FAILED");
+      }
+      manifest = readFileSync(fd);
+      if (manifest.length > 512) throw new ProductionRevisionError("COMMAND_FAILED");
+      verifyImageProvenance(manifest.toString("utf8"), { revision, runId, platform });
+    } finally {
+      closeSync(fd);
     }
-    return {
-      archivePath,
-      directory,
-      archiveHash: await hashFile(archivePath),
-    };
+    return { archivePath, directory, archiveHash: createHash("sha256").update(manifest).digest("hex") };
   } catch (error) {
     rmSync(directory, { recursive: true, force: true });
     throw error;
@@ -281,10 +271,11 @@ export async function deployProduction({
   execute = runCommand,
   inspectSource = inspectProductionSource,
   verifyCi = verifyExactShaCi,
+  retrieveEvidence = downloadGhcrEvidence,
   preflight = runProductionPreflight,
 } = {}) {
   if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
-  if (!["install", "deploy", "first-install"].includes(action)) throw new ProductionRevisionError("ARGUMENT_INVALID");
+  if (!["install", "deploy", "first-install", "first-install-recovery"].includes(action)) throw new ProductionRevisionError("ARGUMENT_INVALID");
 
   const source = inspectSource({ repositoryRoot, execute });
   const ci = verifyCi({ revision: source.revision, execute, repositoryRoot });
@@ -299,12 +290,13 @@ export async function deployProduction({
     const preflightResult = await preflight({ execute, config });
     if (preflightResult.status !== 0) return preflightResult;
 
-    if (action === "deploy" || action === "first-install") {
+    if (action === "deploy" || action === "first-install" || action === "first-install-recovery") {
       imageArchive = await downloadProductionImages({
         runId: ci.runId,
         revision: source.revision,
         platform: preflightResult.platform,
         execute,
+        retrieveEvidence,
       });
     }
     try {
@@ -330,6 +322,8 @@ export async function deployProduction({
         runRemoteScript(action, source.revision, archive.archiveHash, archiveId, imageArchive.archiveHash, archiveId, sourceCode, config, execute),
         action === "first-install"
           ? "Fresh Virki initialization stopped; any new Virki database volume was preserved and legacy services were not changed."
+          : action === "first-install-recovery"
+            ? "Partial Virki first-install recovery stopped; existing Virki database and verified backups were preserved."
           : "Remote deployment stopped. Maintenance remains active if production mutation had begun.",
       );
     } catch (error) {
