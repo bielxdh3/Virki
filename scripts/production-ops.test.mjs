@@ -569,6 +569,7 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
       assert.ok(result.dockerCalls.some((call) => call.includes(".Config.Image")));
 
       writeFileSync(path.join(target.backups, "extra.dump"), "unexpected", { mode: 0o600 });
+      writeFileSync(target.callsPath, "", { mode: 0o600 });
       const contaminated = runRecovery(target);
       assert.equal(contaminated.status, 1);
       assert.match(contaminated.output, /backup directory contains unverified artifacts/u);
