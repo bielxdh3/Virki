@@ -328,7 +328,8 @@ verify_first_install_recovery_project() {
 }
 
 verify_first_install_recovery_release() {
-  local release_revision=$1 expected_hash=$2 release_marker="$release_dir/$release_revision/.virki-release"
+  local release_revision=$1 expected_hash=$2 release_marker
+  release_marker="$release_dir/$release_revision/.virki-release"
   [[ -d "$release_dir/$release_revision" && ! -L "$release_dir/$release_revision" ]] || fail 'First-install recovery release is missing or unsafe.'
   [[ -f "$release_marker" && ! -L "$release_marker" && "$(stat -c '%a' -- "$release_marker")" == 600 && "$(stat -c '%u' -- "$release_marker")" == "$(id -u)" && "$(wc -l < "$release_marker")" -eq 2 ]] || fail 'First-install recovery release marker is missing or unsafe.'
   grep -Fxq "revision=$release_revision" "$release_marker" && grep -Fxq "archive_sha256=$expected_hash" "$release_marker" || fail 'First-install recovery release marker does not match its source state.'
