@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CANONICAL_VIRKI_REPOSITORY,
   inspectProductionSource,
   ProductionRevisionError,
   runCommand,
@@ -13,6 +12,7 @@ import { verifyExactShaCi } from "./lib/production-ci.mjs";
 import { SSH_OPTIONS, runProductionPreflight } from "./production-preflight.mjs";
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
 import { verifyImageProvenance } from "./lib/production-image-provenance.mjs";
+import { downloadGhcrEvidence } from "./lib/ghcr-evidence.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const serverScriptPath = "scripts/production-server.sh";
@@ -202,29 +202,17 @@ function copyImageArchive(archivePath, revision, archiveId, config, execute) {
   ]);
 }
 
-async function downloadProductionImages({ runId, revision, platform, execute }) {
+async function downloadProductionImages({ runId, revision, platform, execute, retrieveEvidence }) {
   if (!Number.isSafeInteger(runId) || runId <= 0 || !["linux/amd64", "linux/arm64"].includes(platform)) {
     throw new ProductionRevisionError("COMMAND_FAILED");
   }
-  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-production-images-"));
+  const retrieved = retrieveEvidence({ revision, runId, kind: "images", platform: platform.slice(6), execute, repositoryRoot });
+  const { directory, contents } = retrieved;
   try {
-    const platformName = platform.replace("/", "-");
-    const artifactName = `virki-image-provenance-${revision}-${platformName}`;
-    requireSuccess(
-      execute("gh", [
-        "run", "download", String(runId),
-        "--repo", CANONICAL_VIRKI_REPOSITORY,
-        "--name", artifactName,
-        "--dir", directory,
-      ], { cwd: repositoryRoot }),
-      "Exact-revision production images could not be downloaded from CI.",
-    );
     const archiveName = "virki-production-images.manifest";
-    const entries = readdirSync(directory);
-    const archivePath = path.join(directory, archiveName);
-    if (entries.length !== 1 || entries[0] !== archiveName) {
-      throw new ProductionRevisionError("COMMAND_FAILED");
-    }
+    const entries = readdirSync(contents);
+    const archivePath = path.join(contents, archiveName);
+    if (entries.length !== 1 || entries[0] !== archiveName) throw new ProductionRevisionError("COMMAND_FAILED");
     // Validate and hash the same opened file; refuse links and file replacement.
     const fd = openSync(archivePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     let manifest;
@@ -240,11 +228,7 @@ async function downloadProductionImages({ runId, revision, platform, execute }) 
     } finally {
       closeSync(fd);
     }
-    return {
-      archivePath,
-      directory,
-      archiveHash: createHash("sha256").update(manifest).digest("hex"),
-    };
+    return { archivePath, directory, archiveHash: createHash("sha256").update(manifest).digest("hex") };
   } catch (error) {
     rmSync(directory, { recursive: true, force: true });
     throw error;
@@ -287,6 +271,7 @@ export async function deployProduction({
   execute = runCommand,
   inspectSource = inspectProductionSource,
   verifyCi = verifyExactShaCi,
+  retrieveEvidence = downloadGhcrEvidence,
   preflight = runProductionPreflight,
 } = {}) {
   if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
@@ -311,6 +296,7 @@ export async function deployProduction({
         revision: source.revision,
         platform: preflightResult.platform,
         execute,
+        retrieveEvidence,
       });
     }
     try {

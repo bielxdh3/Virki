@@ -103,7 +103,7 @@ jobs:
       - name: Native Linux production operations tests
         run: |
           bash -n scripts/production-server.sh
-          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs
+          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
 
       - name: Read-only backup inventory tests
         run: npm run test:backup:inventory
@@ -267,13 +267,30 @@ jobs:
             "$ACCEPTED_SHA" "$ACCEPTED_RUN_ID" "$EXPECTED_ARCH" "$runtime_digest" "$migrator_digest" \
             > "$RUNNER_TEMP/virki-production-images.manifest"
 
-      - name: Upload exact-revision image provenance (not image archives)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: virki-image-provenance-${{ github.sha }}-linux-${{ matrix.arch }}
-          path: ${{ runner.temp }}/virki-production-images.manifest
-          if-no-files-found: error
-          retention-days: 14
+      - name: Store exact-run image digests in private GHCR evidence
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTED_SHA: ${{ github.sha }}
+          ACCEPTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
+          mkdir evidence
+          cp "$RUNNER_TEMP/virki-production-images.manifest" evidence/
+          mkdir -m 700 "$RUNNER_TEMP/ghcr-evidence-auth"
+          export DOCKER_CONFIG="$RUNNER_TEMP/ghcr-evidence-auth"
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GHCR_PASSWORD" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin >/dev/null
+          ref="ghcr.io/bielxdh3/virki-evidence:$ACCEPTED_SHA-$ACCEPTED_RUN_ID-images-$EXPECTED_ARCH"
+          docker build --build-arg "VIRKI_BUILD_REVISION=$ACCEPTED_SHA" --build-arg "VIRKI_EVIDENCE_RUN_ID=$ACCEPTED_RUN_ID" --build-arg VIRKI_EVIDENCE_KIND=images --build-arg "VIRKI_EVIDENCE_PLATFORM=linux/$EXPECTED_ARCH" -f infra/Dockerfile.evidence -t "$ref" .
+          push_result=$(docker push "$ref")
+          digest=$(printf '%s\n' "$push_result" | sed -nE 's/^.*digest: (sha256:[a-f0-9]{64}) size: [0-9]+$/\1/p')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
+          printf 'VIRKI_EVIDENCE_DIGEST revision=%s run=%s kind=images platform=linux/%s digest=%s\n' "$ACCEPTED_SHA" "$ACCEPTED_RUN_ID" "$EXPECTED_ARCH" "$digest"
 
   authenticated-e2e:
     name: Authenticated browser E2E

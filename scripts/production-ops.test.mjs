@@ -10,6 +10,17 @@ import { isValidProductionConfig } from "./lib/production-config.mjs";
 import { DOCKER_SCRIPT, runAcceptedProductionPreflight, runProductionPreflight } from "./production-preflight.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
+const makeEvidence = (data = provenanceFixture, type = "file") => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-test-image-evidence-"));
+  const contents = path.join(directory, "contents");
+  mkdirSync(contents);
+  const file = path.join(contents, "virki-production-images.manifest");
+  if (type === "directory") mkdirSync(file);
+  else if (type === "symlink") symlinkSync(secretScannerPath, file);
+  else writeFileSync(file, data);
+  return { directory, contents, file };
+};
+
 const provenanceFixture = `revision=${revision}\nrun_id=54321\nplatform=linux/amd64\nruntime_digest=sha256:${"a".repeat(64)}\nmigrator_digest=sha256:${"b".repeat(64)}\n`;
 const config = {
   sshAlias: "test-production",
@@ -995,6 +1006,12 @@ test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA G
       sequence.push("preflight");
       return { status: 0, platform: "linux/amd64", lines: ["preflight ok"] };
     },
+    retrieveEvidence: () => {
+      sequence.push("ghcr:evidence");
+      const evidence = makeEvidence();
+      imageArchivePath = evidence.file;
+      return evidence;
+    },
     execute: (command, args, options = {}) => {
       sequence.push(command === "ssh" ? "ssh" : isSecretScanCommand(command, args) ? "secret-scan" : command === "git" && args[0] === "show" && args[1] === revision + ":scripts/secret-scan.mjs" ? "scanner-source" : `${command}:${args[0]}`);
       if (command === "git") assert.equal(options.env?.GIT_NO_REPLACE_OBJECTS, "1");
@@ -1032,15 +1049,7 @@ test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA G
         assert.equal(args[2], revision);
         return { status: 0, stdout: "Secret scan passed.\n" };
       }
-      if (command === "gh" && args[0] === "run" && args[1] === "download") {
-        assert.equal(args[2], "54321");
-        assert.equal(args[args.indexOf("--repo") + 1], "bielxdh3/Virki");
-        assert.equal(args[args.indexOf("--name") + 1], `virki-image-provenance-${revision}-linux-amd64`);
-        const targetDirectory = args[args.indexOf("--dir") + 1];
-        imageArchivePath = path.join(targetDirectory, "virki-production-images.manifest");
-        writeFileSync(imageArchivePath, provenanceFixture);
-        return { status: 0, stdout: "" };
-      }
+
       if (command === "scp") {
         if (args.at(-2) === archivePath) {
           const remotePath = args.at(-1).split(":").at(-1);
@@ -1072,8 +1081,8 @@ test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA G
 
   assert.equal(result.status, 0);
   assert.deepEqual(sequence.slice(0, 10), ["source", "ci", "git:archive", "git:ls-tree", "git:cat-file", "git:cat-file", "git:check-attr", "tar:-tf", "scanner-source", "secret-scan"]);
-  assert.ok(sequence.indexOf("preflight") < sequence.indexOf("gh:run"));
-  assert.ok(sequence.indexOf("gh:run") < sequence.findIndex((item) => item.startsWith("scp:")));
+  assert.ok(sequence.indexOf("preflight") < sequence.indexOf("ghcr:evidence"));
+  assert.ok(sequence.indexOf("ghcr:evidence") < sequence.findIndex((item) => item.startsWith("scp:")));
   assert.equal(sequence.filter((item) => item.startsWith("scp:")).length, 2);
   assert.equal(sequence.filter((item) => item === "ssh").length, 1);
   assert.equal(existsSync(path.dirname(archivePath)), false);
@@ -1091,6 +1100,11 @@ test("deployment rejects nonregular, symlinked, and oversized GHCR artifact entr
         inspectSource: () => ({ branch: "main", revision }),
         verifyCi: () => ({ ok: true, runId: 54321, lines: [] }),
         preflight: async () => ({ status: 0, platform: "linux/amd64", lines: [] }),
+        retrieveEvidence: () => {
+          const evidence = makeEvidence(entryKind === "oversized" ? provenanceFixture.padEnd(513, "x") : provenanceFixture, entryKind);
+          artifactDirectory = evidence.directory;
+          return evidence;
+        },
         execute: (command, args) => {
           if (command === "git" && args[0] === "archive") {
             writeFileSync(args.find((arg) => arg.startsWith("--output=")).slice(9), "archive");
@@ -1105,16 +1119,7 @@ test("deployment rejects nonregular, symlinked, and oversized GHCR artifact entr
           if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
           if (command === "tar") return { status: 0, stdout: "README.md\n" };
           if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
-          if (command === "gh" && args[0] === "run" && args[1] === "download") {
-            artifactDirectory = args[args.indexOf("--dir") + 1];
-            const candidate = path.join(artifactDirectory, "virki-production-images.manifest");
-            if (entryKind === "directory") mkdirSync(candidate);
-            if (entryKind === "oversized") writeFileSync(candidate, provenanceFixture.padEnd(513, "x"));
-            if (entryKind === "symlink") {
-              symlinkSync(secretScannerPath, candidate);
-            }
-            return { status: 0, stdout: "" };
-          }
+
           if (command === "ssh" || command === "scp") {
             stagingTouched = true;
             return { status: 1, stdout: "" };
@@ -1150,6 +1155,12 @@ test("first-install uses the exact-SHA CI GHCR provenance and invokes only the g
       calls.push("preflight");
       return { status: 0, platform: "linux/amd64", lines: ["preflight passed"] };
     },
+    retrieveEvidence: () => {
+      calls.push("ghcr:evidence");
+      const evidence = makeEvidence();
+      imageArchivePath = evidence.file;
+      return evidence;
+    },
     execute: (command, args, options = {}) => {
       calls.push(command === "ssh" ? "ssh" : `${command}:${args[0]}`);
       if (command === "git" && args[0] === "archive") {
@@ -1167,13 +1178,7 @@ test("first-install uses the exact-SHA CI GHCR provenance and invokes only the g
       if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
       if (command === "tar") return { status: 0, stdout: `${sourcePaths.join("\n")}\n` };
       if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
-      if (command === "gh" && args[0] === "run" && args[1] === "download") {
-        assert.equal(args[2], "54321");
-        assert.equal(args[args.indexOf("--name") + 1], `virki-image-provenance-${revision}-linux-amd64`);
-        imageArchivePath = path.join(args[args.indexOf("--dir") + 1], "virki-production-images.manifest");
-        writeFileSync(imageArchivePath, provenanceFixture);
-        return { status: 0, stdout: "" };
-      }
+
       if (command === "scp") {
         if (args.at(-2) === sourceArchivePath) {
           stagingId = args.at(-1).match(new RegExp(`source-${revision}-([a-f0-9]{24})\\.tar$`, "u"))?.[1];
@@ -1195,8 +1200,8 @@ test("first-install uses the exact-SHA CI GHCR provenance and invokes only the g
   });
 
   assert.equal(result.status, 0);
-  assert.ok(calls.indexOf("preflight") < calls.indexOf("gh:run"));
-  assert.ok(calls.indexOf("gh:run") < calls.findIndex((call) => call === "ssh"));
+  assert.ok(calls.indexOf("preflight") < calls.indexOf("ghcr:evidence"));
+  assert.ok(calls.indexOf("ghcr:evidence") < calls.findIndex((call) => call === "ssh"));
   assert.equal(calls.filter((call) => call === "ssh").length, 1);
   assert.equal(existsSync(path.dirname(sourceArchivePath)), false);
   assert.equal(existsSync(path.dirname(imageArchivePath)), false);
@@ -1215,6 +1220,11 @@ test("failed transfers and remote deploys invoke cleanup for only their unique s
         inspectSource: () => ({ branch: "main", revision }),
         verifyCi: () => ({ ok: true, runId: 54321, lines: [] }),
         preflight: async () => ({ status: 0, platform: "linux/amd64", lines: [] }),
+        retrieveEvidence: () => {
+          const evidence = makeEvidence();
+          imageArchivePath = evidence.file;
+          return evidence;
+        },
         execute: (command, args, options = {}) => {
           calls.push({ command, args });
           if (command === "git" && args[0] === "archive") {
@@ -1231,12 +1241,7 @@ test("failed transfers and remote deploys invoke cleanup for only their unique s
           if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
           if (command === "tar") return { status: 0, stdout: "README.md\n" };
           if (isSecretScanCommand(command, args)) return { status: 0, stdout: "Secret scan passed.\n" };
-          if (command === "gh") {
-            const targetDirectory = args[args.indexOf("--dir") + 1];
-            imageArchivePath = path.join(targetDirectory, "virki-production-images.manifest");
-            writeFileSync(imageArchivePath, provenanceFixture);
-            return { status: 0, stdout: "" };
-          }
+
           if (command === "scp") {
             if (args.at(-2) === archivePath) {
               const remotePath = args.at(-1).split(":").at(-1);

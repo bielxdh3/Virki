@@ -1,8 +1,7 @@
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { rmSync } from "node:fs";
 import { CANONICAL_VIRKI_REPOSITORY, normalizeRevision, ProductionRevisionError } from "./production-revision.mjs";
 import { evaluateCodeqlSarif, readSarifDirectory } from "../codeql-sarif-policy.mjs";
+import { downloadGhcrEvidence, evidenceTag } from "./ghcr-evidence.mjs";
 
 const RUN_FIELDS = "databaseId,headSha,status,conclusion,event,headBranch,createdAt";
 const WORKFLOWS = ["ci.yml", "codeql.yml"];
@@ -67,35 +66,22 @@ export function evaluateExactShaRelease(ciRuns, codeqlRuns, expectedRevision) {
   return { status, ci, codeql };
 }
 
-function verifyExactShaSarifArtifact({ revision, runId, execute, repositoryRoot }) {
-  const artifactName = "codeql-sarif-" + revision;
-  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-codeql-sarif-"));
+function verifyExactShaSarifArtifact({ revision, runId, execute, repositoryRoot, retrieveEvidence }) {
+  let evidence;
   try {
-    const result = execute("gh", [
-      "run", "download", String(runId),
-      "--repo", CANONICAL_VIRKI_REPOSITORY,
-      "--name", artifactName,
-      "--dir", directory
-    ], { cwd: repositoryRoot });
-    if (!result || result.status !== 0) return { status: "BLOCKED" };
-
-    const entries = readdirSync(directory, { withFileTypes: true });
-    if (entries.length === 0 || entries.some((entry) => !entry.isFile() || !entry.name.endsWith(".sarif"))) {
-      return { status: "BLOCKED" };
-    }
-
-    const policy = evaluateCodeqlSarif(readSarifDirectory(directory));
+    evidence = retrieveEvidence({ revision, runId, kind: "codeql", execute, repositoryRoot });
+    const policy = evaluateCodeqlSarif(readSarifDirectory(evidence.contents));
     return policy.ok
-      ? { status: "PASS", artifactName, totalResults: policy.totalResults, violations: 0 }
+      ? { status: "PASS", artifactName: `virki-evidence:${evidenceTag(revision, runId, "codeql")}`, totalResults: policy.totalResults, violations: 0 }
       : { status: "FAIL" };
   } catch {
     return { status: "BLOCKED" };
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    if (evidence?.directory) rmSync(evidence.directory, { recursive: true, force: true });
   }
 }
 
-export function verifyExactShaCi({ revision, execute, repositoryRoot }) {
+export function verifyExactShaCi({ revision, execute, repositoryRoot, retrieveEvidence = downloadGhcrEvidence }) {
   let expected;
   try {
     expected = normalizeRevision(revision);
@@ -131,7 +117,8 @@ export function verifyExactShaCi({ revision, execute, repositoryRoot }) {
     revision: expected,
     runId: release.codeql.runId,
     execute,
-    repositoryRoot
+    repositoryRoot,
+    retrieveEvidence
   });
   if (sarif.status !== "PASS") {
     return {
@@ -139,7 +126,7 @@ export function verifyExactShaCi({ revision, execute, repositoryRoot }) {
       status: sarif.status,
       lines: [sarif.status === "FAIL"
         ? "Reviewed exact-SHA CodeQL SARIF policy did not pass."
-        : "Exact-SHA CodeQL SARIF artifact is missing, expired, or unavailable."]
+        : "Exact-SHA private GHCR CodeQL SARIF evidence is missing, inaccessible, or invalid."]
     };
   }
 
@@ -150,6 +137,6 @@ export function verifyExactShaCi({ revision, execute, repositoryRoot }) {
     codeqlRunId: release.codeql.runId,
     sarifArtifactName: sarif.artifactName,
     sarifResults: sarif.totalResults,
-    lines: ["Exact-SHA CI, CodeQL, reviewed SARIF policy, and retained artifact checks passed for " + expected + "."]
+    lines: ["Exact-SHA CI, CodeQL, reviewed SARIF policy, and retained GHCR evidence checks passed for " + expected + "."]
   };
 }
