@@ -19,7 +19,7 @@ An ADMIN grants each USER entry under **Hub → Acessos**. The portal displays o
 - Claims: subject, verified email state, display name when present, and the session's authentication methods (`amr`) and assurance level (`acr`)
 - State: required for every authorization request
 - Nonce: required for OpenID authorization requests
-- Authorization code lifetime: 90 seconds, one-time use, bound to its client
+- Authorization code lifetime: 90 seconds, one-time use, bound to its client. A second exchange of the same code receives `invalid_grant`, and a detected replay revokes tokens issued from that grant
 - Access token lifetime: 300 seconds
 - Refresh tokens, client credentials, dynamic client registration, request objects, device flow, and introspection are disabled
 - Token revocation is supported
@@ -30,7 +30,7 @@ Use an exact registered HTTPS redirect URI. Wildcards, HTTP, userinfo, fragments
 
 Virki authenticates the user on the portal host. A valid portal session is required at interaction completion. The project access grant is checked server-side at authorization, not inferred from a browser link or client claim. Virki does not receive or enforce project-internal roles.
 
-Sessions authenticated with a password alone report `amr: ["pwd"]` and `acr: "urn:virki:loa:1"`. Sessions completed with an email or TOTP one-time code report `amr: ["pwd", "otp", "mfa"]` and `acr: "urn:virki:loa:2"`. Existing sessions retain the conservative password-only values until the user authenticates again.
+Sessions authenticated with a password alone report `amr: ["pwd"]` and `acr: "urn:virki:loa:1"`. Sessions completed with an email or TOTP one-time code report `amr: ["pwd", "otp", "mfa"]` and `acr: "urn:virki:loa:2"`. Existing sessions retain the conservative password-only values until the user authenticates again. The email one-time code counts as the second factor for `urn:virki:loa:2`; it proves control of the registered mailbox, which is weaker than an authenticator app. Projects that need app-based proof must say so with the owner before Virki introduces a distinct assurance value; the current values are not changed silently.
 
 The ID token `auth_time` uses the central session's successful authentication time. Virki requires fresh central proof for `prompt=login` and when `max_age` is exceeded; a stale browser session cannot be re-stamped with the current interaction time. Requests for `urn:virki:loa:2` also trigger fresh login when the active session does not record MFA.
 

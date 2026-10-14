@@ -11,10 +11,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # PR runs supersede each other; main pushes publish images and evidence and are never cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   identity:
     name: Verify Virki identity
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout
@@ -31,6 +37,7 @@ jobs:
   tooling-policy:
     name: Audit Prisma tooling policy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -60,6 +67,7 @@ jobs:
   production-audit:
     name: Audit production dependency tree
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -80,6 +88,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -184,6 +193,7 @@ jobs:
       contents: read
       packages: write
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -295,6 +305,7 @@ jobs:
   authenticated-e2e:
     name: Authenticated browser E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       VIRKI_CORE_TEST_DATABASE_CONFIRM: disposable
       VIRKI_E2E_ACCESS_DIAGNOSTICS: "true"
@@ -380,6 +391,10 @@ jobs:
 
       - name: Apply committed Prisma migrations to disposable PostgreSQL
         run: npm run prisma:migrate:deploy
+
+      - name: Database integration tests
+        run: |
+          VIRKI_INTEGRATION_DATABASE_URL="$VIRKI_E2E_DATABASE_URL" npm run test:integration
 
       - name: Grant fixture-scoped audit cleanup to disposable maintenance role
         run: |
