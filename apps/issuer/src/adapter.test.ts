@@ -62,7 +62,7 @@ test("OIDC artifacts cannot be consumed after their stored row is revoked", asyn
   process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
   try {
     const database = { oidcArtifact: { findUnique: async () => null } };
-    await assert.rejects(() => new PrismaOidcAdapter("AuthorizationCode", database as never).consume("revoked-code"), /OIDC artifact was not found/u);
+    await assert.rejects(() => new PrismaOidcAdapter("AuthorizationCode", database as never).consume("revoked-code"), /invalid_grant/u);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
     else process.env.VIRKI_OIDC_ADAPTER_KEY = original;

@@ -85,7 +85,8 @@ export class PrismaOidcAdapter implements Adapter {
   async consume(id: string): Promise<void> {
     const where = { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } };
     const record = await this.database.oidcArtifact.findUnique({ where, select: { payloadCiphertext: true } });
-    if (!record) throw new Error("OIDC artifact was not found.");
+    // A code found by the provider but gone now was revoked by a concurrent replay of the same grant.
+    if (!record) throw new errors.InvalidGrant("authorization code is no longer valid");
     const payload = parsePayload(decryptOidcPayload(record.payloadCiphertext));
     if (payload.consumed) await this.rejectReplay(payload);
     payload.consumed = Math.floor(Date.now() / 1000);

@@ -110,7 +110,7 @@ test("concurrent exchanges of one code yield exactly one token, and replay is re
     const results = await Promise.all([exchange(seeded.clientId, code), exchange(seeded.clientId, code), exchange(seeded.clientId, code)]);
     const winners = results.filter((result) => result.status === 200);
     assert.equal(winners.length, 1, "exactly one exchange of a code succeeds");
-    assert.ok(results.every((result) => result.status === 200 || (result.status === 400 && result.json.error === "invalid_grant")), "losers get invalid_grant, never a 500");
+    assert.ok(results.every((result) => result.status === 200 || (result.status === 400 && result.json.error === "invalid_grant")), `losers get invalid_grant, never a 500: ${JSON.stringify(results.map((result) => [result.status, result.json.error]))}`);
     const third = await exchange(seeded.clientId, code);
     assert.equal(third.status, 400);
     assert.equal(third.json.error, "invalid_grant");

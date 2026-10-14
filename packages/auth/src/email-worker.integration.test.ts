@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
 import { createDeterministicTestTransport, enqueueEmailMessage, processNextEmailMessage } from "./email";
@@ -12,7 +12,7 @@ const OLD_SLEEP_PER_MESSAGE_MS = 5_000;
 
 async function drainBatch(count: number) {
   const recipients = Array.from({ length: count }, (_, index) => uniqueEmail(`worker-batch-${index}`));
-  const codes = new Map(recipients.map((recipient) => [recipient, randomBytes(3).readUIntBE(0, 3) % 1_000_000]));
+  const codes = new Map(recipients.map((recipient) => [recipient, randomInt(0, 1_000_000)]));
   for (const recipient of recipients) {
     await enqueueEmailMessage({
       idempotencyKey: randomUUID(),
