@@ -71,6 +71,8 @@ test("USER can sign in and sees only the granted enabled project", async ({ brow
 });
 
 test("ADMIN can sign in to a protected page, navigate, and have the session revoked on logout", async ({ browser }) => {
+  // Multi-step ADMIN journey: every ADMIN sign-in now includes the emailed second-factor step.
+  test.setTimeout(90_000);
   const context = await browser.newContext();
   const prisma = createE2ePrismaClient();
   let firstHydrationMismatchPhase: string | undefined;
@@ -407,6 +409,8 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
 });
 
 test("ADMIN recovery is Access-protected, role-bound, independently approved, and revokes the old session", async ({ browser }) => {
+  // Multi-step ADMIN journey: every ADMIN sign-in now includes the emailed second-factor step.
+  test.setTimeout(90_000);
   const prisma = createE2ePrismaClient();
   const contexts: BrowserContext[] = [];
   const createContext = async () => {
