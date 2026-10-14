@@ -9,7 +9,7 @@ export function RecoveryVerificationForm({ csrf, csrfFieldName, requestId }: { c
   const [state, action, pending] = useActionState(verifyRecoveryAction, initialState);
 
   if (state.status === "verified") {
-    return <p role="status">E-mail confirmado. Aguarde a análise administrativa; esta página será liberada para definir uma nova senha após a aprovação.</p>;
+    return <p role="status">E-mail confirmado. Um administrador analisará a solicitação. Após a aprovação, você receberá um novo e-mail com um link para definir a senha; abra esse novo link, pois esta página não será atualizada.</p>;
   }
 
   return <form className="form-stack" action={action}>

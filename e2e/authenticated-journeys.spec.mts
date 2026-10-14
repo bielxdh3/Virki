@@ -485,7 +485,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await hubPage.getByLabel("Código de verificação", { exact: true }).fill(requestMessage.code!);
     await hubPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
     try {
-      await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+      await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Um administrador analisará a solicitação");
     } catch {
       const verificationUrl = new URL(hubPage.url());
       const recoveryState = await prisma.accountRecoveryRequest.findUnique({
@@ -506,7 +506,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     }
     await expect(hubPage.getByLabel("Código de verificação", { exact: true })).toHaveCount(0);
     await hubPage.reload();
-    await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+    await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Um administrador analisará a solicitação");
 
     await targetPage.goto(`${hubUrl}/admin/security`);
     await expect(targetPage.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
@@ -635,7 +635,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await expect(userRecoveryCode).toBeVisible();
     await userRecoveryCode.fill(userRequestMessage.code!);
     await portalPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
-    await expect(portalPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+    await expect(portalPage.getByRole("status")).toContainText("E-mail confirmado. Um administrador analisará a solicitação");
 
     await reviewerPage.goto(`${hubUrl}/admin/security`);
     const userRecoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.recoveryTargetUser.email });
