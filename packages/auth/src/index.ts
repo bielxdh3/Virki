@@ -362,48 +362,61 @@ export async function authenticateUserWithRateLimit(
     const activeSourceReservation = sourceReservation;
     const activeSourceIdentifier = sourceIdentifier;
     authenticationTransactionStarted = true;
-    const result = await prisma.$transaction<LoginAuthenticationResult>(
-      async (transaction): Promise<LoginAuthenticationResult> => {
+    // Short transaction: reject when blocked, otherwise reserve the attempt by counting it as a failure.
+    // Argon2id then runs with no transaction or advisory lock held, and concurrent guesses each hold a slot.
+    const reservation = await prisma.$transaction<LoginAuthenticationResult | null>(
+      async (transaction) => {
         await lockLoginRateLimitIdentifier(transaction, accountIdentifierHash);
         await lockLoginRateLimitIdentifier(transaction, identifierHash);
         const accountEntry = await transaction.loginRateLimit.findUnique({
           where: { identifierHash: accountIdentifierHash },
-          select: {
-            attempts: true,
-            windowStartedAt: true,
-            blockedUntil: true
-          }
+          select: { attempts: true, windowStartedAt: true, blockedUntil: true }
         });
-
-        if (accountEntry && isLoginRateLimitBlocked(accountEntry, now, LOGIN_ACCOUNT_RATE_LIMIT_MAX_ATTEMPTS)) {
-          return { user: null, failureMode: "rate-limited" };
-        }
-
         const entry = await transaction.loginRateLimit.findUnique({
           where: { identifierHash },
-          select: {
-            attempts: true,
-            windowStartedAt: true,
-            blockedUntil: true
-          }
+          select: { attempts: true, windowStartedAt: true, blockedUntil: true }
         });
 
-        if (entry && isLoginRateLimitBlocked(entry, now)) {
+        if (
+          (accountEntry && isLoginRateLimitBlocked(accountEntry, now, LOGIN_ACCOUNT_RATE_LIMIT_MAX_ATTEMPTS)) ||
+          (entry && isLoginRateLimitBlocked(entry, now))
+        ) {
+          if (activeSourceIdentifier && activeSourceReservation) {
+            await refundRateLimitAttemptInTransaction(
+              transaction,
+              activeSourceIdentifier,
+              activeSourceReservation.windowStartedAt,
+              LOGIN_SOURCE_RATE_LIMIT_MAX_ATTEMPTS
+            );
+          }
           return { user: null, failureMode: "rate-limited" };
         }
 
-        const user = await authenticateUserFromLookup(
-          () => findAuthenticationUser(transaction, email),
-          password,
-          requiredRole
-        );
+        await recordFailedLoginEntry(transaction, identifierHash, now);
+        await recordFailedLoginEntry(transaction, accountIdentifierHash, now, LOGIN_ACCOUNT_RATE_LIMIT_MAX_ATTEMPTS);
+        return null;
+      },
+      { maxWait: 5_000, timeout: 15_000 }
+    );
+    if (reservation) {
+      sourceReservation = null;
+      return reservation;
+    }
+    // From here the attempt is already counted; a failure or crash leaves it counted (fail-safe).
+    sourceReservation = null;
 
-        if (!user) {
-          await recordFailedLoginEntry(transaction, identifierHash, now);
-          await recordFailedLoginEntry(transaction, accountIdentifierHash, now, LOGIN_ACCOUNT_RATE_LIMIT_MAX_ATTEMPTS);
-          return { user: null, failureMode: "invalid-credentials" };
-        }
+    const user = await authenticateUserFromLookup(
+      () => findAuthenticationUser(prisma, email),
+      password,
+      requiredRole
+    );
+    if (!user) return { user: null, failureMode: "invalid-credentials" };
 
+    // Only a correct password clears the counters and refunds the source reservation.
+    await prisma.$transaction(
+      async (transaction) => {
+        await lockLoginRateLimitIdentifier(transaction, accountIdentifierHash);
+        await lockLoginRateLimitIdentifier(transaction, identifierHash);
         if (activeSourceIdentifier && activeSourceReservation) {
           await refundRateLimitAttemptInTransaction(
             transaction,
@@ -413,25 +426,10 @@ export async function authenticateUserWithRateLimit(
           );
         }
         await transaction.loginRateLimit.deleteMany({ where: { identifierHash: { in: [accountIdentifierHash, identifierHash] } } });
-        return { user };
       },
       { maxWait: 5_000, timeout: 15_000 }
     );
-    if (result.user || result.failureMode === "invalid-credentials") {
-      sourceReservation = null;
-    } else if (sourceReservation && activeSourceIdentifier) {
-      const reservationToRelease = sourceReservation;
-      sourceReservation = null;
-      await prisma.$transaction((transaction) =>
-        refundRateLimitAttemptInTransaction(
-          transaction,
-          activeSourceIdentifier,
-          reservationToRelease.windowStartedAt,
-          LOGIN_SOURCE_RATE_LIMIT_MAX_ATTEMPTS
-        )
-      );
-    }
-    return result;
+    return { user };
   } catch {
     if (sourceReservation && sourceIdentifier && !authenticationTransactionStarted) {
       const reservationToRelease = sourceReservation;

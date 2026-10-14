@@ -1,0 +1,305 @@
+import assert from "node:assert/strict";
+import { createHmac, randomInt, randomUUID } from "node:crypto";
+import { after, test } from "node:test";
+import { prisma } from "@virki/database";
+import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl } from "./integration-fixtures";
+import { hashOidcIdentifier } from "./oidc-secrets";
+import {
+  approveAccountRecovery,
+  consumeApprovedAccountRecovery,
+  createTotpSecret,
+  disableTotp,
+  generateRecoveryCode,
+  getAccountRecoveryRequestId,
+  hashDeviceToken,
+  hashRecoveryCode,
+  LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT,
+  LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT,
+  type LoginCeremonyStart,
+  requestAccountRecovery,
+  SecurityMutationError,
+  startLoginCeremony,
+  verifyAccountRecoveryEmail,
+  verifyLoginEmailCode,
+  verifyLoginRecoveryCode,
+  verifyLoginTotpCode,
+  verifyTotpCode
+} from "./security";
+
+after(() => prisma.$disconnect());
+
+const MINUTE = 60 * 1000;
+const DAY = 24 * 60 * MINUTE;
+const LOGIN_CODE_KINDS = new Set(["EMAIL_TWO_FACTOR", "NEW_DEVICE_VERIFICATION"]);
+
+type CeremonyStart = Extract<LoginCeremonyStart, { kind: "CEREMONY" }>;
+
+function ceremonyOf(start: LoginCeremonyStart): CeremonyStart {
+  assert.equal(start.kind, "CEREMONY");
+  return start as CeremonyStart;
+}
+
+// The newest login code mailed to the address; emails are read from the never-sent outbox.
+async function latestLoginCode(email: string): Promise<string> {
+  const code = (await queuedEmails(email)).filter((message) => LOGIN_CODE_KINDS.has(message.kind)).at(-1)?.code;
+  if (!code) throw new Error("No login code was queued for the test user.");
+  return code;
+}
+
+async function countLoginMails(email: string): Promise<number> {
+  return (await queuedEmails(email)).filter((message) => LOGIN_CODE_KINDS.has(message.kind)).length;
+}
+
+async function countTrustedRows(userId: string, deviceToken: string): Promise<number> {
+  return prisma.trustedDevice.count({ where: { userId, deviceIdHash: hashDeviceToken(deviceToken), status: "TRUSTED" } });
+}
+
+async function seedOidcArtifact(userId: string): Promise<void> {
+  await prisma.oidcArtifact.create({
+    data: { model: "AccessToken", idHash: `int-${randomUUID()}`, payloadCiphertext: "x", accountIdHash: hashOidcIdentifier(userId) }
+  });
+}
+
+async function countOidcArtifacts(userId: string): Promise<number> {
+  return prisma.oidcArtifact.count({ where: { accountIdHash: hashOidcIdentifier(userId) } });
+}
+
+// Email-factor login from a device. An untrusted candidate token is replaced by the server, so the
+// device token returned by startLoginCeremony is the one every later call must use.
+async function completeEmailLogin(userId: string, email: string, when: Date, role?: "USER" | "ADMIN") {
+  const ceremony = ceremonyOf(await startLoginCeremony(userId, undefined, "pt-BR", when, false, role));
+  const result = await verifyLoginEmailCode(ceremony.ceremonyId, await latestLoginCode(email), ceremony.deviceToken, when, role);
+  return { deviceToken: ceremony.deviceToken, result };
+}
+
+// Full MFA login for a TOTP account: emailed code, then the authenticator code.
+async function completeEmailAndTotpLogin(user: { id: string; email: string }, secret: string, when: Date) {
+  const ceremony = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", when));
+  const emailStep = await verifyLoginEmailCode(ceremony.ceremonyId, await latestLoginCode(user.email), ceremony.deviceToken, when);
+  assert.deepEqual(emailStep, { requiresTotp: true, session: null });
+  const session = await verifyLoginTotpCode(ceremony.ceremonyId, totpAt(secret, when), ceremony.deviceToken, when);
+  return { deviceToken: ceremony.deviceToken, session };
+}
+
+// RFC 4648 base32 decoding for the secret produced by createTotpSecret().
+function base32Decode(value: string): Buffer {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (const char of value) {
+    buffer = ((buffer << 5) | alphabet.indexOf(char)) & 0xffff;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((buffer >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+// RFC 6238 code (HMAC-SHA1, 30 s step, 6 digits), computed independently of the production verifier.
+function totpAt(secret: string, when: Date): string {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(when.getTime() / 1_000 / 30)));
+  const digest = createHmac("sha1", base32Decode(secret)).update(counter).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary = ((digest[offset] & 0x7f) << 24) | (digest[offset + 1] << 16) | (digest[offset + 2] << 8) | digest[offset + 3];
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
+async function openLatestRecovery(email: string, now: Date) {
+  const emails = (await queuedEmails(email)).filter((message) => message.kind === "ACCOUNT_RECOVERY");
+  const latest = emails.at(-1);
+  const requestKey = requestKeyFromActionUrl(latest?.actionUrl);
+  const opened = await getAccountRecoveryRequestId(requestKey, now);
+  assert.ok(opened, "the newest emailed recovery link opens");
+  return { requestId: opened.id, requestKey, code: latest?.code };
+}
+
+test("a TOTP device is trusted only after the TOTP step completes", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const user = await createTestUser({ totpSecret: secret, label: "login-totp-trust" });
+  const base = new Date();
+  assert.notEqual(verifyTotpCode(secret, totpAt(secret, base), base), null, "the test-local TOTP matches the production verifier");
+
+  const first = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", base));
+  assert.equal(first.factor, "EMAIL");
+  assert.equal(first.newDevice, true);
+  const emailStep = await verifyLoginEmailCode(first.ceremonyId, await latestLoginCode(user.email), first.deviceToken, base);
+  assert.deepEqual(emailStep, { requiresTotp: true, session: null });
+  assert.equal(await countTrustedRows(user.id, first.deviceToken), 0, "no trusted device before the full MFA");
+
+  const secondAt = new Date(base.getTime() + 5_000);
+  const second = ceremonyOf(await startLoginCeremony(user.id, first.deviceToken, "pt-BR", secondAt));
+  assert.equal(second.factor, "EMAIL", "the same device still goes through the email step, not TOTP-only");
+  await verifyLoginEmailCode(second.ceremonyId, await latestLoginCode(user.email), second.deviceToken, secondAt);
+  const session = await verifyLoginTotpCode(second.ceremonyId, totpAt(secret, secondAt), second.deviceToken, secondAt);
+  assert.ok(session.token);
+  assert.equal(await countTrustedRows(user.id, second.deviceToken), 1, "the device is trusted after the TOTP step");
+
+  // forceFreshProof skips the remembered grant so the TOTP-only ceremony for the trusted device is observed.
+  const forced = ceremonyOf(await startLoginCeremony(user.id, second.deviceToken, "pt-BR", new Date(base.getTime() + 20_000), true));
+  assert.equal(forced.factor, "TOTP", "a trusted TOTP device still requires TOTP and skips email");
+});
+
+test("an EMAIL-factor user keeps a remembered browser for 7 days", integrationOptions, async () => {
+  const user = await createTestUser({ label: "login-email-remember" });
+  const base = new Date();
+  const { deviceToken, result } = await completeEmailLogin(user.id, user.email, base);
+  assert.ok(result.session);
+  assert.equal(await countTrustedRows(user.id, deviceToken), 1);
+
+  const remembered = await startLoginCeremony(user.id, deviceToken, "pt-BR", new Date(base.getTime() + DAY));
+  assert.equal(remembered.kind, "SESSION");
+});
+
+test("an ADMIN never receives a remembered password-only session", integrationOptions, async () => {
+  const admin = await createTestUser({ role: "ADMIN", label: "login-admin-remember" });
+  const base = new Date();
+  const { deviceToken, result } = await completeEmailLogin(admin.id, admin.email, base, "ADMIN");
+  assert.ok(result.session);
+
+  const again = await startLoginCeremony(admin.id, deviceToken, "pt-BR", new Date(base.getTime() + MINUTE), false, "ADMIN");
+  assert.equal(again.kind, "CEREMONY");
+});
+
+test("login email ceremonies are capped per account even after a correct password", integrationOptions, async () => {
+  const user = await createTestUser({ label: "login-quota-account" });
+  const base = new Date();
+  let successes = 0;
+  for (let i = 0; i < 30; i += 1) {
+    try {
+      await startLoginCeremony(user.id, undefined, "pt-BR", new Date(base.getTime() + i * 1_000));
+      successes += 1;
+    } catch (error) {
+      assert.ok(error instanceof SecurityMutationError);
+    }
+  }
+  assert.equal(successes, LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT);
+  assert.equal(await countLoginMails(user.email), successes);
+});
+
+test("login email ceremonies are capped per trusted client source", integrationOptions, async () => {
+  // A random host in TEST-NET-3 keeps the rate-limit window private to this run.
+  const address = `203.0.113.${randomInt(10, 250)}`;
+  const base = new Date();
+  let successes = 0;
+  let step = 0;
+  for (let index = 0; index < 5; index += 1) {
+    const user = await createTestUser({ label: `login-source-${index}` });
+    for (let attempt = 0; attempt < LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT; attempt += 1) {
+      step += 1;
+      try {
+        await startLoginCeremony(user.id, undefined, "pt-BR", new Date(base.getTime() + step * 1_000), false, undefined, address);
+        successes += 1;
+      } catch (error) {
+        assert.ok(error instanceof SecurityMutationError);
+      }
+    }
+  }
+  assert.equal(successes, LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
+});
+
+test("concurrent login ceremony starts cannot exceed the account quota", integrationOptions, async () => {
+  const user = await createTestUser({ label: "login-quota-race" });
+  const base = new Date();
+  const results = await Promise.allSettled(Array.from({ length: 20 }, () => startLoginCeremony(user.id, undefined, "pt-BR", base)));
+  for (const result of results) {
+    if (result.status === "rejected") assert.ok(result.reason instanceof SecurityMutationError);
+  }
+  const successes = results.filter((result) => result.status === "fulfilled").length;
+  assert.ok(successes <= LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT);
+  assert.equal(await countLoginMails(user.email), successes);
+});
+
+test("a repeated trusted-device start within 60 seconds reuses the pending ceremony", integrationOptions, async () => {
+  const user = await createTestUser({ label: "login-reuse" });
+  const base = new Date();
+  const { deviceToken: token } = await completeEmailLogin(user.id, user.email, base);
+  const mailsBefore = await countLoginMails(user.email);
+  const at = (ms: number) => new Date(base.getTime() + ms);
+
+  const first = ceremonyOf(await startLoginCeremony(user.id, token, "pt-BR", at(10_000), true));
+  assert.equal(await countLoginMails(user.email), mailsBefore + 1);
+
+  const reused = ceremonyOf(await startLoginCeremony(user.id, token, "pt-BR", at(30_000), true));
+  assert.equal(reused.ceremonyId, first.ceremonyId);
+  assert.equal(await countLoginMails(user.email), mailsBefore + 1, "a reused ceremony queues no new email");
+
+  const fresh = ceremonyOf(await startLoginCeremony(user.id, token, "pt-BR", at(71_000), true));
+  assert.notEqual(fresh.ceremonyId, first.ceremonyId);
+  assert.equal(await countLoginMails(user.email), mailsBefore + 2);
+});
+
+test("an emailed proof does not spend the recovery-code verification budget", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const user = await createTestUser({ totpSecret: secret, label: "login-recovery" });
+  const base = new Date();
+  // The verification window of the earlier full login expires before the recovery attempt.
+  const later = new Date(base.getTime() + 20 * MINUTE);
+  const completed = await completeEmailAndTotpLogin(user, secret, base);
+  assert.ok(completed.session.token);
+
+  const recoveryCode = generateRecoveryCode();
+  await prisma.recoveryCode.create({ data: { userId: user.id, codeHash: hashRecoveryCode(recoveryCode) } });
+  await seedOidcArtifact(user.id);
+
+  const ceremony = ceremonyOf(await startLoginCeremony(user.id, completed.deviceToken, "pt-BR", later, true));
+  assert.equal(ceremony.factor, "TOTP");
+  const challenge = await prisma.deviceChallenge.findUnique({ where: { ceremonyId: ceremony.ceremonyId }, select: { status: true, emailVerifiedAt: true } });
+  assert.equal(challenge?.status, "VERIFIED");
+  assert.equal(challenge?.emailVerifiedAt, null);
+
+  assert.deepEqual(await verifyLoginRecoveryCode(ceremony.ceremonyId, "anything", ceremony.deviceToken, later), { kind: "EMAIL_REQUIRED" });
+  assert.deepEqual(await verifyLoginEmailCode(ceremony.ceremonyId, await latestLoginCode(user.email), ceremony.deviceToken, later), { requiresTotp: true, session: null });
+
+  // The emailed code spends one attempt; three wrong codes plus the valid recovery code fit in the five-attempt budget.
+  for (let index = 0; index < 3; index += 1) {
+    await assert.rejects(verifyLoginRecoveryCode(ceremony.ceremonyId, generateRecoveryCode(), ceremony.deviceToken, later), SecurityMutationError);
+  }
+  const recovered = await verifyLoginRecoveryCode(ceremony.ceremonyId, recoveryCode, ceremony.deviceToken, later);
+  assert.ok(recovered.kind === "RECOVERED");
+  assert.ok(recovered.session.token);
+
+  const factor = await prisma.totpFactor.findUnique({ where: { userId: user.id }, select: { status: true } });
+  assert.equal(factor?.status, "REVOKED");
+  assert.equal(await prisma.recoveryCode.count({ where: { userId: user.id } }), 0);
+  assert.equal(await countOidcArtifacts(user.id), 0);
+});
+
+test("disabling TOTP purges OIDC artifacts and revokes sessions for that account only", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const user = await createTestUser({ totpSecret: secret, label: "oidc-totp-disable" });
+  const other = await createTestUser({ label: "oidc-totp-other" });
+  const base = new Date();
+  await seedOidcArtifact(user.id);
+  await seedOidcArtifact(other.id);
+  const session = await prisma.session.create({ data: { userId: user.id, tokenHash: `int-${randomUUID()}`, expiresAt: new Date(base.getTime() + DAY) }, select: { id: true } });
+
+  await disableTotp(user.id, totpAt(secret, base), base);
+
+  assert.equal(await countOidcArtifacts(user.id), 0);
+  assert.equal(await countOidcArtifacts(other.id), 1);
+  const stored = await prisma.session.findUniqueOrThrow({ where: { id: session.id }, select: { revokedAt: true } });
+  assert.notEqual(stored.revokedAt, null);
+});
+
+test("an approved account recovery purges OIDC artifacts for that account only", integrationOptions, async () => {
+  const owner = await createTestUser({ label: "oidc-recovery-owner" });
+  const other = await createTestUser({ label: "oidc-recovery-other" });
+  const admin = await createTestUser({ role: "ADMIN", label: "oidc-recovery-admin" });
+  await seedOidcArtifact(owner.id);
+  await seedOidcArtifact(other.id);
+
+  const start = new Date();
+  await requestAccountRecovery(owner.email, "pt-BR", start);
+  const legit = await openLatestRecovery(owner.email, start);
+  await verifyAccountRecoveryEmail(legit.requestId, legit.requestKey, legit.code ?? "", start);
+  await approveAccountRecovery({ id: admin.id, role: "ADMIN" }, legit.requestId, start);
+  const approved = await openLatestRecovery(owner.email, start);
+  await consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "integration-oidc-password-1", start);
+
+  assert.equal(await countOidcArtifacts(owner.id), 0);
+  assert.equal(await countOidcArtifacts(other.id), 1);
+});

@@ -70,13 +70,14 @@ test("TOTP confirmation accepts the RFC vector and rejects same-window replay", 
   assert.equal(verifyTotpCode(secret, "000000", now, null), null);
 });
 
-test("short security codes use a keyed versioned digest while existing recovery codes remain compatible", () => {
+test("short security codes accept only the keyed versioned digest while recovery codes stay normalized", () => {
   const env = { NODE_ENV: "test" };
   const stored = hashSecurityCode("123456", env);
   assert.match(stored, /^h2:[a-f0-9]{64}$/u);
   assert.equal(verifySecurityCode("123456", stored, env), true);
   assert.equal(verifySecurityCode("654321", stored, env), false);
-  assert.equal(verifySecurityCode("123456", "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92", env), true);
+  // Unkeyed legacy SHA-256 code hashes are no longer accepted.
+  assert.equal(verifySecurityCode("123456", "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92", env), false);
   assert.equal(hashRecoveryCode("ab-cd"), hashRecoveryCode("AB CD"));
 });
 
@@ -174,7 +175,8 @@ test("approved password recovery changes the password and revokes access while p
     user
   };
   const mfaOperations: string[] = [];
-  const revocations = { sessions: 0, elevations: 0, devices: 0, challenges: 0 };
+  const revocations = { sessions: 0, elevations: 0, devices: 0, challenges: 0, oidcArtifacts: 0 };
+  let oidcAccountIdHash: unknown;
   let requestStatus = "APPROVED";
   let passwordHash = "old-password-hash";
   let userUpdateData: Record<string, unknown> | undefined;
@@ -213,6 +215,9 @@ test("approved password recovery changes the password and revokes access while p
     deviceChallenge: {
       updateMany: async () => { revocations.challenges += 1; return { count: 1 }; }
     },
+    oidcArtifact: {
+      deleteMany: async ({ where }: { where: { accountIdHash?: unknown } }) => { revocations.oidcArtifacts += 1; oidcAccountIdHash = where.accountIdHash; return { count: 2 }; }
+    },
     totpFactor: {
       updateMany: async () => { mfaOperations.push("totp-update"); return { count: 1 }; },
       deleteMany: async () => { mfaOperations.push("totp-delete"); return { count: 1 }; }
@@ -249,7 +254,8 @@ test("approved password recovery changes the password and revokes access while p
   assert.notEqual(passwordHash, "old-password-hash");
   assert.deepEqual(Object.keys(userUpdateData ?? {}).sort(), ["emailVerifiedAt", "passwordHash"]);
   assert.equal(userUpdateData?.emailVerifiedAt, now);
-  assert.deepEqual(revocations, { sessions: 1, elevations: 1, devices: 1, challenges: 1 });
+  assert.deepEqual(revocations, { sessions: 1, elevations: 1, devices: 1, challenges: 1, oidcArtifacts: 1 });
+  assert.equal(oidcAccountIdHash, createHash("sha256").update(userId, "utf8").digest("hex"));
   assert.deepEqual(mfaOperations, []);
   assert.equal(totpFactor.status, "ACTIVE");
   assert.equal(user.secondFactorMethod, "TOTP");

@@ -90,6 +90,38 @@ test("audit persistence rejects suspicious URL values and URL-shaped fields", as
   });
 });
 
+test("audit persistence keeps boolean and numeric url/uri flags while redacting URL-valued fields", async () => {
+  const metadata: AuditMetadata = {
+    redirectUrisChanged: true,
+    launchUrlConfigured: false,
+    originChanged: true,
+    redirectUriCount: 2,
+    redirectUri: "https://x.example/cb",
+    launchUrl: "https://x.example/launch",
+    callbackUrl: "relative/path",
+    redirectUris: ["https://x.example/cb"],
+    tokenRevoked: true,
+    sessionCount: 3,
+    otpConfigured: true,
+    referrer: "https://x.example/"
+  };
+
+  assert.deepEqual(sanitizeAuditMetadata(metadata), {
+    redirectUrisChanged: true,
+    launchUrlConfigured: false,
+    originChanged: true,
+    redirectUriCount: 2,
+    redirectUri: "[REDACTED]",
+    launchUrl: "[REDACTED]",
+    callbackUrl: "[REDACTED]",
+    redirectUris: "[REDACTED]",
+    tokenRevoked: "[REDACTED]",
+    sessionCount: "[REDACTED]",
+    otpConfigured: "[REDACTED]",
+    referrer: "[REDACTED]"
+  });
+});
+
 test("audit persistence strips controls and bounds keys, arrays, and strings", async () => {
   const metadata: AuditMetadata = {
     note: "bounded ".repeat(20),

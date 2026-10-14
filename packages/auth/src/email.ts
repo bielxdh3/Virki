@@ -11,7 +11,8 @@ export type EmailMessageKind =
   | "SECOND_FACTOR_CHANGED"
   | "ADMIN_EMAIL_VERIFICATION"
   | "ADMIN_CREDENTIAL_CHANGED"
-  | "ELEVATION_CHANGED";
+  | "ELEVATION_CHANGED"
+  | "ACCOUNT_INVITATION";
 const EMAIL_OUTBOX_PAYLOAD_VERSION = 1;
 const EMAIL_OUTBOX_KEY_BYTES = 32;
 const MAX_EMAIL_ATTEMPTS = 5;
@@ -263,7 +264,8 @@ export function renderEmailMessage(
     SECOND_FACTOR_CHANGED: { "pt-BR": "Segundo fator atualizado", en: "Second factor updated" },
     ADMIN_EMAIL_VERIFICATION: { "pt-BR": "Verificação administrativa", en: "Administrative verification" },
     ADMIN_CREDENTIAL_CHANGED: { "pt-BR": "Credencial administrativa atualizada", en: "Administrative credential updated" },
-    ELEVATION_CHANGED: { "pt-BR": "Elevação de segurança atualizada", en: "Security elevation updated" }
+    ELEVATION_CHANGED: { "pt-BR": "Elevação de segurança atualizada", en: "Security elevation updated" },
+    ACCOUNT_INVITATION: { "pt-BR": "Convite para o Virki", en: "Virki invitation" }
   };
   const greeting = payload.displayName ? `${payload.displayName},` : "Virki,";
   const action = payload.actionUrl ? `\n${payload.actionUrl}` : "";

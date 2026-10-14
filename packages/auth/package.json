@@ -12,6 +12,7 @@
     "./csrf": "./src/csrf.ts",
     "./email": "./src/email.ts",
     "./security": "./src/security.ts",
+    "./account-invitation": "./src/account-invitation.ts",
     "./oidc-secrets": "./src/oidc-secrets.ts",
     "./administration": "./src/administration.ts",
     "./elevation-scopes": "./src/elevation-scopes.ts"

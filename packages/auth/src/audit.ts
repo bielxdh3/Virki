@@ -67,7 +67,8 @@ const MAX_METADATA_DEPTH = 4;
 const MAX_METADATA_NODES = 64;
 const MAX_METADATA_ARRAY_ITEMS = 12;
 const REDACTED_METADATA_VALUE = "[REDACTED]";
-const SENSITIVE_METADATA_KEY = /(?:token|code|password|passwd|passphrase|secret|privatekey|credential|authorization|authheader|cookie|session|assertion|verifier|nonce|otp|totp|apikey|clientkey|url|uri)/u;
+const SENSITIVE_METADATA_KEY = /(?:token|code|password|passwd|passphrase|secret|privatekey|credential|authorization|authheader|cookie|session|assertion|verifier|nonce|otp|totp|apikey|clientkey)/u;
+const URL_METADATA_KEY = /(?:url|uri)/u;
 const URL_VALUE = /(?:\b(?:https?|ftp):\/\/|(?:^|\s)www\.)/iu;
 const ENCODED_URL_VALUE = /\b(?:https?|ftp)(?:%3a|:)(?:%2f|\/){2}/iu;
 const PROTOCOL_RELATIVE_URL = /(?:^|[\s"'(])\/\/[^\s/]+/u;
@@ -256,12 +257,12 @@ function sanitizeMetadataObject(
       continue;
     }
 
-    if (isSensitiveMetadataKey(key)) {
+    const entry = value[rawKey];
+    if (isSensitiveMetadataKey(key, entry)) {
       sanitized[key] = REDACTED_METADATA_VALUE;
       continue;
     }
 
-    const entry = value[rawKey];
     const safeValue = sanitizeMetadataValue(entry, depth + 1, key, state);
     if (safeValue !== undefined) {
       sanitized[key] = safeValue;
@@ -327,9 +328,15 @@ function sanitizeMetadataKey(key: string): string | undefined {
   return key;
 }
 
-function isSensitiveMetadataKey(key: string): boolean {
+function isSensitiveMetadataKey(key: string, value: unknown): boolean {
   const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/gu, "");
-  return SENSITIVE_METADATA_KEY.test(normalizedKey);
+  if (SENSITIVE_METADATA_KEY.test(normalizedKey)) {
+    return true;
+  }
+
+  // URL/URI-named keys hold booleans or counts as often as URLs; those values cannot carry a URL.
+  const cannotCarryUrl = typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+  return URL_METADATA_KEY.test(normalizedKey) && !cannotCarryUrl;
 }
 
 function sanitizeMetadataString(value: string, key: string): string {

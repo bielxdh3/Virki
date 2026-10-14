@@ -1,31 +1,30 @@
 import { prisma } from "@virki/database";
 import { createSmtpEmailTransport, getEmailTransportStatus, processNextEmailMessage } from "./email";
 import { runAuthCommand } from "./command-output";
-
-const EMAIL_WORKER_POLL_INTERVAL_MS = 5_000;
+import { parseEmailSendIntervalMs, runEmailWorkerLoop } from "./email-worker-loop";
 
 let shuttingDown = false;
-let wakePoll: (() => void) | null = null;
+let wakeSleep: (() => void) | null = null;
 
 function requestShutdown() {
   shuttingDown = true;
-  wakePoll?.();
+  wakeSleep?.();
 }
 
-function waitForNextPoll(): Promise<void> {
+function sleep(milliseconds: number): Promise<void> {
   if (shuttingDown) {
     return Promise.resolve();
   }
 
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
-      wakePoll = null;
+      wakeSleep = null;
       resolve();
-    }, EMAIL_WORKER_POLL_INTERVAL_MS);
+    }, milliseconds);
 
-    wakePoll = () => {
+    wakeSleep = () => {
       clearTimeout(timer);
-      wakePoll = null;
+      wakeSleep = null;
       resolve();
     };
   });
@@ -37,10 +36,15 @@ async function main() {
   }
 
   const transport = createSmtpEmailTransport();
-  while (!shuttingDown) {
-    await processNextEmailMessage(transport);
-    await waitForNextPoll();
-  }
+  await runEmailWorkerLoop({
+    processNext: () => processNextEmailMessage(transport),
+    sleep,
+    isStopping: () => shuttingDown,
+    sendIntervalMs: parseEmailSendIntervalMs(process.env.VIRKI_EMAIL_MIN_SEND_INTERVAL_MS),
+    onIterationError: () => {
+      console.error("Email worker iteration failed; retrying after a pause.");
+    }
+  });
 }
 
 process.once("SIGTERM", requestShutdown);
