@@ -1,4 +1,5 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { createSessionCsrfToken } from "../../../lib/session-csrf";
 import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
 import { ConnectionForm } from "./connection-form";
@@ -14,7 +15,7 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
   const params = await searchParams;
   const [connections, csrf] = await Promise.all([
     prisma.projectConnection.findMany({ select: { id: true, name: true, slug: true, origin: true, launchUrl: true, redirectUris: true, enabled: true, _count: { select: { grants: true } } }, orderBy: [{ name: "asc" }, { id: "asc" }] }),
-    Promise.resolve(createCsrfToken({ scope: "admin-connections" }))
+    createSessionCsrfToken("admin-connections")
   ]);
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Conexões</h1><p>Clientes OIDC externos. Virki não armazena nem hospeda suas experiências.</p></div></header>

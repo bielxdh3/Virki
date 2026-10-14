@@ -37,7 +37,7 @@ test("access picker filters active USER accounts and legacy ADMIN grants stay cl
   ]) as unknown as typeof originalGrantFindMany;
 
   try {
-    const page = await AccessView({ searchParams: Promise.resolve({}) });
+    const page = await AccessView({ searchParams: Promise.resolve({}), csrf: "test-csrf-value" });
     assert.deepEqual(userQuery?.where, { role: "USER", isActive: true, accountStatus: "ACTIVE" });
 
     const renderedText = collectText(page);

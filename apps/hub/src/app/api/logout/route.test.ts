@@ -4,7 +4,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
-import { SESSION_COOKIE_NAME } from "@virki/auth";
+import { hashSessionToken, SESSION_COOKIE_NAME } from "@virki/auth";
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 
 import { POST } from "./route";
@@ -164,6 +164,85 @@ test("invalid production redirect configuration clears the cookie without an ext
     restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
   }
 });
+
+test("logout rejects a CSRF token issued for another form scope", async () => {
+  const response = await postHubLogoutWithCsrfScope("account-security");
+
+  assert.equal(response.status, 403);
+  assert.equal(response.headers.get("location"), null);
+});
+
+test("logout accepts a logout-scoped CSRF token without a session cookie", async () => {
+  const response = await postHubLogoutWithCsrfScope("logout");
+  const setCookie = response.headers.get("set-cookie") ?? "";
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "https://hub.example.invalid/login");
+  assert.equal(setCookie.startsWith(`${SESSION_COOKIE_NAME}=`), true);
+  assert.equal(setCookie.includes("Max-Age=0"), true);
+});
+
+test("logout rejects a token bound to another session", async () => {
+  const response = await postHubLogoutWithCsrfScope("logout", { tokenBoundTo: "session-a", cookie: "session-b" });
+
+  assert.equal(response.status, 403);
+});
+
+test("logout rejects an unbound token when a session cookie is present", async () => {
+  const response = await postHubLogoutWithCsrfScope("logout", { cookie: "session-b" });
+
+  assert.equal(response.status, 403);
+});
+
+// The accepted path for a bound token with a matching cookie reaches getSessionByToken (database),
+// so it is covered by validateCsrfToken/session-csrf unit tests rather than here.
+
+async function postHubLogoutWithCsrfScope(scope: "logout" | "account-security", session?: { tokenBoundTo?: string; cookie?: string }): Promise<Response> {
+  const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
+  const originalAccessAudience = process.env.CLOUDFLARE_ACCESS_AUDIENCE;
+  const originalTeamDomain = process.env.CLOUDFLARE_TEAM_DOMAIN;
+  const originalHubUrl = process.env.VIRKI_HUB_URL;
+  const originalHubHostname = process.env.VIRKI_HUB_HOSTNAME;
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY;
+  const originalPreviousCsrfKey = process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
+  let access: ProductionAccessAssertion | undefined;
+
+  try {
+    access = await createProductionAccessAssertion();
+    process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "true";
+    process.env.CLOUDFLARE_ACCESS_AUDIENCE = access.audience;
+    process.env.CLOUDFLARE_TEAM_DOMAIN = access.teamDomain;
+    process.env.VIRKI_HUB_URL = "https://hub.example.invalid";
+    process.env.VIRKI_HUB_HOSTNAME = "hub.example.invalid";
+    process.env.VIRKI_CSRF_SIGNING_KEY = "11".repeat(32);
+    delete process.env.VIRKI_CSRF_SIGNING_KEY_PREVIOUS;
+    setEnvironmentVariable("NODE_ENV", "production");
+    const formData = new FormData();
+    formData.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope, ...(session?.tokenBoundTo ? { binding: hashSessionToken(session.tokenBoundTo) } : {}) }));
+
+    return await POST(new NextRequest("https://hub.example.invalid:3001/api/logout", {
+      method: "POST",
+      body: formData,
+      headers: {
+        host: "hub.example.invalid:3001",
+        origin: "https://hub.example.invalid:3001",
+        "cf-access-jwt-assertion": access.token,
+        ...(session?.cookie ? { cookie: `${SESSION_COOKIE_NAME}=${session.cookie}` } : {})
+      }
+    }));
+  } finally {
+    access?.restore();
+    restoreEnvironmentVariable("CLOUDFLARE_ACCESS_JWT_REQUIRED", originalAccessRequired);
+    restoreEnvironmentVariable("CLOUDFLARE_ACCESS_AUDIENCE", originalAccessAudience);
+    restoreEnvironmentVariable("CLOUDFLARE_TEAM_DOMAIN", originalTeamDomain);
+    restoreEnvironmentVariable("VIRKI_HUB_URL", originalHubUrl);
+    restoreEnvironmentVariable("VIRKI_HUB_HOSTNAME", originalHubHostname);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY", originalCsrfKey);
+    restoreEnvironmentVariable("VIRKI_CSRF_SIGNING_KEY_PREVIOUS", originalPreviousCsrfKey);
+    restoreEnvironmentVariable("NODE_ENV", originalNodeEnv);
+  }
+}
 
 function restoreEnvironmentVariable(name: string, value: string | undefined): void {
   if (value === undefined) {

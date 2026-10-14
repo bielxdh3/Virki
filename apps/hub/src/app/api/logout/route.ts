@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import {
   getExpiredSessionCookieOptions,
+  hashSessionToken,
   getSessionByToken,
   revokeSessionToken,
   SESSION_COOKIE_NAME,
@@ -10,6 +11,7 @@ import {
   writeAuditLog
 } from "@virki/auth";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
+
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
@@ -26,13 +28,18 @@ export async function POST(request: NextRequest) {
 
   const formData = await readBoundedFormData(request, 8 * 1024);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
-  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME), { scope: "logout" });
+  const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  // With a session cookie the token must be bound to that session. Without one (e.g. the session already
+  // expired) an unbound "logout" token is accepted so the user can still clear stale cookies; nothing to revoke.
+  const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME), {
+    scope: "logout",
+    ...(sessionToken ? { binding: hashSessionToken(sessionToken) } : {})
+  });
 
   if (!csrfResult.valid) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const currentSession = sessionToken ? await getSessionByToken(sessionToken) : null;
 
   if (sessionToken && currentSession) {

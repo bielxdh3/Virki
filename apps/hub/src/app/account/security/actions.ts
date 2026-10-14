@@ -1,7 +1,8 @@
 "use server";
 
 import { verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { validateSessionCsrfToken } from "../../../lib/session-csrf";
 import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt } from "@virki/auth/security";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
@@ -91,7 +92,7 @@ async function requireAccountMutation(formData: FormData, source: string) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   if (!hasSameOrigin(requestHeaders) || surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) redirect("/login");
-  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "account-security" }).valid) redirect("/login");
+  if (!(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "account-security"))) redirect("/login");
   const session = await getCurrentSession();
   if (!session) redirect("/login");
   if ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) redirect("/login");

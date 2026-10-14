@@ -1,4 +1,5 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { createSessionCsrfToken } from "../../../lib/session-csrf";
 import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
 import { createAccountAction, setAccountStateAction } from "../actions";
@@ -10,20 +11,19 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
   const params = await searchParams;
   const [users, csrf] = await Promise.all([
     prisma.user.findMany({ where: { role: "USER" }, select: { id: true, email: true, displayName: true, isActive: true, accountStatus: true, secondFactorMethod: true, createdAt: true, _count: { select: { sessions: true, projectGrants: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 }),
-    Promise.resolve(createCsrfToken({ scope: "admin-accounts" }))
+    createSessionCsrfToken("admin-accounts")
   ]);
 
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Contas</h1><p>Provisione e suspenda contas USER. A suspensão encerra todas as sessões.</p></div></header>
-    {params.status && <p className="form-success" role="status">Alteração concluída.</p>}
+    {params.status && <p className="form-success" role="status">{params.status === "created" ? "Conta criada. O convite foi enviado por e-mail e expira em 72 horas." : "Alteração concluída."}</p>}
     {params.error && <p className="form-error" role="alert">A ação não foi concluída. Verifique os dados e a elevação de segurança.</p>}
     <section className="surface" aria-labelledby="create-account"><h2 id="create-account">Provisionar conta</h2>
       <form action={createAccountAction} className="form-stack">
         <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} />
         <label>Nome<input name="displayName" autoComplete="name" maxLength={80} /></label>
         <label>E-mail<input name="email" type="email" autoComplete="email" required maxLength={254} /></label>
-        <label>Senha inicial<input name="password" type="password" autoComplete="new-password" required minLength={12} maxLength={256} /></label>
-        <p className="muted">Use uma senha inicial exclusiva e entregue-a ao titular por um canal seguro.</p>
+        <p className="muted">A pessoa receberá por e-mail um link de uso único, válido por 72 horas, para definir a própria senha. O administrador nunca conhece a senha.</p>
         <button className="button-primary" type="submit">Criar conta</button>
       </form>
     </section>

@@ -1,15 +1,15 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { prisma } from "@virki/database";
 import { grantProjectAccessAction, revokeProjectAccessAction } from "../actions";
 
 // Callers must run requireAdminPage() first; see ./page.tsx.
-export async function AccessView({ searchParams }: { searchParams: Promise<{ status?: string; error?: string }> }) {
+// csrf is a session-bound "admin-access" token minted by the page.
+export async function AccessView({ searchParams, csrf }: { searchParams: Promise<{ status?: string; error?: string }>; csrf: string }) {
   const params = await searchParams;
-  const [users, connections, grants, csrf] = await Promise.all([
+  const [users, connections, grants] = await Promise.all([
     prisma.user.findMany({ where: { role: "USER", isActive: true, accountStatus: "ACTIVE" }, select: { id: true, email: true, displayName: true }, orderBy: { email: "asc" } }),
     prisma.projectConnection.findMany({ where: { enabled: true }, select: { id: true, name: true, origin: true }, orderBy: { name: "asc" } }),
-    prisma.userProjectGrant.findMany({ where: { revokedAt: null }, select: { id: true, createdAt: true, user: { select: { email: true, displayName: true, role: true } }, connection: { select: { name: true, enabled: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200 }),
-    Promise.resolve(createCsrfToken({ scope: "admin-access" }))
+    prisma.userProjectGrant.findMany({ where: { revokedAt: null }, select: { id: true, createdAt: true, user: { select: { email: true, displayName: true, role: true } }, connection: { select: { name: true, enabled: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200 })
   ]);
 
   return <main className="admin-main" id="admin-content" tabIndex={-1}>

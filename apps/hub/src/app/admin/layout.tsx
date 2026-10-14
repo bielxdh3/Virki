@@ -1,4 +1,5 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { createSessionCsrfToken } from "../../lib/session-csrf";
 import { headers } from "next/headers";
 import { getSurface, trustedReturnTo } from "../../lib/surface";
 import { requireAdminPage } from "../../lib/admin-page";
@@ -17,7 +18,7 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
   const session = await requireAdminPage();
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
-  const csrf = createCsrfToken({ scope: "logout" });
+  const csrf = await createSessionCsrfToken("logout");
   const currentPath = trustedReturnTo(requestHeaders, surface, session.user.role);
   const currentPathname = currentPath?.split("?", 1)[0];
 

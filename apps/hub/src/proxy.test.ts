@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { evaluateProxyRequest } from "./proxy";
 
 const env = { VIRKI_HUB_HOSTNAME: "hub.biel.dev.br", VIRKI_PORTAL_HOSTNAME: "portal.biel.dev.br", CLOUDFLARE_ACCESS_JWT_REQUIRED: "true" };
@@ -98,4 +99,75 @@ test("development Hub keeps its explicit local Access opt-out", async () => {
     { ...env, NODE_ENV: "development", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false" }
   );
   assert.equal(response.status, 307);
+});
+
+const nonceOf = (csp: string) => /'nonce-([A-Za-z0-9+/=]+)'/u.exec(csp)?.[1];
+
+test("every proxy response path carries one nonce CSP with the hardened directives", async () => {
+  const requests: Array<[string, Record<string, string>]> = [
+    ["https://other.invalid/", { host: "other.invalid" }],
+    ["https://hub.biel.dev.br/admin/accounts", { host: "hub.biel.dev.br" }],
+    ["https://portal.biel.dev.br/login", { host: "portal.biel.dev.br" }],
+    ["https://portal.biel.dev.br/account/security", { host: "portal.biel.dev.br" }],
+    ["https://portal.biel.dev.br/account/security", { host: "portal.biel.dev.br", cookie: `${SESSION_COOKIE_NAME}=x` }]
+  ];
+  for (const [url, headers] of requests) {
+    const response = await evaluateProxyRequest(new NextRequest(url, { headers }), { ...env, NODE_ENV: "production" });
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.ok(nonceOf(csp), `${url} nonce`);
+    for (const directive of ["default-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "upgrade-insecure-requests", "connect-src 'self'"]) {
+      assert.ok(csp.split("; ").includes(directive), `${url} ${directive}`);
+    }
+    assert.match(csp, /script-src 'self' 'nonce-[^']+' 'strict-dynamic'(?:;|$)/u);
+    assert.match(csp, /style-src 'self' 'nonce-[^']+'(?:;|$)/u);
+    assert.doesNotMatch(csp, /unsafe-eval|unsafe-inline/u);
+  }
+});
+
+test("CSP nonces are unique per request, forwarded to the app, and eval is development-only", async () => {
+  const make = () => new NextRequest("https://portal.biel.dev.br/login", { headers: { host: "portal.biel.dev.br", "x-nonce": "spoofed" } });
+  const first = await evaluateProxyRequest(make(), { ...env, NODE_ENV: "production" });
+  const second = await evaluateProxyRequest(make(), { ...env, NODE_ENV: "production" });
+  const firstNonce = nonceOf(first.headers.get("content-security-policy") ?? "");
+  assert.ok(firstNonce && firstNonce.length >= 22);
+  assert.notEqual(firstNonce, nonceOf(second.headers.get("content-security-policy") ?? ""));
+  assert.equal(first.headers.get("x-middleware-request-x-nonce"), firstNonce);
+  assert.equal(first.headers.get("x-middleware-request-content-security-policy"), first.headers.get("content-security-policy"));
+
+  const development = await evaluateProxyRequest(make(), { ...env, NODE_ENV: "development" });
+  const developmentCsp = development.headers.get("content-security-policy") ?? "";
+  assert.match(developmentCsp, /'unsafe-eval'/u);
+  assert.doesNotMatch(developmentCsp, /upgrade-insecure-requests/u);
+  assert.doesNotMatch(first.headers.get("content-security-policy") ?? "", /unsafe-eval/u);
+});
+
+test("form-action stays self except on portal login pages that can end in a relying-party redirect", async () => {
+  const csp = async (url: string, host: string) => (await evaluateProxyRequest(new NextRequest(url, { headers: { host } }), env)).headers.get("content-security-policy") ?? "";
+  assert.match(await csp("https://hub.biel.dev.br/api/health", "hub.biel.dev.br"), /form-action 'self'/u);
+  assert.match(await csp("https://portal.biel.dev.br/recover", "portal.biel.dev.br"), /form-action 'self'/u);
+  assert.doesNotMatch(await csp("https://portal.biel.dev.br/login", "portal.biel.dev.br"), /form-action/u);
+  assert.doesNotMatch(await csp("https://portal.biel.dev.br/login/verify", "portal.biel.dev.br"), /form-action/u);
+});
+
+test("issuer-proxied OIDC paths are left to the issuer's own single CSP", async () => {
+  for (const path of ["/auth/abcdefghijklmnop", "/token", "/session/end", "/interaction/abcdefghijklmnop", "/.well-known/openid-configuration"]) {
+    const response = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env);
+    assert.equal(response.headers.get("content-security-policy"), null, path);
+  }
+});
+
+test("client-supplied internal request-path header never reaches the app", async () => {
+  const forwarded = (response: Response) => response.headers.get("x-middleware-request-x-virki-request-path");
+  const spoof = { host: "portal.biel.dev.br", "x-virki-request-path": "/admin/accounts" };
+
+  const publicResponse = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/login", { headers: spoof }), env);
+  assert.equal(publicResponse.status, 200);
+  assert.equal(forwarded(publicResponse), null);
+
+  const healthResponse = await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/api/health", { headers: { ...spoof, host: "hub.biel.dev.br" } }), env);
+  assert.equal(forwarded(healthResponse), null);
+
+  const protectedResponse = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/account/security?tab=mfa", { headers: { ...spoof, cookie: `${SESSION_COOKIE_NAME}=x` } }), env);
+  assert.equal(protectedResponse.status, 200);
+  assert.equal(forwarded(protectedResponse), "/account/security?tab=mfa");
 });

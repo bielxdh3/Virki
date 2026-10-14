@@ -35,3 +35,14 @@ test("public landing rejects unsafe portal URLs", () => {
   else process.env.VIRKI_PORTAL_URL = previous;
   assert.doesNotMatch(markup, /href=/u);
 });
+
+test("public site CSP is strict: no framing, plugins, base rewriting or form posts, and eval only in development", async () => {
+  // @ts-expect-error -- plain .mjs config module without type declarations
+  const { buildPublicContentSecurityPolicy } = (await import("../../next.config.mjs")) as { buildPublicContentSecurityPolicy: (nodeEnv?: string) => string };
+  const production = buildPublicContentSecurityPolicy("production");
+  for (const directive of ["default-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'", "upgrade-insecure-requests"]) {
+    assert.ok(production.split("; ").includes(directive), directive);
+  }
+  assert.doesNotMatch(production, /unsafe-eval/u);
+  assert.match(buildPublicContentSecurityPolicy("development"), /'unsafe-eval'/u);
+});
