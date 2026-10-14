@@ -218,3 +218,14 @@ test("production application, maintenance, and migration services run non-root w
   assert.match(imageAssertion, /runtimeUid !== 1000/u);
   assert.match(imageAssertion, /"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"/u);
 });
+
+test("oidc-issuer is reachable only on the internal Compose network", () => {
+  for (const [name, compose] of [["production", productionCompose], ["development", developmentCompose]]) {
+    const issuer = serviceBlock(compose, "oidc-issuer");
+    assert.doesNotMatch(issuer, /^\s{4}ports:/mu, `${name} issuer must not publish ports`);
+    assert.doesNotMatch(issuer, /^\s{4}(?:expose|network_mode|networks):/mu, `${name} issuer must stay on the default internal network`);
+    assert.doesNotMatch(issuer, /VIRKI_OIDC_BIND_ADDRESS/u);
+  }
+  assert.match(productionCompose, /VIRKI_OIDC_PROXY_URL:\s*http:\/\/oidc-issuer:3003/u);
+  assert.doesNotMatch(cloudflareCompose, /^\s{4}ports:/mu);
+});

@@ -1,4 +1,4 @@
-import type { Adapter, AdapterPayload } from "oidc-provider";
+import { errors, type Adapter, type AdapterPayload } from "oidc-provider";
 import { decryptOidcClientSecret, decryptOidcPayload, encryptOidcPayload, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
 import { prisma, type PrismaClient } from "@virki/database";
 
@@ -57,6 +57,14 @@ export class PrismaOidcAdapter implements Adapter {
       if (this.model === "AuthorizationCode" && (typeof payload.redirectUri !== "string" || !stringArray(activeGrant[0].redirectUris).includes(payload.redirectUri))) {
         throw new Error("OIDC redirect URI is no longer registered.");
       }
+      if (grantBoundModels.has(this.model)) {
+        // An account-level purge deletes the provider Grant while holding the User row lock taken above, so this check serializes with it.
+        const providerGrant = await transaction.oidcArtifact.findUnique({
+          where: { model_idHash: { model: "Grant", idHash: hashOidcIdentifier(payload.grantId as string) } },
+          select: { expiresAt: true }
+        });
+        if (!providerGrant || (providerGrant.expiresAt && providerGrant.expiresAt <= new Date())) throw new Error("OIDC provider grant is no longer active.");
+      }
       await transaction.oidcArtifact.upsert(artifact);
     });
   }
@@ -79,13 +87,19 @@ export class PrismaOidcAdapter implements Adapter {
     const record = await this.database.oidcArtifact.findUnique({ where, select: { payloadCiphertext: true } });
     if (!record) throw new Error("OIDC artifact was not found.");
     const payload = parsePayload(decryptOidcPayload(record.payloadCiphertext));
-    if (payload.consumed) throw new Error("OIDC artifact was already consumed.");
+    if (payload.consumed) await this.rejectReplay(payload);
     payload.consumed = Math.floor(Date.now() / 1000);
     const consumed = await this.database.oidcArtifact.updateMany({
       where: { model: this.model, idHash: hashOidcIdentifier(id), consumedAt: null },
       data: { payloadCiphertext: encryptOidcPayload(JSON.stringify(payload)), consumedAt: new Date() }
     });
-    if (consumed.count !== 1) throw new Error("OIDC artifact was already consumed.");
+    if (consumed.count !== 1) await this.rejectReplay(payload);
+  }
+
+  // Losing the one-time consume race is a replay: answer invalid_grant (not a 500) and revoke the grant, as the provider does for a code it sees already consumed.
+  private async rejectReplay(payload: AdapterPayload): Promise<never> {
+    if (typeof payload.grantId === "string" && payload.grantId) await this.revokeByGrantId(payload.grantId);
+    throw new errors.InvalidGrant("authorization code already consumed");
   }
 
   async destroy(id: string): Promise<void> {

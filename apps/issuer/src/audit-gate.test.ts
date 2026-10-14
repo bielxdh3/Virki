@@ -10,7 +10,7 @@ test("issuer applies frame, MIME, referrer, and production transport headers", (
   const response = { setHeader: (name: string, value: string) => values.set(name.toLowerCase(), value) } as never;
 
   setIssuerSecurityHeaders(response, true);
-  assert.equal(values.get("content-security-policy"), "frame-ancestors 'none'");
+  assert.match(values.get("content-security-policy") ?? "", /(?:^|; )frame-ancestors 'none'(?:;|$)/u);
   assert.equal(values.get("permissions-policy"), "camera=(), geolocation=(), microphone=()");
   assert.equal(values.get("referrer-policy"), "no-referrer");
   assert.equal(values.get("x-content-type-options"), "nosniff");

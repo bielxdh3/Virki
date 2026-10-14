@@ -4,6 +4,8 @@ import { prisma } from "@virki/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
+import { readIssuer } from "./issuer-config";
+import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isTokenEndpoint, selectAuthRateLimits, selectTokenRateLimit, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
@@ -186,22 +188,11 @@ provider.use(async (rawContext, next) => {
       context.body = { error: "invalid_request", error_description: "state and nonce are required." };
       return;
     }
-    const clientAddress = getString(context.req.headers["cf-connecting-ip"]) ?? undefined;
-    if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(clientAddress)) {
-      context.status = 503;
-      context.body = { error: "temporarily_unavailable" };
-      return;
-    }
-    if (clientAddress && isTrustedClientAddress(clientAddress)) {
-      const attempt = await prisma.$transaction((transaction) =>
-        consumeRateLimitAttemptInTransaction(transaction, `oidc-source:${clientAddress}`, new Date(), 30)
-      );
-      if (!attempt.allowed) {
-        context.status = 429;
-        context.body = { error: "temporarily_unavailable" };
-        return;
-      }
-    }
+    const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
+    if (await rateLimitRequest(context, (address) => selectAuthRateLimits(address, sessionCookie))) return;
+  } else if (isTokenEndpoint(context.method, context.path)) {
+    const authorization = getString(context.req.headers.authorization) ?? undefined;
+    if (await rateLimitRequest(context, (address) => [selectTokenRateLimit(address, authorization)])) return;
   }
 
   const match = context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u);
@@ -394,11 +385,28 @@ async function hasActiveProjectGrant(userId: string, clientId: string): Promise<
   return isCurrentActiveUserProjectGrant(grant);
 }
 
-function readIssuer(env: NodeJS.ProcessEnv): string {
-  const issuerUrl = new URL(env.VIRKI_OIDC_ISSUER ?? "https://portal.biel.dev.br");
-  if (issuerUrl.username || issuerUrl.password || issuerUrl.search || issuerUrl.hash || issuerUrl.pathname !== "/") throw new Error("OIDC issuer URL is invalid.");
-  if (env.NODE_ENV === "production" && issuerUrl.protocol !== "https:") throw new Error("OIDC issuer requires HTTPS in production.");
-  return issuerUrl.origin;
+/** Returns true when the request was answered (503 or 429). Public traffic always arrives via Cloudflare. */
+async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: string) => RateLimitCheck[]): Promise<boolean> {
+  const clientAddress = getString(context.req.headers["cf-connecting-ip"]) ?? undefined;
+  if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(clientAddress)) {
+    context.status = 503;
+    context.body = { error: "temporarily_unavailable" };
+    return true;
+  }
+  if (!isTrustedClientAddress(clientAddress)) return false;
+  const now = new Date();
+  const allowed = await prisma.$transaction(async (transaction) => {
+    for (const check of select(clientAddress)) {
+      const attempt = await consumeRateLimitAttemptInTransaction(transaction, check.identifier, now, check.maxAttempts);
+      if (!attempt.allowed) return false;
+    }
+    return true;
+  });
+  if (allowed) return false;
+  context.status = 429;
+  context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
+  context.body = { error: "temporarily_unavailable" };
+  return true;
 }
 
 function readSigningJwks(value: string | undefined): { keys: Array<Record<string, string>> } {
