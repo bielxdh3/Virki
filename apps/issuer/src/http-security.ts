@@ -3,17 +3,24 @@ import type { ServerResponse } from "node:http";
 /**
  * Issuer responses are JSON, redirects and the oidc-provider default HTML pages (error, logout confirmation,
  * post-logout success). Those pages carry one inline <style> block and no scripts, so style-src needs
- * 'unsafe-inline' and script-src stays closed (default-src 'none'). response_mode=form_post is not enabled, so no
- * inline auto-submit script or external form post is rendered.
+ * 'unsafe-inline' and script-src stays closed (default-src 'none').
+ * oidc-provider always supports response_mode=form_post: on /auth* it renders an auto-submitting form to the
+ * relying party's registered redirect URI. The provider adds that inline script's hash to an existing script-src,
+ * so /auth* declares script-src 'self' and omits form-action (the post targets the external redirect URI).
  * The logout confirmation form posts to /session/end/confirm and the provider answers with a 303 to the relying
  * party's post_logout_redirect_uri. Chromium enforces form-action on that redirect, so form-action is omitted for
  * /session/end*; everywhere else it is 'self'.
  */
 export function issuerContentSecurityPolicy(pathname: string): string {
-  const directives = ["default-src 'none'", "style-src 'unsafe-inline'", "base-uri 'none'"];
-  if (!isLogoutPath(pathname)) directives.push("form-action 'self'");
+  const authorization = isAuthorizationPath(pathname);
+  const directives = ["default-src 'none'", ...(authorization ? ["script-src 'self'"] : []), "style-src 'unsafe-inline'", "base-uri 'none'"];
+  if (!isLogoutPath(pathname) && !authorization) directives.push("form-action 'self'");
   directives.push("frame-ancestors 'none'");
   return directives.join("; ");
+}
+
+function isAuthorizationPath(pathname: string): boolean {
+  return pathname === "/auth" || pathname.startsWith("/auth/");
 }
 
 function isLogoutPath(pathname: string): boolean {

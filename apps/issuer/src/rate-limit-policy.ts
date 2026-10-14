@@ -37,9 +37,15 @@ export function parseBasicClientId(authorization: string | undefined): string {
   }
 }
 
-export function selectTokenRateLimit(clientAddress: string, authorization: string | undefined): RateLimitCheck {
+// The per-source ceiling bounds an address that rotates client_id values to obtain fresh per-client buckets.
+export const OIDC_TOKEN_SOURCE_CEILING = 2000;
+
+export function selectTokenRateLimits(clientAddress: string, authorization: string | undefined): RateLimitCheck[] {
   const clientRef = createHash("sha256").update(parseBasicClientId(authorization)).digest("hex").slice(0, 32);
-  return { identifier: `oidc-token:${clientAddress}:${clientRef}`, maxAttempts: OIDC_TOKEN_LIMIT };
+  return [
+    { identifier: `oidc-token-source:${clientAddress}`, maxAttempts: OIDC_TOKEN_SOURCE_CEILING },
+    { identifier: `oidc-token:${clientAddress}:${clientRef}`, maxAttempts: OIDC_TOKEN_LIMIT }
+  ];
 }
 
 export function isTokenEndpoint(method: string, path: string): boolean {

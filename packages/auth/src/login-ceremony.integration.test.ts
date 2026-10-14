@@ -209,6 +209,7 @@ test("concurrent login ceremony starts cannot exceed the account quota", integra
     if (result.status === "rejected") assert.ok(result.reason instanceof SecurityMutationError);
   }
   const successes = results.filter((result) => result.status === "fulfilled").length;
+  assert.ok(successes >= 1, "concurrent starts still let a legitimate ceremony through");
   assert.ok(successes <= LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT);
   assert.equal(await countLoginMails(user.email), successes);
 });

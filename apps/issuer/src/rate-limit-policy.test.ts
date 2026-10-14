@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isTokenEndpoint, parseBasicClientId, selectAuthRateLimits, selectTokenRateLimit } from "./rate-limit-policy";
+import { isTokenEndpoint, parseBasicClientId, selectAuthRateLimits, selectTokenRateLimits } from "./rate-limit-policy";
 
 const basic = (value: string) => `Basic ${Buffer.from(value).toString("base64")}`;
 
@@ -29,13 +29,17 @@ test("client id is parsed from Basic and malformed input becomes invalid", () =>
   }
 });
 
-test("token buckets are per address and per client", () => {
-  const rp = selectTokenRateLimit("198.51.100.1", basic("rp:s"));
-  assert.notEqual(rp.identifier, selectTokenRateLimit("198.51.100.2", basic("rp:s")).identifier);
-  assert.notEqual(rp.identifier, selectTokenRateLimit("198.51.100.1", basic("other:s")).identifier);
-  assert.equal(rp.identifier, selectTokenRateLimit("198.51.100.1", basic("rp:different")).identifier);
+test("token buckets are per address and per client under a per-address ceiling", () => {
+  const client = (address: string, header: string) => selectTokenRateLimits(address, header)[1];
+  const [ceiling, rp] = selectTokenRateLimits("198.51.100.1", basic("rp:s"));
+  assert.notEqual(rp.identifier, client("198.51.100.2", basic("rp:s")).identifier);
+  assert.notEqual(rp.identifier, client("198.51.100.1", basic("other:s")).identifier);
+  assert.equal(rp.identifier, client("198.51.100.1", basic("rp:different")).identifier);
   assert.equal(rp.maxAttempts, 600);
   assert.ok(!rp.identifier.includes("rp:s"));
+  // Rotating client_id values from one address still hits the same ceiling bucket.
+  assert.equal(ceiling.identifier, selectTokenRateLimits("198.51.100.1", basic("rotated:s"))[0].identifier);
+  assert.equal(ceiling.maxAttempts, 2000);
 });
 
 test("only POST /token and /token/revocation are limited", () => {

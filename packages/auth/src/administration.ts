@@ -184,6 +184,9 @@ export async function changeAdministrativePassword(actor: { id: string; role: st
   const admin = await requireAdminSession(actor, sessionId, now);
   await requireSecurityElevation(actor.id, sessionId, "ADMIN_CREDENTIAL_CHANGE", now);
   assertAdminPassword(newPassword);
+  // Budget the comparison so this path is not an unthrottled oracle for the normal password.
+  const attempt = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `admin-credential-change:${actor.id}`, now));
+  if (!attempt.allowed) throw new AdministrationMutationError();
   await assertNotNormalPassword(admin.passwordHash, newPassword);
   const passwordHash = await hashPassword(newPassword);
   await prisma.$transaction(async (transaction) => {

@@ -16,7 +16,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
 
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Contas</h1><p>Provisione e suspenda contas USER. A suspensão encerra todas as sessões.</p></div></header>
-    {params.status && <p className="form-success" role="status">{params.status === "created" ? "Conta criada. O convite foi enviado por e-mail e expira em 72 horas." : "Alteração concluída."}</p>}
+    {params.status && <p className="form-success" role="status">{params.status === "created" ? "Conta criada. O convite será enviado por e-mail e expira em 72 horas." : "Alteração concluída."}</p>}
     {params.error && <p className="form-error" role="alert">A ação não foi concluída. Verifique os dados e a elevação de segurança.</p>}
     <section className="surface" aria-labelledby="create-account"><h2 id="create-account">Provisionar conta</h2>
       <form action={createAccountAction} className="form-stack">

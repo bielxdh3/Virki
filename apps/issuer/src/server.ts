@@ -5,7 +5,7 @@ import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } fr
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { readIssuer } from "./issuer-config";
-import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isTokenEndpoint, selectAuthRateLimits, selectTokenRateLimit, type RateLimitCheck } from "./rate-limit-policy";
+import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isTokenEndpoint, selectAuthRateLimits, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
@@ -192,7 +192,7 @@ provider.use(async (rawContext, next) => {
     if (await rateLimitRequest(context, (address) => selectAuthRateLimits(address, sessionCookie))) return;
   } else if (isTokenEndpoint(context.method, context.path)) {
     const authorization = getString(context.req.headers.authorization) ?? undefined;
-    if (await rateLimitRequest(context, (address) => [selectTokenRateLimit(address, authorization)])) return;
+    if (await rateLimitRequest(context, (address) => selectTokenRateLimits(address, authorization))) return;
   }
 
   const match = context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u);

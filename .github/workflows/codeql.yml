@@ -14,8 +14,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.ref }}
-  # PR runs supersede each other; main runs publish reviewed evidence and are never cancelled.
+  # PR runs supersede each other. Push and scheduled runs get a per-SHA-and-event group, so a main run is never
+  # cancelled or displaced while pending.
+  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.event_name, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -49,8 +50,6 @@ jobs:
         run: node scripts/codeql-sarif-policy.mjs codeql-results
 
       - name: Store reviewed CodeQL SARIF in private GHCR evidence
-        # Evidence is kept even when the policy gate fails; the gate step above still fails the job.
-        if: ${{ always() && !cancelled() }}
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
