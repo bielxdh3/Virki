@@ -53,7 +53,7 @@ export class PrismaOidcAdapter implements Adapter {
           AND connection_record."enabled" = TRUE
         FOR UPDATE OF grant_record, account_record, connection_record
       `;
-      if (activeGrant.length !== 1) throw new Error("OIDC authorization is no longer active.");
+      if (activeGrant.length !== 1) throw new errors.InvalidGrant("OIDC authorization is no longer active.");
       if (this.model === "AuthorizationCode" && (typeof payload.redirectUri !== "string" || !stringArray(activeGrant[0].redirectUris).includes(payload.redirectUri))) {
         throw new Error("OIDC redirect URI is no longer registered.");
       }
@@ -63,7 +63,7 @@ export class PrismaOidcAdapter implements Adapter {
           where: { model_idHash: { model: "Grant", idHash: hashOidcIdentifier(payload.grantId as string) } },
           select: { expiresAt: true }
         });
-        if (!providerGrant || (providerGrant.expiresAt && providerGrant.expiresAt <= new Date())) throw new Error("OIDC provider grant is no longer active.");
+        if (!providerGrant || (providerGrant.expiresAt && providerGrant.expiresAt <= new Date())) throw new errors.InvalidGrant("OIDC provider grant is no longer active.");
       }
       await transaction.oidcArtifact.upsert(artifact);
     });
@@ -108,7 +108,8 @@ export class PrismaOidcAdapter implements Adapter {
   }
 
   async revokeByGrantId(grantId: string): Promise<void> {
-    await this.database.oidcArtifact.deleteMany({ where: { grantHash: hashOidcIdentifier(grantId) } });
+    const hash = hashOidcIdentifier(grantId);
+    await this.database.oidcArtifact.deleteMany({ where: { OR: [{ grantHash: hash }, { model: "Grant", idHash: hash }] } });
   }
 
   private async findClient(clientId: string): Promise<AdapterPayload | undefined> {

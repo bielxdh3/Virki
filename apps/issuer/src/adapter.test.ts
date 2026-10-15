@@ -149,7 +149,7 @@ test("grant-bound token persistence fails closed when the USER grant has been re
       accountId: "user-id",
       clientId: "client-id",
       grantId: "provider-grant-id"
-    } as never, 300), /OIDC authorization is no longer active/u);
+    } as never, 300), /invalid_grant/u);
     assert.equal(upserted, false);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
@@ -204,7 +204,7 @@ test("OIDC provider Grant persistence fails closed when project access was revok
     await assert.rejects(() => new PrismaOidcAdapter("Grant", database as never).upsert("provider-grant-id", {
       accountId: "user-id",
       clientId: "client-id"
-    } as never, 300), /OIDC authorization is no longer active/u);
+    } as never, 300), /invalid_grant/u);
     assert.equal(upserted, false);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
@@ -228,9 +228,9 @@ test("grant-bound token persistence fails closed when the provider Grant artifac
     };
     const payload = { accountId: "user-id", clientId: "client-id", grantId: "provider-grant-id" } as never;
     const adapter = new PrismaOidcAdapter("AccessToken", database as never);
-    await assert.rejects(() => adapter.upsert("t", payload, 300), /provider grant is no longer active/u);
+    await assert.rejects(() => adapter.upsert("t", payload, 300), /invalid_grant/u);
     grant = { expiresAt: new Date(Date.now() - 1000) };
-    await assert.rejects(() => adapter.upsert("t", payload, 300), /provider grant is no longer active/u);
+    await assert.rejects(() => adapter.upsert("t", payload, 300), /invalid_grant/u);
     assert.equal(upserted, false);
     grant = { expiresAt: null };
     await adapter.upsert("t", payload, 300);
@@ -239,4 +239,17 @@ test("grant-bound token persistence fails closed when the provider Grant artifac
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
     else process.env.VIRKI_OIDC_ADAPTER_KEY = original;
   }
+});
+
+test("replaying a grant revokes its provider Grant and all grant-bound tokens atomically", async () => {
+  const calls: unknown[] = [];
+  const database = {
+    oidcArtifact: { deleteMany: async (args: unknown) => { calls.push(args); return { count: 2 }; } }
+  };
+  await new PrismaOidcAdapter("AuthorizationCode", database as never).revokeByGrantId("one-time-grant");
+  assert.equal(calls.length, 1);
+  const where = (calls[0] as { where: { OR: Array<Record<string, string>> } }).where;
+  assert.equal(where.OR.length, 2);
+  assert.equal(where.OR[0].grantHash, where.OR[1].idHash);
+  assert.equal(where.OR[1].model, "Grant");
 });
