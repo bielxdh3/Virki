@@ -116,8 +116,12 @@ async function assertStatus(url, expectedStatus, headers = {}) {
 }
 
 function assertSecurityHeaders(headers, referrerPolicy = "no-referrer") {
+  const csp = (headers["content-security-policy"] ?? "").split(";").map((directive) => directive.trim());
+  for (const directive of ["frame-ancestors 'none'", "base-uri 'none'"]) {
+    if (!csp.includes(directive)) throw new Error(`Runtime smoke is missing CSP directive ${directive}.`);
+  }
+  if (!csp.includes("object-src 'none'") && !csp.includes("default-src 'none'")) throw new Error("Runtime smoke CSP does not block plugin content.");
   const expected = {
-    "content-security-policy": "frame-ancestors 'none'",
     "permissions-policy": "camera=(), geolocation=(), microphone=()",
     "referrer-policy": referrerPolicy,
     "strict-transport-security": "max-age=31536000",

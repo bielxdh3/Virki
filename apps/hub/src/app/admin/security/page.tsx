@@ -1,6 +1,7 @@
 import { getAdministrativeCredentialState, listActiveSecurityElevations } from "@virki/auth/administration";
 import { listPendingAccountRecoveries } from "@virki/auth/security";
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { createSessionCsrfToken } from "../../../lib/session-csrf";
 import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
 import { approveRecoveryAction } from "../../recover/actions";
@@ -15,7 +16,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
     getAdministrativeCredentialState(session.user.id),
     listActiveSecurityElevations(session.user, session.id),
     listPendingAccountRecoveries(session.user),
-    Promise.resolve(createCsrfToken({ scope: "admin-security" })),
+    createSessionCsrfToken("admin-security"),
     prisma.session.count({ where: { userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } } })
   ]);
   return <main className="admin-main" id="admin-content" tabIndex={-1}>

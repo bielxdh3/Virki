@@ -1,4 +1,5 @@
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { validateSessionCsrfToken } from "./session-csrf";
 import { forbidden } from "next/navigation";
 import { headers } from "next/headers";
 import { getCurrentSession } from "./auth";
@@ -16,7 +17,7 @@ export async function requireAdminMutation(formData: FormData, source: string): 
   if (!isAdminRequestAllowed(surface, accessValid)) forbidden();
   if (!hasSameOrigin(requestHeaders)) forbidden();
   const csrf = formData.get(CSRF_FORM_FIELD_NAME);
-  if (typeof csrf !== "string" || !validateCsrfToken(csrf, { scope: getAdminCsrfScope(source) }).valid) forbidden();
+  if (typeof csrf !== "string" || !(await validateSessionCsrfToken(csrf, getAdminCsrfScope(source)))) forbidden();
   const session = await getCurrentSession();
   if (!session || !isAdminRole(session.user.role)) forbidden();
   return session as AdminSession;

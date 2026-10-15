@@ -3,12 +3,13 @@
 import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@virki/auth/security";
 import { requireSecurityElevation } from "@virki/auth/administration";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
+import { validateSessionCsrfToken } from "../../lib/session-csrf";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../lib/surface";
-import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
+import { getRecoveryCookieOptions, LEGACY_RECOVERY_COOKIE, RECOVERY_COOKIE_NAME } from "../../lib/recovery";
 
 export async function requestRecoveryAction(formData: FormData) {
   const { requestHeaders } = await requireRecoveryAccess(formData, "recovery-request", "portal");
@@ -36,13 +37,8 @@ export async function openRecoveryAction(formData: FormData) {
   const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
   if (!recovery) redirect("/recover?error=1");
   const cookieStore = await cookies();
-  cookieStore.set(RECOVERY_COOKIE_NAME, requestKey, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/recover",
-    expires: recovery.expiresAt
-  });
+  if (RECOVERY_COOKIE_NAME !== LEGACY_RECOVERY_COOKIE.name) cookieStore.delete(LEGACY_RECOVERY_COOKIE);
+  cookieStore.set(RECOVERY_COOKIE_NAME, requestKey, getRecoveryCookieOptions(recovery.expiresAt));
   redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
 }
 
@@ -71,13 +67,15 @@ export async function completeRecoveryAction(formData: FormData) {
   } catch {
     redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
   }
-  (await cookies()).delete(RECOVERY_COOKIE_NAME);
+  const cookieStore = await cookies();
+  cookieStore.delete({ name: RECOVERY_COOKIE_NAME, path: "/" });
+  if (RECOVERY_COOKIE_NAME !== LEGACY_RECOVERY_COOKIE.name) cookieStore.delete(LEGACY_RECOVERY_COOKIE);
   redirect("/login?recovered=1");
 }
 
 export async function approveRecoveryAction(formData: FormData) {
   const requestHeaders = await headers();
-  if (!hasSameOrigin(requestHeaders) || getSurface(requestHeaders) !== "hub" || !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery-approve")) || !validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "admin-security" }).valid) redirect("/login");
+  if (!hasSameOrigin(requestHeaders) || getSurface(requestHeaders) !== "hub" || !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery-approve")) || !(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "admin-security"))) redirect("/login");
   const session = await getCurrentSession();
   if (!session || session.user.role !== "ADMIN") redirect("/login");
   try {

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getAccountRecoveryRequestId } from "@virki/auth/security";
 import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { RECOVERY_COOKIE_NAME } from "../../../lib/recovery";
+import { getRecoveryCookieOptions, LEGACY_RECOVERY_COOKIE, RECOVERY_COOKIE_NAME } from "../../../lib/recovery";
 
 export const dynamic = "force-dynamic";
 
@@ -22,13 +22,8 @@ export async function GET(request: Request) {
   }
   destination.searchParams.set("requestId", recovery.id);
   const response = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
-  response.cookies.set(RECOVERY_COOKIE_NAME, requestKey, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/recover",
-    expires: recovery.expiresAt
-  });
+  if (RECOVERY_COOKIE_NAME !== LEGACY_RECOVERY_COOKIE.name) response.cookies.delete(LEGACY_RECOVERY_COOKIE);
+  response.cookies.set(RECOVERY_COOKIE_NAME, requestKey, getRecoveryCookieOptions(recovery.expiresAt));
   return response;
 }
 

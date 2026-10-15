@@ -25,17 +25,59 @@ const OIDC_ROOT_ROUTES = new Set([
 ]);
 const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml|woff2?)$/iu;
 
+/**
+ * Per-request nonce CSP (https://nextjs.org/docs/app/guides/content-security-policy).
+ * `form-action` is omitted for the portal login/verify pages: those forms post to same-origin routes that 303 to
+ * `/auth/<uid>`, which the issuer 303s to the external relying-party redirect URI, and Chromium enforces
+ * `form-action` on every redirect hop of a form submission.
+ */
+export function buildContentSecurityPolicy(nonce: string, env: Readonly<Record<string, string | undefined>>, options: { allowExternalFormRedirect?: boolean } = {}): string {
+  const directives = [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${env.NODE_ENV === "development" ? " 'unsafe-eval'" : ""}`,
+    `style-src 'self' 'nonce-${nonce}'`,
+    "img-src 'self' data:",
+    "font-src 'self'",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'"
+  ];
+  if (!options.allowExternalFormRedirect) directives.push("form-action 'self'");
+  directives.push("frame-ancestors 'none'");
+  if (env.NODE_ENV === "production") directives.push("upgrade-insecure-requests");
+  return directives.join("; ");
+}
+
+function createNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 export async function proxy(request: NextRequest) {
   return evaluateProxyRequest(request, process.env);
 }
 
 export async function evaluateProxyRequest(request: NextRequest, env: Readonly<Record<string, string | undefined>>) {
+  const nonce = createNonce();
   const surface = getSurface(request.headers, env as NodeJS.ProcessEnv);
   const pathname = normalizePath(request.nextUrl.pathname);
+  const csp = buildContentSecurityPolicy(nonce, env, { allowExternalFormRedirect: surface === "portal" && (pathname === "/login" || pathname === "/login/verify") });
+  const withCsp = <T extends NextResponse>(response: T): T => {
+    response.headers.set("Content-Security-Policy", csp);
+    return response;
+  };
+  // Never trust client-supplied internal headers; only values set below reach the app.
+  const forwardedHeaders = new Headers(request.headers);
+  forwardedHeaders.delete(TRUSTED_REQUEST_PATH_HEADER);
+  forwardedHeaders.delete("x-nonce");
+  forwardedHeaders.set("x-nonce", nonce);
+  forwardedHeaders.set("Content-Security-Policy", csp);
 
-  if (surface === "unknown") return new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  if (surface === "unknown") return withCsp(new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } }));
   // Loopback/Compose host names never pass through Cloudflare Access; in production they only serve the health probe.
-  if (surface === "local" && env.NODE_ENV === "production" && pathname !== "/api/health") return new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  if (surface === "local" && env.NODE_ENV === "production" && pathname !== "/api/health") return withCsp(new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } }));
 
   if (surface === "hub" && pathname !== "/api/health") {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);
@@ -46,24 +88,28 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
         const kid = readE2eAccessKeyId(request.headers.get("cf-access-jwt-assertion"));
         if (kid) headers.set("x-virki-e2e-access-kid", kid);
       }
-      return new NextResponse("Forbidden", { status: 403, headers });
+      return withCsp(new NextResponse("Forbidden", { status: 403, headers }));
     }
   }
 
-  if (isPublicPath(pathname, surface)) return NextResponse.next();
+  if (isPublicPath(pathname, surface)) {
+    const response = NextResponse.next({ request: { headers: forwardedHeaders } });
+    // Issuer-proxied OIDC paths are answered by the issuer, which sets its own (single) Content-Security-Policy.
+    if (!isIssuerProxiedPath(pathname, surface)) response.headers.set("Content-Security-Policy", csp);
+    return response;
+  }
 
   if (!request.cookies.get(SESSION_COOKIE_NAME)?.value) {
     const requestedPath = safeReturnTo(`${pathname}${request.nextUrl.search}`, surface);
     const destination = loginUrl(request, surface, env, requestedPath);
-    if (!destination) return new NextResponse("Service Unavailable", { status: 503, headers: { "Cache-Control": "no-store" } });
-    const response = NextResponse.redirect(destination);
+    if (!destination) return withCsp(new NextResponse("Service Unavailable", { status: 503, headers: { "Cache-Control": "no-store" } }));
+    const response = withCsp(NextResponse.redirect(destination));
     response.headers.set("Cache-Control", "no-store");
     return response;
   }
 
-  const forwardedHeaders = new Headers(request.headers);
   forwardedHeaders.set(TRUSTED_REQUEST_PATH_HEADER, `${pathname}${request.nextUrl.search}`.slice(0, 2048));
-  const response = NextResponse.next({ request: { headers: forwardedHeaders } });
+  const response = withCsp(NextResponse.next({ request: { headers: forwardedHeaders } }));
   response.headers.set("Cache-Control", PROTECTED_CACHE_CONTROL);
   return response;
 }
@@ -101,6 +147,11 @@ function isPublicPath(pathname: string, surface: "hub" | "portal" | "local"): bo
   if (surface !== "hub" && pathname.startsWith("/resume/")) return true;
   if (surface !== "hub" && /^\/auth\/[A-Za-z0-9_-]{8,160}$/u.test(pathname)) return true;
   return surface !== "hub" && OIDC_ROOT_ROUTES.has(pathname);
+}
+
+function isIssuerProxiedPath(pathname: string, surface: "hub" | "portal" | "local"): boolean {
+  if (surface !== "portal") return false;
+  return pathname.startsWith("/.well-known/") || pathname.startsWith("/interaction/") || pathname.startsWith("/resume/") || pathname.startsWith("/auth/") || OIDC_ROOT_ROUTES.has(pathname);
 }
 
 function normalizePath(pathname: string): string {

@@ -1,7 +1,8 @@
 "use server";
 
 import { randomBytes } from "node:crypto";
-import { hashPassword, normalizeEmail, hashAuditEmail, writeAuditLogInTransaction } from "@virki/auth";
+import { normalizeEmail, writeAuditLogInTransaction } from "@virki/auth";
+import { provisionInvitedUserAccount } from "@virki/auth/account-invitation";
 import { revokeUserAuthenticationProofsInTransaction } from "@virki/auth/security";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
 import { AdministrationMutationError, requireSecurityElevation } from "@virki/auth/administration";
@@ -48,26 +49,9 @@ export async function createAccountAction(formData: FormData): Promise<void> {
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "ACCOUNT_STATE_CHANGE");
     const email = normalizeEmail(readFormString(formData, "email"));
-    const password = readFormRawString(formData, "password");
     const displayName = readFormString(formData, "displayName");
-    if (!/^\S+@\S+\.\S+$/u.test(email) || password.length < 12 || password.length > 256 || displayName.length > 80) throw new Error("Invalid account input.");
-    const passwordHash = await hashPassword(password);
-    await prisma.$transaction(async (transaction) => {
-      const user = await transaction.user.create({
-        data: {
-          email,
-          emailNormalized: email,
-          displayName: displayName || null,
-          passwordHash,
-          role: "USER",
-          isActive: true,
-          accountStatus: "ACTIVE",
-          emailVerifiedAt: null
-        },
-        select: { id: true }
-      });
-      await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_CREATED", result: "SUCCESS", actorUserId: actor.user.id, resource: "account", message: "User account provisioned.", metadata: { targetRef: hashOidcIdentifier(user.id), emailRef: hashAuditEmail(email) } });
-    });
+    if (!/^\S+@\S+\.\S+$/u.test(email) || displayName.length > 80) throw new Error("Invalid account input.");
+    await provisionInvitedUserAccount(actor.user, { email, displayName: displayName || null });
     revalidatePath("/admin/accounts");
     redirect("/admin/accounts?status=created");
   } catch (error) {

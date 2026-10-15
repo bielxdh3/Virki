@@ -60,14 +60,14 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
           {params?.sent ? <p role="status">Se a conta puder ser recuperada, você receberá instruções no e-mail cadastrado.</p> : null}
         </> : null}
 
-        {params?.requestId && !state ? <p className="form-error" role="alert">Este link de recuperação não é válido ou expirou. <a href="/recover">Solicite novas instruções.</a></p> : null}
+        {params?.requestId && !state ? <p className="form-error" role="alert">Este link de recuperação não é mais válido. Se a sua solicitação já foi aprovada, use o link mais recente enviado por e-mail. Caso contrário, <a href="/recover">solicite novas instruções.</a></p> : null}
         {state?.status === "PENDING" && !state.emailVerified ? <>
           <p>Informe o código enviado ao endereço cadastrado. Depois, um administrador analisará a solicitação.</p>
           <RecoveryVerificationForm csrf={csrf.verify} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={state.id} />
         </> : null}
-        {state?.status === "PENDING" && state.emailVerified ? <p role="status">E-mail confirmado. Aguarde a análise administrativa; esta página será liberada para definir uma nova senha após a aprovação.</p> : null}
+        {state?.status === "PENDING" && state.emailVerified ? <p role="status">E-mail confirmado. Um administrador analisará a solicitação. Após a aprovação, você receberá um novo e-mail com um link para definir a senha; abra esse novo link, pois esta página não será atualizada.</p> : null}
         {state?.status === "APPROVED" ? <>
-          <p role="status">Solicitação aprovada. Defina uma nova senha para concluir a recuperação do acesso.</p>
+          <p role="status">Defina uma nova senha para concluir o acesso à sua conta.</p>
           <form className="form-stack" action={completeRecoveryAction}>
             <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf.complete} />
             <input type="hidden" name="requestId" value={state.id} />

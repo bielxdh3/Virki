@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AdministrationMutationError,
+  AdministrativePasswordReuseError,
   ELEVATION_SCOPES,
   ELEVATION_SCOPE_ACTIONS,
   UI_ELEVATION_SCOPES,
@@ -42,4 +44,10 @@ test("elevation scope map exposes only implemented UI actions", () => {
   assert.equal(ELEVATION_SCOPE_ACTIONS.PROJECT_CONNECTION_MANAGE.ui, true);
   assert.equal(ELEVATION_SCOPE_ACTIONS.ADMIN_CREDENTIAL_CHANGE.ui, true);
   assert.equal(ELEVATION_SCOPE_ACTIONS.ADMIN_RECOVERY_REGENERATE.ui, true);
+});
+
+test("administrative password reuse is a specific mutation rejection", () => {
+  const error = new AdministrativePasswordReuseError();
+  assert.ok(error instanceof AdministrationMutationError);
+  assert.equal(error.name, "AdministrativePasswordReuseError");
 });

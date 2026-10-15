@@ -9,6 +9,7 @@ import {
 } from "node:crypto";
 import { isIP } from "node:net";
 import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
+import { hashOidcIdentifier } from "./oidc-secrets";
 import {
   consumeRateLimitAttemptInTransaction,
   generateSessionToken,
@@ -17,6 +18,7 @@ import {
   hashAuditIdentifier,
   hashSessionToken,
   lockRateLimitIdentifierInTransaction,
+  verifyPassword,
   writeAuditLogInTransaction
 } from "./index";
 import { prisma, type Prisma } from "@virki/database";
@@ -26,6 +28,13 @@ export const SECURITY_CEREMONY_TTL_MS = 10 * 60 * 1000;
 export const DEVICE_TRUST_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 export const REMEMBERED_BROWSER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const RECOVERY_REQUEST_COOLDOWN_MS = 60 * 1000;
+// Anonymous recovery requests take at least this long whether or not the account exists.
+export const RECOVERY_REQUEST_RESPONSE_FLOOR_MS = 500;
+// Email-sending login ceremonies a password-correct caller may start per 15-minute window.
+export const LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT = 6;
+export const LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT = 20;
+// A repeated start for the same browser within this window reuses the pending ceremony instead of mailing a new code.
+export const LOGIN_EMAIL_CEREMONY_REUSE_MS = 60 * 1000;
 
 const TOTP_KEY_VERSION = 1;
 const TOTP_STEP_SECONDS = 30;
@@ -64,6 +73,7 @@ export type LoginCeremonyFailureStage =
   | "trusted-device-lookup"
   | "remembered-challenges-revoke"
   | "remembered-session-create"
+  | "ceremony-rate-limited"
   | "challenge-revoke"
   | "challenge-code-hash"
   | "challenge-create"
@@ -123,10 +133,9 @@ export function hashSecurityCode(code: string, env: NodeJS.ProcessEnv = process.
   return `h2:${createHmac("sha256", key).update(code.trim(), "utf8").digest("hex")}`;
 }
 
+// Only keyed (h2) hashes are accepted. Unkeyed SHA-256 codes predate h2 and every code TTL (at most 72 h).
 export function verifySecurityCode(code: string, storedHash: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (storedHash.startsWith("h2:")) return safeEqual(hashSecurityCode(code, env), storedHash);
-  const legacyHash = createHash("sha256").update(code.trim(), "utf8").digest("hex");
-  return safeEqual(legacyHash, storedHash);
+  return storedHash.startsWith("h2:") && safeEqual(hashSecurityCode(code, env), storedHash);
 }
 
 export function generateRecoveryCode(): string {
@@ -216,6 +225,7 @@ export async function disableTotp(userId: string, code: string, now = new Date()
   await consumeSecurityProofAttempt(userId, now);
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   await prisma.$transaction(async (transaction) => {
+    if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "ACTIVE") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -228,6 +238,7 @@ export async function disableTotp(userId: string, code: string, now = new Date()
     await revokeLoginChallenges(transaction, userId);
     await transaction.securityElevation.updateMany({ where: { userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
     await transaction.session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: now } });
+    await revokeUserOidcArtifactsInTransaction(transaction, userId);
     await writeAuditLogInTransaction(transaction, { eventType: "SECOND_FACTOR_DISABLED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP second factor disabled." });
   });
 }
@@ -279,7 +290,8 @@ export async function startLoginCeremony(
   locale: EmailLocale,
   now = new Date(),
   forceFreshProof = false,
-  expectedRole?: RequiredLoginRole
+  expectedRole?: RequiredLoginRole,
+  trustedClientAddress?: string
 ): Promise<LoginCeremonyStart> {
   const candidateToken = deviceToken && isDeviceToken(deviceToken) ? deviceToken : undefined;
   let stage: LoginCeremonyFailureStage = "transaction-start";
@@ -304,7 +316,8 @@ export async function startLoginCeremony(
       const isTrusted = resolvedDevice.isTrusted;
       if (user.secondFactorMethod === "TOTP" && user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
       const requiresTotp = user.secondFactorMethod === "TOTP";
-      const hasRememberedGrant = Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
+      // ADMIN logins always complete a fresh second factor; a remembered browser never yields a password-only ADMIN session.
+      const hasRememberedGrant = user.role !== "ADMIN" && Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
 
       if (hasRememberedGrant && !forceFreshProof) {
         stage = "remembered-challenges-revoke";
@@ -320,6 +333,20 @@ export async function startLoginCeremony(
       }
 
       const totpOnly = Boolean(user.emailVerifiedAt) && requiresTotp && isTrusted;
+      if (!totpOnly) {
+        stage = "challenge-revoke";
+        const recent = await transaction.deviceChallenge.findFirst({
+          where: { userId, deviceIdHash, requiresTotp, status: "PENDING", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now }, createdAt: { gt: new Date(now.getTime() - LOGIN_EMAIL_CEREMONY_REUSE_MS), lte: now } },
+          orderBy: { createdAt: "desc" },
+          select: { ceremonyId: true }
+        });
+        if (recent) {
+          stage = "transaction-commit";
+          return { kind: "CEREMONY", ceremonyId: recent.ceremonyId, factor: "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
+        }
+        stage = "ceremony-rate-limited";
+        if (!await consumeLoginEmailCeremonyQuota(transaction, userId, isTrusted ? deviceIdHash : null, now, trustedClientAddress)) throw new SecurityMutationError();
+      }
       const code = totpOnly ? "totp-only" : generateNumericCode();
       const ceremonyId = randomBytes(24).toString("base64url");
       stage = "challenge-revoke";
@@ -327,7 +354,7 @@ export async function startLoginCeremony(
       stage = "challenge-code-hash";
       const codeHash = hashSecurityCode(code);
       stage = "challenge-create";
-      await transaction.deviceChallenge.create({ data: { userId, ceremonyId, deviceIdHash, emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), codeHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", expiresAt: new Date(now.getTime() + SECURITY_CEREMONY_TTL_MS) } });
+      await transaction.deviceChallenge.create({ data: { userId, ceremonyId, deviceIdHash, emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), codeHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", expiresAt: new Date(now.getTime() + SECURITY_CEREMONY_TTL_MS), createdAt: now } });
       if (!totpOnly) {
         stage = "outbox-enqueue";
         await enqueueEmailMessageForClient(transaction, {
@@ -344,6 +371,19 @@ export async function startLoginCeremony(
   } catch {
     throw new LoginCeremonyStartError(stage);
   }
+}
+
+// Persistent budget for login ceremonies that mail a code, charged even after a correct password so a
+// password holder cannot mail unbounded codes. A trusted device spends its own bucket, so someone who has
+// the password but not the owner's device token cannot exhaust the owner's budget; untrusted browsers
+// share the per-account bucket. The per-source bucket applies when the client address is known.
+async function consumeLoginEmailCeremonyQuota(transaction: Prisma.TransactionClient, userId: string, trustedDeviceIdHash: string | null, now: Date, trustedClientAddress?: string): Promise<boolean> {
+  const bucket = trustedDeviceIdHash ? `login-email-ceremony-device:${userId}:${trustedDeviceIdHash}` : `login-email-ceremony-account:${userId}`;
+  const account = await consumeRateLimitAttemptInTransaction(transaction, bucket, now, LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT);
+  if (!account.allowed) return false;
+  if (!isTrustedClientAddress(trustedClientAddress)) return true;
+  const source = await consumeRateLimitAttemptInTransaction(transaction, `login-email-ceremony-source:${trustedClientAddress}`, now, LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
+  return source.allowed;
 }
 
 function loginAuditSource(expectedRole?: RequiredLoginRole): string {
@@ -364,7 +404,8 @@ export async function verifyLoginEmailCode(ceremonyId: string, code: string, dev
       const verified = await transaction.deviceChallenge.updateMany({ where: { id: challenge.id, deviceIdHash: challenge.deviceIdHash, emailAddressHash: challenge.emailAddressHash, status: "PENDING", consumedAt: null, expiresAt: { gt: now } }, data: { status: "VERIFIED", emailVerifiedAt: now } });
       if (verified.count !== 1) throw new SecurityMutationError();
       await transaction.user.update({ where: { id: challenge.userId }, data: { emailVerifiedAt: now } });
-      await transaction.trustedDevice.upsert({ where: { userId_deviceIdHash: { userId: challenge.userId, deviceIdHash: challenge.deviceIdHash } }, update: { status: "TRUSTED", revokedAt: null, lastSeenAt: now, rememberedUntil: null, strongVerifiedAt: null }, create: { deviceKey: randomBytes(24).toString("base64url"), userId: challenge.userId, deviceIdHash: challenge.deviceIdHash, status: "TRUSTED", lastSeenAt: now } });
+      // A TOTP account's device is trusted only after the TOTP step completes (verifyLoginTotpCode).
+      if (!challenge.requiresTotp) await trustLoginDevice(transaction, challenge.userId, challenge.deviceIdHash, now);
       const session = challenge.requiresTotp
         ? null
         : await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now, ["pwd", "otp", "mfa"]);
@@ -399,6 +440,7 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, devi
       if (step === null) return { kind: "INVALID" as const };
       const claimed = await transaction.totpFactor.updateMany({ where: { id: factor.id, status: "ACTIVE", lastUsedStep: factor.lastUsedStep }, data: { lastUsedStep: step } });
       if (claimed.count !== 1) throw new SecurityMutationError();
+      await trustLoginDevice(transaction, challenge.userId, challenge.deviceIdHash, now);
       const methods = ["pwd", "otp", "mfa"];
       const session = await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now, methods);
       await writeAuditLogInTransaction(transaction, {
@@ -425,11 +467,10 @@ export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, 
       const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { id: true, status: true, lastUsedStep: true } } } } } });
       if (!challenge || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || challenge.user.secondFactorMethod !== "TOTP" || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.user.totpFactor?.status !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
 
-      const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
-      const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
-      if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
-
       if (!challenge.emailVerifiedAt) {
+        // No recovery code is checked in this step, so it spends the email-ceremony budget, not verification attempts.
+        // This step is reachable only from a TOTP-only ceremony, i.e. a device that is already trusted.
+        if (!await consumeLoginEmailCeremonyQuota(transaction, challenge.userId, challenge.deviceIdHash, now)) return { kind: "REJECTED" as const };
         const emailCode = generateNumericCode();
         const reopened = await transaction.deviceChallenge.updateMany({ where: { id: challenge.id, deviceIdHash: challenge.deviceIdHash, status: "VERIFIED", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now } }, data: { codeHash: hashSecurityCode(emailCode), status: "PENDING" } });
         if (reopened.count !== 1) throw new SecurityMutationError();
@@ -442,6 +483,10 @@ export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, 
         });
         return { kind: "EMAIL_REQUIRED" as const };
       }
+
+      const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
+      const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
+      if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
 
       const normalizedCode = code.replace(/[-\s]/gu, "").toUpperCase();
       if (!/^[A-F0-9]{18}$/u.test(normalizedCode)) return { kind: "INVALID" as const };
@@ -458,6 +503,7 @@ export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, 
       await transaction.securityElevation.updateMany({ where: { userId: challenge.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
       await transaction.session.updateMany({ where: { userId: challenge.userId, revokedAt: null }, data: { revokedAt: now } });
       await transaction.trustedDevice.updateMany({ where: { userId: challenge.userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
+      await revokeUserOidcArtifactsInTransaction(transaction, challenge.userId);
       await revokeLoginChallenges(transaction, challenge.userId, undefined, challenge.id);
       await writeAuditLogInTransaction(transaction, { eventType: "SECOND_FACTOR_RECOVERED", result: "SUCCESS", resource: "identity.2fa", message: "Lost authenticator recovered with email proof and a one-time recovery code.", metadata: { ceremonyRef: hashAuditIdentifier(ceremonyId) } });
       const session = await consumeChallengeAndCreateSession(transaction, challenge.id, challenge.userId, challenge.deviceIdHash, now, ["pwd", "otp", "mfa"], false);
@@ -489,11 +535,22 @@ export async function revokeTrustedDevice(userId: string, deviceKey: string): Pr
 }
 
 export async function requestAccountRecovery(email: string, locale: EmailLocale, now = new Date(), trustedClientAddress?: string): Promise<void> {
-  return requestAccountRecoveryForRole("USER", email, locale, now, trustedClientAddress);
+  return withResponseFloor(() => requestAccountRecoveryForRole("USER", email, locale, now, trustedClientAddress));
 }
 
 export async function requestAdministrativeAccountRecovery(email: string, locale: EmailLocale, now = new Date(), trustedClientAddress?: string): Promise<void> {
-  return requestAccountRecoveryForRole("ADMIN", email, locale, now, trustedClientAddress);
+  return withResponseFloor(() => requestAccountRecoveryForRole("ADMIN", email, locale, now, trustedClientAddress));
+}
+
+// Hides the extra database work done for an existing account behind a fixed minimum duration.
+async function withResponseFloor(operation: () => Promise<void>): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    await operation();
+  } finally {
+    const remaining = startedAt + RECOVERY_REQUEST_RESPONSE_FLOOR_MS - Date.now();
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
 }
 
 async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, email: string, locale: EmailLocale, now: Date, trustedClientAddress?: string): Promise<void> {
@@ -520,11 +577,15 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
       if (!await lockActiveRecoveryAccountInTransaction(transaction, user.id, expectedRole)) return false;
       const latestRequest = await transaction.accountRecoveryRequest.findFirst({ where: { userId: user.id }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
       if (latestRequest && latestRequest.createdAt.getTime() + RECOVERY_REQUEST_COOLDOWN_MS > now.getTime()) return false;
+      // An anonymous request never expires another request. While the owner holds an email-verified
+      // request (awaiting approval or approved), a new request is not created at all; the owner
+      // continues with the emailed approval link. Unverified requests coexist until one is verified.
+      const ownerProven = await transaction.accountRecoveryRequest.findFirst({ where: { userId: user.id, emailVerifiedAt: { not: null }, status: { in: ["PENDING", "APPROVED"] }, expiresAt: { gt: now } }, select: { id: true } });
+      if (ownerProven) return false;
       const attempt = await consumeRateLimitAttemptInTransaction(transaction, rateLimitIdentifier, now);
       if (!attempt.allowed) return false;
       const requestKey = randomBytes(24).toString("base64url");
       const code = generateNumericCode();
-      await transaction.accountRecoveryRequest.updateMany({ where: { userId: user.id, status: { in: ["PENDING", "APPROVED"] } }, data: { status: "EXPIRED" } });
       const recoveryRequest = await transaction.accountRecoveryRequest.create({ data: { requestKeyHash: hashRecoveryRequestKey(requestKey), emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), userId: user.id, emailChallengeHash: hashSecurityCode(code), expiresAt: new Date(now.getTime() + RECOVERY_REQUEST_TTL_MS) } });
       const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase).toString();
       await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: user.email, locale, payload: { publicValues: { displayName: user.displayName ?? "" }, protectedValues: { code, actionUrl } } });
@@ -565,6 +626,7 @@ export async function verifyAccountRecoveryEmail(requestId: string, requestKey: 
       if (!verifySecurityCode(code, request.emailChallengeHash)) return { kind: "INVALID" as const };
       const verified = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash: request.requestKeyHash, status: "PENDING", emailVerifiedAt: null, expiresAt: { gt: now } }, data: { emailVerifiedAt: now } });
       if (verified.count !== 1) throw new SecurityMutationError();
+      await transaction.accountRecoveryRequest.updateMany({ where: { userId: request.userId, id: { not: request.id }, status: "PENDING", emailVerifiedAt: null }, data: { status: "EXPIRED" } });
       await transaction.user.update({ where: { id: request.userId }, data: { emailVerifiedAt: now } });
       await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_EMAIL_VERIFIED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery email verified.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
       return { kind: "SUCCESS" as const };
@@ -606,6 +668,7 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
     if (!actionBase) throw new SecurityMutationError();
     const approved = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash: request.requestKeyHash, status: "PENDING", emailVerifiedAt: { not: null }, expiresAt: { gt: now } }, data: { status: "APPROVED", requestKeyHash: hashRecoveryRequestKey(requestKey), reviewedByUserId: actor.id, approvedAt: now, expiresAt: getApprovedAccountRecoveryExpiry(now) } });
     if (approved.count !== 1) return approved;
+    await transaction.accountRecoveryRequest.updateMany({ where: { userId: request.userId, id: { not: request.id }, status: "PENDING" }, data: { status: "EXPIRED" } });
     const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase).toString();
     await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-approved:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: request.user.email, locale: "pt-BR", payload: { publicValues: { displayName: request.user.displayName ?? "" }, protectedValues: { actionUrl } } });
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_APPROVED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.recovery", message: "Account recovery approved.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
@@ -625,6 +688,11 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     return account.allowed && ceremony.allowed;
   });
   if (!attempts) throw new SecurityMutationError();
+  if (expectedRole === "ADMIN") {
+    // The normal ADMIN password must stay independent from the administrative credential.
+    const administrative = await prisma.administrativeCredential.findUnique({ where: { userId: request.userId }, select: { passwordHash: true, status: true } });
+    if (administrative?.status === "ACTIVE" && await verifyPassword(administrative.passwordHash, newPassword)) throw new SecurityMutationError();
+  }
   const newPasswordHash = await hashPassword(newPassword);
   await prisma.$transaction(async (transaction) => {
     if (!await lockActiveRecoveryAccountInTransaction(transaction, request.userId, expectedRole)) throw new SecurityMutationError();
@@ -639,6 +707,7 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     await transaction.securityElevation.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
     await transaction.trustedDevice.updateMany({ where: { userId: request.userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
     await revokeLoginChallenges(transaction, request.userId);
+    await revokeUserOidcArtifactsInTransaction(transaction, request.userId);
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery consumed.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
   }, { isolationLevel: "Serializable" });
 }
@@ -670,6 +739,10 @@ export async function invalidateRememberedLoginGrants(transaction: Prisma.Transa
   await transaction.trustedDevice.updateMany({ where: { userId }, data: { rememberedUntil: null, strongVerifiedAt: null } });
 }
 
+async function trustLoginDevice(transaction: Prisma.TransactionClient, userId: string, deviceIdHash: string, now: Date): Promise<void> {
+  await transaction.trustedDevice.upsert({ where: { userId_deviceIdHash: { userId, deviceIdHash } }, update: { status: "TRUSTED", revokedAt: null, lastSeenAt: now, rememberedUntil: null, strongVerifiedAt: null }, create: { deviceKey: randomBytes(24).toString("base64url"), userId, deviceIdHash, status: "TRUSTED", lastSeenAt: now } });
+}
+
 async function establishRememberedLoginGrant(transaction: Prisma.TransactionClient, userId: string, deviceIdHash: string, now: Date): Promise<void> {
   const updated = await transaction.trustedDevice.updateMany({
     where: { userId, deviceIdHash, status: "TRUSTED", revokedAt: null },
@@ -688,6 +761,15 @@ export async function revokeLoginChallenges(transaction: Prisma.TransactionClien
     },
     data: { status: "REVOKED" }
   });
+}
+
+// Deletes every stored OIDC artifact (provider sessions, grants, codes, opaque tokens) for the account.
+// Callers hold the account row lock, and the issuer adapter requires the grant row to still exist when
+// it stores a code or token, so an exchange racing this revocation cannot persist a fresh artifact.
+// Already-issued signed ID tokens cannot be recalled; they expire on their own TTL.
+export async function revokeUserOidcArtifactsInTransaction(transaction: Prisma.TransactionClient, userId: string): Promise<number> {
+  const result = await transaction.oidcArtifact.deleteMany({ where: { accountIdHash: hashOidcIdentifier(userId) } });
+  return result.count;
 }
 
 export async function revokeUserAuthenticationProofsInTransaction(transaction: Prisma.TransactionClient, userId: string, now: Date): Promise<void> {
@@ -769,8 +851,8 @@ function getTotpKey(env: NodeJS.ProcessEnv): Buffer {
 
 async function requireAdmin(actor: { id: string; role: string }): Promise<void> {
   if (actor.role !== "ADMIN") throw new SecurityMutationError();
-  const persisted = await prisma.user.findUnique({ where: { id: actor.id }, select: { role: true, isActive: true } });
-  if (!persisted?.isActive || persisted.role !== "ADMIN") throw new SecurityMutationError();
+  const persisted = await prisma.user.findUnique({ where: { id: actor.id }, select: { role: true, isActive: true, accountStatus: true } });
+  if (!persisted?.isActive || persisted.accountStatus !== "ACTIVE" || persisted.role !== "ADMIN") throw new SecurityMutationError();
 }
 
 function totpValue(secret: string, step: number): number {
@@ -824,11 +906,11 @@ function safeEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function hashEmailAddress(email: string): string {
+export function hashEmailAddress(email: string): string {
   return createHash("sha256").update(email.trim().toLowerCase(), "utf8").digest("hex");
 }
 
-function hashRecoveryRequestKey(requestKey: string): string {
+export function hashRecoveryRequestKey(requestKey: string): string {
   return createHash("sha256").update(requestKey, "utf8").digest("hex");
 }
 
@@ -840,7 +922,7 @@ function isTrustedClientAddress(value: string | undefined): value is string {
   return Boolean(value && value.length <= 64 && value === value.trim() && !value.includes(",") && isIP(value));
 }
 
-function getRecoveryActionBaseUrl(role: AccountRecoveryRole): URL | null {
+export function getRecoveryActionBaseUrl(role: AccountRecoveryRole): URL | null {
   const configured = (role === "ADMIN" ? process.env.VIRKI_HUB_URL : process.env.VIRKI_PORTAL_URL)?.trim();
   if (!configured) return null;
   try {

@@ -1,6 +1,7 @@
 "use server";
 
 import {
+  AdministrativePasswordReuseError,
   completeAdministrativeCredentialSetup,
   changeAdministrativePassword,
   regenerateAdministrativeRecoveryCodes,
@@ -17,14 +18,14 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../../lib/admin-mutation";
 
-export type SecurityFormState = { status: "idle" | "error" | "started" | "complete"; requestKey?: string; scope?: string; recoveryCodes?: string[] };
+export type SecurityFormState = { status: "idle" | "error" | "password-reuse" | "started" | "complete"; requestKey?: string; scope?: string; recoveryCodes?: string[] };
 
 export async function startCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   const session = await requireAdminMutation(formData, "admin-credential-setup");
   try {
     const requestKey = await startAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, normalPassword: readFormRawString(formData, "normalPassword"), locale: "pt-BR" });
     return { status: "started", requestKey };
-  } catch { return { status: "error" }; }
+  } catch (error) { return { status: passwordStatus(error) }; }
 }
 
 export async function completeCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
@@ -33,7 +34,7 @@ export async function completeCredentialSetupAction(_state: SecurityFormState, f
     const recoveryCodes = await completeAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code"), newPassword: readFormRawString(formData, "newPassword") });
     revalidatePath("/admin/security");
     return { status: "complete", recoveryCodes };
-  } catch { return { status: "error" }; }
+  } catch (error) { return { status: passwordStatus(error) }; }
 }
 
 export async function startElevationAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
@@ -46,7 +47,7 @@ export async function startElevationAction(_state: SecurityFormState, formData: 
       : { kind: "TIMED", minutes: Number(durationValue) as 15 | 60 | 240 | 1440 };
     const request = await startSecurityElevation({ actor: session.user, sessionId: session.id, normalPassword: readFormRawString(formData, "normalPassword"), administrativePassword: readFormRawString(formData, "administrativePassword"), scope, duration, locale: "pt-BR" });
     return { status: "started", requestKey: request.requestKey, scope };
-  } catch { return { status: "error", scope }; }
+  } catch (error) { return { status: passwordStatus(error), scope }; }
 }
 
 export async function verifyElevationAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
@@ -92,7 +93,7 @@ export async function changeAdminPasswordAction(_state: SecurityFormState, formD
     await changeAdministrativePassword(session.user, session.id, readFormRawString(formData, "newPassword"));
     revalidatePath("/admin/security");
     return { status: "complete" };
-  } catch { return { status: "error" }; }
+  } catch (error) { return { status: passwordStatus(error) }; }
 }
 
 export async function regenerateAdminRecoveryCodesAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
@@ -114,7 +115,11 @@ export async function recoverAdminCredentialAction(_state: SecurityFormState, fo
     });
     revalidatePath("/admin/security");
     return { status: "complete", recoveryCodes };
-  } catch {
-    return { status: "error" };
+  } catch (error) {
+    return { status: passwordStatus(error) };
   }
+}
+
+function passwordStatus(error: unknown): SecurityFormState["status"] {
+  return error instanceof AdministrativePasswordReuseError ? "password-reuse" : "error";
 }

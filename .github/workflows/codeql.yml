@@ -13,10 +13,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # PR runs supersede each other. Push and scheduled runs get a per-SHA-and-event group, so a main run is never
+  # cancelled or displaced while pending.
+  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze JavaScript / TypeScript
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read

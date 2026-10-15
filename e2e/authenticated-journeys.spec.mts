@@ -71,6 +71,8 @@ test("USER can sign in and sees only the granted enabled project", async ({ brow
 });
 
 test("ADMIN can sign in to a protected page, navigate, and have the session revoked on logout", async ({ browser }) => {
+  // Multi-step ADMIN journey: every ADMIN sign-in now includes the emailed second-factor step.
+  test.setTimeout(90_000);
   const context = await browser.newContext();
   const prisma = createE2ePrismaClient();
   let firstHydrationMismatchPhase: string | undefined;
@@ -407,6 +409,8 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
 });
 
 test("ADMIN recovery is Access-protected, role-bound, independently approved, and revokes the old session", async ({ browser }) => {
+  // Multi-step ADMIN journey: every ADMIN sign-in now includes the emailed second-factor step.
+  test.setTimeout(90_000);
   const prisma = createE2ePrismaClient();
   const contexts: BrowserContext[] = [];
   const createContext = async () => {
@@ -485,7 +489,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await hubPage.getByLabel("Código de verificação", { exact: true }).fill(requestMessage.code!);
     await hubPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
     try {
-      await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+      await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Um administrador analisará a solicitação");
     } catch {
       const verificationUrl = new URL(hubPage.url());
       const recoveryState = await prisma.accountRecoveryRequest.findUnique({
@@ -506,7 +510,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     }
     await expect(hubPage.getByLabel("Código de verificação", { exact: true })).toHaveCount(0);
     await hubPage.reload();
-    await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+    await expect(hubPage.getByRole("status")).toContainText("E-mail confirmado. Um administrador analisará a solicitação");
 
     await targetPage.goto(`${hubUrl}/admin/security`);
     await expect(targetPage.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
@@ -591,7 +595,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     const approvalMessage = await readLatestRecoveryEmail(prisma, fixture.admin.email, "account-recovery-approved:");
     expect(new URL(approvalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(hubUrl);
     await hubPage.goto(approvalMessage.actionUrl!);
-    await expect(hubPage.getByRole("status")).toContainText("Solicitação aprovada");
+    await expect(hubPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
     await hubPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
     await hubPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     await expect(hubPage).toHaveURL(`${hubUrl}/login?recovered=1`);
@@ -635,7 +639,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await expect(userRecoveryCode).toBeVisible();
     await userRecoveryCode.fill(userRequestMessage.code!);
     await portalPage.getByRole("button", { name: "Verificar e-mail", exact: true }).click();
-    await expect(portalPage.getByRole("status")).toContainText("E-mail confirmado. Aguarde a análise administrativa");
+    await expect(portalPage.getByRole("status")).toContainText("E-mail confirmado. Um administrador analisará a solicitação");
 
     await reviewerPage.goto(`${hubUrl}/admin/security`);
     const userRecoveryRow = reviewerPage.locator("article.list-row").filter({ hasText: fixture.recoveryTargetUser.email });
@@ -645,7 +649,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     const userApprovalMessage = await readLatestRecoveryEmail(prisma, fixture.recoveryTargetUser.email, "account-recovery-approved:");
     expect(new URL(userApprovalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(portalUrl);
     await portalPage.goto(userApprovalMessage.actionUrl!);
-    await expect(portalPage.getByRole("status")).toContainText("Solicitação aprovada");
+    await expect(portalPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
     const newUserPassword = randomBytes(32).toString("base64url");
     await portalPage.getByLabel("Nova senha", { exact: true }).fill(newUserPassword);
     await portalPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
@@ -681,6 +685,21 @@ async function readLatestAdminVerificationCode(prisma: PrismaClient, email: stri
   if (!message) throw new Error("E2E admin verification message is unavailable.");
   const code = decryptEmailPayload(message.payload).code;
   if (!/^\d{6}$/u.test(code ?? "")) throw new Error("E2E admin verification message is invalid.");
+  return code;
+}
+
+async function readLatestLoginVerificationCode(prisma: PrismaClient, email: string, ceremonyId: string): Promise<string> {
+  const message = await prisma.emailOutboxMessage.findFirst({
+    where: {
+      idempotencyKey: `security-ceremony:${ceremonyId}`,
+      recipientEmail: email,
+      kind: { in: ["EMAIL_TWO_FACTOR", "NEW_DEVICE_VERIFICATION"] }
+    },
+    select: { payload: true }
+  });
+  if (!message) throw new Error("E2E login verification message is unavailable.");
+  const code = decryptEmailPayload(message.payload).code;
+  if (!/^\d{6}$/u.test(code ?? "")) throw new Error("E2E login verification message is invalid.");
   return code;
 }
 
@@ -729,6 +748,32 @@ async function signIn(page: import("@playwright/test").Page, account: AccountFix
     if (redirect.pathname === "/login" && redirect.searchParams.get("error") === "1") {
       throw new Error(`E2E login was rejected (${loginDenialDiagnostic(loginResponse.headers())}).`);
     }
+    // ADMIN logins always complete an emailed code, even from a remembered browser; USER remembered grants skip this step.
+    if (redirect.pathname === "/login/verify") {
+      await completeLoginEmailVerification(page, account, redirect);
+    }
+  }
+}
+
+async function completeLoginEmailVerification(page: import("@playwright/test").Page, account: AccountFixture, verifyUrl: URL): Promise<void> {
+  const ceremonyId = verifyUrl.searchParams.get("ceremony") ?? "";
+  if (!ceremonyId || verifyUrl.searchParams.get("factor") !== "email") {
+    throw new Error("E2E login requested an unsupported second factor.");
+  }
+  await page.waitForURL((url) => url.pathname === "/login/verify" && url.searchParams.get("ceremony") === ceremonyId, { timeout: 15_000 });
+  const prisma = createE2ePrismaClient();
+  let code: string;
+  try {
+    code = await readLatestLoginVerificationCode(prisma, account.email, ceremonyId);
+  } finally {
+    await prisma.$disconnect();
+  }
+  await page.getByLabel("Código", { exact: true }).fill(code);
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  try {
+    await page.waitForURL((url) => url.pathname !== "/login/verify", { timeout: 15_000 });
+  } catch {
+    throw new Error("E2E login email verification was not accepted.");
   }
 }
 
@@ -779,6 +824,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "remembered-challenges-revoke",
     "remembered-session-create",
     "challenge-revoke",
+    "ceremony-rate-limited",
     "challenge-code-hash",
     "challenge-create",
     "outbox-enqueue",

@@ -37,13 +37,28 @@ test("OIDC rewrites default to Compose DNS for builds and allow loopback for dir
     for (const [surfaceConfig, expectedReferrerPolicy] of [[config, "strict-origin"], [publicConfig, "no-referrer"]]) {
       const routeHeaders = (await surfaceConfig.headers()).find((route) => route.source === "/:path*").headers;
       const headerMap = Object.fromEntries(routeHeaders.map(({ key, value }) => [key.toLowerCase(), value]));
-      assert.equal(headerMap["content-security-policy"], "frame-ancestors 'none'");
+      if (surfaceConfig === config) {
+        // The hub CSP carries a per-request nonce and is set by src/proxy.ts; a static one here would be a duplicate.
+        assert.equal(headerMap["content-security-policy"], undefined);
+      } else {
+        const csp = headerMap["content-security-policy"];
+        assert.equal(
+          csp,
+          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
+        );
+        assert.doesNotMatch(csp, /unsafe-eval/u);
+      }
       assert.equal(headerMap["permissions-policy"], "camera=(), geolocation=(), microphone=()");
       assert.equal(headerMap["referrer-policy"], expectedReferrerPolicy);
       assert.equal(headerMap["x-content-type-options"], "nosniff");
       assert.equal(headerMap["x-frame-options"], "DENY");
       assert.equal(headerMap["strict-transport-security"], "max-age=31536000");
     }
+    process.env.NODE_ENV = "development";
+    const developmentHeaders = (await publicConfig.headers()).find((route) => route.source === "/:path*").headers;
+    const developmentCsp = developmentHeaders.find(({ key }) => key === "Content-Security-Policy").value;
+    assert.match(developmentCsp, /script-src 'self' 'unsafe-inline' 'unsafe-eval'/u);
+    assert.doesNotMatch(developmentCsp, /upgrade-insecure-requests/u);
   } finally {
     if (previousIssuer === undefined) delete process.env.VIRKI_OIDC_PROXY_URL;
     else process.env.VIRKI_OIDC_PROXY_URL = previousIssuer;

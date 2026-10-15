@@ -56,17 +56,21 @@ test("successful logins release their source reservations without clearing faile
   const testPrisma = prisma as unknown as {
     $transaction: (callback: (client: Prisma.TransactionClient) => Promise<unknown>) => Promise<unknown>;
     loginRateLimit: { deleteMany: (args: unknown) => Promise<{ count: number }> };
+    user: unknown;
   };
   const originalTransaction = prisma.$transaction;
   const originalRateLimitDelegate = prisma.loginRateLimit;
+  const originalUserDelegate = prisma.user;
   let transactionCount = 0;
   testPrisma.$transaction = async (callback) => {
     transactionCount += 1;
     const result = await callback(transaction);
-    if (transactionCount === 4) throw new Error("Simulated lost commit acknowledgment.");
+    // Per login: source reservation, attempt reservation, success clear.
+    if (transactionCount === 6) throw new Error("Simulated lost commit acknowledgment.");
     return result;
   };
   testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }) };
+  testPrisma.user = { findUnique: async () => user };
 
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -87,6 +91,7 @@ test("successful logins release their source reservations without clearing faile
   } finally {
     testPrisma.$transaction = originalTransaction as unknown as typeof testPrisma.$transaction;
     testPrisma.loginRateLimit = originalRateLimitDelegate as unknown as typeof testPrisma.loginRateLimit;
+    testPrisma.user = originalUserDelegate;
   }
 });
 
@@ -124,11 +129,14 @@ test("a surface-scoped login treats other roles as missing accounts and keeps se
   const testPrisma = prisma as unknown as {
     $transaction: (callback: (client: Prisma.TransactionClient) => Promise<unknown>) => Promise<unknown>;
     loginRateLimit: { deleteMany: (args: unknown) => Promise<{ count: number }> };
+    user: unknown;
   };
   const originalTransaction = prisma.$transaction;
   const originalRateLimitDelegate = prisma.loginRateLimit;
+  const originalUserDelegate = prisma.user;
   testPrisma.$transaction = async (callback) => callback(transaction);
   testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }) };
+  testPrisma.user = { findUnique: async () => admin };
 
   try {
     const portal = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, sourceAddress, "USER");
@@ -151,5 +159,6 @@ test("a surface-scoped login treats other roles as missing accounts and keeps se
   } finally {
     testPrisma.$transaction = originalTransaction as unknown as typeof testPrisma.$transaction;
     testPrisma.loginRateLimit = originalRateLimitDelegate as unknown as typeof testPrisma.loginRateLimit;
+    testPrisma.user = originalUserDelegate;
   }
 });

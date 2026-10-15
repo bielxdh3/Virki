@@ -330,6 +330,7 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "remembered-challenges-revoke",
     "remembered-session-create",
     "challenge-revoke",
+    "ceremony-rate-limited",
     "challenge-code-hash",
     "challenge-create",
     "outbox-enqueue",

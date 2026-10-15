@@ -62,7 +62,7 @@ test("OIDC artifacts cannot be consumed after their stored row is revoked", asyn
   process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
   try {
     const database = { oidcArtifact: { findUnique: async () => null } };
-    await assert.rejects(() => new PrismaOidcAdapter("AuthorizationCode", database as never).consume("revoked-code"), /OIDC artifact was not found/u);
+    await assert.rejects(() => new PrismaOidcAdapter("AuthorizationCode", database as never).consume("revoked-code"), /invalid_grant/u);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
     else process.env.VIRKI_OIDC_ADAPTER_KEY = original;
@@ -80,7 +80,7 @@ test("grant-bound OIDC artifacts lock and recheck active account, connection, an
           calls.push({ kind: "lock", sql: strings.join("?"), values });
           return [{ id: "active-grant", redirectUris: ["https://project.example.invalid/callback"] }];
         },
-        oidcArtifact: { upsert: async () => { calls.push({ kind: "upsert" }); } }
+        oidcArtifact: { findUnique: async () => { calls.push({ kind: "grant-check" }); return { expiresAt: new Date(Date.now() + 60_000) }; }, upsert: async () => { calls.push({ kind: "upsert" }); } }
       }),
       oidcArtifact: { upsert: async () => { calls.push({ kind: "unexpected-direct-upsert" }); } },
       projectConnection: {}
@@ -92,7 +92,7 @@ test("grant-bound OIDC artifacts lock and recheck active account, connection, an
       grantId: "provider-grant-id"
     } as never, 300);
 
-    assert.deepEqual(calls.map(({ kind }) => kind), ["lock", "upsert"]);
+    assert.deepEqual(calls.map(({ kind }) => kind), ["lock", "grant-check", "upsert"]);
     assert.match(calls[0].sql ?? "", /grant_record\."revokedAt" IS NULL[\s\S]*account_record\."role" = 'USER'[\s\S]*account_record\."isActive" = TRUE[\s\S]*account_record\."accountStatus" = 'ACTIVE'[\s\S]*connection_record\."enabled" = TRUE/u);
     assert.match(calls[0].sql ?? "", /FOR UPDATE OF grant_record, account_record, connection_record/u);
     assert.match(calls[0].sql ?? "", /connection_record\."redirectUris" AS "redirectUris"/u);
@@ -111,7 +111,7 @@ test("authorization codes are persisted only for a redirect URI that is still re
     const database = {
       $transaction: async (callback: (transaction: unknown) => Promise<void>) => callback({
         $queryRaw: async () => [{ id: "active-grant", redirectUris: ["https://project.example.invalid/new-callback"] }],
-        oidcArtifact: { upsert: async () => { upserts += 1; } }
+        oidcArtifact: { findUnique: async () => ({ expiresAt: null }), upsert: async () => { upserts += 1; } }
       }),
       oidcArtifact: { upsert: async () => { upserts += 1; } },
       projectConnection: {}
@@ -206,6 +206,35 @@ test("OIDC provider Grant persistence fails closed when project access was revok
       clientId: "client-id"
     } as never, 300), /OIDC authorization is no longer active/u);
     assert.equal(upserted, false);
+  } finally {
+    if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
+    else process.env.VIRKI_OIDC_ADAPTER_KEY = original;
+  }
+});
+
+test("grant-bound token persistence fails closed when the provider Grant artifact was purged or expired", async () => {
+  const original = process.env.VIRKI_OIDC_ADAPTER_KEY;
+  process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
+  let upserted = false;
+  let grant: { expiresAt: Date | null } | null = null;
+  try {
+    const database = {
+      $transaction: async (callback: (transaction: unknown) => Promise<void>) => callback({
+        $queryRaw: async () => [{ id: "active-grant", redirectUris: ["https://project.example.invalid/callback"] }],
+        oidcArtifact: { findUnique: async () => grant, upsert: async () => { upserted = true; } }
+      }),
+      oidcArtifact: {},
+      projectConnection: {}
+    };
+    const payload = { accountId: "user-id", clientId: "client-id", grantId: "provider-grant-id" } as never;
+    const adapter = new PrismaOidcAdapter("AccessToken", database as never);
+    await assert.rejects(() => adapter.upsert("t", payload, 300), /provider grant is no longer active/u);
+    grant = { expiresAt: new Date(Date.now() - 1000) };
+    await assert.rejects(() => adapter.upsert("t", payload, 300), /provider grant is no longer active/u);
+    assert.equal(upserted, false);
+    grant = { expiresAt: null };
+    await adapter.upsert("t", payload, 300);
+    assert.equal(upserted, true);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
     else process.env.VIRKI_OIDC_ADAPTER_KEY = original;

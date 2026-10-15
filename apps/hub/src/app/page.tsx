@@ -1,4 +1,5 @@
-import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
+import { createSessionCsrfToken } from "../lib/session-csrf";
 import { prisma } from "@virki/database";
 import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
@@ -27,7 +28,7 @@ export default async function HomePage() {
     orderBy: { connection: { name: "asc" } },
     select: { connection: { select: { name: true, description: true, launchUrl: true } } }
   });
-  const csrf = createCsrfToken({ scope: "logout" });
+  const csrf = await createSessionCsrfToken("logout");
 
   return (
     <>

@@ -12,9 +12,9 @@ const nextConfig = {
   outputFileTracingRoot: workspaceRoot,
   serverExternalPackages: ["@node-rs/argon2", "@prisma/client"],
   transpilePackages: ["@virki/auth", "@virki/database"],
+  // Content-Security-Policy is set per request (with a nonce) by src/proxy.ts; do not add a second one here.
   async headers() {
     const headers = [
-      { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
       { key: "Permissions-Policy", value: "camera=(), geolocation=(), microphone=()" },
       { key: "Referrer-Policy", value: "strict-origin" },
       { key: "X-Content-Type-Options", value: "nosniff" },

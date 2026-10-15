@@ -46,3 +46,24 @@ test("CSRF rejects malformed, expired, future-dated and unconfigured production 
   assert.deepEqual(validateCsrfToken(token, { env: { NODE_ENV: "production" } as NodeJS.ProcessEnv, now: issuedAt, scope: "login" }), { valid: false, reason: "misconfigured" });
   assert.throws(() => createCsrfToken({ env: { NODE_ENV: "production" } as NodeJS.ProcessEnv, now: issuedAt, scope: "login" }));
 });
+
+test("session-bound CSRF tokens validate only with the same binding", () => {
+  const env = { NODE_ENV: "production", VIRKI_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
+  const token = createCsrfToken({ env, now: issuedAt, scope: "admin-accounts", binding: "session-a" });
+
+  assert.deepEqual(validateCsrfToken(token, { env, now: issuedAt + 1, scope: "admin-accounts", binding: "session-a" }), { valid: true });
+  assert.deepEqual(validateCsrfToken(token, { env, now: issuedAt + 1, scope: "admin-accounts", binding: "session-b" }), { valid: false, reason: "invalid" });
+  assert.deepEqual(validateCsrfToken(token, { env, now: issuedAt + 1, scope: "admin-accounts" }), { valid: false, reason: "invalid" });
+  assert.equal(token.split(".").length, 6);
+  assert.equal(token.includes("session-a"), false);
+});
+
+test("an unbound CSRF token fails where a binding is required, and scope and expiry still apply", () => {
+  const env = { NODE_ENV: "production", VIRKI_CSRF_SIGNING_KEY: firstKey } as NodeJS.ProcessEnv;
+  const unbound = createCsrfToken({ env, now: issuedAt, scope: "logout" });
+  const bound = createCsrfToken({ env, now: issuedAt, scope: "logout", binding: "s" });
+
+  assert.equal(validateCsrfToken(unbound, { env, now: issuedAt + 1, scope: "logout", binding: "s" }).valid, false);
+  assert.deepEqual(validateCsrfToken(bound, { env, now: issuedAt + 1, scope: "account-security", binding: "s" }), { valid: false, reason: "wrong-scope" });
+  assert.deepEqual(validateCsrfToken(bound, { env, now: issuedAt + CSRF_TOKEN_TTL_MS + 1, scope: "logout", binding: "s" }), { valid: false, reason: "expired" });
+});
