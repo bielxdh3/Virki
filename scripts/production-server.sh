@@ -647,7 +647,10 @@ assert_health() {
   [[ "$discovery_response" == *"\"issuer\":\"$oidc_issuer\""* && "$discovery_response" == *'"S256"'* && "$discovery_response" == *'"code"'* ]] || fail 'Portal discovery profile does not match the expected OIDC issuer.'
   assert_production_response_headers "$public_response" 'no-referrer'
   assert_production_response_headers "$hub_response" 'strict-origin'
-  assert_production_response_headers "$discovery_response" 'strict-origin'
+  # OIDC discovery is proxied from the issuer, whose stricter policy is
+  # no-referrer (unlike the Hub's strict-origin policy). Preserve that
+  # issuer-owned header and validate it exactly, never weaken the response.
+  assert_production_response_headers "$discovery_response" 'no-referrer'
   assert_production_response_headers "$access_response" 'strict-origin'
   printf 'Public site, Hub health, portal OIDC discovery, security headers, cookie boundary, and unauthenticated ADMIN denial are healthy.\n'
 }
