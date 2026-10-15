@@ -1,0 +1,103 @@
+name: Authorize Virki production release
+
+# Manual approval only; a separately installed, constrained Linux agent consumes
+# this pointer and performs all existing fail-closed deployment validations.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+  packages: read
+
+concurrency:
+  group: virki-production-approval
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    if: github.ref == 'refs/heads/main' && github.actor == 'bielxdh3'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out trusted main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Verify exact SHA and CI / CodeQL / GHCR release gates
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$TARGET_SHA" ]] || {
+            echo "::error::main moved; re-run against the new head."
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$TARGET_SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs.json"
+          for workflow in CI CodeQL; do
+            count="$(jq -r --arg name "$workflow" --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")] | length' "$RUNNER_TEMP/runs.json")"
+            [[ "$count" -eq 1 ]] || {
+              echo "::error::Expected exactly one successful $workflow run for the exact commit (found $count)."
+              exit 1
+            }
+          done
+          ci_run="$(jq -r --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $sha and .conclusion == "success")][0].id' "$RUNNER_TEMP/runs.json")"
+          codeql_run="$(jq -r --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == "CodeQL" and .head_sha == $sha and .conclusion == "success")][0].id' "$RUNNER_TEMP/runs.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
+          jq -e '[.jobs[] | select((.name == "Build tested production images (amd64)" or .name == "Build tested production images (arm64)") and .status == "completed" and .conclusion == "success")] | length == 2' "$RUNNER_TEMP/jobs.json" >/dev/null || {
+            echo "::error::Both architecture-specific image jobs must have succeeded."
+            exit 1
+          }
+          for package in virki-runtime virki-migrator virki-evidence; do
+            [[ "$(gh api "users/bielxdh3/packages/container/$package" --jq '.visibility')" == "private" ]] || {
+              echo "::error::Missing or non-private GHCR package: $package"
+              exit 1
+            }
+          done
+          echo "ci_run=$ci_run" >> "$GITHUB_OUTPUT"
+          echo "codeql_run=$codeql_run" >> "$GITHUB_OUTPUT"
+
+      - name: Publish approved revision pointer only
+        env:
+          CI_RUN: ${{ steps.gate.outputs.ci_run }}
+          CODEQL_RUN: ${{ steps.gate.outputs.codeql_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous=''
+          blob=''
+          if gh api "repos/$GITHUB_REPOSITORY/contents/production.json?ref=production" > "$RUNNER_TEMP/previous.json" 2>/dev/null; then
+            blob="$(jq -er '.sha' "$RUNNER_TEMP/previous.json")"
+            previous="$(jq -r '.content' "$RUNNER_TEMP/previous.json" | base64 --decode | jq -er 'select(.version == 1) | .source_commit')"
+            [[ "$previous" =~ ^[0-9a-f]{40}$ ]]
+            if [[ "$previous" == "$TARGET_SHA" ]]; then
+              echo "This commit is already approved; no changes made." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          elif gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/production" >/dev/null 2>&1; then
+            echo "::error::Production branch already exists without a valid approval pointer."
+            exit 1
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref='refs/heads/production' -f sha="$TARGET_SHA" >/dev/null
+          fi
+          jq -n --arg sha "$TARGET_SHA" --arg previous "$previous" --arg approved_by "$GITHUB_ACTOR" --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ci_run "$CI_RUN" --argjson codeql_run "$CODEQL_RUN" '{version:1, source_commit:$sha, previous_approval:$previous, approved_by:$approved_by, approved_at:$timestamp, ci_run:$ci_run, codeql_run:$codeql_run}' > "$RUNNER_TEMP/production.json"
+          jq -n --arg payload "$(base64 -w0 "$RUNNER_TEMP/production.json")" --arg blob "$blob" --arg message "release: authorize Virki $TARGET_SHA for production" '{message:$message,content:$payload,branch:"production"} + (if $blob == "" then {} else {sha:$blob} end)' > "$RUNNER_TEMP/payload.json"
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/production.json" --input "$RUNNER_TEMP/payload.json" >/dev/null
+          {
+            echo "## Virki source approval recorded"
+            echo "- Source commit: $TARGET_SHA"
+            echo "- Verified CI: $CI_RUN"
+            echo "- Verified CodeQL: $CODEQL_RUN"
+            echo "- This is an approval pointer, NOT evidence of a deployment."
+            echo "- The separate server-side agent must validate GHCR/SARIF digests, migrations, backups, network isolation, health and rollback before applying it."
+            echo "- Without a configured server agent, production remains unchanged."
+          } >> "$GITHUB_STEP_SUMMARY"
