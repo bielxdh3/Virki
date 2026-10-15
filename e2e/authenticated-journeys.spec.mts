@@ -110,6 +110,10 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await assertAdminSkipLink(page);
     const projectRow = page.locator("article").filter({ hasText: fixture.projectName });
     const editDetails = projectRow.locator("details").filter({ hasText: "Editar configuração" });
+    // Native <details> clicks during React hydration mutate the SSR open
+    // attribute, causing a real console hydration mismatch. Wait for the
+    // component's post-hydration effect; do not suppress the warning.
+    await expect(editDetails).toHaveAttribute("data-hydrated", "true");
     await editDetails.getByText("Editar configuração", { exact: true }).click();
     const projectNameInput = editDetails.locator('input[name="name"]');
     const redirectUrisInput = editDetails.locator('textarea[name="redirectUris"]');
@@ -270,6 +274,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page).toHaveURL(hubUrl + "/admin/connections");
     const activeProjectRow = page.locator("article").filter({ hasText: fixture.projectName });
     const activeEditDetails = activeProjectRow.locator("details").filter({ hasText: "Editar configuração" });
+    await expect(activeEditDetails).toHaveAttribute("data-hydrated", "true");
     await activeEditDetails.getByText("Editar configuração", { exact: true }).click();
     const activeNameInput = activeEditDetails.locator('input[name="name"]');
     const originInput = activeEditDetails.locator('input[name="origin"]');

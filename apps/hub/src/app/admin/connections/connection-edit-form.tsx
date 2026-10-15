@@ -34,6 +34,13 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
   const canReapplyDraft = state.status === "conflict" && draft.expectedRevision !== state.latest.configurationRevision;
 
   useEffect(() => {
+    // <details> can be toggled natively before React finishes hydration.
+    // Expose an effect-time readiness marker so browser journeys only toggle
+    // it after hydration, while retaining native progressive enhancement.
+    if (detailsRef.current) detailsRef.current.dataset.hydrated = "true";
+  }, []);
+
+  useEffect(() => {
     if (state.status !== "idle") {
       if (detailsRef.current) detailsRef.current.open = true;
       if ("draft" in state) setDraft(state.draft);
