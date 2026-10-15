@@ -70,6 +70,50 @@ assert_production_response_headers "$RESPONSE" "$EXPECTED_REFERRER"
   reject(base.filter((line) => !line.startsWith("Permissions-Policy:")));
 });
 
+test("production health gate enforces the issuer's stricter no-referrer policy on OIDC discovery", () => {
+  const server = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
+  const health = server.match(/^assert_health\(\) \{[\s\S]*?^\}/mu);
+  assert.ok(health, "The deployed production health gate must exist.");
+  assert.match(health[0], /assert_production_response_headers "\$public_response" 'no-referrer'/u);
+  assert.match(health[0], /assert_production_response_headers "\$hub_response" 'strict-origin'/u);
+  assert.match(health[0], /assert_production_response_headers "\$discovery_response" 'no-referrer'/u);
+  assert.match(health[0], /assert_production_response_headers "\$access_response" 'strict-origin'/u);
+
+  // Validate through the actual fail-closed production AWK parser, not a
+  // separately implemented simulation of its security contract.
+  const validator = server.match(/^assert_production_response_headers\(\) \{[\s\S]*?^\}/mu);
+  assert.ok(validator);
+  const shell = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
+  const response = [
+    "HTTP/1.1 200 OK",
+    "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'",
+    "Permissions-Policy: camera=(), geolocation=(), microphone=()",
+    "Referrer-Policy: no-referrer",
+    "Strict-Transport-Security: max-age=31536000",
+    "X-Content-Type-Options: nosniff",
+    "X-Frame-Options: DENY",
+    "VIRKI_STATUS:200",
+  ].join("\n");
+  const script = `set -euo pipefail
+fail() { printf '%s\\n' "$1" >&2; exit 12; }
+${validator[0]}
+assert_production_response_headers "$RESPONSE" "$EXPECTED"
+`;
+  const check = (expected, value = response) => {
+    const r = spawnSync(shell, ["-c", script], {
+      encoding: "utf8",
+      env: { ...process.env, EXPECTED: expected, RESPONSE: value },
+    });
+    assert.equal(r.error, undefined);
+    return r.status;
+  };
+  assert.equal(check("no-referrer"), 0, "OIDC issuer response must be accepted.");
+  assert.equal(check("strict-origin"), 12, "Issuer's stronger policy must not be mislabeled as the Hub's.");
+  assert.equal(check("no-referrer", response.replace("Referrer-Policy: no-referrer", "Referrer-Policy: unsafe-url")), 12);
+  assert.equal(check("no-referrer", response.replace("Referrer-Policy: no-referrer", "")), 12);
+  assert.equal(check("no-referrer", response.replace("Referrer-Policy: no-referrer", "Referrer-Policy: no-referrer\nReferrer-Policy: no-referrer")), 12);
+});
+
 test("production configuration accepts only safe absolute Linux roots", () => {
   assert.equal(isValidProductionConfig(operatorConfig), true);
   assert.equal(isValidProductionConfig({ ...operatorConfig, sshAlias: "-oProxyCommand=touch /tmp/pwned" }), false);
