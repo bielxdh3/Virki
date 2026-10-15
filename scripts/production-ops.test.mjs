@@ -288,7 +288,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.doesNotMatch(serverScript, /\bcompose[^\n]*\bdown\b|docker volume rm|prisma db push|powershell/i);
   assert.match(serverScript, /readonly lock_path="\$root\/\.virki-operations\.lock"/u);
   assert.match(serverScript, /flock -n "\$state_lock_fd"/u);
-  assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging first-install first-install-recovery stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
+  assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging first-install first-install-recovery first-admin-rescue-prepare first-admin-rescue stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
   assert.match(serverScript, /tar --list --verbose --quoting-style=c --file "\$archive"/u);
   assert.match(serverScript, /local role_script="\$release\/infra\/postgres-init\/10-virki-database-roles\.sh"[\s\S]*?chmod 644 -- "\$role_script"[\s\S]*?stat -c '%a' -- "\$role_script"/u);
   assert.match(serverScript, /Source archive contains a link or unsupported filesystem entry/u);
