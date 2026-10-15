@@ -653,6 +653,20 @@ assert_production_response_headers() {
   local response=$1 expected_referrer=$2 headers
   headers=${response%$'\nVIRKI_STATUS:'*}
   awk -F: -v expected_referrer="$expected_referrer" '
+    function frame_ancestors_deny_only(policy,     directives, count, i, directive, found) {
+      count = split(policy, directives, ";")
+      found = 0
+      for (i = 1; i <= count; i++) {
+        directive = directives[i]
+        sub(/^[[:space:]]+/, "", directive)
+        sub(/[[:space:]]+$/, "", directive)
+        if (directive ~ /^frame-ancestors([[:space:]]|$)/) {
+          found++
+          if (directive != sprintf("frame-ancestors %cnone%c", 39, 39)) return 0
+        }
+      }
+      return found == 1
+    }
     {
       key = tolower($1)
       value = substr($0, index($0, ":") + 1)
@@ -666,7 +680,7 @@ assert_production_response_headers() {
       else if (key == "x-frame-options") { frame = value; frame_count++ }
     }
     END {
-      exit !(csp == "frame-ancestors '\''none'\''" && csp_count == 1 &&
+      exit !(frame_ancestors_deny_only(csp) && csp_count == 1 &&
         permissions == "camera=(), geolocation=(), microphone=()" && permissions_count == 1 &&
         referrer == expected_referrer && referrer_count == 1 &&
         hsts == "max-age=31536000" && hsts_count == 1 &&

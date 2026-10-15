@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
@@ -21,6 +22,52 @@ const operatorConfig = {
 test("remote Linux Bash script uses LF line endings", () => {
   const script = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
   assert.equal(script.includes("\r"), false);
+});
+
+test("staging accepts full secure CSP policies but rejects unsafe or repeated frame-ancestors", () => {
+  // Exercise the actual production Bash/AWK validator without sourcing the
+  // production runner or touching Docker, SSH, databases, or host files.
+  const source = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
+  const match = source.match(/^assert_production_response_headers\(\) \{[\s\S]*?^\}/mu);
+  assert.ok(match, "The checked-in production response validator must exist.");
+  const shell = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
+  const harness = `set -euo pipefail
+fail() { printf '%s\\n' "$1" >&2; exit 1; }
+${match[0]}
+assert_production_response_headers "$RESPONSE" "$EXPECTED_REFERRER"
+`;
+  const base = [
+    "HTTP/1.1 200 OK",
+    "Content-Security-Policy: default-src 'self'; object-src 'none'; frame-ancestors 'none'; upgrade-insecure-requests",
+    "Permissions-Policy: camera=(), geolocation=(), microphone=()",
+    "Referrer-Policy: no-referrer",
+    "Strict-Transport-Security: max-age=31536000",
+    "X-Content-Type-Options: nosniff",
+    "X-Frame-Options: DENY",
+    "VIRKI_STATUS:200",
+  ];
+  const check = (headers, referrer = "no-referrer") => {
+    const result = spawnSync(shell, ["-c", harness], {
+      encoding: "utf8",
+      env: { ...process.env, RESPONSE: headers.join("\n"), EXPECTED_REFERRER: referrer },
+    });
+    assert.equal(result.error, undefined);
+    return result.status;
+  };
+  assert.equal(check(base), 0, "The public site CSP contains additional mandatory directives.");
+  assert.equal(check(base.map((line) => line.replace("no-referrer", "strict-origin")), "strict-origin"), 0);
+  assert.equal(check(base.map((line) => line.replace("default-src 'self'; object-src 'none'; ", ""))), 0,
+    "A single exact frame-ancestors 'none' directive is sufficient regardless of other directives.");
+
+  const reject = (headers) => assert.notEqual(check(headers), 0);
+  reject(base.map((line) => line.replace("; frame-ancestors 'none'", "")));
+  reject(base.map((line) => line.replace("frame-ancestors 'none'", "frame-ancestors 'self'")));
+  reject(base.map((line) => line.replace("frame-ancestors 'none'", "frame-ancestors 'none' 'self'")));
+  reject(base.map((line) => line.replace("frame-ancestors 'none'", "frame-ancestors 'none'; frame-ancestors 'none'")));
+  reject([...base.slice(0, 2), base[1], ...base.slice(2)]);
+  reject([...base.slice(0, -1), "Set-Cookie: unexpected=value", base.at(-1)]);
+  reject(base.map((line) => line.replace("max-age=31536000", "max-age=0")));
+  reject(base.filter((line) => !line.startsWith("Permissions-Policy:")));
 });
 
 test("production configuration accepts only safe absolute Linux roots", () => {
