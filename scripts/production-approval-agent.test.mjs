@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseApprovedProductionPointer, planApprovedProductionAttempt } from "./production-approval-agent.mjs";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { parseApprovedProductionPointer, planApprovedProductionAttempt, withExclusiveAgentLock } from "./production-approval-agent.mjs";
 
 const approved = {
   version: 1, source_commit: "a".repeat(40), approved_by: "bielxdh3",
@@ -25,4 +28,17 @@ test("the agent never repeats or overwrites an unresolved production attempt", (
   }
   assert.throws(() => planApprovedProductionAttempt(approved, { sha: "oops", status: "success" }));
   assert.equal(planApprovedProductionAttempt(approved, { sha: "b".repeat(40), status: "success" }), "deploy");
+});
+
+test("atomic lock refuses a concurrent deployment and releases on normal completion", { skip: process.platform !== "linux" }, async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "virki-approval-agent-"));
+  try {
+    const stateFile = path.join(dir, "virki-approval-state.json");
+    await withExclusiveAgentLock(stateFile, async () => {
+      await assert.rejects(withExclusiveAgentLock(stateFile, async () => {}), { code: "EEXIST" });
+    });
+    await withExclusiveAgentLock(stateFile, async () => {});
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
