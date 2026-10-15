@@ -18,7 +18,7 @@ jobs:
   approve:
     if: github.ref == 'refs/heads/main' && github.actor == 'bielxdh3'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     environment:
       name: production
     env:
@@ -42,14 +42,34 @@ jobs:
             echo "::error::main moved; re-run against the new head."
             exit 1
           }
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$TARGET_SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs.json"
-          for workflow in CI CodeQL; do
-            count="$(jq -r --arg name "$workflow" --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")] | length' "$RUNNER_TEMP/runs.json")"
-            [[ "$count" -eq 1 ]] || {
-              echo "::error::Expected exactly one successful $workflow run for the exact commit (found $count)."
+          # A single click made immediately after merge must wait for the
+          # exact-sha push checks to finish, rather than fail prematurely.
+          # Failed/cancelled checks always fail closed; this is not a bypass.
+          ready=false
+          for attempt in $(seq 1 100); do
+            [[ "$(git ls-remote origin refs/heads/main | cut -f1)" == "$TARGET_SHA" ]] || {
+              echo "::error::main changed while waiting; approve the new revision separately."
               exit 1
             }
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$TARGET_SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs.json"
+            ready=true
+            for workflow in CI CodeQL; do
+              count="$(jq -r --arg name "$workflow" --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")] | length' "$RUNNER_TEMP/runs.json")"
+              failure="$(jq -r --arg name "$workflow" --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion != "success")] | length' "$RUNNER_TEMP/runs.json")"
+              if [[ "$failure" -gt 0 ]]; then
+                echo "::error::$workflow failed or was cancelled at the exact commit; release denied."
+                exit 1
+              fi
+              [[ "$count" -eq 1 ]] || ready=false
+            done
+            if [[ "$ready" == true ]]; then break; fi
+            echo "::notice::Waiting for exact-SHA main CI and CodeQL (attempt $attempt/100)."
+            sleep 15
           done
+          [[ "$ready" == true ]] || {
+            echo "::error::Timed out waiting for both required exact-SHA checks."
+            exit 1
+          }
           ci_run="$(jq -r --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $sha and .conclusion == "success")][0].id' "$RUNNER_TEMP/runs.json")"
           codeql_run="$(jq -r --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == "CodeQL" and .head_sha == $sha and .conclusion == "success")][0].id' "$RUNNER_TEMP/runs.json")"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"

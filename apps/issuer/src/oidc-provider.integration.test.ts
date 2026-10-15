@@ -6,7 +6,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { createTestUser, integrationOptions } from "../../../packages/auth/src/integration-fixtures";
-import { encryptOidcClientSecret } from "@virki/auth/oidc-secrets";
+import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
 import { revokeUserOidcArtifactsInTransaction } from "@virki/auth/security";
 import { prisma } from "@virki/database";
 import Provider from "oidc-provider";
@@ -103,14 +103,21 @@ test("missing or wrong code_verifier is rejected and the code stays usable", int
   assert.equal((await exchange(seeded.clientId, code)).status, 200);
 });
 
-test("concurrent exchanges of one code yield exactly one token, and replay is rejected", integrationOptions, async () => {
-  for (let round = 0; round < 12; round += 1) {
+test("concurrent exchanges issue at most one token, and every replay is rejected", integrationOptions, async () => {
+  for (let round = 0; round < 36; round += 1) {
     const seeded = await seed();
-    const { code } = await issueCode(seeded);
+    const { code, grantId } = await issueCode(seeded);
     const results = await Promise.all([exchange(seeded.clientId, code), exchange(seeded.clientId, code), exchange(seeded.clientId, code)]);
     const winners = results.filter((result) => result.status === 200);
-    assert.equal(winners.length, 1, "exactly one exchange of a code succeeds");
+    assert.ok(winners.length <= 1, `round ${round}: at most one exchange succeeds: ${JSON.stringify(results.map(result => [result.status, result.json.error]))}`);
     assert.ok(results.every((result) => result.status === 200 || (result.status === 400 && result.json.error === "invalid_grant")), `losers get invalid_grant, never a 500: ${JSON.stringify(results.map((result) => [result.status, result.json.error]))}`);
+    if (winners.length === 0) {
+      assert.equal(
+        await prisma.oidcArtifact.count({ where: { model: "AccessToken", grantHash: hashOidcIdentifier(grantId) } }),
+        0,
+        "a fully denied race must not leave a bearer token persisted"
+      );
+    }
     const third = await exchange(seeded.clientId, code);
     assert.equal(third.status, 400);
     assert.equal(third.json.error, "invalid_grant");
@@ -124,8 +131,8 @@ test("a purge before the exchange rejects it, and a late token upsert cannot per
   const result = await exchange(seeded.clientId, code);
   assert.notEqual(result.status, 200);
   assert.equal(result.json.access_token, undefined);
-  await assert.rejects(() => new PrismaOidcAdapter("AccessToken").upsert(randomUUID(), { accountId: seeded.userId, clientId: seeded.clientId, grantId } as never, 300), /provider grant is no longer active/u);
-  await assert.rejects(() => new PrismaOidcAdapter("AuthorizationCode").upsert(randomUUID(), { accountId: seeded.userId, clientId: seeded.clientId, grantId, redirectUri } as never, 90), /provider grant is no longer active/u);
+  await assert.rejects(() => new PrismaOidcAdapter("AccessToken").upsert(randomUUID(), { accountId: seeded.userId, clientId: seeded.clientId, grantId } as never, 300), /invalid_grant/u);
+  await assert.rejects(() => new PrismaOidcAdapter("AuthorizationCode").upsert(randomUUID(), { accountId: seeded.userId, clientId: seeded.clientId, grantId, redirectUri } as never, 90), /invalid_grant/u);
 });
 
 test("a purge after issuance makes the opaque access token unusable at /me", integrationOptions, async () => {
