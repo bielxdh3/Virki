@@ -27,6 +27,51 @@ async function countApplicationRows(transaction: PrismaTypes.TransactionClient):
 }
 
 const BOOTSTRAP_LOCK_ID = 4_852_716_032_158_417_203n;
+const AUDIT_LOG_COUNT_INDEX = 6;
+const MAX_PREBOOTSTRAP_CLEANUP_AUDITS = 32;
+
+function isHarmlessPrebootstrapCleanupAudit(record: {
+  eventType: string;
+  result: string;
+  resource: string | null;
+  message: string | null;
+  actorUserId: string | null;
+  actorEmailHash: string | null;
+  metadata: PrismaTypes.JsonValue;
+}): boolean {
+  if (record.eventType !== "AUTH_SESSION_CLEANUP" || record.result !== "SUCCESS" ||
+      record.resource !== "session" || record.message !== "Inactive sessions cleaned up." ||
+      record.actorUserId !== null || record.actorEmailHash !== null) return false;
+  const metadata = record.metadata;
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const fields = Object.keys(metadata).sort();
+  return fields.length === 3 &&
+    fields[0] === "deletedCount" && fields[1] === "deletedRateLimitCount" && fields[2] === "source" &&
+    metadata.source === "sessions-cleanup" && metadata.deletedCount === 0 && metadata.deletedRateLimitCount === 0;
+}
+
+async function verifyBootstrapDatabaseIsVirgin(transaction: PrismaTypes.TransactionClient): Promise<void> {
+  const counts = await countApplicationRows(transaction);
+  if (counts.some((count, index) => index !== AUDIT_LOG_COUNT_INDEX && count !== 0)) {
+    throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
+  }
+  const auditCount = counts[AUDIT_LOG_COUNT_INDEX] ?? 0;
+  if (auditCount === 0) return;
+  if (auditCount > MAX_PREBOOTSTRAP_CLEANUP_AUDITS) throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
+  // A staging worker on an otherwise empty, recovered first install may have
+  // emitted successful no-op cleanup audits. Preserve those immutable records;
+  // never permit another audit type, an actor, a deletion, or any application data.
+  const audits = await transaction.auditLog.findMany({
+    select: {
+      eventType: true, result: true, resource: true, message: true,
+      actorUserId: true, actorEmailHash: true, metadata: true
+    },
+    take: MAX_PREBOOTSTRAP_CLEANUP_AUDITS + 1
+  });
+  if (audits.length !== auditCount || audits.some((audit) => !isHarmlessPrebootstrapCleanupAudit(audit))) {
+    throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
+  }
+}
 
 export class FirstAdminBootstrapError extends Error {
   constructor(readonly code: "INPUT_INVALID" | "DATABASE_NOT_VIRGIN" | "INTERACTIVE_TTY_REQUIRED" | "PRODUCTION_CONTEXT_REQUIRED" | "DATABASE_TARGET_INVALID" | "FIRST_INSTALL_NOT_ENABLED") {
@@ -61,13 +106,16 @@ export async function bootstrapFirstAdmin(input: BootstrapInput, dependencies: B
   const hashEmail = dependencies.hashAdminEmail ?? hashAuditEmail;
   const writeAudit = dependencies.writeAudit ?? writeAuditLogInTransaction;
   const now = dependencies.now ?? new Date();
+  // Argon2 is intentionally expensive. Keep it outside the bounded Prisma
+  // transaction so the advisory lock cannot time out during password hashing.
+  const passwordHash = await hash(input.password);
 
   return database.$transaction(async (transaction) => {
-    await transaction.$queryRaw`SELECT pg_advisory_xact_lock(${BOOTSTRAP_LOCK_ID})`;
-    const counts = await countApplicationRows(transaction);
-    if (counts.some((count) => count !== 0)) throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
+    // Postgres advisory lock returns void; Prisma $queryRaw cannot deserialize
+    // that type (P2010). Select a supported integer from the locking function.
+    await transaction.$queryRaw`SELECT 1::integer AS acquired FROM pg_advisory_xact_lock(${BOOTSTRAP_LOCK_ID})`;
+    await verifyBootstrapDatabaseIsVirgin(transaction);
 
-    const passwordHash = await hash(input.password);
     const user = await transaction.user.create({
       data: {
         email,

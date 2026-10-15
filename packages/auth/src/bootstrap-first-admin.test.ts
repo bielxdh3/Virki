@@ -23,7 +23,30 @@ const dataModels = [
   "securityElevation"
 ] as const;
 
-function createDatabase(overrides: Partial<Record<(typeof dataModels)[number], number>> = {}) {
+type AuditFixture = {
+  eventType: string;
+  result: string;
+  resource: string | null;
+  message: string | null;
+  actorUserId: string | null;
+  actorEmailHash: string | null;
+  metadata: unknown;
+};
+
+const noopAudit = {
+  eventType: "AUTH_SESSION_CLEANUP",
+  result: "SUCCESS",
+  resource: "session",
+  message: "Inactive sessions cleaned up.",
+  actorUserId: null,
+  actorEmailHash: null,
+  metadata: { source: "sessions-cleanup", deletedCount: 0, deletedRateLimitCount: 0 }
+};
+
+function createDatabase(
+  overrides: Partial<Record<(typeof dataModels)[number], number>> = {},
+  auditRows: AuditFixture[] = []
+) {
   const calls: string[] = [];
   let createdUser: Record<string, unknown> | undefined;
   let auditInput: Record<string, unknown> | undefined;
@@ -34,16 +57,24 @@ function createDatabase(overrides: Partial<Record<(typeof dataModels)[number], n
     }
   }])) as Record<string, unknown> & {
     user: { count: () => Promise<number>; create: (input: { data: Record<string, unknown> }) => Promise<{ id: string }> };
-    $queryRaw: (query: unknown) => Promise<unknown>;
+    $queryRaw: (query: TemplateStringsArray) => Promise<unknown>;
   };
   transaction.user.create = async ({ data }) => {
     calls.push("create:user");
     createdUser = data;
     return { id: "created-admin" };
   };
-  transaction.$queryRaw = async () => {
+  transaction.$queryRaw = async (strings: TemplateStringsArray) => {
+    assert.match(strings[0], /^SELECT 1::integer AS acquired FROM pg_advisory_xact_lock\(/u);
     calls.push("lock");
-    return [];
+    return [{ acquired: 1 }];
+  };
+  transaction.auditLog = {
+    ...(transaction.auditLog as object),
+    findMany: async () => {
+      calls.push("read:auditLog");
+      return auditRows;
+    }
   };
   const database = {
     $transaction: async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)
@@ -93,6 +124,77 @@ test("first ADMIN bootstrap writes only to a completely virgin database", async 
   assert.equal(fixture.auditInput?.actorUserId, "created-admin");
   assert.equal(fixture.auditInput?.actorEmailHash, "pseudonym:owner@example.com");
   assert.equal(fixture.auditInput?.message, "Initial ADMIN account provisioned through restricted operator bootstrap.");
+});
+
+test("first ADMIN bootstrap accepts ONLY preserved zero-change session-cleanup audits", async () => {
+  const fixture = createDatabase({ auditLog: 2 }, [{ ...noopAudit }, { ...noopAudit }]);
+  const result = await bootstrapFirstAdmin(validInput, {
+    database: fixture.database as never,
+    hashPassword: async () => "argon2:hashed",
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async (_transaction, input) => fixture.setAudit(input as unknown as Record<string, unknown>)
+  });
+  assert.equal(result.id, "created-admin");
+  assert.equal(fixture.calls.filter((call) => call === "read:auditLog").length, 1);
+  assert.equal(fixture.auditInput?.eventType, "ACCOUNT_CREATED");
+});
+
+test("bootstrap refuses suspicious audit rows and excess no-op audits", async () => {
+  const suspicious = [
+    { ...noopAudit, eventType: "ACCOUNT_CREATED" },
+    { ...noopAudit, result: "FAILURE" },
+    { ...noopAudit, resource: "identity.admin" },
+    { ...noopAudit, message: "something else" },
+    { ...noopAudit, actorUserId: "existing-user" },
+    { ...noopAudit, actorEmailHash: "some-hash" },
+    { ...noopAudit, metadata: { ...noopAudit.metadata, deletedCount: 1 } },
+    { ...noopAudit, metadata: { ...noopAudit.metadata, deletedRateLimitCount: 1 } },
+    { ...noopAudit, metadata: { ...noopAudit.metadata, source: "other" } },
+    { ...noopAudit, metadata: { ...noopAudit.metadata, extra: "unexpected" } }
+  ];
+  for (const record of suspicious) {
+    const fixture = createDatabase({ auditLog: 1 }, [record]);
+    await assert.rejects(
+      bootstrapFirstAdmin(validInput, {
+        database: fixture.database as never,
+        hashPassword: async () => "argon2:hashed",
+        writeAudit: async () => assert.fail("Audit must not be written for a rejected bootstrap.")
+      }),
+      (error) => error instanceof FirstAdminBootstrapError && error.code === "DATABASE_NOT_VIRGIN"
+    );
+    assert.equal(fixture.createdUser, undefined);
+  }
+  const tooMany = createDatabase({ auditLog: 33 }, Array.from({ length: 33 }, () => ({ ...noopAudit })));
+  await assert.rejects(
+    bootstrapFirstAdmin(validInput, {
+      database: tooMany.database as never,
+      hashPassword: async () => "argon2:hashed",
+      writeAudit: async () => assert.fail("An excess of audits must not be ignored.")
+    }),
+    (error) => error instanceof FirstAdminBootstrapError && error.code === "DATABASE_NOT_VIRGIN"
+  );
+  assert.equal(tooMany.createdUser, undefined);
+});
+
+test("expensive password hashing completes before acquiring the transaction lock", async () => {
+  const fixture = createDatabase();
+  let hashCompleted = false;
+  await bootstrapFirstAdmin(validInput, {
+    database: {
+      $transaction: (callback: (tx: unknown) => Promise<unknown>) => {
+        assert.equal(hashCompleted, true, "Argon2 must not consume Prisma transaction time");
+        return fixture.database.$transaction(callback as never);
+      }
+    } as never,
+    hashPassword: async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      hashCompleted = true;
+      return "argon2:hashed";
+    },
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async (_transaction, input) => fixture.setAudit(input as unknown as Record<string, unknown>)
+  });
+  assert.ok(hashCompleted);
 });
 
 test("bootstrap refuses any pre-existing application data and creates no ADMIN", async () => {
