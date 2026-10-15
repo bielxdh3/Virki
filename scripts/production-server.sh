@@ -18,7 +18,7 @@ fail() {
 [[ "$root" =~ ^/([A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$ ]] || fail 'Production root is invalid.'
 [[ "$root" != '/' && ! "$root" =~ (^|/)\.\.?(/|$) ]] || fail 'Production root is invalid.'
 
-allowed_actions=' install-source cleanup-deploy-staging first-install first-install-recovery deploy stage first-admin-bootstrap start restart start-tunnel stop maintenance-on maintenance-off status ports revision health logs backup-verify migration-status audit-recent audit-cleanup sessions-cleanup config '
+allowed_actions=' install-source cleanup-deploy-staging first-install first-install-recovery first-admin-rescue-prepare first-admin-rescue deploy stage first-admin-bootstrap start restart start-tunnel stop maintenance-on maintenance-off status ports revision health logs backup-verify migration-status audit-recent audit-cleanup sessions-cleanup config '
 [[ "$allowed_actions" == *" $action "* ]] || fail 'Production action is not allowed.'
 
 if [[ "$action" == cleanup-deploy-staging ]]; then
@@ -40,12 +40,15 @@ readonly recovery_path="$root/.virki-first-install-recovery"
 readonly maintenance_path="$root/.virki-maintenance"
 readonly first_install_path="$root/.virki-first-install"
 readonly first_install_volume='virki-prod_virki_postgres_data'
+# Exceptional one-time bridge for the proven October 2026 no-ADMIN install.
+# This is NOT a generic permission to bypass an existing ADMIN requirement.
+readonly first_admin_rescue_predecessor='cbd065f2c560fdbc1f32c4c1c4804c352cf84494'
 readonly migration_schema='packages/database/prisma/schema.prisma'
 readonly migration_directory='packages/database/prisma/migrations'
 readonly transition_migration_name='20260922090000_total_identity_security_rebaseline'
 readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @virki/database)
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
-readonly state_changing_actions=' install-source cleanup-deploy-staging first-install first-install-recovery stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
+readonly state_changing_actions=' install-source cleanup-deploy-staging first-install first-install-recovery first-admin-rescue-prepare first-admin-rescue stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
 readonly -a legacy_transition_migrations=(
   20260624190000_initial_schema
   20260624203000_add_login_rate_limit
@@ -1313,6 +1316,124 @@ assert_backup_verified() {
   ((now_epoch - verified_epoch <= 86400 && verified_epoch <= now_epoch + 300)) || fail 'Verified backup is stale.'
 }
 
+# This bridge accepts only the one exact, previously recovered install that
+# was observed to have zero accounts and two actorless, zero-change worker
+# audits. Both the current revision and its first-install marker stay intact.
+# The query checks every application table, including any future additions.
+assert_first_admin_rescue_rows() {
+  local sql
+  sql=$(cat <<'SQL'
+DO $$
+DECLARE candidate record; contains_rows boolean;
+BEGIN
+  FOR candidate IN
+    SELECT tablename FROM pg_tables
+    WHERE schemaname = 'public' AND tablename NOT IN ('_prisma_migrations', 'AuditLog')
+  LOOP
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I.%I LIMIT 1)', 'public', candidate.tablename)
+      INTO contains_rows;
+    IF contains_rows THEN
+      RAISE EXCEPTION 'Application records exist; first-ADMIN rescue is prohibited.';
+    END IF;
+  END LOOP;
+  IF (SELECT count(*) FROM "AuditLog") <> 2 OR EXISTS (
+    SELECT 1 FROM "AuditLog"
+    WHERE "eventType"::text <> 'AUTH_SESSION_CLEANUP'
+      OR "result"::text <> 'SUCCESS'
+      OR "resource" IS DISTINCT FROM 'session'
+      OR "message" IS DISTINCT FROM 'Inactive sessions cleaned up.'
+      OR "actorUserId" IS NOT NULL
+      OR "actorEmailHash" IS NOT NULL
+      OR "metadata" IS DISTINCT FROM '{"source":"sessions-cleanup","deletedCount":0,"deletedRateLimitCount":0}'::jsonb
+  ) THEN
+    RAISE EXCEPTION 'Unexpected audit activity; first-ADMIN rescue is prohibited.';
+  END IF;
+END
+$$;
+SQL
+)
+  database_query "$sql" >/dev/null 2>&1 || fail 'First ADMIN rescue denied: application or audit state differs from the verified virgin-install exception.'
+}
+
+verify_first_admin_rescue_state() {
+  # Local variables intentionally scope the existing production guard to the
+  # PREDECESSOR. Never change on-disk revision or first-install markers here.
+  local requested_revision=$revision
+  [[ "$requested_revision" =~ ^[0-9a-f]{40}$ && "$requested_revision" != "$first_admin_rescue_predecessor" ]] || fail 'First ADMIN rescue target revision is invalid.'
+  [[ ! -e "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'First ADMIN rescue cannot run in maintenance.'
+  [[ ! -e "$HOME/.config/virki-approval/ENABLED" ]] || fail 'Disable the unattended approval agent before first ADMIN rescue.'
+  local revision=$first_admin_rescue_predecessor
+  local source_dir="$release_dir/$first_admin_rescue_predecessor"
+  local -x VIRKI_PRODUCTION_IMAGE="virki-production-ci:$first_admin_rescue_predecessor"
+  local -x VIRKI_MIGRATOR_IMAGE="virki-migrator-ci:$first_admin_rescue_predecessor"
+  verify_revision
+  assert_active_source
+  verify_first_install_marker
+  verify_first_install_volume
+  assert_tunnel_stopped
+  assert_backup_verified
+  local project_service running_services
+  running_services=$(docker ps --filter 'label=com.docker.compose.project=virki-prod' --format '{{.Label "com.docker.compose.service"}}') ||
+    fail 'First ADMIN rescue could not inspect running Virki services.'
+  while IFS= read -r project_service; do
+    [[ -z "$project_service" || "$project_service" == 'postgres' ]] ||
+      fail 'First ADMIN rescue requires every Virki application and Tunnel to be stopped.'
+  done <<< "$running_services"
+  wait_for_virki_postgres
+  assert_first_admin_rescue_rows
+}
+
+assert_first_admin_rescue_prepared_image() {
+  local expected="$revision" actual architecture
+  [[ -d "$source_dir" && ! -L "$source_dir" ]] || fail 'Approved first ADMIN rescue source is not installed.'
+  [[ -f "$source_dir/.virki-release" && ! -L "$source_dir/.virki-release" ]] || fail 'Approved first ADMIN rescue release marker is missing.'
+  grep -Fxq "revision=$expected" "$source_dir/.virki-release" || fail 'Approved first ADMIN rescue release does not match source revision.'
+  [[ -L "$source_dir/.env" && "$(readlink -- "$source_dir/.env")" == "$root/.env" &&
+     -L "$source_dir/.env.oidc" && "$(readlink -- "$source_dir/.env.oidc")" == "$root/.env.oidc" &&
+     -L "$source_dir/.env.oidc-data" && "$(readlink -- "$source_dir/.env.oidc-data")" == "$root/.env.oidc-data" ]] ||
+     fail 'Approved first ADMIN rescue source is not bound to protected remote environment.'
+  cmp -- "$source_dir/$migration_schema" "$release_dir/$first_admin_rescue_predecessor/$migration_schema" >/dev/null ||
+    fail 'First ADMIN rescue forbids Prisma schema changes.'
+  diff --brief --recursive -- "$source_dir/$migration_directory" "$release_dir/$first_admin_rescue_predecessor/$migration_directory" >/dev/null ||
+    fail 'First ADMIN rescue forbids migration changes.'
+  actual=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source"}}|{{.Os}}/{{.Architecture}}' "virki-production-ci:$expected") ||
+    fail 'Verified first ADMIN rescue runtime image is unavailable.'
+  architecture=$(docker info --format '{{.OSType}}/{{.Architecture}}') || fail 'First ADMIN rescue Docker platform is unavailable.'
+  case "$architecture" in
+    linux/x86_64|linux/amd64) architecture=linux/amd64 ;;
+    linux/aarch64|linux/arm64) architecture=linux/arm64 ;;
+    *) fail 'First ADMIN rescue target architecture is unsupported.' ;;
+  esac
+  [[ "$actual" == "$expected|https://github.com/bielxdh3/Virki|$architecture" ]] ||
+    fail 'First ADMIN rescue runtime image identity or architecture is wrong.'
+}
+
+create_first_admin_rescue_snapshot() {
+  # The previously clone-restored backup remains untouched. Additionally
+  # capture the exact current virgin DB (including its two audit rows) before
+  # invoking the one-time interactive ADMIN creation transaction.
+  local id snapshot partial digest
+  id="$(date -u +%Y%m%d-%H%M%S)-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+  [[ "$id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]{12}$ ]] || fail 'First ADMIN rescue snapshot identifier is invalid.'
+  snapshot="$backup_dir/virki-first-admin-rescue-$id.dump"
+  partial="$backup_dir/.virki-first-admin-rescue-$id.$$.partial"
+  [[ ! -e "$snapshot" && ! -L "$snapshot" && ! -e "$partial" && ! -L "$partial" ]] ||
+    fail 'First ADMIN rescue snapshot path is already occupied.'
+  compose exec -T postgres sh -lc 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' > "$partial" ||
+    fail 'First ADMIN rescue snapshot failed; no account was created.'
+  chmod 600 -- "$partial"
+  [[ -s "$partial" ]] || fail 'First ADMIN rescue snapshot is empty.'
+  compose exec -T postgres pg_restore --list < "$partial" >/dev/null ||
+    fail 'First ADMIN rescue snapshot format could not be validated; no account was created.'
+  mv --no-clobber -- "$partial" "$snapshot" || fail 'First ADMIN rescue snapshot could not be committed.'
+  [[ ! -e "$partial" && -f "$snapshot" && ! -L "$snapshot" &&
+     "$(stat -c '%a' -- "$snapshot")" == 600 && "$(stat -c '%u' -- "$snapshot")" == "$(id -u)" ]] ||
+     fail 'First ADMIN rescue snapshot metadata is invalid.'
+  digest=$(sha256sum -- "$snapshot" | awk '{print $1}')
+  [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || fail 'First ADMIN rescue snapshot SHA-256 is invalid.'
+  printf 'A fresh pre-ADMIN database snapshot was preserved alongside the previously restored and verified backup.\n'
+}
+
 verify_first_install_recovery_backups() {
   local backup_name backup_count
   [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || fail 'First-install recovery backup directory is missing or unsafe.'
@@ -1409,6 +1530,7 @@ resume_services() {
 }
 
 install_source() {
+  local preserve_live_markers=${1:-false}
   verify_source_archive
   local archive="$temp_dir/source-$revision-$archive_id.tar"
   local stage="$temp_dir/stage-$revision-$$"
@@ -1440,6 +1562,11 @@ install_source() {
   chmod 644 -- "$role_script"
   [[ "$(stat -c '%a' -- "$role_script")" == 644 ]] || fail 'PostgreSQL role initializer is not readable by the database container.'
   rm -f -- "$archive" || fail 'Verified source archive could not be removed after staging.'
+  if [[ "$preserve_live_markers" == true ]]; then
+    # A prepared, immutable rescue source is NOT an activated release.
+    printf 'Verified first ADMIN rescue source %s staged without altering live production markers.\n' "$revision"
+    return 0
+  fi
   {
     printf 'revision=%s\n' "$revision"
     printf 'source=verified-archive\n'
@@ -1534,6 +1661,34 @@ if [[ "$action" == install-source ]]; then
   exit 0
 fi
 if [[ "$state_changing_actions" == *" $action "* ]]; then acquire_state_lock; fi
+if [[ "$action" == first-admin-rescue-prepare ]]; then
+  verify_first_admin_rescue_state
+  verify_source_archive
+  verify_image_manifest
+  load_production_images
+  install_source true
+  source_dir="$release_dir/$revision"
+  assert_first_admin_rescue_prepared_image
+  verify_first_admin_rescue_state
+  printf 'Verified first ADMIN rescue image prepared; live release, database and first-install markers unchanged.\n'
+  exit 0
+fi
+if [[ "$action" == first-admin-rescue ]]; then
+  [[ -t 0 && -t 1 ]] || fail 'First ADMIN rescue requires a trusted interactive terminal.'
+  verify_first_admin_rescue_state
+  source_dir="$release_dir/$revision"
+  assert_first_admin_rescue_prepared_image
+  export VIRKI_PRODUCTION_IMAGE="virki-production-ci:$revision"
+  export VIRKI_MIGRATOR_IMAGE="virki-migrator-ci:$revision"
+  create_first_admin_rescue_snapshot
+  compose --profile bootstrap run --rm --no-deps --interactive --tty --env VIRKI_FIRST_INSTALL_BOOTSTRAP=enabled first-admin-bootstrap ||
+    fail 'First ADMIN rescue failed; the original release and verified backup are preserved.'
+  local_admin_count=$(database_query 'SELECT count(*)::text FROM "User" WHERE "role"::text = '\''ADMIN'\''') ||
+    fail 'First ADMIN rescue could not verify its database result.'
+  [[ "$local_admin_count" == 1 ]] || fail 'First ADMIN rescue did not create exactly one administrator.'
+  printf 'Exactly one first ADMIN created; previous release remains active. The normal protected deploy is required next.\n'
+  exit 0
+fi
 if [[ "$action" == deploy || "$action" == first-install || "$action" == first-install-recovery ]]; then
   if [[ "$action" == first-install ]]; then verify_fresh_install_target; fi
   if [[ "$action" == first-install-recovery ]]; then verify_first_install_recovery_target; fi

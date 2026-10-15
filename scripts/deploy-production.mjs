@@ -13,6 +13,7 @@ import { SSH_OPTIONS, runProductionPreflight } from "./production-preflight.mjs"
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
 import { verifyImageProvenance } from "./lib/production-image-provenance.mjs";
 import { downloadGhcrEvidence } from "./lib/ghcr-evidence.mjs";
+import { parseApprovedProductionPointer } from "./production-approval-agent.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const serverScriptPath = "scripts/production-server.sh";
@@ -71,6 +72,32 @@ function isSensitiveArchivePath(entry) {
 function requireSuccess(result, message) {
   if (!result || result.status !== 0) throw new ProductionRevisionError("COMMAND_FAILED", message);
   return result.stdout ?? "";
+}
+
+export function verifyOwnerApprovedFirstAdminRescue({ revision, ci, execute = runCommand }) {
+  // Unlike a routine manual deploy, the exceptional pre-ADMIN path must have
+  // an explicit owner approval recorded on the protected production pointer.
+  let pointer, run;
+  try {
+    const encoded = requireSuccess(execute("gh", [
+      "api", "repos/bielxdh3/Virki/contents/production.json?ref=production", "--jq", ".content"
+    ], { cwd: repositoryRoot }), "First ADMIN rescue approval pointer is unavailable.");
+    pointer = parseApprovedProductionPointer(Buffer.from(encoded.replace(/\s/gu, ""), "base64").toString("utf8"));
+    const raw = requireSuccess(execute("gh", [
+      "api", `repos/bielxdh3/Virki/actions/runs/${pointer.approval_run}`
+    ], { cwd: repositoryRoot }), "First ADMIN rescue approval provenance is unavailable.");
+    run = JSON.parse(raw);
+  } catch {
+    throw new ProductionRevisionError("COMMAND_FAILED", "First ADMIN rescue owner approval is missing or invalid.");
+  }
+  if (pointer.source_commit !== revision || pointer.ci_run !== ci.runId ||
+    pointer.codeql_run !== ci.codeqlRunId ||
+    run.id !== pointer.approval_run || run.name !== "Authorize Virki production release" ||
+    run.event !== "workflow_dispatch" || run.status !== "completed" ||
+    run.conclusion !== "success" || run.head_branch !== "main" ||
+    run.head_sha !== revision || run.actor?.login !== "bielxdh3") {
+    throw new ProductionRevisionError("COMMAND_FAILED", "First ADMIN rescue requires a successful owner-approved exact-SHA release.");
+  }
 }
 
 function sourceScript(revision, execute) {
@@ -275,11 +302,16 @@ export async function deployProduction({
   preflight = runProductionPreflight,
 } = {}) {
   if (!isValidProductionConfig(config)) throw new ProductionRevisionError("OPERATOR_CONFIG_INVALID");
-  if (!["install", "deploy", "first-install", "first-install-recovery"].includes(action)) throw new ProductionRevisionError("ARGUMENT_INVALID");
+  if (!["install", "deploy", "first-install", "first-install-recovery", "first-admin-rescue-prepare"].includes(action)) {
+    throw new ProductionRevisionError("ARGUMENT_INVALID");
+  }
 
   const source = inspectSource({ repositoryRoot, execute });
   const ci = verifyCi({ revision: source.revision, execute, repositoryRoot });
   if (!ci.ok) return { status: 1, lines: ci.lines };
+  if (action === "first-admin-rescue-prepare") {
+    verifyOwnerApprovedFirstAdminRescue({ revision: source.revision, ci, execute });
+  }
 
   let archive;
   let imageArchive;
@@ -290,7 +322,7 @@ export async function deployProduction({
     const preflightResult = await preflight({ execute, config });
     if (preflightResult.status !== 0) return preflightResult;
 
-    if (action === "deploy" || action === "first-install" || action === "first-install-recovery") {
+    if (action === "deploy" || action === "first-install" || action === "first-install-recovery" || action === "first-admin-rescue-prepare") {
       imageArchive = await downloadProductionImages({
         runId: ci.runId,
         revision: source.revision,
@@ -324,6 +356,8 @@ export async function deployProduction({
           ? "Fresh Virki initialization stopped; any new Virki database volume was preserved and legacy services were not changed."
           : action === "first-install-recovery"
             ? "Partial Virki first-install recovery stopped; existing Virki database and verified backups were preserved."
+          : action === "first-admin-rescue-prepare"
+            ? "First ADMIN rescue preparation stopped; original installed release, identity markers, and persistent data were preserved."
           : "Remote deployment stopped. Maintenance remains active if production mutation had begun.",
       );
     } catch (error) {
