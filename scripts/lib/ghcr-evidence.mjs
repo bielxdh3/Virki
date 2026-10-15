@@ -6,6 +6,23 @@ import { CANONICAL_VIRKI_REPOSITORY, normalizeRevision, ProductionRevisionError 
 const PACKAGE = "ghcr.io/bielxdh3/virki-evidence";
 const SOURCE = "https://github.com/bielxdh3/Virki";
 
+// GitHub's private GHCR API and registry require a classic read:packages PAT.
+// Unattended deployment must not reuse its fine-grained repository/Actions
+// read-only token for package access, or require a broad classic repo scope.
+export function selectGhcrReadCredential(env = process.env) {
+  const dedicated = env.VIRKI_GHCR_READ_TOKEN;
+  if (dedicated !== undefined && (typeof dedicated !== "string" ||
+      dedicated.length === 0 || /\s/u.test(dedicated))) {
+    throw new ProductionRevisionError("COMMAND_FAILED");
+  }
+  if (env.VIRKI_AUTOMATED_DEPLOY_ENABLED === "true" && !dedicated) {
+    throw new ProductionRevisionError("COMMAND_FAILED");
+  }
+  return dedicated
+    ? { token: dedicated, apiOptions: { env: { ...env, GH_TOKEN: dedicated } } }
+    : { token: null, apiOptions: {} };
+}
+
 export function evidenceDigestFromRunLog(log, { revision, runId, kind, platform = "" }) {
   evidenceTag(revision, runId, kind, platform);
   if (typeof log !== "string" || log.length > 60 * 1024 * 1024) throw new ProductionRevisionError("COMMAND_FAILED");
@@ -57,14 +74,15 @@ export function downloadGhcrEvidence({ revision, runId, kind, platform = "", exe
     return result.stdout?.trim() ?? "";
   };
   try {
-    const response = run("gh", ["api", "users/bielxdh3/packages/container/virki-evidence"]);
+    const registry = selectGhcrReadCredential();
+    const response = run("gh", ["api", "users/bielxdh3/packages/container/virki-evidence"], registry.apiOptions);
     const pkg = JSON.parse(response);
     if (pkg.visibility !== "private" || pkg.owner?.login !== "bielxdh3"
       || pkg.repository?.full_name !== CANONICAL_VIRKI_REPOSITORY) throw new ProductionRevisionError("COMMAND_FAILED");
     const log = run("gh", ["run", "view", String(runId), "--repo", CANONICAL_VIRKI_REPOSITORY, "--log"]);
     const digest = evidenceDigestFromRunLog(log, { revision, runId, kind, platform });
     reference = `${PACKAGE}@${digest}`;
-    const token = run("gh", ["auth", "token"]);
+    const token = registry.token ?? run("gh", ["auth", "token"]);
     if (!token) throw new ProductionRevisionError("COMMAND_FAILED");
     const fs = { ...process.env, DOCKER_CONFIG: authDir };
     const docker = (args, extra = {}) => run("docker", args, { ...extra, env: fs });
@@ -90,7 +108,7 @@ export function downloadGhcrEvidence({ revision, runId, kind, platform = "", exe
       if (!metadata.isFile() || metadata.size === 0 || metadata.size > 20 * 1024 * 1024) throw new ProductionRevisionError("COMMAND_FAILED");
     }
     if (kind === "images" && entries.length !== 1) throw new ProductionRevisionError("COMMAND_FAILED");
-    const final = JSON.parse(run("gh", ["api", "users/bielxdh3/packages/container/virki-evidence"]));
+    const final = JSON.parse(run("gh", ["api", "users/bielxdh3/packages/container/virki-evidence"], registry.apiOptions));
     if (final.visibility !== "private" || final.repository?.full_name !== CANONICAL_VIRKI_REPOSITORY) {
       throw new ProductionRevisionError("COMMAND_FAILED");
     }
