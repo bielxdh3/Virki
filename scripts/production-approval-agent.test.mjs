@@ -4,14 +4,14 @@ import { parseApprovedProductionPointer, planApprovedProductionAttempt } from ".
 
 const approved = {
   version: 1, source_commit: "a".repeat(40), approved_by: "bielxdh3",
-  approved_at: "2026-10-15T00:00:00Z", ci_run: 123, codeql_run: 124,
+  approved_at: "2026-10-15T00:00:00Z", ci_run: 123, codeql_run: 124, approval_run: 125,
   previous_approval: ""
 };
 test("the production approval pointer requires the exact schema and approving owner", () => {
   assert.equal(parseApprovedProductionPointer(JSON.stringify(approved)).source_commit, approved.source_commit);
   for (const patch of [
     { version: 2 }, { source_commit: "b" }, { approved_by: "attacker" },
-    { ci_run: null }, { codeql_run: 0 }, { approved_at: "yesterday" }
+    { ci_run: null }, { codeql_run: 0 }, { approval_run: 0 }, { approved_at: "yesterday" }
   ]) {
     assert.throws(() => parseApprovedProductionPointer({ ...approved, ...patch }));
   }
