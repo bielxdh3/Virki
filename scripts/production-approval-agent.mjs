@@ -2,7 +2,7 @@
 // only after Virki's first installation, ingress cutover and GHCR credentials
 // have been verified. Invoked by a non-overlapping, owner-only systemd timer.
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,13 +54,27 @@ function exec(command, args, input) {
 }
 
 function readState(file) {
-  if (!existsSync(file)) return null;
-  const meta = lstatSync(file);
-  if (!meta.isFile() || meta.isSymbolicLink() ||
-    (meta.mode & 0o077) !== 0 || meta.uid !== process.getuid()) {
-    throw new Error("Production state file has unsafe permissions.");
+  // Open the checked inode itself, not a pathname re-resolved after stat:
+  // this removes the file-system race flagged by CodeQL (TOCTOU).
+  const fd = (() => {
+    try {
+      return openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "ENOENT") return null;
+      throw error;
+    }
+  })();
+  if (fd === null) return null;
+  try {
+    const meta = fstatSync(fd);
+    if (!meta.isFile() || (meta.mode & 0o077) !== 0 ||
+      meta.uid !== process.getuid()) {
+      throw new Error("Production state file has unsafe permissions.");
+    }
+    return JSON.parse(readFileSync(fd, "utf8"));
+  } finally {
+    closeSync(fd);
   }
-  return JSON.parse(readFileSync(file, "utf8"));
 }
 
 function writeState(file, state) {
@@ -74,8 +88,8 @@ function validateStateLocation(file) {
     path.basename(file) !== "virki-approval-state.json") {
     throw new Error("Absolute VIRKI_APPROVAL_STATE_FILE is required.");
   }
-  const dir = statSync(path.dirname(file));
-  if (!dir.isDirectory() || (dir.mode & 0o077) !== 0 || dir.uid !== process.getuid()) {
+  const dir = lstatSync(path.dirname(file));
+  if (!dir.isDirectory() || dir.isSymbolicLink() || (dir.mode & 0o077) !== 0 || dir.uid !== process.getuid()) {
     throw new Error("Production agent state directory is not owner-only.");
   }
 }
