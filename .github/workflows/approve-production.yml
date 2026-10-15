@@ -89,7 +89,7 @@ jobs:
           else
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref='refs/heads/production' -f sha="$TARGET_SHA" >/dev/null
           fi
-          jq -n --arg sha "$TARGET_SHA" --arg previous "$previous" --arg approved_by "$GITHUB_ACTOR" --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ci_run "$CI_RUN" --argjson codeql_run "$CODEQL_RUN" '{version:1, source_commit:$sha, previous_approval:$previous, approved_by:$approved_by, approved_at:$timestamp, ci_run:$ci_run, codeql_run:$codeql_run}' > "$RUNNER_TEMP/production.json"
+          jq -n --arg sha "$TARGET_SHA" --arg previous "$previous" --arg approved_by "$GITHUB_ACTOR" --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ci_run "$CI_RUN" --argjson codeql_run "$CODEQL_RUN" --argjson approval_run "$GITHUB_RUN_ID" '{version:1, source_commit:$sha, previous_approval:$previous, approved_by:$approved_by, approved_at:$timestamp, ci_run:$ci_run, codeql_run:$codeql_run, approval_run:$approval_run}' > "$RUNNER_TEMP/production.json"
           jq -n --arg payload "$(base64 -w0 "$RUNNER_TEMP/production.json")" --arg blob "$blob" --arg message "release: authorize Virki $TARGET_SHA for production" '{message:$message,content:$payload,branch:"production"} + (if $blob == "" then {} else {sha:$blob} end)' > "$RUNNER_TEMP/payload.json"
           gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/production.json" --input "$RUNNER_TEMP/payload.json" >/dev/null
           {
