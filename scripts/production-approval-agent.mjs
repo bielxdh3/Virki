@@ -2,7 +2,7 @@
 // only after Virki's first installation, ingress cutover and GHCR credentials
 // have been verified. Invoked by a non-overlapping, owner-only systemd timer.
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -171,7 +171,22 @@ async function run() {
   }
 }
 
+export async function withExclusiveAgentLock(stateFile, action) {
+  validateStateLocation(stateFile);
+  // 'wx' is an atomic O_EXCL create. A crash leaves the lock as a deliberate
+  // fail-closed manual-recovery sentinel, rather than allowing a second deploy.
+  const lockFile = stateFile + ".lock";
+  const fd = openSync(lockFile, "wx", 0o600);
+  try {
+    return await action();
+  } finally {
+    closeSync(fd);
+    unlinkSync(lockFile);
+  }
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  // The systemd service must use an external nonblocking flock for exclusivity.
-  run().catch(error => { console.error(error.message); process.exitCode = 1; });
+  // An additional nonblocking systemd flock is recommended as defense in depth.
+  withExclusiveAgentLock(process.env.VIRKI_APPROVAL_STATE_FILE, run)
+    .catch(error => { console.error(error.message); process.exitCode = 1; });
 }
