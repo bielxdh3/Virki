@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "source_commit": "702f493ea15d38ab0e146846d6848871ec3a40ba",
+  "previous_approval": "",
+  "approved_by": "bielxdh3",
+  "approved_at": "2026-10-15T11:15:26Z",
+  "ci_run": 38679942512,
+  "codeql_run": 38679942517,
+  "approval_run": 38726007473
+}
