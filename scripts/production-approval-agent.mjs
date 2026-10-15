@@ -20,6 +20,7 @@ export function parseApprovedProductionPointer(value) {
     v.approved_by !== "bielxdh3" ||
     !Number.isSafeInteger(v.ci_run) || v.ci_run <= 0 ||
     !Number.isSafeInteger(v.codeql_run) || v.codeql_run <= 0 ||
+    !Number.isSafeInteger(v.approval_run) || v.approval_run <= 0 ||
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u.test(v.approved_at ?? "")) {
     throw new Error("Production approval pointer has invalid or untrusted fields.");
   }
@@ -97,7 +98,7 @@ function demanageContainers(config) {
 }
 
 async function run() {
-  if (os.platform() !== "linux") throw new Error("This agent runs only on native Linux.");
+  if (os.platform() !== "linux" || /microsoft/iu.test(os.release())) throw new Error("This agent runs only on native Linux.");
   if (process.env.VIRKI_AUTOMATED_DEPLOY_ENABLED !== "true") {
     throw new Error("Approval agent is disabled until first-install and ingress cutover are verified.");
   }
@@ -111,6 +112,21 @@ async function run() {
   const pointer = parseApprovedProductionPointer(
     Buffer.from(encoded.replace(/\s/gu, ""), "base64").toString("utf8")
   );
+  // Prove that the pointer was written by a completed owner-triggered
+  // workflow_dispatch on the exact commit, not by editing production.json.
+  const approvalRun = JSON.parse(exec("gh", [
+    "api", "repos/bielxdh3/Virki/actions/runs/" + pointer.approval_run
+  ]));
+  if (approvalRun.id !== pointer.approval_run ||
+      approvalRun.name !== "Authorize Virki production release" ||
+      approvalRun.event !== "workflow_dispatch" ||
+      approvalRun.status !== "completed" ||
+      approvalRun.conclusion !== "success" ||
+      approvalRun.head_branch !== "main" ||
+      approvalRun.head_sha !== pointer.source_commit ||
+      approvalRun.actor?.login !== "bielxdh3") {
+    throw new Error("GitHub owner approval workflow provenance is unverified.");
+  }
   const state = readState(stateFile);
   if (planApprovedProductionAttempt(pointer, state) === "already-applied") {
     process.stdout.write("Approved Virki SHA was already deployed and recorded.\n");
