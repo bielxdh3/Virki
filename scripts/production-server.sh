@@ -201,7 +201,8 @@ load_production_images() {
   auth_dir=$(mktemp -d "$temp_dir/.ghcr-auth.XXXXXXXX") || fail 'Could not allocate isolated registry credential directory.'
   (
     export DOCKER_CONFIG="$auth_dir"
-    trap 'rm -f -- "$auth_dir/config.json"; rmdir -- "$auth_dir"' EXIT
+    # Docker may create contexts/ and other files below this isolated directory.
+    trap 'rm -rf -- "$auth_dir"' EXIT
     docker login ghcr.io --username bielxdh3 --password-stdin < "$token" >/dev/null 2>&1 || fail 'Private GHCR login failed.'
     for role in runtime migrator; do
       case "$role" in
@@ -276,11 +277,6 @@ verify_fresh_install_target() {
   [[ ! -e "$first_install_path" && ! -L "$first_install_path" ]] || fail 'First install has already been initialized or its marker path is occupied.'
   [[ ! -e "$maintenance_path" && ! -L "$maintenance_path" && ! -e "$verification_path" && ! -L "$verification_path" ]] || fail 'First install refused because production state markers already exist.'
 
-  for entry in "$release_dir"/*; do
-    [[ -e "$entry" || -L "$entry" ]] || continue
-    fail 'First install refused because a release already exists.'
-  done
-
   for path in "$source_state_path" "$revision_path"; do
     if [[ -e "$path" || -L "$path" ]]; then
       [[ -f "$path" && ! -L "$path" ]] || fail 'First install refused because a source state marker is unsafe.'
@@ -289,6 +285,14 @@ verify_fresh_install_target() {
     fi
   done
   [[ "$source_marker_present" == "$revision_marker_present" ]] || fail 'First install refused because source state is incomplete.'
+  for entry in "$release_dir"/*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    # A previously staged and verified exact revision may be reused safely.
+    if [[ "$source_marker_present" == true && "$entry" == "$release_dir/$revision" && -d "$entry" && ! -L "$entry" ]]; then
+      continue
+    fi
+    fail 'First install refused because an unrelated release already exists.'
+  done
   [[ "$source_marker_present" == false ]] || verify_revision
 
   local backup_entry
@@ -658,6 +662,9 @@ assert_health() {
 assert_production_response_headers() {
   local response=$1 expected_referrer=$2 headers
   headers=${response%$'\nVIRKI_STATUS:'*}
+  # curl's -D - output includes the JSON body; only the header section is trusted here.
+  headers=${headers%%$'\r\n\r\n'*}
+  headers=${headers%%$'\n\n'*}
   awk -F: -v expected_referrer="$expected_referrer" '
     function frame_ancestors_deny_only(policy,     directives, count, i, directive, found) {
       count = split(policy, directives, ";")
@@ -703,7 +710,7 @@ database_query() {
 
 verify_empty_first_install_recovery_database() {
   local state
-  state=$(database_query "SELECT CASE WHEN current_database() <> 'virki' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_bootstrap' AND rolsuper AND rolcreatedb AND rolcreaterole) OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname !~ '^pg_' AND rolname NOT IN ('postgres', 'virki_bootstrap', 'virki_runtime', 'virki_migrator', 'virki_audit_maintenance')) OR EXISTS (SELECT 1 FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'postgres', 'virki')) OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'public') AND nspname NOT LIKE 'pg_toast%') OR EXISTS (SELECT 1 FROM pg_extension WHERE extname NOT IN ('plpgsql', 'pgcrypto')) THEN 'unexpected-state' WHEN NOT EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) AND NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql') THEN 'empty-partial' WHEN EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relname = '_prisma_migrations' AND relation.relkind = 'r') THEN 'migrated-candidate' ELSE 'unexpected-state' END")
+  state=$(database_query "SELECT CASE WHEN current_database() <> 'virki' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_bootstrap' AND rolsuper AND rolcreatedb AND rolcreaterole) OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname !~ '^pg_' AND rolname NOT IN ('postgres', 'virki_bootstrap', 'virki_runtime', 'virki_migrator', 'virki_audit_maintenance')) OR EXISTS (SELECT 1 FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'postgres', 'virki')) OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'public') AND nspname NOT LIKE 'pg_toast%') OR EXISTS (SELECT 1 FROM pg_extension WHERE extname NOT IN ('plpgsql', 'pgcrypto')) THEN 'unexpected-state' WHEN NOT EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) AND NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname NOT IN ('plpgsql', 'pgcrypto')) THEN 'empty-partial' WHEN EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relname = '_prisma_migrations' AND relation.relkind = 'r') THEN 'migrated-candidate' ELSE 'unexpected-state' END")
   case "$state" in
     empty-partial|migrated-candidate) recovery_database_state=$state ;;
     *) fail 'First-install recovery refused because the Virki database contains an unknown or partially migrated state.' ;;
@@ -1105,6 +1112,8 @@ cleanup_failed_backup_verification() {
 }
 
 create_verified_backup() {
+  # A private subshell ensures backup cleanup never overrides deploy's EXIT guard.
+  (
   local stamp isolation_id backup_path partial_backup_path container db_network alias database_url override migration_container bootstrap_password runtime_password migrator_password audit_maintenance_password verification_tmp backup_verified=false
   stamp="$(date -u +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
   isolation_id=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
@@ -1184,6 +1193,7 @@ create_verified_backup() {
   backup_verified=true
   trap - EXIT
   printf 'Remote production backup restored and all committed migrations validated outside the source tree.\n'
+  )
 }
 
 run_first_install_recovery_clone_migrations() {

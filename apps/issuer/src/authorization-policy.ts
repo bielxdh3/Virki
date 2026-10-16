@@ -47,6 +47,14 @@ export function isOidcInteractionPathBound(routeUid: string, activeInteractionUi
   return routeUid === activeInteractionUid;
 }
 
+export function isOidcGrantBoundToInteraction(
+  grant: { accountId?: string; clientId?: string } | null | undefined,
+  accountId: string,
+  clientId: string
+): boolean {
+  return Boolean(grant && grant.accountId === accountId && grant.clientId === clientId);
+}
+
 export function getOidcAuthenticationContext(
   authenticationMethods: readonly string[],
   requiredAcrValues: readonly string[] = []
@@ -172,6 +180,22 @@ export function requiresFreshOidcAuthentication(input: {
 
 export function hasValidOidcStateAndNonce(state: string, nonce: string, requiresNonce: boolean): boolean {
   return isValidOpaqueValue(state) && (!requiresNonce || isValidOpaqueValue(nonce));
+}
+
+export function hasValidOidcAuthorizationQuery(query: URLSearchParams): boolean {
+  // The issuer and oidc-provider must interpret each authorization parameter identically.
+  // Ambiguous duplicates could make the pre-validation miss an OpenID nonce requirement.
+  const seen = new Set<string>();
+  for (const key of query.keys()) {
+    if (seen.has(key)) return false;
+    seen.add(key);
+  }
+  const scope = query.get("scope") ?? "";
+  return hasValidOidcStateAndNonce(
+    query.get("state") ?? "",
+    query.get("nonce") ?? "",
+    scope.split(/\s+/u).includes("openid")
+  );
 }
 
 function isValidOpaqueValue(value: string): boolean {

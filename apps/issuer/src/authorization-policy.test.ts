@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const activeUserGrant = {
   revokedAt: null,
@@ -35,6 +35,34 @@ test("OIDC state is required and nonce is required for OpenID requests", () => {
   assert.equal(hasValidOidcStateAndNonce(opaqueValue, "", true), false);
   assert.equal(hasValidOidcStateAndNonce("", "", false), false);
   assert.equal(hasValidOidcStateAndNonce(`${opaqueValue}\n`, opaqueValue, true), false);
+});
+
+test("OIDC authorization rejects duplicated query keys before interpreting scope, state, or nonce", () => {
+  const base = new URLSearchParams({ client_id: "client", response_type: "code", scope: "openid profile", state: "0123456789abcdef", nonce: "fedcba9876543210" });
+  assert.equal(hasValidOidcAuthorizationQuery(base), true);
+
+  for (const key of ["scope", "state", "nonce", "client_id", "redirect_uri", "code_challenge"]) {
+    const duplicate = new URLSearchParams(base);
+    if (!duplicate.has(key)) duplicate.set(key, "first");
+    duplicate.append(key, key === "scope" ? "profile" : "different");
+    assert.equal(hasValidOidcAuthorizationQuery(duplicate), false, `${key} must be unambiguous`);
+  }
+
+  const splitOpenId = new URLSearchParams({ scope: "profile", state: "0123456789abcdef" });
+  splitOpenId.append("scope", "openid");
+  assert.equal(hasValidOidcAuthorizationQuery(splitOpenId), false, "a duplicated scope must not waive the OpenID nonce requirement");
+  const singleOpenIdWithoutNonce = new URLSearchParams({ scope: "openid profile", state: "0123456789abcdef" });
+  assert.equal(hasValidOidcAuthorizationQuery(singleOpenIdWithoutNonce), false);
+  const nonOpenId = new URLSearchParams({ scope: "profile", state: "0123456789abcdef" });
+  assert.equal(hasValidOidcAuthorizationQuery(nonOpenId), true, "provider applies the final allowed scopes policy");
+});
+
+test("OIDC consent may only reuse a provider Grant for the current account and client", () => {
+  const grant = { accountId: "current-user", clientId: "project-a" };
+  assert.equal(isOidcGrantBoundToInteraction(grant, "current-user", "project-a"), true);
+  assert.equal(isOidcGrantBoundToInteraction(grant, "another-user", "project-a"), false);
+  assert.equal(isOidcGrantBoundToInteraction(grant, "current-user", "project-b"), false);
+  assert.equal(isOidcGrantBoundToInteraction(undefined, "current-user", "project-a"), false);
 });
 
 test("OIDC authentication claims report the persisted methods and assurance level", () => {
