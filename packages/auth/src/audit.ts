@@ -190,8 +190,29 @@ export async function cleanupExpiredAuditLogs(
   };
 }
 
+export async function writeAuditCleanupResultIfNeeded(
+  result: { deletedCount: number; retentionDays: number },
+  writeAudit: (input: AuditLogInput) => Promise<void> = writeAuditLogForMaintenanceRequired
+): Promise<void> {
+  // A no-op maintenance run must not block first ADMIN bootstrap on a virgin database.
+  if (result.deletedCount === 0) return;
+
+  await writeAudit({
+    eventType: "AUTH_AUDIT_LOG_CLEANUP",
+    result: "SUCCESS",
+    resource: "audit-log",
+    message: "Expired audit logs cleaned up.",
+    metadata: {
+      source: "audit-log-cleanup",
+      deletedCount: result.deletedCount,
+      retentionDays: result.retentionDays
+    }
+  });
+}
+
 export function getAuditLogRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.AUDIT_LOG_RETENTION_DAYS ?? DEFAULT_AUDIT_LOG_RETENTION_DAYS);
+  const configured = env.AUDIT_LOG_RETENTION_DAYS?.trim();
+  const raw = configured ? Number(configured) : DEFAULT_AUDIT_LOG_RETENTION_DAYS;
 
   if (!Number.isFinite(raw)) {
     return DEFAULT_AUDIT_LOG_RETENTION_DAYS;

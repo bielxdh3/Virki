@@ -7,7 +7,7 @@ import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from 
 import { readIssuer } from "./issuer-config";
 import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isTokenEndpoint, selectAuthRateLimits, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const issuer = readIssuer(process.env);
 const signingJwks = readSigningJwks(process.env.VIRKI_OIDC_SIGNING_JWKS);
@@ -180,12 +180,9 @@ provider.use(async (rawContext, next) => {
       return;
     }
     authorizationRequestStartedAt.set(context, Date.now());
-    const scope = String(context.query.scope ?? "").split(/\s+/u);
-    const nonce = String(context.query.nonce ?? "");
-    const state = String(context.query.state ?? "");
-    if (!hasValidOidcStateAndNonce(state, nonce, scope.includes("openid"))) {
+    if (!hasValidOidcAuthorizationQuery(new URL(context.req.url ?? "/auth", issuer).searchParams)) {
       context.status = 400;
-      context.body = { error: "invalid_request", error_description: "state and nonce are required." };
+      context.body = { error: "invalid_request", error_description: "Invalid or ambiguous authorization parameters." };
       return;
     }
     const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
@@ -357,7 +354,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
   const grant = interaction.grantId
     ? await provider.Grant.find(interaction.grantId)
     : new provider.Grant({ accountId: session.user.id, clientId });
-  if (!grant) {
+  if (!grant || !isOidcGrantBoundToInteraction(grant, session.user.id, clientId)) {
     await denyInteraction(context);
     return;
   }

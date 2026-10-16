@@ -25,7 +25,7 @@ function getSmtpConfig(env: SmtpEnvironment): {
   const port = Number(env.VIRKI_EMAIL_SMTP_PORT ?? DEFAULT_SMTP_PORT);
   const secureValue = env.VIRKI_EMAIL_SMTP_SECURE?.trim().toLowerCase();
   const secure =
-    secureValue === undefined ? false : secureValue === "true" ? true : secureValue === "false" ? false : null;
+    !secureValue ? false : secureValue === "true" ? true : secureValue === "false" ? false : null;
 
   if (
     !host ||

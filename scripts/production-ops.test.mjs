@@ -33,6 +33,7 @@ const serverScript = readFileSync(new URL("./production-server.sh", import.meta.
 const migrationRunnerSource = readFileSync(new URL("../packages/database/scripts/prisma-migrate.mjs", import.meta.url), "utf8");
 const migrationRunnerPath = fileURLToPath(new URL("../packages/database/scripts/prisma-migrate.mjs", import.meta.url));
 const deploymentScript = readFileSync(new URL("./deploy-production.mjs", import.meta.url), "utf8");
+const backupRestoreScript = readFileSync(new URL("./backup-restore-validation.mjs", import.meta.url), "utf8");
 const secretScannerPath = fileURLToPath(new URL("./secret-scan.mjs", import.meta.url));
 const secretScannerSource = readFileSync(secretScannerPath, "utf8");
 const isSecretScanCommand = (command, args) => command === process.execPath && path.basename(args[0] ?? "") === "secret-scan.mjs" && args[1] === "--revision";
@@ -356,6 +357,49 @@ test("private GHCR transport requires CI-run-bound exact digests and isolates th
   assert.match(transport, /docker image tag "ghcr\.io\/bielxdh3\/virki-migrator@[\s\S]*?" "virki-migrator-ci:/u);
   assert.doesNotMatch(transport, /docker build|docker load|--password=|docker system prune/u);
   assert.match(preflightScript, /for name in \.env \.env\.oidc \.env\.oidc-data \.ghcr-read-token/u);
+});
+
+test("backup verification isolates its EXIT cleanup trap from the production maintenance trap", () => {
+  const backup = serverScript.slice(serverScript.indexOf("create_verified_backup() {"), serverScript.indexOf("\nrun_first_install_recovery_clone_migrations() {"));
+  assert.match(backup, /create_verified_backup\(\) \{\n(?:[ ]{2}#[^\n]*\n)*[ ]{2}\(\n/u);
+  assert.match(backup, /trap - EXIT[\s\S]*?\n[ ]{2}\)\n\}/u);
+  assert.match(serverScript, /[ ]{2}deploy\)\n[\s\S]*?maintenance_on\n[ ]{4}create_verified_backup\n[ ]{4}apply_production_migrations/u);
+});
+
+test("first install tolerates its own staged revision without allowing unrelated releases", () => {
+  const check = serverScript.slice(serverScript.indexOf("verify_fresh_install_target() {"), serverScript.indexOf("\nverify_empty_first_install_recovery_database() {"));
+  assert.match(check, /"\$source_marker_present" == true && "\$entry" == "\$release_dir\/\$revision" && -d "\$entry" && ! -L "\$entry"/u);
+  assert.match(check, /\[\[ "\$source_marker_present" == false \]\] \|\| verify_revision/u);
+});
+
+test("first-install recovery recognizes the extension provisioned before Prisma migration", () => {
+  const recoveryStart = serverScript.indexOf("verify_empty_first_install_recovery_database() {");
+  assert.ok(recoveryStart >= 0);
+  const recovery = serverScript.slice(recoveryStart, recoveryStart + 3500);
+  assert.match(recovery, /NOT EXISTS \(SELECT 1 FROM pg_extension WHERE extname NOT IN \('plpgsql', 'pgcrypto'\)\) THEN 'empty-partial'/u);
+});
+
+test("GHCR temporary Docker configuration cleanup removes generated subdirectories", () => {
+  const pull = serverScript.slice(serverScript.indexOf("load_production_images() {"), serverScript.indexOf("\ncompose_args() {"));
+  assert.match(pull, /trap 'rm -rf -- "\$auth_dir"' EXIT/u);
+});
+
+test("disposable backup-restore validation uses its own source directory and aborts on restore errors", () => {
+  assert.match(backupRestoreScript, /fileURLToPath\(import\.meta\.url\)/u);
+  assert.doesNotMatch(backupRestoreScript, /repositoryRoot = process\.cwd\(\)/u);
+  assert.match(backupRestoreScript, /"pg_restore", "--exit-on-error", "--clean"/u);
+});
+
+test("archive path screening normalizes Windows separators before every sensitive check", () => {
+  const check = deploymentScript.slice(deploymentScript.indexOf("function isSensitiveArchivePath(entry) {"), deploymentScript.indexOf("\nfunction requireSuccess("));
+  assert.match(check, /const segments = normalizedEntry\.split\("\/"\)/u);
+  assert.doesNotMatch(check, /\.test\(entry\)/u);
+});
+
+test("issuer discovery health checks do not mistake JSON response bodies for HTTP headers", () => {
+  const check = serverScript.slice(serverScript.indexOf("assert_production_response_headers() {"), serverScript.indexOf("\ndatabase_query() {"));
+  assert.match(check, /headers=\$\{headers%%\$'\\r\\n\\r\\n'\*\}/u);
+  assert.match(check, /headers=\$\{headers%%\$'\\n\\n'\*\}/u);
 });
 
 test("first install requires an empty isolated Virki target and leaves legacy and Tunnel state untouched", () => {

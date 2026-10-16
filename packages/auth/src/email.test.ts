@@ -50,6 +50,9 @@ test("SMTP configuration is fail-closed without contacting the provider", () => 
   };
 
   assert.equal(isSmtpEmailTransportConfigured(configured), true);
+  assert.equal(isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_SMTP_SECURE: "" }), true);
+  assert.equal(isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_SMTP_SECURE: " \t " }), true);
+  assert.equal(isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_SMTP_SECURE: "true" }), true);
   assert.equal(
     isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_FROM: "invalid" }),
     false

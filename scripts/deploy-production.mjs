@@ -53,19 +53,19 @@ function hasSensitiveArchiveExtension(name) {
 function isSensitiveArchivePath(entry) {
   const normalizedEntry = entry.replaceAll("\\", "/").toLowerCase().replace(/\/+$/u, "");
   if (normalizedEntry === "infra/backups" || normalizedEntry === backupDirectorySentinel) return false;
-  const segments = entry.split("/");
-  const normalizedSegments = segments.map((segment) => segment.toLowerCase());
+  const segments = normalizedEntry.split("/");
+  const normalizedSegments = segments;
   const name = segments.at(-1) ?? "";
   if (normalizedSegments.some((segment) => reservedArchiveSegments.has(segment) || segment.startsWith(".dev.vars.") ||
     (segment.startsWith(".env.") && segment !== ".env.example") || /^mail-attachments?$/u.test(segment) || /^takeout(?:[-_.]|$)/u.test(segment))) {
     return true;
   }
   if (normalizedSegments[0] === "infra" && normalizedSegments[1] === "cloudflare" && name.toLowerCase().endsWith(".json")) return true;
-  if (/^(?:\.aws\/(?:credentials|config)|secrets\/[^/]+\.(?:pem|key))$/iu.test(entry) ||
-    /(?:^|\/)id_(?:rsa|dsa|ecdsa|ed25519)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*$/iu.test(entry)) return true;
+  if (/^(?:\.aws\/(?:credentials|config)|secrets\/[^/]+\.(?:pem|key))$/iu.test(normalizedEntry) ||
+    /(?:^|\/)id_(?:rsa|dsa|ecdsa|ed25519)(?:\.(?:gz|gzip|bz2|xz|zst|lz4))*$/iu.test(normalizedEntry)) return true;
   if (hasSensitiveArchiveExtension(name)) return true;
   if (/\.(?:sqlite3?|db|dump|bak|backup|sql)(?:\.(?:gz|gzip|bz2|xz|zst|lz4)|-(?:wal|shm|journal))?$/iu.test(name) &&
-    !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/iu.test(entry)) return true;
+    !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/iu.test(normalizedEntry)) return true;
   return false;
 }
 

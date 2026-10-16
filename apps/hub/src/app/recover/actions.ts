@@ -9,7 +9,8 @@ import { redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../lib/surface";
-import { getRecoveryCookieOptions, LEGACY_RECOVERY_COOKIE, RECOVERY_COOKIE_NAME } from "../../lib/recovery";
+import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
+import { clearRecoveryCookie, setRecoveryCookie } from "./recovery-cookie";
 
 export async function requestRecoveryAction(formData: FormData) {
   const { requestHeaders } = await requireRecoveryAccess(formData, "recovery-request", "portal");
@@ -37,8 +38,7 @@ export async function openRecoveryAction(formData: FormData) {
   const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
   if (!recovery) redirect("/recover?error=1");
   const cookieStore = await cookies();
-  if (RECOVERY_COOKIE_NAME !== LEGACY_RECOVERY_COOKIE.name) cookieStore.delete(LEGACY_RECOVERY_COOKIE);
-  cookieStore.set(RECOVERY_COOKIE_NAME, requestKey, getRecoveryCookieOptions(recovery.expiresAt));
+  setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
   redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
 }
 
@@ -68,8 +68,7 @@ export async function completeRecoveryAction(formData: FormData) {
     redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
   }
   const cookieStore = await cookies();
-  cookieStore.delete({ name: RECOVERY_COOKIE_NAME, path: "/" });
-  if (RECOVERY_COOKIE_NAME !== LEGACY_RECOVERY_COOKIE.name) cookieStore.delete(LEGACY_RECOVERY_COOKIE);
+  clearRecoveryCookie(cookieStore);
   redirect("/login?recovered=1");
 }
 

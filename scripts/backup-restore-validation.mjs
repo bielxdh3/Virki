@@ -3,11 +3,12 @@ import { cp, mkdtemp, mkdir, readFile, rm, readdir, writeFile } from "node:fs/pr
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { PrismaClient } from "@prisma/client";
 import { describeBackupMigrationFailure } from "./lib/backup-migration-diagnostics.mjs";
 
-const repositoryRoot = process.cwd();
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
 const transitionName = "20260922090000_total_identity_security_rebaseline";
 const containerName = `virki-backup-validation-${process.pid}`;
@@ -73,7 +74,7 @@ try {
   await writeFile(dumpPath, dump, { mode: 0o600 });
 
   runDocker(["exec", containerName, "createdb", "-U", databaseUser, restoreDatabaseName]);
-  runDockerBinary(["exec", "-i", containerName, "pg_restore", "--clean", "--if-exists", "--no-owner", "--no-privileges", "-U", databaseUser, "-d", restoreDatabaseName], dump);
+  runDockerBinary(["exec", "-i", containerName, "pg_restore", "--exit-on-error", "--clean", "--if-exists", "--no-owner", "--no-privileges", "-U", databaseUser, "-d", restoreDatabaseName], dump);
 
   const restoredUrl = buildDatabaseUrl(port, restoreDatabaseName);
   restoredClient = new PrismaClient({ datasources: { db: { url: restoredUrl } } });
