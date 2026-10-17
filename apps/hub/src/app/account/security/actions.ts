@@ -110,7 +110,8 @@ export async function getAccountSecurityData() {
 async function requireAccountMutation(formData: FormData, source: string) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
-  if (!hasSameOrigin(requestHeaders) || surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) redirect("/login");
+  if (!hasSameOrigin(requestHeaders)) { await recordSecurityDenial(requestHeaders, source, "csrf"); redirect("/login"); }
+  if (surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) { await recordSecurityDenial(requestHeaders, source, "role"); redirect("/login"); }
   if (!(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "account-security"))) { await recordSecurityDenial(requestHeaders, source, "csrf"); redirect("/login"); }
   const session = await getCurrentSession();
   if (!session) { await recordSecurityDenial(requestHeaders, source, "role"); redirect("/login"); }

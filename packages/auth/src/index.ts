@@ -11,6 +11,7 @@ export {
   formatAuditEmailReference,
   hashAuditEmail,
   hashAuditIdentifier,
+  hashAuditSessionReference,
   hashAuditUserAgent,
   writeAuditLog,
   writeAuditLogRequired,

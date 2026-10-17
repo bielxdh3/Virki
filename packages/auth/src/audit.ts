@@ -222,6 +222,10 @@ export function hashAuditIdentifier(identifier: string): string {
   return createHash("sha256").update(identifier, "utf8").digest("hex");
 }
 
+export function hashAuditSessionReference(sessionId: string): string {
+  return hashAuditIdentifier(sessionId);
+}
+
 export function hashAuditUserAgent(userAgent: string | null): string | undefined {
   if (!userAgent) {
     return undefined;

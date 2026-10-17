@@ -92,9 +92,10 @@ export async function completeRecoveryAction(formData: FormData) {
 export async function approveRecoveryAction(formData: FormData) {
   return withHubAuditRequest(async () => {
   const requestHeaders = await headers();
-  if (!hasSameOrigin(requestHeaders) || getSurface(requestHeaders) !== "hub" || !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery-approve")) || !(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "admin-security"))) redirect("/login");
+  if (!hasSameOrigin(requestHeaders) || !(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "admin-security"))) { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "csrf"); redirect("/login"); }
+  if (getSurface(requestHeaders) !== "hub" || !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery-approve"))) { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "role"); redirect("/login"); }
   const session = await getCurrentSession();
-  if (!session || session.user.role !== "ADMIN") redirect("/login");
+  if (!session || session.user.role !== "ADMIN") { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "role", session); redirect("/login"); }
   try {
     await requireSecurityElevation(session.user.id, session.id, "ACCOUNT_STATE_CHANGE");
     await approveAccountRecovery(session.user, read(formData, "requestId"));
@@ -116,7 +117,7 @@ async function requireRecoveryAccess(formData: FormData, csrfScope: string, requ
       : "unknown";
   const recoverySurfaceAllowed = expectedSurface !== "unknown" && (!requiredSurface || expectedSurface === requiredSurface);
   if (!hasSameOrigin(requestHeaders) || !recoverySurfaceAllowed || !validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: csrfScope }).valid) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "csrf"); redirect("/login"); }
-  if (expectedSurface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery"))) redirect("/login");
+  if (expectedSurface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery"))) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); redirect("/login"); }
   return { requestHeaders, expectedRole: expectedSurface === "hub" ? "ADMIN" : "USER" };
 }
 

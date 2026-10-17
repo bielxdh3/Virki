@@ -147,11 +147,17 @@ test("transactional audit persistence sanitizes metadata and propagates storage 
   const input: AuditLogInput = {
     eventType: "ACCOUNT_STATE_CHANGED",
     result: "SUCCESS",
+    actorUserId: "verified-admin-id",
+    actorRole: "ADMIN",
+    sessionRef: "a".repeat(64),
     message: "Account updated.",
     metadata: { password: "placeholder", enabled: false }
   };
 
   await writeAuditLogInTransaction(transaction, input);
+  assert.equal(createdData?.actorUserId, "verified-admin-id");
+  assert.equal(createdData?.actorRole, "ADMIN");
+  assert.equal(createdData?.sessionRef, "a".repeat(64));
   assert.equal((createdData?.metadata as Record<string, unknown>).password, "[REDACTED]");
   assert.equal((createdData?.metadata as Record<string, unknown>).enabled, false);
 

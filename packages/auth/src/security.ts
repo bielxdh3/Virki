@@ -730,11 +730,11 @@ async function consumeChallengeAndCreateSession(transaction: Prisma.TransactionC
 async function createSessionInTransaction(transaction: Prisma.TransactionClient, userId: string, now: Date, authenticationMethods: string[] = ["pwd"]): Promise<CreatedLoginSession> {
   const token = generateSessionToken();
   const expiresAt = getSessionExpiresAt(now);
-  await transaction.session.create({ data: { sessionKey: randomBytes(24).toString("base64url"), userId, tokenHash: hashSessionToken(token), authenticationMethods, expiresAt, createdAt: now } });
-  return { userId, token, expiresAt };
+  const session = await transaction.session.create({ data: { sessionKey: randomBytes(24).toString("base64url"), userId, tokenHash: hashSessionToken(token), authenticationMethods, expiresAt, createdAt: now }, select: { id: true } });
+  return { id: session.id, userId, token, expiresAt };
 }
 
-export type CreatedLoginSession = { userId: string; token: string; expiresAt: Date };
+export type CreatedLoginSession = { id: string; userId: string; token: string; expiresAt: Date };
 
 export async function invalidateRememberedLoginGrantsForUser(userId: string): Promise<void> {
   await prisma.$transaction(async (transaction) => {

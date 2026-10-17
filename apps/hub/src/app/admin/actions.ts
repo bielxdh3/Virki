@@ -3,7 +3,7 @@
 import { withHubAuditRequest } from "../../lib/audit-request";
 
 import { randomBytes } from "node:crypto";
-import { normalizeEmail, writeAuditLogInTransaction } from "@virki/auth";
+import { hashAuditSessionReference, normalizeEmail, writeAuditLogInTransaction } from "@virki/auth";
 import { provisionInvitedUserAccount } from "@virki/auth/account-invitation";
 import { revokeUserAuthenticationProofsInTransaction } from "@virki/auth/security";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
@@ -159,7 +159,7 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
         },
         select: { id: true }
       });
-      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_CREATED", result: "SUCCESS", actorUserId: actor.user.id, resource: "project.connection", message: "External OIDC connection created.", metadata: { connectionRef: hashOidcIdentifier(created.id), clientRef: hashOidcIdentifier(clientId) } });
+      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_CREATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "External OIDC connection created.", metadata: { connectionRef: hashOidcIdentifier(created.id), clientRef: hashOidcIdentifier(clientId) } });
     });
     revalidatePath("/admin/connections");
     return { status: "created", clientId, secret };
@@ -223,6 +223,8 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
         eventType: "PROJECT_CONNECTION_UPDATED",
         result: "SUCCESS",
         actorUserId: actor.user.id,
+        actorRole: "ADMIN",
+        sessionRef: hashAuditSessionReference(actor.id),
         resource: "project.connection",
         message: oidcSettingsChanged ? "External OIDC connection settings updated and outstanding artifacts cleared." : "External project connection updated.",
         metadata: {
@@ -287,7 +289,7 @@ export async function rotateProjectClientSecretAction(_state: ConnectionActionSt
       const rotated = await compareAndSetProjectConnectionSecret(transaction, connection, encryptOidcClientSecret(secret));
       if (!rotated) throw new Error("Project connection changed before secret rotation completed.");
       await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
-      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, resource: "project.connection", message: "Client secret rotated and outstanding OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id), clientRef: hashOidcIdentifier(connection.clientId) } });
+      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "Client secret rotated and outstanding OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id), clientRef: hashOidcIdentifier(connection.clientId) } });
     });
     revalidatePath("/admin/connections");
     return { status: "rotated", clientId: connection.clientId, secret };
@@ -308,7 +310,7 @@ export async function setProjectConnectionEnabledAction(formData: FormData): Pro
     await prisma.$transaction(async (transaction) => {
       const connection = await transaction.projectConnection.update({ where: { id: connectionId }, data: { enabled }, select: { id: true, clientId: true } });
       if (!enabled) await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
-      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, resource: "project.connection", message: enabled ? "External connection enabled." : "External connection disabled and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
+      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: enabled ? "External connection enabled." : "External connection disabled and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
     });
     revalidatePath("/admin/connections");
     redirect("/admin/connections?status=updated");
@@ -332,7 +334,7 @@ export async function deleteProjectConnectionAction(formData: FormData): Promise
     await prisma.$transaction(async (transaction) => {
       await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
       await transaction.projectConnection.delete({ where: { id: connectionId } });
-      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_REVOKED", result: "SUCCESS", actorUserId: actor.user.id, resource: "project.connection", message: "External connection deleted and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
+      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_REVOKED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "External connection deleted and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
     });
     revalidatePath("/admin/connections");
     redirect("/admin/connections?status=deleted");

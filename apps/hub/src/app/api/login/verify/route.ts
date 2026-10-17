@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
-import { createAuditRequestMetadata, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@virki/auth";
+import { createAuditRequestMetadata, hashAuditSessionReference, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@virki/auth";
 import { DEVICE_COOKIE_NAME, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@virki/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../../lib/surface";
@@ -76,7 +76,7 @@ export async function POST(request: Request) {
 }
 
 async function sessionResponse(
-  session: { userId: string; token: string; expiresAt: Date },
+  session: { id: string; userId: string; token: string; expiresAt: Date },
   baseUrl: URL,
   returnTo: string | null,
   surface: LoginSurface,
@@ -85,7 +85,7 @@ async function sessionResponse(
   recoveredFallback?: string
 ) {
   return createLoginResponseAfterRequiredAudit(
-    () => writeAuditLogRequired({ ...createVerifiedLoginAudit(session.userId, surface, factor, requestMetadata), sessionRef: hashAuditIdentifier(`audit-session:${session.token}`), actorRole: surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined }),
+    () => writeAuditLogRequired({ ...createVerifiedLoginAudit(session.userId, surface, factor, requestMetadata), sessionRef: hashAuditSessionReference(session.id), actorRole: surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined }),
     () => {
       const response = NextResponse.redirect(new URL(returnTo ?? recoveredFallback ?? (surface === "hub" ? "/admin/accounts" : "/"), baseUrl), { status: 303 });
       response.cookies.set(SESSION_COOKIE_NAME, session.token, getSessionCookieOptions(session.expiresAt));
