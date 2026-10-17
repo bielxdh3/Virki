@@ -25,7 +25,7 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
   const candidate = params?.switch === "1" && params.requestId && candidateKey
     ? await getAccountRecoveryRequestId(candidateKey, new Date(), expectedRole)
     : null;
-  const confirmRecoverySwitch = candidate?.id === params?.requestId;
+  const confirmRecoverySwitch = Boolean(candidate && params?.requestId && candidate.id === params.requestId);
   const csrf = {
     request: createCsrfToken({ scope: "recovery-request" }),
     adminRequest: createCsrfToken({ scope: "recovery-admin-request" }),

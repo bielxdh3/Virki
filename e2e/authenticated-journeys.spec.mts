@@ -600,7 +600,36 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     const approvalMessage = await readLatestRecoveryEmail(prisma, fixture.admin.email, "account-recovery-approved:");
     expect(new URL(approvalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(hubUrl);
     await hubPage.goto(approvalMessage.actionUrl!);
-    await expect(hubPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
+    await expect(hubPage.getByRole("status")).toContainText("Outro link está aberto nesta sessão.");
+    await expect(hubPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
+    const recoveryCookiesBeforeSwitch = await hubContext.cookies(hubUrl);
+    const candidateRecoveryKey = recoveryCookiesBeforeSwitch.find((cookie) => cookie.name.includes("recovery_candidate"))?.value;
+    const switchResponses: string[] = [];
+    hubPage.on("response", (response) => {
+      const request = response.request();
+      const responseUrl = new URL(response.url());
+      if (request.method() !== "POST" || responseUrl.origin !== hubUrl) return;
+      const rawRedirect = response.headers()["x-action-redirect"]?.split(";")[0];
+      let redirectSummary = "none";
+      if (rawRedirect) {
+        try {
+          const redirectUrl = new URL(rawRedirect, hubUrl);
+          redirectSummary = `${redirectUrl.origin}${redirectUrl.pathname}?${[...redirectUrl.searchParams.keys()].join(",")}`;
+        } catch { redirectSummary = "unparseable"; }
+      }
+      switchResponses.push(`${response.status()} ${responseUrl.pathname} redirect=${redirectSummary}`);
+    });
+    await hubPage.getByRole("button", { name: "Continuar com este link", exact: true }).click();
+    try {
+      await expect(hubPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
+    } catch {
+      const currentUrl = new URL(hubPage.url());
+      const recoveryCookiesAfterSwitch = await hubContext.cookies(hubUrl);
+      const activeRecoveryKey = recoveryCookiesAfterSwitch.find((cookie) => cookie.name.includes("recovery_v2") || cookie.name.includes("__Host-virki_recovery"))?.value;
+      const candidateStillPresent = recoveryCookiesAfterSwitch.some((cookie) => cookie.name.includes("recovery_candidate") && Boolean(cookie.value));
+      const heading = await hubPage.getByRole("heading", { level: 1 }).textContent().catch(() => null);
+      throw new Error(`Recovery link switch did not complete (origin=${currentUrl.origin}; path=${currentUrl.pathname}; queryKeys=${[...currentUrl.searchParams.keys()].join(",")}; heading=${heading ?? "missing"}; candidateBefore=${Boolean(candidateRecoveryKey)}; candidateAfter=${candidateStillPresent}; activeMatchesCandidate=${Boolean(candidateRecoveryKey && activeRecoveryKey === candidateRecoveryKey)}; responses=${switchResponses.join("|") || "none"}).`);
+    }
     await hubPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
     await hubPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     await expect(hubPage).toHaveURL(`${hubUrl}/login?recovered=1`);

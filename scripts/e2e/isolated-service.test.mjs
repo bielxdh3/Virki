@@ -99,9 +99,13 @@ test("Playwright loads E2E config, setup, and OIDC spec through their ESM entryp
     assert.match(setupOutput, /1 skipped/u, "the real OIDC spec was discovered and safely skipped without a fixture");
 
     const configPathUnderTest = resolve(repositoryRoot, "playwright.config.mts");
+    const rootCaCountBeforeListing = process.platform === "win32" ? getCurrentUserRootCaCount() : undefined;
     const listingResult = spawnSync(process.execPath, [cliPath, "test", "--list", "--config", configPathUnderTest], options);
     assert.ifError(listingResult.error);
     const listingOutput = `${listingResult.stdout ?? ""}\n${listingResult.stderr ?? ""}`;
+    if (rootCaCountBeforeListing !== undefined) {
+      assert.equal(getCurrentUserRootCaCount(), rootCaCountBeforeListing, "Playwright test listing must not change the current-user root store");
+    }
     assert.equal(listingResult.status, 0, `Playwright could not load the actual ESM config and tests.\n${listingOutput}`);
     assert.match(listingOutput, /oidc-authorization-code\.spec\.mts/u, "the OIDC ESM spec is discoverable from the real config");
     assert.match(listingOutput, /authenticated-journeys\.spec\.mts/u, "the authenticated ESM spec is discoverable from the real config");
@@ -110,6 +114,14 @@ test("Playwright loads E2E config, setup, and OIDC spec through their ESM entryp
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+function getCurrentUserRootCaCount() {
+  const rootStoreCommand = "$store=[System.Security.Cryptography.X509Certificates.X509Store]::new('Root','CurrentUser'); $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly); try { @($store.Certificates | Where-Object { $_.Subject -like '*CN=Virki E2E Root CA*' }).Count } finally { $store.Close(); $store.Dispose() }";
+  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", rootStoreCommand], { encoding: "utf8", windowsHide: true });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, "the Windows current-user root store was readable");
+  return Number(result.stdout.trim());
+}
 
 test("Hub Next dev receives the private E2E CA for its server worker", () => {
   const tlsDirectory = mkdtempSync(join(tmpdir(), "virki-e2e-next-tls-"));

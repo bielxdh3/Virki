@@ -12,9 +12,17 @@ for (const surface of surfaces) {
     try {
       const page = await context.newPage();
       if (surface.name === "Hub") await addCloudflareAccessHeader(page);
-      const applicationErrors: string[] = [];
+      const applicationErrors = new Set<string>();
       page.on("console", (message) => {
-        if (message.type() === "error" || /hydration|server-rendered html/iu.test(message.text())) applicationErrors.push(message.text());
+        const text = message.text();
+        const location = message.location();
+        // Next's dev overlay injects inline styles that conflict with the app's nonce-only CSP.
+        const nextDevtoolsStyleViolation = text.startsWith("Applying inline style violates the following Content Security Policy directive 'style-src ")
+          && location.url.includes("/node_modules/next/dist/compiled/next-devtools/");
+        if (nextDevtoolsStyleViolation) return;
+        if (message.type() === "error" || /hydration|server-rendered html/iu.test(text)) {
+          applicationErrors.add(`${location.url}:${location.lineNumber}`);
+        }
       });
 
       await page.goto(`${surface.url}/login?error=1`);
@@ -49,7 +57,7 @@ for (const surface of surfaces) {
       await expect(form).toBeVisible();
       expect(submits).toHaveLength(0);
       expect(new URL(page.url()).pathname).toBe("/login");
-      expect(applicationErrors).toEqual([]);
+      expect([...applicationErrors]).toEqual([]);
     } finally {
       await context.close();
     }
