@@ -61,3 +61,13 @@ test("an anonymous request after approval cannot expire the approved recovery", 
   assert.equal(await verifyPassword(stored.passwordHash ?? "", newPassword), true);
   await assert.rejects(consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "integration-replayed-password", attackerTime));
 });
+
+
+test("portal recovery abuse does not spend the hub address or source budget", integrationOptions, async () => {
+  const admin = await createTestUser({ role: "ADMIN", label: "recovery-isolation" });
+  const security = await import("./security");
+  const base = new Date();
+  for (let index = 0; index < 6; index += 1) await security.requestAccountRecovery(admin.email, "pt-BR", new Date(base.getTime() + index * 1000), "192.0.2.221");
+  await security.requestAdministrativeAccountRecovery(admin.email, "pt-BR", new Date(base.getTime() + 7000), "192.0.2.221");
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { userId: admin.id } }), 1);
+});

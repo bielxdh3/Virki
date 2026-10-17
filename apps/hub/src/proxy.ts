@@ -12,8 +12,7 @@ const PUBLIC_ROUTES = new Set([
   "/api/logout",
   "/api/health",
   "/recover",
-  "/recover/open",
-  "/api/recover"
+  "/recover/open"
 ]);
 const OIDC_ROOT_ROUTES = new Set([
   "/auth",

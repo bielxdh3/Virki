@@ -12,6 +12,7 @@ import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import {
   consumeRateLimitAttemptInTransaction,
+  refundRateLimitAttemptInTransaction,
   generateSessionToken,
   getSessionExpiresAt,
   hashPassword,
@@ -308,6 +309,7 @@ export async function startLoginCeremony(
         throw new SecurityMutationError();
       }
       stage = "trusted-device-lookup";
+      await transaction.trustedDevice.updateMany({ where: { userId, status: "TRUSTED", createdAt: { lte: new Date(now.getTime() - DEVICE_TRUST_TTL_MS) } }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
       const candidateHash = candidateToken ? hashDeviceToken(candidateToken) : undefined;
       const trusted = candidateHash ? await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash: candidateHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } }) : null;
       const resolvedDevice = resolveLoginDeviceToken(candidateToken, trusted);
@@ -401,6 +403,8 @@ export async function verifyLoginEmailCode(ceremonyId: string, code: string, dev
       const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
       if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
       if (!verifySecurityCode(code, challenge.codeHash)) return { kind: "INVALID" as const };
+      await refundRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, accountAttempt.windowStartedAt, 5);
+      await refundRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, ceremonyAttempt.windowStartedAt, 5);
       const verified = await transaction.deviceChallenge.updateMany({ where: { id: challenge.id, deviceIdHash: challenge.deviceIdHash, emailAddressHash: challenge.emailAddressHash, status: "PENDING", consumedAt: null, expiresAt: { gt: now } }, data: { status: "VERIFIED", emailVerifiedAt: now } });
       if (verified.count !== 1) throw new SecurityMutationError();
       await transaction.user.update({ where: { id: challenge.userId }, data: { emailVerifiedAt: now } });
@@ -438,6 +442,8 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, devi
       const factor = challenge.user.totpFactor;
       const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
       if (step === null) return { kind: "INVALID" as const };
+      await refundRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, accountAttempt.windowStartedAt, 5);
+      await refundRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, ceremonyAttempt.windowStartedAt, 5);
       const claimed = await transaction.totpFactor.updateMany({ where: { id: factor.id, status: "ACTIVE", lastUsedStep: factor.lastUsedStep }, data: { lastUsedStep: step } });
       if (claimed.count !== 1) throw new SecurityMutationError();
       await trustLoginDevice(transaction, challenge.userId, challenge.deviceIdHash, now);
@@ -496,6 +502,8 @@ export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, 
       const consumedCode = await transaction.recoveryCode.updateMany({ where: { id: recoveryCode.id, usedAt: null }, data: { usedAt: now } });
       if (consumedCode.count !== 1) return { kind: "INVALID" as const };
 
+      await refundRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, accountAttempt.windowStartedAt, 5);
+      await refundRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, ceremonyAttempt.windowStartedAt, 5);
       const disabled = await transaction.totpFactor.updateMany({ where: { id: factor.id, status: "ACTIVE", lastUsedStep: factor.lastUsedStep }, data: { status: "REVOKED" } });
       if (disabled.count !== 1) throw new SecurityMutationError();
       await transaction.user.update({ where: { id: challenge.userId }, data: { secondFactorMethod: "EMAIL" } });
@@ -557,13 +565,13 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
   if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(trustedClientAddress)) return;
   if (trustedClientAddress) {
     if (!isTrustedClientAddress(trustedClientAddress)) return;
-    const sourceAttempt = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `recovery-source:${trustedClientAddress}`, now, 30));
+    const sourceAttempt = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `recovery-source:${expectedRole}:${trustedClientAddress}`, now, 30));
     if (!sourceAttempt.allowed) return;
   }
   const normalizedEmail = email.trim().toLowerCase();
   if (normalizedEmail.length > 320 || !/^\S+@\S+$/.test(normalizedEmail)) return;
   const addressAttempt = await prisma.$transaction((transaction) =>
-    consumeRateLimitAttemptInTransaction(transaction, `account-recovery-address:${normalizedEmail}`, now)
+    consumeRateLimitAttemptInTransaction(transaction, `account-recovery-address:${expectedRole}:${normalizedEmail}`, now)
   );
   if (!addressAttempt.allowed) return;
   const actionBase = getRecoveryActionBaseUrl(expectedRole);
@@ -572,7 +580,7 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
   if (!user || !isAccountRecoveryEligible(user, expectedRole)) return;
   try {
     const requested = await prisma.$transaction(async (transaction) => {
-      const rateLimitIdentifier = `account-recovery:${normalizedEmail}`;
+      const rateLimitIdentifier = `account-recovery:${expectedRole}:${normalizedEmail}`;
       await lockRateLimitIdentifierInTransaction(transaction, rateLimitIdentifier);
       if (!await lockActiveRecoveryAccountInTransaction(transaction, user.id, expectedRole)) return false;
       const latestRequest = await transaction.accountRecoveryRequest.findFirst({ where: { userId: user.id }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });

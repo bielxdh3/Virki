@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { PrismaClient, prisma } from "@virki/database";
 import { createTestUser, integrationOptions, uniqueEmail } from "./integration-fixtures";
-import { authenticateUserWithRateLimit, hashPassword, verifyPassword } from "./index";
+import { authenticateUserWithRateLimit, cleanupExpiredLoginRateLimits, hashPassword, verifyPassword } from "./index";
 
 // Source buckets are shared across runs of this disposable database; start from a clean limiter.
 before(async () => {
@@ -117,4 +117,39 @@ test("Argon2 runs outside any database transaction and concurrent logins all suc
   } finally {
     await monitor.$disconnect();
   }
+});
+
+
+test("owner successes cannot erase interleaved guesses from other sources", integrationOptions, async () => {
+  const user = await createTestUser({ label: "login-interleaved" });
+  for (let index = 0; index < 20; index += 1) {
+    if (index < 19) assert.ok((await authenticateUserWithRateLimit(user.email, user.password, new Date(), "192.0.2.201")).user);
+    assert.equal((await authenticateUserWithRateLimit(user.email, "wrong", new Date(), `192.0.2.${index + 1}`)).failureMode, "invalid-credentials");
+  }
+  assert.equal((await authenticateUserWithRateLimit(user.email, "wrong", new Date(), "192.0.2.202")).failureMode, "rate-limited");
+});
+
+test("expired cleanup observes limiter locks and preserves a concurrently refreshed row", integrationOptions, async () => {
+  const identifier = `cleanup-lock-${crypto.randomUUID()}`;
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  const hash = createRateLimitIdentifierHash(identifier);
+  const now = new Date();
+  await prisma.loginRateLimit.create({ data: { identifierHash: hash, attempts: 1, windowStartedAt: new Date(now.getTime() - 86400_000), expiresAt: new Date(now.getTime() - 1000) } });
+  let release!: () => void;
+  let locked!: () => void;
+  const lockReady = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const writer = prisma.$transaction(async (transaction) => {
+    await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${hash}, 0)) IS NULL AS "locked"`;
+    locked();
+    await gate;
+    await transaction.loginRateLimit.update({ where: { identifierHash: hash }, data: { expiresAt: new Date(now.getTime() + 86400_000), windowStartedAt: now } });
+  });
+  await lockReady;
+  let cleaned = false;
+  const cleanup = cleanupExpiredLoginRateLimits(now).then(() => { cleaned = true; });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  try { assert.equal(cleaned, false, "cleanup must honor the writer's advisory lock"); }
+  finally { release(); await writer; await cleanup; }
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: hash } }), 1);
 });

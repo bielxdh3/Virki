@@ -5,7 +5,7 @@ import { normalizeEmail, writeAuditLogInTransaction } from "@virki/auth";
 import { provisionInvitedUserAccount } from "@virki/auth/account-invitation";
 import { revokeUserAuthenticationProofsInTransaction } from "@virki/auth/security";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
-import { AdministrationMutationError, requireSecurityElevation } from "@virki/auth/administration";
+import { AdministrationMutationError, grantProjectAccess, revokeProjectAccess, requireSecurityElevation } from "@virki/auth/administration";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -95,17 +95,7 @@ export async function grantProjectAccessAction(formData: FormData): Promise<void
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_ACCESS_CHANGE");
     const userId = readFormString(formData, "userId");
     const connectionId = readFormString(formData, "connectionId");
-    const user = await prisma.user.findFirst({ where: { id: userId, role: "USER", isActive: true, accountStatus: "ACTIVE" }, select: { id: true } });
-    const connection = await prisma.projectConnection.findFirst({ where: { id: connectionId, enabled: true }, select: { id: true } });
-    if (!user || !connection) throw new Error("Invalid access grant.");
-    await prisma.$transaction(async (transaction) => {
-      await transaction.userProjectGrant.upsert({
-        where: { userId_connectionId: { userId, connectionId } },
-        create: { userId, connectionId, grantedByUserId: actor.user.id },
-        update: { revokedAt: null, grantedByUserId: actor.user.id }
-      });
-      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_ACCESS_GRANTED", result: "SUCCESS", actorUserId: actor.user.id, resource: "project.access", message: "Project access granted.", metadata: { userRef: hashOidcIdentifier(userId), connectionRef: hashOidcIdentifier(connectionId) } });
-    });
+    await grantProjectAccess(actor.user, actor.id, userId, connectionId);
     revalidatePath("/admin/access");
     redirect("/admin/access?status=granted");
   } catch (error) {
@@ -119,13 +109,7 @@ export async function revokeProjectAccessAction(formData: FormData): Promise<voi
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_ACCESS_CHANGE");
     const grantId = readFormString(formData, "grantId");
-    const grant = await prisma.userProjectGrant.findUnique({ where: { id: grantId }, select: { id: true, userId: true, connectionId: true, connection: { select: { clientId: true } } } });
-    if (!grant) throw new Error("Invalid access grant.");
-    await prisma.$transaction(async (transaction) => {
-      await transaction.userProjectGrant.update({ where: { id: grant.id }, data: { revokedAt: new Date() } });
-      await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(grant.connection.clientId), accountIdHash: hashOidcIdentifier(grant.userId) } });
-      await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_ACCESS_REVOKED", result: "SUCCESS", actorUserId: actor.user.id, resource: "project.access", message: "Project access revoked and OIDC artifacts cleared.", metadata: { userRef: hashOidcIdentifier(grant.userId), connectionRef: hashOidcIdentifier(grant.connectionId) } });
-    });
+    await revokeProjectAccess(actor.user, actor.id, grantId);
     revalidatePath("/admin/access");
     redirect("/admin/access?status=revoked");
   } catch (error) {

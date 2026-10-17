@@ -9,6 +9,7 @@ import {
   consumeApprovedAccountRecovery,
   createTotpSecret,
   disableTotp,
+  DEVICE_TRUST_TTL_MS,
   generateRecoveryCode,
   getAccountRecoveryRequestId,
   hashDeviceToken,
@@ -255,13 +256,15 @@ test("an emailed proof does not spend the recovery-code verification budget", in
   assert.deepEqual(await verifyLoginRecoveryCode(ceremony.ceremonyId, "anything", ceremony.deviceToken, later), { kind: "EMAIL_REQUIRED" });
   assert.deepEqual(await verifyLoginEmailCode(ceremony.ceremonyId, await latestLoginCode(user.email), ceremony.deviceToken, later), { requiresTotp: true, session: null });
 
-  // The emailed code spends one attempt; three wrong codes plus the valid recovery code fit in the five-attempt budget.
+  // Successful proofs refund only their reservation; the three failed recovery guesses remain counted.
   for (let index = 0; index < 3; index += 1) {
     await assert.rejects(verifyLoginRecoveryCode(ceremony.ceremonyId, generateRecoveryCode(), ceremony.deviceToken, later), SecurityMutationError);
   }
   const recovered = await verifyLoginRecoveryCode(ceremony.ceremonyId, recoveryCode, ceremony.deviceToken, later);
   assert.ok(recovered.kind === "RECOVERED");
   assert.ok(recovered.session.token);
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: createRateLimitIdentifierHash(`login-verification-user:${user.id}`) } })).attempts, 3);
 
   const factor = await prisma.totpFactor.findUnique({ where: { userId: user.id }, select: { status: true } });
   assert.equal(factor?.status, "REVOKED");
@@ -303,4 +306,55 @@ test("an approved account recovery purges OIDC artifacts for that account only",
 
   assert.equal(await countOidcArtifacts(owner.id), 0);
   assert.equal(await countOidcArtifacts(other.id), 1);
+});
+
+
+test("successful email and TOTP ceremonies preserve the shared verification failure budget", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const user = await createTestUser({ totpSecret: secret, label: "mfa-success-budget" });
+  const base = new Date();
+  for (let index = 0; index < 4; index += 1) await completeEmailAndTotpLogin(user, secret, new Date(base.getTime() + index * 60_000));
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: (await import("./rate-limit-config")).createRateLimitIdentifierHash(`login-verification-user:${user.id}`), attempts: { gt: 0 } } }), 0);
+});
+
+test("aged trusted-device tokens are revoked and cannot restore a remembered grant", integrationOptions, async () => {
+  const user = await createTestUser({ label: "device-aged" });
+  const base = new Date();
+  const { deviceToken } = await completeEmailLogin(user.id, user.email, base);
+  await prisma.trustedDevice.updateMany({ where: { userId: user.id }, data: { createdAt: new Date(base.getTime() - DEVICE_TRUST_TTL_MS), lastSeenAt: base } });
+  const replay = ceremonyOf(await startLoginCeremony(user.id, deviceToken, "pt-BR", base));
+  assert.equal(replay.newDevice, true);
+  assert.notEqual(replay.deviceToken, deviceToken);
+  const aged = await prisma.trustedDevice.findUniqueOrThrow({ where: { userId_deviceIdHash: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken) } } });
+  assert.equal(aged.status, "REVOKED");
+  assert.ok(aged.revokedAt);
+  assert.equal(aged.rememberedUntil, null);
+});
+
+test("forced reauthentication on a remembered browser still requires MFA", integrationOptions, async () => {
+  const user = await createTestUser({ label: "fresh-reauth" });
+  const base = new Date();
+  const { deviceToken } = await completeEmailLogin(user.id, user.email, base);
+  const forced = ceremonyOf(await startLoginCeremony(user.id, deviceToken, "pt-BR", new Date(base.getTime() + 1000), true, "USER"));
+  assert.equal(forced.factor, "EMAIL");
+  await assert.rejects(verifyLoginTotpCode(forced.ceremonyId, "000000", forced.deviceToken, base, "USER"), SecurityMutationError);
+});
+
+
+test("failed email proofs remain limited across ceremonies after successful proofs", integrationOptions, async () => {
+  const user = await createTestUser({ label: "mfa-failures-persist" });
+  const base = new Date();
+  const first = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", base));
+  const firstCode = await latestLoginCode(user.email);
+  const firstWrong = firstCode === "000000" ? "000001" : "000000";
+  for (let attempt = 0; attempt < 4; attempt += 1) await assert.rejects(verifyLoginEmailCode(first.ceremonyId, firstWrong, first.deviceToken, base), SecurityMutationError);
+  await verifyLoginEmailCode(first.ceremonyId, await latestLoginCode(user.email), first.deviceToken, base);
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  const identifierHash = createRateLimitIdentifierHash(`login-verification-user:${user.id}`);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash } })).attempts, 4, "successful proof preserves four failures");
+  const second = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", new Date(base.getTime() + 1000)));
+  const secondCode = await latestLoginCode(user.email);
+  await assert.rejects(verifyLoginEmailCode(second.ceremonyId, secondCode === "000000" ? "000001" : "000000", second.deviceToken, base), SecurityMutationError);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash } })).attempts, 5, "failure on another ceremony reaches shared limit");
+  await assert.rejects(verifyLoginEmailCode(second.ceremonyId, await latestLoginCode(user.email), second.deviceToken, base), SecurityMutationError);
 });

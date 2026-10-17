@@ -24,6 +24,7 @@ test("validates a signed Access JWT against its issuer, audience, and JWKS", asy
       .setIssuer(teamDomain)
       .setAudience(audience)
       .setIssuedAt()
+      .setNotBefore("0s")
       .setExpirationTime("2m")
       .sign(privateKey);
     const result = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), {
@@ -206,4 +207,22 @@ test("never returns raw JOSE or private failure details", () => {
     assert.equal(category, "invalid-cloudflare-access-jwt");
     assert.equal(category.includes(privateValue), false);
   }
+});
+
+
+test("Access rejects signed tokens with missing temporal claims or invalid time boundaries", async () => {
+  const teamDomain = "https://temporal-jwt-test.example.invalid";
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = await exportJWK(publicKey);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ keys: [{ ...jwk, kid: "time-key", use: "sig", alg: "RS256" }] }))) as typeof fetch;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const valid = { iat: now - 10, nbf: now - 10, exp: now + 60 };
+    for (const claims of [{ iat: valid.iat, nbf: valid.nbf }, { nbf: valid.nbf, exp: valid.exp }, { iat: valid.iat, exp: valid.exp }, { ...valid, exp: now }, { ...valid, nbf: now + 60 }, { ...valid, iat: now + 60 }]) {
+      const token = await new SignJWT(claims).setProtectedHeader({ alg: "RS256", kid: "time-key" }).setIssuer(teamDomain).setAudience("time-audience").sign(privateKey);
+      const result = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), { CLOUDFLARE_ACCESS_JWT_REQUIRED: "true", CLOUDFLARE_ACCESS_AUDIENCE: "time-audience", CLOUDFLARE_TEAM_DOMAIN: teamDomain });
+      assert.equal(result.allowed, false, JSON.stringify(claims));
+    }
+  } finally { globalThis.fetch = originalFetch; }
 });

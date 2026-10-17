@@ -77,8 +77,11 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
 }
 
 export async function getAccountSecurityData() {
+  const requestHeaders = await headers();
+  const surface = getSurface(requestHeaders);
+  if (surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-security-data")))) return null;
   const session = await getCurrentSession();
-  if (!session) return null;
+  if (!session || (surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) return null;
   const now = new Date();
   const [state, devices, sessions] = await Promise.all([
     getAccountSecurityState(session.user.id),

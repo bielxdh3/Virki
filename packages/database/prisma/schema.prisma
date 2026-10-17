@@ -216,7 +216,7 @@ model AuditLog {
   message        String?
   metadata       Json?
   createdAt      DateTime @default(now())
-  actor          User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  actor          User?    @relation(fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([eventType])
   @@index([actorUserId])

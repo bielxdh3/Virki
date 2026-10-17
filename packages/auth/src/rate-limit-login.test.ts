@@ -55,7 +55,7 @@ test("successful logins release their source reservations without clearing faile
   } as unknown as Prisma.TransactionClient;
   const testPrisma = prisma as unknown as {
     $transaction: (callback: (client: Prisma.TransactionClient) => Promise<unknown>) => Promise<unknown>;
-    loginRateLimit: { deleteMany: (args: unknown) => Promise<{ count: number }> };
+    loginRateLimit: { deleteMany: (args: unknown) => Promise<{ count: number }>; findMany?: () => Promise<unknown[]> };
     user: unknown;
   };
   const originalTransaction = prisma.$transaction;
@@ -69,7 +69,7 @@ test("successful logins release their source reservations without clearing faile
     if (transactionCount === 6) throw new Error("Simulated lost commit acknowledgment.");
     return result;
   };
-  testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }) };
+  testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }), findMany: async () => [] };
   testPrisma.user = { findUnique: async () => user };
 
   try {
@@ -128,14 +128,14 @@ test("a surface-scoped login treats other roles as missing accounts and keeps se
   } as unknown as Prisma.TransactionClient;
   const testPrisma = prisma as unknown as {
     $transaction: (callback: (client: Prisma.TransactionClient) => Promise<unknown>) => Promise<unknown>;
-    loginRateLimit: { deleteMany: (args: unknown) => Promise<{ count: number }> };
+    loginRateLimit: { deleteMany: (args: unknown) => Promise<{ count: number }>; findMany?: () => Promise<unknown[]> };
     user: unknown;
   };
   const originalTransaction = prisma.$transaction;
   const originalRateLimitDelegate = prisma.loginRateLimit;
   const originalUserDelegate = prisma.user;
   testPrisma.$transaction = async (callback) => callback(transaction);
-  testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }) };
+  testPrisma.loginRateLimit = { deleteMany: async () => ({ count: 0 }), findMany: async () => [] };
   testPrisma.user = { findUnique: async () => admin };
 
   try {

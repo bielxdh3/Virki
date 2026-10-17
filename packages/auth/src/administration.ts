@@ -3,6 +3,7 @@ import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
 import { generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode, verifySecurityCode } from "./security";
 import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashPassword, verifyPassword, writeAuditLogInTransaction, type AuditLogInput } from "./index";
 import { prisma, type Prisma } from "@virki/database";
+import { hashOidcIdentifier } from "./oidc-secrets";
 import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
 
 export { ELEVATION_SCOPES, ELEVATION_SCOPE_ACTIONS, UI_ELEVATION_SCOPES } from "./elevation-scopes";
@@ -131,6 +132,7 @@ export async function verifySecurityElevation(input: { actor: { id: string; role
   await requireAdminSession(input.actor, input.sessionId, now);
   await consumeAdministrativeProofAttempts(input.actor.id, input.requestKey, now);
   await prisma.$transaction(async (transaction) => {
+    await lockAdminSessionInTransaction(transaction, input.actor.id, input.sessionId, now);
     const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, undefined, now);
     if (!isAllowedScope(ceremony.scope)) throw new AdministrationMutationError();
     if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
@@ -156,7 +158,7 @@ export async function hasActiveSecurityElevation(userId: string, sessionId: stri
   if (!isDatabaseId(userId) || !isDatabaseId(sessionId) || !isAllowedScope(scope)) return false;
   await expireSecurityElevations(now);
   const [row, session] = await Promise.all([
-    prisma.securityElevation.findFirst({ where: { userId, sessionId, scope, status: "ACTIVE", user: { isActive: true, accountStatus: "ACTIVE" }, OR: [{ manualUntilRevoked: true }, { expiresAt: { gt: now } }] }, select: { id: true } }),
+    prisma.securityElevation.findFirst({ where: { userId, sessionId, scope, status: "ACTIVE", user: { role: "ADMIN", isActive: true, accountStatus: "ACTIVE" }, OR: [{ manualUntilRevoked: true }, { expiresAt: { gt: now } }] }, select: { id: true } }),
     prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true, revokedAt: true, expiresAt: true } })
   ]);
   return Boolean(row && session?.userId === userId && !session.revokedAt && session.expiresAt > now);
@@ -190,16 +192,20 @@ export async function changeAdministrativePassword(actor: { id: string; role: st
   await assertNotNormalPassword(admin.passwordHash, newPassword);
   const passwordHash = await hashPassword(newPassword);
   await prisma.$transaction(async (transaction) => {
-    await transaction.administrativeCredential.update({ where: { userId: actor.id }, data: { passwordHash, status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null } });
+    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ADMIN_CREDENTIAL_CHANGE", now);
+    const changed = await transaction.administrativeCredential.updateMany({ where: { userId: actor.id, status: "ACTIVE", revokedAt: null }, data: { passwordHash, keyVersion: { increment: 1 } } });
+    if (changed.count !== 1) throw new AdministrationMutationError();
     await transaction.securityElevation.updateMany({ where: { userId: actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_CHANGED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.admin", message: "Administrative credential changed." });
   });
 }
 
 export async function regenerateAdministrativeRecoveryCodes(actor: { id: string; role: string }, sessionId: string, now = new Date()): Promise<string[]> {
+  await requireAdminSession(actor, sessionId, now);
   await requireSecurityElevation(actor.id, sessionId, "ADMIN_RECOVERY_REGENERATE", now);
   const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
   await prisma.$transaction(async (transaction) => {
+    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ADMIN_RECOVERY_REGENERATE", now);
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: actor.id, codeHash: hashRecoveryCode(value) })) });
     await writeAuditLogInTransaction(transaction, { eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.admin", message: "Administrative recovery codes regenerated." });
@@ -244,6 +250,7 @@ async function createEmailElevationCeremony(input: { userId: string; sessionId: 
   const code = generateNumericCode();
   const expiresAt = input.expiresAt ?? new Date(input.now.getTime() + ELEVATION_CEREMONY_TTL_MS);
   await prisma.$transaction(async (transaction) => {
+    await lockAdminSessionInTransaction(transaction, input.userId, input.sessionId, input.now);
     await transaction.securityElevation.updateMany({ where: { userId: input.userId, sessionId: input.sessionId, status: "PENDING" }, data: { status: "REVOKED", revokedAt: input.now } });
     await transaction.securityElevation.create({ data: { requestKey, userId: input.userId, sessionId: input.sessionId, protocolVersion: ELEVATION_PROTOCOL_VERSION, scope: input.scope, challengeHash: hashSecurityCode(code), status: "PENDING", manualUntilRevoked: input.manualUntilRevoked ?? false, expiresAt, createdAt: input.now } });
     await enqueueEmailMessageForClient(transaction, { idempotencyKey: `admin-elevation:${requestKey}`, kind: input.kind, recipientEmail: input.recipientEmail, locale: input.locale, payload: { publicValues: { displayName: input.displayName ?? "" }, protectedValues: { code } } });
@@ -326,3 +333,57 @@ function assertScope(value: string): asserts value is ElevationScope { if (!isAl
 function isAllowedScope(value: string): value is ElevationScope { return (ELEVATION_SCOPES as readonly string[]).includes(value); }
 function isRequestKey(value: string): boolean { return /^[A-Za-z0-9_-]{32,100}$/.test(value); }
 function isDatabaseId(value: string): boolean { return /^[A-Za-z0-9_-]{8,80}$/.test(value); }
+
+async function lockAdminSessionInTransaction(transaction: Prisma.TransactionClient, userId: string, sessionId: string, now: Date): Promise<void> {
+  const rows = await transaction.$queryRaw<Array<{ id: string }>>`
+    SELECT u."id" FROM "User" u JOIN "Session" s ON s."userId" = u."id"
+    WHERE u."id" = ${userId} AND u."role" = 'ADMIN'::"UserRole"
+      AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
+      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL AND s."expiresAt" > ${now}
+    FOR UPDATE OF u, s
+  `;
+  if (rows.length !== 1) throw new AdministrationMutationError();
+}
+
+async function requireSecurityElevationInTransaction(transaction: Prisma.TransactionClient, userId: string, sessionId: string, scope: ElevationScope, now: Date): Promise<void> {
+  await lockAdminSessionInTransaction(transaction, userId, sessionId, now);
+  // Lock the proof as well so revocation and the protected mutation have one order.
+  const rows = await transaction.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "SecurityElevation"
+    WHERE "userId" = ${userId} AND "sessionId" = ${sessionId} AND "scope" = ${scope}
+      AND "status" = 'ACTIVE'::"SecurityElevationStatus"
+      AND ("manualUntilRevoked" = TRUE OR "expiresAt" > ${now})
+    FOR UPDATE
+  `;
+  if (rows.length === 0) throw new AdministrationMutationError();
+}
+
+export async function grantProjectAccess(actor: { id: string; role: string }, sessionId: string, userId: string, connectionId: string, now = new Date()): Promise<void> {
+  if (actor.role !== "ADMIN") throw new AdministrationMutationError();
+  await prisma.$transaction(async (transaction) => {
+    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "PROJECT_ACCESS_CHANGE", now);
+    const users = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "User" WHERE "id" = ${userId} AND "role" = 'USER'::"UserRole"
+        AND "isActive" = TRUE AND "accountStatus" = 'ACTIVE'::"AccountStatus" FOR UPDATE
+    `;
+    const connections = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "ProjectConnection" WHERE "id" = ${connectionId} AND "enabled" = TRUE FOR UPDATE
+    `;
+    if (users.length !== 1 || connections.length !== 1) throw new AdministrationMutationError();
+    await transaction.userProjectGrant.upsert({ where: { userId_connectionId: { userId, connectionId } }, create: { userId, connectionId, grantedByUserId: actor.id }, update: { revokedAt: null, grantedByUserId: actor.id } });
+    await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_ACCESS_GRANTED", result: "SUCCESS", actorUserId: actor.id, resource: "project.access", message: "Project access granted.", metadata: { userRef: hashOidcIdentifier(userId), connectionRef: hashOidcIdentifier(connectionId) } });
+  });
+}
+
+export async function revokeProjectAccess(actor: { id: string; role: string }, sessionId: string, grantId: string, now = new Date()): Promise<void> {
+  if (actor.role !== "ADMIN") throw new AdministrationMutationError();
+  await prisma.$transaction(async (transaction) => {
+    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "PROJECT_ACCESS_CHANGE", now);
+    const grant = await transaction.userProjectGrant.findUnique({ where: { id: grantId }, select: { userId: true, connectionId: true, connection: { select: { clientId: true } } } });
+    if (!grant) throw new AdministrationMutationError();
+    const changed = await transaction.userProjectGrant.updateMany({ where: { id: grantId, revokedAt: null }, data: { revokedAt: now } });
+    if (changed.count === 0) return;
+    await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(grant.connection.clientId), accountIdHash: hashOidcIdentifier(grant.userId) } });
+    await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_ACCESS_REVOKED", result: "SUCCESS", actorUserId: actor.id, resource: "project.access", message: "Project access revoked and OIDC artifacts cleared.", metadata: { userRef: hashOidcIdentifier(grant.userId), connectionRef: hashOidcIdentifier(grant.connectionId) } });
+  });
+}

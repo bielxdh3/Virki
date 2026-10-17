@@ -9,6 +9,7 @@ import {
   completeAdministrativeCredentialSetup,
   hasActiveSecurityElevation,
   recoverAdministrativeCredential,
+  regenerateAdministrativeRecoveryCodes,
   startAdministrativeCredentialSetup,
   startSecurityElevation,
   verifySecurityElevation
@@ -185,4 +186,70 @@ test("an admin whose account is blocked cannot start an elevation even while the
     AdministrationMutationError
   );
   assert.equal((await queuedEmails(admin.email)).length, 0);
+});
+
+
+async function seedActiveElevation(admin: Awaited<ReturnType<typeof setupAdmin>>, scope: string) {
+  await prisma.securityElevation.create({ data: { userId: admin.actor.id, sessionId: admin.sessionId, requestKey: randomBytes(24).toString("base64url"), protocolVersion: 1, scope, challengeHash: "fixture", status: "ACTIVE", expiresAt: new Date(Date.now() + DAY) } });
+}
+
+test("demoted admins cannot use active elevation or regenerate administrative codes", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  await seedActiveElevation(admin, "ADMIN_RECOVERY_REGENERATE");
+  await prisma.user.update({ where: { id: admin.actor.id }, data: { role: "USER" } });
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "ADMIN_RECOVERY_REGENERATE"), false);
+  await assert.rejects(regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId), AdministrationMutationError);
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 0);
+});
+
+test("password change cannot reactivate an already revoked administrative credential", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  await seedActiveElevation(admin, "ADMIN_CREDENTIAL_CHANGE");
+  const revokedAt = new Date();
+  await prisma.administrativeCredential.update({ where: { userId: admin.actor.id }, data: { status: "REVOKED", revokedAt } });
+  await assert.rejects(changeAdministrativePassword(admin.actor, admin.sessionId, "new-distinct-admin-password-2"), AdministrationMutationError);
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  assert.equal(credential.status, "REVOKED");
+  assert.deepEqual(credential.revokedAt, revokedAt);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_CHANGED" } }), 0);
+});
+
+test("concurrent administrative credential revocation wins over password change", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  await seedActiveElevation(admin, "ADMIN_CREDENTIAL_CHANGE");
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const revocation = prisma.$transaction(async (transaction) => {
+    await transaction.administrativeCredential.update({ where: { userId: admin.actor.id }, data: { status: "REVOKED", revokedAt: new Date() } });
+    locked(); await gate;
+  }, { timeout: 10000 });
+  await ready;
+  const changing = changeAdministrativePassword(admin.actor, admin.sessionId, "new-concurrent-admin-password-2");
+  const rejected = assert.rejects(changing, AdministrationMutationError);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  release(); await revocation; await rejected;
+  assert.equal((await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } })).status, "REVOKED");
+});
+
+
+for (const state of ["demotion", "session-revocation"] as const) test(`administrative recovery regeneration rejects concurrent ${state}`, integrationOptions, async () => {
+  const admin = await setupAdmin();
+  await seedActiveElevation(admin, "ADMIN_RECOVERY_REGENERATE");
+  let locked!: () => void; let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const change = prisma.$transaction(async (transaction) => {
+    if (state === "demotion") await transaction.user.update({ where: { id: admin.actor.id }, data: { role: "USER" } });
+    else await transaction.session.update({ where: { id: admin.sessionId }, data: { revokedAt: new Date() } });
+    locked(); await gate;
+  });
+  await ready;
+  const regeneration = regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId);
+  const rejected = assert.rejects(regeneration, AdministrationMutationError);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release(); await change; await rejected;
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 0);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "RECOVERY_CODES_REGENERATED" } }), 0);
 });

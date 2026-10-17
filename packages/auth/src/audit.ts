@@ -363,11 +363,13 @@ function isSensitiveMetadataKey(key: string, value: unknown): boolean {
 function sanitizeMetadataString(value: string, key: string): string {
   const inspectionValue = replaceAuditControlCharacters(value.slice(0, MAX_METADATA_INSPECTION_LENGTH), "");
 
-  if (hasSensitiveMetadataValue(inspectionValue, key)) {
+  const canonicalValue = replaceAuditControlCharacters(value.slice(0, MAX_METADATA_INSPECTION_LENGTH), " ");
+
+  if (hasSensitiveMetadataValue(inspectionValue, key) || hasSensitiveMetadataValue(canonicalValue, key)) {
     return REDACTED_METADATA_VALUE;
   }
 
-  return replaceAuditControlCharacters(value.slice(0, MAX_METADATA_STRING_LENGTH), " ");
+  return canonicalValue.slice(0, MAX_METADATA_STRING_LENGTH);
 }
 
 function hasAuditControlCharacters(value: string): boolean {

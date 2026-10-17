@@ -211,3 +211,12 @@ test("blank audit retention configuration uses the documented 180-day default", 
   assert.equal(getAuditLogRetentionDays({ AUDIT_LOG_RETENTION_DAYS: "0" }), 1);
   assert.equal(getAuditLogRetentionDays({ AUDIT_LOG_RETENTION_DAYS: "30" }), 30);
 });
+
+
+test("redacts the canonical control-normalized value recursively", () => {
+  for (const control of ["\t", "\0", "\u200b", "\u202e", "\u0085"]) {
+    const result = sanitizeAuditMetadata({ detail: `Bearer${control}abcdefghijklmnop`, nested: { values: [`Basic${control}abcdefghijklmnop`] } });
+    assert.equal(result?.detail, "[REDACTED]");
+    assert.deepEqual(result?.nested, { values: ["[REDACTED]"] });
+  }
+});
