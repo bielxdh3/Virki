@@ -286,7 +286,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(serverScript, /prisma:migrate:status --workspace @virki\/database/u);
   assert.match(serverScript, /encrypted recovery outbox payload or delivery-attempt metadata/u);
   assert.match(serverScript, /docker rm --force --volumes "\$container_id"/u);
-  assert.doesNotMatch(serverScript.replace(/^cleanup_clone\(\) \{[\s\S]*?^\}/mu, ""), /\bcompose[^\n]*\bdown\b|docker volume rm|prisma db push|powershell/i);
+  assert.doesNotMatch(serverScript.replace(/^cleanup_clone\(\) \{[\s\S]*?^\}/mu, ""), /\bcompose[^\n]*\bdown\b|docker volume (?:rm|prune)|docker system prune|prisma db push|powershell/i);
   assert.match(serverScript, /readonly lock_path="\$root\/\.virki-operations\.lock"/u);
   assert.match(serverScript, /flock -n "\$state_lock_fd"/u);
   assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging first-install first-install-recovery first-admin-rescue-prepare first-admin-rescue stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
@@ -875,6 +875,9 @@ test("restore clone and migration runner use an isolated password-protected inte
   assert.doesNotMatch(backup, /virki-prod_default/u);
   const cloneCleanup = serverScript.slice(serverScript.indexOf("cleanup_clone() {"), serverScript.indexOf("\nverify_clone_cleanup() {"));
   assert.match(cloneCleanup, /docker ps --all --quiet --filter "label=virki\.restore\.operation=\$isolation_id"[\s\S]*?docker rm --force --volumes "\$container_id"[\s\S]*?docker network rm "\$network_id"[\s\S]*?return "\$cleanup_failed"/u);
+  assert.match(cloneCleanup, /docker volume ls --filter "label=virki\.restore\.operation=\$isolation_id"[\s\S]*?docker volume inspect --format '\{\{index \.Labels "virki\.restore\.operation"\}\}' "\$volume_name"[\s\S]*?if \[\[ "\$volume_name" != "virki-restore-data-\$isolation_id" \|\| "\$owned" != "\$isolation_id" \]\]; then\s+printf[^\n]+\s+cleanup_failed=1\s+continue\s+fi\s+docker volume rm "\$volume_name"/u);
+  assert.equal((cloneCleanup.match(/docker volume rm\b/gu) ?? []).length, 1);
+  assert.doesNotMatch(cloneCleanup, /\bcompose[^\n]*\bdown\b|docker volume prune|docker system prune|prisma db push|powershell/iu);
   assert.doesNotMatch(cloneCleanup, /\|\| true/u);
   assert.match(backup, /docker exec --interactive --user postgres "\$container" pg_restore[^\n]*< "\$partial_backup_path" >\/dev\/null/u);
   assert.doesNotMatch(backup, /docker cp/u);
