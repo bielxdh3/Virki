@@ -77,7 +77,7 @@ Excluded from the actionable tally: [07] and [25] remain unconfirmed; no exploit
 | Login/invitation/recovery | `2bd0082`, `d8e8515` | Fix round 1 approved; no open Critical/Important findings. | [#53](https://github.com/bielxdh3/Virki/pull/53), draft; includes this tracked mission report. |
 | Final whole-branch review | `d8e8515` | Seven-commit review against the verified base found no Critical/Important code defects; acceptance remains blocked. | PRs #51–#53 remain open drafts. |
 
-The PRs are stacked in order: #51 → #52 → #53. At the latest check, all three were open drafts with no reviews and no remote status checks reported. The issue tracker still showed #43 and #45–#50 open with no comments. Remote CI is unverified, not green. `main` remained at `d4e9131df1876c7ce7c9d36035881e54887269aa`.
+The PRs are stacked in order: #51 → #52 → #53. At the latest check, all three were open drafts with no reviews. PR #51's CI and CodeQL workflow runs completed with failure; the listed jobs had no step summaries and log retrieval returned 404 `BlobNotFound`, so the failure cause is unconfirmed and the workflows were not rerun. PRs #52 and #53 had no workflow runs or status checks reported. Remote validation is not green. The issue tracker still showed #43 and #45–#50 open with no comments. `main` remained at `d4e9131df1876c7ce7c9d36035881e54887269aa`.
 
 ## Validation record
 
