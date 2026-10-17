@@ -120,14 +120,28 @@ test("Argon2 runs outside any database transaction and concurrent logins all suc
 });
 
 
-test("owner successes cannot erase interleaved guesses from other sources", integrationOptions, async () => {
-  const user = await createTestUser({ label: "login-interleaved" });
-  for (let index = 0; index < 20; index += 1) {
-    if (index < 19) assert.ok((await authenticateUserWithRateLimit(user.email, user.password, new Date(), "192.0.2.201")).user);
-    assert.equal((await authenticateUserWithRateLimit(user.email, "wrong", new Date(), `192.0.2.${index + 1}`)).failureMode, "invalid-credentials");
-  }
-  assert.equal((await authenticateUserWithRateLimit(user.email, "wrong", new Date(), "192.0.2.202")).failureMode, "rate-limited");
-});
+for (const role of ["USER", "ADMIN"] as const) {
+  test(`${role} owner successes cannot erase interleaved guesses from other sources`, integrationOptions, async () => {
+    const user = await createTestUser({ role, label: "login-interleaved" });
+    for (let index = 0; index < 20; index += 1) {
+      if (index < 19) assert.ok((await authenticateUserWithRateLimit(user.email, user.password, new Date(), "192.0.2.201", role)).user);
+      assert.equal((await authenticateUserWithRateLimit(user.email, "wrong", new Date(), `192.0.2.${index + 1}`, role)).failureMode, "invalid-credentials");
+    }
+    assert.equal((await authenticateUserWithRateLimit(user.email, "wrong", new Date(), "192.0.2.202", role)).failureMode, "rate-limited");
+  });
+
+  test(`${role} successful password checks refund only their own account reservations`, integrationOptions, async () => {
+    const user = await createTestUser({ role, label: "login-scoped-refund" });
+    const { createLoginAccountRateLimitIdentifierHash, scopeLoginRateLimitEmail } = await import("./rate-limit-config");
+    const identifierHash = createLoginAccountRateLimitIdentifierHash(scopeLoginRateLimitEmail(user.email, role));
+    const now = new Date();
+    assert.equal((await authenticateUserWithRateLimit(user.email, "wrong", now, "192.0.2.231", role)).failureMode, "invalid-credentials");
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      assert.equal((await authenticateUserWithRateLimit(user.email, user.password, now, "192.0.2.232", role)).user?.id, user.id, `successful check ${attempt + 1}`);
+    }
+    assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash } })).attempts, 1, "the earlier failure survives, successful reservations are refunded");
+  });
+}
 
 test("expired cleanup observes limiter locks and preserves a concurrently refreshed row", integrationOptions, async () => {
   const identifier = `cleanup-lock-${crypto.randomUUID()}`;

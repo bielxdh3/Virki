@@ -354,7 +354,7 @@ export async function authenticateUserWithRateLimit(
       if (!sourceAttempt.allowed) return { user: null, failureMode: "rate-limited" };
       sourceReservation = sourceAttempt;
     }
-    const rateLimitEmail = scopeLoginRateLimitEmail(email, requiredRole);
+    const rateLimitEmail = scopeLoginRateLimitEmail(email, requiredRole).toLowerCase();
     const accountIdentifierHash = createLoginAccountRateLimitIdentifierHash(rateLimitEmail);
     const identifierHash = createLoginAttemptRateLimitIdentifierHash(rateLimitEmail, trustedClientAddress);
     await pruneExpiredLoginRateLimits(now);

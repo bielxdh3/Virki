@@ -154,6 +154,7 @@ test("a surface-scoped login treats other roles as missing accounts and keeps se
 
     const hub = await authenticateUserWithRateLimit(admin.email, "correct-admin-password", now, sourceAddress, "ADMIN");
     assert.equal(hub.user?.id, admin.id);
+    assert.equal(rows.get(hubAccountHash)?.attempts, 0, "a hub success refunds its own normalized account reservation");
     assert.equal(rows.get(portalAccountHash)?.attempts, 1, "a hub success does not reset portal counters");
     assert.equal(rows.get(portalSourceHash)?.attempts, 1, "a hub success does not reset portal source counters");
   } finally {
