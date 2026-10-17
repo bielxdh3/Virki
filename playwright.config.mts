@@ -145,6 +145,7 @@ export default defineConfig({
   use: {
     browserName: "chromium",
     launchOptions: {
+      executablePath: process.env.VIRKI_E2E_CHROMIUM_EXECUTABLE_PATH || undefined,
       env: buildChromiumEnvironment(process.env, process.platform, chromiumHomePath),
       args: [
         "--disable-background-networking",

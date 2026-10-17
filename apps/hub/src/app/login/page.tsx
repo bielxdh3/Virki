@@ -8,7 +8,7 @@ import { PasswordField } from "../password-field";
 
 export const dynamic = "force-dynamic";
 
-export default async function LoginPage({ searchParams }: { searchParams?: Promise<{ error?: string; reauth?: string; recovered?: string; returnTo?: string }> }) {
+export default async function LoginPage({ searchParams }: { searchParams?: Promise<{ error?: string; invited?: string; reauth?: string; recovered?: string; returnTo?: string }> }) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   if (surface === "unknown") forbidden();
@@ -28,6 +28,7 @@ export default async function LoginPage({ searchParams }: { searchParams?: Promi
         <h1 id="login-title">{reauth ? "Confirmar identidade" : "Entrar"}</h1>
         {reauth ? <p>Entre novamente para continuar com a confirmação de segurança solicitada pelo projeto.</p> : null}
         {params?.recovered ? <p className="form-success" role="status">A senha foi atualizada. Entre com sua nova senha.</p> : null}
+        {params?.invited ? <p className="form-success" role="status">Conta ativada. Entre com sua senha para continuar.</p> : null}
         <form className="form-stack" action="/api/login" method="post">
           <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrfToken} />
           <input type="hidden" name="returnTo" value={returnTo ?? ""} />

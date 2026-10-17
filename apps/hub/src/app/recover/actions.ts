@@ -2,7 +2,7 @@
 
 import { withHubAuditRequest } from "../../lib/audit-request";
 
-import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@virki/auth/security";
+import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, getAccountRecoveryState, isAcceptableRecoveryPassword, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@virki/auth/security";
 import { requireSecurityElevation } from "@virki/auth/administration";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { validateSessionCsrfToken } from "../../lib/session-csrf";
@@ -13,7 +13,7 @@ import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
-import { clearRecoveryCookie, setRecoveryCookie } from "./recovery-cookie";
+import { clearRecoveryCandidateCookie, clearRecoveryCookie, RECOVERY_CANDIDATE_COOKIE, setRecoveryCandidateCookie, setRecoveryCookie } from "./recovery-cookie";
 
 export async function requestRecoveryAction(formData: FormData) {
   return withHubAuditRequest(async () => {
@@ -48,8 +48,27 @@ export async function openRecoveryAction(formData: FormData) {
   const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
   if (!recovery) redirect("/recover?error=1");
   const cookieStore = await cookies();
+  const activeKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value;
+  if (activeKey && activeKey !== requestKey) {
+    setRecoveryCandidateCookie(cookieStore, requestKey, recovery.expiresAt);
+    redirect(`/recover?switch=1&requestId=${encodeURIComponent(recovery.id)}`);
+  }
   setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
   redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
+  });
+}
+
+export async function switchRecoveryAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
+    const { expectedRole } = await requireRecoveryAccess(formData, "recovery-open");
+    const cookieStore = await cookies();
+    const requestKey = cookieStore.get(RECOVERY_CANDIDATE_COOKIE)?.value ?? "";
+    const requestId = read(formData, "requestId");
+    const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
+    if (!recovery || recovery.id !== requestId) redirect("/recover?error=1");
+    setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
+    clearRecoveryCandidateCookie(cookieStore);
+    redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
   });
 }
 
@@ -77,15 +96,19 @@ export async function completeRecoveryAction(formData: FormData) {
   const requestId = read(formData, "requestId");
   const requestKey = (await cookies()).get(RECOVERY_COOKIE_NAME)?.value;
   if (!requestKey) redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
+  const newPassword = readRaw(formData, "newPassword");
+  if (!isAcceptableRecoveryPassword(expectedRole, newPassword)) redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=password`);
+  const recovery = await getAccountRecoveryState(requestId, requestKey, new Date(), expectedRole);
   try {
-    await consumeApprovedAccountRecovery(requestId, requestKey, readRaw(formData, "newPassword"), new Date(), expectedRole);
+    await consumeApprovedAccountRecovery(requestId, requestKey, newPassword, new Date(), expectedRole);
   } catch {
     await recordSecurityDenial(await headers(), "account-recovery-complete", "rejected");
     redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
   }
   const cookieStore = await cookies();
   clearRecoveryCookie(cookieStore);
-  redirect("/login?recovered=1");
+  clearRecoveryCandidateCookie(cookieStore);
+  redirect(recovery?.purpose === "INVITATION" ? "/login?invited=1" : "/login?recovered=1");
   });
 }
 

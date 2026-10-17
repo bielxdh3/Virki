@@ -79,7 +79,7 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
           <label>Código enviado por e-mail<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required /></label>
           <label>Nova senha administrativa (16 caracteres ou mais)<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
           <button type="submit" disabled={completing}>{completing ? "Configurando…" : "Configurar credencial"}</button>
-          {complete.status === "error" && <p className="form-error" role="alert">Código inválido ou expirado. Inicie novamente.</p>}
+          {complete.status === "error" && <><p className="form-error" role="alert">Código inválido ou expirado. Inicie novamente para receber outro código.</p><a className="subtle-link" href="/admin/security?restart=credential#admin-content">Iniciar configuração novamente</a></>}
           {complete.status === "password-reuse" && <p className="form-error" role="alert">{passwordReuseMessage}</p>}
         </form>
       ) : (

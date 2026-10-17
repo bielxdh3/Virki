@@ -327,7 +327,12 @@ function passwordsMatch(left: string, right: string): boolean {
 }
 
 function assertAdminPassword(value: string): void {
-  if (value.length < ADMIN_MIN_PASSWORD_LENGTH || value.length > 256) throw new AdministrationMutationError();
+  let hasControlCharacter = false;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) hasControlCharacter = true;
+  }
+  if (value.length < ADMIN_MIN_PASSWORD_LENGTH || value.length > 256 || hasControlCharacter) throw new AdministrationMutationError();
 }
 function assertScope(value: string): asserts value is ElevationScope { if (!isAllowedScope(value)) throw new AdministrationMutationError(); }
 function isAllowedScope(value: string): value is ElevationScope { return (ELEVATION_SCOPES as readonly string[]).includes(value); }

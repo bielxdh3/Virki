@@ -28,8 +28,9 @@ test("an invited user has no password until the one-time link sets it", integrat
 
   const opened = await getAccountRecoveryRequestId(requestKey, now);
   assert.ok(opened, "the emailed link opens the invitation");
-  const request = await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: opened.id }, select: { status: true, reviewedByUserId: true, expiresAt: true, requestKeyHash: true } });
+  const request = await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: opened.id }, select: { status: true, purpose: true, reviewedByUserId: true, expiresAt: true, requestKeyHash: true } });
   assert.equal(request.status, "APPROVED");
+  assert.equal(request.purpose, "INVITATION");
   assert.equal(request.reviewedByUserId, admin.id);
   assert.equal(request.expiresAt.getTime(), now.getTime() + ACCOUNT_INVITATION_TTL_MS);
   assert.notEqual(request.requestKeyHash, requestKey);

@@ -21,6 +21,7 @@ async function openLatestRecovery(email: string, now: Date) {
   const requestKey = requestKeyFromActionUrl(latest?.actionUrl);
   const opened = await getAccountRecoveryRequestId(requestKey, now);
   assert.ok(opened, "the newest emailed recovery link opens");
+  assert.equal((await getAccountRecoveryState(opened.id, requestKey, now))?.purpose, "RECOVERY");
   return { requestId: opened.id, requestKey, code: latest?.code };
 }
 
