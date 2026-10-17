@@ -1,5 +1,7 @@
 "use server";
 
+import { withHubAuditRequest } from "../../../lib/audit-request";
+
 import { verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
 import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { validateSessionCsrfToken } from "../../../lib/session-csrf";
@@ -8,6 +10,7 @@ import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
+import { recordSecurityDenial } from "../../../lib/audit-denial";
 import { getCurrentSession } from "../../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../../lib/surface";
@@ -15,6 +18,7 @@ import { getSurface, hasSameOrigin } from "../../../lib/surface";
 export type AccountSecurityState = { status: "idle" | "error" | "started" | "complete"; secret?: string; recoveryCodes?: string[] };
 
 export async function startTotpAction(_state: AccountSecurityState, formData: FormData): Promise<AccountSecurityState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-totp-start");
   try {
     await consumeSecurityProofAttempt(session.user.id);
@@ -24,43 +28,53 @@ export async function startTotpAction(_state: AccountSecurityState, formData: Fo
     const enrollment = await startTotpEnrollment(session.user.id, user.email);
     revalidatePath("/account/security");
     return { status: "started", secret: enrollment.secret };
-  } catch { return { status: "error" }; }
+  } catch { await recordSecurityDenial(await headers(), "account-security-proof", "rejected", session); return { status: "error" }; }
+  });
 }
 
 export async function confirmTotpAction(_state: AccountSecurityState, formData: FormData): Promise<AccountSecurityState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-totp-confirm");
   try {
     const recoveryCodes = await confirmTotpEnrollment(session.user.id, read(formData, "code"));
     revalidatePath("/account/security");
     return { status: "complete", recoveryCodes };
-  } catch { return { status: "error" }; }
+  } catch { await recordSecurityDenial(await headers(), "account-security-proof", "rejected", session); return { status: "error" }; }
+  });
 }
 
 export async function disableTotpAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-totp-disable");
   try { await disableTotp(session.user.id, read(formData, "code")); }
-  catch { redirect("/account/security?error=totp"); }
+  catch { await recordSecurityDenial(await headers(), "account-totp-disable", "rejected", session); redirect("/account/security?error=totp"); }
   redirect("/login?security=changed");
+  });
 }
 
 export async function regenerateRecoveryCodesAction(_state: AccountSecurityState, formData: FormData): Promise<AccountSecurityState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-recovery-codes");
   try {
     const recoveryCodes = await regenerateRecoveryCodes(session.user.id, read(formData, "code"));
     revalidatePath("/account/security");
     return { status: "complete", recoveryCodes };
-  } catch { return { status: "error" }; }
+  } catch { await recordSecurityDenial(await headers(), "account-security-proof", "rejected", session); return { status: "error" }; }
+  });
 }
 
 export async function revokeTrustedDeviceAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-device-revoke");
   try { await revokeTrustedDevice(session.user.id, read(formData, "deviceKey")); }
-  catch { redirect("/account/security?error=device"); }
+  catch { await recordSecurityDenial(await headers(), "account-device-revoke", "rejected", session); redirect("/account/security?error=device"); }
   revalidatePath("/account/security");
   redirect("/account/security?status=device");
+  });
 }
 
 export async function revokeAccountSessionAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-session-revoke");
   const target = read(formData, "sessionId");
   if (!/^[A-Za-z0-9_-]{8,80}$/u.test(target) || target === session.id) redirect("/account/security?error=session");
@@ -70,10 +84,12 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
       if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other account session revoked." });
     });
   } catch {
+    await recordSecurityDenial(await headers(), "account-session-revoke", "rejected", session);
     redirect("/account/security?error=session");
   }
   revalidatePath("/account/security");
   redirect("/account/security?status=session");
+  });
 }
 
 export async function getAccountSecurityData() {
@@ -95,10 +111,10 @@ async function requireAccountMutation(formData: FormData, source: string) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   if (!hasSameOrigin(requestHeaders) || surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) redirect("/login");
-  if (!(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "account-security"))) redirect("/login");
+  if (!(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "account-security"))) { await recordSecurityDenial(requestHeaders, source, "csrf"); redirect("/login"); }
   const session = await getCurrentSession();
-  if (!session) redirect("/login");
-  if ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) redirect("/login");
+  if (!session) { await recordSecurityDenial(requestHeaders, source, "role"); redirect("/login"); }
+  if ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) { await recordSecurityDenial(requestHeaders, source, "role", session); redirect("/login"); }
   return session;
 }
 

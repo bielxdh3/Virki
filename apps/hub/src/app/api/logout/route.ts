@@ -15,6 +15,7 @@ import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
+import { recordSecurityDenial } from "../../../lib/audit-denial";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +25,7 @@ export async function POST(request: NextRequest) {
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-logout-api"))) {
     return new NextResponse("Forbidden", { status: 403 });
   }
-  if (!hasSameOrigin(request.headers)) return new NextResponse("Forbidden", { status: 403 });
+  if (!hasSameOrigin(request.headers)) { await recordSecurityDenial(request.headers, "logout-origin", "csrf"); return new NextResponse("Forbidden", { status: 403 }); }
 
   const formData = await readBoundedFormData(request, 8 * 1024);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
@@ -37,6 +38,7 @@ export async function POST(request: NextRequest) {
   });
 
   if (!csrfResult.valid) {
+    await recordSecurityDenial(request.headers, "logout-csrf", "csrf");
     return new NextResponse("Forbidden", { status: 403 });
   }
 
@@ -53,6 +55,8 @@ export async function POST(request: NextRequest) {
       eventType: "AUTH_LOGOUT",
       result: "SUCCESS",
       actorUserId: currentSession.user.id,
+      actorRole: currentSession.user.role === "ADMIN" ? "ADMIN" : currentSession.user.role === "USER" ? "USER" : undefined,
+      sessionRef: hashSessionToken(`audit-session:${currentSession.id}`),
       actorEmailHash: hashAuditEmail(currentSession.user.email),
       resource: surface,
       message: "User logged out.",
@@ -64,6 +68,8 @@ export async function POST(request: NextRequest) {
         eventType: "AUTH_SESSION_REVOKED",
         result: "SUCCESS",
         actorUserId: currentSession.user.id,
+        actorRole: currentSession.user.role === "ADMIN" ? "ADMIN" : currentSession.user.role === "USER" ? "USER" : undefined,
+        sessionRef: hashSessionToken(`audit-session:${currentSession.id}`),
         actorEmailHash: hashAuditEmail(currentSession.user.email),
         resource: "session",
         message: "Session revoked.",

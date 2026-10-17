@@ -13,7 +13,7 @@ export async function validateHubCloudflareAccess(
 ): Promise<CloudflareAccessJwtResult> {
   const result = await validateCloudflareAccessJwt(headers);
 
-  if (!result.required) {
+  if (!result.required || result.allowed) {
     return result;
   }
 

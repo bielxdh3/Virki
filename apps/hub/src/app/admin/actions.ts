@@ -1,5 +1,7 @@
 "use server";
 
+import { withHubAuditRequest } from "../../lib/audit-request";
+
 import { randomBytes } from "node:crypto";
 import { normalizeEmail, writeAuditLogInTransaction } from "@virki/auth";
 import { provisionInvitedUserAccount } from "@virki/auth/account-invitation";
@@ -8,6 +10,8 @@ import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-se
 import { AdministrationMutationError, grantProjectAccess, revokeProjectAccess, requireSecurityElevation } from "@virki/auth/administration";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
+import { recordSecurityDenial } from "../../lib/audit-denial";
 import { redirect } from "next/navigation";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../lib/admin-mutation";
 import { compareAndSetProjectConnectionSecret } from "../../lib/connection-secret-rotation";
@@ -45,6 +49,7 @@ export type ConnectionEditActionState =
     };
 
 export async function createAccountAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-account-create");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "ACCOUNT_STATE_CHANGE");
@@ -56,11 +61,14 @@ export async function createAccountAction(formData: FormData): Promise<void> {
     redirect("/admin/accounts?status=created");
   } catch (error) {
     if (isRedirect(error)) throw error;
+    await recordSecurityDenial(await headers(), "admin-mutation", "rejected", actor);
     redirect("/admin/accounts?error=create");
   }
+  });
 }
 
 export async function setAccountStateAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-account-state");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "ACCOUNT_STATE_CHANGE");
@@ -79,17 +87,20 @@ export async function setAccountStateAction(formData: FormData): Promise<void> {
         await revokeUserAuthenticationProofsInTransaction(transaction, userId, now);
         await transaction.oidcArtifact.deleteMany({ where: { accountIdHash: hashOidcIdentifier(userId) } });
       }
-      await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_STATE_CHANGED", result: "SUCCESS", actorUserId: actor.user.id, resource: "account", message: enabled ? "User account enabled." : "User account disabled and sessions revoked.", metadata: { targetRef: hashOidcIdentifier(userId), enabled } });
+      await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_STATE_CHANGED", result: "SUCCESS", actorUserId: actor.user.id, resource: "account", message: enabled ? "User account enabled." : "User account disabled and sessions revoked.", actorRole: "ADMIN", after: { enabled, accountStatus: enabled ? "ACTIVE" : "INACTIVE" }, metadata: { targetRef: hashOidcIdentifier(userId), enabled } });
     });
     revalidatePath("/admin/accounts");
     redirect("/admin/accounts?status=updated");
   } catch (error) {
     if (isRedirect(error)) throw error;
+    await recordSecurityDenial(await headers(), "admin-mutation", "rejected", actor);
     redirect("/admin/accounts?error=update");
   }
+  });
 }
 
 export async function grantProjectAccessAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-project-access-grant");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_ACCESS_CHANGE");
@@ -100,11 +111,14 @@ export async function grantProjectAccessAction(formData: FormData): Promise<void
     redirect("/admin/access?status=granted");
   } catch (error) {
     if (isRedirect(error)) throw error;
+    await recordSecurityDenial(await headers(), "admin-mutation", "rejected", actor);
     redirect("/admin/access?error=grant");
   }
+  });
 }
 
 export async function revokeProjectAccessAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-project-access-revoke");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_ACCESS_CHANGE");
@@ -114,11 +128,14 @@ export async function revokeProjectAccessAction(formData: FormData): Promise<voi
     redirect("/admin/access?status=revoked");
   } catch (error) {
     if (isRedirect(error)) throw error;
+    await recordSecurityDenial(await headers(), "admin-mutation", "rejected", actor);
     redirect("/admin/access?error=revoke");
   }
+  });
 }
 
 export async function createProjectConnectionAction(_state: ConnectionActionState, formData: FormData): Promise<ConnectionActionState> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-project-connection-create");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
@@ -147,12 +164,15 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
     revalidatePath("/admin/connections");
     return { status: "created", clientId, secret };
   } catch (error) {
+    await recordSecurityDenial(await headers(), "admin-connection-create", "rejected", actor);
     if (error instanceof ConnectionInputError) return { status: "error" };
     return { status: "error" };
   }
+  });
 }
 
 export async function updateProjectConnectionAction(_state: ConnectionEditActionState, formData: FormData): Promise<ConnectionEditActionState> {
+  return withHubAuditRequest(async () => {
   const draft = {
     name: readFormRawString(formData, "name"),
     slug: readFormRawString(formData, "slug"),
@@ -245,14 +265,17 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
       }
     };
   } catch (error) {
+    if (isRedirect(error)) throw error;
+    await recordSecurityDenial(await headers(), "admin-mutation", "rejected", actor);
     if (error instanceof AdministrationMutationError) return { status: "elevation-required", draft };
     if (error instanceof ConnectionInputError) return { status: "invalid", draft };
-    if (isRedirect(error)) throw error;
     return { status: "error", draft };
   }
+  });
 }
 
 export async function rotateProjectClientSecretAction(_state: ConnectionActionState, formData: FormData): Promise<ConnectionActionState> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-project-connection-rotate");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
@@ -269,11 +292,14 @@ export async function rotateProjectClientSecretAction(_state: ConnectionActionSt
     revalidatePath("/admin/connections");
     return { status: "rotated", clientId: connection.clientId, secret };
   } catch {
+    await recordSecurityDenial(await headers(), "admin-connection-secret", "rejected", actor);
     return { status: "error" };
   }
+  });
 }
 
 export async function setProjectConnectionEnabledAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-project-connection-state");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
@@ -288,11 +314,14 @@ export async function setProjectConnectionEnabledAction(formData: FormData): Pro
     redirect("/admin/connections?status=updated");
   } catch (error) {
     if (isRedirect(error)) throw error;
+    await recordSecurityDenial(await headers(), "admin-mutation", "rejected", actor);
     redirect("/admin/connections?error=update");
   }
+  });
 }
 
 export async function deleteProjectConnectionAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const actor = await requireAdminMutation(formData, "admin-project-connection-delete");
   try {
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
@@ -309,8 +338,10 @@ export async function deleteProjectConnectionAction(formData: FormData): Promise
     redirect("/admin/connections?status=deleted");
   } catch (error) {
     if (isRedirect(error)) throw error;
+    await recordSecurityDenial(await headers(), "admin-mutation", "rejected", actor);
     redirect("/admin/connections?error=delete");
   }
+  });
 }
 
 function isRedirect(error: unknown): boolean {

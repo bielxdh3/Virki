@@ -215,6 +215,23 @@ model AuditLog {
   resource       String?
   message        String?
   metadata       Json?
+  schemaVersion  Int      @default(0)
+  category       String   @default("LEGACY")
+  severity       String   @default("UNKNOWN")
+  action         String?
+  reason         String?
+  actorRef       String?
+  actorRole      String?
+  targetRef      String?
+  sessionRef     String?
+  deviceRef      String?
+  requestId      String?
+  service        String?
+  route          String?
+  method         String?
+  networkProvenance String @default("unavailable")
+  beforeState    Json?
+  afterState     Json?
   createdAt      DateTime @default(now())
   actor          User?    @relation(fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
@@ -222,6 +239,13 @@ model AuditLog {
   @@index([actorUserId])
   @@index([actorEmailHash])
   @@index([createdAt])
+  @@index([createdAt, id])
+  @@index([category, createdAt, id])
+  @@index([result, createdAt, id])
+  @@index([actorRef, createdAt, id])
+  @@index([resource, createdAt, id])
+  @@index([requestId])
+  @@index([action])
 }
 
 model EmailOutboxMessage {

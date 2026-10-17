@@ -15,6 +15,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../..
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, sameOriginFailureReason } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
 import { createLoginResponseAfterRequiredAudit } from "../../../lib/login-audit";
+import { recordSecurityDenial } from "../../../lib/audit-denial";
 
 export const dynamic = "force-dynamic";
 
@@ -25,13 +26,14 @@ export async function POST(request: Request) {
     return loginForbiddenResponse("cloudflare-access");
   }
   const sameOriginFailure = sameOriginFailureReason(request.headers);
-  if (sameOriginFailure) return loginForbiddenResponse(`same-origin-${sameOriginFailure}`);
+  if (sameOriginFailure) { await recordSecurityDenial(request.headers, "login-origin", "csrf"); return loginForbiddenResponse(`same-origin-${sameOriginFailure}`); }
 
   const formData = await readBoundedFormData(request);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
   const csrfResult = validateCsrfToken(getFormString(formData, CSRF_FORM_FIELD_NAME), { scope: "login" });
 
   if (!csrfResult.valid) {
+    await recordSecurityDenial(request.headers, "login-csrf", "csrf");
     return loginForbiddenResponse(`csrf-${csrfResult.reason}`);
   }
 
@@ -54,6 +56,7 @@ export async function POST(request: Request) {
   const user = authentication.user;
 
   if (!user) {
+    if (authentication.failureMode === "rate-limited" || authentication.failureMode === "limiter-unavailable") await writeAuditLog({ eventType: "RATE_LIMIT_REACHED", result: "DENIED", reason: authentication.failureMode === "rate-limited" ? "rate-limited" : "unavailable", actorEmailHash, resource: surface, metadata: auditMetadata });
     await writeAuditLog({
       eventType: "AUTH_LOGIN_FAILURE",
       result: "FAILURE",

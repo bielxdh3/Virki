@@ -6,20 +6,21 @@ import { getCurrentSession } from "./auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "./cloudflare-access";
 import { getSurface, hasSameOrigin } from "./surface";
 import { isAdminRequestAllowed, isAdminRole, isHubAdminMutationSurface } from "./admin-policy";
+import { recordSecurityDenial } from "./audit-denial";
 
 type AdminSession = NonNullable<Awaited<ReturnType<typeof getCurrentSession>>>;
 
 export async function requireAdminMutation(formData: FormData, source: string): Promise<AdminSession> {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
-  if (!isHubAdminMutationSurface(surface)) forbidden();
+  if (!isHubAdminMutationSurface(surface)) { await recordSecurityDenial(requestHeaders, source, "role"); forbidden(); }
   const accessValid = isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source));
   if (!isAdminRequestAllowed(surface, accessValid)) forbidden();
-  if (!hasSameOrigin(requestHeaders)) forbidden();
+  if (!hasSameOrigin(requestHeaders)) { await recordSecurityDenial(requestHeaders, source, "csrf"); forbidden(); }
   const csrf = formData.get(CSRF_FORM_FIELD_NAME);
-  if (typeof csrf !== "string" || !(await validateSessionCsrfToken(csrf, getAdminCsrfScope(source)))) forbidden();
+  if (typeof csrf !== "string" || !(await validateSessionCsrfToken(csrf, getAdminCsrfScope(source)))) { await recordSecurityDenial(requestHeaders, source, "csrf"); forbidden(); }
   const session = await getCurrentSession();
-  if (!session || !isAdminRole(session.user.role)) forbidden();
+  if (!session || !isAdminRole(session.user.role)) { await recordSecurityDenial(requestHeaders, source, "role", session); forbidden(); }
   return session as AdminSession;
 }
 
