@@ -37,7 +37,7 @@ export function validateProjectConnectionInput(input: {
   const origin = requireCanonicalHttpsUrl(input.origin.trim(), true);
   const launchUrl = validateProjectLaunchUrl(origin, input.launchUrl ?? "");
   if (!name || name.length > 80 || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(slug)) throw new ConnectionInputError();
-  const redirectUris = input.redirectUris.split(/\r?\n/u).map((value) => requireCanonicalHttpsUrl(value.trim(), false));
+  const redirectUris = input.redirectUris.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean).map((value) => requireCanonicalHttpsUrl(value, false));
   if (redirectUris.length < 1 || redirectUris.length > 10 || new Set(redirectUris).size !== redirectUris.length) throw new ConnectionInputError();
   return { name, slug, origin, launchUrl, redirectUris };
 }

@@ -173,7 +173,7 @@ async function run() {
   writeState(stateFile, { sha: pointer.source_commit, status: "attempted" });
   try {
     exec("npm", ["run", "deploy:prod"]);
-    exec("npm", ["run", "health:prod"]);
+    exec("npm", ["run", "health:prod", "--", "--expected", pointer.source_commit]);
     if (demanageContainers(config) !== before) {
       throw new Error("deManage container continuity check failed.");
     }

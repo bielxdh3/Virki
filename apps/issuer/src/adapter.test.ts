@@ -1,9 +1,46 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { encryptOidcPayload } from "@virki/auth/oidc-secrets";
+import { encryptOidcPayload, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 
 const env = { VIRKI_OIDC_ADAPTER_KEY: "ab".repeat(32) };
+
+test("nonpositive or invalid OIDC TTL removes existing storage instead of creating an unbounded artifact", async () => {
+  const previous = process.env.VIRKI_OIDC_ADAPTER_KEY;
+  process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
+  const calls: unknown[] = [];
+  const database = { oidcArtifact: {
+    deleteMany: async (args: unknown) => { calls.push(args); return { count: 1 }; },
+    upsert: async () => assert.fail("An invalid TTL must never persist an artifact.")
+  } };
+  try {
+    for (const ttl of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await new PrismaOidcAdapter("Interaction", database as never).upsert("expired", {} as never, ttl);
+    }
+    assert.deepEqual(calls, Array.from({ length: 4 }, () => ({ where: { model: "Interaction", idHash: hashOidcIdentifier("expired") } })));
+  } finally {
+    if (previous === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
+    else process.env.VIRKI_OIDC_ADAPTER_KEY = previous;
+  }
+});
+
+test("pending Interaction indexes nested client and authenticated session without inventing a pre-login account", async () => {
+  const previous = process.env.VIRKI_OIDC_ADAPTER_KEY;
+  process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
+  const rows: Array<{ create: { clientIdHash: string | null; accountIdHash: string | null } }> = [];
+  try {
+    const database = { oidcArtifact: { upsert: async (args: typeof rows[number]) => { rows.push(args); } } };
+    const adapter = new PrismaOidcAdapter("Interaction", database as never);
+    await adapter.upsert("before-login", { params: { client_id: "client" } } as never, 300);
+    await adapter.upsert("after-login", { params: { client_id: "client" }, session: { accountId: "user" } } as never, 300);
+    assert.deepEqual(rows.map(({ create }) => [create.clientIdHash, create.accountIdHash]), [
+      [hashOidcIdentifier("client"), null], [hashOidcIdentifier("client"), hashOidcIdentifier("user")]
+    ]);
+  } finally {
+    if (previous === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
+    else process.env.VIRKI_OIDC_ADAPTER_KEY = previous;
+  }
+});
 
 test("expired OIDC artifacts are deleted using the indexed expiry cutoff", async () => {
   const now = new Date("2026-10-02T12:00:00.000Z");

@@ -22,7 +22,7 @@ type BufferedResponseOperation = {
 
 export function requireAuditBeforeResponse(response: ServerResponse, write: Promise<void>): void {
   const previous = pendingAuditWrites.get(response);
-  const pending = previous ? previous.then(() => write) : write;
+  const pending = Promise.all(previous ? [previous, write] : [write]).then(() => undefined);
   pendingAuditWrites.set(response, pending);
   void pending.catch(() => undefined);
 }

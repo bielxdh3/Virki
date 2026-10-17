@@ -5,6 +5,25 @@ import type { AddressInfo } from "node:net";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 
+test("each queued audit rejection is observed immediately while earlier writes remain pending", async (context) => {
+  const { spawnSync } = await import("node:child_process");
+  // A child lets --unhandled-rejections=strict prove there was no transient rejection.
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--unhandled-rejections=strict", "--input-type=module", "-e", `
+    import { requireAuditBeforeResponse } from './apps/issuer/src/audit-gate.ts';
+    const response = {};
+    let resolveFirst;
+    const first = new Promise(resolve => { resolveFirst = resolve; });
+    requireAuditBeforeResponse(response, first);
+    requireAuditBeforeResponse(response, Promise.reject(new Error('second audit fails first')));
+    requireAuditBeforeResponse(response, Promise.reject(new Error('third audit also fails')));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    resolveFirst();
+    await new Promise(resolve => setImmediate(resolve));
+  `], { encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  context.diagnostic("All rejected promises were observed before the first write settled.");
+});
+
 test("issuer applies frame, MIME, referrer, and production transport headers", () => {
   const values = new Map<string, string>();
   const response = { setHeader: (name: string, value: string) => values.set(name.toLowerCase(), value) } as never;

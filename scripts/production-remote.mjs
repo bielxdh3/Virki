@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   inspectProductionSource,
+  normalizeRevision,
   ProductionRevisionError,
   runCommand,
 } from "./lib/production-revision.mjs";
@@ -35,6 +36,10 @@ const allowedCommands = new Set([
 ]);
 
 export function parseRemoteProductionCommand(args) {
+  if (args.length === 3 && args[0] === "health" && args[1] === "--expected") {
+    normalizeRevision(args[2]);
+    return "health";
+  }
   if (args.length !== 1 || !allowedCommands.has(args[0])) {
     throw new ProductionRevisionError("ARGUMENT_INVALID");
   }
@@ -88,7 +93,7 @@ export function runRemoteProductionCommand(
 
   let source;
   try {
-    source = inspectSource({ repositoryRoot, execute });
+    source = inspectSource({ repositoryRoot, execute, ...(args.length === 3 ? { expectedRevision: normalizeRevision(args[2]) } : {}) });
   } catch (error) {
     return { status: 1, lines: [error instanceof ProductionRevisionError ? error.message : "Production source state could not be verified."] };
   }

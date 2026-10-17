@@ -28,7 +28,7 @@ async function countApplicationRows(transaction: PrismaTypes.TransactionClient):
 
 const BOOTSTRAP_LOCK_ID = 4_852_716_032_158_417_203n;
 const AUDIT_LOG_COUNT_INDEX = 6;
-const MAX_PREBOOTSTRAP_CLEANUP_AUDITS = 32;
+const RATE_LIMIT_COUNT_INDEX = 2;
 
 function isHarmlessPrebootstrapCleanupAudit(record: {
   eventType: string;
@@ -39,6 +39,15 @@ function isHarmlessPrebootstrapCleanupAudit(record: {
   actorEmailHash: string | null;
   metadata: PrismaTypes.JsonValue;
 }): boolean {
+  if (record.actorUserId !== null) return false;
+  // Anonymous failures and request counters establish no account ownership. Keep their immutable history.
+  if (record.eventType === "AUTH_LOGIN_FAILURE" && record.result === "FAILURE" &&
+      ["hub", "portal"].includes(record.resource ?? "") &&
+      ["Login failed.", "Login rate limit reached.", "Login rate limit unavailable.", "Security verification failed."].includes(record.message ?? "")) return true;
+  if (record.actorEmailHash === null && record.result === "FAILURE" && (
+    (record.eventType === "SSO_AUTHORIZATION_DENIED" && record.resource === "sso.authorization" && record.message === "OIDC authorization request rejected.") ||
+    (record.eventType === "SSO_TOKEN_REJECTED" && record.resource === "sso.token" && record.message === "OIDC token request rejected.")
+  )) return true;
   if (record.eventType !== "AUTH_SESSION_CLEANUP" || record.result !== "SUCCESS" ||
       record.resource !== "session" || record.message !== "Inactive sessions cleaned up." ||
       record.actorUserId !== null || record.actorEmailHash !== null) return false;
@@ -47,26 +56,24 @@ function isHarmlessPrebootstrapCleanupAudit(record: {
   const fields = Object.keys(metadata).sort();
   return fields.length === 3 &&
     fields[0] === "deletedCount" && fields[1] === "deletedRateLimitCount" && fields[2] === "source" &&
-    metadata.source === "sessions-cleanup" && metadata.deletedCount === 0 && metadata.deletedRateLimitCount === 0;
+    metadata.source === "sessions-cleanup" && metadata.deletedCount === 0 &&
+    typeof metadata.deletedRateLimitCount === "number" && Number.isSafeInteger(metadata.deletedRateLimitCount) && metadata.deletedRateLimitCount >= 0;
 }
 
 async function verifyBootstrapDatabaseIsVirgin(transaction: PrismaTypes.TransactionClient): Promise<void> {
   const counts = await countApplicationRows(transaction);
-  if (counts.some((count, index) => index !== AUDIT_LOG_COUNT_INDEX && count !== 0)) {
+  if (counts.some((count, index) => index !== AUDIT_LOG_COUNT_INDEX && index !== RATE_LIMIT_COUNT_INDEX && count !== 0)) {
     throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
   }
   const auditCount = counts[AUDIT_LOG_COUNT_INDEX] ?? 0;
   if (auditCount === 0) return;
-  if (auditCount > MAX_PREBOOTSTRAP_CLEANUP_AUDITS) throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
-  // A staging worker on an otherwise empty, recovered first install may have
-  // emitted successful no-op cleanup audits. Preserve those immutable records;
-  // never permit another audit type, an actor, a deletion, or any application data.
+  // No finite allowance: anonymous traffic must not exhaust first-admin bootstrap.
+  // All identity-bearing tables remain empty, and successful identity history is rejected.
   const audits = await transaction.auditLog.findMany({
     select: {
       eventType: true, result: true, resource: true, message: true,
       actorUserId: true, actorEmailHash: true, metadata: true
-    },
-    take: MAX_PREBOOTSTRAP_CLEANUP_AUDITS + 1
+    }
   });
   if (audits.length !== auditCount || audits.some((audit) => !isHarmlessPrebootstrapCleanupAudit(audit))) {
     throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");

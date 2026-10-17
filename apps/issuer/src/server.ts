@@ -231,7 +231,7 @@ provider.on("grant.success", (rawContext) => {
   requireAuditBeforeResponse(context.res, writeAuditLogRequired({
     eventType: "SSO_TOKEN_ISSUED",
     result: "SUCCESS",
-    actorUserId: context.oidc.session?.accountId,
+    actorUserId: context.oidc.entities.Grant?.accountId ?? context.oidc.entities.Account?.accountId,
     resource: "sso.token",
     message: "OIDC token response issued.",
     metadata: clientId ? { clientRef: hashAuditIdentifier(clientId) } : undefined
@@ -244,7 +244,7 @@ provider.on("grant.error", (rawContext) => {
   requireAuditBeforeResponse(context.res, writeAuditLogRequired({
     eventType: "SSO_TOKEN_REJECTED",
     result: "FAILURE",
-    actorUserId: context.oidc.session?.accountId,
+    actorUserId: context.oidc.entities.Grant?.accountId ?? context.oidc.entities.Account?.accountId,
     resource: "sso.token",
     message: "OIDC token request rejected.",
     metadata: clientId ? { clientRef: hashAuditIdentifier(clientId) } : undefined
@@ -359,8 +359,10 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
     return;
   }
   grant.addOIDCScope("openid profile email");
+  const missingClaims = interaction.prompt.details.missingOIDCClaims;
+  if (Array.isArray(missingClaims) && missingClaims.every((claim) => typeof claim === "string")) grant.addOIDCClaims(missingClaims);
   const grantId = await grant.save();
-  await provider.interactionFinished(context.req, context.res, { consent: { grantId } }, { mergeWithLastSubmission: false });
+  await provider.interactionFinished(context.req, context.res, { consent: { grantId } }, { mergeWithLastSubmission: true });
 }
 
 async function denyInteraction(context: KoaContextWithOIDC): Promise<void> {

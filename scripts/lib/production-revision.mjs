@@ -88,7 +88,7 @@ function pathsMatch(left, right) {
   return normalizedLeft === normalizedRight;
 }
 
-export function inspectProductionSource({ repositoryRoot, execute = runCommand, canonicalRemoteUrl = CANONICAL_VIRKI_REMOTE }) {
+export function inspectProductionSource({ repositoryRoot, execute = runCommand, canonicalRemoteUrl = CANONICAL_VIRKI_REMOTE, expectedRevision }) {
   const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
   const git = (args) => execute("git", args, { cwd: repositoryRoot, env: gitEnvironment });
   const resolvedRoot = requireSuccess(git(["rev-parse", "--show-toplevel"]));
@@ -129,6 +129,11 @@ export function inspectProductionSource({ repositoryRoot, execute = runCommand, 
   const revision = normalizeRevision(
     requireSuccess(git(["rev-parse", "--verify", "HEAD"])),
   );
+  // A post-deploy health read is pinned to the approved release; main may have advanced.
+  if (expectedRevision !== undefined) {
+    if (revision !== normalizeRevision(expectedRevision)) throw new ProductionRevisionError("SOURCE_REMOTE_MISMATCH");
+    return { branch, revision };
+  }
   const remoteMain = requireSuccess(
     git(["ls-remote", "--exit-code", "--refs", "origin", "refs/heads/main"]),
   ).split(/\s+/u);

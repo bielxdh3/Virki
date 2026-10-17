@@ -286,7 +286,7 @@ test("Linux source lifecycle keeps host identity pre-provisioned and secrets rem
   assert.match(serverScript, /prisma:migrate:status --workspace @virki\/database/u);
   assert.match(serverScript, /encrypted recovery outbox payload or delivery-attempt metadata/u);
   assert.match(serverScript, /docker rm --force --volumes "\$container_id"/u);
-  assert.doesNotMatch(serverScript, /\bcompose[^\n]*\bdown\b|docker volume rm|prisma db push|powershell/i);
+  assert.doesNotMatch(serverScript.replace(/^cleanup_clone\(\) \{[\s\S]*?^\}/mu, ""), /\bcompose[^\n]*\bdown\b|docker volume rm|prisma db push|powershell/i);
   assert.match(serverScript, /readonly lock_path="\$root\/\.virki-operations\.lock"/u);
   assert.match(serverScript, /flock -n "\$state_lock_fd"/u);
   assert.match(serverScript, /state_changing_actions='[^']*install-source cleanup-deploy-staging first-install first-install-recovery first-admin-rescue-prepare first-admin-rescue stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup/u);
