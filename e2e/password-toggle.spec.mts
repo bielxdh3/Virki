@@ -20,7 +20,7 @@ for (const surface of surfaces) {
       await page.goto(`${surface.url}/login?error=1`);
       const form = page.locator("form").filter({ has: page.getByLabel("Senha", { exact: true }) });
       const password = page.getByLabel("Senha", { exact: true });
-      const toggle = page.getByRole("button", { name: "Mostrar senha", exact: true });
+      const toggle = page.locator(".password-field button[type='button']");
       const submits: string[] = [];
       page.on("request", (request) => {
         if (request.url().includes("/api/login")) submits.push(request.url());
