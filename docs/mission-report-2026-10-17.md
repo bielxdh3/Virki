@@ -5,7 +5,7 @@
 | Date | 2026-10-17 |
 | Repository | `bielxdh3/Virki` |
 | Verified base | `main` at `d4e9131df1876c7ce7c9d36035881e54887269aa` |
-| Integrated local head | `d8e8515f26922013ff8703620c6576ad3da3b558` |
+| Integrated implementation head before this report | `d8e8515f26922013ff8703620c6576ad3da3b558` |
 
 ## Outcome
 
@@ -74,7 +74,7 @@ Excluded from the actionable tally: [07] and [25] remain unconfirmed; no exploit
 | Identity/auth/database and #50 | `f063ef5`, `98ca13a` | Independent review approved after one focused correction. | [#51](https://github.com/bielxdh3/Virki/pull/51), draft; head `194c97ed7b7ddbe4bdba44abb2288c741b9ee811` |
 | OIDC/operations | `194c97e` | Independent review approved; one Minor test-assertion coverage limitation remains. | [#51](https://github.com/bielxdh3/Virki/pull/51), draft |
 | Structured audit/timezone/search | `dd65ba1`, `eae4e61` | Fix round 1 approved; no open Critical/Important findings. | [#52](https://github.com/bielxdh3/Virki/pull/52), draft; head `eae4e617b6d1cc75625bfae4472d4c5c27f758d9` |
-| Login/invitation/recovery | `2bd0082`, `d8e8515` | Fix round 1 approved; no open Critical/Important findings. | [#53](https://github.com/bielxdh3/Virki/pull/53), draft; head `d8e8515f26922013ff8703620c6576ad3da3b558` |
+| Login/invitation/recovery | `2bd0082`, `d8e8515` | Fix round 1 approved; no open Critical/Important findings. | [#53](https://github.com/bielxdh3/Virki/pull/53), draft; includes this tracked mission report. |
 | Final whole-branch review | `d8e8515` | Seven-commit review against the verified base found no Critical/Important code defects; acceptance remains blocked. | PRs #51–#53 remain open drafts. |
 
 The PRs are stacked in order: #51 → #52 → #53. At the latest check, all three were open drafts with no reviews and no remote status checks reported. The issue tracker still showed #43 and #45–#50 open with no comments. Remote CI is unverified, not green. `main` remained at `d4e9131df1876c7ce7c9d36035881e54887269aa`.
