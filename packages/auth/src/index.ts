@@ -111,7 +111,6 @@ export async function checkLoginRateLimit(
   now = new Date()
 ): Promise<LoginRateLimitResult> {
   try {
-    await pruneExpiredLoginRateLimits(now);
     const entry = await prisma.loginRateLimit.findUnique({
       where: { identifierHash: hashLoginRateLimitIdentifier(identifier) },
       select: {
@@ -361,8 +360,6 @@ export async function authenticateUserWithRateLimit(
     const rateLimitEmail = scopeLoginRateLimitEmail(email, requiredRole).toLowerCase();
     const accountIdentifierHash = createLoginAccountRateLimitIdentifierHash(rateLimitEmail);
     const identifierHash = createLoginAttemptRateLimitIdentifierHash(rateLimitEmail, trustedClientAddress);
-    await pruneExpiredLoginRateLimits(now);
-
     const activeSourceReservation = sourceReservation;
     const activeSourceIdentifier = sourceIdentifier;
     authenticationTransactionStarted = true;
@@ -579,7 +576,14 @@ function getRateLimitWindowResetAt(windowStartedAt: Date): Date {
 }
 
 async function pruneExpiredLoginRateLimits(now: Date): Promise<number> {
-  const candidates = await prisma.loginRateLimit.findMany({ where: { expiresAt: { lte: now } }, select: { identifierHash: true } });
+  // Maintenance only: never run a full-table cleanup in a login request.
+  // Bounded scans avoid holding an auth request behind unrelated expired entries.
+  const candidates = await prisma.loginRateLimit.findMany({
+    where: { expiresAt: { lte: now } },
+    select: { identifierHash: true },
+    orderBy: { identifierHash: "asc" },
+    take: 128
+  });
   let deleted = 0;
   for (const { identifierHash } of candidates) {
     deleted += await prisma.$transaction(async (transaction) => {
