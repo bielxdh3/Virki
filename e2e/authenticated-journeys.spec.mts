@@ -70,6 +70,60 @@ test("USER can sign in and sees only the granted enabled project", async ({ brow
   }
 });
 
+test("ADMIN restarts a failed credential setup challenge with a fresh same-origin CSRF token", async ({ browser }) => {
+  test.setTimeout(60_000);
+  const context = await browser.newContext();
+  const prisma = createE2ePrismaClient();
+  let sessionId: string | undefined;
+  try {
+    const token = randomBytes(32).toString("base64url");
+    const session = await prisma.session.create({ data: {
+      userId: fixture.admin.id, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 600_000), authenticationMethods: ["pwd", "otp", "mfa"]
+    }, select: { id: true } });
+    sessionId = session.id;
+    await context.addCookies([{ name: SESSION_COOKIE_NAME, value: token, url: hubUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
+    const page = await context.newPage();
+    await addCloudflareAccessHeader(page);
+    await page.goto(`${hubUrl}/admin/security`);
+    const credentialSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Credencial administrativa", exact: true }) });
+    const setupForm = credentialSection.locator("form").first();
+    await setupForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await setupForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
+    const firstChallengeForm = credentialSection.locator("form").first();
+    const firstRequestKey = await firstChallengeForm.locator('input[name="requestKey"]').inputValue();
+    const firstCsrf = await firstChallengeForm.locator('input[name="csrfToken"]').inputValue();
+    const firstCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, firstRequestKey);
+    const invalidCode = firstCode === "000000" ? "000001" : "000000";
+    await firstChallengeForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(invalidCode);
+    await firstChallengeForm.locator('input[name="newPassword"]').fill(randomBytes(32).toString("base64url"));
+    await firstChallengeForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
+    await expect(firstChallengeForm.getByRole("alert")).toContainText("Código inválido ou expirado");
+    const restartLink = credentialSection.getByRole("link", { name: "Iniciar configuração novamente", exact: true });
+    await expect(restartLink).toBeVisible();
+    expect((await prisma.securityElevation.findUnique({ where: { requestKey: firstRequestKey }, select: { status: true } }))?.status).toBe("PENDING");
+
+    await restartLink.click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/security?restart=credential#admin-content`);
+    const restartedForm = credentialSection.locator("form").first();
+    expect(await restartedForm.locator('input[name="requestKey"]').count()).toBe(0);
+    const freshCsrf = await restartedForm.locator('input[name="csrfToken"]').inputValue();
+    expect(freshCsrf).not.toBe(firstCsrf);
+    await restartedForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await restartedForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
+    const newRequestKey = await credentialSection.locator("form").first().locator('input[name="requestKey"]').inputValue();
+    expect(newRequestKey).not.toBe(firstRequestKey);
+    expect((await prisma.securityElevation.findUnique({ where: { requestKey: firstRequestKey }, select: { status: true } }))?.status).toBe("REVOKED");
+    expect((await prisma.securityElevation.findUnique({ where: { requestKey: newRequestKey }, select: { status: true } }))?.status).toBe("PENDING");
+  } finally {
+    if (sessionId) {
+      await prisma.securityElevation.updateMany({ where: { userId: fixture.admin.id, sessionId, status: "PENDING" }, data: { status: "REVOKED", revokedAt: new Date() } });
+      await prisma.session.updateMany({ where: { id: sessionId, revokedAt: null }, data: { revokedAt: new Date() } });
+    }
+    await context.close();
+    await prisma.$disconnect();
+  }
+});
+
 test("ADMIN can sign in to a protected page, navigate, and have the session revoked on logout", async ({ browser }) => {
   // Multi-step ADMIN journey: every ADMIN sign-in now includes the emailed second-factor step.
   test.setTimeout(90_000);
@@ -683,6 +737,10 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     const userApprovalMessage = await readLatestRecoveryEmail(prisma, fixture.recoveryTargetUser.email, "account-recovery-approved:");
     expect(new URL(userApprovalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(portalUrl);
     await portalPage.goto(userApprovalMessage.actionUrl!);
+    if (new URL(portalPage.url()).searchParams.get("switch") === "1") {
+      await expect(portalPage.getByRole("status")).toContainText("Outro link está aberto nesta sessão.");
+      await portalPage.getByRole("button", { name: "Continuar com este link", exact: true }).click();
+    }
     await expect(portalPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
     const newUserPassword = randomBytes(32).toString("base64url");
     await portalPage.getByLabel("Nova senha", { exact: true }).fill(newUserPassword);

@@ -5,7 +5,8 @@ import { getAccountRecoveryRequestId, getAccountRecoveryState } from "@virki/aut
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
-import { completeRecoveryAction, openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction } from "./actions";
+import { openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction } from "./actions";
+import { RecoveryCompletionForm } from "./recovery-completion-form";
 import { RecoveryVerificationForm } from "./recovery-verification-form";
 import { RecoverySwitchForm } from "./recovery-switch-form";
 import { RECOVERY_CANDIDATE_COOKIE } from "./recovery-cookie";
@@ -53,7 +54,7 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
     <main className="auth-page">
       <section className="auth-panel" aria-labelledby="recover-title">
         <p className="eyebrow">Virki</p>
-        <h1 id="recover-title">{state?.purpose === "INVITATION" ? "Ativar conta" : expectedRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta"}</h1>
+        <h1 id="recover-title">{state?.purpose === "INVITATION" ? "Ativar sua conta" : expectedRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta"}</h1>
         {legacyRequestKey ? <>
           <p>Este link precisa ser aberto em uma etapa segura antes de continuar.</p>
           <form className="form-stack" action={openRecoveryAction}>
@@ -84,13 +85,8 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
         </> : null}
         {state?.status === "PENDING" && state.emailVerified ? <p role="status">E-mail confirmado. Um administrador analisará a solicitação. Após a aprovação, você receberá um novo e-mail com um link para definir a senha; abra esse novo link, pois esta página não será atualizada.</p> : null}
         {state?.status === "APPROVED" ? <>
-          <p role="status">{state.purpose === "INVITATION" ? "Crie uma senha para ativar sua conta. O convite é válido por 72 horas e pode ser usado uma vez." : "Defina uma nova senha para concluir o acesso à sua conta."}</p>
-          <form className="form-stack" action={completeRecoveryAction}>
-            <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf.complete} />
-            <input type="hidden" name="requestId" value={state.id} />
-            <label>{state.purpose === "INVITATION" ? "Crie sua senha" : "Nova senha"}<input type="password" name="newPassword" minLength={expectedRole === "ADMIN" ? 16 : 12} maxLength={256} pattern="[^\u0000-\u001f\u007f-\u009f]{12,256}" autoComplete="new-password" required /></label>
-            <button className="button-primary" type="submit">{state.purpose === "INVITATION" ? "Ativar conta" : "Concluir recuperação"}</button>
-          </form>
+          <p role="status">{state.purpose === "INVITATION" ? "Bem-vindo ao Virki! Defina uma senha para ativar sua conta. O convite é válido por 72 horas e pode ser usado uma vez." : "Defina uma nova senha para concluir o acesso à sua conta."}</p>
+          <RecoveryCompletionForm csrf={csrf.complete} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={state.id} expectedRole={expectedRole} purpose={state.purpose} />
         </> : null}
         {recoveryErrorMessage ? <p className="form-error" role="alert">{recoveryErrorMessage}</p> : null}
         <a className="subtle-link" href="/login">Voltar ao login</a>

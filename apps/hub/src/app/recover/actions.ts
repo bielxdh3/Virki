@@ -95,14 +95,16 @@ export async function verifyRecoveryAction(_state: RecoveryVerificationActionSta
   });
 }
 
-export async function completeRecoveryAction(formData: FormData) {
+export type RecoveryCompletionActionState = { status: "idle" | "password-error" };
+
+export async function completeRecoveryAction(_previousState: RecoveryCompletionActionState, formData: FormData): Promise<RecoveryCompletionActionState> {
   return withHubAuditRequest(async () => {
   const { expectedRole } = await requireRecoveryAccess(formData, "recovery-complete");
   const requestId = read(formData, "requestId");
   const requestKey = (await cookies()).get(RECOVERY_COOKIE_NAME)?.value;
   if (!requestKey) redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
   const newPassword = readRaw(formData, "newPassword");
-  if (!isAcceptableRecoveryPassword(expectedRole, newPassword)) redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=password`);
+  if (!isAcceptableRecoveryPassword(expectedRole, newPassword)) return { status: "password-error" };
   const recovery = await getAccountRecoveryState(requestId, requestKey, new Date(), expectedRole);
   try {
     await consumeApprovedAccountRecovery(requestId, requestKey, newPassword, new Date(), expectedRole);

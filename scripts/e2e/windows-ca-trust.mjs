@@ -59,6 +59,7 @@ try {
         VIRKI_E2E_CA_THUMBPRINT: thumbprint
       },
       stdio: "ignore",
+      timeout: 15_000,
       windowsHide: true
     });
   } catch {
