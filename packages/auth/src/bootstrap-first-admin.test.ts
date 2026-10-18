@@ -71,9 +71,15 @@ function createDatabase(
   };
   transaction.auditLog = {
     ...(transaction.auditLog as object),
-    findMany: async () => {
+    findMany: async (args?: { take?: number; cursor?: { id: string }; skip?: number; orderBy?: { id: string } }) => {
       calls.push("read:auditLog");
-      return auditRows;
+      if (args?.take === undefined || args.take > 128 || args.take < 1 || args.orderBy?.id !== "asc") {
+        throw new Error("Audit bootstrap must use bounded, deterministic pages.");
+      }
+      const records = auditRows.map((record, index) => ({ ...record, id: `audit-${String(index).padStart(6, "0")}` }));
+      const position = args.cursor ? records.findIndex((record) => record.id === args.cursor?.id) : -1;
+      if (args.cursor && position < 0) throw new Error("Unknown audit cursor.");
+      return records.slice(position + (args.cursor ? (args.skip ?? 0) : 1), position + (args.cursor ? (args.skip ?? 0) : 1) + args.take);
     }
   };
   const database = {
@@ -184,6 +190,26 @@ test("no-op maintenance audits cannot consume a finite prebootstrap allowance", 
   const fixture = createDatabase({ auditLog: rows.length }, rows);
   const result = await bootstrapFirstAdmin(validInput, { database: fixture.database as never, hashPassword: async () => "argon2:hashed", hashAdminEmail: () => "pseudonym:admin", writeAudit: async () => undefined });
   assert.equal(result.id, "created-admin");
+});
+
+test("bootstrap validates a large anonymous audit history in bounded pages, including its last row", async () => {
+  const rows = Array.from({ length: 301 }, () => ({ ...noopAudit }));
+  const fixture = createDatabase({ auditLog: rows.length }, rows);
+  const result = await bootstrapFirstAdmin(validInput, {
+    database: fixture.database as never,
+    hashPassword: async () => "argon2:hashed",
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async () => undefined
+  });
+  assert.equal(result.id, "created-admin");
+  assert.equal(fixture.calls.filter((call) => call === "read:auditLog").length, 3);
+
+  const invalid = createDatabase({ auditLog: rows.length }, [...rows.slice(0, -1), { ...noopAudit, actorUserId: "existing-user" }]);
+  await assert.rejects(
+    bootstrapFirstAdmin(validInput, { database: invalid.database as never, hashPassword: async () => "argon2:hashed", writeAudit: async () => assert.fail("Do not create an admin.") }),
+    (error) => error instanceof FirstAdminBootstrapError && error.code === "DATABASE_NOT_VIRGIN"
+  );
+  assert.equal(invalid.createdUser, undefined);
 });
 
 test("expensive password hashing completes before acquiring the transaction lock", async () => {

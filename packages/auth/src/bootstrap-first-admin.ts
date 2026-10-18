@@ -29,6 +29,7 @@ async function countApplicationRows(transaction: PrismaTypes.TransactionClient):
 const BOOTSTRAP_LOCK_ID = 4_852_716_032_158_417_203n;
 const AUDIT_LOG_COUNT_INDEX = 6;
 const RATE_LIMIT_COUNT_INDEX = 2;
+const BOOTSTRAP_AUDIT_PAGE_SIZE = 128;
 
 function isHarmlessPrebootstrapCleanupAudit(record: {
   eventType: string;
@@ -69,13 +70,25 @@ async function verifyBootstrapDatabaseIsVirgin(transaction: PrismaTypes.Transact
   if (auditCount === 0) return;
   // No finite allowance: anonymous traffic must not exhaust first-admin bootstrap.
   // All identity-bearing tables remain empty, and successful identity history is rejected.
-  const audits = await transaction.auditLog.findMany({
-    select: {
-      eventType: true, result: true, resource: true, message: true,
-      actorUserId: true, actorEmailHash: true, metadata: true
+  let examined = 0;
+  let cursor: string | undefined;
+  while (examined < auditCount) {
+    const audits = await transaction.auditLog.findMany({
+      take: BOOTSTRAP_AUDIT_PAGE_SIZE,
+      orderBy: { id: "asc" },
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      select: {
+        id: true, eventType: true, result: true, resource: true, message: true,
+        actorUserId: true, actorEmailHash: true, metadata: true
+      }
+    });
+    if (audits.length === 0 || audits.some((audit) => !isHarmlessPrebootstrapCleanupAudit(audit))) {
+      throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
     }
-  });
-  if (audits.length !== auditCount || audits.some((audit) => !isHarmlessPrebootstrapCleanupAudit(audit))) {
+    examined += audits.length;
+    cursor = audits.at(-1)!.id;
+  }
+  if (examined !== auditCount) {
     throw new FirstAdminBootstrapError("DATABASE_NOT_VIRGIN");
   }
 }

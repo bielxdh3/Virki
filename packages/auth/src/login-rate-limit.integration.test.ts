@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { PrismaClient, prisma } from "@virki/database";
 import { createTestUser, integrationOptions, uniqueEmail } from "./integration-fixtures";
-import { authenticateUserWithRateLimit, cleanupExpiredLoginRateLimits, hashPassword, verifyPassword } from "./index";
+import { authenticateUserWithRateLimit, checkLoginRateLimit, cleanupExpiredLoginRateLimits, hashPassword, verifyPassword } from "./index";
 
 // Source buckets are shared across runs of this disposable database; start from a clean limiter.
 before(async () => {
@@ -166,4 +166,59 @@ test("expired cleanup observes limiter locks and preserves a concurrently refres
   try { assert.equal(cleaned, false, "cleanup must honor the writer's advisory lock"); }
   finally { release(); await writer; await cleanup; }
   assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: hash } }), 1);
+});
+
+test("unrelated expired limiter locks never stall login or rate-limit checks", integrationOptions, async () => {
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  const now = new Date();
+  const hash = createRateLimitIdentifierHash(`stale-${crypto.randomUUID()}`);
+  await prisma.loginRateLimit.create({ data: { identifierHash: hash, attempts: 1, windowStartedAt: new Date(now.getTime() - 86400_000), expiresAt: new Date(now.getTime() - 1000) } });
+  const user = await createTestUser({ label: "login-stale-unrelated" });
+  let unlock!: () => void;
+  let locked!: () => void;
+  const acquired = new Promise<void>((resolve) => { locked = resolve; });
+  const release = new Promise<void>((resolve) => { unlock = resolve; });
+  const holder = prisma.$transaction(async (transaction) => {
+    await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${hash}, 0)) IS NULL AS "locked"`;
+    locked();
+    await release;
+  }, { timeout: 10000 });
+  await acquired;
+  const deadline = async <T>(operation: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Unrelated stale limiter lock blocked authentication.")), 2500);
+      })]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  try {
+    assert.equal((await deadline(checkLoginRateLimit(`no-entry-${crypto.randomUUID()}`, now))).allowed, true);
+    assert.equal((await deadline(authenticateUserWithRateLimit(user.email, user.password, now, "192.0.2.242"))).user?.id, user.id);
+  } finally {
+    unlock();
+    await holder;
+  }
+});
+
+test("expired login limiter maintenance operates in bounded batches", integrationOptions, async () => {
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  const now = new Date();
+  const prefix = crypto.randomUUID();
+  const identifiers = Array.from({ length: 140 }, (_, i) => createRateLimitIdentifierHash(`batch-${prefix}-${i}`));
+  await prisma.loginRateLimit.createMany({ data: identifiers.map((identifierHash) => ({
+    identifierHash, attempts: 1, windowStartedAt: new Date(now.getTime() - 86400_000), expiresAt: new Date(now.getTime() - 1000)
+  })) });
+  try {
+    const removedFirst = await cleanupExpiredLoginRateLimits(now);
+    assert.ok(removedFirst > 0 && removedFirst <= 128, `Expected a bounded cleanup batch, removed ${removedFirst}`);
+    assert.ok((await prisma.loginRateLimit.count({ where: { identifierHash: { in: identifiers } } })) > 0);
+    const removedSecond = await cleanupExpiredLoginRateLimits(now);
+    assert.ok(removedSecond > 0 && removedSecond <= 128);
+    assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: { in: identifiers } } }), 0);
+  } finally {
+    await prisma.loginRateLimit.deleteMany({ where: { identifierHash: { in: identifiers } } });
+  }
 });
