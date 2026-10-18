@@ -118,11 +118,20 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     const initialSecrets = fixtureSecrets;
     const create = docker(args, `create ${kind} PostgreSQL fixture`, { env: initialSecrets });
     assert.ok(create.stdout.trim(), `Could not create the ${kind} disposable PostgreSQL fixture.`);
-    for (const [source, destination] of initializerFiles) {
-      docker(["cp", source, `${name}:${destination}`], `copy reviewed ${kind} PostgreSQL initializer`);
+    if (kind === "populated") {
+      const start = docker(["start", name], `start ${kind} PostgreSQL fixture`);
+      assert.equal(start.status, 0, `Could not start the ${kind} disposable PostgreSQL fixture.`);
+      docker(["exec", name, "mkdir", "-m", "0700", "/test"], "create private PostgreSQL fixture initializer directory");
+      for (const [source, destination] of initializerFiles) {
+        docker(["cp", source, `${name}:${destination}`], `copy reviewed ${kind} PostgreSQL initializer`);
+      }
+    } else {
+      for (const [source, destination] of initializerFiles) {
+        docker(["cp", source, `${name}:${destination}`], `copy reviewed ${kind} PostgreSQL initializer`);
+      }
+      const start = docker(["start", name], `start ${kind} PostgreSQL fixture`);
+      assert.equal(start.status, 0, `Could not start the ${kind} disposable PostgreSQL fixture.`);
     }
-    const start = docker(["start", name], `start ${kind} PostgreSQL fixture`);
-    assert.equal(start.status, 0, `Could not start the ${kind} disposable PostgreSQL fixture.`);
     assertFixtureContainer(name, network, testRunId, name, "postgres");
     await waitForHealthy(name, fixtureSecrets);
     assertPostgresFixtureMounts(name, kind, dataVolume);
@@ -161,6 +170,11 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
       const recreated = docker(args, "recreate PostgreSQL fixture against initialized PGDATA", { env: fixtureSecrets });
       assert.equal(recreated.status, 0, "Could not recreate the PostgreSQL fixture against its initialized data volume.");
       assertFixtureContainer(name, network, testRunId, name, "postgres");
+      for (const [source, destination] of initializerFiles) {
+        docker(["cp", source, `${name}:${destination}`], `copy reviewed ${kind} PostgreSQL initializer after container recreation`);
+      }
+      const started = docker(["start", name], "start PostgreSQL fixture after container recreation");
+      assert.equal(started.stdout.trim(), name, "The recreated PostgreSQL fixture must start before its health check.");
       await waitForHealthy(name, fixtureSecrets);
       assertPostgresFixtureMounts(name, kind, dataVolume);
       const partialRole = runPsql(name, "virki_bootstrap", bootstrapPassword, "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'virki_runtime';", "inspect partial runtime role");
