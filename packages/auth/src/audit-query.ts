@@ -3,7 +3,7 @@ import type { Prisma } from "@virki/database";
 export const AUDIT_PAGE_SIZE = 50;
 export const AUDIT_CATEGORIES = ["AUTH", "ACCOUNT", "ADMIN", "PROJECT", "SSO", "SECURITY", "ACCESS", "AUTHORIZATION", "CSRF", "RATE", "AUDIT", "LEGACY"] as const;
 export type AuditSearchParams = Record<string, string | string[] | undefined>;
-export type AuditFilters = { q: string; event: string; category: string; result: string; actor: string; resource: string; id: string; from: string; to: string; sort: "newest" | "oldest"; page: number };
+export type AuditFilters = { q: string; event: string; category: string; result: string; actor: string; actorRole: "" | "ADMIN" | "USER" | "SYSTEM"; resource: string; id: string; from: string; to: string; sort: "newest" | "oldest"; page: number };
 export class AuditFilterError extends Error {
   constructor() { super("Filtros inválidos. Use identificadores seguros e um intervalo de até 366 dias (UTC−4)."); }
 }
@@ -30,6 +30,7 @@ export function parseAuditFilters(params: AuditSearchParams): AuditFilters {
     event: read("event", /^[A-Z0-9_]{3,80}$/u), category,
     result: read("result", /^(SUCCESS|FAILURE|DENIED|INFO)$/u),
     actor: read("actor", /^(system|identified|[a-f0-9]{8,64})$/u),
+    actorRole: read("actorRole", /^(ADMIN|USER|SYSTEM)$/u) as AuditFilters["actorRole"],
     resource: read("resource", /^[A-Za-z0-9_.-]{1,80}$/u),
     id: read("id", /^[A-Za-z0-9_.-]{8,80}$/u), from, to,
     sort: read("sort", /^(newest|oldest)$/u, "newest") as AuditFilters["sort"], page
@@ -40,6 +41,7 @@ export function buildAuditQuery(filters: AuditFilters) {
     ...(filters.event ? { eventType: filters.event } : {}),
     ...(filters.category ? { category: filters.category } : {}),
     ...(filters.result ? { result: filters.result } : {}),
+    ...(filters.actorRole === "SYSTEM" ? { actorRole: null, actorUserId: null, actorEmailHash: null } : filters.actorRole ? { actorRole: filters.actorRole } : {}),
     ...(filters.resource ? { resource: filters.resource } : {}),
     ...(filters.id ? { id: filters.id } : {}),
     ...(filters.actor === "system" ? { actorUserId: null, actorEmailHash: null } : filters.actor === "identified" ? { OR: [{ actorUserId: { not: null } }, { actorEmailHash: { not: null } }] } : filters.actor ? { actorRef: { startsWith: filters.actor } } : {}),

@@ -37,3 +37,22 @@ test("exact event ID accepts safe dotted identifiers used by persisted events", 
   const query = buildAuditQuery(parseAuditFilters({ id: "browser.03ea2af7-000" }));
   assert.equal(query.where.id, "browser.03ea2af7-000");
 });
+
+test("actor role filters are allowlisted, server-side, combinable and shareable", () => {
+  const admin = parseAuditFilters({ actorRole: "ADMIN", result: "DENIED", actor: "abcdef012345" });
+  assert.equal(admin.actorRole, "ADMIN");
+  assert.equal(buildAuditQuery(admin).where.actorRole, "ADMIN");
+  assert.equal(buildAuditQuery(admin).where.result, "DENIED");
+  assert.deepEqual(buildAuditQuery(admin).where.actorRef, { startsWith: "abcdef012345" });
+
+  const user = parseAuditFilters({ actorRole: "USER" });
+  assert.equal(buildAuditQuery(user).where.actorRole, "USER");
+
+  const system = buildAuditQuery(parseAuditFilters({ actorRole: "SYSTEM" }));
+  assert.equal(system.where.actorRole, null);
+  assert.equal(system.where.actorUserId, null);
+  assert.equal(system.where.actorEmailHash, null);
+
+  assert.match(auditPageHref(admin, 2), /actorRole=ADMIN/u);
+  assert.throws(() => parseAuditFilters({ actorRole: "ROOT" }));
+});

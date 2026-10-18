@@ -25,7 +25,8 @@ export function AuditView({ filters, rows, hasNext }: { filters: AuditFilters; r
         <label>Tipo de evento<input name="event" defaultValue={filters.event} maxLength={80} pattern="[A-Z0-9_]+" /></label>
         <label>Categoria<select name="category" defaultValue={filters.category}><option value="">Todas</option>{AUDIT_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label>
         <label>Resultado<select name="result" defaultValue={filters.result}><option value="">Todos</option>{Object.entries(outcomes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label>Ator<input name="actor" defaultValue={filters.actor} maxLength={64} aria-describedby="audit-actor-help" /></label>
+        <label>Papel do ator<select name="actorRole" defaultValue={filters.actorRole}><option value="">Todos</option><option value="ADMIN">Administrador (ADMIN)</option><option value="USER">Usuário (USER)</option><option value="SYSTEM">Sistema sem conta identificada (SYSTEM)</option></select></label>
+        <label>Referência do ator<input name="actor" defaultValue={filters.actor} maxLength={64} aria-describedby="audit-actor-help" /></label>
         <p className="muted" id="audit-actor-help">Use system (sem ator identificado), identified (conta identificada) ou o prefixo hexadecimal da referência (mínimo 8 caracteres).</p>
         <label>Recurso exato<input name="resource" defaultValue={filters.resource} maxLength={80} /></label>
         <label>ID exato do evento<input name="id" defaultValue={filters.id} maxLength={80} /></label>
