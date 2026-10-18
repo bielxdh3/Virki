@@ -203,6 +203,14 @@ test("authenticated E2E uses the real PostgreSQL role initializer and scoped dis
   assert.doesNotMatch(e2e, /services:\r?\n\x20+postgres:/u);
 });
 
+test("CI and CodeQL run on stacked cdx pull requests while production builds remain main-push only", () => {
+  for (const source of [workflow, codeqlWorkflow]) {
+    assert.match(source, /pull_request:\r?\n\x20{4}branches:\r?\n\x20{6}- main\r?\n\x20{6}- ["']?cdx\/\*\*["']?/u);
+    assert.match(source, /push:\r?\n\x20{4}branches:\r?\n\x20{6}- main/u);
+  }
+  assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
+});
+
 test("CodeQL analyzes without Code Scanning upload and preserves SARIF as a pinned artifact", () => {
   assert.match(codeqlWorkflow, /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/u);
   assert.match(codeqlWorkflow, /uses: github\/codeql-action\/(?:init|analyze)@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4\.38\.2/u);
