@@ -71,6 +71,21 @@ test("ADMIN investigates persisted audit with safe details, filters, paging, UTC
     await page.getByLabel("ID exato do evento", { exact: true }).fill(`${resource}-000`);
     await page.getByRole("button", { name: "Buscar eventos", exact: true }).click();
     await expect(page.locator("article.audit-event")).toHaveCount(1);
+    const roleResource = `${resource}.roles`;
+    await database.auditLog.createMany({ data: [
+      { ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: fixture.admin.id, actorRole: "ADMIN", resource: roleResource }), id: `${roleResource}.admin` },
+      { ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: fixture.user.id, actorRole: "USER", resource: roleResource }), id: `${roleResource}.user` },
+      { ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource: roleResource }), id: `${roleResource}.system` }
+    ] });
+    for (const [actorRole, eventId, displayedRole] of [["ADMIN", "admin", "ADMIN"], ["USER", "user", "USER"], ["SYSTEM", "system", "Indisponível"]] as const) {
+      await page.goto(`${hub}/admin/audit?resource=${roleResource}&actorRole=${actorRole}`);
+      await expect(page.getByRole("combobox", { name: "Papel do ator", exact: true })).toHaveValue(actorRole);
+      await expect(page.locator("article.audit-event")).toHaveCount(1);
+      await expect(page.locator("article.audit-event").first()).toContainText(`${roleResource}.${eventId}`);
+      const roleDetail = page.locator("article.audit-event details").first();
+      await roleDetail.locator("summary").click();
+      await expect(roleDetail.locator("pre")).toContainText(`"papelVerificado": "${displayedRole}"`);
+    }
     await page.goto(`${hub}/admin/audit?resource=missing.resource`);
     await expect(page.getByText("Nenhum evento corresponde aos filtros.", { exact: false })).toBeVisible();
     await page.goto(`${hub}/admin/audit?from=2026-02-30&to=2026-03-01`);

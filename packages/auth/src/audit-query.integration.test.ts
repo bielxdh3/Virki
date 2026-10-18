@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "@virki/database";
 import { createAuditLogData, hashAuditIdentifier, writeAuditLogInTransaction, writeAuditLogRequired, runWithAuditContext } from "./audit";
 import { buildAuditQuery, parseAuditFilters } from "./audit-query";
-import { integrationOptions } from "./integration-fixtures";
+import { createTestUser, integrationOptions } from "./integration-fixtures";
 
 test("structured audit persists/query filters, isolated correlation, UTC bounds and append-only role", integrationOptions, async () => {
   const resource = `test.${randomUUID()}`;
@@ -42,4 +42,17 @@ test("structured audit persists/query filters, isolated correlation, UTC bounds 
   assert.equal((await prisma.auditLog.findMany(buildAuditQuery({ ...filters, q: "AUTH_LOGIN_FAILURE" }))).length, 51);
   assert.equal((await prisma.auditLog.findMany(buildAuditQuery({ ...filters, id: `${resource}-000` }))).length, 1);
   assert.equal(await prisma.auditLog.count({ where: { resource, requestId } }), 2);
+
+  const roleResource = `${resource}.roles`;
+  const admin = await createTestUser({ role: "ADMIN" });
+  const user = await createTestUser({ role: "USER" });
+  await prisma.auditLog.createMany({ data: [
+    { ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: admin.id, actorRole: "ADMIN", resource: roleResource }), id: `${roleResource}.admin` },
+    { ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: user.id, actorRole: "USER", resource: roleResource }), id: `${roleResource}.user` },
+    { ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource: roleResource }), id: `${roleResource}.system` }
+  ] });
+  for (const [actorRole, expectedId] of [["ADMIN", `${roleResource}.admin`], ["USER", `${roleResource}.user`], ["SYSTEM", `${roleResource}.system`]] as const) {
+    const matches = await prisma.auditLog.findMany(buildAuditQuery(parseAuditFilters({ resource: roleResource, actorRole })));
+    assert.deepEqual(matches.map((row) => row.id), [expectedId]);
+  }
 });
