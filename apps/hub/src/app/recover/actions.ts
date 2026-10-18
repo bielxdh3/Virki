@@ -58,17 +58,22 @@ export async function openRecoveryAction(formData: FormData) {
   });
 }
 
-export async function switchRecoveryAction(formData: FormData): Promise<void> {
+export type RecoverySwitchActionState = { status: "idle" | "error" | "complete"; requestId?: string };
+
+export async function switchRecoveryAction(_previousState: RecoverySwitchActionState, formData: FormData): Promise<RecoverySwitchActionState> {
   return withHubAuditRequest(async () => {
     const { expectedRole } = await requireRecoveryAccess(formData, "recovery-open");
     const cookieStore = await cookies();
     const requestKey = cookieStore.get(RECOVERY_CANDIDATE_COOKIE)?.value ?? "";
     const requestId = read(formData, "requestId");
     const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
-    if (!recovery || recovery.id !== requestId) redirect("/recover?error=1");
+    if (!recovery || recovery.id !== requestId) {
+      await recordSecurityDenial(await headers(), "account-recovery-switch", "rejected");
+      return { status: "error" };
+    }
     setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
     clearRecoveryCandidateCookie(cookieStore);
-    redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
+    return { status: "complete", requestId: recovery.id };
   });
 }
 

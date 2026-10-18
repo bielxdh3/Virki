@@ -372,3 +372,30 @@ test("Chromium receives only required platform variables and never Virki secrets
     }
   }
 });
+
+test("Hub readiness checks its listening port while the browser verifies the private TLS CA", () => {
+  const configPath = resolve(repositoryRoot, "playwright.config.mts");
+  const inspector = `
+    process.argv.push("--list");
+    const { default: config } = await import(${JSON.stringify(configPath)});
+    const hub = config.webServer.find(({ command }) => command.includes("isolated-service.mjs hub"));
+    process.stdout.write(JSON.stringify({ port: hub?.port, url: hub?.url, ignoreHTTPSErrors: config.use?.ignoreHTTPSErrors }));
+  `;
+  const platformNames = platformEnvironmentVariableNames[process.platform === "win32" ? "windows" : "posix"];
+  const environment = Object.fromEntries(platformNames
+    .filter((key) => typeof process.env[key] === "string")
+    .map((key) => [key, process.env[key]]));
+  if (process.platform === "win32" && environment.PATH === undefined && process.env.Path) {
+    environment.PATH = process.env.Path;
+  }
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", inspector], {
+    cwd: repositoryRoot,
+    env: environment,
+    encoding: "utf8",
+    timeout: 15_000,
+    windowsHide: true
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `Could not inspect the E2E web server configuration.\n${result.stderr}`);
+  assert.deepEqual(JSON.parse(result.stdout), { port: 3001 });
+});

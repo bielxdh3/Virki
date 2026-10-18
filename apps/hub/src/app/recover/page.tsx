@@ -5,8 +5,9 @@ import { getAccountRecoveryRequestId, getAccountRecoveryState } from "@virki/aut
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
-import { completeRecoveryAction, openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction, switchRecoveryAction } from "./actions";
+import { completeRecoveryAction, openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction } from "./actions";
 import { RecoveryVerificationForm } from "./recovery-verification-form";
+import { RecoverySwitchForm } from "./recovery-switch-form";
 import { RECOVERY_CANDIDATE_COOKIE } from "./recovery-cookie";
 
 export const dynamic = "force-dynamic";
@@ -74,11 +75,7 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
 
         {confirmRecoverySwitch ? <>
           <p role="status">Outro link está aberto nesta sessão. Continuar com este link vai encerrar o progresso atual de recuperação neste navegador.</p>
-          <form className="form-stack" action={switchRecoveryAction}>
-            <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf.open} />
-            <input type="hidden" name="requestId" value={candidate!.id} />
-            <button className="button-primary" type="submit">Continuar com este link</button>
-          </form>
+          <RecoverySwitchForm csrf={csrf.open} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={candidate!.id} />
         </> : null}
         {params?.requestId && !state && !confirmRecoverySwitch ? <p className="form-error" role="alert">Este link de recuperação não é mais válido. Se a sua solicitação já foi aprovada, use o link mais recente enviado por e-mail. Caso contrário, <a href="/recover">solicite novas instruções.</a></p> : null}
         {state?.status === "PENDING" && !state.emailVerified ? <>

@@ -70,7 +70,7 @@ BEGIN
       AND type.typname NOT IN (
         'AccountStatus', 'AdministrativeCredentialStatus', 'DeliveryAttemptStatus',
         'DeviceChallengeStatus', 'EmailMessageKind', 'OutboxMessageStatus',
-        'RecoveryRequestStatus', 'SecondFactorMethod', 'SecurityElevationStatus',
+        'RecoveryRequestPurpose', 'RecoveryRequestStatus', 'SecondFactorMethod', 'SecurityElevationStatus',
         'SecurityFactorStatus', 'TrustedDeviceStatus', 'UserRole'
       )
       AND NOT EXISTS (

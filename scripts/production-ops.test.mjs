@@ -1571,3 +1571,15 @@ test("restore-clone migration ledger reads use the migrator role, never runtime"
   assert.doesNotMatch(namesFunction, /clone_query "\$container" "\$sql"/u);
   assert.doesNotMatch(summaryFunction, /clone_query "\$container" "\$sql"/u);
 });
+
+test("database role initialization allows every Prisma model and enum after migration", () => {
+  const roleInitializer = readFileSync(new URL("../infra/postgres-init/10-virki-database-roles.sh", import.meta.url), "utf8");
+  const prismaSchema = readFileSync(new URL("../packages/database/prisma/schema.prisma", import.meta.url), "utf8");
+  const allowedRelations = roleInitializer.match(/relation\.relname NOT IN \(([\s\S]*?)\)/u)?.[1] ?? "";
+  const allowedTypes = roleInitializer.match(/type\.typname NOT IN \(([\s\S]*?)\)/u)?.[1] ?? "";
+  const models = [...prismaSchema.matchAll(/^model\s+(\w+)\s+\{/gmu)].map((match) => match[1]);
+  const enums = [...prismaSchema.matchAll(/^enum\s+(\w+)\s+\{/gmu)].map((match) => match[1]);
+
+  for (const model of models) assert.ok(allowedRelations.includes(`'${model}'`), `Database role guard must allow Prisma model ${model}.`);
+  for (const enumName of enums) assert.ok(allowedTypes.includes(`'${enumName}'`), `Database role guard must allow Prisma enum ${enumName}.`);
+});

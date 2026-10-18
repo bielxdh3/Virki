@@ -207,7 +207,9 @@ export default defineConfig({
     },
     {
       command: "node scripts/e2e/isolated-service.mjs hub",
-      url: "https://127.0.0.1:3001/login",
+      // Playwright's webServer URL probe cannot consume this run's private CA. Check the listener only;
+      // the browser navigation below still performs normal TLS verification against its private NSS DB.
+      port: 3001,
       reuseExistingServer: false,
       timeout: 120_000,
       env: hubEnv

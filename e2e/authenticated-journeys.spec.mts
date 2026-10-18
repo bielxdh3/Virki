@@ -765,6 +765,14 @@ async function signIn(page: import("@playwright/test").Page, account: AccountFix
   await page.getByLabel("Senha", { exact: true }).fill(account.password);
   const expectedOrigin = new URL(page.url()).origin;
   const documentOrigin = await page.evaluate(() => window.origin);
+  const verificationResponseTrace: string[] = [];
+  const recordVerificationResponse = (response: import("@playwright/test").Response) => {
+    const responseUrl = new URL(response.url());
+    if (responseUrl.origin === expectedOrigin && ["/api/login", "/login/verify", "/login"].includes(responseUrl.pathname)) {
+      verificationResponseTrace.push(`${response.request().method()} ${responseUrl.pathname}:${response.status()}`);
+    }
+  };
+  page.on("response", recordVerificationResponse);
   const loginResponsePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === "/api/login" && response.request().method() === "POST"
   );
@@ -784,17 +792,24 @@ async function signIn(page: import("@playwright/test").Page, account: AccountFix
     }
     // ADMIN logins always complete an emailed code, even from a remembered browser; USER remembered grants skip this step.
     if (redirect.pathname === "/login/verify") {
-      await completeLoginEmailVerification(page, account, redirect);
+      await completeLoginEmailVerification(page, account, redirect, loginResponse.status(), verificationResponseTrace);
     }
   }
 }
 
-async function completeLoginEmailVerification(page: import("@playwright/test").Page, account: AccountFixture, verifyUrl: URL): Promise<void> {
+async function completeLoginEmailVerification(page: import("@playwright/test").Page, account: AccountFixture, verifyUrl: URL, responseStatus: number, responseTrace: string[]): Promise<void> {
   const ceremonyId = verifyUrl.searchParams.get("ceremony") ?? "";
   if (!ceremonyId || verifyUrl.searchParams.get("factor") !== "email") {
     throw new Error("E2E login requested an unsupported second factor.");
   }
-  await page.waitForURL((url) => url.pathname === "/login/verify" && url.searchParams.get("ceremony") === ceremonyId, { timeout: 15_000 });
+  try {
+    await page.waitForURL((url) => url.pathname === "/login/verify" && url.searchParams.get("ceremony") === ceremonyId, { timeout: 15_000 });
+  } catch {
+    const currentUrl = new URL(page.url());
+    const expectedQueryKeys = [...verifyUrl.searchParams.keys()].sort().join(",") || "none";
+    const currentQueryKeys = [...currentUrl.searchParams.keys()].sort().join(",") || "none";
+    throw new Error(`E2E login verification navigation did not complete (response=${responseStatus}; redirect=${verifyUrl.pathname}; redirect-query-keys=${expectedQueryKeys}; current=${currentUrl.pathname}; current-query-keys=${currentQueryKeys}; response-trace=${responseTrace.join(",") || "none"}).`);
+  }
   const prisma = createE2ePrismaClient();
   let code: string;
   try {
