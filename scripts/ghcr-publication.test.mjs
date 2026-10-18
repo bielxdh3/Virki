@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 // Exercise the actual workflow Bash step without a registry or Docker daemon.
-const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8").replace(/\r\n/gu, "\n");
 const step = workflow.indexOf("      - name: Publish tested private GHCR images and record exact manifest digests\n");
 const begin = workflow.indexOf("        run: |\n", step) + "        run: |\n".length;
 const end = workflow.indexOf("\n      - name:", begin);
