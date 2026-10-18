@@ -7,6 +7,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$playwrightArgumentsJson = $env:VIRKI_E2E_PLAYWRIGHT_ARGUMENTS_JSON
+if ($playwrightArgumentsJson) {
+  try {
+    $decodedPlaywrightArguments = ConvertFrom-Json -InputObject $playwrightArgumentsJson -ErrorAction Stop
+  } catch {
+    throw 'Playwright arguments must be a JSON array of strings.'
+  }
+  if ($decodedPlaywrightArguments -isnot [System.Array] -or @($decodedPlaywrightArguments | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+    throw 'Playwright arguments must be a JSON array of strings.'
+  }
+  $PlaywrightArguments = [string[]]$decodedPlaywrightArguments
+}
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $runId = [Guid]::NewGuid().ToString('N').Substring(0, 10)
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
@@ -73,7 +85,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Could not snapshot unstaged worktree changes.' }
   $untrackedFiles = @(& git ls-files --others --exclude-standard)
   if ($LASTEXITCODE -ne 0) { throw 'Could not inventory nonignored untracked files.' }
-  $allowedUntracked = @('apps/hub/src/app/recover/recovery-completion-form.tsx', 'e2e/recovery-invitation.spec.mts', 'scripts/e2e/run-isolated-linux-docker.ps1')
+  $allowedUntracked = @('apps/hub/src/app/recover/recovery-completion-form.tsx', 'e2e/recovery-invitation.spec.mts', 'scripts/e2e/run-isolated-linux-docker.ps1', 'scripts/e2e/run-e2e.mjs', 'scripts/e2e/run-e2e.test.mjs')
   if ($untrackedFiles | Where-Object { $_ -notin $allowedUntracked }) {
     throw 'The Docker E2E snapshot found an unexpected untracked file; review it before copying.'
   }
