@@ -7,9 +7,13 @@ import { tmpdir } from "node:os";
 import { buildChromiumEnvironment } from "./scripts/e2e/isolated-service.mjs";
 import { createWindowsCaTrust } from "./scripts/e2e/windows-ca-trust.mjs";
 import { reuseE2eEmailOutboxKey, reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
+import { assertDirectPlaywrightPlatform } from "./scripts/e2e/run-e2e.mjs";
 
 // @ts-expect-error This JavaScript safety helper has no declaration file.
 import { CORE_TEST_DATABASE_CONFIRMATION } from "./scripts/core-test-database-safety.mjs";
+
+const discoveryOnly = process.argv.includes("--list");
+assertDirectPlaywrightPlatform(process.platform, discoveryOnly);
 
 const portalUrl = "https://portal.localhost:3001";
 const accessTeamDomain = "http://127.0.0.1:3010";
@@ -25,7 +29,6 @@ if (process.env[registrationTokenInitializedEnv] === "true" && !initializedRegis
 const jwksRegistrationToken = initializedRegistrationToken ?? randomBytes(32).toString("base64url");
 const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL;
 const runtimeReady = process.env.VIRKI_E2E_RUNTIME_READY === "true";
-const discoveryOnly = process.argv.includes("--list");
 const inheritedTotpEncryptionKey = runtimeReady ? process.env.VIRKI_TOTP_ENCRYPTION_KEY : undefined;
 if (runtimeReady && (!inheritedTotpEncryptionKey || !/^[0-9a-f]{64}$/iu.test(inheritedTotpEncryptionKey))) {
   throw new Error("Inherited E2E TOTP encryption key is invalid.");

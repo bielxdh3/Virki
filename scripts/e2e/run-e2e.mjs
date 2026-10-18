@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 const modulePath = fileURLToPath(import.meta.url);
 const repositoryRoot = resolve(dirname(modulePath), "../..");
 
+export function assertDirectPlaywrightPlatform(platform, discoveryOnly = false) {
+  if (platform === "win32" && !discoveryOnly) {
+    throw new Error("Direct Playwright execution on Windows can install a test CA in CurrentUser\\Root. Use npm run test:e2e to run in isolated Linux Docker.");
+  }
+}
+
 export function buildE2ECommand(platform, playwrightArguments = [], repoRoot = repositoryRoot) {
   if (!Array.isArray(playwrightArguments) || playwrightArguments.some((argument) => typeof argument !== "string")) {
     throw new TypeError("Playwright arguments must be an array of strings.");
