@@ -48,7 +48,7 @@ Subject identifiers are the internal account ID and are shared across connected 
 
 ## Audit and redaction
 
-Audit entries contain event type, result, actor reference, resource, safe message, timestamp, and sanitized structured metadata. Connection/client references are hashed. Audit views use stable cursor pagination and event filters. Never record passwords, session values, cookies, TOTP seeds, recovery plaintext, client secrets, private keys, bearer tokens, or raw credential payloads.
+Audit entries use a versioned, queryable structured envelope with static actions, outcomes, safe references and bounded allowlisted metadata. The authorized ADMIN investigation view uses server-side filters and deterministic bounded paging without joining raw actor emails or display names. Dates use America/Porto_Velho (UTC−4); stored instants stay UTC. See [Security audit](audit.md) for field availability, failure policy, retention, redaction and migration limits. Never record passwords, session values, cookies, TOTP seeds, recovery plaintext, client secrets, private keys, bearer tokens, or raw credential payloads.
 
 Operational logs are summarized without returning their contents. Secret scans run in CI and locally before publication or deployment.
 

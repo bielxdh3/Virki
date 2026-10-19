@@ -1,5 +1,7 @@
 "use server";
 
+import { withHubAuditRequest } from "../../../lib/audit-request";
+
 import {
   AdministrativePasswordReuseError,
   completeAdministrativeCredentialSetup,
@@ -16,28 +18,35 @@ import { hashAuditIdentifier, writeAuditLogInTransaction } from "@virki/auth";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
+import { recordSecurityDenial } from "../../../lib/audit-denial";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../../lib/admin-mutation";
 
 export type SecurityFormState = { status: "idle" | "error" | "password-reuse" | "started" | "complete"; requestKey?: string; scope?: string; recoveryCodes?: string[] };
 
 export async function startCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-credential-setup");
   try {
     const requestKey = await startAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, normalPassword: readFormRawString(formData, "normalPassword"), locale: "pt-BR" });
     return { status: "started", requestKey };
-  } catch (error) { return { status: passwordStatus(error) }; }
+  } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error) }; }
+  });
 }
 
 export async function completeCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-credential-setup-complete");
   try {
     const recoveryCodes = await completeAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code"), newPassword: readFormRawString(formData, "newPassword") });
     revalidatePath("/admin/security");
     return { status: "complete", recoveryCodes };
-  } catch (error) { return { status: passwordStatus(error) }; }
+  } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error) }; }
+  });
 }
 
 export async function startElevationAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-elevation-start");
   const scope = readFormString(formData, "scope") as ElevationScope;
   try {
@@ -47,21 +56,26 @@ export async function startElevationAction(_state: SecurityFormState, formData: 
       : { kind: "TIMED", minutes: Number(durationValue) as 15 | 60 | 240 | 1440 };
     const request = await startSecurityElevation({ actor: session.user, sessionId: session.id, normalPassword: readFormRawString(formData, "normalPassword"), administrativePassword: readFormRawString(formData, "administrativePassword"), scope, duration, locale: "pt-BR" });
     return { status: "started", requestKey: request.requestKey, scope };
-  } catch (error) { return { status: passwordStatus(error), scope }; }
+  } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error), scope }; }
+  });
 }
 
 export async function verifyElevationAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-elevation-verify");
   try {
     await verifySecurityElevation({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code") });
     revalidatePath("/admin/security");
     return { status: "complete" };
   } catch {
+    await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session);
     return { status: "error" };
   }
+  });
 }
 
 export async function revokeElevationAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-elevation-revoke");
   const requestKey = readFormString(formData, "requestKey");
   const revoked = await prisma.$transaction(async (transaction) => {
@@ -75,9 +89,11 @@ export async function revokeElevationAction(formData: FormData): Promise<void> {
   if (!revoked) redirect("/admin/security?error=elevation#admin-content");
   revalidatePath("/admin/security");
   redirect("/admin/security?status=revoked#admin-content");
+  });
 }
 
 export async function revokeOtherSessionsAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-sessions-revoke");
   await prisma.$transaction(async (transaction) => {
     const result = await transaction.session.updateMany({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null }, data: { revokedAt: new Date() } });
@@ -85,26 +101,32 @@ export async function revokeOtherSessionsAction(formData: FormData): Promise<voi
   });
   revalidatePath("/admin/security");
   redirect("/admin/security?status=sessions#admin-content");
+  });
 }
 
 export async function changeAdminPasswordAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-credential-change");
   try {
     await changeAdministrativePassword(session.user, session.id, readFormRawString(formData, "newPassword"));
     revalidatePath("/admin/security");
     return { status: "complete" };
-  } catch (error) { return { status: passwordStatus(error) }; }
+  } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error) }; }
+  });
 }
 
 export async function regenerateAdminRecoveryCodesAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-recovery-codes");
   try {
     const recoveryCodes = await regenerateAdministrativeRecoveryCodes(session.user, session.id);
     return { status: "complete", recoveryCodes };
-  } catch { return { status: "error" }; }
+  } catch { await recordSecurityDenial(await headers(), "admin-recovery-codes", "rejected", session); return { status: "error" }; }
+  });
 }
 
 export async function recoverAdminCredentialAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-credential-recovery");
   try {
     const recoveryCodes = await recoverAdministrativeCredential({
@@ -116,8 +138,10 @@ export async function recoverAdminCredentialAction(_state: SecurityFormState, fo
     revalidatePath("/admin/security");
     return { status: "complete", recoveryCodes };
   } catch (error) {
+    await recordSecurityDenial(await headers(), "admin-credential-recovery", "rejected", session);
     return { status: passwordStatus(error) };
   }
+  });
 }
 
 function passwordStatus(error: unknown): SecurityFormState["status"] {

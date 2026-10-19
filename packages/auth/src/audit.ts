@@ -1,8 +1,16 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma, prisma } from "@virki/database";
 import type { Prisma as PrismaTypes } from "@virki/database";
 
 export type AuditEventType =
+  | "AUTHORIZATION_DENIED"
+  | "CSRF_DENIED"
+  | "RATE_LIMIT_REACHED"
+  | "SECURITY_PROOF_REJECTED"
+  | "SSO_INTERACTION_STARTED"
+  | "SSO_INTERACTION_COMPLETED"
+  | "SSO_INTERACTION_DENIED"
   | "AUTH_LOGIN_SUCCESS"
   | "AUTH_LOGIN_FAILURE"
   | "AUTH_LOGOUT"
@@ -42,7 +50,18 @@ export type AuditEventType =
   | "ACCESS_JWT_INVALID"
   | "ACCESS_JWT_VALID";
 
-export type AuditResult = "SUCCESS" | "FAILURE" | "INFO";
+export type AuditResult = "SUCCESS" | "FAILURE" | "INFO" | "DENIED";
+
+export type AuditContext = {
+  requestId: string;
+  service: "hub" | "issuer";
+  route?: string;
+  method?: string;
+};
+const auditContext = new AsyncLocalStorage<AuditContext>();
+export function runWithAuditContext<T>(context: AuditContext, operation: () => T): T {
+  return auditContext.run(context, operation);
+}
 
 export interface AuditMetadata {
   [key: string]: AuditMetadataValue;
@@ -54,6 +73,11 @@ export type AuditLogInput = {
   result: AuditResult;
   actorUserId?: string;
   actorEmailHash?: string;
+  actorRole?: "ADMIN" | "USER";
+  sessionRef?: string;
+  reason?: "completed" | "rejected" | "observed" | "rate-limited" | "unavailable" | "csrf" | "role" | "cloudflare";
+  before?: { enabled?: boolean; accountStatus?: "ACTIVE" | "INACTIVE" | "BLOCKED" | "PENDING_ACTIVATION" };
+  after?: { enabled?: boolean; accountStatus?: "ACTIVE" | "INACTIVE" | "BLOCKED" | "PENDING_ACTIVATION" };
   resource?: string;
   message?: string;
   metadata?: AuditMetadata;
@@ -76,6 +100,7 @@ const CREDENTIAL_ASSIGNMENT = /(?:^|[^A-Za-z0-9])(?:access[_-]?token|refresh[_-]
 const PRIVATE_KEY_MATERIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/iu;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u;
 const AUTHORIZATION_VALUE = /\b(?:Bearer|Basic)\s+[A-Za-z0-9+/_=-]{8,}/iu;
+const EMAIL_VALUE = /[^\s@]+@[^\s@]+\.[^\s@]+/u;
 const OPAQUE_CREDENTIAL_VALUE = /^[A-Za-z0-9+/_=-]{32,}$/u;
 const DEFAULT_AUDIT_LOG_RETENTION_DAYS = 180;
 const MIN_AUDIT_LOG_RETENTION_DAYS = 1;
@@ -99,8 +124,8 @@ export async function writeAuditLogForMaintenanceRequired(
 ): Promise<void> {
   const data = createAuditLogData(input);
   await execute(Prisma.sql`
-    INSERT INTO "AuditLog" ("id", "eventType", "actorUserId", "actorEmailHash", "result", "resource", "message", "metadata", "createdAt")
-    VALUES (${randomUUID()}, ${data.eventType}, ${data.actorUserId ?? null}, ${data.actorEmailHash ?? null}, ${data.result}, ${data.resource ?? null}, ${data.message ?? null}, ${JSON.stringify(data.metadata ?? null)}::jsonb, CURRENT_TIMESTAMP)
+    INSERT INTO "AuditLog" ("id", "eventType", "actorUserId", "actorEmailHash", "result", "resource", "message", "metadata", "createdAt", "schemaVersion", "category", "severity", "action", "reason", "actorRef", "networkProvenance")
+    VALUES (${randomUUID()}, ${data.eventType}, ${data.actorUserId ?? null}, ${data.actorEmailHash ?? null}, ${data.result}, ${data.resource ?? null}, ${data.message ?? null}, ${JSON.stringify(data.metadata ?? null)}::jsonb, CURRENT_TIMESTAMP, 1, ${data.category}, ${data.severity}, ${data.action}, ${data.reason}, ${data.actorRef ?? null}, 'unavailable')
   `);
 }
 
@@ -111,15 +136,62 @@ export async function writeAuditLogInTransaction(
   await transaction.auditLog.create({ data: createAuditLogData(input) });
 }
 
-function createAuditLogData(input: AuditLogInput) {
+const PERSISTED_METADATA_KEYS = new Set([
+  "source", "cloudflareAccessPresent", "userAgentHash", "requestId", "route", "method", "requestRef", "ceremonyRef", "deviceRef", "targetRef", "userRef", "connectionRef", "clientRef", "invitationRef", "verificationFactor", "rememberedBrowser", "enabled", "scope", "error", "revokedCount", "deletedCount", "retentionDays", "redirectUrisChanged", "launchUrlConfigured", "originChanged", "redirectUriCount", "accessJwtRequired", "accessJwtStatus", "accessJwtReason", "nameChanged", "slugChanged", "launchUrlChanged"
+]);
+export function safePersistedAuditMetadata(value: unknown): AuditMetadata | undefined {
+  const sanitized = sanitizeAuditMetadata(value as AuditMetadata);
+  if (!sanitized) return undefined;
+  return Object.fromEntries(Object.entries(sanitized).filter(([key, entry]) =>
+    (entry === REDACTED_METADATA_VALUE && isSensitiveMetadataKey(key, entry)) || (PERSISTED_METADATA_KEYS.has(key) && (entry === null || ["string", "boolean", "number"].includes(typeof entry)))
+  ));
+}
+function digestReference(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : undefined;
+}
+function emailHashReference(value: string | undefined): string | undefined {
+  return value && /^(?:[a-f0-9]{64}|hmac-v1:[a-f0-9]{16}:[a-f0-9]{64})$/u.test(value) ? value : undefined;
+}
+function identifier(value: unknown, pattern = /^[a-zA-Z0-9_.-]{1,80}$/u): string | undefined {
+  return typeof value === "string" && pattern.test(value) ? value : undefined;
+}
+export function safeAuditState(input: unknown): AuditLogInput["before"] {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = input as AuditLogInput["before"] & object;
+  return {
+    ...(typeof value.enabled === "boolean" ? { enabled: value.enabled } : {}),
+    ...(["ACTIVE", "INACTIVE", "BLOCKED", "PENDING_ACTIVATION"].includes(value.accountStatus ?? "") ? { accountStatus: value.accountStatus } : {})
+  };
+}
+export function createAuditLogData(input: AuditLogInput) {
+  const context = auditContext.getStore();
+  const metadata = safePersistedAuditMetadata(input.metadata);
+  const failed = input.result === "FAILURE" || input.result === "DENIED";
   return {
     eventType: input.eventType,
     result: input.result,
     actorUserId: input.actorUserId,
-    actorEmailHash: input.actorEmailHash,
-    resource: input.resource,
-    message: truncate(input.message, MAX_MESSAGE_LENGTH),
-    metadata: sanitizeAuditMetadata(input.metadata)
+    actorEmailHash: emailHashReference(input.actorEmailHash),
+    resource: identifier(input.resource),
+    message: input.message ? sanitizeMetadataString(input.message, "message").slice(0, MAX_MESSAGE_LENGTH) : undefined,
+    metadata,
+    schemaVersion: 1,
+    category: input.eventType.startsWith("AUTH_") ? "AUTH" : input.eventType.startsWith("SECOND_FACTOR_") || input.eventType.startsWith("RECOVERY_CODES_") || input.eventType.includes("DEVICE") ? "SECURITY" : input.eventType.split("_")[0],
+    severity: failed ? "WARNING" : "INFO",
+    action: input.eventType.toLowerCase().replaceAll("_", "."),
+    reason: input.reason ?? (failed ? "rejected" : input.result === "INFO" ? "observed" : "completed"),
+    actorRef: input.actorUserId ? hashAuditIdentifier(input.actorUserId) : emailHashReference(input.actorEmailHash) ? hashAuditIdentifier(input.actorEmailHash!) : undefined,
+    actorRole: input.actorRole === "ADMIN" || input.actorRole === "USER" ? input.actorRole : undefined,
+    targetRef: digestReference(metadata?.targetRef ?? metadata?.userRef ?? metadata?.connectionRef),
+    sessionRef: digestReference(input.sessionRef),
+    deviceRef: digestReference(metadata?.deviceRef),
+    requestId: identifier(context?.requestId ?? metadata?.requestId, /^[a-f0-9-]{36}$/u),
+    service: context?.service ?? (typeof metadata?.source === "string" && /^(hub|portal|admin|account)-/u.test(metadata.source) ? "hub" : undefined),
+    route: identifier(context?.route ?? metadata?.route, /^\/[a-zA-Z0-9/_.:-]{0,100}$/u),
+    method: identifier(context?.method ?? metadata?.method, /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/u),
+    networkProvenance: "unavailable",
+    beforeState: safeAuditState(input.before),
+    afterState: safeAuditState(input.after)
   };
 }
 
@@ -150,6 +222,10 @@ export function hashAuditIdentifier(identifier: string): string {
   return createHash("sha256").update(identifier, "utf8").digest("hex");
 }
 
+export function hashAuditSessionReference(sessionId: string): string {
+  return hashAuditIdentifier(sessionId);
+}
+
 export function hashAuditUserAgent(userAgent: string | null): string | undefined {
   if (!userAgent) {
     return undefined;
@@ -163,11 +239,18 @@ export function createAuditRequestMetadata(
   source: string
 ): AuditMetadata {
   const userAgentHash = hashAuditUserAgent(headers.get("user-agent"));
+  // The Next ingress proxy removes the caller's value and generates this header.
+  const requestId = identifier(headers.get("x-virki-audit-request-id"), /^[a-f0-9-]{36}$/u);
+  const route = identifier(headers.get("x-virki-audit-route"), /^\/[a-zA-Z0-9/_.:-]{0,100}$/u);
+  const method = identifier(headers.get("x-virki-audit-method"), /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/u);
 
   return {
     source,
     cloudflareAccessPresent: Boolean(headers.get("cf-access-jwt-assertion")),
-    userAgentHash: userAgentHash ?? null
+    userAgentHash: userAgentHash ?? null,
+    ...(requestId ? { requestId } : {}),
+    ...(route ? { route } : {}),
+    ...(method ? { method } : {})
   };
 }
 
@@ -402,6 +485,7 @@ function hasSensitiveMetadataValue(value: string, key: string): boolean {
     PRIVATE_KEY_MATERIAL.test(candidate) ||
     JWT_VALUE.test(candidate) ||
     AUTHORIZATION_VALUE.test(candidate)
+    || EMAIL_VALUE.test(candidate)
   ) {
     return true;
   }
@@ -414,13 +498,6 @@ function hasSensitiveMetadataValue(value: string, key: string): boolean {
 }
 
 function isAuditDigestReference(key: string, value: string): boolean {
+  if (key === "requestId" && /^[a-f0-9-]{36}$/u.test(value)) return true;
   return /(?:refs?|hash)$/iu.test(key) && /^[a-f0-9]{64}$/iu.test(value);
-}
-
-function truncate(value: string | undefined, maxLength: number): string | undefined {
-  if (!value) {
-    return value;
-  }
-
-  return value.length > maxLength ? value.slice(0, maxLength) : value;
 }

@@ -1,3 +1,4 @@
+import { formatDateTime } from "@virki/auth/date-time";
 import { getAdministrativeCredentialState, listActiveSecurityElevations } from "@virki/auth/administration";
 import { listPendingAccountRecoveries } from "@virki/auth/security";
 import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
@@ -28,12 +29,12 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
       csrf={csrf}
       activeCredential={credential?.status === "ACTIVE" ? {
         keyVersion: credential.keyVersion,
-        updatedAt: credential.updatedAt.toLocaleString("pt-BR")
+        updatedAt: formatDateTime(credential.updatedAt)
       } : undefined}
     />
     <ElevationControls csrf={csrf} credentialReady={credential?.status === "ACTIVE"} active={activeElevations.map((item) => ({ ...item, expiresAt: item.expiresAt.toISOString() }))} />
     <section className="surface"><h2>Recuperação de contas ({recoveryRequests.length})</h2><p className="muted">Pedidos expirados, não verificados ou da sua própria conta não aparecem aqui. Aprovar envia uma autorização de troca de senha ao titular; a aprovação exige elevação ativa.</p>
-      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.role === "ADMIN" ? "Administrador" : "Usuário"} · {request.user.emailNormalized} · E-mail confirmado · expira {request.expiresAt.toLocaleString("pt-BR")}</span></div><form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form></article>)}</div>}
+      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.role === "ADMIN" ? "Administrador" : "Usuário"} · {request.user.emailNormalized} · E-mail confirmado · expira {formatDateTime(request.expiresAt)}</span></div><form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form></article>)}</div>}
     </section>
     <section className="surface"><h2>Sessões deste admin</h2><p>{activeSessions} sessão(ões) ativa(s), incluindo a sessão atual.</p></section>
   </main>;

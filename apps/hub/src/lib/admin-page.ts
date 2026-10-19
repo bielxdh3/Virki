@@ -5,6 +5,7 @@ import { getCurrentSession } from "./auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "./cloudflare-access";
 import { getSurface, trustedReturnTo } from "./surface";
 import { isAdminRequestAllowed, isAdminRole } from "./admin-policy";
+import { recordSecurityDenial } from "./audit-denial";
 
 type AdminSession = NonNullable<Awaited<ReturnType<typeof getCurrentSession>>>;
 
@@ -21,6 +22,6 @@ export const requireAdminPage = cache(async (): Promise<AdminSession> => {
     const returnTo = trustedReturnTo(requestHeaders, surface) ?? "/admin/accounts";
     redirect(`/login?returnTo=${encodeURIComponent(returnTo)}`);
   }
-  if (!isAdminRole(session.user.role)) forbidden();
+  if (!isAdminRole(session.user.role)) { await recordSecurityDenial(requestHeaders, "admin-page", "role", session); forbidden(); }
   return session;
 });

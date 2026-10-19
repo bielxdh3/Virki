@@ -3,8 +3,26 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { evaluateProxyRequest } from "./proxy";
+import { prisma } from "@virki/database";
 
 const env = { VIRKI_HUB_HOSTNAME: "hub.biel.dev.br", VIRKI_PORTAL_HOSTNAME: "portal.biel.dev.br", CLOUDFLARE_ACCESS_JWT_REQUIRED: "true" };
+
+test("ingress replaces spoofed correlation and records Cloudflare denials without forwarding values", async () => {
+  const original = prisma.auditLog.create;
+  const rows: unknown[] = [];
+  prisma.auditLog.create = (async ({ data }: { data: unknown }) => { rows.push(data); return {}; }) as unknown as typeof original;
+  try {
+    const denied = await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/admin/audit?token=synthetic", { headers: { host: "hub.biel.dev.br", "x-request-id": "spoof", "x-virki-audit-request-id": "spoof", "cf-connecting-ip": "203.0.113.1" } }), { ...env, CLOUDFLARE_ACCESS_AUDIENCE: "test-audience", CLOUDFLARE_TEAM_DOMAIN: "https://access.invalid" });
+    assert.equal(denied.status, 403);
+    assert.equal(rows.length, 1);
+    assert.match(JSON.stringify(rows), /ACCESS_JWT_MISSING/u);
+    assert.doesNotMatch(JSON.stringify(rows), /spoof|synthetic|203\.0\.113/u);
+    const response = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/login", { headers: { host: "portal.biel.dev.br", "x-virki-audit-request-id": "spoof" } }), env);
+    assert.match(response.headers.get("x-middleware-request-x-virki-audit-request-id") ?? "", /^[a-f0-9-]{36}$/u);
+    assert.equal(response.headers.get("x-middleware-request-x-virki-audit-route"), "/login");
+    assert.equal(response.headers.get("x-middleware-request-x-virki-audit-method"), "GET");
+  } finally { prisma.auditLog.create = original; }
+});
 
 test("unknown hosts are denied and the hub requires a valid Access assertion", async () => {
   assert.equal((await evaluateProxyRequest(new NextRequest("https://other.invalid/", { headers: { host: "other.invalid" } }), env)).status, 404);

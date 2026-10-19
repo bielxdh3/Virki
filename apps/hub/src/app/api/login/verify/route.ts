@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
-import { createAuditRequestMetadata, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@virki/auth";
+import { createAuditRequestMetadata, hashAuditSessionReference, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@virki/auth";
 import { DEVICE_COOKIE_NAME, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@virki/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../../lib/surface";
 import { createLoginResponseAfterRequiredAudit, createVerifiedLoginAudit, type LoginSurface, type LoginVerificationFactor } from "../../../../lib/login-audit";
 import { SESSION_COOKIE_NAME, getSessionCookieOptions } from "@virki/auth";
 import { readBoundedFormData } from "../../../../lib/request-form";
+import { recordSecurityDenial } from "../../../../lib/audit-denial";
 
 export const dynamic = "force-dynamic";
 
@@ -14,10 +15,10 @@ export async function POST(request: Request) {
   const surface = getSurface(request.headers);
   if (surface === "unknown") return new NextResponse("Not found", { status: 404 });
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-login-verification-api"))) return new NextResponse("Forbidden", { status: 403 });
-  if (!hasSameOrigin(request.headers)) return new NextResponse("Forbidden", { status: 403 });
+  if (!hasSameOrigin(request.headers)) { await recordSecurityDenial(request.headers, "login-verification-origin", "csrf"); return new NextResponse("Forbidden", { status: 403 }); }
   const formData = await readBoundedFormData(request);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
-  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "login-verification" }).valid) return new NextResponse("Forbidden", { status: 403 });
+  if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "login-verification" }).valid) { await recordSecurityDenial(request.headers, "login-verification-csrf", "csrf"); return new NextResponse("Forbidden", { status: 403 }); }
   const reauth = read(formData, "reauth") === "1";
   const ceremony = read(formData, "ceremony");
   const factor = read(formData, "factor").toLowerCase();
@@ -69,13 +70,13 @@ export async function POST(request: Request) {
       return sessionResponse(result.session, baseUrl, returnTo, surface, "recovery", auditMetadata, "/account/security?recovered=totp");
     }
   } catch {
-    await writeAuditLog({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource: surface, message: "Security verification failed.", metadata: { ceremonyRef: hashAuditIdentifier(ceremony) } });
+    await writeAuditLog({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource: surface, message: "Security verification failed.", metadata: { ...auditMetadata, ceremonyRef: hashAuditIdentifier(ceremony) } });
   }
   return NextResponse.redirect(errorUrl, { status: 303 });
 }
 
 async function sessionResponse(
-  session: { userId: string; token: string; expiresAt: Date },
+  session: { id: string; userId: string; token: string; expiresAt: Date },
   baseUrl: URL,
   returnTo: string | null,
   surface: LoginSurface,
@@ -84,7 +85,7 @@ async function sessionResponse(
   recoveredFallback?: string
 ) {
   return createLoginResponseAfterRequiredAudit(
-    () => writeAuditLogRequired(createVerifiedLoginAudit(session.userId, surface, factor, requestMetadata)),
+    () => writeAuditLogRequired({ ...createVerifiedLoginAudit(session.userId, surface, factor, requestMetadata), sessionRef: hashAuditSessionReference(session.id), actorRole: surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined }),
     () => {
       const response = NextResponse.redirect(new URL(returnTo ?? recoveredFallback ?? (surface === "hub" ? "/admin/accounts" : "/"), baseUrl), { status: 303 });
       response.cookies.set(SESSION_COOKIE_NAME, session.token, getSessionCookieOptions(session.expiresAt));

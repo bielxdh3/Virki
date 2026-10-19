@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
+import { writeAuditLog } from "@virki/auth/audit";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
 
 const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";
@@ -60,17 +61,25 @@ export async function proxy(request: NextRequest) {
 
 export async function evaluateProxyRequest(request: NextRequest, env: Readonly<Record<string, string | undefined>>) {
   const nonce = createNonce();
+  const auditRequestId = crypto.randomUUID();
   const surface = getSurface(request.headers, env as NodeJS.ProcessEnv);
   const pathname = normalizePath(request.nextUrl.pathname);
   const csp = buildContentSecurityPolicy(nonce, env, { allowExternalFormRedirect: surface === "portal" && (pathname === "/login" || pathname === "/login/verify") });
   const withCsp = <T extends NextResponse>(response: T): T => {
     response.headers.set("Content-Security-Policy", csp);
+    response.headers.set("x-virki-request-id", auditRequestId);
     return response;
   };
   // Never trust client-supplied internal headers; only values set below reach the app.
   const forwardedHeaders = new Headers(request.headers);
   forwardedHeaders.delete(TRUSTED_REQUEST_PATH_HEADER);
   forwardedHeaders.delete("x-nonce");
+  forwardedHeaders.delete("x-virki-audit-request-id");
+  forwardedHeaders.set("x-virki-audit-request-id", auditRequestId);
+  forwardedHeaders.delete("x-virki-audit-route");
+  forwardedHeaders.delete("x-virki-audit-method");
+  if (/^\/(?:login(?:\/verify)?|api\/(?:login(?:\/verify)?|logout)|admin\/(?:accounts|access|security|audit|connections)|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
+  forwardedHeaders.set("x-virki-audit-method", request.method);
   forwardedHeaders.set("x-nonce", nonce);
   forwardedHeaders.set("Content-Security-Policy", csp);
 
@@ -81,6 +90,7 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   if (surface === "hub" && pathname !== "/api/health") {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);
     if (!access.allowed) {
+      await writeAuditLog({ eventType: access.status === "missing" ? "ACCESS_JWT_MISSING" : "ACCESS_JWT_INVALID", result: "DENIED", reason: "cloudflare", resource: "hub", metadata: { requestId: auditRequestId, source: "hub-ingress", accessJwtStatus: access.status } });
       const headers = new Headers({ "Cache-Control": "no-store" });
       if (env.NODE_ENV === "development" && env.VIRKI_E2E_ACCESS_DIAGNOSTICS === "true" && access.reason) {
         headers.set("x-virki-e2e-access-reason", access.reason);
