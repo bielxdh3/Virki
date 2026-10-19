@@ -1,16 +1,19 @@
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { cookies, headers } from "next/headers";
 import { forbidden } from "next/navigation";
-import { getAccountRecoveryState } from "@virki/auth/security";
+import { getAccountRecoveryRequestId, getAccountRecoveryState } from "@virki/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
-import { completeRecoveryAction, openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction } from "./actions";
+import { openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction } from "./actions";
+import { RecoveryCompletionForm } from "./recovery-completion-form";
 import { RecoveryVerificationForm } from "./recovery-verification-form";
+import { RecoverySwitchForm } from "./recovery-switch-form";
+import { RECOVERY_CANDIDATE_COOKIE } from "./recovery-cookie";
 
 export const dynamic = "force-dynamic";
 
-export default async function RecoverPage({ searchParams }: { searchParams?: Promise<{ request?: string; requestId?: string; sent?: string; verified?: string; error?: string }> }) {
+export default async function RecoverPage({ searchParams }: { searchParams?: Promise<{ request?: string; requestId?: string; sent?: string; verified?: string; error?: string; switch?: string }> }) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   if (surface !== "portal" && surface !== "hub" && !(surface === "local" && process.env.NODE_ENV !== "production")) forbidden();
@@ -20,6 +23,11 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
   const cookieStore = await cookies();
   const requestKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value;
   const state = params?.requestId && requestKey ? await getAccountRecoveryState(params.requestId, requestKey, new Date(), expectedRole) : null;
+  const candidateKey = cookieStore.get(RECOVERY_CANDIDATE_COOKIE)?.value;
+  const candidate = params?.switch === "1" && params.requestId && candidateKey
+    ? await getAccountRecoveryRequestId(candidateKey, new Date(), expectedRole)
+    : null;
+  const confirmRecoverySwitch = Boolean(candidate && params?.requestId && candidate.id === params.requestId);
   const csrf = {
     request: createCsrfToken({ scope: "recovery-request" }),
     adminRequest: createCsrfToken({ scope: "recovery-admin-request" }),
@@ -28,7 +36,13 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
     complete: createCsrfToken({ scope: "recovery-complete" })
   };
   const legacyRequestKey = params?.request ?? "";
-  const recoveryErrorMessage = params?.error && (!params.requestId || state)
+  const recoveryErrorMessage = params?.error === "password" && state?.status === "APPROVED"
+    ? state.purpose === "INVITATION"
+      ? "Escolha uma senha de pelo menos 12 caracteres, sem caracteres de controle."
+      : expectedRole === "ADMIN"
+        ? "A senha administrativa deve ter pelo menos 16 caracteres, sem caracteres de controle."
+        : "A senha deve ter pelo menos 12 caracteres, sem caracteres de controle."
+    : params?.error && (!params.requestId || state)
     ? state?.status === "PENDING" && !state.emailVerified
       ? "Não foi possível validar o código. Confira o código enviado ou solicite novas instruções."
       : params.requestId
@@ -40,7 +54,7 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
     <main className="auth-page">
       <section className="auth-panel" aria-labelledby="recover-title">
         <p className="eyebrow">Virki</p>
-        <h1 id="recover-title">{expectedRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta"}</h1>
+        <h1 id="recover-title">{state?.purpose === "INVITATION" ? "Ativar sua conta" : expectedRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta"}</h1>
         {legacyRequestKey ? <>
           <p>Este link precisa ser aberto em uma etapa segura antes de continuar.</p>
           <form className="form-stack" action={openRecoveryAction}>
@@ -60,20 +74,19 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
           {params?.sent ? <p role="status">Se a conta puder ser recuperada, você receberá instruções no e-mail cadastrado.</p> : null}
         </> : null}
 
-        {params?.requestId && !state ? <p className="form-error" role="alert">Este link de recuperação não é mais válido. Se a sua solicitação já foi aprovada, use o link mais recente enviado por e-mail. Caso contrário, <a href="/recover">solicite novas instruções.</a></p> : null}
+        {confirmRecoverySwitch ? <>
+          <p role="status">Outro link está aberto nesta sessão. Continuar com este link vai encerrar o progresso atual de recuperação neste navegador.</p>
+          <RecoverySwitchForm csrf={csrf.open} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={candidate!.id} />
+        </> : null}
+        {params?.requestId && !state && !confirmRecoverySwitch ? <p className="form-error" role="alert">Este link de recuperação não é mais válido. Se a sua solicitação já foi aprovada, use o link mais recente enviado por e-mail. Caso contrário, <a href="/recover">solicite novas instruções.</a></p> : null}
         {state?.status === "PENDING" && !state.emailVerified ? <>
           <p>Informe o código enviado ao endereço cadastrado. Depois, um administrador analisará a solicitação.</p>
           <RecoveryVerificationForm csrf={csrf.verify} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={state.id} />
         </> : null}
         {state?.status === "PENDING" && state.emailVerified ? <p role="status">E-mail confirmado. Um administrador analisará a solicitação. Após a aprovação, você receberá um novo e-mail com um link para definir a senha; abra esse novo link, pois esta página não será atualizada.</p> : null}
         {state?.status === "APPROVED" ? <>
-          <p role="status">Defina uma nova senha para concluir o acesso à sua conta.</p>
-          <form className="form-stack" action={completeRecoveryAction}>
-            <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf.complete} />
-            <input type="hidden" name="requestId" value={state.id} />
-            <label>Nova senha<input type="password" name="newPassword" minLength={12} maxLength={256} autoComplete="new-password" required /></label>
-            <button className="button-primary" type="submit">Concluir recuperação</button>
-          </form>
+          <p role="status">{state.purpose === "INVITATION" ? "Bem-vindo ao Virki! Defina uma senha para ativar sua conta. O convite é válido por 72 horas e pode ser usado uma vez." : "Defina uma nova senha para concluir o acesso à sua conta."}</p>
+          <RecoveryCompletionForm csrf={csrf.complete} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={state.id} expectedRole={expectedRole} purpose={state.purpose} />
         </> : null}
         {recoveryErrorMessage ? <p className="form-error" role="alert">{recoveryErrorMessage}</p> : null}
         <a className="subtle-link" href="/login">Voltar ao login</a>

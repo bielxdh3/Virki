@@ -33,6 +33,7 @@ export async function provisionInvitedUserAccount(
         emailAddressHash: hashEmailAddress(email),
         emailChallengeHash: hashSecurityCode(String(randomInt(0, 1_000_000)).padStart(6, "0")),
         status: "APPROVED",
+        purpose: "INVITATION",
         emailVerifiedAt: null,
         reviewedByUserId: actor.id,
         approvedAt: now,

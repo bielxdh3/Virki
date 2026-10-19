@@ -70,6 +70,60 @@ test("USER can sign in and sees only the granted enabled project", async ({ brow
   }
 });
 
+test("ADMIN restarts a failed credential setup challenge with a fresh same-origin CSRF token", async ({ browser }) => {
+  test.setTimeout(60_000);
+  const context = await browser.newContext();
+  const prisma = createE2ePrismaClient();
+  let sessionId: string | undefined;
+  try {
+    const token = randomBytes(32).toString("base64url");
+    const session = await prisma.session.create({ data: {
+      userId: fixture.admin.id, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 600_000), authenticationMethods: ["pwd", "otp", "mfa"]
+    }, select: { id: true } });
+    sessionId = session.id;
+    await context.addCookies([{ name: SESSION_COOKIE_NAME, value: token, url: hubUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
+    const page = await context.newPage();
+    await addCloudflareAccessHeader(page);
+    await page.goto(`${hubUrl}/admin/security`);
+    const credentialSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Credencial administrativa", exact: true }) });
+    const setupForm = credentialSection.locator("form").first();
+    await setupForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await setupForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
+    const firstChallengeForm = credentialSection.locator("form").first();
+    const firstRequestKey = await firstChallengeForm.locator('input[name="requestKey"]').inputValue();
+    const firstCsrf = await firstChallengeForm.locator('input[name="csrfToken"]').inputValue();
+    const firstCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, firstRequestKey);
+    const invalidCode = firstCode === "000000" ? "000001" : "000000";
+    await firstChallengeForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(invalidCode);
+    await firstChallengeForm.locator('input[name="newPassword"]').fill(randomBytes(32).toString("base64url"));
+    await firstChallengeForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
+    await expect(firstChallengeForm.getByRole("alert")).toContainText("Código inválido ou expirado");
+    const restartLink = credentialSection.getByRole("link", { name: "Iniciar configuração novamente", exact: true });
+    await expect(restartLink).toBeVisible();
+    expect((await prisma.securityElevation.findUnique({ where: { requestKey: firstRequestKey }, select: { status: true } }))?.status).toBe("PENDING");
+
+    await restartLink.click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/security?restart=credential#admin-content`);
+    const restartedForm = credentialSection.locator("form").first();
+    expect(await restartedForm.locator('input[name="requestKey"]').count()).toBe(0);
+    const freshCsrf = await restartedForm.locator('input[name="csrfToken"]').inputValue();
+    expect(freshCsrf).not.toBe(firstCsrf);
+    await restartedForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await restartedForm.getByRole("button", { name: "Enviar código de confirmação", exact: true }).click();
+    const newRequestKey = await credentialSection.locator("form").first().locator('input[name="requestKey"]').inputValue();
+    expect(newRequestKey).not.toBe(firstRequestKey);
+    expect((await prisma.securityElevation.findUnique({ where: { requestKey: firstRequestKey }, select: { status: true } }))?.status).toBe("REVOKED");
+    expect((await prisma.securityElevation.findUnique({ where: { requestKey: newRequestKey }, select: { status: true } }))?.status).toBe("PENDING");
+  } finally {
+    if (sessionId) {
+      await prisma.securityElevation.updateMany({ where: { userId: fixture.admin.id, sessionId, status: "PENDING" }, data: { status: "REVOKED", revokedAt: new Date() } });
+      await prisma.session.updateMany({ where: { id: sessionId, revokedAt: null }, data: { revokedAt: new Date() } });
+    }
+    await context.close();
+    await prisma.$disconnect();
+  }
+});
+
 test("ADMIN can sign in to a protected page, navigate, and have the session revoked on logout", async ({ browser }) => {
   // Multi-step ADMIN journey: every ADMIN sign-in now includes the emailed second-factor step.
   test.setTimeout(90_000);
@@ -600,7 +654,36 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     const approvalMessage = await readLatestRecoveryEmail(prisma, fixture.admin.email, "account-recovery-approved:");
     expect(new URL(approvalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(hubUrl);
     await hubPage.goto(approvalMessage.actionUrl!);
-    await expect(hubPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
+    await expect(hubPage.getByRole("status")).toContainText("Outro link está aberto nesta sessão.");
+    await expect(hubPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
+    const recoveryCookiesBeforeSwitch = await hubContext.cookies(hubUrl);
+    const candidateRecoveryKey = recoveryCookiesBeforeSwitch.find((cookie) => cookie.name.includes("recovery_candidate"))?.value;
+    const switchResponses: string[] = [];
+    hubPage.on("response", (response) => {
+      const request = response.request();
+      const responseUrl = new URL(response.url());
+      if (request.method() !== "POST" || responseUrl.origin !== hubUrl) return;
+      const rawRedirect = response.headers()["x-action-redirect"]?.split(";")[0];
+      let redirectSummary = "none";
+      if (rawRedirect) {
+        try {
+          const redirectUrl = new URL(rawRedirect, hubUrl);
+          redirectSummary = `${redirectUrl.origin}${redirectUrl.pathname}?${[...redirectUrl.searchParams.keys()].join(",")}`;
+        } catch { redirectSummary = "unparseable"; }
+      }
+      switchResponses.push(`${response.status()} ${responseUrl.pathname} redirect=${redirectSummary}`);
+    });
+    await hubPage.getByRole("button", { name: "Continuar com este link", exact: true }).click();
+    try {
+      await expect(hubPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
+    } catch {
+      const currentUrl = new URL(hubPage.url());
+      const recoveryCookiesAfterSwitch = await hubContext.cookies(hubUrl);
+      const activeRecoveryKey = recoveryCookiesAfterSwitch.find((cookie) => cookie.name.includes("recovery_v2") || cookie.name.includes("__Host-virki_recovery"))?.value;
+      const candidateStillPresent = recoveryCookiesAfterSwitch.some((cookie) => cookie.name.includes("recovery_candidate") && Boolean(cookie.value));
+      const heading = await hubPage.getByRole("heading", { level: 1 }).textContent().catch(() => null);
+      throw new Error(`Recovery link switch did not complete (origin=${currentUrl.origin}; path=${currentUrl.pathname}; queryKeys=${[...currentUrl.searchParams.keys()].join(",")}; heading=${heading ?? "missing"}; candidateBefore=${Boolean(candidateRecoveryKey)}; candidateAfter=${candidateStillPresent}; activeMatchesCandidate=${Boolean(candidateRecoveryKey && activeRecoveryKey === candidateRecoveryKey)}; responses=${switchResponses.join("|") || "none"}).`);
+    }
     await hubPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
     await hubPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     await expect(hubPage).toHaveURL(`${hubUrl}/login?recovered=1`);
@@ -654,6 +737,10 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     const userApprovalMessage = await readLatestRecoveryEmail(prisma, fixture.recoveryTargetUser.email, "account-recovery-approved:");
     expect(new URL(userApprovalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(portalUrl);
     await portalPage.goto(userApprovalMessage.actionUrl!);
+    if (new URL(portalPage.url()).searchParams.get("switch") === "1") {
+      await expect(portalPage.getByRole("status")).toContainText("Outro link está aberto nesta sessão.");
+      await portalPage.getByRole("button", { name: "Continuar com este link", exact: true }).click();
+    }
     await expect(portalPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
     const newUserPassword = randomBytes(32).toString("base64url");
     await portalPage.getByLabel("Nova senha", { exact: true }).fill(newUserPassword);
@@ -736,6 +823,14 @@ async function signIn(page: import("@playwright/test").Page, account: AccountFix
   await page.getByLabel("Senha", { exact: true }).fill(account.password);
   const expectedOrigin = new URL(page.url()).origin;
   const documentOrigin = await page.evaluate(() => window.origin);
+  const verificationResponseTrace: string[] = [];
+  const recordVerificationResponse = (response: import("@playwright/test").Response) => {
+    const responseUrl = new URL(response.url());
+    if (responseUrl.origin === expectedOrigin && ["/api/login", "/login/verify", "/login"].includes(responseUrl.pathname)) {
+      verificationResponseTrace.push(`${response.request().method()} ${responseUrl.pathname}:${response.status()}`);
+    }
+  };
+  page.on("response", recordVerificationResponse);
   const loginResponsePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === "/api/login" && response.request().method() === "POST"
   );
@@ -755,17 +850,24 @@ async function signIn(page: import("@playwright/test").Page, account: AccountFix
     }
     // ADMIN logins always complete an emailed code, even from a remembered browser; USER remembered grants skip this step.
     if (redirect.pathname === "/login/verify") {
-      await completeLoginEmailVerification(page, account, redirect);
+      await completeLoginEmailVerification(page, account, redirect, loginResponse.status(), verificationResponseTrace);
     }
   }
 }
 
-async function completeLoginEmailVerification(page: import("@playwright/test").Page, account: AccountFixture, verifyUrl: URL): Promise<void> {
+async function completeLoginEmailVerification(page: import("@playwright/test").Page, account: AccountFixture, verifyUrl: URL, responseStatus: number, responseTrace: string[]): Promise<void> {
   const ceremonyId = verifyUrl.searchParams.get("ceremony") ?? "";
   if (!ceremonyId || verifyUrl.searchParams.get("factor") !== "email") {
     throw new Error("E2E login requested an unsupported second factor.");
   }
-  await page.waitForURL((url) => url.pathname === "/login/verify" && url.searchParams.get("ceremony") === ceremonyId, { timeout: 15_000 });
+  try {
+    await page.waitForURL((url) => url.pathname === "/login/verify" && url.searchParams.get("ceremony") === ceremonyId, { timeout: 15_000 });
+  } catch {
+    const currentUrl = new URL(page.url());
+    const expectedQueryKeys = [...verifyUrl.searchParams.keys()].sort().join(",") || "none";
+    const currentQueryKeys = [...currentUrl.searchParams.keys()].sort().join(",") || "none";
+    throw new Error(`E2E login verification navigation did not complete (response=${responseStatus}; redirect=${verifyUrl.pathname}; redirect-query-keys=${expectedQueryKeys}; current=${currentUrl.pathname}; current-query-keys=${currentQueryKeys}; response-trace=${responseTrace.join(",") || "none"}).`);
+  }
   const prisma = createE2ePrismaClient();
   let code: string;
   try {

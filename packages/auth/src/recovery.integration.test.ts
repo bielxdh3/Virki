@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl } from "./integration-fixtures";
@@ -21,6 +22,7 @@ async function openLatestRecovery(email: string, now: Date) {
   const requestKey = requestKeyFromActionUrl(latest?.actionUrl);
   const opened = await getAccountRecoveryRequestId(requestKey, now);
   assert.ok(opened, "the newest emailed recovery link opens");
+  assert.equal((await getAccountRecoveryState(opened.id, requestKey, now))?.purpose, "RECOVERY");
   return { requestId: opened.id, requestKey, code: latest?.code };
 }
 
@@ -66,8 +68,26 @@ test("an anonymous request after approval cannot expire the approved recovery", 
 test("portal recovery abuse does not spend the hub address or source budget", integrationOptions, async () => {
   const admin = await createTestUser({ role: "ADMIN", label: "recovery-isolation" });
   const security = await import("./security");
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
   const base = new Date();
-  for (let index = 0; index < 6; index += 1) await security.requestAccountRecovery(admin.email, "pt-BR", new Date(base.getTime() + index * 1000), "192.0.2.221");
-  await security.requestAdministrativeAccountRecovery(admin.email, "pt-BR", new Date(base.getTime() + 7000), "192.0.2.221");
+  const uuid = randomUUID().replaceAll("-", "");
+  const source = `2001:db8:${uuid.slice(0, 4)}:${uuid.slice(4, 8)}:${uuid.slice(8, 12)}:${uuid.slice(12, 16)}:${uuid.slice(16, 20)}:${uuid.slice(20, 24)}`;
+  const rateLimitAttempts = async (identifier: string) => (await prisma.loginRateLimit.findUnique({
+    where: { identifierHash: createRateLimitIdentifierHash(identifier) },
+    select: { attempts: true }
+  }))?.attempts ?? null;
+  for (let index = 0; index < 6; index += 1) await security.requestAccountRecovery(admin.email, "pt-BR", new Date(base.getTime() + index * 1000), source);
+
+  assert.equal(await rateLimitAttempts(`recovery-source:USER:${source}`), 6);
+  assert.equal(await rateLimitAttempts(`recovery-source:ADMIN:${source}`), null);
+  assert.equal(await rateLimitAttempts(`account-recovery-address:USER:${admin.email.toLowerCase()}`), 5);
+  assert.equal(await rateLimitAttempts(`account-recovery-address:ADMIN:${admin.email.toLowerCase()}`), null);
+
+  await security.requestAdministrativeAccountRecovery(admin.email, "pt-BR", new Date(base.getTime() + 7000), source);
+
+  assert.equal(await rateLimitAttempts(`recovery-source:USER:${source}`), 6);
+  assert.equal(await rateLimitAttempts(`recovery-source:ADMIN:${source}`), 1);
+  assert.equal(await rateLimitAttempts(`account-recovery-address:USER:${admin.email.toLowerCase()}`), 5);
+  assert.equal(await rateLimitAttempts(`account-recovery-address:ADMIN:${admin.email.toLowerCase()}`), 1);
   assert.equal(await prisma.accountRecoveryRequest.count({ where: { userId: admin.id } }), 1);
 });

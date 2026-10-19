@@ -4,7 +4,7 @@ import { prisma } from "@virki/database";
 import { ACCOUNT_INVITATION_TTL_MS, provisionInvitedUserAccount } from "./account-invitation";
 import { authenticateUser, verifyPassword } from "./index";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, uniqueEmail } from "./integration-fixtures";
-import { consumeApprovedAccountRecovery, getAccountRecoveryRequestId } from "./security";
+import { consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery } from "./security";
 
 after(() => prisma.$disconnect());
 
@@ -28,8 +28,9 @@ test("an invited user has no password until the one-time link sets it", integrat
 
   const opened = await getAccountRecoveryRequestId(requestKey, now);
   assert.ok(opened, "the emailed link opens the invitation");
-  const request = await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: opened.id }, select: { status: true, reviewedByUserId: true, expiresAt: true, requestKeyHash: true } });
+  const request = await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: opened.id }, select: { status: true, purpose: true, reviewedByUserId: true, expiresAt: true, requestKeyHash: true } });
   assert.equal(request.status, "APPROVED");
+  assert.equal(request.purpose, "INVITATION");
   assert.equal(request.reviewedByUserId, admin.id);
   assert.equal(request.expiresAt.getTime(), now.getTime() + ACCOUNT_INVITATION_TTL_MS);
   assert.notEqual(request.requestKeyHash, requestKey);
@@ -50,4 +51,26 @@ test("an invitation expires after 72 hours", integrationOptions, async () => {
   const late = new Date(now.getTime() + ACCOUNT_INVITATION_TTL_MS + 1000);
   assert.equal(await getAccountRecoveryRequestId(requestKey, late), null);
   await assert.rejects(consumeApprovedAccountRecovery(opened.id, requestKey, "Late-password-4242", late));
+});
+
+test("a client-supplied purpose query cannot change invitation or recovery purpose", integrationOptions, async () => {
+  const invited = await invite("invite-purpose-spoof");
+  const invitationMessage = (await queuedEmails(invited.email)).find((entry) => entry.kind === "ACCOUNT_INVITATION");
+  assert.ok(invitationMessage?.actionUrl);
+  const spoofedInvitationUrl = new URL(invitationMessage.actionUrl);
+  spoofedInvitationUrl.searchParams.set("purpose", "RECOVERY");
+  const invitationKey = requestKeyFromActionUrl(spoofedInvitationUrl.toString());
+  const openedInvitation = await getAccountRecoveryRequestId(invitationKey, invited.now);
+  assert.equal(openedInvitation?.purpose, "INVITATION");
+
+  const recoveryUser = await createTestUser({ label: "recovery-purpose-spoof" });
+  const now = new Date();
+  await requestAccountRecovery(recoveryUser.email, "pt-BR", now);
+  const recoveryMessage = (await queuedEmails(recoveryUser.email)).find((entry) => entry.kind === "ACCOUNT_RECOVERY");
+  assert.ok(recoveryMessage?.actionUrl);
+  const spoofedRecoveryUrl = new URL(recoveryMessage.actionUrl);
+  spoofedRecoveryUrl.searchParams.set("purpose", "INVITATION");
+  const recoveryKey = requestKeyFromActionUrl(spoofedRecoveryUrl.toString());
+  const openedRecovery = await getAccountRecoveryRequestId(recoveryKey, now);
+  assert.equal(openedRecovery?.purpose, "RECOVERY");
 });

@@ -5,10 +5,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildChromiumEnvironment } from "./scripts/e2e/isolated-service.mjs";
+import { createWindowsCaTrust } from "./scripts/e2e/windows-ca-trust.mjs";
 import { reuseE2eEmailOutboxKey, reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
+import { assertDirectPlaywrightPlatform } from "./scripts/e2e/run-e2e.mjs";
 
 // @ts-expect-error This JavaScript safety helper has no declaration file.
 import { CORE_TEST_DATABASE_CONFIRMATION } from "./scripts/core-test-database-safety.mjs";
+
+const discoveryOnly = process.argv.includes("--list");
+assertDirectPlaywrightPlatform(process.platform, discoveryOnly);
 
 const portalUrl = "https://portal.localhost:3001";
 const accessTeamDomain = "http://127.0.0.1:3010";
@@ -49,35 +54,59 @@ if (runtimeReady && (!inheritedEmailOutboxKey || !/^[A-Za-z0-9_-]{43}$/u.test(in
   throw new Error("Inherited E2E outbox key is invalid.");
 }
 const emailOutboxKey = inheritedEmailOutboxKey ?? randomBytes(32).toString("base64url");
+let windowsCaTrust: ReturnType<typeof createWindowsCaTrust> | undefined;
 
 try {
-  if (ownsRuntimeArtifacts) {
-    restrictTemporaryDirectory(tlsDirectory);
-    generateLocalTlsPair(tlsKeyPath, tlsCertificatePath, tlsCaKeyPath, tlsCaCertificatePath, tlsCsrPath, tlsExtensionsPath);
-  }
-  assertLocalTlsPair(tlsCertificatePath, tlsCaCertificatePath);
-  if (process.platform === "linux") {
-    // Chromium trusts only this run's CA through a private NSS database.
-    for (const path of [chromiumHomePath, join(chromiumHomePath, ".pki"), chromiumNssDbPath]) {
-      mkdirSync(path, { recursive: true, mode: 0o700 });
-      chmodSync(path, 0o700);
+  if (!discoveryOnly) {
+    if (ownsRuntimeArtifacts) {
+      restrictTemporaryDirectory(tlsDirectory);
+      generateLocalTlsPair(tlsKeyPath, tlsCertificatePath, tlsCaKeyPath, tlsCaCertificatePath, tlsCsrPath, tlsExtensionsPath);
     }
-    const database = `sql:${chromiumNssDbPath}`;
-    if (!existsSync(join(chromiumNssDbPath, "cert9.db"))) {
-      execFileSync("certutil", ["-N", "--empty-password", "-d", database], { stdio: "ignore" });
+    assertLocalTlsPair(tlsCertificatePath, tlsCaCertificatePath);
+    if (process.platform === "win32") {
+      const caThumbprint = new X509Certificate(readFileSync(tlsCaCertificatePath)).fingerprint.replaceAll(":", "");
+      windowsCaTrust = createWindowsCaTrust({ platform: process.platform, certificatePath: tlsCaCertificatePath, thumbprint: caThumbprint });
+      windowsCaTrust.install();
+      process.env.VIRKI_E2E_TLS_CA_THUMBPRINT = caThumbprint;
+      const cleanupOnInterrupt = () => {
+        try {
+          windowsCaTrust?.cleanup();
+        } catch {
+          process.stderr.write("Windows E2E test CA cleanup failed.\n");
+          process.exitCode = 1;
+        }
+      };
+      process.once("SIGINT", cleanupOnInterrupt);
+      process.once("SIGTERM", cleanupOnInterrupt);
     }
-    const certificates = execFileSync("certutil", ["-L", "-d", database], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    if (!certificates.includes("Virki E2E Test CA")) {
-      execFileSync("certutil", ["-A", "-d", database, "-n", "Virki E2E Test CA", "-t", "C,,", "-i", tlsCaCertificatePath], { stdio: "ignore" });
+    if (process.platform === "linux") {
+      // Chromium trusts only this run's CA through a private NSS database.
+      for (const path of [chromiumHomePath, join(chromiumHomePath, ".pki"), chromiumNssDbPath]) {
+        mkdirSync(path, { recursive: true, mode: 0o700 });
+        chmodSync(path, 0o700);
+      }
+      const database = `sql:${chromiumNssDbPath}`;
+      if (!existsSync(join(chromiumNssDbPath, "cert9.db"))) {
+        execFileSync("certutil", ["-N", "--empty-password", "-d", database], { stdio: "ignore" });
+      }
+      const certificates = execFileSync("certutil", ["-L", "-d", database], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      if (!certificates.includes("Virki E2E Test CA")) {
+        execFileSync("certutil", ["-A", "-d", database, "-n", "Virki E2E Test CA", "-t", "C,,", "-i", tlsCaCertificatePath], { stdio: "ignore" });
+      }
     }
-  }
-  if (ownsRuntimeArtifacts) {
-    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const kid = randomUUID();
-    const publicJwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
-    writeFileSync(accessSigningKeyPath, JSON.stringify({ kid, publicJwk, privateKey: privateKey.export({ format: "pem", type: "pkcs8" }) }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    if (ownsRuntimeArtifacts) {
+      const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const kid = randomUUID();
+      const publicJwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
+      writeFileSync(accessSigningKeyPath, JSON.stringify({ kid, publicJwk, privateKey: privateKey.export({ format: "pem", type: "pkcs8" }) }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    }
   }
 } catch {
+  try {
+    windowsCaTrust?.cleanup();
+  } catch {
+    process.stderr.write("Windows E2E test CA cleanup failed.\n");
+  }
   if (ownsRuntimeArtifacts) rmSync(tlsDirectory, { recursive: true, force: true });
   throw new Error("E2E requires local TLS, Chromium CA trust, and signing-key generation support.");
 }
@@ -137,6 +166,7 @@ process.env[registrationTokenInitializedEnv] = "true";
 
 export default defineConfig({
   testDir: "./e2e",
+  globalTeardown: "./scripts/e2e/global-teardown.mts",
   globalSetup: e2eDatabaseUrl ? "./scripts/e2e/global-setup.mts" : undefined,
   fullyParallel: false,
   workers: 1,
@@ -145,6 +175,7 @@ export default defineConfig({
   use: {
     browserName: "chromium",
     launchOptions: {
+      executablePath: process.env.VIRKI_E2E_CHROMIUM_EXECUTABLE_PATH || undefined,
       env: buildChromiumEnvironment(process.env, process.platform, chromiumHomePath),
       args: [
         "--disable-background-networking",
@@ -179,8 +210,9 @@ export default defineConfig({
     },
     {
       command: "node scripts/e2e/isolated-service.mjs hub",
-      url: "https://127.0.0.1:3001/login",
-      ignoreHTTPSErrors: true,
+      // Playwright's webServer URL probe cannot consume this run's private CA. Check the listener only;
+      // the browser navigation below still performs normal TLS verification against its private NSS DB.
+      port: 3001,
       reuseExistingServer: false,
       timeout: 120_000,
       env: hubEnv

@@ -95,6 +95,16 @@ export type AccountRecoveryRole = "USER" | "ADMIN";
 export type RequiredLoginRole = "USER" | "ADMIN";
 export type AccountRecoveryIdentity = { id: string; role: string; isActive: boolean; accountStatus: string };
 
+export function isAcceptableRecoveryPassword(role: AccountRecoveryRole, password: string): boolean {
+  const minimumLength = role === "ADMIN" ? 16 : 12;
+  if (password.length < minimumLength || password.length > 256) return false;
+  for (const character of password) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) return false;
+  }
+  return true;
+}
+
 export function isAccountRecoveryEligible(user: Omit<AccountRecoveryIdentity, "id"> | null | undefined, expectedRole: AccountRecoveryRole): boolean {
   return Boolean(user && user.role === expectedRole && user.isActive && user.accountStatus === "ACTIVE");
 }
@@ -594,7 +604,7 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
       if (!attempt.allowed) return false;
       const requestKey = randomBytes(24).toString("base64url");
       const code = generateNumericCode();
-      const recoveryRequest = await transaction.accountRecoveryRequest.create({ data: { requestKeyHash: hashRecoveryRequestKey(requestKey), emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), userId: user.id, emailChallengeHash: hashSecurityCode(code), expiresAt: new Date(now.getTime() + RECOVERY_REQUEST_TTL_MS) } });
+      const recoveryRequest = await transaction.accountRecoveryRequest.create({ data: { requestKeyHash: hashRecoveryRequestKey(requestKey), emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), userId: user.id, emailChallengeHash: hashSecurityCode(code), expiresAt: new Date(now.getTime() + RECOVERY_REQUEST_TTL_MS), purpose: "RECOVERY" } });
       const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase).toString();
       await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: user.email, locale, payload: { publicValues: { displayName: user.displayName ?? "" }, protectedValues: { code, actionUrl } } });
       await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_REQUESTED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery requested.", metadata: { targetRef: hashAuditIdentifier(user.id), requestRef: hashAuditIdentifier(recoveryRequest.id) } });
@@ -606,18 +616,18 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
   }
 }
 
-export async function getAccountRecoveryRequestId(requestKey: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<{ id: string; expiresAt: Date } | null> {
+export async function getAccountRecoveryRequestId(requestKey: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<{ id: string; expiresAt: Date; purpose: "RECOVERY" | "INVITATION" } | null> {
   if (!isCeremonyId(requestKey)) return null;
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { requestKeyHash: hashRecoveryRequestKey(requestKey) }, select: { id: true, status: true, expiresAt: true, user: { select: { role: true, isActive: true, accountStatus: true } } } });
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { requestKeyHash: hashRecoveryRequestKey(requestKey) }, select: { id: true, status: true, expiresAt: true, purpose: true, user: { select: { role: true, isActive: true, accountStatus: true } } } });
   if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED" || request.expiresAt <= now) return null;
-  return { id: request.id, expiresAt: request.expiresAt };
+  return { id: request.id, expiresAt: request.expiresAt, purpose: request.purpose };
 }
 
 export async function getAccountRecoveryState(requestId: string, requestKey: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER") {
   if (!isDatabaseId(requestId) || !isCeremonyId(requestKey)) return null;
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, status: true, emailVerifiedAt: true, expiresAt: true, user: { select: { emailNormalized: true, email: true, role: true, isActive: true, accountStatus: true } } } });
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, status: true, emailVerifiedAt: true, expiresAt: true, purpose: true, user: { select: { emailNormalized: true, email: true, role: true, isActive: true, accountStatus: true } } } });
   if (!request || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !isAccountRecoveryEligible(request.user, expectedRole) || request.expiresAt <= now || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED") return null;
-  return { id: request.id, status: request.status, emailVerified: Boolean(request.emailVerifiedAt), expiresAt: request.expiresAt };
+  return { id: request.id, status: request.status, emailVerified: Boolean(request.emailVerifiedAt), expiresAt: request.expiresAt, purpose: request.purpose };
 }
 
 export async function verifyAccountRecoveryEmail(requestId: string, requestKey: string, code: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<void> {
@@ -686,7 +696,7 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
 }
 
 export async function consumeApprovedAccountRecovery(requestId: string, requestKey: string, newPassword: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<void> {
-  if (!isDatabaseId(requestId) || !isCeremonyId(requestKey) || newPassword.length < 12 || newPassword.length > 256) throw new SecurityMutationError();
+  if (!isDatabaseId(requestId) || !isCeremonyId(requestKey) || !isAcceptableRecoveryPassword(expectedRole, newPassword)) throw new SecurityMutationError();
   const requestKeyHash = hashRecoveryRequestKey(requestKey);
   const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
   if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || !safeEqual(request.requestKeyHash, requestKeyHash) || request.status !== "APPROVED" || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email)) throw new SecurityMutationError();

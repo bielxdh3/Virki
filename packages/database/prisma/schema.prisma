@@ -76,6 +76,11 @@ enum RecoveryRequestStatus {
   CONSUMED
 }
 
+enum RecoveryRequestPurpose {
+  RECOVERY
+  INVITATION
+}
+
 enum AdministrativeCredentialStatus {
   NOT_CONFIGURED
   ACTIVE
@@ -354,6 +359,7 @@ model AccountRecoveryRequest {
   emailChallengeHash String
   emailVerifiedAt    DateTime?
   status             RecoveryRequestStatus @default(PENDING)
+  purpose            RecoveryRequestPurpose @default(RECOVERY)
   expiresAt          DateTime
   reviewedByUserId   String?
   approvedAt         DateTime?
