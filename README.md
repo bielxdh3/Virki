@@ -14,6 +14,10 @@ Virki provides identity, authentication and SSO, security, project entry access,
 
 The ADMIN navigation is Contas, Acessos, Segurança, Auditoria, and Conexões. Stored roles are ADMIN and USER. Project access is granted explicitly to users; Virki has no project roles.
 
+**October 2026 source status:** [PR #51](https://github.com/bielxdh3/Virki/pull/51), [PR #52](https://github.com/bielxdh3/Virki/pull/52), and [PR #53](https://github.com/bielxdh3/Virki/pull/53) are merged into `main`. They add authentication/OIDC and database safeguards, structured audit records and ADMIN investigation filters, and login, invitation, and recovery-flow improvements. Local integrated regression evidence covers these changes, but does not substitute for hosted CI or a verified production deployment.
+
+**Validation boundary (2026-10-19):** the recorded `main` CI run following these merges failed. The native Linux production host is still unverified; the operations gate below remains in force. Do not infer a successful deployment from merged PRs.
+
 ## Local development
 
 Requirements: Node.js 22.13 or later within Node 22, npm 10 or later, Docker Compose, and PostgreSQL.
