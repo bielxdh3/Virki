@@ -137,7 +137,8 @@ export async function claimNextEmailMessage(now = new Date(), database: typeof p
       where: {
         OR: [
           { status: { in: ["QUEUED", "RETRYABLE_FAILURE"] }, availableAt: { lte: now } },
-          { status: "PROCESSING", processingLeaseExpiresAt: { lte: now } }
+          { status: "PROCESSING", processingLeaseExpiresAt: { lte: now } },
+          { status: "PROCESSING", processingLeaseExpiresAt: null }
         ]
       },
       orderBy: [{ availableAt: "asc" }, { createdAt: "asc" }]
@@ -155,7 +156,9 @@ export async function claimNextEmailMessage(now = new Date(), database: typeof p
         status: candidate.status,
         attemptCount: candidate.attemptCount,
         ...(interrupted
-          ? { processingLeaseExpiresAt: { lte: now } }
+          ? candidate.processingLeaseExpiresAt === null
+            ? { processingLeaseExpiresAt: null }
+            : { processingLeaseExpiresAt: { lte: now } }
           : { availableAt: { lte: now } })
       },
       data: exhausted

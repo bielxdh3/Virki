@@ -7,7 +7,7 @@ import { hashAuditSessionReference, normalizeEmail, writeAuditLogInTransaction }
 import { provisionInvitedUserAccount } from "@virki/auth/account-invitation";
 import { revokeUserAuthenticationProofsInTransaction } from "@virki/auth/security";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
-import { AdministrationMutationError, grantProjectAccess, revokeProjectAccess, requireSecurityElevation } from "@virki/auth/administration";
+import { AdministrationMutationError, grantProjectAccess, revokeProjectAccess, requireSecurityElevation, requireSecurityElevationInTransaction } from "@virki/auth/administration";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
@@ -16,6 +16,7 @@ import { redirect } from "next/navigation";
 import { requireAdminMutation, readFormRawString, readFormString } from "../../lib/admin-mutation";
 import { compareAndSetProjectConnectionSecret } from "../../lib/connection-secret-rotation";
 import { ConnectionInputError, projectConnectionConfigurationRevision, validateProjectConnectionInput } from "../../lib/connection-policy";
+import { accountStateTransitionWhere } from "./accounts/account-state-policy";
 
 export type ConnectionActionState = {
   status: "idle" | "error" | "created" | "rotated";
@@ -56,7 +57,7 @@ export async function createAccountAction(formData: FormData): Promise<void> {
     const email = normalizeEmail(readFormString(formData, "email"));
     const displayName = readFormString(formData, "displayName");
     if (!/^\S+@\S+\.\S+$/u.test(email) || displayName.length > 80) throw new Error("Invalid account input.");
-    await provisionInvitedUserAccount(actor.user, { email, displayName: displayName || null });
+    await provisionInvitedUserAccount(actor.user, actor.id, { email, displayName: displayName || null });
     revalidatePath("/admin/accounts");
     redirect("/admin/accounts?status=created");
   } catch (error) {
@@ -76,8 +77,9 @@ export async function setAccountStateAction(formData: FormData): Promise<void> {
     const enabled = readFormString(formData, "enabled") === "true";
     const now = new Date();
     await prisma.$transaction(async (transaction) => {
+      await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "ACCOUNT_STATE_CHANGE", now);
       const changed = await transaction.user.updateMany({
-        where: { id: userId, role: "USER" },
+        where: accountStateTransitionWhere(userId, enabled),
         data: { isActive: enabled, accountStatus: enabled ? "ACTIVE" : "INACTIVE" }
       });
       if (changed.count !== 1) throw new Error("Account was not found.");
@@ -88,7 +90,7 @@ export async function setAccountStateAction(formData: FormData): Promise<void> {
         await transaction.oidcArtifact.deleteMany({ where: { accountIdHash: hashOidcIdentifier(userId) } });
       }
       await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_STATE_CHANGED", result: "SUCCESS", actorUserId: actor.user.id, resource: "account", message: enabled ? "User account enabled." : "User account disabled and sessions revoked.", actorRole: "ADMIN", after: { enabled, accountStatus: enabled ? "ACTIVE" : "INACTIVE" }, metadata: { targetRef: hashOidcIdentifier(userId), enabled } });
-    });
+    }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/accounts");
     redirect("/admin/accounts?status=updated");
   } catch (error) {
@@ -148,7 +150,9 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
     });
     const clientId = `biel_${randomBytes(18).toString("base64url")}`;
     const secret = randomBytes(48).toString("base64url");
+    const now = new Date();
     await prisma.$transaction(async (transaction) => {
+      await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE", now);
       const created = await transaction.projectConnection.create({
         data: {
           ...connection,
@@ -160,7 +164,7 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
         select: { id: true }
       });
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_CREATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "External OIDC connection created.", metadata: { connectionRef: hashOidcIdentifier(created.id), clientRef: hashOidcIdentifier(clientId) } });
-    });
+    }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/connections");
     return { status: "created", clientId, secret };
   } catch (error) {
@@ -198,7 +202,9 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
       launchUrl: draft.launchUrl,
       redirectUris: draft.redirectUris
     });
+    const now = new Date();
     const result = await prisma.$transaction(async (transaction) => {
+      await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE", now);
       const existing = await transaction.projectConnection.findUnique({
         where: { id: connectionId },
         select: { id: true, clientId: true, name: true, slug: true, origin: true, launchUrl: true, redirectUris: true }
@@ -285,12 +291,14 @@ export async function rotateProjectClientSecretAction(_state: ConnectionActionSt
     const connection = await prisma.projectConnection.findUnique({ where: { id: connectionId }, select: { id: true, clientId: true, enabled: true, clientSecretCiphertext: true } });
     if (!connection || !connection.enabled) return { status: "error" };
     const secret = randomBytes(48).toString("base64url");
+    const now = new Date();
     await prisma.$transaction(async (transaction) => {
+      await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE", now);
       const rotated = await compareAndSetProjectConnectionSecret(transaction, connection, encryptOidcClientSecret(secret));
       if (!rotated) throw new Error("Project connection changed before secret rotation completed.");
       await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "Client secret rotated and outstanding OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id), clientRef: hashOidcIdentifier(connection.clientId) } });
-    });
+    }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/connections");
     return { status: "rotated", clientId: connection.clientId, secret };
   } catch {
@@ -307,11 +315,13 @@ export async function setProjectConnectionEnabledAction(formData: FormData): Pro
     await requireSecurityElevation(actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     const connectionId = readFormString(formData, "connectionId");
     const enabled = readFormString(formData, "enabled") === "true";
+    const now = new Date();
     await prisma.$transaction(async (transaction) => {
+      await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE", now);
       const connection = await transaction.projectConnection.update({ where: { id: connectionId }, data: { enabled }, select: { id: true, clientId: true } });
       if (!enabled) await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: enabled ? "External connection enabled." : "External connection disabled and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
-    });
+    }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/connections");
     redirect("/admin/connections?status=updated");
   } catch (error) {
@@ -331,11 +341,13 @@ export async function deleteProjectConnectionAction(formData: FormData): Promise
     const connectionId = readFormString(formData, "connectionId");
     const connection = await prisma.projectConnection.findUnique({ where: { id: connectionId }, select: { id: true, clientId: true } });
     if (!connection) throw new Error("Connection was not found.");
+    const now = new Date();
     await prisma.$transaction(async (transaction) => {
+      await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE", now);
       await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
       await transaction.projectConnection.delete({ where: { id: connectionId } });
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_REVOKED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "External connection deleted and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
-    });
+    }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/connections");
     redirect("/admin/connections?status=deleted");
   } catch (error) {

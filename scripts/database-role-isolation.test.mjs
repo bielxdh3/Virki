@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const roleSetupPath = path.join(repositoryRoot, "infra", "postgres-init", "10-virki-database-roles.sh");
 const e2eRoleSetupPath = path.join(repositoryRoot, "scripts", "e2e", "20-virki-e2e-runtime-test-role.sh");
-const postgresImage = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
+const postgresImage = "postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3";
 const testRunId = randomBytes(12).toString("hex");
 
 let migrationRunner;
@@ -59,6 +59,7 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     VIRKI_RUNTIME_DB_PASSWORD: runtimePassword,
     VIRKI_MIGRATOR_DB_PASSWORD: migratorPassword,
     VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD: auditMaintenancePassword,
+    AUDIT_LOG_RETENTION_DAYS: "365",
     VIRKI_E2E_DATABASE_PASSWORD: e2ePassword
   };
 
@@ -78,6 +79,7 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     "--env=VIRKI_RUNTIME_DB_PASSWORD",
     "--env=VIRKI_MIGRATOR_DB_PASSWORD",
     "--env=VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD",
+    "--env=AUDIT_LOG_RETENTION_DAYS",
     "--env=VIRKI_E2E_DATABASE_PASSWORD"
   ];
   if (dataVolume) args.push("--mount", `type=volume,source=${dataVolume},target=/var/lib/postgresql/data`);
@@ -217,6 +219,25 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
       assert.notEqual(unsafeRoutine.status, 0, "Existing-volume transition must stop when public contains an unreviewed SECURITY DEFINER routine.");
       assert.match(unsafeRoutine.stderr ?? "", /SECURITY DEFINER routines in public schema/u, "Routine rejection must identify the manual-review requirement.");
       runPsql(name, "virki_bootstrap", bootstrapPassword, "DROP FUNCTION public.__virki_security_definer_probe();", "remove SECURITY DEFINER fixture routine");
+      runPsql(name, "virki_bootstrap", bootstrapPassword, "CREATE SCHEMA IF NOT EXISTS virki_security AUTHORIZATION virki_migrator; ALTER SCHEMA virki_security OWNER TO virki_bootstrap;", "inject a deterministic role-initializer failure at the protected-schema ownership boundary");
+      const interruptedProvision = docker([
+        "exec",
+        "--env=VIRKI_RUNTIME_DB_PASSWORD",
+        "--env=VIRKI_MIGRATOR_DB_PASSWORD",
+        "--env=VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD",
+        name,
+        "sh", "/test/10-virki-database-roles.sh"
+      ], "stop role provisioning at the protected-schema ownership boundary", { allowFailure: true, env: fixtureSecrets });
+      assert.notEqual(interruptedProvision.status, 0, "Role provisioning must stop rather than take over a security schema owned by another role.");
+      assert.match(interruptedProvision.stderr ?? "", /virki_security must be owned by virki_migrator/u, "The deterministic statement-boundary failure must identify the invalid schema owner.");
+      const committedBeforeFailure = runPsql(name, "virki_bootstrap", bootstrapPassword, `SELECT
+        (SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit AND rolpassword IS NOT NULL FROM pg_roles WHERE rolname = 'virki_runtime')
+        AND (SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit AND rolpassword IS NOT NULL FROM pg_roles WHERE rolname = 'virki_migrator')
+        AND has_database_privilege('virki_migrator', current_database(), 'CREATE')
+        AND NOT has_database_privilege('virki_runtime', current_database(), 'CREATE')
+        AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('virki_runtime', 'virki_migrator', 'virki_audit_maintenance')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('virki_runtime', 'virki_migrator', 'virki_audit_maintenance')));`, "inspect committed role state after the injected provisioning failure");
+      assert.equal(committedBeforeFailure.trim(), "t", "Statements committed before the protected-schema boundary must remain valid and least-privileged after interruption.");
+      runPsql(name, "virki_bootstrap", bootstrapPassword, "ALTER SCHEMA virki_security OWNER TO virki_migrator;", "restore the expected owner before role-provisioning convergence");
       const provision = docker([
         "exec",
         "--env=VIRKI_RUNTIME_DB_PASSWORD",
@@ -242,7 +263,9 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
       runPsql(name, "virki_bootstrap", bootstrapPassword, "DROP FUNCTION public.__virki_public_exec_probe();", "remove legacy routine fixture");
     }
 
-    runMigrationsAsMigrator(migrationRunner, network, name, testRunId, migratorUrl, "apply Prisma migrations as migrator");
+    runPsql(name, "virki_bootstrap", bootstrapPassword, "UPDATE virki_security.audit_retention_policy SET retention_days = 180 WHERE singleton = true;", "seed a stale but valid audit retention policy before migration reconciliation");
+    runMigrationsAsMigrator(migrationRunner, network, name, testRunId, migratorUrl, "apply Prisma migrations as migrator", fixtureSecrets.AUDIT_LOG_RETENTION_DAYS);
+    assert.equal(runPsql(name, "virki_migrator", migratorPassword, "SELECT retention_days::text FROM virki_security.audit_retention_policy WHERE singleton = true;", "verify the migration role applies configured audit retention after schema deployment").trim(), fixtureSecrets.AUDIT_LOG_RETENTION_DAYS, "The migration wrapper must reconcile the operator-configured policy after migrations.");
     if (kind === "interrupted") {
       const stopped = docker(["stop", name], "stop PostgreSQL after migration bootstrap");
       assert.equal(stopped.stdout.trim(), name, "The PostgreSQL fixture must stop by its exact name after migration bootstrap.");
@@ -338,8 +361,52 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
 
     const runtimePrivileges = runPsql(name, "virki_bootstrap", bootstrapPassword, `SELECT has_database_privilege('virki_runtime', current_database(), 'CONNECT') AND NOT has_database_privilege('virki_runtime', current_database(), 'CREATE') AND NOT has_database_privilege('virki_runtime', current_database(), 'TEMPORARY') AND has_schema_privilege('virki_runtime', 'public', 'USAGE') AND NOT has_schema_privilege('virki_runtime', 'public', 'CREATE') AND has_table_privilege('virki_runtime', 'public."User"', 'SELECT') AND has_table_privilege('virki_runtime', 'public."User"', 'INSERT') AND has_table_privilege('virki_runtime', 'public."User"', 'UPDATE') AND has_table_privilege('virki_runtime', 'public."User"', 'DELETE') AND NOT has_table_privilege('virki_runtime', 'public."User"', 'TRUNCATE') AND NOT has_table_privilege('virki_runtime', 'public."User"', 'REFERENCES') AND NOT has_table_privilege('virki_runtime', 'public."User"', 'TRIGGER') AND has_type_privilege('virki_runtime', 'public."UserRole"', 'USAGE') AND NOT has_function_privilege('virki_runtime', 'public.digest(text,text)', 'EXECUTE');`, "inspect runtime grants");
     assert.equal(runtimePrivileges.trim(), "t", "Runtime grants must permit application DML while denying database and schema DDL.");
-    const auditPrivileges = runPsql(name, "virki_bootstrap", bootstrapPassword, `SELECT has_table_privilege('virki_runtime', 'public."AuditLog"', 'SELECT') AND has_table_privilege('virki_runtime', 'public."AuditLog"', 'INSERT') AND NOT has_table_privilege('virki_runtime', 'public."AuditLog"', 'UPDATE') AND NOT has_table_privilege('virki_runtime', 'public."AuditLog"', 'DELETE') AND NOT has_table_privilege('virki_runtime', 'public."AuditLog"', 'TRUNCATE') AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'SELECT') AND has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'createdAt', 'SELECT') AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'actorUserId', 'SELECT') AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'message', 'SELECT') AND has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'INSERT') AND has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'DELETE') AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'UPDATE') AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'TRUNCATE') AND NOT has_any_column_privilege('virki_audit_maintenance', 'public."User"', 'SELECT') AND NOT has_table_privilege('virki_audit_maintenance', 'public."User"', 'DELETE') AND has_database_privilege('virki_audit_maintenance', current_database(), 'CONNECT') AND has_schema_privilege('virki_audit_maintenance', 'public', 'USAGE') AND NOT has_schema_privilege('virki_audit_maintenance', 'public', 'CREATE');`, "inspect audit-specific role grants");
-    assert.equal(auditPrivileges.trim(), "t", "Runtime may append/read audit records but cannot modify/delete them; maintenance may append/delete and read only its approved columns.");
+    const auditPrivileges = runPsql(name, "virki_bootstrap", bootstrapPassword, `SELECT
+      has_table_privilege('virki_runtime', 'public."AuditLog"', 'SELECT')
+      AND has_column_privilege('virki_runtime', 'public."AuditLog"', 'id', 'INSERT')
+      AND has_column_privilege('virki_runtime', 'public."AuditLog"', 'createdAt', 'INSERT')
+      AND NOT has_table_privilege('virki_runtime', 'public."AuditLog"', 'UPDATE')
+      AND NOT has_table_privilege('virki_runtime', 'public."AuditLog"', 'DELETE')
+      AND NOT has_table_privilege('virki_runtime', 'public."AuditLog"', 'TRUNCATE')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'SELECT')
+      AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'createdAt', 'SELECT')
+      AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'actorUserId', 'SELECT')
+      AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'message', 'SELECT')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'INSERT')
+      AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'id', 'INSERT')
+      AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'eventType', 'INSERT')
+      AND NOT has_column_privilege('virki_audit_maintenance', 'public."AuditLog"', 'createdAt', 'INSERT')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'DELETE')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'UPDATE')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'TRUNCATE')
+      AND has_schema_privilege('virki_audit_maintenance', 'virki_security', 'USAGE')
+      AND NOT has_schema_privilege('virki_audit_maintenance', 'virki_security', 'CREATE')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'SELECT')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'INSERT')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'UPDATE')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'DELETE')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'TRUNCATE')
+      AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'SELECT')
+      AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'INSERT')
+      AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'UPDATE')
+      AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'REFERENCES')
+      AND NOT has_table_privilege('virki_runtime', 'virki_security.audit_retention_policy', 'SELECT')
+      AND NOT has_table_privilege('virki_runtime_test', 'virki_security.audit_retention_policy', 'SELECT')
+      AND has_function_privilege('virki_audit_maintenance', 'virki_security.delete_expired_audit_logs()', 'EXECUTE')
+      AND NOT has_function_privilege('virki_runtime', 'virki_security.delete_expired_audit_logs()', 'EXECUTE')
+      AND NOT has_function_privilege('virki_runtime_test', 'virki_security.delete_expired_audit_logs()', 'EXECUTE')
+      AND (SELECT pg_get_userbyid(namespace.nspowner) = 'virki_migrator' FROM pg_namespace AS namespace WHERE namespace.nspname = 'virki_security')
+      AND (SELECT pg_get_userbyid(policy.relowner) = 'virki_migrator' FROM pg_class AS policy WHERE policy.oid = 'virki_security.audit_retention_policy'::regclass)
+      AND (SELECT retention_days = 365 FROM virki_security.audit_retention_policy WHERE singleton = true)
+      AND (SELECT pg_get_userbyid(routine.proowner) = 'virki_migrator' AND routine.prosecdef AND routine.proconfig = ARRAY['search_path=pg_catalog'] FROM pg_proc AS routine WHERE routine.oid = 'virki_security.delete_expired_audit_logs()'::regprocedure)
+      AND NOT has_any_column_privilege('virki_audit_maintenance', 'public."User"', 'SELECT')
+      AND NOT has_table_privilege('virki_audit_maintenance', 'public."User"', 'DELETE')
+      AND has_database_privilege('virki_audit_maintenance', current_database(), 'CONNECT')
+      AND has_schema_privilege('virki_audit_maintenance', 'public', 'USAGE')
+      AND NOT has_schema_privilege('virki_audit_maintenance', 'public', 'CREATE');`, "inspect audit-specific role grants");
+    assert.equal(auditPrivileges.trim(), "t", "Maintenance must have no direct audit or retention-policy table access and may execute only the database-owned cleanup function.");
+    const auditWriteBoundaries = runPsql(name, "virki_bootstrap", bootstrapPassword, `SELECT has_column_privilege('virki_runtime', 'public."AuditLog"', 'id', 'INSERT') AND has_column_privilege('virki_runtime', 'public."AuditLog"', 'createdAt', 'INSERT') AND NOT has_table_privilege('virki_runtime', 'public."AuditLog"', 'INSERT') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public."AuditLog"'::regclass AND tgname = 'virki_audit_log_created_at_guard' AND NOT tgisinternal AND tgenabled = 'O' AND tgfoid = 'virki_security.enforce_audit_log_timestamp()'::regprocedure) AND NOT has_function_privilege('virki_runtime', 'virki_security.enforce_audit_log_timestamp()', 'EXECUTE') AND has_table_privilege('virki_runtime', 'public."SanitizedAuditReference"', 'SELECT') AND NOT has_table_privilege('virki_runtime', 'public."SanitizedAuditReference"', 'INSERT') AND NOT has_table_privilege('virki_runtime', 'public."SanitizedAuditReference"', 'UPDATE') AND NOT has_table_privilege('virki_runtime', 'public."SanitizedAuditReference"', 'DELETE');`, "inspect audit write boundaries");
+    assert.equal(auditWriteBoundaries.trim(), "t", "Runtime may provide the timestamp column for Prisma, but PostgreSQL must replace it with its own clock and runtime must not mutate sanitized audit references.");
     const e2ePrivileges = runPsql(name, "virki_bootstrap", bootstrapPassword, `SELECT has_database_privilege('virki_runtime_test', current_database(), 'CONNECT') AND NOT has_database_privilege('virki_runtime_test', current_database(), 'CREATE') AND NOT has_database_privilege('virki_runtime_test', current_database(), 'TEMPORARY') AND has_schema_privilege('virki_runtime_test', 'public', 'USAGE') AND NOT has_schema_privilege('virki_runtime_test', 'public', 'CREATE') AND has_table_privilege('virki_runtime_test', 'public."User"', 'SELECT') AND has_table_privilege('virki_runtime_test', 'public."User"', 'INSERT') AND has_table_privilege('virki_runtime_test', 'public."User"', 'UPDATE') AND has_table_privilege('virki_runtime_test', 'public."User"', 'DELETE') AND has_type_privilege('virki_runtime_test', 'public."UserRole"', 'USAGE') AND NOT has_table_privilege('virki_runtime_test', 'public."AuditLog"', 'UPDATE') AND NOT has_table_privilege('virki_runtime_test', 'public."AuditLog"', 'DELETE');`, "inspect isolated E2E role grants");
     assert.equal(e2ePrivileges.trim(), "t", "The isolated E2E role must support fixture DML without database or schema DDL.");
     runPsql(name, "virki_migrator", migratorPassword, "CREATE TABLE public.__virki_role_probe (id integer PRIMARY KEY, value text NOT NULL); ALTER TABLE public.__virki_role_probe ADD COLUMN changed boolean NOT NULL DEFAULT false;", "create objects with migration role");
@@ -357,7 +424,20 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
     assert.match(pgcryptoMigrationAccess, /^[a-f0-9]{64}$/mu, "The migration role must be able to use the pgcrypto digest function required by the committed migration.");
     const runtimeCrud = runPsql(name, "virki_runtime", runtimePassword, "INSERT INTO public.__virki_role_probe (id, value) VALUES (1, 'before'); UPDATE public.__virki_role_probe SET value = 'after' WHERE id = 1; SELECT value FROM public.__virki_role_probe WHERE id = 1; DELETE FROM public.__virki_role_probe WHERE id = 1;", "application CRUD with runtime role");
     assert.match(runtimeCrud, /after/u, "The runtime role must complete application reads and writes.");
-    runPsql(name, "virki_runtime", runtimePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "createdAt") VALUES ('runtime-audit-probe', 'probe', 'INFO', '2000-01-01T00:00:00Z');`, "append audit row with runtime role");
+    runPsql(name, "virki_runtime", runtimePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result") VALUES ('runtime-audit-probe', 'probe', 'INFO');`, "append audit row with database timestamp using runtime role");
+    const explicitAuditTimestamp = runPsql(name, "virki_runtime", runtimePassword, `WITH inserted AS (INSERT INTO public."AuditLog" ("id", "eventType", "result", "createdAt") VALUES ('runtime-audit-timestamp-probe', 'probe', 'INFO', '2000-01-01T00:00:00Z') RETURNING "createdAt") SELECT (abs(EXTRACT(EPOCH FROM ("createdAt" - pg_catalog.clock_timestamp()::timestamp)) ) < 5)::text || '|' || "createdAt"::text || '|' || pg_catalog.clock_timestamp()::timestamp::text FROM inserted;`, "override caller-selected audit timestamp with the database clock");
+    const [timestampEnforced, observedTimestamp, databaseTimestamp] = explicitAuditTimestamp.trim().split("|");
+    assert.equal(timestampEnforced, "true", `The database trigger must replace caller-selected AuditLog.createdAt with PostgreSQL time (createdAt=${observedTimestamp}, databaseTime=${databaseTimestamp}).`);
+    runPsql(name, "virki_migrator", migratorPassword, `INSERT INTO public."SanitizedAuditReference" ("id", "referenceHash", "category") VALUES ('runtime-reference-probe', repeat('a', 64), 'probe');`, "seed sanitized reference privilege probe");
+    for (const [label, sql] of [
+      ["insert", `INSERT INTO public."SanitizedAuditReference" ("id", "referenceHash", "category") VALUES ('runtime-reference-insert-probe', repeat('b', 64), 'probe');`],
+      ["update", `UPDATE public."SanitizedAuditReference" SET "category" = 'changed' WHERE "id" = 'runtime-reference-probe';`],
+      ["delete", `DELETE FROM public."SanitizedAuditReference" WHERE "id" = 'runtime-reference-probe';`]
+    ]) {
+      const deniedReferenceMutation = runPsql(name, "virki_runtime", runtimePassword, sql, `deny runtime sanitized-reference ${label}`, { allowFailure: true });
+      assert.notEqual(deniedReferenceMutation.status, 0, `Runtime must not ${label} sanitized audit references.`);
+      assert.match(deniedReferenceMutation.stderr ?? "", /permission denied/u, `Sanitized-reference ${label} must fail due to PostgreSQL privileges.`);
+    }
     for (const [label, sql] of [
       ["update", `UPDATE public."AuditLog" SET "message" = 'changed' WHERE "id" = 'runtime-audit-probe';`],
       ["delete", `DELETE FROM public."AuditLog" WHERE "id" = 'runtime-audit-probe';`]
@@ -366,10 +446,40 @@ async function verifyDatabaseRoles(kind, migrationRunner, testRunId) {
       assert.notEqual(deniedAuditMutation.status, 0, `Runtime must not ${label} audit records.`);
       assert.match(deniedAuditMutation.stderr ?? "", /permission denied/u, `Runtime ${label} must fail due to PostgreSQL privileges.`);
     }
-    const maintenanceAuditInsert = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "metadata") VALUES ('maintenance-audit-probe', 'AUTH_AUDIT_LOG_CLEANUP', 'SUCCESS', '{}'::jsonb);`, "append maintenance audit event without reading a row");
-    assert.match(maintenanceAuditInsert, /INSERT 0 1/u, "Maintenance may append the cleanup audit event without SELECT or RETURNING privileges.");
-    const maintainedAudit = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `DELETE FROM public."AuditLog" WHERE "createdAt" < '2001-01-01T00:00:00Z';`, "delete expired audit probe with maintenance role");
-    assert.match(maintainedAudit, /DELETE 1/u, "Audit-maintenance may delete audit rows.");
+    const seededAuditRows = runPsql(name, "virki_migrator", migratorPassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "createdAt") VALUES ('expired-maintenance-audit-probe', 'probe', 'INFO', '2000-01-01T00:00:00Z'), ('within-retention-maintenance-audit-probe', 'probe', 'INFO', pg_catalog.clock_timestamp() - INTERVAL '30 days');`, "seed expired and within-policy audit rows through migration role");
+    assert.match(seededAuditRows, /INSERT 0 2/u, "The disposable fixture must seed one expired and one within-policy audit row.");
+    const maintenanceAuditInsert = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `INSERT INTO public."AuditLog" ("id", "eventType", "result", "metadata") VALUES ('maintenance-audit-probe', 'FORGED_EVENT', 'SUCCESS', '{}'::jsonb);`, "deny direct maintenance audit insertion", { allowFailure: true });
+    assert.notEqual(maintenanceAuditInsert.status, 0, "Maintenance must not forge audit events by direct insert.");
+    assert.match(maintenanceAuditInsert.stderr ?? "", /permission denied/u, "Arbitrary maintenance audit inserts must be denied by PostgreSQL privileges.");
+    const deniedMaintenanceAuditDelete = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `DELETE FROM public."AuditLog" WHERE "id" = 'runtime-audit-probe';`, "deny direct maintenance deletion of an audit row", { allowFailure: true });
+    assert.notEqual(deniedMaintenanceAuditDelete.status, 0, "Maintenance must not delete arbitrary audit rows directly.");
+    assert.match(deniedMaintenanceAuditDelete.stderr ?? "", /permission denied/u, "Direct audit deletion must be denied by PostgreSQL privileges.");
+    const deniedShortRetention = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `SELECT virki_security.delete_expired_audit_logs(1);`, "deny caller-selected shorter retention", { allowFailure: true });
+    assert.notEqual(deniedShortRetention.status, 0, "Maintenance must not supply a shorter retention period to the database function.");
+    assert.match(deniedShortRetention.stderr ?? "", /function .*delete_expired_audit_logs\(integer\) does not exist/u, "A caller-selected retention argument must be unavailable.");
+    const stillRetained = runPsql(name, "virki_migrator", migratorPassword, `SELECT "id" FROM public."AuditLog" WHERE "id" = 'within-retention-maintenance-audit-probe';`, "confirm shorter-retention attempt preserved an in-policy row");
+    assert.equal(stillRetained.trim(), "within-retention-maintenance-audit-probe", "A caller-selected shorter retention must not delete rows inside the configured policy.");
+    runPsql(name, "virki_migrator", migratorPassword, "CREATE TABLE public.audit_retention_policy (retention_days integer NOT NULL); INSERT INTO public.audit_retention_policy VALUES (1);", "create a public-schema retention-policy shadow candidate");
+    runPsql(name, "virki_bootstrap", bootstrapPassword, "GRANT TEMPORARY ON DATABASE virki_roles_test TO virki_audit_maintenance;", "allow only the hostile-path fixture to create a temporary shadow relation");
+    const maintainedAudit = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `CREATE TEMP TABLE "AuditLog" ("id" text NOT NULL);
+      INSERT INTO pg_temp."AuditLog" VALUES ('shadow-audit-row');
+      CREATE TEMP TABLE audit_retention_policy (retention_days integer NOT NULL);
+      INSERT INTO pg_temp.audit_retention_policy VALUES (1);
+      SET search_path = public, pg_temp;
+      SELECT cleanup.deleted_count, cleanup.retention_days FROM virki_security.delete_expired_audit_logs() AS cleanup;
+      SELECT count(*) FROM pg_temp."AuditLog" WHERE "id" = 'shadow-audit-row';`, "invoke the SECURITY DEFINER cleanup with hostile public/temp search_path and shadow relations");
+    assert.deepEqual(maintainedAudit.trim().split(/\r?\n/u).slice(-2), ["1|365", "1"], "Cleanup must use the protected policy and qualified AuditLog table even when public and temporary objects are shadow candidates.");
+    assert.equal(runPsql(name, "virki_migrator", migratorPassword, "SELECT retention_days FROM public.audit_retention_policy;", "verify the public retention-policy shadow candidate remains intact").trim(), "1", "Cleanup must read the protected policy instead of the public shadow candidate.");
+    runPsql(name, "virki_bootstrap", bootstrapPassword, "REVOKE TEMPORARY ON DATABASE virki_roles_test FROM virki_audit_maintenance;", "restore least-privilege temporary-table access after the shadowing attempt");
+    runPsql(name, "virki_migrator", migratorPassword, "DROP TABLE public.audit_retention_policy;", "remove the public-schema retention-policy shadow candidate");
+    const retainedAudit = runPsql(name, "virki_migrator", migratorPassword, `SELECT "id" FROM public."AuditLog" WHERE "id" IN ('within-retention-maintenance-audit-probe', 'runtime-audit-probe') ORDER BY "id";`, "confirm policy-retained audit rows remain after cleanup");
+    assert.deepEqual(retainedAudit.trim().split(/\r?\n/u), ["runtime-audit-probe", "within-retention-maintenance-audit-probe"], "Retention cleanup must preserve rows newer than its protected cutoff.");
+    const cleanupAudit = runPsql(name, "virki_migrator", migratorPassword, `SELECT jsonb_build_object('eventType', "eventType", 'result', "result", 'resource', "resource", 'message', "message", 'schemaVersion', "schemaVersion", 'category', "category", 'severity', "severity", 'action', "action", 'reason', "reason", 'metadata', "metadata")::text FROM public."AuditLog" WHERE "eventType" = 'AUTH_AUDIT_LOG_CLEANUP' AND "metadata"->>'source' = 'audit-log-cleanup';`, "inspect the fixed event created by the cleanup function");
+    assert.deepEqual(JSON.parse(cleanupAudit.trim()), { eventType: "AUTH_AUDIT_LOG_CLEANUP", result: "SUCCESS", resource: "audit-log", message: "Expired audit logs cleaned up.", schemaVersion: 1, category: "AUTH", severity: "INFO", action: "auth.audit.log.cleanup", reason: "completed", metadata: { source: "audit-log-cleanup", deletedCount: 1, retentionDays: 365 } }, "The database function must append the fixed v1 cleanup record with its actual policy and count.");
+    const noOpMaintenance = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `SELECT cleanup.deleted_count, cleanup.retention_days FROM virki_security.delete_expired_audit_logs() AS cleanup;`, "verify no-op audit cleanup");
+    assert.equal(noOpMaintenance.trim(), "0|365", "An empty cleanup must report the protected retention policy without deleting rows.");
+    const cleanupEventCount = runPsql(name, "virki_migrator", migratorPassword, `SELECT count(*) FROM public."AuditLog" WHERE "eventType" = 'AUTH_AUDIT_LOG_CLEANUP' AND "metadata"->>'source' = 'audit-log-cleanup';`, "ensure no-op cleanup does not append another event");
+    assert.equal(cleanupEventCount.trim(), "1", "A no-op cleanup must not fabricate a second audit event.");
     const deniedMaintenanceUserDelete = runPsql(name, "virki_audit_maintenance", auditMaintenancePassword, `DELETE FROM public."User" WHERE false;`, "deny maintenance access to User", { allowFailure: true });
     assert.notEqual(deniedMaintenanceUserDelete.status, 0, "Audit-maintenance must not have access to unrelated application tables.");
     assert.match(deniedMaintenanceUserDelete.stderr ?? "", /permission denied/u, "Audit-maintenance access to User must fail due to PostgreSQL privileges.");
@@ -462,10 +572,10 @@ function buildMigrationRunner(testRunId) {
   return { image, imageId: metadata.split("|")[0] };
 }
 
-function runMigrationsAsMigrator(runner, network, fixtureName, testRunId, databaseUrl, label) {
+function runMigrationsAsMigrator(runner, network, fixtureName, testRunId, databaseUrl, label, auditRetentionDays) {
   runMigrationCommand(runner, network, fixtureName, testRunId, "MIGRATION_DATABASE_URL", databaseUrl, label, [
     "/app/packages/database/scripts/prisma-migrate.mjs", "deploy"
-  ]);
+  ], { AUDIT_LOG_RETENTION_DAYS: auditRetentionDays });
 }
 
 function runMigrationStatusAsMigrator(runner, network, fixtureName, testRunId, databaseUrl, label) {
@@ -481,15 +591,15 @@ function runMigrationsDirect(runner, network, fixtureName, testRunId, databaseUr
   ]);
 }
 
-function runMigrationCommand(runner, network, fixtureName, testRunId, urlKey, databaseUrl, label, command) {
+function runMigrationCommand(runner, network, fixtureName, testRunId, urlKey, databaseUrl, label, command, extraEnv = {}) {
   const name = `${fixtureName}-migrate-${randomBytes(6).toString("hex")}`;
   const result = docker([
     "run", "--name", name, "--network", network,
     "--label", `virki.role-test.run=${testRunId}`,
     "--label", `virki.role-test.fixture=${fixtureName}`,
     "--label", "virki.role-test.kind=migration-runner",
-    "--env", urlKey, "--entrypoint", "node", runner.image, ...command
-  ], label, { allowFailure: true, env: { [urlKey]: databaseUrl } });
+    "--env", urlKey, ...(extraEnv.AUDIT_LOG_RETENTION_DAYS ? ["--env", "AUDIT_LOG_RETENTION_DAYS"] : []), "--entrypoint", "node", runner.image, ...command
+  ], label, { allowFailure: true, env: { ...extraEnv, [urlKey]: databaseUrl } });
   if (result.status === 0) assertFixtureContainer(name, network, testRunId, fixtureName, "migration-runner");
   const detail = result.stderr.trim();
   assert.equal(result.status, 0, `${label} failed (exit ${result.status ?? "unknown"})${detail ? `: ${detail}` : ""}.`);

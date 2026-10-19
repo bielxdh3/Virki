@@ -45,6 +45,7 @@ test("logout redirects to the configured public hub origin", async () => {
 
     assert.equal(response.status, 303);
     assert.equal(response.headers.get("location"), "https://hub.example.invalid/login");
+    assert.equal(response.headers.get("cache-control"), "no-store");
   } finally {
     access?.restore();
     restoreEnvironmentVariable("CLOUDFLARE_ACCESS_JWT_REQUIRED", originalAccessRequired);

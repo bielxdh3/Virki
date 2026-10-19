@@ -44,8 +44,29 @@ export function buildE2ECommand(platform, playwrightArguments = [], repoRoot = r
   };
 }
 
+export function shouldBuildProductionHub(environment = process.env) {
+  return environment.VIRKI_E2E_HUB_MODE === "production" && environment.VIRKI_E2E_HUB_BUILD_READY !== "true";
+}
+
 function runE2E() {
   const command = buildE2ECommand(process.platform, process.argv.slice(2));
+  if (process.platform !== "win32" && shouldBuildProductionHub()) {
+    const build = spawnSync("npm", ["run", "build", "--workspace", "@virki/hub"], {
+      cwd: repositoryRoot,
+      env: process.env,
+      stdio: "inherit",
+      windowsHide: true
+    });
+    if (build.error) {
+      process.stderr.write(`Could not start the production Hub build (${build.error.code ?? "unknown error"}).\n`);
+      process.exitCode = 1;
+      return;
+    }
+    if (build.signal || build.status !== 0) {
+      process.exitCode = build.status ?? 1;
+      return;
+    }
+  }
   const result = spawnSync(command.executable, command.args, {
     cwd: repositoryRoot,
     env: { ...process.env, ...command.environment },

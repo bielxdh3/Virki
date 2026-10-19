@@ -10,6 +10,8 @@ const revision = "0123456789abcdef0123456789abcdef01234567";
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
 const codeqlWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql.yml"), "utf8");
+const codeqlEvidenceWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql-evidence.yml"), "utf8");
+const approvalWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "approve-production.yml"), "utf8");
 const reviewedSarif = {
   version: "2.1.0",
   runs: [{
@@ -211,16 +213,39 @@ test("CI and CodeQL run on stacked cdx pull requests while production builds rem
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
 });
 
-test("CodeQL analyzes without Code Scanning upload and preserves SARIF as a pinned artifact", () => {
+test("CodeQL analysis stays read-only and preserves SARIF for later trusted publication", () => {
   assert.match(codeqlWorkflow, /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/u);
   assert.match(codeqlWorkflow, /uses: github\/codeql-action\/(?:init|analyze)@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4\.38\.2/u);
   assert.doesNotMatch(codeqlWorkflow, /uses: [^\s]+@v\d/u);
   assert.match(codeqlWorkflow, /queries: security-extended/u);
   assert.match(codeqlWorkflow, /output: codeql-results[\s\S]*?upload: never/u);
-  assert.ok(codeqlWorkflow.includes("Store reviewed CodeQL SARIF in private GHCR evidence"));
-  assert.ok(codeqlWorkflow.includes('docker push "$ref"'));
-  assert.ok(codeqlWorkflow.includes("packages: write"));
-  assert.ok(!codeqlWorkflow.includes("actions/upload-artifact"));
+  assert.match(codeqlWorkflow, /actions: read[\s\S]*?contents: read/u);
+  assert.doesNotMatch(codeqlWorkflow, /packages: write|GHCR_PASSWORD:|secrets\.GITHUB_TOKEN|docker login ghcr\.io|docker push/u);
+  assert.match(codeqlWorkflow, /actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7\.0\.2/u);
+  assert.match(codeqlWorkflow, /name: codeql-sarif-\$\{\{ github\.run_id \}\}[\s\S]*?retention-days: 2/u);
+  assert.ok(codeqlWorkflow.includes("actions/upload-artifact"));
   assert.doesNotMatch(codeqlWorkflow, /security-events: write/u);
   assert.match(codeqlWorkflow, /contents: read/u);
+});
+
+test("CodeQL analysis has no package-write credential and trusted main publication is isolated", () => {
+  assert.doesNotMatch(codeqlWorkflow, /packages: write|GHCR_PASSWORD:|docker login ghcr\.io|docker push/u);
+  assert.match(codeqlEvidenceWorkflow, /workflow_run:[\s\S]*?workflows:\s*\["CodeQL"\][\s\S]*?types:\s*\[completed\]/u);
+  assert.match(codeqlEvidenceWorkflow, /event == 'push'[\s\S]*?head_branch == 'main'[\s\S]*?conclusion == 'success'/u);
+  assert.match(codeqlEvidenceWorkflow, /head_repository\.full_name == github\.repository/u);
+  assert.match(codeqlEvidenceWorkflow, /packages: write/u);
+  assert.match(codeqlEvidenceWorkflow, /actions: read/u);
+  assert.match(codeqlEvidenceWorkflow, /actions\/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8\.0\.2/u);
+  assert.match(codeqlEvidenceWorkflow, /github\.event\.workflow_run\.head_sha/u);
+  assert.match(codeqlEvidenceWorkflow, /node scripts\/codeql-sarif-policy\.mjs/u);
+  assert.ok(codeqlEvidenceWorkflow.indexOf("node scripts/codeql-sarif-policy.mjs") < codeqlEvidenceWorkflow.indexOf('docker push "$ref"'));
+  assert.match(codeqlEvidenceWorkflow, /codeql-sarif-\$\{\{ github\.event\.workflow_run\.id \}\}/u);
+  assert.doesNotMatch(codeqlEvidenceWorkflow, /pull_request_target/u);
+});
+
+test("production approval selects the latest successful exact main-push run by workflow and SHA", () => {
+  assert.match(approvalWorkflow, /node scripts\/production-run-selector\.mjs --name "\$workflow" --sha "\$TARGET_SHA"/u);
+  assert.doesNotMatch(approvalWorkflow, /\[\[ "\$count" -eq 1 \]\]/u);
+  assert.match(approvalWorkflow, /Latest exact main-push \$workflow run failed or was cancelled/u);
+  assert.doesNotMatch(approvalWorkflow, /select\(\.name == "CodeQL" and \.head_sha == \$sha and \.conclusion == "success"\)/u);
 });

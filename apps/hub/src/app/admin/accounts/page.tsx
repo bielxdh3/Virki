@@ -2,7 +2,8 @@ import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { createSessionCsrfToken } from "../../../lib/session-csrf";
 import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
-import { createAccountAction, setAccountStateAction } from "../actions";
+import { createAccountAction } from "../actions";
+import { AccountStateRow } from "./account-state-control";
 
 export const dynamic = "force-dynamic";
 
@@ -28,13 +29,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
       </form>
     </section>
     <section className="surface"><h2>Usuários ({users.length}{users.length === 100 ? "+" : ""})</h2>
-      {users.length === 0 ? <p className="muted">Nenhuma conta USER cadastrada.</p> : <div className="row-list">{users.map((user) => <article className="list-row" key={user.id}>
-        <div className="row-main"><strong>{user.displayName || user.email}</strong><span>{user.email} · {user.isActive ? "Ativa" : "Suspensa"} · MFA {user.secondFactorMethod === "TOTP" ? "TOTP" : "e-mail"} · {user._count.projectGrants} acessos</span></div>
-        <form action={setAccountStateAction}>
-          <input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="userId" value={user.id} /><input type="hidden" name="enabled" value={user.isActive ? "false" : "true"} />
-          <button className={user.isActive ? "button-danger" : ""} type="submit">{user.isActive ? "Suspender" : "Reativar"}</button>
-        </form>
-      </article>)}</div>}
+      {users.length === 0 ? <p className="muted">Nenhuma conta USER cadastrada.</p> : <div className="row-list">{users.map((user) => <AccountStateRow key={user.id} user={{ ...user, projectGrantCount: user._count.projectGrants }} csrf={csrf} />)}</div>}
     </section>
   </main>;
 }

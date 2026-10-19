@@ -29,6 +29,11 @@ if (!migrationUrl || !isMigratorUrl(migrationUrl)) {
   console.error("MIGRATION_DATABASE_URL must use the virki_migrator database role.");
   process.exit(1);
 }
+const auditRetentionDays = command === "deploy" ? readAuditRetentionDays(process.env.AUDIT_LOG_RETENTION_DAYS) : null;
+if (command === "deploy" && auditRetentionDays === null) {
+  console.error("AUDIT_LOG_RETENTION_DAYS must be an integer between 1 and 3650.");
+  process.exit(1);
+}
 const prismaArgs = command === "verify-schema" ? args : [...args, "--schema", schemaPath];
 const result = spawnSync(process.execPath, [prismaCli, ...prismaArgs], {
   cwd: workspaceRoot,
@@ -41,6 +46,20 @@ let exitCode = result.status ?? 1;
 if (result.error) {
   console.error("Prisma schema command could not start.");
   exitCode = 1;
+}
+
+if (command === "deploy" && exitCode === 0) {
+  const reconcileAuditRetention = spawnSync(process.execPath, [prismaCli, "db", "execute", "--stdin", "--schema", schemaPath], {
+    cwd: workspaceRoot,
+    env: { ...process.env, DATABASE_URL: migrationUrl },
+    input: `DO $virki$\nDECLARE\n  updated_rows bigint;\nBEGIN\n  IF to_regclass('virki_security.audit_retention_policy') IS NULL THEN\n    RAISE EXCEPTION 'Virki audit retention policy is missing after migrations';\n  END IF;\n\n  UPDATE virki_security.audit_retention_policy\n  SET retention_days = ${auditRetentionDays}\n  WHERE singleton = true;\n  GET DIAGNOSTICS updated_rows = ROW_COUNT;\n\n  IF updated_rows <> 1 THEN\n    RAISE EXCEPTION 'Virki audit retention policy must contain exactly one singleton row';\n  END IF;\nEND\n$virki$;`,
+    stdio: ["pipe", "inherit", "inherit"],
+    windowsHide: true
+  });
+  if (reconcileAuditRetention.error || reconcileAuditRetention.status !== 0) {
+    console.error("Virki audit retention policy could not be reconciled by the migration role after schema deployment.");
+    exitCode = 1;
+  }
 }
 
 if (["dev", "deploy", "resolve-baseline"].includes(command)) {
@@ -73,4 +92,11 @@ function isMigratorUrl(value) {
   } catch {
     return false;
   }
+}
+
+function readAuditRetentionDays(value) {
+  const normalized = value?.trim() || "180";
+  if (!/^\d{1,4}$/u.test(normalized)) return null;
+  const days = Number(normalized);
+  return Number.isInteger(days) && days >= 1 && days <= 3650 ? days : null;
 }

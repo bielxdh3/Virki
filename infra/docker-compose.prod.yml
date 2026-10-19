@@ -110,6 +110,7 @@ services:
     environment:
       NODE_ENV: production
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set in local .env}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
     depends_on:
       postgres:
         condition: service_healthy
@@ -208,6 +209,7 @@ services:
       VIRKI_RUNTIME_DB_PASSWORD: ${VIRKI_RUNTIME_DB_PASSWORD:?VIRKI_RUNTIME_DB_PASSWORD must be set in local .env}
       VIRKI_MIGRATOR_DB_PASSWORD: ${VIRKI_MIGRATOR_DB_PASSWORD:?VIRKI_MIGRATOR_DB_PASSWORD must be set in local .env}
       VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD: ${VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD:?VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD must be set in local .env}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
     volumes:
       - virki_postgres_data:/var/lib/postgresql/data
       - ./postgres-init/10-virki-database-roles.sh:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro

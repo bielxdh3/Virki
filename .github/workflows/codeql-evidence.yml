@@ -1,0 +1,85 @@
+name: CodeQL evidence publication
+
+on:
+  workflow_run:
+    workflows: ["CodeQL"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: codeql-evidence-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    env:
+      ACCEPTED_SHA: ${{ github.event.workflow_run.head_sha }}
+      ACCEPTED_RUN_ID: ${{ github.event.workflow_run.id }}
+      UPSTREAM_EVENT: ${{ github.event.workflow_run.event }}
+      UPSTREAM_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      UPSTREAM_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      UPSTREAM_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+
+    steps:
+      - name: Check out the exact trusted main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Download SARIF from the exact CodeQL run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: codeql-sarif-${{ github.event.workflow_run.id }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: codeql-results
+
+      - name: Verify trusted source identity and reviewed SARIF policy
+        run: |
+          set -euo pipefail
+          [[ "$ACCEPTED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$ACCEPTED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$UPSTREAM_EVENT" = push
+          test "$UPSTREAM_BRANCH" = main
+          test "$UPSTREAM_CONCLUSION" = success
+          test "$UPSTREAM_REPOSITORY" = "$GITHUB_REPOSITORY"
+          test "$(git rev-parse HEAD)" = "$ACCEPTED_SHA"
+          test -n "$(find codeql-results -type f -name '*.sarif' -print -quit)"
+          node scripts/codeql-sarif-policy.mjs codeql-results
+
+      - name: Store reviewed CodeQL SARIF in private GHCR evidence
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
+          mkdir evidence
+          cp codeql-results/*.sarif evidence/
+          mkdir -m 700 "$RUNNER_TEMP/ghcr-auth"
+          export DOCKER_CONFIG="$RUNNER_TEMP/ghcr-auth"
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GHCR_PASSWORD" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin >/dev/null
+          ref="ghcr.io/bielxdh3/virki-evidence:$ACCEPTED_SHA-$ACCEPTED_RUN_ID-codeql"
+          docker build --build-arg "VIRKI_BUILD_REVISION=$ACCEPTED_SHA" --build-arg "VIRKI_EVIDENCE_RUN_ID=$ACCEPTED_RUN_ID" --build-arg VIRKI_EVIDENCE_KIND=codeql --build-arg VIRKI_EVIDENCE_PLATFORM=none -f infra/Dockerfile.evidence -t "$ref" .
+          push_result=$(docker push "$ref")
+          digest=$(printf '%s\n' "$push_result" | sed -nE 's/^.*digest: (sha256:[a-f0-9]{64}) size: [0-9]+$/\1/p')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
+          printf 'VIRKI_EVIDENCE_DIGEST revision=%s run=%s kind=codeql platform=none digest=%s\n' "$ACCEPTED_SHA" "$ACCEPTED_RUN_ID" "$digest"

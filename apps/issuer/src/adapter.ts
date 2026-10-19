@@ -22,7 +22,9 @@ export class PrismaOidcAdapter implements Adapter {
       return;
     }
     const indexedClientId = this.model === "Interaction" ? nestedString(payload.params, "client_id") : payload.clientId;
-    const indexedAccountId = this.model === "Interaction" ? nestedString(payload.session, "accountId") : payload.accountId;
+    const indexedAccountId = this.model === "Interaction"
+      ? nestedString(payload.session, "accountId") ?? nestedString(nestedValue(payload.result, "login"), "accountId")
+      : payload.accountId;
     const data = {
       payloadCiphertext: encryptOidcPayload(JSON.stringify(payload)),
       grantHash: grantBoundModels.has(this.model) && payload.grantId ? hashOidcIdentifier(payload.grantId) : null,
@@ -126,9 +128,15 @@ export class PrismaOidcAdapter implements Adapter {
     if (!connection?.enabled) return undefined;
     const redirectUris = stringArray(connection.redirectUris);
     if (!redirectUris.length) return undefined;
+    let clientSecret: string;
+    try {
+      clientSecret = decryptOidcClientSecret(connection.clientSecretCiphertext);
+    } catch {
+      return undefined;
+    }
     return {
       client_id: connection.clientId,
-      client_secret: decryptOidcClientSecret(connection.clientSecretCiphertext),
+      client_secret: clientSecret,
       client_name: connection.name,
       client_uri: connection.origin,
       redirect_uris: redirectUris,
@@ -177,6 +185,11 @@ function nestedString(value: unknown, key: string): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = (value as Record<string, unknown>)[key];
   return typeof candidate === "string" && candidate ? candidate : undefined;
+}
+
+function nestedValue(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return (value as Record<string, unknown>)[key];
 }
 
 function stringArray(value: unknown): string[] {

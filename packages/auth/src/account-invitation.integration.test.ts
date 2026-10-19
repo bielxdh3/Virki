@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { prisma } from "@virki/database";
 import { ACCOUNT_INVITATION_TTL_MS, provisionInvitedUserAccount } from "./account-invitation";
 import { authenticateUser, verifyPassword } from "./index";
-import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, uniqueEmail } from "./integration-fixtures";
+import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation, uniqueEmail } from "./integration-fixtures";
 import { consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery } from "./security";
 
 after(() => prisma.$disconnect());
@@ -12,7 +12,8 @@ async function invite(label: string) {
   const admin = await createTestUser({ role: "ADMIN", label: `${label}-admin` });
   const email = uniqueEmail(label);
   const now = new Date();
-  const { userId } = await provisionInvitedUserAccount(admin, { email, displayName: "Convidado" }, now);
+  const { sessionId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", now);
+  const { userId } = await provisionInvitedUserAccount({ id: admin.id }, sessionId, { email, displayName: "Convidado" }, now);
   const message = (await queuedEmails(email)).find((entry) => entry.kind === "ACCOUNT_INVITATION");
   assert.ok(message?.actionUrl, "the invitation e-mail carries an action link");
   return { admin, email, userId, now, requestKey: requestKeyFromActionUrl(message.actionUrl) };
@@ -73,4 +74,29 @@ test("a client-supplied purpose query cannot change invitation or recovery purpo
   const recoveryKey = requestKeyFromActionUrl(spoofedRecoveryUrl.toString());
   const openedRecovery = await getAccountRecoveryRequestId(recoveryKey, now);
   assert.equal(openedRecovery?.purpose, "RECOVERY");
+});
+
+test("a revoked elevation prevents invitation writes when revocation commits first", integrationOptions, async () => {
+  const admin = await createTestUser({ role: "ADMIN", label: "invite-revoked" });
+  const now = new Date();
+  const { sessionId, elevationId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", now);
+  const email = uniqueEmail("invite-revoked-target");
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const revocation = prisma.$transaction(async (transaction) => {
+    await transaction.securityElevation.update({ where: { id: elevationId }, data: { status: "REVOKED", revokedAt: now } });
+    locked();
+    await gate;
+  });
+  await ready;
+  const creating = provisionInvitedUserAccount({ id: admin.id }, sessionId, { email, displayName: "Convidado" }, now);
+  const rejected = assert.rejects(creating);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release();
+  await revocation;
+  await rejected;
+  assert.equal(await prisma.user.findUnique({ where: { emailNormalized: email }, select: { id: true } }), null);
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { recipientEmail: email } }), 0);
 });

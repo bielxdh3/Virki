@@ -18,6 +18,24 @@ export function selectAuthRateLimits(clientAddress: string, sessionCookieValue: 
   ];
 }
 
+export function isInteractionPath(path: string): boolean {
+  return /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u.test(path);
+}
+
+export function selectInteractionRateLimits(clientAddress: string, sessionCookieValue: string | null): RateLimitCheck[] {
+  const bucket = sessionCookieValue
+    ? `oidc-interaction-browser:${createHash("sha256").update(sessionCookieValue).digest("hex")}`
+    : `oidc-interaction-anonymous:${clientAddress}`;
+  return [
+    { identifier: `oidc-interaction-source:${clientAddress}`, maxAttempts: OIDC_AUTH_SOURCE_CEILING },
+    { identifier: bucket, maxAttempts: OIDC_AUTH_BUCKET_LIMIT }
+  ];
+}
+
+export function selectRateLimitAudit(clientAddress: string): RateLimitCheck {
+  return { identifier: `oidc-rate-limit-audit:${clientAddress}`, maxAttempts: 1 };
+}
+
 const MAX_BASIC_HEADER_LENGTH = 2048;
 const MAX_CLIENT_ID_LENGTH = 256;
 
@@ -49,5 +67,6 @@ export function selectTokenRateLimits(clientAddress: string, authorization: stri
 }
 
 export function isTokenEndpoint(method: string, path: string): boolean {
-  return method === "POST" && (path === "/token" || path === "/token/revocation");
+  const normalizedPath = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+  return method === "POST" && ["/token", "/token/revocation"].includes(normalizedPath.toLowerCase());
 }

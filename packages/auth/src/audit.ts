@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma, prisma } from "@virki/database";
 import type { Prisma as PrismaTypes } from "@virki/database";
@@ -29,6 +29,11 @@ export type AuditEventType =
   | "SSO_AUTHORIZATION_DENIED"
   | "SSO_TOKEN_ISSUED"
   | "SSO_TOKEN_REJECTED"
+  | "SSO_USERINFO_REJECTED"
+  | "SSO_REVOCATION_REJECTED"
+  | "SSO_LOGOUT_COMPLETED"
+  | "SSO_LOGOUT_REJECTED"
+  | "SSO_PROVIDER_ERROR"
   | "SECOND_FACTOR_ENROLLMENT_STARTED"
   | "SECOND_FACTOR_ENROLLED"
   | "SECOND_FACTOR_DISABLED"
@@ -102,7 +107,6 @@ const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10
 const AUTHORIZATION_VALUE = /\b(?:Bearer|Basic)\s+[A-Za-z0-9+/_=-]{8,}/iu;
 const EMAIL_VALUE = /[^\s@]+@[^\s@]+\.[^\s@]+/u;
 const OPAQUE_CREDENTIAL_VALUE = /^[A-Za-z0-9+/_=-]{32,}$/u;
-const DEFAULT_AUDIT_LOG_RETENTION_DAYS = 180;
 const MIN_AUDIT_LOG_RETENTION_DAYS = 1;
 const MAX_AUDIT_LOG_RETENTION_DAYS = 3650;
 
@@ -118,17 +122,6 @@ export async function writeAuditLogRequired(input: AuditLogInput): Promise<void>
   await prisma.auditLog.create({ data: createAuditLogData(input) });
 }
 
-export async function writeAuditLogForMaintenanceRequired(
-  input: AuditLogInput,
-  execute: (query: ReturnType<typeof Prisma.sql>) => Promise<number> = (query) => prisma.$executeRaw(query)
-): Promise<void> {
-  const data = createAuditLogData(input);
-  await execute(Prisma.sql`
-    INSERT INTO "AuditLog" ("id", "eventType", "actorUserId", "actorEmailHash", "result", "resource", "message", "metadata", "createdAt", "schemaVersion", "category", "severity", "action", "reason", "actorRef", "networkProvenance")
-    VALUES (${randomUUID()}, ${data.eventType}, ${data.actorUserId ?? null}, ${data.actorEmailHash ?? null}, ${data.result}, ${data.resource ?? null}, ${data.message ?? null}, ${JSON.stringify(data.metadata ?? null)}::jsonb, CURRENT_TIMESTAMP, 1, ${data.category}, ${data.severity}, ${data.action}, ${data.reason}, ${data.actorRef ?? null}, 'unavailable')
-  `);
-}
-
 export async function writeAuditLogInTransaction(
   transaction: PrismaTypes.TransactionClient,
   input: AuditLogInput
@@ -137,7 +130,7 @@ export async function writeAuditLogInTransaction(
 }
 
 const PERSISTED_METADATA_KEYS = new Set([
-  "source", "cloudflareAccessPresent", "userAgentHash", "requestId", "route", "method", "requestRef", "ceremonyRef", "deviceRef", "targetRef", "userRef", "connectionRef", "clientRef", "invitationRef", "verificationFactor", "rememberedBrowser", "enabled", "scope", "error", "revokedCount", "deletedCount", "retentionDays", "redirectUrisChanged", "launchUrlConfigured", "originChanged", "redirectUriCount", "accessJwtRequired", "accessJwtStatus", "accessJwtReason", "nameChanged", "slugChanged", "launchUrlChanged"
+  "source", "cloudflareAccessPresent", "userAgentHash", "requestId", "route", "method", "requestRef", "ceremonyRef", "deviceRef", "targetRef", "userRef", "connectionRef", "clientRef", "invitationRef", "verificationFactor", "rememberedBrowser", "enabled", "scope", "error", "revokedCount", "deletedCount", "deletedRateLimitCount", "retentionDays", "redirectUrisChanged", "launchUrlConfigured", "originChanged", "redirectUriCount", "accessJwtRequired", "accessJwtStatus", "accessJwtReason", "nameChanged", "slugChanged", "launchUrlChanged"
 ]);
 export function safePersistedAuditMetadata(value: unknown): AuditMetadata | undefined {
   const sanitized = sanitizeAuditMetadata(value as AuditMetadata);
@@ -255,56 +248,23 @@ export function createAuditRequestMetadata(
 }
 
 export async function cleanupExpiredAuditLogs(
-  now = new Date(),
-  env: NodeJS.ProcessEnv = process.env
+  now = new Date()
 ): Promise<{ deletedCount: number; retentionDays: number; cutoff: Date }> {
-  const retentionDays = getAuditLogRetentionDays(env);
-  const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
-  const result = await prisma.auditLog.deleteMany({
-    where: {
-      createdAt: { lt: cutoff }
-    }
-  });
-
-  return {
-    deletedCount: result.count,
-    retentionDays,
-    cutoff
-  };
-}
-
-export async function writeAuditCleanupResultIfNeeded(
-  result: { deletedCount: number; retentionDays: number },
-  writeAudit: (input: AuditLogInput) => Promise<void> = writeAuditLogForMaintenanceRequired
-): Promise<void> {
-  // A no-op maintenance run must not block first ADMIN bootstrap on a virgin database.
-  if (result.deletedCount === 0) return;
-
-  await writeAudit({
-    eventType: "AUTH_AUDIT_LOG_CLEANUP",
-    result: "SUCCESS",
-    resource: "audit-log",
-    message: "Expired audit logs cleaned up.",
-    metadata: {
-      source: "audit-log-cleanup",
-      deletedCount: result.deletedCount,
-      retentionDays: result.retentionDays
-    }
-  });
-}
-
-export function getAuditLogRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
-  const configured = env.AUDIT_LOG_RETENTION_DAYS?.trim();
-  const raw = configured ? Number(configured) : DEFAULT_AUDIT_LOG_RETENTION_DAYS;
-
-  if (!Number.isFinite(raw)) {
-    return DEFAULT_AUDIT_LOG_RETENTION_DAYS;
+  const result = await prisma.$queryRaw<Array<{ deletedCount: bigint; retentionDays: number }>>(Prisma.sql`
+    SELECT cleanup.deleted_count AS "deletedCount", cleanup.retention_days AS "retentionDays"
+    FROM virki_security.delete_expired_audit_logs() AS cleanup
+  `);
+  const deletedCount = Number(result[0]?.deletedCount ?? 0n);
+  const retentionDays = result[0]?.retentionDays;
+  if (!Number.isSafeInteger(deletedCount) || deletedCount < 0 || typeof retentionDays !== "number" || !Number.isInteger(retentionDays) || retentionDays < MIN_AUDIT_LOG_RETENTION_DAYS || retentionDays > MAX_AUDIT_LOG_RETENTION_DAYS) {
+    throw new Error("Audit cleanup returned an invalid database policy or deleted-row count.");
   }
 
-  return Math.min(
-    Math.max(Math.floor(raw), MIN_AUDIT_LOG_RETENTION_DAYS),
-    MAX_AUDIT_LOG_RETENTION_DAYS
-  );
+  return {
+    deletedCount,
+    retentionDays,
+    cutoff: new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000)
+  };
 }
 
 export function sanitizeAuditMetadata(metadata?: AuditMetadata): AuditMetadata | undefined {

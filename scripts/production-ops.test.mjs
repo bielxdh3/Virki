@@ -10,6 +10,9 @@ import { isValidProductionConfig } from "./lib/production-config.mjs";
 import { DOCKER_SCRIPT, runAcceptedProductionPreflight, runProductionPreflight } from "./production-preflight.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
+const linuxKernelRelease = process.platform === "linux"
+  ? readFileSync("/proc/sys/kernel/osrelease", "utf8").toLowerCase()
+  : "";
 const makeEvidence = (data = provenanceFixture, type = "file") => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "virki-test-image-evidence-"));
   const contents = path.join(directory, "contents");
@@ -22,6 +25,11 @@ const makeEvidence = (data = provenanceFixture, type = "file") => {
 };
 
 const provenanceFixture = `revision=${revision}\nrun_id=54321\nplatform=linux/amd64\nruntime_digest=sha256:${"a".repeat(64)}\nmigrator_digest=sha256:${"b".repeat(64)}\n`;
+const nativeLinuxHostSkip = process.platform !== "linux"
+  ? "Requires a Linux shell."
+  : /microsoft|wsl/u.test(linuxKernelRelease)
+    ? "Production host checks reject WSL kernels; native Linux is required."
+    : false;
 const config = {
   sshAlias: "test-production",
   host: "production.example.invalid",
@@ -112,7 +120,8 @@ test("standalone preflight binds host contact to the exact accepted source gate"
     sourceExecute: () => ({ status: 0, stdout: "" }),
     inspectSource: ({ repositoryRoot }) => {
       calls.push("source");
-      assert.match(repositoryRoot.toLowerCase(), /virki/u);
+      assert.equal(path.isAbsolute(repositoryRoot), true);
+      assert.equal(existsSync(path.join(repositoryRoot, "package.json")), true);
       return { branch: "main", revision };
     },
     verifyCi: ({ revision: observed }) => {
@@ -210,7 +219,7 @@ test("preflight identifies strict host-key rejection without returning SSH diagn
   assert.doesNotMatch(result.lines.join(" "), /private-value|must-not-be-returned/u);
 });
 
-test("native shell probe emits the sanitized protected environment metadata category", { skip: process.platform !== "linux" }, async () => {
+test("native shell probe emits the sanitized protected environment metadata category", { skip: nativeLinuxHostSkip }, async () => {
   const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "virki-native-probe-"));
   const root = path.join(temporaryDirectory, "root");
   try {
@@ -375,8 +384,40 @@ test("first install tolerates its own staged revision without allowing unrelated
 test("first-install recovery recognizes the extension provisioned before Prisma migration", () => {
   const recoveryStart = serverScript.indexOf("verify_empty_first_install_recovery_database() {");
   assert.ok(recoveryStart >= 0);
-  const recovery = serverScript.slice(recoveryStart, recoveryStart + 3500);
-  assert.match(recovery, /NOT EXISTS \(SELECT 1 FROM pg_extension WHERE extname NOT IN \('plpgsql', 'pgcrypto'\)\) THEN 'empty-partial'/u);
+  const recoveryEnd = serverScript.indexOf("\nverify_first_install_recovery_has_no_application_rows() {", recoveryStart);
+  const recovery = serverScript.slice(recoveryStart, recoveryEnd);
+  assert.match(recovery, /extname NOT IN \('plpgsql', 'pgcrypto'\)/u);
+  assert.match(recovery, /WHEN NOT EXISTS \([\s\S]*?namespace\.nspname = 'public'[\s\S]*?THEN 'empty-partial'/u);
+});
+
+test("audit maintenance is restricted to the protected cleanup function and configured policy", () => {
+  const roleInitializer = readFileSync(new URL("../infra/postgres-init/10-virki-database-roles.sh", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../packages/database/prisma/migrations/20261019120000_runtime_audit_write_boundary/migration.sql", import.meta.url), "utf8");
+  const compose = readFileSync(new URL("../infra/docker-compose.prod.yml", import.meta.url), "utf8");
+  const contractStart = serverScript.indexOf("verify_first_install_role_contract() {");
+  const contractEnd = serverScript.indexOf("\napply_first_install_database_roles() {", contractStart);
+  const contract = serverScript.slice(contractStart, contractEnd);
+  const recoveryStart = serverScript.indexOf("verify_empty_first_install_recovery_database() {");
+  const recoveryEnd = serverScript.indexOf("\nverify_first_install_recovery_has_no_application_rows() {", recoveryStart);
+  const recovery = serverScript.slice(recoveryStart, recoveryEnd);
+
+  assert.match(roleInitializer, /AUDIT_LOG_RETENTION_DAYS=\$\{AUDIT_LOG_RETENTION_DAYS:-180\}/u);
+  assert.match(roleInitializer, /CREATE TABLE IF NOT EXISTS virki_security\.audit_retention_policy/u);
+  assert.match(roleInitializer, /ON CONFLICT \(singleton\) DO UPDATE SET retention_days = EXCLUDED\.retention_days/u);
+  assert.doesNotMatch(roleInitializer, /GRANT INSERT \([^\n]*\) ON TABLE public\."AuditLog" TO virki_audit_maintenance/u);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION virki_security\.delete_expired_audit_logs\(\)/u);
+  assert.match(migration, /FROM virki_security\.audit_retention_policy/u);
+  assert.match(migration, /AUTH_AUDIT_LOG_CLEANUP/u);
+  assert.match(compose, /AUDIT_LOG_RETENTION_DAYS: \$\{AUDIT_LOG_RETENTION_DAYS:-180\}/u);
+  assert.match(compose, /MIGRATION_DATABASE_URL:[\s\S]*?AUDIT_LOG_RETENTION_DAYS: \$\{AUDIT_LOG_RETENTION_DAYS:-180\}/u);
+  assert.match(migrationRunnerSource, /readAuditRetentionDays\(process\.env\.AUDIT_LOG_RETENTION_DAYS\)/u);
+  assert.match(migrationRunnerSource, /command === "deploy" && exitCode === 0[\s\S]*?SET retention_days = \$\{auditRetentionDays\}[\s\S]*?Virki audit retention policy could not be reconciled/u);
+  assert.match(contract, /NOT has_any_column_privilege\('virki_audit_maintenance', 'public\.\\"AuditLog\\"', 'INSERT'\)/u);
+  assert.match(contract, /retention_days = \$audit_retention_days/u);
+  assert.match(serverScript, /configured_audit_retention_days\(\)[\s\S]*?AUDIT_LOG_RETENTION_DAYS[\s\S]*?retention_days >= 1 && retention_days <= 3650/u);
+  assert.match(contract, /delete_expired_audit_logs\(\)'/u);
+  assert.match(recovery, /policy\.relname = 'audit_retention_policy'/u);
+  assert.match(recovery, /routine\.proconfig IS DISTINCT FROM ARRAY\['search_path=pg_catalog'\]/u);
 });
 
 test("GHCR temporary Docker configuration cleanup removes generated subdirectories", () => {
@@ -446,6 +487,10 @@ test("partial first-install recovery is typed, exact-resource-only, and checkpoi
   assert.match(serverScript, /first_install_volume='virki-prod_virki_postgres_data'/u);
   assert.match(projectGuard, /com\.docker\.compose\.project[\s\S]*?\$first_install_volume[\s\S]*?another container uses the Virki network/u);
   assert.match(databaseGuard, /current_database\(\) <> 'virki'[\s\S]*?datname NOT IN[\s\S]*?migrated-candidate/u);
+  assert.match(serverScript, /has_column_privilege[\s\S]*?createdAt[\s\S]*?virki_audit_log_created_at_guard[\s\S]*?timestamp_policy/u);
+  assert.match(serverScript, /runtime_test\.rolname = 'virki_runtime_test'[\s\S]*?has_function_privilege\(runtime_test\.oid/u);
+  assert.match(databaseGuard, /routine\.proname NOT IN \('delete_expired_audit_logs', 'enforce_audit_log_timestamp'\)[\s\S]*?routine\.prosecdef OR pg_get_function_result\(routine\.oid\) IS DISTINCT FROM 'trigger'[\s\S]*?CASE WHEN to_regclass\('public\."AuditLog"'\) IS NULL THEN 0 ELSE 2 END/u);
+  assert.match(databaseGuard, /virki_audit_log_created_at_guard[\s\S]*?tgfoid = 'virki_security\.enforce_audit_log_timestamp\(\)'::regprocedure/u);
   assert.match(recovery, /elif \[\[ "\$recovery_database_state" == migrated-candidate \]\]; then[\s\S]*?assert_backup_verified[\s\S]*?Recovery found migrations applied before the prior checkpoint/u);
   assert.match(recovery, /apply_first_install_database_roles[\s\S]*?verify_migrator_tcp_authentication[\s\S]*?if \[\[ "\$recovery_database_state" == empty-partial \]\]; then[\s\S]*?compose --profile migration run/u);
   assert.match(recovery, /verify_empty_first_install_recovery_database[\s\S]*?report_first_install_migrator_pre_reconcile_state[\s\S]*?apply_first_install_database_roles/u);
@@ -477,7 +522,7 @@ test("first-install recovery is a main-SHA CI-gated production mutation", async 
   assert.match(deploymentScript, /runRemoteScript\(action, source\.revision/u);
 });
 
-test("Linux first-install shell guard accepts only a pristine Virki target before image or database work", { skip: process.platform !== "linux" }, async (suite) => {
+test("Linux first-install shell guard accepts only a pristine Virki target before image or database work", { skip: nativeLinuxHostSkip }, async (suite) => {
   const rootDirectory = mkdtempSync(path.join(os.tmpdir(), "virki-first-install-guard-"));
   const scriptPath = fileURLToPath(new URL("./production-server.sh", import.meta.url));
   const host = spawnSync("hostname", ["-s"], { encoding: "utf8" });
@@ -809,9 +854,11 @@ test("routed services start only after app checks, and failure cleanup preserves
   const resumeStart = serverScript.indexOf("resume_services() {");
   const resumeEnd = serverScript.indexOf("\ninstall_source() {", resumeStart);
   const resume = serverScript.slice(resumeStart, resumeEnd);
+  const resumeBackupVerification = resume.indexOf("assert_backup_verified");
   const resumeMigrationStatus = resume.indexOf("run_migration_status");
   const resumeSchemaValidation = resume.indexOf("verify_migration_schema", resumeMigrationStatus);
   const resumeSourceActivation = resume.indexOf("activate_source", resumeSchemaValidation);
+  assert.ok(resumeBackupVerification >= 0 && resumeBackupVerification < resumeMigrationStatus, "maintenance-off must prove a fresh exact-revision backup before source activation");
   assert.ok(resumeMigrationStatus >= 0 && resumeSchemaValidation > resumeMigrationStatus && resumeSourceActivation > resumeSchemaValidation);
   const resumeAppStart = resume.indexOf('compose up --detach --force-recreate "${application_services[@]}"');
   const resumeRevision = resume.indexOf("assert_revisions", resumeAppStart);
@@ -854,6 +901,19 @@ test("routed services start only after app checks, and failure cleanup preserves
   assert.match(stopServices, /for service in cloudflared "\$\{application_services\[@\]\}"/u);
   assert.doesNotMatch(stopServices, /postgres/u);
   assert.match(serverScript, /maintenance_on\(\)[\s\S]*?trap 'stop_routed_services' EXIT[\s\S]*?compose stop cloudflared[\s\S]*?compose stop "\$\{application_services\[@\]\}"/u);
+});
+
+test("sessions cleanup runs as a configured one-shot service during maintenance", () => {
+  const start = serverScript.indexOf("  sessions-cleanup)\n");
+  const end = serverScript.indexOf("  config)\n", start);
+  const action = serverScript.slice(start, end);
+  const compose = readFileSync(new URL("../infra/docker-compose.prod.yml", import.meta.url), "utf8");
+  const worker = compose.slice(compose.indexOf("  session-cleanup:"), compose.indexOf("\n  audit-maintenance:", compose.indexOf("  session-cleanup:")));
+  assert.match(action, /compose run --rm --no-deps session-cleanup npm run sessions:cleanup --workspace @virki\/auth/u);
+  assert.doesNotMatch(action, /compose exec[^\n]*\bhub\b/u);
+  assert.match(worker, /DATABASE_URL: \$\{DATABASE_URL/u);
+  assert.match(worker, /SESSION_CLEANUP_INTERVAL_SECONDS: \$\{SESSION_CLEANUP_INTERVAL_SECONDS/u);
+  assert.match(worker, /AUDIT_LOG_RETENTION_DAYS: \$\{AUDIT_LOG_RETENTION_DAYS/u);
 });
 
 test("restore clone and migration runner use an isolated password-protected internal network", () => {
@@ -973,6 +1033,7 @@ test("production migration reconciles only exact baseline histories and verifies
   assert.ok(apply.indexOf("normalize_migration_history") < apply.indexOf("compose --profile migration run --rm --no-deps migrate"));
   assert.ok(apply.indexOf("compose --profile migration run --rm --no-deps migrate") < apply.indexOf("run_migration_status"));
   assert.ok(apply.indexOf("run_migration_status") < apply.indexOf("verify_migration_schema"));
+  assert.ok(apply.indexOf("verify_migration_schema") < apply.indexOf("verify_first_install_role_contract"));
   assert.match(history, /run_migration_prisma .* verify-schema/u);
   assert.match(migrationRunnerSource, /\["verify-schema", \["migrate", "diff", "--from-schema-datasource", schemaPath, "--to-schema-datamodel", schemaPath, "--exit-code"\]\]/u);
 });

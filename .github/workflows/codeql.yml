@@ -28,7 +28,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-      packages: write
 
     steps:
       - name: Check out repository
@@ -50,26 +49,10 @@ jobs:
       - name: Enforce reviewed CodeQL SARIF policy
         run: node scripts/codeql-sarif-policy.mjs codeql-results
 
-      - name: Store reviewed CodeQL SARIF in private GHCR evidence
-        env:
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ github.token }}
-          ACCEPTED_SHA: ${{ github.sha }}
-          ACCEPTED_RUN_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
-          mkdir evidence
-          cp codeql-results/*.sarif evidence/
-          mkdir -m 700 "$RUNNER_TEMP/ghcr-auth"
-          export DOCKER_CONFIG="$RUNNER_TEMP/ghcr-auth"
-          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
-          printf '%s' "$GHCR_PASSWORD" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin >/dev/null
-          ref="ghcr.io/bielxdh3/virki-evidence:$ACCEPTED_SHA-$ACCEPTED_RUN_ID-codeql"
-          docker build --build-arg "VIRKI_BUILD_REVISION=$ACCEPTED_SHA" --build-arg "VIRKI_EVIDENCE_RUN_ID=$ACCEPTED_RUN_ID" --build-arg VIRKI_EVIDENCE_KIND=codeql --build-arg VIRKI_EVIDENCE_PLATFORM=none -f infra/Dockerfile.evidence -t "$ref" .
-          push_result=$(docker push "$ref")
-          digest=$(printf '%s\n' "$push_result" | sed -nE 's/^.*digest: (sha256:[a-f0-9]{64}) size: [0-9]+$/\1/p')
-          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
-          printf 'VIRKI_EVIDENCE_DIGEST revision=%s run=%s kind=codeql platform=none digest=%s\n' "$ACCEPTED_SHA" "$ACCEPTED_RUN_ID" "$digest"
+      - name: Preserve reviewed SARIF for trusted publication
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codeql-sarif-${{ github.run_id }}
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 2

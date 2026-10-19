@@ -99,11 +99,12 @@ const contentRules = [
   {
     id: "generic-secret-assignment",
     pattern:
-      /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|secret|token)\b["']?\s*[:=]\s*["']?(?!$|<|false|local-validation-only|owner@example\.invalid|placeholder|replace)[A-Za-z0-9_./+=-]{24,}/i
+      /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|secret|token)\b["']?\s*[:=]\s*["'\x60]?(?!$|<|false|local-validation-only|owner@example\.invalid|placeholder|replace)[A-Za-z0-9_./+=-]{24,}/i
   }
 ];
 
-const applicationKeyPattern = /\b(?:[a-z][a-z0-9]*[_-])*(?:(?:api|signing|encryption|private)[_-]?key|secret)\b["']?\s*[:=]\s*(["']?)([A-Za-z0-9_./+=-]{24,})/gi;
+const applicationKeyPattern = /\b(?:[a-z][a-z0-9]*[_-])*(?:(?:api|signing|encryption|private)[_-]?key|secret)\b["']?\s*[:=]\s*(["'\x60]?)([A-Za-z0-9_./+=-]{24,})/gi;
+const multilineSecretAssignmentPattern = /\b(?:[a-z][a-z0-9]*[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|secret|token)\b["']?\s*[:=]\s*\r?\n\s*["'\x60]([A-Za-z0-9_./+=-]{24,})/giu;
 const databaseUrlPattern =
   /\b(?:(?:postgres(?:ql)?)|mysql|mongodb(?:\+srv)?):\/\/([^:\s/]+):([^@\s]+)@/gi;
 const allowedPlaceholderValues = new Set([
@@ -226,6 +227,45 @@ function scanFileContents(filePath, objectId) {
   for (const [index, line] of lines.entries()) {
     scanLine(filePath, index + 1, line);
   }
+  scanMultilineSecretAssignments(filePath, text);
+  scanPrivateJwk(filePath, text);
+}
+
+function scanMultilineSecretAssignments(filePath, text) {
+  for (const match of text.matchAll(multilineSecretAssignmentPattern)) {
+    if (isAllowedPlaceholder(match[1])) continue;
+    findings.push({
+      file: filePath,
+      line: text.slice(0, match.index).split(/\r?\n/u).length,
+      rule: "multiline-secret-assignment"
+    });
+  }
+}
+
+function scanPrivateJwk(filePath, text) {
+  let document;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    return;
+  }
+
+  let hasPrivateKey = false;
+  const visit = (value) => {
+    if (hasPrivateKey || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry);
+      return;
+    }
+    const privateMember = value.kty === "oct" ? value.k : value.d;
+    if (["RSA", "EC", "OKP", "oct"].includes(value.kty) && typeof privateMember === "string" && privateMember.length > 0 && !isAllowedPlaceholder(privateMember)) {
+      hasPrivateKey = true;
+      return;
+    }
+    for (const entry of Object.values(value)) visit(entry);
+  };
+  visit(document);
+  if (hasPrivateKey) findings.push({ file: filePath, line: 1, rule: "private-jwk" });
 }
 
 function scanLine(filePath, lineNumber, line) {

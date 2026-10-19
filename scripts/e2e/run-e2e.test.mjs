@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, request as httpRequest } from "node:http";
+import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
-import { buildE2ECommand } from "./run-e2e.mjs";
+import { fileURLToPath } from "node:url";
+import { buildE2ECommand, shouldBuildProductionHub } from "./run-e2e.mjs";
+import { buildServiceEnvironment, getServiceCommand } from "./isolated-service.mjs";
+
+const scriptDirectory = dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = resolve(scriptDirectory, "../..");
 
 test("Windows runs browser E2E in isolated Linux Docker and carries filters as JSON data", () => {
   const playwrightArguments = ["--grep", "OIDC flow with spaces", "value; do-not-run-shell"];
@@ -38,4 +47,265 @@ test("Linux executes the repository Playwright CLI directly with argv boundaries
     ...playwrightArguments
   ]);
   assert.deepEqual(command.environment, {});
+});
+
+test("an isolated runner can skip a duplicate production Hub build after its build stage", () => {
+  assert.equal(shouldBuildProductionHub({ VIRKI_E2E_HUB_MODE: "production" }), true);
+  assert.equal(shouldBuildProductionHub({ VIRKI_E2E_HUB_MODE: "production", VIRKI_E2E_HUB_BUILD_READY: "true" }), false);
+  assert.equal(shouldBuildProductionHub({ VIRKI_E2E_HUB_BUILD_READY: "true" }), false);
+});
+
+test("production Hub E2E uses the production start adapter", () => {
+  const tlsDirectory = mkdtempSync(resolve(tmpdir(), "virki-prod-hub-command-"));
+  const keyPath = resolve(tlsDirectory, "server-key.pem");
+  const certificatePath = resolve(tlsDirectory, "server-cert.pem");
+  const caCertificatePath = resolve(tlsDirectory, "test-ca-cert.pem");
+  try {
+    for (const path of [keyPath, certificatePath, caCertificatePath]) writeFileSync(path, "fixture", { flag: "wx" });
+    const command = getServiceCommand("hub", {
+      VIRKI_E2E_HUB_MODE: "production",
+      VIRKI_E2E_TLS_KEY_PATH: keyPath,
+      VIRKI_E2E_TLS_CERTIFICATE_PATH: certificatePath,
+      NODE_EXTRA_CA_CERTS: caCertificatePath
+    });
+    assert.equal(command.cwd, repositoryRoot);
+    assert.deepEqual(command.args, [resolve(scriptDirectory, "start-production-hub.mjs")]);
+  } finally {
+    rmSync(tlsDirectory, { recursive: true, force: true });
+  }
+});
+
+test("production E2E mode is limited to the Hub child environment", () => {
+  const tlsDirectory = mkdtempSync(resolve(tmpdir(), "virki-prod-hub-env-"));
+  const tlsPath = (name) => resolve(tlsDirectory, name);
+  const source = {
+    PATH: process.env.PATH ?? process.env.Path ?? "",
+    HOME: process.env.HOME ?? "",
+    TMPDIR: process.env.TMPDIR ?? "",
+    TMP: process.env.TMP ?? "",
+    TEMP: process.env.TEMP ?? "",
+    LANG: process.env.LANG ?? "C.UTF-8",
+    LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
+    NODE_ENV: "production",
+    DATABASE_URL: "postgresql://virki_runtime_test@127.0.0.1:5432/virki_e2e_test",
+    VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
+    VIRKI_OIDC_PROXY_URL: "http://127.0.0.1:3003",
+    VIRKI_E2E_TLS_KEY_PATH: tlsPath("server-key.pem"),
+    VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsPath("server-cert.pem"),
+    NODE_EXTRA_CA_CERTS: tlsPath("test-ca-cert.pem"),
+    VIRKI_CSRF_SIGNING_KEY: "a".repeat(64),
+    VIRKI_E2E_HUB_MODE: "production"
+  };
+  try {
+    const hub = buildServiceEnvironment("hub", source, process.platform);
+    const publicSite = buildServiceEnvironment("public-site", source, process.platform);
+    assert.equal(hub.NODE_ENV, "production");
+    assert.equal(hub.VIRKI_E2E_HUB_MODE, "production");
+    assert.equal(Object.hasOwn(hub, "VIRKI_CORE_TEST_DATABASE_CONFIRM"), false);
+    assert.equal(publicSite.NODE_ENV, "development");
+    assert.equal(Object.hasOwn(publicSite, "VIRKI_E2E_HUB_MODE"), false);
+    assert.throws(
+      () => buildServiceEnvironment("hub", { ...source, VIRKI_CORE_TEST_DATABASE_CONFIRM: undefined }, process.platform),
+      /explicit disposable-database marker/u,
+      "production Hub E2E still requires the explicit disposable-database marker"
+    );
+    assert.throws(
+    () => buildServiceEnvironment("hub", { ...source, DATABASE_URL: "postgresql://virki_test@remote.example.invalid:5432/virki_e2e_test" }, process.platform),
+      /local or isolated CI host/u,
+      "production Hub E2E still refuses a remote database target"
+    );
+  } finally {
+    rmSync(tlsDirectory, { recursive: true, force: true });
+  }
+});
+
+test("production Hub proxy preserves no-store responses and forwards the browser's secure host", async () => {
+  const productionHub = await import("./start-production-hub.mjs").catch(() => null);
+  assert.ok(productionHub, "the production Hub adapter is available");
+  assert.equal(typeof productionHub.createProductionHubProxyRequestHandler, "function");
+
+  let forwardedHeaders;
+  const upstream = createServer((request, response) => {
+    forwardedHeaders = {
+      host: request.headers.host,
+      forwardedHost: request.headers["x-forwarded-host"],
+      forwardedProto: request.headers["x-forwarded-proto"],
+      forwardedFor: request.headers["x-forwarded-for"],
+      cfConnectingIp: request.headers["cf-connecting-ip"]
+    };
+    response.writeHead(200, { "cache-control": "private, no-store, max-age=0, must-revalidate" });
+    response.end("ready");
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", resolveListen);
+  });
+  const upstreamPort = upstream.address().port;
+  const proxy = createServer(productionHub.createProductionHubProxyRequestHandler(upstreamPort));
+  await new Promise((resolveListen, rejectListen) => {
+    proxy.once("error", rejectListen);
+    proxy.listen(0, "127.0.0.1", resolveListen);
+  });
+
+  try {
+    const response = await new Promise((resolveResponse, rejectResponse) => {
+      const request = httpRequest({
+        hostname: "127.0.0.1",
+        port: proxy.address().port,
+        path: "/account/security",
+        headers: {
+          host: "portal.localhost:3001",
+          "x-forwarded-proto": "http",
+          "x-forwarded-for": "198.51.100.42",
+          "cf-connecting-ip": "198.51.100.42"
+        }
+      }, (incoming) => {
+        const chunks = [];
+        incoming.on("data", (chunk) => chunks.push(chunk));
+        incoming.on("end", () => resolveResponse({ statusCode: incoming.statusCode, cacheControl: incoming.headers["cache-control"], body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      request.once("error", rejectResponse);
+      request.end();
+    });
+    assert.deepEqual(forwardedHeaders, {
+      host: "portal.localhost:3001",
+      forwardedHost: "portal.localhost:3001",
+      forwardedProto: "https",
+      forwardedFor: "127.0.0.1",
+      cfConnectingIp: "127.0.0.1"
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.cacheControl, "private, no-store, max-age=0, must-revalidate");
+    assert.equal(response.body, "ready");
+  } finally {
+    await Promise.all([upstream, proxy].map((server) => new Promise((resolveClose) => server.close(resolveClose))));
+  }
+});
+
+test("isolated Linux runner clones the current local branch instead of a fixed repository branch", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  assert.match(script, /git -C \$repoRoot branch --show-current/u);
+  assert.match(script, /git clone --branch \$repositoryBranch/u);
+  const clonedHeadCheckIndex = script.indexOf("$clonedHeadOutput = & docker exec --workdir /workspace $runnerName git rev-parse HEAD");
+  const patchApplyIndex = script.indexOf("git apply --binary /tmp/staged.patch");
+  assert.ok(clonedHeadCheckIndex !== -1 && patchApplyIndex > clonedHeadCheckIndex, "the cloned base HEAD is verified before local patches are applied");
+  assert.ok(script.includes("$clonedHead -cne $sourceHead"), "the isolated clone must match the captured source commit");
+  assert.doesNotMatch(script, /--branch cdx\/virki-open-issues/u);
+});
+
+test("isolated Linux runner snapshots every local Git input from the resolved repository root", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  for (const command of ["bundle create", "diff --cached", "diff --binary", "ls-files --others"]) {
+    assert.ok(script.includes(`git -C $repoRoot ${command}`), command);
+  }
+  assert.doesNotMatch(script, /& git (?:bundle|diff|ls-files)/u);
+});
+
+test("isolated Linux snapshot explicitly permits this remediation's new source and test files", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  for (const file of [
+    "apps/hub/src/lib/login-redirect.test.ts",
+    "apps/hub/src/lib/login-redirect.ts",
+    "apps/issuer/src/interaction-error.test.ts",
+    "apps/issuer/src/interaction-error.ts",
+    "apps/issuer/src/provider-audit.test.ts",
+    "apps/issuer/src/provider-audit.ts",
+    "apps/public-site/src/app/public-origin.test.ts",
+    "apps/public-site/src/app/public-origin.ts",
+    "packages/auth/src/elevation-authorization.ts",
+    "packages/auth/src/legacy-data-inventory.integration.test.ts",
+    "scripts/e2e/start-production-hub.mjs",
+    "scripts/admin-elevation-boundary.test.mjs"
+  ]) assert.ok(script.includes(`'${file}'`), file);
+});
+
+test("isolated runner removes only resources whose creation succeeded", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  const resources = [
+    {
+      name: "snapshot",
+      create: "New-Item -ItemType Directory -Path $snapshotDirectory -ErrorAction Stop",
+      owned: "$script:ownedResources.snapshot = $true",
+      cleanup: "if ($script:ownedResources.snapshot) {"
+    },
+    {
+      name: "network",
+      create: "& docker network create --driver bridge --internal $networkName",
+      owned: "$script:ownedResources.network = $true",
+      cleanup: "if ($script:ownedResources.network) { & docker network rm $networkName"
+    },
+    {
+      name: "database container",
+      create: "& docker create --name $databaseName --network $networkName",
+      owned: "$script:ownedResources.database = $true",
+      cleanup: "if ($script:ownedResources.database) { & docker rm --force --volumes $databaseName"
+    },
+    {
+      name: "browser cache volume",
+      create: "& docker volume create $browserVolumeName",
+      owned: "$script:ownedResources.browserVolume = $true",
+      cleanup: "if ($script:ownedResources.browserVolume) { & docker volume rm $browserVolumeName"
+    },
+    {
+      name: "browser seed container",
+      create: "& docker create --name $browserSeedName --network none",
+      owned: "$script:ownedResources.browserSeed = $true",
+      cleanup: "if ($script:ownedResources.browserSeed) { & docker rm --force $browserSeedName"
+    },
+    {
+      name: "runner container",
+      create: "$runnerCreateArguments = @('create', '--name', $runnerName, '--network', 'bridge')",
+      owned: "$script:ownedResources.runner = $true",
+      cleanup: "if ($script:ownedResources.runner) { & docker rm --force --volumes $runnerName"
+    }
+  ];
+
+  for (const resource of resources) {
+    const createIndex = script.indexOf(resource.create);
+    const ownedIndex = script.indexOf(resource.owned, createIndex);
+    assert.notEqual(createIndex, -1, `${resource.name} creation is present`);
+    assert.ok(ownedIndex > createIndex, `${resource.name} ownership is recorded after creation`);
+    if (resource.name !== "snapshot") {
+      const failureIndex = script.indexOf("if ($LASTEXITCODE -ne 0)", createIndex);
+      assert.ok(failureIndex > createIndex && failureIndex < ownedIndex, `${resource.name} failure is checked before ownership`);
+    }
+    assert.ok(script.includes(resource.cleanup), `${resource.name} cleanup is ownership guarded`);
+  }
+});
+
+test("isolated runner retains complete TAP output for integration and production-operations stages", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  assert.ok(/Write-Output \("ISOLATED_RUN_ID=" \+ \$runId\)/u.test(script), "runner emits its unique run ID");
+  assert.ok(/durationMs\s*=/u.test(script), "stage manifest records elapsed time");
+  assert.ok(script.includes("STAGE_MANIFEST_JSON="), "runner emits a machine-readable stage manifest");
+  assert.ok(script.includes("production-operations-tests.tap.log"), "complete TAP output has a durable artifact path");
+  assert.ok(script.includes("integration-tests.tap.log"), "integration TAP output has a durable artifact path");
+  assert.ok(script.includes("function Get-TapFailureManifest"), "retained TAP failures are parsed into structured entries");
+  assert.match(script, /productionOperationsFailures\s*=\s*@\(\$script:productionOperationsFailures\)/u, "the durable manifest includes named TAP failures and nesting data");
+  assert.match(script, /productionOperationsFailureCount\s*=\s*\$script:productionOperationsFailures\.Count/u, "the durable manifest counts every TAP failure entry");
+  assert.match(script, /integrationTestsFailures\s*=\s*@\(\$script:integrationTestFailures\)/u, "the durable manifest includes named integration TAP failures");
+  assert.match(script, /integrationTestsLog\s*=\s*if \(Test-Path -LiteralPath \$integrationTestsEvidencePath\)/u, "the durable manifest points to the integration TAP artifact");
+  assert.match(script, /integrationTestsFailureCount\s*=\s*\$script:integrationTestFailures\.Count/u, "the durable manifest counts integration TAP failures");
+  assert.ok(script.includes("run-manifest.json"), "run metadata has a durable artifact path");
+  assert.ok(script.includes(".superpowers/sdd/2026-10-19-virki-final-gates/runs"), "artifacts are stored in the ignored goal evidence area");
+  assert.ok(script.includes("Join-Path $evidenceRoot $runId"), "each run gets a unique artifact directory");
+  assert.ok(/Invoke-LoggedStage -Name 'production-operations-tests'[^\r\n]*-EvidenceLogPath \$productionOperationsEvidencePath -CaptureFullOutput/u.test(script), "production-operations output is retained without truncation");
+  assert.ok(/Invoke-LoggedStage -Name 'integration-tests'[^\r\n]*-EvidenceLogPath \$integrationTestsEvidencePath -CaptureFullOutput/u.test(script), "integration output is retained without truncation");
+  assert.ok(/\[System\.IO\.File\]::WriteAllLines\(\$EvidenceLogPath, \$stageLines/u.test(script), "captured output is written to the artifact");
+  for (const field of ["runId", "sourceBranch", "sourceHead", "startedUtc", "finishedUtc", "nodeVersion", "npmVersion", "stagedPatchSha256", "workingTreePatchSha256", "untrackedFiles", "exitCode", "failedStages", "stages"]) {
+    assert.match(script, new RegExp(`\\b${field}\\s*=`, "u"), `run manifest includes ${field}`);
+  }
+  assert.match(script, /Get-FileSha256 -LiteralPath \$stagedPatchPath/u, "staged changes are identified by content hash");
+  assert.match(script, /Get-FileSha256 -LiteralPath \$workingPatchPath/u, "unstaged changes are identified by content hash");
+  assert.match(script, /Copy-Item -LiteralPath \(Join-Path \$repoRoot \$relativePath\) -Destination \$snapshotPath/u, "untracked source bytes are frozen before hashing");
+  assert.match(script, /Get-FileSha256 -LiteralPath \$untrackedPath/u, "the copied untracked snapshot is identified by content hash");
+  assert.match(script, /path = \$relativePath\.Replace\('\\', '\/'\)/u, "untracked paths are normalized for the manifest");
+  assert.match(script, /Assert-RunnerFileSha256 '\/tmp\/staged\.patch' \$script:stagedPatchSha256/u, "the staged patch hash is verified after Docker copy");
+  assert.match(script, /Assert-RunnerFileSha256 '\/tmp\/working-tree\.patch' \$script:workingTreePatchSha256/u, "the unstaged patch hash is verified after Docker copy");
+  assert.match(script, /Assert-RunnerFileSha256 \('\/workspace\/' \+ \$relativeManifestPath\) \$expectedFile\.sha256/u, "each untracked file hash is verified after Docker copy");
+  assert.match(script, /Sort-Object -Property path -Culture 'en-US' -CaseSensitive/u, "untracked provenance is deterministically sorted");
+  const manifestWriteIndex = script.indexOf("[System.IO.File]::WriteAllText($runManifestPath");
+  const cleanupIndex = script.indexOf("& docker rm --force --volumes $runnerName");
+  assert.ok(manifestWriteIndex !== -1 && cleanupIndex > manifestWriteIndex, "artifacts are persisted before owned-container cleanup");
+  assert.match(script, /WriteAllText\(\$runManifestPath[\s\S]*?\} finally \{\s*Write-Output "[^\r\n]*Removing only temporary resources created by this run\."/u, "owned-resource cleanup has its own finally block around evidence persistence");
 });

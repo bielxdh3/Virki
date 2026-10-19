@@ -2,13 +2,50 @@ import assert from "node:assert/strict";
 import { randomInt, randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
-import { createDeterministicTestTransport, enqueueEmailMessage, processNextEmailMessage } from "./email";
+import { claimNextEmailMessage, createDeterministicTestTransport, enqueueEmailMessage, processNextEmailMessage } from "./email";
 import { runEmailWorkerLoop } from "./email-worker-loop";
 import { integrationOptions, uniqueEmail } from "./integration-fixtures";
 
 after(() => prisma.$disconnect());
 
 const OLD_SLEEP_PER_MESSAGE_MS = 5_000;
+
+test("processing messages with no lease are reclaimed once and stale finalizers are fenced", integrationOptions, async () => {
+  const now = new Date("2026-10-19T12:00:00.000Z");
+  const message = await prisma.emailOutboxMessage.create({
+    data: {
+      idempotencyKey: randomUUID(),
+      kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: uniqueEmail("outbox-missing-lease"),
+      locale: "en",
+      payload: { publicValues: {}, protectedValues: {} },
+      status: "PROCESSING",
+      attemptCount: 1,
+      availableAt: new Date(0),
+      processingLeaseExpiresAt: null,
+      createdAt: new Date(0),
+      updatedAt: new Date(0)
+    },
+    select: { id: true }
+  });
+
+  const reclaimed = await claimNextEmailMessage(now);
+  assert.equal(reclaimed?.id, message.id);
+  assert.equal(reclaimed?.attemptCount, 2);
+  assert.deepEqual(await prisma.emailDeliveryAttempt.findMany({ where: { messageId: message.id }, select: { attempt: true, status: true, errorCode: true } }), [
+    { attempt: 1, status: "FAILED", errorCode: "worker-interrupted" }
+  ]);
+
+  const staleFinalizer = await prisma.emailOutboxMessage.updateMany({
+    where: { id: message.id, status: "PROCESSING", attemptCount: 1 },
+    data: { status: "SENT", sentAt: now, processingLeaseExpiresAt: null }
+  });
+  assert.equal(staleFinalizer.count, 0);
+  const current = await prisma.emailOutboxMessage.findUniqueOrThrow({ where: { id: message.id }, select: { status: true, attemptCount: true, processingLeaseExpiresAt: true } });
+  assert.equal(current.status, "PROCESSING");
+  assert.equal(current.attemptCount, 2);
+  assert.ok(current.processingLeaseExpiresAt && current.processingLeaseExpiresAt > now);
+});
 
 async function drainBatch(count: number) {
   const recipients = Array.from({ length: count }, (_, index) => uniqueEmail(`worker-batch-${index}`));

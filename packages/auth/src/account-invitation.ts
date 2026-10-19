@@ -4,6 +4,7 @@ import { enqueueEmailMessageForClient } from "./email";
 import { hashAuditEmail, hashAuditIdentifier, writeAuditLogInTransaction } from "./audit";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import { getRecoveryActionBaseUrl, hashEmailAddress, hashRecoveryRequestKey, hashSecurityCode } from "./security";
+import { requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export const ACCOUNT_INVITATION_TTL_MS = 72 * 60 * 60 * 1000;
 
@@ -12,6 +13,7 @@ export const ACCOUNT_INVITATION_TTL_MS = 72 * 60 * 60 * 1000;
 // never knows the credential. The account and its invitation e-mail are created atomically.
 export async function provisionInvitedUserAccount(
   actor: { id: string },
+  sessionId: string,
   input: { email: string; displayName: string | null },
   now = new Date()
 ): Promise<{ userId: string }> {
@@ -22,6 +24,7 @@ export async function provisionInvitedUserAccount(
   const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase).toString();
 
   return prisma.$transaction(async (transaction) => {
+    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ACCOUNT_STATE_CHANGE", now);
     const user = await transaction.user.create({
       data: { email, emailNormalized: email, displayName: input.displayName, passwordHash: null, role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: null },
       select: { id: true }
@@ -58,5 +61,5 @@ export async function provisionInvitedUserAccount(
       metadata: { targetRef: hashOidcIdentifier(user.id), emailRef: hashAuditEmail(email), invitationRef: hashAuditIdentifier(invitation.id) }
     });
     return { userId: user.id };
-  });
+  }, { isolationLevel: "Serializable" });
 }

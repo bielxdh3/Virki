@@ -3,6 +3,7 @@ import { createSessionCsrfToken } from "../../lib/session-csrf";
 import { headers } from "next/headers";
 import { getSurface, trustedReturnTo } from "../../lib/surface";
 import { requireAdminPage } from "../../lib/admin-page";
+import { ProtectedPageLifecycle } from "../protected-page-lifecycle";
 
 const navigation = [
   ["/admin/accounts", "Contas"],
@@ -23,7 +24,9 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
   const currentPathname = currentPath?.split("?", 1)[0];
 
   return (
-    <div className="admin-shell">
+    <>
+    <ProtectedPageLifecycle />
+    <div className="admin-shell" data-protected-page-content>
       <a className="skip-link" href="#admin-content">Ir para o conteúdo</a>
       <aside className="admin-sidebar">
         <a className="brand" href="/admin/accounts">Virki · Admin</a>
@@ -37,5 +40,6 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
       </aside>
       {children}
     </div>
+    </>
   );
 }

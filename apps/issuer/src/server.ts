@@ -5,9 +5,11 @@ import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAtt
 import { prisma } from "@virki/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
+import { readInteractionDetailsOrRespond } from "./interaction-error";
+import { createProviderEventAudit } from "./provider-audit";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { readIssuer } from "./issuer-config";
-import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isTokenEndpoint, selectAuthRateLimits, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
+import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isInteractionPath, isTokenEndpoint, selectAuthRateLimits, selectInteractionRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
@@ -194,8 +196,10 @@ provider.use(async (rawContext, next) => {
     if (await rateLimitRequest(context, (address) => selectTokenRateLimits(address, authorization))) return;
   }
 
-  const match = context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u);
+  const match = isInteractionPath(context.path) ? context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u) : null;
   if (match) {
+    const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
+    if (await rateLimitRequest(context, (address) => selectInteractionRateLimits(address, sessionCookie))) return;
     await handleInteraction(context, match[1]);
     return;
   }
@@ -253,6 +257,14 @@ provider.on("grant.error", (rawContext) => {
   }));
 });
 
+provider.on("userinfo.error", (rawContext, error) => auditProviderEvent("userinfo.error", rawContext, error));
+provider.on("revocation.error", (rawContext, error) => auditProviderEvent("revocation.error", rawContext, error));
+provider.on("end_session.success", (rawContext) => auditProviderEvent("end_session.success", rawContext));
+provider.on("end_session.error", (rawContext, error) => auditProviderEvent("end_session.error", rawContext, error));
+provider.on("end_session_confirm.error", (rawContext, error) => auditProviderEvent("end_session_confirm.error", rawContext, error));
+provider.on("end_session_success.error", (rawContext, error) => auditProviderEvent("end_session_success.error", rawContext, error));
+provider.on("server_error", (rawContext, error) => auditProviderEvent("server_error", rawContext, error));
+
 const port = Number(process.env.OIDC_ISSUER_PORT ?? "3003");
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("OIDC issuer port is invalid.");
 const bindAddress = process.env.VIRKI_OIDC_BIND_ADDRESS ?? "0.0.0.0";
@@ -272,13 +284,15 @@ server.listen(port, bindAddress, () => {
 });
 
 async function handleInteraction(context: KoaContextWithOIDC, uid: string): Promise<void> {
-  await writeAuditLog({ eventType: "SSO_INTERACTION_STARTED", result: "INFO", resource: "sso.interaction", metadata: { requestRef: hashAuditIdentifier(uid) } });
-  const interaction = await provider.interactionDetails(context.req, context.res);
+  const interactionResult = await readInteractionDetailsOrRespond(context, () => provider.interactionDetails(context.req, context.res));
+  if (!interactionResult.ok) return;
+  const interaction = interactionResult.value;
   if (!isOidcInteractionPathBound(uid, interaction.uid)) {
     context.status = 400;
     context.body = { error: "invalid_request" };
     return;
   }
+  await writeAuditLog({ eventType: "SSO_INTERACTION_STARTED", result: "INFO", resource: "sso.interaction", metadata: { requestRef: hashAuditIdentifier(uid) } });
   const essentialAcr = getEssentialAcrRequest(interaction.prompt.details.acr);
   if (essentialAcr.required && !supportsEssentialOidcAcrValues(essentialAcr.values)) {
     await denyInteraction(context);
@@ -374,6 +388,14 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
   await provider.interactionFinished(context.req, context.res, { consent: { grantId } }, { mergeWithLastSubmission: true });
 }
 
+function auditProviderEvent(eventName: string, rawContext: unknown, error?: unknown): void {
+  if (!rawContext || typeof rawContext !== "object") return;
+  const context = rawContext as KoaContextWithOIDC;
+  const record = createProviderEventAudit(eventName, context, error);
+  if (!record) return;
+  requireAuditBeforeResponse(context.res, writeAuditLogRequired(record));
+}
+
 async function denyInteraction(context: KoaContextWithOIDC): Promise<void> {
   await writeAuditLog({ eventType: "SSO_INTERACTION_DENIED", result: "DENIED", resource: "sso.interaction" });
   await provider.interactionFinished(context.req, context.res, {
@@ -398,7 +420,7 @@ async function hasActiveProjectGrant(userId: string, clientId: string): Promise<
 async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: string) => RateLimitCheck[]): Promise<boolean> {
   const clientAddress = getString(context.req.headers["cf-connecting-ip"]) ?? undefined;
   if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(clientAddress)) {
-    await writeAuditLog({ eventType: "RATE_LIMIT_REACHED", result: "DENIED", reason: "unavailable", resource: "sso.rate-limit" });
+    await writeRateLimitAuditOnce(context.req.socket.remoteAddress ?? "unknown", new Date(), "unavailable");
     context.status = 503;
     context.body = { error: "temporarily_unavailable" };
     return true;
@@ -413,11 +435,28 @@ async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: s
     return true;
   });
   if (allowed) return false;
-  await writeAuditLog({ eventType: "RATE_LIMIT_REACHED", result: "DENIED", reason: "rate-limited", resource: "sso.rate-limit" });
+  await writeRateLimitAuditOnce(clientAddress, now, "rate-limited");
   context.status = 429;
   context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
   context.body = { error: "temporarily_unavailable" };
   return true;
+}
+
+async function writeRateLimitAuditOnce(clientAddress: string, now: Date, reason: "rate-limited" | "unavailable"): Promise<void> {
+  const auditCheck = selectRateLimitAudit(clientAddress);
+  try {
+    const attempt = await prisma.$transaction((transaction) =>
+      consumeRateLimitAttemptInTransaction(transaction, auditCheck.identifier, now, auditCheck.maxAttempts)
+    );
+    if (!attempt.allowed) return;
+  } catch {
+    return;
+  }
+  try {
+    await writeAuditLog({ eventType: "RATE_LIMIT_REACHED", result: "DENIED", reason, resource: "sso.rate-limit" });
+  } catch {
+    // Keep throttling effective if this optional denial audit cannot be stored.
+  }
 }
 
 function readSigningJwks(value: string | undefined): { keys: Array<Record<string, string>> } {
