@@ -10,7 +10,7 @@ import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-se
 import { revokeUserOidcArtifactsInTransaction } from "@virki/auth/security";
 import { prisma } from "@virki/database";
 import Provider from "oidc-provider";
-import { PrismaOidcAdapter } from "./adapter";
+import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 
 let server: Server;
 let provider: Provider;
@@ -81,6 +81,26 @@ async function exchange(clientId: string, code: string, codeVerifier: string | n
 
 const userinfo = (accessToken: string) => fetch(`${origin}/me`, { headers: { authorization: `Bearer ${accessToken}` } });
 const purge = (userId: string) => prisma.$transaction((transaction) => revokeUserOidcArtifactsInTransaction(transaction, userId));
+
+test("artifact storage removes nonpositive TTL rewrites and cleanup includes the exact expiry boundary", integrationOptions, async () => {
+  const adapter = new PrismaOidcAdapter("Interaction");
+  const expiredId = randomUUID();
+  await adapter.upsert(expiredId, { params: {} } as never, 300);
+  await adapter.upsert(expiredId, { params: {} } as never, 0);
+  assert.equal(await adapter.find(expiredId), undefined);
+  assert.equal(await prisma.oidcArtifact.count({ where: { idHash: hashOidcIdentifier(expiredId) } }), 0);
+
+  const cutoff = new Date(Date.now() + 3_000);
+  const identifiers = [randomUUID(), randomUUID(), randomUUID()];
+  for (const [index, id] of identifiers.entries()) {
+    await adapter.upsert(id, { params: {} } as never, 300);
+    await prisma.oidcArtifact.update({ where: { model_idHash: { model: "Interaction", idHash: hashOidcIdentifier(id) } }, data: { expiresAt: new Date(cutoff.getTime() + index - 1) } });
+  }
+  await deleteExpiredOidcArtifacts(prisma, cutoff);
+  const remaining = await prisma.oidcArtifact.findMany({ where: { idHash: { in: identifiers.map(hashOidcIdentifier) } }, select: { idHash: true } });
+  assert.deepEqual(remaining, [{ idHash: hashOidcIdentifier(identifiers[2]) }]);
+  await adapter.destroy(identifiers[2]);
+});
 
 test("positive control: a valid exchange succeeds and the opaque access token reaches /me", integrationOptions, async () => {
   const seeded = await seed();

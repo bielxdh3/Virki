@@ -17,14 +17,20 @@ export class PrismaOidcAdapter implements Adapter {
 
   async upsert(id: string, payload: AdapterPayload, expiresIn: number): Promise<void> {
     if (this.model === "Client") throw new Error("Client metadata is managed through project connections.");
+    if (!Number.isFinite(expiresIn) || expiresIn <= 0) {
+      await this.destroy(id);
+      return;
+    }
+    const indexedClientId = this.model === "Interaction" ? nestedString(payload.params, "client_id") : payload.clientId;
+    const indexedAccountId = this.model === "Interaction" ? nestedString(payload.session, "accountId") : payload.accountId;
     const data = {
       payloadCiphertext: encryptOidcPayload(JSON.stringify(payload)),
       grantHash: grantBoundModels.has(this.model) && payload.grantId ? hashOidcIdentifier(payload.grantId) : null,
       uidHash: payload.uid ? hashOidcIdentifier(payload.uid) : null,
       userCodeHash: payload.userCode ? hashOidcIdentifier(payload.userCode) : null,
-      clientIdHash: payload.clientId ? hashOidcIdentifier(payload.clientId) : null,
-      accountIdHash: payload.accountId ? hashOidcIdentifier(payload.accountId) : null,
-      expiresAt: Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000) : null,
+      clientIdHash: indexedClientId ? hashOidcIdentifier(indexedClientId) : null,
+      accountIdHash: indexedAccountId ? hashOidcIdentifier(indexedAccountId) : null,
+      expiresAt: new Date(Date.now() + expiresIn * 1000),
       consumedAt: payload.consumed ? new Date(Number(payload.consumed) * 1000) : null
     };
     const artifact = {
@@ -165,6 +171,12 @@ function parsePayload(value: string): AdapterPayload {
   const payload: unknown = JSON.parse(value);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid stored OIDC record.");
   return payload as AdapterPayload;
+}
+
+function nestedString(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = (value as Record<string, unknown>)[key];
+  return typeof candidate === "string" && candidate ? candidate : undefined;
 }
 
 function stringArray(value: unknown): string[] {

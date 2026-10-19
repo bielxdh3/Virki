@@ -75,11 +75,14 @@ export async function validateCloudflareAccessJwt(
   }
 
   try {
-    await jwtVerify(token, getJwks(config.teamDomain), {
+    const { payload } = await jwtVerify(token, getJwks(config.teamDomain), {
       audience: config.audience,
       issuer: config.teamDomain,
-      algorithms: ["RS256"]
+      algorithms: ["RS256"],
+      requiredClaims: ["exp", "iat", "nbf"]
     });
+
+    if (payload.iat! > Math.floor(Date.now() / 1000) || payload.exp! <= payload.iat!) throw new Error("Invalid token lifetime.");
 
     return {
       allowed: true,

@@ -7,7 +7,7 @@ import { getSurface, safeReturnTo } from "../../../lib/surface";
 
 export const dynamic = "force-dynamic";
 
-export default async function LoginVerificationPage({ searchParams }: { searchParams?: Promise<{ ceremony?: string; factor?: string; flow?: string; error?: string; returnTo?: string }> }) {
+export default async function LoginVerificationPage({ searchParams }: { searchParams?: Promise<{ ceremony?: string; factor?: string; flow?: string; error?: string; reauth?: string; returnTo?: string }> }) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   if (surface === "unknown") forbidden();
@@ -18,12 +18,17 @@ export default async function LoginVerificationPage({ searchParams }: { searchPa
   const ceremony = params?.ceremony ?? "";
   const factor = params?.factor === "totp" || params?.factor === "recovery" ? params.factor : "email";
   const returnTo = safeReturnTo(params?.returnTo, surface) ?? "";
-  const loginHref = returnTo ? `/login?returnTo=${encodeURIComponent(returnTo)}` : "/login";
-  if (session && !ceremony) redirect(safeReturnTo(params?.returnTo, surface, session.user.role) ?? (session.user.role === "ADMIN" ? "/admin/accounts" : "/"));
-  if (!session && !ceremony) redirect(loginHref);
+  const reauth = params?.reauth === "1";
+  const loginParams = new URLSearchParams();
+  if (returnTo) loginParams.set("returnTo", returnTo);
+  if (reauth) loginParams.set("reauth", "1");
+  const loginHref = loginParams.size ? `/login?${loginParams.toString()}` : "/login";
+  if (session && !ceremony && !reauth) redirect(safeReturnTo(params?.returnTo, surface, session.user.role) ?? (session.user.role === "ADMIN" ? "/admin/accounts" : "/"));
+  if (!ceremony) redirect(loginHref);
   const csrfToken = createCsrfToken({ scope: "login-verification" });
   const recoveryParams = new URLSearchParams({ ceremony, factor: "recovery", flow: "recovery" });
   if (returnTo) recoveryParams.set("returnTo", returnTo);
+  if (reauth) recoveryParams.set("reauth", "1");
 
   return (
     <main className="auth-page">
@@ -37,6 +42,7 @@ export default async function LoginVerificationPage({ searchParams }: { searchPa
           <input type="hidden" name="factor" value={factor} />
           {params?.flow === "recovery" ? <input type="hidden" name="flow" value="recovery" /> : null}
           <input type="hidden" name="returnTo" value={returnTo} />
+          {reauth ? <input type="hidden" name="reauth" value="1" /> : null}
           <label>Código<input name="code" inputMode={factor === "recovery" ? "text" : "numeric"} pattern={factor === "recovery" ? "[A-Fa-f0-9 -]{18,24}" : "[0-9]{6}"} autoComplete="one-time-code" maxLength={factor === "recovery" ? 24 : 6} required /></label>
           {params?.error ? <p className="form-error" role="alert">Não foi possível validar este código.</p> : null}
           <button className="button-primary" type="submit">Continuar</button>

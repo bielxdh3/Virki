@@ -272,6 +272,7 @@ async function createProductionAccessAssertion(): Promise<ProductionAccessAssert
       .setIssuer(teamDomain)
       .setAudience(audience)
       .setIssuedAt()
+      .setNotBefore("0s")
       .setExpirationTime("2m")
       .sign(privateKey);
     return { audience, teamDomain, token, restore: () => { globalThis.fetch = originalFetch; } };

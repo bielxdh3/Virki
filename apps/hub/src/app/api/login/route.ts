@@ -153,6 +153,7 @@ export async function POST(request: Request) {
         verifyUrl.searchParams.set("ceremony", ceremony.ceremonyId);
         verifyUrl.searchParams.set("factor", ceremony.factor.toLowerCase());
         if (returnTo) verifyUrl.searchParams.set("returnTo", returnTo);
+        if (reauth) verifyUrl.searchParams.set("reauth", "1");
         const response = NextResponse.redirect(verifyUrl, { status: 303 });
         if (readCookie(request.headers.get("cookie"), DEVICE_COOKIE_NAME) !== ceremony.deviceToken) {
           response.cookies.set(DEVICE_COOKIE_NAME, ceremony.deviceToken, {

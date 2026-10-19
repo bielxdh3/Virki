@@ -71,9 +71,15 @@ function createDatabase(
   };
   transaction.auditLog = {
     ...(transaction.auditLog as object),
-    findMany: async () => {
+    findMany: async (args?: { take?: number; cursor?: { id: string }; skip?: number; orderBy?: { id: string } }) => {
       calls.push("read:auditLog");
-      return auditRows;
+      if (args?.take === undefined || args.take > 128 || args.take < 1 || args.orderBy?.id !== "asc") {
+        throw new Error("Audit bootstrap must use bounded, deterministic pages.");
+      }
+      const records = auditRows.map((record, index) => ({ ...record, id: `audit-${String(index).padStart(6, "0")}` }));
+      const position = args.cursor ? records.findIndex((record) => record.id === args.cursor?.id) : -1;
+      if (args.cursor && position < 0) throw new Error("Unknown audit cursor.");
+      return records.slice(position + (args.cursor ? (args.skip ?? 0) : 1), position + (args.cursor ? (args.skip ?? 0) : 1) + args.take);
     }
   };
   const database = {
@@ -139,7 +145,7 @@ test("first ADMIN bootstrap accepts ONLY preserved zero-change session-cleanup a
   assert.equal(fixture.auditInput?.eventType, "ACCOUNT_CREATED");
 });
 
-test("bootstrap refuses suspicious audit rows and excess no-op audits", async () => {
+test("bootstrap refuses suspicious audit rows", async () => {
   const suspicious = [
     { ...noopAudit, eventType: "ACCOUNT_CREATED" },
     { ...noopAudit, result: "FAILURE" },
@@ -148,7 +154,7 @@ test("bootstrap refuses suspicious audit rows and excess no-op audits", async ()
     { ...noopAudit, actorUserId: "existing-user" },
     { ...noopAudit, actorEmailHash: "some-hash" },
     { ...noopAudit, metadata: { ...noopAudit.metadata, deletedCount: 1 } },
-    { ...noopAudit, metadata: { ...noopAudit.metadata, deletedRateLimitCount: 1 } },
+    { ...noopAudit, metadata: { ...noopAudit.metadata, deletedRateLimitCount: -1 } },
     { ...noopAudit, metadata: { ...noopAudit.metadata, source: "other" } },
     { ...noopAudit, metadata: { ...noopAudit.metadata, extra: "unexpected" } }
   ];
@@ -164,16 +170,46 @@ test("bootstrap refuses suspicious audit rows and excess no-op audits", async ()
     );
     assert.equal(fixture.createdUser, undefined);
   }
-  const tooMany = createDatabase({ auditLog: 33 }, Array.from({ length: 33 }, () => ({ ...noopAudit })));
+});
+
+test("anonymous failed login traffic and rate-limit rows cannot exhaust first ADMIN bootstrap", async () => {
+  const rows = Array.from({ length: 64 }, () => ({ ...noopAudit, eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource: "portal", message: "Login failed.", actorEmailHash: "ab".repeat(32), metadata: { source: "portal-login" } }));
+  const fixture = createDatabase({ auditLog: rows.length, loginRateLimit: 64 }, rows);
+  const result = await bootstrapFirstAdmin(validInput, {
+    database: fixture.database as never,
+    hashPassword: async () => "argon2:hashed",
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async (_transaction, input) => fixture.setAudit(input as unknown as Record<string, unknown>)
+  });
+  assert.equal(result.id, "created-admin");
+  assert.equal(fixture.auditInput?.eventType, "ACCOUNT_CREATED");
+});
+
+test("no-op maintenance audits cannot consume a finite prebootstrap allowance", async () => {
+  const rows = Array.from({ length: 64 }, () => ({ ...noopAudit }));
+  const fixture = createDatabase({ auditLog: rows.length }, rows);
+  const result = await bootstrapFirstAdmin(validInput, { database: fixture.database as never, hashPassword: async () => "argon2:hashed", hashAdminEmail: () => "pseudonym:admin", writeAudit: async () => undefined });
+  assert.equal(result.id, "created-admin");
+});
+
+test("bootstrap validates a large anonymous audit history in bounded pages, including its last row", async () => {
+  const rows = Array.from({ length: 301 }, () => ({ ...noopAudit }));
+  const fixture = createDatabase({ auditLog: rows.length }, rows);
+  const result = await bootstrapFirstAdmin(validInput, {
+    database: fixture.database as never,
+    hashPassword: async () => "argon2:hashed",
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async () => undefined
+  });
+  assert.equal(result.id, "created-admin");
+  assert.equal(fixture.calls.filter((call) => call === "read:auditLog").length, 3);
+
+  const invalid = createDatabase({ auditLog: rows.length }, [...rows.slice(0, -1), { ...noopAudit, actorUserId: "existing-user" }]);
   await assert.rejects(
-    bootstrapFirstAdmin(validInput, {
-      database: tooMany.database as never,
-      hashPassword: async () => "argon2:hashed",
-      writeAudit: async () => assert.fail("An excess of audits must not be ignored.")
-    }),
+    bootstrapFirstAdmin(validInput, { database: invalid.database as never, hashPassword: async () => "argon2:hashed", writeAudit: async () => assert.fail("Do not create an admin.") }),
     (error) => error instanceof FirstAdminBootstrapError && error.code === "DATABASE_NOT_VIRGIN"
   );
-  assert.equal(tooMany.createdUser, undefined);
+  assert.equal(invalid.createdUser, undefined);
 });
 
 test("expensive password hashing completes before acquiring the transaction lock", async () => {
@@ -199,6 +235,7 @@ test("expensive password hashing completes before acquiring the transaction lock
 
 test("bootstrap refuses any pre-existing application data and creates no ADMIN", async () => {
   for (const model of dataModels) {
+    if (model === "loginRateLimit") continue; // Anonymous request counters carry no identity state.
     const fixture = createDatabase({ [model]: 1 });
 
     await assert.rejects(

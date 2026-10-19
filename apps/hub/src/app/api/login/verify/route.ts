@@ -18,6 +18,7 @@ export async function POST(request: Request) {
   const formData = await readBoundedFormData(request);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });
   if (!validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: "login-verification" }).valid) return new NextResponse("Forbidden", { status: 403 });
+  const reauth = read(formData, "reauth") === "1";
   const ceremony = read(formData, "ceremony");
   const factor = read(formData, "factor").toLowerCase();
   const requiredRole = surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined;
@@ -33,6 +34,7 @@ export async function POST(request: Request) {
   errorUrl.searchParams.set("factor", factor);
   if (read(formData, "flow") === "recovery") errorUrl.searchParams.set("flow", "recovery");
   if (returnTo) errorUrl.searchParams.set("returnTo", returnTo);
+  if (reauth) errorUrl.searchParams.set("reauth", "1");
   errorUrl.searchParams.set("error", "1");
   try {
     if (factor === "email") {
@@ -44,6 +46,7 @@ export async function POST(request: Request) {
         totpUrl.searchParams.set("factor", nextFactor);
         if (nextFactor === "recovery") totpUrl.searchParams.set("flow", "recovery");
         if (returnTo) totpUrl.searchParams.set("returnTo", returnTo);
+        if (reauth) totpUrl.searchParams.set("reauth", "1");
         return NextResponse.redirect(totpUrl, { status: 303 });
       }
       if (!result.session) throw new Error("missing-session");
@@ -60,6 +63,7 @@ export async function POST(request: Request) {
         emailUrl.searchParams.set("factor", "email");
         emailUrl.searchParams.set("flow", "recovery");
         if (returnTo) emailUrl.searchParams.set("returnTo", returnTo);
+        if (reauth) emailUrl.searchParams.set("reauth", "1");
         return NextResponse.redirect(emailUrl, { status: 303 });
       }
       return sessionResponse(result.session, baseUrl, returnTo, surface, "recovery", auditMetadata, "/account/security?recovered=totp");

@@ -1,6 +1,7 @@
 import type { ServerResponse } from "node:http";
 
 const pendingAuditWrites = new WeakMap<ServerResponse, Promise<void>>();
+const pendingAuditWaiters = new WeakMap<ServerResponse, () => void>();
 const AUDIT_FAILURE_BODY = JSON.stringify({ error: "temporarily_unavailable" });
 const MAX_PENDING_RESPONSE_BYTES = 1024 * 1024;
 const REPLACED_RESPONSE_HEADERS = [
@@ -22,9 +23,10 @@ type BufferedResponseOperation = {
 
 export function requireAuditBeforeResponse(response: ServerResponse, write: Promise<void>): void {
   const previous = pendingAuditWrites.get(response);
-  const pending = previous ? previous.then(() => write) : write;
+  const pending = Promise.all(previous ? [previous, write] : [write]).then(() => undefined);
   pendingAuditWrites.set(response, pending);
   void pending.catch(() => undefined);
+  pendingAuditWaiters.get(response)?.();
 }
 
 export function installAuditResponseGate(response: ServerResponse): void {
@@ -32,51 +34,114 @@ export function installAuditResponseGate(response: ServerResponse): void {
   const originalWrite = response.write.bind(response);
   const originalWriteHead = response.writeHead.bind(response);
   const originalFlushHeaders = response.flushHeaders.bind(response);
-  let state: "open" | "waiting" | "failed" = "open";
+  let state: "open" | "waiting" | "failed" | "closed" = "open";
   let bufferedBytes = 0;
   let queue: BufferedResponseOperation[] = [];
+  let observedAuditPromise: Promise<void> | undefined;
+
+  function discardBufferedResponse(error: Error): void {
+    const operations = queue;
+    queue = [];
+    bufferedBytes = 0;
+    discardOperations(operations, error);
+  }
+
+  function discardOperations(operations: BufferedResponseOperation[], error: Error): void {
+    for (const operation of operations) {
+      try {
+        operation.discard(error);
+      } catch {
+        // One response callback must not prevent the remaining callbacks from settling.
+      }
+    }
+  }
+
+  function closeBufferedResponse(): void {
+    if (state === "failed" || state === "closed") return;
+    state = "closed";
+    pendingAuditWrites.delete(response);
+    pendingAuditWaiters.delete(response);
+    discardBufferedResponse(new Error("OIDC response closed before required audit persistence completed."));
+  }
+
+  response.once("close", () => {
+    if (!response.writableFinished) closeBufferedResponse();
+  });
+
+  function isResponseClosed(): boolean {
+    return state === "closed" || response.destroyed || response.writableEnded || response.writableFinished;
+  }
+
+  function waitForLatestAudit(): void {
+    if (state !== "waiting") return;
+    if (isResponseClosed()) {
+      closeBufferedResponse();
+      return;
+    }
+    const pending = pendingAuditWrites.get(response);
+    if (!pending) {
+      pendingAuditWaiters.delete(response);
+      releaseBufferedResponse();
+      return;
+    }
+    if (pending === observedAuditPromise) return;
+    observedAuditPromise = pending;
+    void pending.then(
+      () => {
+        if (state !== "waiting") return;
+        if (pendingAuditWrites.get(response) === pending) pendingAuditWrites.delete(response);
+        if (observedAuditPromise === pending) observedAuditPromise = undefined;
+        waitForLatestAudit();
+      },
+      () => failClosed()
+    ).catch(() => response.destroy());
+  }
 
   function beginWaitingForAudit(): boolean {
     const pending = pendingAuditWrites.get(response);
-    if (!pending || state === "failed") return false;
+    if (!pending || state === "failed" || state === "closed") return false;
     if (state === "open") {
       state = "waiting";
-      void pending.then(
-        () => releaseBufferedResponse(),
-        () => failClosed()
-      ).catch(() => response.destroy());
+      pendingAuditWaiters.set(response, waitForLatestAudit);
+      waitForLatestAudit();
     }
     return state === "waiting";
   }
 
   function releaseBufferedResponse(): void {
     if (state !== "waiting") return;
+    if (pendingAuditWrites.has(response)) {
+      waitForLatestAudit();
+      return;
+    }
+    if (isResponseClosed()) {
+      closeBufferedResponse();
+      return;
+    }
     state = "open";
     pendingAuditWrites.delete(response);
     const operations = queue;
     queue = [];
     bufferedBytes = 0;
     try {
-      for (const operation of operations) operation.replay();
+      for (let index = 0; index < operations.length; index++) {
+        if (response.destroyed || response.writableEnded || response.writableFinished) {
+          discardOperations(operations.slice(index), new Error("OIDC response already ended before all audited response data was released."));
+          return;
+        }
+        operations[index]!.replay();
+      }
     } catch (error) {
       response.destroy(error instanceof Error ? error : new Error("OIDC response replay failed."));
     }
   }
 
   function failClosed(): void {
-    if (state === "failed") return;
+    if (state === "failed" || state === "closed") return;
     state = "failed";
     pendingAuditWrites.delete(response);
-    const operations = queue;
-    queue = [];
-    bufferedBytes = 0;
-    for (const operation of operations) {
-      try {
-        operation.discard(new Error("OIDC response withheld because required audit persistence failed."));
-      } catch {
-        // One application callback must not prevent the fail-closed 503 response.
-      }
-    }
+    pendingAuditWaiters.delete(response);
+    discardBufferedResponse(new Error("OIDC response withheld because required audit persistence failed."));
     if (response.headersSent) {
       console.warn("OIDC audit persistence failed after response headers were sent; the response was terminated.");
       response.destroy();
@@ -104,21 +169,21 @@ export function installAuditResponseGate(response: ServerResponse): void {
   }
 
   response.writeHead = ((...args: Parameters<ServerResponse["writeHead"]>) => {
-    if (state === "failed") return response;
+    if (state === "failed" || isResponseClosed()) return response;
     if (!beginWaitingForAudit()) return originalWriteHead(...args);
     enqueue(0, () => { originalWriteHead(...args); });
     return response;
   }) as ServerResponse["writeHead"];
 
   response.flushHeaders = (() => {
-    if (state === "failed") return;
+    if (state === "failed" || isResponseClosed()) return;
     if (!beginWaitingForAudit()) return originalFlushHeaders();
     enqueue(0, () => originalFlushHeaders());
   }) as ServerResponse["flushHeaders"];
 
   response.write = ((...args: Parameters<ServerResponse["write"]>) => {
-    if (state === "failed") {
-      getCallback(args)?.(new Error("OIDC response was withheld because required audit persistence failed."));
+    if (state === "failed" || isResponseClosed()) {
+      getCallback(args)?.(new Error(state === "failed" ? "OIDC response was withheld because required audit persistence failed." : "OIDC response is already closed."));
       return false;
     }
     if (!beginWaitingForAudit()) return originalWrite(...args);
@@ -134,8 +199,8 @@ export function installAuditResponseGate(response: ServerResponse): void {
   }) as ServerResponse["write"];
 
   response.end = ((...args: Parameters<ServerResponse["end"]>) => {
-    if (state === "failed") {
-      getCallback(args)?.(new Error("OIDC response was withheld because required audit persistence failed."));
+    if (state === "failed" || isResponseClosed()) {
+      getCallback(args)?.(new Error(state === "failed" ? "OIDC response was withheld because required audit persistence failed." : "OIDC response is already closed."));
       return response;
     }
     if (!beginWaitingForAudit()) return originalEnd(...args);

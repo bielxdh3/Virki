@@ -34,6 +34,7 @@ async function createCloudflareAccessToken(): Promise<string> {
     .setIssuer(issuer)
     .setAudience(audience)
     .setIssuedAt(issuedAt)
+    .setNotBefore(issuedAt)
     .setExpirationTime(issuedAt + 120)
     .sign(privateKey);
   const verification = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), {

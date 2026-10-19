@@ -69,3 +69,6 @@ packages/database/generated/
 
 # Private registry pull credential; provision only on the production host.
 .ghcr-read-token
+
+# Local audit working note.
+/auditoria.txt

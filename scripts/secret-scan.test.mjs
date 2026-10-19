@@ -105,3 +105,28 @@ test("exact-revision secret scan accepts safe tracked files and migration SQL", 
     rmSync(repository, { recursive: true, force: true });
   }
 });
+
+
+test("scanner covers prefixed keys in tracked formats and every credential URL on a line", () => {
+  const repository = mkdtempSync(path.join(tmpdir(), "virki-secret-names-"));
+  const value = ["synthetic", "scanner", "fixture", "0123456789abcdef"].join("-");
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    for (const [file, content] of [
+      ["config.json", JSON.stringify({ PROD_API_KEY: value, VIRKI_HASH_SECRET: value })],
+      ["settings.yml", `VIRKI_SIGNING_KEY: ${value}`],
+      ["settings.toml", `encryption_key = "${value}"`],
+      ["settings.ts", `export const PROD_API_KEY = "${value}";`],
+      ["urls.md", `postgresql://test:placeholder@localhost/a postgresql://test:${value}@localhost/b`],
+    ]) writeFileSync(path.join(repository, file), content);
+    writeFileSync(path.join(repository, "safe.ts"), 'const PROD_API_KEY = process.env.PROD_API_KEY;\n');
+    writeFileSync(path.join(repository, ".env.example"), 'POSTGRES_PASSWORD=change-me-in-your-local-env\nPROD_API_KEY=replace-with-local-secret\n');
+    execFileSync("git", ["add", "."], { cwd: repository });
+    const result = spawnSync(process.execPath, [scannerPath], { cwd: repository, encoding: "utf8" });
+    assert.equal(result.status, 1);
+    for (const file of ["config.json", "settings.yml", "settings.toml", "settings.ts", "urls.md"]) assert.ok(result.stderr.includes(`${file}:1`), file);
+    assert.equal(result.stderr.includes(value), false);
+    assert.equal(result.stderr.includes("safe.ts:"), false);
+    assert.equal(result.stderr.includes(".env.example:"), false);
+  } finally { rmSync(repository, { recursive: true, force: true }); }
+});

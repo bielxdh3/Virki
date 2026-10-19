@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ConnectionInputError, isExactRedirectUriAllowed, projectConnectionConfigurationRevision, validateProjectConnectionInput, validateProjectLaunchUrl } from "./connection-policy";
 
+test("redirect URI separator lines are ignored while invalid, duplicate and oversized entries still fail", () => {
+  const input = { name: "Alpha", slug: "alpha", origin: "https://project.example.invalid", redirectUris: "\n https://project.example.invalid/callback \r\n \n" };
+  assert.deepEqual(validateProjectConnectionInput(input).redirectUris, ["https://project.example.invalid/callback"]);
+  for (const redirectUris of ["\n \n", "https://project.example.invalid/callback\n\nhttps://project.example.invalid/callback", "\ninvalid\n", `https://project.example.invalid/${"a".repeat(2048)}`, Array.from({ length: 11 }, (_, i) => `https://project.example.invalid/${i}`).join("\n")]) {
+    assert.throws(() => validateProjectConnectionInput({ ...input, redirectUris }), ConnectionInputError);
+  }
+});
+
 test("connection configuration revision binds each editable field and the connection identity", () => {
   const connection = {
     id: "connection-1",

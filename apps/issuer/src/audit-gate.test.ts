@@ -1,9 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
+
+test("each queued audit rejection is observed immediately while earlier writes remain pending", async (context) => {
+  const { spawnSync } = await import("node:child_process");
+  // A child lets --unhandled-rejections=strict prove there was no transient rejection.
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--unhandled-rejections=strict", "--input-type=module", "-e", `
+    import { requireAuditBeforeResponse } from './apps/issuer/src/audit-gate.ts';
+    const response = {};
+    let resolveFirst;
+    const first = new Promise(resolve => { resolveFirst = resolve; });
+    requireAuditBeforeResponse(response, first);
+    requireAuditBeforeResponse(response, Promise.reject(new Error('second audit fails first')));
+    requireAuditBeforeResponse(response, Promise.reject(new Error('third audit also fails')));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    resolveFirst();
+    await new Promise(resolve => setImmediate(resolve));
+  `], { encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  context.diagnostic("All rejected promises were observed before the first write settled.");
+});
 
 test("issuer applies frame, MIME, referrer, and production transport headers", () => {
   const values = new Map<string, string>();
@@ -163,4 +183,140 @@ test("OIDC responses wait for required audit persistence and fail closed without
   assert.deepEqual(await writtenWithheldResponse.json(), { error: "temporarily_unavailable" });
   assert.equal(writtenWithheldResponse.headers.get("location"), null);
   assert.equal(writtenWithheldResponse.headers.get("set-cookie"), null);
+});
+
+test("an aborted client connection discards the pending audited response without crashing the issuer", async (context) => {
+  let finishAudit!: () => void;
+  let reachGate!: () => void;
+  const allowAudit = new Promise<void>((resolve) => { finishAudit = resolve; });
+  const requestReachedGate = new Promise<void>((resolve) => { reachGate = resolve; });
+  const callbackErrors: string[] = [];
+  let endCallbackCount = 0;
+  const server = createServer((request, response) => {
+    installAuditResponseGate(response);
+    if (request.url === "/aborted") {
+      requireAuditBeforeResponse(response, allowAudit);
+      response.statusCode = 302;
+      response.setHeader("location", "https://client.invalid/callback?code=private-code");
+      response.write("private-", (error) => { if (error) callbackErrors.push(error.message); });
+      response.end("response", () => { endCallbackCount++; });
+      reachGate();
+      return;
+    }
+    response.statusCode = 204;
+    response.end();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const address = server.address() as AddressInfo;
+  const request = httpRequest(`http://127.0.0.1:${address.port}/aborted`);
+  request.on("error", () => undefined);
+  request.end();
+  await requestReachedGate;
+  request.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  finishAudit();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(server.listening, true);
+  assert.equal(callbackErrors.length, 1);
+  assert.ok(callbackErrors.every((message) => message === "OIDC response closed before required audit persistence completed."));
+  assert.equal(endCallbackCount, 1);
+  const ordinaryResponse = await fetch(`http://127.0.0.1:${address.port}/ordinary`, { redirect: "manual" });
+  assert.equal(ordinaryResponse.status, 204);
+});
+
+test("queued duplicate response.end calls cannot crash the issuer or append data after the first end", async (context) => {
+  let finishAudit!: () => void;
+  let reachGate!: () => void;
+  const allowAudit = new Promise<void>((resolve) => { finishAudit = resolve; });
+  const requestReachedGate = new Promise<void>((resolve) => { reachGate = resolve; });
+  let duplicateEndCallbackCount = 0;
+  const server = createServer((request, response) => {
+    installAuditResponseGate(response);
+    if (request.url === "/duplicate-end") {
+      requireAuditBeforeResponse(response, allowAudit);
+      response.end("first response", () => undefined);
+      response.end("late response", () => { duplicateEndCallbackCount++; });
+      reachGate();
+      return;
+    }
+    response.statusCode = 204;
+    response.end();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const address = server.address() as AddressInfo;
+  const responsePromise = fetch(`http://127.0.0.1:${address.port}/duplicate-end`);
+  await requestReachedGate;
+  finishAudit();
+  const response = await responsePromise;
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "first response");
+  assert.equal(duplicateEndCallbackCount, 1);
+  assert.equal(server.listening, true);
+});
+
+test("a required audit registered while the response waits is included before release", async (context) => {
+  let finishFirstAudit!: () => void;
+  let finishSecondAudit!: () => void;
+  let reachGate!: () => void;
+  let gatedResponse: import("node:http").ServerResponse | undefined;
+  let responseFinished = false;
+  const firstAudit = new Promise<void>((resolve) => { finishFirstAudit = resolve; });
+  const secondAudit = new Promise<void>((resolve) => { finishSecondAudit = resolve; });
+  const requestReachedGate = new Promise<void>((resolve) => { reachGate = resolve; });
+  const server = createServer((request, response) => {
+    installAuditResponseGate(response);
+    response.on("finish", () => { responseFinished = true; });
+    if (request.url === "/late-audit") {
+      gatedResponse = response;
+      requireAuditBeforeResponse(response, firstAudit);
+      response.statusCode = 302;
+      response.setHeader("location", "https://client.invalid/callback?code=synthetic-code");
+      response.end("audited response");
+      reachGate();
+      return;
+    }
+    response.statusCode = 204;
+    response.end();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const address = server.address() as AddressInfo;
+  const responsePromise = fetch(`http://127.0.0.1:${address.port}/late-audit`, { redirect: "manual" });
+  await requestReachedGate;
+  assert.ok(gatedResponse);
+  requireAuditBeforeResponse(gatedResponse, secondAudit);
+  finishFirstAudit();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(responseFinished, false);
+
+  finishSecondAudit();
+  const response = await responsePromise;
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("location"), "https://client.invalid/callback?code=synthetic-code");
+  assert.equal(await response.text(), "audited response");
+  assert.equal(responseFinished, true);
 });

@@ -103,10 +103,12 @@ const contentRules = [
   }
 ];
 
+const applicationKeyPattern = /\b(?:[a-z][a-z0-9]*[_-])*(?:(?:api|signing|encryption|private)[_-]?key|secret)\b["']?\s*[:=]\s*(["']?)([A-Za-z0-9_./+=-]{24,})/gi;
 const databaseUrlPattern =
-  /\b(?:(?:postgres(?:ql)?)|mysql|mongodb(?:\+srv)?):\/\/([^:\s/]+):([^@\s]+)@/i;
+  /\b(?:(?:postgres(?:ql)?)|mysql|mongodb(?:\+srv)?):\/\/([^:\s/]+):([^@\s]+)@/gi;
 const allowedPlaceholderValues = new Set([
   "local-validation-only",
+  "synthetic-private-key-material",
   "placeholder",
   "replace",
   "replace-with-local-secret",
@@ -237,9 +239,16 @@ function scanLine(filePath, lineNumber, line) {
     }
   }
 
-  const databaseUrlMatch = line.match(databaseUrlPattern);
+  for (const match of line.matchAll(applicationKeyPattern)) {
+    // Source identifiers and environment references are code; only literals are credential assignments there.
+    if (/\.(?:[cm]?[jt]sx?)$/iu.test(filePath) && !match[1]) continue;
+    if (isAllowedPlaceholder(match[2])) continue;
+    findings.push({ file: filePath, line: lineNumber, rule: "application-key-assignment" });
+  }
 
-  if (databaseUrlMatch && !isAllowedPlaceholder(databaseUrlMatch[2])) {
+  const databaseUrlMatches = [...line.matchAll(databaseUrlPattern)];
+
+  if (databaseUrlMatches.some((match) => !isAllowedPlaceholder(match[2]))) {
     findings.push({
       file: filePath,
       line: lineNumber,

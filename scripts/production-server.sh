@@ -1015,8 +1015,19 @@ run_clone_migrations() {
   verify_migration_schema "$database_url" "$override" "$migration_container" "$isolation_id"
 }
 
+create_clone_storage() {
+  local isolation_id=$1 storage="virki-restore-data-$1" existing identity
+  [[ "$isolation_id" =~ ^[a-f0-9]{24}$ ]] || fail 'Disposable restore storage identifier is invalid.'
+  existing=$(docker volume ls --filter "name=^$storage$" --format '{{.Name}}') || fail 'Disposable restore storage could not be inspected.'
+  [[ -z "$existing" ]] || fail 'Disposable restore storage already exists; manual recovery is required.'
+  docker volume create --driver local --label "virki.restore.operation=$isolation_id" "$storage" >/dev/null || fail 'Disposable restore storage could not be created.'
+  identity=$(docker volume inspect --format '{{.Name}}|{{index .Labels "virki.restore.operation"}}' "$storage") || fail 'Disposable restore storage identity could not be inspected.'
+  [[ "$identity" == "$storage|$isolation_id" ]] || fail 'Disposable restore storage has an unexpected identity.'
+}
+
 cleanup_clone() {
-  local isolation_id=$1 override=$2 containers networks container_id network_id owned cleanup_failed=0
+  local isolation_id=$1 override=$2 containers networks volumes container_id network_id volume_name owned cleanup_failed=0
+  [[ "$isolation_id" =~ ^[a-f0-9]{24}$ ]] || return 1
   containers=$(docker ps --all --quiet --filter "label=virki.restore.operation=$isolation_id") || {
     printf '%s\n' 'Could not list disposable restore containers during cleanup.' >&2
     cleanup_failed=1
@@ -1039,6 +1050,26 @@ cleanup_clone() {
       cleanup_failed=1
     }
   done <<< "$containers"
+
+  # Disk-backed PGDATA has no artificial backup-size ceiling. Its exact label/name survives a crash for manual recovery.
+  volumes=$(docker volume ls --filter "label=virki.restore.operation=$isolation_id" --format '{{.Name}}') || {
+    printf '%s\n' 'Could not list disposable restore storage during cleanup.' >&2
+    cleanup_failed=1
+    volumes=
+  }
+  while IFS= read -r volume_name; do
+    [[ -n "$volume_name" ]] || continue
+    owned=$(docker volume inspect --format '{{index .Labels "virki.restore.operation"}}' "$volume_name") || {
+      cleanup_failed=1
+      continue
+    }
+    if [[ "$volume_name" != "virki-restore-data-$isolation_id" || "$owned" != "$isolation_id" ]]; then
+      printf '%s\n' 'Disposable restore storage did not match its operation identity.' >&2
+      cleanup_failed=1
+      continue
+    fi
+    docker volume rm "$volume_name" >/dev/null || cleanup_failed=1
+  done <<< "$volumes"
 
   networks=$(docker network ls --quiet --filter "label=virki.restore.operation=$isolation_id") || {
     printf '%s\n' 'Could not list the disposable restore network during cleanup.' >&2
@@ -1071,7 +1102,7 @@ cleanup_clone() {
 }
 
 verify_clone_cleanup() {
-  local isolation_id=$1 override=$2 containers networks
+  local isolation_id=$1 override=$2 containers networks volumes
   containers=$(docker ps --all --filter "label=virki.restore.operation=$isolation_id" --format '{{.Names}}') || {
     printf '%s\n' 'Could not confirm disposable restore containers were removed.' >&2
     return 1
@@ -1086,6 +1117,11 @@ verify_clone_cleanup() {
   }
   [[ -z "$networks" ]] || {
     printf '%s\n' 'Disposable restore network remains after migration validation.' >&2
+    return 1
+  }
+  volumes=$(docker volume ls --filter "label=virki.restore.operation=$isolation_id" --format '{{.Name}}') || return 1
+  [[ -z "$volumes" ]] || {
+    printf '%s\n' 'Disposable restore storage remains after migration validation.' >&2
     return 1
   }
   [[ ! -e "$override" && ! -L "$override" ]] || {
@@ -1140,6 +1176,9 @@ create_verified_backup() {
   [[ ! -e "$backup_path" && ! -L "$backup_path" && ! -e "$partial_backup_path" && ! -L "$partial_backup_path" ]] || fail 'A production backup path already exists.'
   rm -f -- "$verification_path" "$verification_tmp"
   trap 'cleanup_failed_backup_verification "$?" "$isolation_id" "$override" "$backup_path" "$partial_backup_path" "$verification_tmp" "$backup_verified" "$verification_path"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   compose exec -T postgres sh -lc 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' > "$partial_backup_path" || fail 'Production PostgreSQL backup failed.'
   chmod 600 -- "$partial_backup_path"
   [[ -s "$partial_backup_path" ]] || fail 'Production PostgreSQL backup is empty.'
@@ -1156,7 +1195,10 @@ create_verified_backup() {
     printf '    name: %s\n' "$db_network"
   } > "$override"
   chmod 600 -- "$override"
+  create_clone_storage "$isolation_id"
   docker run --detach --name "$container" --label "virki.restore.operation=$isolation_id" --network "$db_network" --network-alias "$alias" \
+    --mount "type=volume,source=virki-restore-data-$isolation_id,target=/var/lib/postgresql/data,volume-nocopy" \
+    --env PGDATA=/var/lib/postgresql/data/pgdata \
     --env POSTGRES_DB=virki_restore --env POSTGRES_USER --env POSTGRES_PASSWORD \
     --env VIRKI_RUNTIME_DB_PASSWORD --env VIRKI_MIGRATOR_DB_PASSWORD --env VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD \
     --volume "$source_dir/infra/postgres-init/10-virki-database-roles.sh:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro" \
@@ -1252,6 +1294,9 @@ create_first_install_recovery_backup() {
   local -x POSTGRES_USER=virki_bootstrap POSTGRES_PASSWORD="$bootstrap_password" VIRKI_RUNTIME_DB_PASSWORD="$runtime_password" VIRKI_MIGRATOR_DB_PASSWORD="$migrator_password" VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD="$audit_maintenance_password"
   database_url="postgresql://virki_migrator:$migrator_password@$alias:5432/virki_restore?schema=public"
   trap 'cleanup_first_install_recovery_fixture "$?" "$isolation_id" "$override"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
 
   compose exec -T postgres sh -lc 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' 2>/dev/null > "$partial_backup_path" || fail 'Partial Virki database backup could not be created.'
   chmod 600 -- "$partial_backup_path"
@@ -1271,16 +1316,18 @@ create_first_install_recovery_backup() {
     printf '    name: %s\n' "$db_network"
   } > "$override"
   chmod 600 -- "$override"
+  create_clone_storage "$isolation_id"
   docker run --detach --name "$container" --label "virki.restore.operation=$isolation_id" --network "$db_network" --network-alias "$alias" \
-    --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m \
+    --mount "type=volume,source=virki-restore-data-$isolation_id,target=/var/lib/postgresql/data,volume-nocopy" \
+    --env PGDATA=/var/lib/postgresql/data/pgdata \
     --env POSTGRES_DB=virki_restore --env POSTGRES_USER --env POSTGRES_PASSWORD \
     --env VIRKI_RUNTIME_DB_PASSWORD --env VIRKI_MIGRATOR_DB_PASSWORD --env VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD \
     --volume "$source_dir/infra/postgres-init/10-virki-database-roles.sh:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro" \
     --health-cmd 'pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_restore' --health-interval 1s --health-timeout 3s --health-retries 60 \
     postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 >/dev/null || fail 'Disposable PostgreSQL backup restore target could not start.'
   local fixture_identity initializer_mount fixture_members
-  fixture_identity=$(docker inspect --format '{{.Config.Image}}|{{.HostConfig.NetworkMode}}|{{index .HostConfig.Tmpfs "/var/lib/postgresql/data"}}|{{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}published{{end}}{{end}}|{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}published{{end}}{{end}}' "$container") || fail 'Disposable PostgreSQL backup restore target metadata could not be inspected.'
-  [[ "$fixture_identity" == "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|$db_network|rw,noexec,nosuid,nodev,size=512m||" ]] || fail 'Disposable PostgreSQL backup restore target must use the internal network, tmpfs, and no published host ports.'
+  fixture_identity=$(docker inspect --format '{{.Config.Image}}|{{.HostConfig.NetworkMode}}|{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}}:{{.Name}}{{end}}{{end}}|{{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}published{{end}}{{end}}|{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}published{{end}}{{end}}' "$container") || fail 'Disposable PostgreSQL backup restore target metadata could not be inspected.'
+  [[ "$fixture_identity" == "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24|$db_network|volume:virki-restore-data-$isolation_id||" ]] || fail 'Disposable PostgreSQL backup restore target must use the internal network, private disposable storage, and no published host ports.'
   initializer_mount=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/docker-entrypoint-initdb.d/10-virki-database-roles.sh"}}{{.RW}}{{end}}{{end}}' "$container") || fail 'Disposable PostgreSQL role initializer mount could not be inspected.'
   [[ "$initializer_mount" == false ]] || fail 'Disposable PostgreSQL role initializer must be mounted read-only.'
   fixture_members=$(docker network inspect --format '{{range .Containers}}{{.Name}}|{{end}}' "$db_network") || fail 'Disposable PostgreSQL restore network membership could not be inspected.'

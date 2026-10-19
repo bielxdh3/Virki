@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import PublicLandingPage from "./page";
@@ -45,4 +46,18 @@ test("public site CSP is strict: no framing, plugins, base rewriting or form pos
   }
   assert.doesNotMatch(production, /unsafe-eval/u);
   assert.match(buildPublicContentSecurityPolicy("development"), /'unsafe-eval'/u);
+});
+
+test("robots safely falls back for empty, malformed or non-origin public URL configuration", () => {
+  for (const value of ["", " ", "invalid", "javascript:alert(1)", "https://user:secret@example.invalid", "https://example.invalid/path", "https://example.invalid?query=1", "https://public.example.invalid/"]) {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import robots from './apps/public-site/src/app/robots.ts';
+      console.log(JSON.stringify((robots.default ?? robots)()));
+    `], { encoding: "utf8", windowsHide: true, env: { ...process.env, PUBLIC_SITE_URL: value } });
+    assert.equal(result.status, 0, result.stderr);
+    const metadata = JSON.parse(result.stdout);
+    const expectedOrigin = value === "https://public.example.invalid/" ? "https://public.example.invalid" : "https://biel.dev.br";
+    assert.equal(metadata.sitemap, `${expectedOrigin}/sitemap.xml`);
+    assert.equal(metadata.host, expectedOrigin);
+  }
 });

@@ -19,6 +19,34 @@ const operatorConfig = {
   root: "/srv/virki",
 };
 
+test("post-deploy health verifies the approved SHA even after main advances without querying remote main", async () => {
+  const commands = [];
+  const result = await runRemoteProductionCommand(["health", "--expected", revision], {
+    config: operatorConfig,
+    execute: (command, args) => {
+      commands.push([command, args]);
+      if (command === "ssh") {
+        assert.match(args.at(-1), new RegExp(`health ${operatorConfig.root} ${revision}$`, "u"));
+        return { status: 0, stdout: "Health verified at approved SHA.\n" };
+      }
+      assert.equal(command, "git");
+      if (args.includes("ls-remote")) assert.fail("Post-deploy health must not compare the approved release to newly advanced main.");
+      const key = args.join(" ");
+      if (key === "rev-parse --show-toplevel") return { status: 0, stdout: process.cwd() };
+      if (key === "branch --show-current") return { status: 0, stdout: "main" };
+      if (key === "remote get-url origin") return { status: 0, stdout: "https://github.com/bielxdh3/Virki.git" };
+      if (key === "rev-parse --verify HEAD") return { status: 0, stdout: revision };
+      return { status: 0, stdout: "" };
+    },
+    verifyCi: ({ revision: exact }) => { assert.equal(exact, revision); return { ok: true, lines: [] }; },
+    preflight: () => ({ status: 0, lines: [] })
+  });
+  assert.equal(result.status, 0);
+  assert.equal(commands.filter(([command]) => command === "ssh").length, 1);
+  assert.throws(() => parseRemoteProductionCommand(["start", "--expected", revision]), /arguments are invalid/u);
+  assert.throws(() => parseRemoteProductionCommand(["health", "--expected", "bad"]), /Revision is invalid/u);
+});
+
 test("remote Linux Bash script uses LF line endings", () => {
   const script = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
   assert.equal(script.includes("\r"), false);
@@ -219,3 +247,71 @@ test("interactive first ADMIN bootstrap passes through the terminal without a sc
   assert.equal(Object.hasOwn(calls[0].options, "input"), false);
   assert.ok(calls[0].args.includes("-tt"));
 });
+
+const source = readFileSync(new URL("./production-server.sh", import.meta.url), "utf8");
+const shell = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
+const definitions = ["create_clone_storage", "cleanup_clone", "verify_clone_cleanup", "cleanup_failed_backup_verification", "cleanup_first_install_recovery_fixture", "create_verified_backup", "create_first_install_recovery_backup"]
+  .flatMap((name) => source.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, "mu"))?.[0] ?? []).join("\n");
+
+for (const operation of ["create_verified_backup", "create_first_install_recovery_backup"]) {
+for (const mode of ["failure", "TERM", "KILL"]) {
+  test(`${operation} storage is explicit, labelled and recoverable after ${mode}`, () => {
+    // Only extracted functions run. Every Docker/Compose operation is a local fixture function.
+    const result = spawnSync(shell, ["-s"], { input: `
+set -Eeuo pipefail
+umask 077
+fixture=$(mktemp -d)
+trap 'rm -rf -- "$fixture"' EXIT
+root=$fixture
+source_dir=$fixture
+backup_dir=$fixture/backups
+temp_dir=$fixture/temp
+verification_path=$fixture/verified
+revision=0123456789abcdef0123456789abcdef01234567
+mkdir "$backup_dir" "$temp_dir"
+fail() { printf '%s\\n' "$1" >&2; exit 1; }
+compose() { if [[ "$1" == ps ]]; then printf 'synthetic-postgres\\n'; else printf 'synthetic-backup\\n'; fi; }
+docker() {
+  case "$1 $2" in
+    'volume create')
+      printf '%s' "\${@: -1}" > "$fixture/volume-name"
+      printf '%s' "$isolation_id" > "$fixture/volume-label"
+      touch "$fixture/volume-present" ;;
+    'volume inspect')
+      if [[ "$*" == *'.Name'* ]]; then printf '%s|%s\\n' "$(cat "$fixture/volume-name")" "$(cat "$fixture/volume-label")"
+      else cat "$fixture/volume-label"; fi ;;
+    'volume ls') [[ ! -e "$fixture/volume-present" ]] || cat "$fixture/volume-name" ;;
+    'volume rm') rm -- "$fixture/volume-present" ;;
+    'network create') : ;;
+    'network inspect') printf '%s|true|%s|0\\n' "$db_network" "$isolation_id" ;;
+    'network ls'|'ps --all') : ;;
+    run*)
+      printf '<%s>\\n' "$@" > "$fixture/run-args"
+      case "$MODE" in TERM) kill -TERM "$BASHPID" ;; KILL) kill -KILL "$BASHPID" ;; *) return 19 ;; esac ;;
+    *) : ;;
+  esac
+}
+${definitions}
+set +e
+( ${operation} )
+status=$?
+set -e
+[[ "$status" != 0 ]] || fail 'Failure injection did not interrupt the backup.'
+cat "$fixture/run-args"
+if [[ "$MODE" == KILL ]]; then
+  [[ -e "$fixture/volume-present" ]] || fail 'Crash storage must retain its operation identity for manual recovery.'
+  recovered_id=$(cat "$fixture/volume-label")
+  cleanup_clone "$recovered_id" "$temp_dir/restore-$recovered_id.compose.yml"
+  verify_clone_cleanup "$recovered_id" "$temp_dir/restore-$recovered_id.compose.yml"
+fi
+[[ ! -e "$fixture/volume-present" ]] || fail 'Disposable storage leaked after cleanup.'
+printf 'CLEANUP_CONFIRMED\\n'
+`, encoding: "utf8", windowsHide: true, env: { ...process.env, MODE: mode } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /<--mount>\n<type=volume,source=virki-restore-data-[a-f0-9]{24},target=\/var\/lib\/postgresql\/data,volume-nocopy>/u);
+    assert.match(result.stdout, /<PGDATA=\/var\/lib\/postgresql\/data\/pgdata>/u);
+    assert.doesNotMatch(result.stdout, /512m|<--publish>|<--tmpfs>/u);
+    assert.match(result.stdout, /CLEANUP_CONFIRMED/u);
+  });
+}
+}

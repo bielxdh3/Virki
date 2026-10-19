@@ -171,3 +171,9 @@ test("client-supplied internal request-path header never reaches the app", async
   assert.equal(protectedResponse.status, 200);
   assert.equal(forwarded(protectedResponse), "/account/security?tab=mfa");
 });
+
+
+test("obsolete recovery API requires authentication while real recovery routes stay public", async () => {
+  for (const path of ["/recover", "/recover/open"]) assert.equal((await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env)).status, 200);
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/api/recover", { headers: { host: "portal.biel.dev.br" } }), env)).status, 307);
+});
