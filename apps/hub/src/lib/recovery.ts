@@ -9,6 +9,10 @@ export const RECOVERY_COOKIE_NAME = getRecoveryCookieName();
 // Pre-__Host- cookie scoped to /recover; expired whenever a recovery link is opened or completed.
 export const LEGACY_RECOVERY_COOKIE = { name: "virki_recovery", path: "/recover" } as const;
 
+export function requiresRecoveryRequestSwitch(activeRequestId: string | null | undefined, nextRequestId: string): boolean {
+  return Boolean(activeRequestId && activeRequestId !== nextRequestId);
+}
+
 export function getRecoveryCookieOptions(expires: Date, env: { NODE_ENV?: string } = process.env) {
   return { httpOnly: true, sameSite: "lax" as const, secure: env.NODE_ENV === "production", path: "/", expires };
 }

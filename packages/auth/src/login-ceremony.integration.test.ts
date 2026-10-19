@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac, randomInt, randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
-import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl } from "./integration-fixtures";
+import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import {
   approveAccountRecovery,
@@ -253,7 +253,7 @@ test("an emailed proof does not spend the recovery-code verification budget", in
   assert.equal(challenge?.status, "VERIFIED");
   assert.equal(challenge?.emailVerifiedAt, null);
 
-  assert.deepEqual(await verifyLoginRecoveryCode(ceremony.ceremonyId, "anything", ceremony.deviceToken, later), { kind: "EMAIL_REQUIRED" });
+  assert.deepEqual(await verifyLoginRecoveryCode(ceremony.ceremonyId, "000000000000000000", ceremony.deviceToken, later), { kind: "EMAIL_REQUIRED" });
   assert.deepEqual(await verifyLoginEmailCode(ceremony.ceremonyId, await latestLoginCode(user.email), ceremony.deviceToken, later), { requiresTotp: true, session: null });
 
   // Successful proofs refund only their reservation; the three failed recovery guesses remain counted.
@@ -297,10 +297,11 @@ test("an approved account recovery purges OIDC artifacts for that account only",
   await seedOidcArtifact(other.id);
 
   const start = new Date();
+  const { sessionId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", start);
   await requestAccountRecovery(owner.email, "pt-BR", start);
   const legit = await openLatestRecovery(owner.email, start);
   await verifyAccountRecoveryEmail(legit.requestId, legit.requestKey, legit.code ?? "", start);
-  await approveAccountRecovery({ id: admin.id, role: "ADMIN" }, legit.requestId, start);
+  await approveAccountRecovery({ id: admin.id, role: "ADMIN" }, sessionId, legit.requestId, start);
   const approved = await openLatestRecovery(owner.email, start);
   await consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "integration-oidc-password-1", start);
 

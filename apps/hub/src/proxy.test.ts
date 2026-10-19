@@ -32,7 +32,7 @@ test("unknown hosts are denied and the hub requires a valid Access assertion", a
 });
 
 test("portal OIDC endpoints are public to clients while account surfaces still require a session", async () => {
-  for (const path of ["/.well-known/openid-configuration", "/auth", "/auth/abcdefghijklmnop", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/interaction/abcdefghijklmnop"]) {
+  for (const path of ["/.well-known/openid-configuration", "/auth", "/auth/abcdefghijklmnop", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/session/end/confirm", "/session/end/success", "/interaction/abcdefghijklmnop"]) {
     assert.equal((await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env)).status, 200, path);
   }
   assert.equal((await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/auth/short/nested", { headers: { host: "portal.biel.dev.br" } }), env)).status, 307);
@@ -42,6 +42,16 @@ test("portal OIDC endpoints are public to clients while account surfaces still r
   assert.equal(protectedResponse.headers.get("location"), "https://portal.biel.dev.br/login?returnTo=%2Faccount%2Fsecurity");
   const spoofedReturn = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/account/security?tab=mfa", { headers: { host: "portal.biel.dev.br", "x-virki-request-path": "/admin/accounts" } }), env);
   assert.equal(spoofedReturn.headers.get("location"), "https://portal.biel.dev.br/login?returnTo=%2Faccount%2Fsecurity%3Ftab%3Dmfa");
+});
+
+test("authenticated portal pages receive the no-store policy from the production Proxy boundary", async () => {
+  const response = await evaluateProxyRequest(
+    new NextRequest("https://portal.biel.dev.br/account/security", {
+      headers: { host: "portal.biel.dev.br", cookie: `${SESSION_COOKIE_NAME}=synthetic-session` }
+    }),
+    { ...env, NODE_ENV: "production" }
+  );
+  assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate");
 });
 
 test("production login redirects use the canonical portal origin behind an internal request URL", async () => {
@@ -168,7 +178,7 @@ test("form-action stays self except on portal login pages that can end in a rely
 });
 
 test("issuer-proxied OIDC paths are left to the issuer's own single CSP", async () => {
-  for (const path of ["/auth/abcdefghijklmnop", "/token", "/session/end", "/interaction/abcdefghijklmnop", "/.well-known/openid-configuration"]) {
+  for (const path of ["/auth/abcdefghijklmnop", "/token", "/session/end", "/session/end/confirm", "/session/end/success", "/interaction/abcdefghijklmnop", "/.well-known/openid-configuration"]) {
     const response = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env);
     assert.equal(response.headers.get("content-security-policy"), null, path);
   }

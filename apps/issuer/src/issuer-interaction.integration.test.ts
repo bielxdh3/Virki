@@ -179,3 +179,12 @@ test("pre-login Interaction is indexed by client and purged without a fabricated
   const resumed = await client.request(response.headers.get("location")!);
   assert.notEqual(resumed.status, 303, "Purged interaction cannot complete an authorization.");
 });
+
+test("unknown interaction IDs do not create persistent interaction-start audit rows", integrationOptions, async () => {
+  const client = browser();
+  const before = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  const response = await client.request(`${origin}/interaction/${randomBytes(12).toString("base64url")}`);
+  assert.ok(response.status >= 400, "An unknown interaction ID must fail closed.");
+  const after = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  assert.equal(after, before, "Unvalidated interaction IDs must not create durable audit writes.");
+});

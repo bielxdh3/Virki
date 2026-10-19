@@ -12,7 +12,7 @@ import { recordSecurityDenial } from "../../lib/audit-denial";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../lib/surface";
-import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
+import { RECOVERY_COOKIE_NAME, requiresRecoveryRequestSwitch } from "../../lib/recovery";
 import { clearRecoveryCandidateCookie, clearRecoveryCookie, RECOVERY_CANDIDATE_COOKIE, setRecoveryCandidateCookie, setRecoveryCookie } from "./recovery-cookie";
 
 export async function requestRecoveryAction(formData: FormData) {
@@ -49,10 +49,12 @@ export async function openRecoveryAction(formData: FormData) {
   if (!recovery) redirect("/recover?error=1");
   const cookieStore = await cookies();
   const activeKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value;
-  if (activeKey && activeKey !== requestKey) {
+  const activeRecovery = activeKey ? await getAccountRecoveryRequestId(activeKey, new Date(), expectedRole) : null;
+  if (requiresRecoveryRequestSwitch(activeRecovery?.id, recovery.id)) {
     setRecoveryCandidateCookie(cookieStore, requestKey, recovery.expiresAt);
     redirect(`/recover?switch=1&requestId=${encodeURIComponent(recovery.id)}`);
   }
+  clearRecoveryCandidateCookie(cookieStore);
   setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
   redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
   });
@@ -128,7 +130,7 @@ export async function approveRecoveryAction(formData: FormData) {
   if (!session || session.user.role !== "ADMIN") { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "role", session); redirect("/login"); }
   try {
     await requireSecurityElevation(session.user.id, session.id, "ACCOUNT_STATE_CHANGE");
-    await approveAccountRecovery(session.user, read(formData, "requestId"));
+    await approveAccountRecovery(session.user, session.id, read(formData, "requestId"));
   } catch {
     await recordSecurityDenial(requestHeaders, "account-recovery-approve", "rejected", session);
     redirect("/admin/security?error=recovery#admin-content");

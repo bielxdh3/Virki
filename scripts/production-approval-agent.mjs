@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
 import { SSH_OPTIONS } from "./production-preflight.mjs";
+import { verifyRemoteMainHead } from "./production-main-head-check.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const remote = "https://github.com/bielxdh3/Virki.git";
@@ -167,6 +168,7 @@ async function run() {
   exec("npm", ["run", "preflight:prod"]);
   assertInitialized(config);
   const before = demanageContainers(config);
+  verifyRemoteMainHead(pointer.source_commit, (command, args) => exec(command, args));
 
   // Write before any mutation. A failed or interrupted attempt is latched and
   // cannot rerun automatically; recovery requires owner/operator review.

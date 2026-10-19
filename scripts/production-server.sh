@@ -502,13 +502,28 @@ wait_for_virki_postgres() {
 }
 
 verify_first_install_role_contract() {
-  local container=${1:-} role_attributes privileges sql
+  local container=${1:-} role_attributes privileges timestamp_policy sql
+  local audit_retention_days
+  audit_retention_days=$(configured_audit_retention_days)
   sql="SELECT CASE WHEN count(*) = 3 AND bool_and(rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit) THEN 'valid' ELSE 'invalid' END FROM pg_roles WHERE rolname IN ('virki_runtime', 'virki_migrator', 'virki_audit_maintenance')"
   role_attributes=$(if [[ -n "$container" ]]; then clone_query "$container" "$sql"; else database_query "$sql"; fi)
   [[ "$role_attributes" == valid ]] || fail 'Fresh Virki database role attributes do not match the least-privilege contract.'
-  sql="SELECT CASE WHEN has_table_privilege('virki_runtime', 'public.\"User\"', 'INSERT') AND NOT has_database_privilege('virki_runtime', current_database(), 'CREATE') AND NOT has_schema_privilege('virki_runtime', 'public', 'CREATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'UPDATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'DELETE') AND (SELECT pg_get_userbyid(relowner) = 'virki_migrator' FROM pg_class WHERE oid = 'public.\"User\"'::regclass) AND has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'DELETE') AND has_column_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'createdAt', 'SELECT') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'SELECT') THEN 'valid' ELSE 'invalid' END"
-  privileges=$(if [[ -n "$container" ]]; then clone_query "$container" "$sql"; else database_query "$sql"; fi)
+  sql="SELECT CASE WHEN has_table_privilege('virki_runtime', 'public.\"User\"', 'INSERT') AND NOT has_database_privilege('virki_runtime', current_database(), 'CREATE') AND NOT has_schema_privilege('virki_runtime', 'public', 'CREATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'UPDATE') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'DELETE') AND (SELECT pg_get_userbyid(relowner) = 'virki_migrator' FROM pg_class WHERE oid = 'public.\"User\"'::regclass) AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'DELETE') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'SELECT') AND NOT has_any_column_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'SELECT') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'INSERT') AND NOT has_any_column_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'INSERT') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'UPDATE') AND NOT has_table_privilege('virki_audit_maintenance', 'public.\"AuditLog\"', 'TRUNCATE') AND has_schema_privilege('virki_audit_maintenance', 'virki_security', 'USAGE') AND NOT has_schema_privilege('virki_audit_maintenance', 'virki_security', 'CREATE') AND has_function_privilege('virki_audit_maintenance', 'virki_security.delete_expired_audit_logs()', 'EXECUTE') AND NOT has_function_privilege('virki_runtime', 'virki_security.delete_expired_audit_logs()', 'EXECUTE') AND NOT EXISTS (SELECT 1 FROM pg_roles AS runtime_test WHERE runtime_test.rolname = 'virki_runtime_test' AND has_function_privilege(runtime_test.oid, 'virki_security.delete_expired_audit_logs()', 'EXECUTE')) AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'SELECT') AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'INSERT') AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'UPDATE') AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'DELETE') AND NOT has_table_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'TRUNCATE') AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'SELECT') AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'INSERT') AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'UPDATE') AND NOT has_any_column_privilege('virki_audit_maintenance', 'virki_security.audit_retention_policy', 'REFERENCES') AND (SELECT pg_get_userbyid(namespace.nspowner) = 'virki_migrator' FROM pg_namespace AS namespace WHERE namespace.nspname = 'virki_security') AND (SELECT pg_get_userbyid(policy.relowner) = 'virki_migrator' FROM pg_class AS policy WHERE policy.oid = 'virki_security.audit_retention_policy'::regclass) AND (SELECT retention_days = $audit_retention_days FROM virki_security.audit_retention_policy WHERE singleton = true) AND (SELECT pg_get_userbyid(routine.proowner) = 'virki_migrator' AND routine.prosecdef AND routine.proconfig = ARRAY['search_path=pg_catalog'] AND pg_get_function_result(routine.oid) = 'TABLE(deleted_count bigint, retention_days integer)' FROM pg_proc AS routine WHERE routine.oid = 'virki_security.delete_expired_audit_logs()'::regprocedure) THEN 'valid' ELSE 'invalid' END"
+  privileges=$(if [[ -n "$container" ]]; then clone_migration_query "$container" "$sql"; else database_query "$sql"; fi)
   [[ "$privileges" == valid ]] || fail 'Fresh Virki database grants do not match the least-privilege contract.'
+  sql="SELECT CASE WHEN has_column_privilege('virki_runtime', 'public.\"AuditLog\"', 'createdAt', 'INSERT') AND NOT has_table_privilege('virki_runtime', 'public.\"AuditLog\"', 'INSERT') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.\"AuditLog\"'::regclass AND tgname = 'virki_audit_log_created_at_guard' AND NOT tgisinternal AND tgenabled = 'O' AND tgfoid = 'virki_security.enforce_audit_log_timestamp()'::regprocedure) AND (SELECT pg_get_userbyid(routine.proowner) = 'virki_migrator' AND NOT routine.prosecdef AND routine.proconfig = ARRAY['search_path=pg_catalog'] FROM pg_proc AS routine WHERE routine.oid = 'virki_security.enforce_audit_log_timestamp()'::regprocedure) AND NOT has_function_privilege('virki_runtime', 'virki_security.enforce_audit_log_timestamp()', 'EXECUTE') AND NOT EXISTS (SELECT 1 FROM pg_roles AS runtime_test WHERE runtime_test.rolname = 'virki_runtime_test' AND has_function_privilege(runtime_test.oid, 'virki_security.enforce_audit_log_timestamp()', 'EXECUTE')) THEN 'valid' ELSE 'invalid' END"
+  timestamp_policy=$(if [[ -n "$container" ]]; then clone_migration_query "$container" "$sql"; else database_query "$sql"; fi)
+  [[ "$timestamp_policy" == valid ]] || fail 'AuditLog timestamps are not enforced by the database-owned insert trigger.'
+}
+
+configured_audit_retention_days() {
+  local retention_days
+  retention_days=$(compose exec -T postgres sh -lc 'printf "%s" "${AUDIT_LOG_RETENTION_DAYS:-180}"') || fail 'Configured audit retention could not be read from the protected PostgreSQL service.'
+  [[ "$retention_days" =~ ^[0-9]{1,4}$ ]] || fail 'Configured audit retention is invalid.'
+  while [[ "${retention_days#0}" != "$retention_days" ]]; do retention_days=${retention_days#0}; done
+  retention_days=${retention_days:-0}
+  ((retention_days >= 1 && retention_days <= 3650)) || fail 'Configured audit retention is invalid.'
+  printf '%s\n' "$retention_days"
 }
 
 apply_first_install_database_roles() {
@@ -709,8 +724,88 @@ database_query() {
 }
 
 verify_empty_first_install_recovery_database() {
-  local state
-  state=$(database_query "SELECT CASE WHEN current_database() <> 'virki' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_bootstrap' AND rolsuper AND rolcreatedb AND rolcreaterole) OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname !~ '^pg_' AND rolname NOT IN ('postgres', 'virki_bootstrap', 'virki_runtime', 'virki_migrator', 'virki_audit_maintenance')) OR EXISTS (SELECT 1 FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'postgres', 'virki')) OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'public') AND nspname NOT LIKE 'pg_toast%') OR EXISTS (SELECT 1 FROM pg_extension WHERE extname NOT IN ('plpgsql', 'pgcrypto')) THEN 'unexpected-state' WHEN NOT EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) AND NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname NOT IN ('plpgsql', 'pgcrypto')) THEN 'empty-partial' WHEN EXISTS (SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relname = '_prisma_migrations' AND relation.relkind = 'r') THEN 'migrated-candidate' ELSE 'unexpected-state' END")
+  local state sql
+  sql=$(cat <<'SQL'
+SELECT CASE
+  WHEN current_database() <> 'virki'
+    OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_bootstrap' AND rolsuper AND rolcreatedb AND rolcreaterole)
+    OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname !~ '^pg_' AND rolname NOT IN ('postgres', 'virki_bootstrap', 'virki_runtime', 'virki_migrator', 'virki_audit_maintenance'))
+    OR EXISTS (SELECT 1 FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'postgres', 'virki'))
+    OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'public', 'virki_security') AND nspname NOT LIKE 'pg_toast%')
+    OR EXISTS (SELECT 1 FROM pg_extension WHERE extname NOT IN ('plpgsql', 'pgcrypto'))
+    OR EXISTS (
+      SELECT 1 FROM pg_namespace AS namespace
+      WHERE namespace.nspname = 'virki_security'
+        AND namespace.nspowner <> (SELECT oid FROM pg_roles WHERE rolname = 'virki_migrator')
+    )
+    OR EXISTS (
+      SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = 'virki_security'
+        AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+        AND relation.relname <> 'audit_retention_policy'
+    )
+    OR EXISTS (
+      SELECT 1 FROM pg_namespace AS namespace
+      WHERE namespace.nspname = 'virki_security'
+        AND (SELECT count(*) FROM pg_class AS relation WHERE relation.relnamespace = namespace.oid AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) <> 1
+    )
+    OR (
+      EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'virki_security')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pg_class AS policy
+        JOIN pg_namespace AS namespace ON namespace.oid = policy.relnamespace
+        WHERE namespace.nspname = 'virki_security'
+          AND policy.relname = 'audit_retention_policy'
+          AND policy.relkind = 'r'
+          AND policy.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'virki_migrator')
+          AND (SELECT count(*) FROM pg_attribute WHERE attrelid = policy.oid AND attnum > 0 AND NOT attisdropped) = 2
+          AND (SELECT count(*) FROM pg_constraint WHERE conrelid = policy.oid) = 3
+          AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = policy.oid AND attname = 'singleton' AND atttypid = 'boolean'::regtype AND attnotnull)
+          AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = policy.oid AND attname = 'retention_days' AND atttypid = 'integer'::regtype AND attnotnull)
+      )
+    )
+    OR EXISTS (
+      SELECT 1 FROM pg_proc AS routine JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+      WHERE namespace.nspname = 'virki_security'
+        AND (
+          routine.proname NOT IN ('delete_expired_audit_logs', 'enforce_audit_log_timestamp')
+          OR routine.pronargs <> 0
+          OR routine.proowner <> (SELECT oid FROM pg_roles WHERE rolname = 'virki_migrator')
+          OR routine.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog']
+          OR routine.prokind <> 'f'
+          OR (routine.proname = 'delete_expired_audit_logs'
+            AND (NOT routine.prosecdef OR pg_get_function_result(routine.oid) IS DISTINCT FROM 'TABLE(deleted_count bigint, retention_days integer)'))
+          OR (routine.proname = 'enforce_audit_log_timestamp'
+            AND (routine.prosecdef OR pg_get_function_result(routine.oid) IS DISTINCT FROM 'trigger'))
+        )
+    )
+    OR (SELECT count(*) FROM pg_proc AS routine JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace WHERE namespace.nspname = 'virki_security') <> CASE WHEN to_regclass('public."AuditLog"') IS NULL THEN 0 ELSE 2 END
+    OR (to_regclass('public."AuditLog"') IS NOT NULL AND (
+      NOT EXISTS (
+        SELECT 1 FROM pg_trigger AS audit_trigger
+        WHERE audit_trigger.tgrelid = 'public."AuditLog"'::regclass
+          AND audit_trigger.tgname = 'virki_audit_log_created_at_guard'
+          AND NOT audit_trigger.tgisinternal
+          AND audit_trigger.tgenabled = 'O'
+          AND audit_trigger.tgfoid = 'virki_security.enforce_audit_log_timestamp()'::regprocedure
+      )
+      OR (SELECT count(*) FROM pg_trigger AS audit_trigger WHERE audit_trigger.tgrelid = 'public."AuditLog"'::regclass AND NOT audit_trigger.tgisinternal) <> 1
+    ))
+  THEN 'unexpected-state'
+  WHEN NOT EXISTS (
+    SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+  ) THEN 'empty-partial'
+  WHEN EXISTS (
+    SELECT 1 FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public' AND relation.relname = '_prisma_migrations' AND relation.relkind = 'r'
+  ) THEN 'migrated-candidate'
+  ELSE 'unexpected-state'
+END
+SQL
+  )
+  state=$(database_query "$sql")
   case "$state" in
     empty-partial|migrated-candidate) recovery_database_state=$state ;;
     *) fail 'First-install recovery refused because the Virki database contains an unknown or partially migrated state.' ;;
@@ -1528,6 +1623,7 @@ apply_production_migrations() {
   compose --profile migration run --rm --no-deps migrate
   run_migration_status
   verify_migration_schema '' '' '' ''
+  verify_first_install_role_contract
   after_identity=$(identity_snapshot)
   after_recovery=$(recovery_snapshot "" after_migrations)
   [[ "$before_identity" == "$after_identity" ]] || fail 'Production migration changed ADMIN or USER counts.'
@@ -1574,6 +1670,7 @@ assert_tunnel_running() {
 
 resume_services() {
   [[ -f "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'Production maintenance is not active.'
+  assert_backup_verified
   trap 'stop_routed_services' EXIT
   compose stop cloudflared >/dev/null 2>&1 || true
   run_migration_status
@@ -1934,7 +2031,7 @@ case "$action" in
     printf 'Remote audit cleanup completed.\n'
     ;;
   sessions-cleanup)
-    compose exec -T hub npm run sessions:cleanup --workspace @virki/auth >/dev/null
+    compose run --rm --no-deps session-cleanup npm run sessions:cleanup --workspace @virki/auth >/dev/null
     printf 'Remote session cleanup completed.\n'
     ;;
   config)

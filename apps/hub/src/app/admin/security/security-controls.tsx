@@ -4,6 +4,7 @@ import { formatDateTime } from "@virki/auth/date-time";
 
 import { useActionState, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import { useSensitiveFormAction } from "../../../lib/use-sensitive-form-action";
 import type { ElevationScope } from "@virki/auth/administration";
 import { changeAdminPasswordAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
@@ -19,9 +20,9 @@ const scopes: Array<[ElevationScope, string]> = [
 ];
 
 export function CredentialSetup({ csrf, activeCredential }: { csrf: string; activeCredential?: { keyVersion: number; updatedAt: string } }) {
-  const [start, startAction, starting] = useActionState(startCredentialSetupAction, initialState);
-  const [complete, completeAction, completing] = useActionState(completeCredentialSetupAction, initialState);
-  const [recovery, recoveryAction, recovering] = useActionState(recoverAdminCredentialAction, initialState);
+  const [start, startAction, starting] = useSensitiveFormAction(startCredentialSetupAction, initialState);
+  const [complete, completeAction, completing] = useSensitiveFormAction(completeCredentialSetupAction, initialState);
+  const [recovery, recoveryAction, recovering] = useSensitiveFormAction(recoverAdminCredentialAction, initialState);
   const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
   const acknowledgingRecoveryCodes = useRef(false);
   const showRecoveryCodes = Boolean(complete.recoveryCodes && !recoveryCodesAcknowledged);
@@ -98,7 +99,7 @@ export function ElevationControls({ csrf, credentialReady, active }: { csrf: str
   const [state, action, pending] = useActionState(startElevationAction, initialState);
   const [verificationState, verificationAction, verifying] = useActionState(verifyElevationAction, initialState);
   const [passwordState, passwordAction, passwordPending] = useActionState(changeAdminPasswordAction, initialState);
-  const [recoveryState, recoveryAction, recoveryPending] = useActionState(regenerateAdminRecoveryCodesAction, initialState);
+  const [recoveryState, recoveryAction, recoveryPending] = useSensitiveFormAction(regenerateAdminRecoveryCodesAction, initialState);
   useEffect(() => {
     if (verificationState.status === "complete") {
       window.location.replace("/admin/security?status=elevation#admin-content");
@@ -145,5 +146,5 @@ function OneTimeRecoveryCodes({ codes, destination, label }: { codes: string[]; 
 }
 
 function RecoveryCodes({ codes }: { codes: string[] }) {
-  return <section className="surface form-success" aria-live="polite"><h3>Códigos de recuperação — exibidos uma vez</h3><p>Guarde-os em local seguro. A página não poderá recuperá-los.</p><ul>{codes.map((code) => <li key={code}><code>{code}</code></li>)}</ul></section>;
+  return <section className="surface form-success" aria-live="polite" data-sensitive-one-time-value="true"><h3>Códigos de recuperação — exibidos uma vez</h3><p>Guarde-os em local seguro. A página não poderá recuperá-los.</p><ul>{codes.map((code) => <li key={code}><code>{code}</code></li>)}</ul></section>;
 }

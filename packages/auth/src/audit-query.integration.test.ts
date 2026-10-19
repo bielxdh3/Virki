@@ -31,8 +31,11 @@ test("structured audit persists/query filters, isolated correlation, UTC bounds 
   }));
   assert.equal(await prisma.auditLog.count({ where: { resource: rollbackId } }), 0);
   const actorId = randomUUID();
-  await prisma.auditLog.createMany({ data: Array.from({ length: 53 }, (_, index) => ({ ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource }), actorRef: hashAuditIdentifier(actorId), createdAt: new Date(Date.UTC(2026, 0, 1, 4, index)), id: `${resource}-${String(index).padStart(3, "0")}` })) });
-  const filters = parseAuditFilters({ resource, actor: hashAuditIdentifier(actorId).slice(0, 12), from: "2026-01-01", to: "2026-01-01", sort: "oldest" });
+  await prisma.auditLog.createMany({ data: Array.from({ length: 53 }, (_, index) => ({ ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource }), actorRef: hashAuditIdentifier(actorId), id: `${resource}-${String(index).padStart(3, "0")}` })) });
+  const firstAuditRecord = await prisma.auditLog.findUniqueOrThrow({ where: { id: `${resource}-000` }, select: { createdAt: true } });
+  const localDateParts = Object.fromEntries(new Intl.DateTimeFormat("en", { timeZone: "America/Porto_Velho", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(firstAuditRecord.createdAt).map(({ type, value }) => [type, value]));
+  const auditDate = `${localDateParts.year}-${localDateParts.month}-${localDateParts.day}`;
+  const filters = parseAuditFilters({ resource, actor: hashAuditIdentifier(actorId).slice(0, 12), from: auditDate, to: auditDate, sort: "oldest" });
   const first = await prisma.auditLog.findMany(buildAuditQuery(filters));
   const second = await prisma.auditLog.findMany(buildAuditQuery({ ...filters, page: 2 }));
   assert.equal(first.length, 51);

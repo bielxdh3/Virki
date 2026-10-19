@@ -359,10 +359,10 @@ export function validateAuditCleanupDatabase(cleanupDatabaseUrl: string | undefi
     const cleanup = new URL(cleanupDatabaseUrl);
     if (cleanup.protocol !== target.protocol || cleanup.hostname !== target.hostname || cleanup.port !== target.port ||
       cleanup.pathname !== target.pathname || cleanup.search !== target.search || cleanup.hash ||
-      decodeURIComponent(cleanup.username) !== "virki_audit_maintenance" || !cleanup.password) throw new Error();
+      decodeURIComponent(cleanup.username) !== "virki_migrator" || !cleanup.password) throw new Error();
     return cleanup;
   } catch {
-    throw new Error("E2E audit cleanup requires the maintenance role on the exact validated disposable database.");
+    throw new Error("E2E audit fixture cleanup requires the migration role on the exact validated disposable database.");
   }
 }
 

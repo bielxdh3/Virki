@@ -34,8 +34,8 @@ const serviceEnvironment = {
   hub: [
     "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_HUB_HOSTNAME", "VIRKI_PORTAL_HOSTNAME",
     "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
-    "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
-    "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY"
+    "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_E2E_LOW05_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_RATE_LIMIT_HASH_SECRET", "VIRKI_AUDIT_HASH_SECRET", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
+    "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_E2E_HUB_MODE", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY"
   ],
   issuer: ["DATABASE_URL", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"]
 };
@@ -52,7 +52,7 @@ export function buildServiceEnvironment(service, source = process.env, platform 
   }
 
   if (service !== "jwks") {
-    result.NODE_ENV = "development";
+    result.NODE_ENV = service === "hub" && source.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
     result.NEXT_TELEMETRY_DISABLED = "1";
   }
   if (service === "hub" && (!result.DATABASE_URL || !result.VIRKI_OIDC_PROXY_URL || !result.VIRKI_E2E_TLS_KEY_PATH || !result.VIRKI_E2E_TLS_CERTIFICATE_PATH || !/^[a-f0-9]{64}$/iu.test(result.VIRKI_CSRF_SIGNING_KEY ?? "") || !result.NODE_EXTRA_CA_CERTS || !isAbsolute(result.NODE_EXTRA_CA_CERTS))) {
@@ -64,7 +64,10 @@ export function buildServiceEnvironment(service, source = process.env, platform 
   if (service === "hub" || service === "issuer") {
     const databaseUrl = result.DATABASE_URL?.trim();
     if (!databaseUrl) throw new Error("E2E database configuration is incomplete.");
-    assertDisposableCoreTestDatabase(databaseUrl, source);
+    const databaseValidationEnvironment = service === "hub" && source.VIRKI_E2E_HUB_MODE === "production"
+      ? { ...source, NODE_ENV: "development" }
+      : source;
+    assertDisposableCoreTestDatabase(databaseUrl, databaseValidationEnvironment);
     result.DATABASE_URL = databaseUrl;
   }
   if (service === "jwks" && !result.VIRKI_E2E_JWKS_REGISTRATION_TOKEN) {
@@ -128,22 +131,33 @@ export function getServiceCommand(service, source) {
 
   const workspace = service === "hub" ? "hub" : service === "public-site" ? "public-site" : undefined;
   if (!workspace) throw new Error("Unknown E2E service.");
+  if (service === "hub" && source.VIRKI_E2E_HUB_MODE === "production") {
+    assertHubTlsFiles(source);
+    return { cwd: repositoryRoot, args: [join(scriptDirectory, "start-production-hub.mjs")] };
+  }
   const workspaceDirectory = join(repositoryRoot, "apps", workspace);
   const nextCli = testRequire.resolve("next/dist/bin/next", { paths: [workspaceDirectory] });
   const args = [nextCli, "dev", "--webpack", "-p", service === "hub" ? "3001" : "3000", "--hostname", "127.0.0.1"];
 
   if (service === "hub") {
+    assertHubTlsFiles(source);
     const keyPath = source.VIRKI_E2E_TLS_KEY_PATH;
     const certificatePath = source.VIRKI_E2E_TLS_CERTIFICATE_PATH;
     const caCertificatePath = source.NODE_EXTRA_CA_CERTS;
-    const expectedCaCertificatePath = certificatePath ? join(dirname(certificatePath), "test-ca-cert.pem") : undefined;
-    if (!keyPath || !certificatePath || !isAbsolute(keyPath) || !isAbsolute(certificatePath) || !existsSync(keyPath) || !existsSync(certificatePath) || !caCertificatePath || !isAbsolute(caCertificatePath) || !existsSync(caCertificatePath) || !expectedCaCertificatePath || resolve(caCertificatePath) !== resolve(expectedCaCertificatePath)) {
-      throw new Error("Hub E2E TLS files are unavailable.");
-    }
     args.push("--experimental-https", "--experimental-https-key", keyPath, "--experimental-https-cert", certificatePath, "--experimental-https-ca", caCertificatePath);
   }
 
   return { cwd: workspaceDirectory, args };
+}
+
+function assertHubTlsFiles(source) {
+  const keyPath = source.VIRKI_E2E_TLS_KEY_PATH;
+  const certificatePath = source.VIRKI_E2E_TLS_CERTIFICATE_PATH;
+  const caCertificatePath = source.NODE_EXTRA_CA_CERTS;
+  const expectedCaCertificatePath = certificatePath ? join(dirname(certificatePath), "test-ca-cert.pem") : undefined;
+  if (!keyPath || !certificatePath || !isAbsolute(keyPath) || !isAbsolute(certificatePath) || !existsSync(keyPath) || !existsSync(certificatePath) || !caCertificatePath || !isAbsolute(caCertificatePath) || !existsSync(caCertificatePath) || !expectedCaCertificatePath || resolve(caCertificatePath) !== resolve(expectedCaCertificatePath)) {
+    throw new Error("Hub E2E TLS files are unavailable.");
+  }
 }
 
 function loadIssuerPrivateConfiguration(environment) {

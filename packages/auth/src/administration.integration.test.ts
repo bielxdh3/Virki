@@ -8,6 +8,7 @@ import {
   changeAdministrativePassword,
   completeAdministrativeCredentialSetup,
   hasActiveSecurityElevation,
+  requireSecurityElevationInTransaction,
   recoverAdministrativeCredential,
   regenerateAdministrativeRecoveryCodes,
   startAdministrativeCredentialSetup,
@@ -15,7 +16,7 @@ import {
   verifySecurityElevation
 } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
-import { hashPassword } from "./index";
+import { cleanupInactiveSessions, hashPassword } from "./index";
 import { hashRecoveryCode } from "./security";
 
 after(() => prisma.$disconnect());
@@ -190,8 +191,67 @@ test("an admin whose account is blocked cannot start an elevation even while the
 
 
 async function seedActiveElevation(admin: Awaited<ReturnType<typeof setupAdmin>>, scope: string) {
-  await prisma.securityElevation.create({ data: { userId: admin.actor.id, sessionId: admin.sessionId, requestKey: randomBytes(24).toString("base64url"), protocolVersion: 1, scope, challengeHash: "fixture", status: "ACTIVE", expiresAt: new Date(Date.now() + DAY) } });
+  return prisma.securityElevation.create({ data: { userId: admin.actor.id, sessionId: admin.sessionId, requestKey: randomBytes(24).toString("base64url"), protocolVersion: 1, scope, challengeHash: "fixture", status: "ACTIVE", expiresAt: new Date(Date.now() + DAY) }, select: { id: true } });
 }
+
+for (const sessionState of ["missing", "cross-user", "revoked", "expired"] as const) test(`active elevation linked to a ${sessionState} session cannot authorize a protected write`, integrationOptions, async () => {
+  const admin = await setupAdmin();
+  let sessionId = admin.sessionId;
+  if (sessionState === "missing") {
+    sessionId = "missing-session-1234567890";
+  } else if (sessionState === "cross-user") {
+    sessionId = (await setupAdmin()).sessionId;
+  } else if (sessionState === "revoked") {
+    await prisma.session.update({ where: { id: sessionId }, data: { revokedAt: new Date() } });
+  } else {
+    await prisma.session.update({ where: { id: sessionId }, data: { expiresAt: new Date(Date.now() - 1) } });
+  }
+  await prisma.securityElevation.create({ data: {
+    userId: admin.actor.id,
+    sessionId,
+    requestKey: randomBytes(24).toString("base64url"),
+    protocolVersion: 1,
+    scope: "ADMIN_RECOVERY_REGENERATE",
+    challengeHash: "integration-fixture",
+    status: "ACTIVE",
+    manualUntilRevoked: true,
+    expiresAt: new Date(Date.now() + DAY)
+  } });
+
+  const before = await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } });
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, sessionId, "ADMIN_RECOVERY_REGENERATE"), false);
+  await assert.rejects(prisma.$transaction(async (transaction) => {
+    await requireSecurityElevationInTransaction(transaction, admin.actor.id, sessionId, "ADMIN_RECOVERY_REGENERATE", new Date());
+    await transaction.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(randomBytes(18).toString("base64url")) } });
+  }), AdministrationMutationError);
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), before);
+});
+
+test("duplicate active elevations grant only their recorded scope and remain separate rows", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  await seedActiveElevation(admin, "ADMIN_RECOVERY_REGENERATE");
+  await seedActiveElevation(admin, "ADMIN_RECOVERY_REGENERATE");
+
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "ADMIN_RECOVERY_REGENERATE"), true);
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "ADMIN_CREDENTIAL_CHANGE"), false);
+  assert.equal(await prisma.securityElevation.count({ where: { userId: admin.actor.id, sessionId: admin.sessionId, scope: "ADMIN_RECOVERY_REGENERATE", status: "ACTIVE" } }), 2);
+});
+
+test("session cleanup preserves elevation history but the orphan cannot authorize and cleanup writes no row-level event", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  await seedActiveElevation(admin, "ADMIN_RECOVERY_REGENERATE");
+  await prisma.session.update({ where: { id: admin.sessionId }, data: { expiresAt: new Date(now.getTime() - 1) } });
+  const auditCount = await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "AUTH_SESSION_CLEANUP" } });
+  const cleanupEligibleCount = await prisma.session.count({ where: { OR: [{ expiresAt: { lt: now } }, { revokedAt: { not: null } }] } });
+
+  assert.equal(await cleanupInactiveSessions(now), cleanupEligibleCount);
+  assert.equal(await prisma.session.findUnique({ where: { id: admin.sessionId } }), null);
+  assert.equal(await prisma.securityElevation.count({ where: { userId: admin.actor.id, sessionId: admin.sessionId, status: "ACTIVE" } }), 1);
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "ADMIN_RECOVERY_REGENERATE", now), false);
+  await assert.rejects(prisma.$transaction((transaction) => requireSecurityElevationInTransaction(transaction, admin.actor.id, admin.sessionId, "ADMIN_RECOVERY_REGENERATE", now)), AdministrationMutationError);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "AUTH_SESSION_CLEANUP" } }), auditCount);
+});
 
 test("demoted admins cannot use active elevation or regenerate administrative codes", integrationOptions, async () => {
   const admin = await setupAdmin();
@@ -252,4 +312,45 @@ for (const state of ["demotion", "session-revocation"] as const) test(`administr
   release(); await change; await rejected;
   assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 0);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "RECOVERY_CODES_REGENERATED" } }), 0);
+});
+
+for (const lockTarget of ["session", "elevation"] as const) test(`administrative elevation rejects when the ${lockTarget} expires while locked`, integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  const elevation = await seedActiveElevation(admin, "ADMIN_RECOVERY_REGENERATE");
+  const expiresAt = new Date(now.getTime() + 500);
+  if (lockTarget === "session") await prisma.session.update({ where: { id: admin.sessionId }, data: { expiresAt } });
+  else await prisma.securityElevation.update({ where: { id: elevation.id }, data: { expiresAt } });
+
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = prisma.$transaction(async (transaction) => {
+    if (lockTarget === "session") {
+      await transaction.$queryRaw`SELECT "id" FROM "Session" WHERE "id" = ${admin.sessionId} FOR UPDATE`;
+    } else {
+      await transaction.$queryRaw`SELECT "id" FROM "SecurityElevation" WHERE "id" = ${elevation.id} FOR UPDATE`;
+    }
+    locked();
+    await gate;
+  }, { timeout: 10000 });
+  await ready;
+
+  const mutation = prisma.$transaction(async (transaction) => {
+    await requireSecurityElevationInTransaction(transaction, admin.actor.id, admin.sessionId, "ADMIN_RECOVERY_REGENERATE", now);
+    await transaction.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(randomBytes(18).toString("base64url")) } });
+  }, { timeout: 10000 });
+  const rejection = assert.rejects(mutation, AdministrationMutationError);
+  let settled = false;
+  void mutation.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    assert.equal(settled, false, "the helper is waiting on the locked authorization row");
+  } finally {
+    release();
+    await holder;
+  }
+  await rejection;
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 0);
 });

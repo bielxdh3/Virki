@@ -13,6 +13,7 @@ test("OIDC rewrites default to Compose DNS for builds and allow loopback for dir
     const { default: publicConfig } = await import("../public-site/next.config.mjs");
     const getDiscoveryRewrite = async () => (await config.rewrites()).find((route) => route.source === "/.well-known/:path*");
     const getAuthorizationRewrites = async () => (await config.rewrites()).filter((route) => route.source === "/auth" || route.source === "/auth/:uid");
+    const getLogoutRewrites = async () => (await config.rewrites()).filter((route) => route.source === "/session/end" || route.source === "/session/end/:path*");
 
     const buildDefaultRewrite = await getDiscoveryRewrite();
     assert.equal(buildDefaultRewrite.destination, "http://oidc-issuer:3003/.well-known/:path*");
@@ -21,6 +22,13 @@ test("OIDC rewrites default to Compose DNS for builds and allow loopback for dir
     const authorizationRewrites = await getAuthorizationRewrites();
     assert.deepEqual(authorizationRewrites.map((route) => route.source), ["/auth", "/auth/:uid"]);
     for (const route of authorizationRewrites) {
+      assert.equal(route.destination, `http://oidc-issuer:3003${route.source}`);
+      assert.deepEqual(route.has, [{ type: "host", value: "portal.example.test" }]);
+    }
+
+    const logoutRewrites = await getLogoutRewrites();
+    assert.deepEqual(logoutRewrites.map((route) => route.source), ["/session/end", "/session/end/:path*"]);
+    for (const route of logoutRewrites) {
       assert.equal(route.destination, `http://oidc-issuer:3003${route.source}`);
       assert.deepEqual(route.has, [{ type: "host", value: "portal.example.test" }]);
     }

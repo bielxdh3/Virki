@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { assertProductionBootstrapContext, bootstrapFirstAdmin, FirstAdminBootstrapError } from "./bootstrap-first-admin";
+import { safePersistedAuditMetadata } from "./audit";
 
 const dataModels = [
   "user",
@@ -143,6 +144,23 @@ test("first ADMIN bootstrap accepts ONLY preserved zero-change session-cleanup a
   assert.equal(result.id, "created-admin");
   assert.equal(fixture.calls.filter((call) => call === "read:auditLog").length, 1);
   assert.equal(fixture.auditInput?.eventType, "ACCOUNT_CREATED");
+});
+
+test("first ADMIN bootstrap accepts the actual sanitized cleanup audit with rate-limit count", async () => {
+  const metadata = safePersistedAuditMetadata(noopAudit.metadata);
+  assert.deepEqual(metadata, {
+    source: "sessions-cleanup",
+    deletedCount: 0,
+    deletedRateLimitCount: 0
+  });
+  const fixture = createDatabase({ auditLog: 1 }, [{ ...noopAudit, metadata }]);
+  const result = await bootstrapFirstAdmin(validInput, {
+    database: fixture.database as never,
+    hashPassword: async () => "argon2:hashed",
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async (_transaction, input) => fixture.setAudit(input as unknown as Record<string, unknown>)
+  });
+  assert.equal(result.id, "created-admin");
 });
 
 test("bootstrap refuses suspicious audit rows", async () => {

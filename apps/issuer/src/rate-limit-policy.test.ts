@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isTokenEndpoint, parseBasicClientId, selectAuthRateLimits, selectTokenRateLimits } from "./rate-limit-policy";
+import { isInteractionPath, isTokenEndpoint, parseBasicClientId, selectAuthRateLimits, selectInteractionRateLimits, selectRateLimitAudit, selectTokenRateLimits } from "./rate-limit-policy";
 
 const basic = (value: string) => `Basic ${Buffer.from(value).toString("base64")}`;
 
@@ -47,4 +47,32 @@ test("only POST /token and /token/revocation are limited", () => {
   assert.equal(isTokenEndpoint("POST", "/token/revocation"), true);
   assert.equal(isTokenEndpoint("GET", "/token"), false);
   assert.equal(isTokenEndpoint("POST", "/token/x"), false);
+});
+
+test("token limiter matches the provider router's case and trailing-slash aliases", () => {
+  assert.equal(isTokenEndpoint("POST", "/TOKEN"), true);
+  assert.equal(isTokenEndpoint("POST", "/token/"), true);
+  assert.equal(isTokenEndpoint("POST", "/TOKEN/REVOCATION/"), true);
+  assert.equal(isTokenEndpoint("POST", "/token//"), false);
+  assert.equal(isTokenEndpoint("GET", "/TOKEN/"), false);
+});
+
+test("interaction routes are matched and have bounded source and browser rate buckets", () => {
+  assert.equal(isInteractionPath("/interaction/abcdefgh"), true);
+  assert.equal(isInteractionPath("/interaction/short"), false);
+  assert.equal(isInteractionPath("/interaction/abcdefgh/extra"), false);
+
+  const checks = selectInteractionRateLimits("203.0.113.9", "browser-cookie");
+  assert.equal(checks[0].identifier, "oidc-interaction-source:203.0.113.9");
+  assert.equal(checks[0].maxAttempts, 300);
+  assert.match(checks[1].identifier, /^oidc-interaction-browser:[a-f0-9]{64}$/u);
+  assert.equal(checks[1].maxAttempts, 30);
+  assert.equal(checks[1].identifier.includes("browser-cookie"), false);
+});
+
+test("rate-limit denial audit uses one fixed per-source window bucket", () => {
+  assert.deepEqual(selectRateLimitAudit("203.0.113.9"), {
+    identifier: "oidc-rate-limit-audit:203.0.113.9",
+    maxAttempts: 1
+  });
 });

@@ -15,7 +15,10 @@ import { CORE_TEST_DATABASE_CONFIRMATION } from "./scripts/core-test-database-sa
 const discoveryOnly = process.argv.includes("--list");
 assertDirectPlaywrightPlatform(process.platform, discoveryOnly);
 
-const portalUrl = "https://portal.localhost:3001";
+const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
+const portalUrl = productionHubMode ? "https://portal.localhost" : "https://portal.localhost:3001";
+const hubUrl = productionHubMode ? "https://hub.localhost" : "https://hub.localhost:3001";
+const hubListenerPort = productionHubMode ? 443 : 3001;
 const accessTeamDomain = "http://127.0.0.1:3010";
 const accessAudience = "virki-e2e-access-audience";
 const registrationTokenEnv = "VIRKI_E2E_JWKS_REGISTRATION_TOKEN";
@@ -35,6 +38,8 @@ if (runtimeReady && (!inheritedTotpEncryptionKey || !/^[0-9a-f]{64}$/iu.test(inh
 }
 const totpEncryptionKey = inheritedTotpEncryptionKey ?? randomBytes(32).toString("hex");
 const csrfSigningKey = randomBytes(32).toString("hex");
+const rateLimitHashSecret = randomBytes(32).toString("hex");
+const auditHashSecret = randomBytes(32).toString("hex");
 const inheritedTlsDirectory = reuseE2eRuntimeDirectory(process.env);
 if (runtimeReady && !inheritedTlsDirectory) throw new Error("Inherited E2E runtime artifacts are incomplete or outside the private temp directory.");
 const ownsRuntimeArtifacts = !runtimeReady;
@@ -120,15 +125,18 @@ const localOnlyEnv = {
   NEXT_TELEMETRY_DISABLED: "1",
   VIRKI_HUB_HOSTNAME: "hub.localhost",
   VIRKI_PORTAL_HOSTNAME: "portal.localhost",
-  VIRKI_HUB_URL: "https://hub.localhost:3001",
+  VIRKI_HUB_URL: hubUrl,
   VIRKI_PORTAL_URL: portalUrl,
   VIRKI_OIDC_PROXY_URL: "http://127.0.0.1:3003",
   CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
   CLOUDFLARE_ACCESS_AUDIENCE: accessAudience,
   CLOUDFLARE_TEAM_DOMAIN: accessTeamDomain,
   VIRKI_E2E_ACCESS_DIAGNOSTICS: "true",
+  ...(process.env.VIRKI_E2E_LOW05_DIAGNOSTICS === "true" ? { VIRKI_E2E_LOW05_DIAGNOSTICS: "true" } : {}),
   VIRKI_TOTP_ENCRYPTION_KEY: totpEncryptionKey,
   VIRKI_CSRF_SIGNING_KEY: csrfSigningKey,
+  VIRKI_RATE_LIMIT_HASH_SECRET: rateLimitHashSecret,
+  VIRKI_AUDIT_HASH_SECRET: auditHashSecret,
   NODE_EXTRA_CA_CERTS: tlsCaCertificatePath,
   VIRKI_E2E_JWKS_REGISTRATION_TOKEN: "",
   VIRKI_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED: "",
@@ -148,11 +156,14 @@ const hubEnv = {
   ...localOnlyEnv,
   VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
   VIRKI_E2E_TLS_KEY_PATH: tlsKeyPath,
-  VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath
+  VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath,
+  ...(process.env.VIRKI_E2E_HUB_MODE === "production" ? { NODE_ENV: "production", VIRKI_E2E_HUB_MODE: "production" } : {})
 };
 process.env.VIRKI_E2E_ACCESS_AUDIENCE = accessAudience;
 process.env.VIRKI_E2E_ACCESS_ISSUER = accessTeamDomain;
 process.env.VIRKI_TOTP_ENCRYPTION_KEY = totpEncryptionKey;
+process.env.VIRKI_RATE_LIMIT_HASH_SECRET = rateLimitHashSecret;
+process.env.VIRKI_AUDIT_HASH_SECRET = auditHashSecret;
 process.env.VIRKI_E2E_TLS_KEY_PATH = tlsKeyPath;
 process.env.VIRKI_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
 process.env.VIRKI_E2E_TLS_CA_CERTIFICATE_PATH = tlsCaCertificatePath;
@@ -212,9 +223,10 @@ export default defineConfig({
       command: "node scripts/e2e/isolated-service.mjs hub",
       // Playwright's webServer URL probe cannot consume this run's private CA. Check the listener only;
       // the browser navigation below still performs normal TLS verification against its private NSS DB.
-      port: 3001,
+      port: hubListenerPort,
       reuseExistingServer: false,
       timeout: 120_000,
+      stdout: process.env.VIRKI_E2E_LOW05_DIAGNOSTICS === "true" ? "pipe" : "ignore",
       env: hubEnv
     }
   ]

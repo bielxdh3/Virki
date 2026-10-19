@@ -73,3 +73,41 @@ for (const viewport of [
     }
   });
 }
+
+test("isolated ingress ignores forged forwarding headers and rejects a forged Access assertion", async ({ browser }) => {
+  const portalContext = await browser.newContext({
+    extraHTTPHeaders: {
+      "x-forwarded-host": "attacker.invalid",
+      "x-forwarded-proto": "http"
+    }
+  });
+  try {
+    const page = await portalContext.newPage();
+    let protectedResponse: import("@playwright/test").Response | undefined;
+    page.on("response", (response) => {
+      if (response.url() === `${portalUrl}/account/security`) protectedResponse = response;
+    });
+    await page.goto(`${portalUrl}/account/security`);
+    await expect(page).toHaveURL(`${portalUrl}/login?returnTo=%2Faccount%2Fsecurity`);
+    expect(protectedResponse?.status()).toBe(307);
+    expect(protectedResponse?.headers().location).toBe(`${portalUrl}/login?returnTo=%2Faccount%2Fsecurity`);
+  } finally {
+    await portalContext.close();
+  }
+
+  const hubContext = await browser.newContext({
+    extraHTTPHeaders: {
+      "cf-access-jwt-assertion": "forged-synthetic-assertion",
+      "x-forwarded-host": "attacker.invalid",
+      "x-forwarded-proto": "http"
+    }
+  });
+  try {
+    const page = await hubContext.newPage();
+    const response = await page.goto(`${hubUrl}/login`);
+    expect(response?.status()).toBe(403);
+    await expect(page.getByRole("heading", { name: "Entrar", exact: true })).toHaveCount(0);
+  } finally {
+    await hubContext.close();
+  }
+});

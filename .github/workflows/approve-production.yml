@@ -53,14 +53,21 @@ jobs:
             }
             gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$TARGET_SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs.json"
             ready=true
+            ci_run=''
+            codeql_run=''
             for workflow in CI CodeQL; do
-              count="$(jq -r --arg name "$workflow" --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")] | length' "$RUNNER_TEMP/runs.json")"
-              failure="$(jq -r --arg name "$workflow" --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion != "success")] | length' "$RUNNER_TEMP/runs.json")"
-              if [[ "$failure" -gt 0 ]]; then
-                echo "::error::$workflow failed or was cancelled at the exact commit; release denied."
-                exit 1
-              fi
-              [[ "$count" -eq 1 ]] || ready=false
+              selection="$(node scripts/production-run-selector.mjs --name "$workflow" --sha "$TARGET_SHA" "$RUNNER_TEMP/runs.json")"
+              read -r run_state selected_run <<< "$selection"
+              case "$run_state" in
+                success)
+                  if [[ "$workflow" == CI ]]; then ci_run="$selected_run"; else codeql_run="$selected_run"; fi
+                  ;;
+                failure)
+                  echo "::error::Latest exact main-push $workflow run failed or was cancelled; release denied."
+                  exit 1
+                  ;;
+                *) ready=false ;;
+              esac
             done
             if [[ "$ready" == true ]]; then break; fi
             echo "::notice::Waiting for exact-SHA main CI and CodeQL (attempt $attempt/100)."
@@ -70,8 +77,6 @@ jobs:
             echo "::error::Timed out waiting for both required exact-SHA checks."
             exit 1
           }
-          ci_run="$(jq -r --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $sha and .conclusion == "success")][0].id' "$RUNNER_TEMP/runs.json")"
-          codeql_run="$(jq -r --arg sha "$TARGET_SHA" '[.workflow_runs[] | select(.name == "CodeQL" and .head_sha == $sha and .conclusion == "success")][0].id' "$RUNNER_TEMP/runs.json")"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
           jq -e '[.jobs[] | select((.name == "Build tested production images (amd64)" or .name == "Build tested production images (arm64)") and .status == "completed" and .conclusion == "success")] | length == 2' "$RUNNER_TEMP/jobs.json" >/dev/null || {
             echo "::error::Both architecture-specific image jobs must have succeeded."
@@ -93,6 +98,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Recheck after all exact-SHA gates and immediately before publishing.
+          node scripts/production-main-head-check.mjs "$TARGET_SHA"
           previous=''
           blob=''
           if gh api "repos/$GITHUB_REPOSITORY/contents/production.json?ref=production" > "$RUNNER_TEMP/previous.json" 2>/dev/null; then

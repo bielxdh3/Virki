@@ -155,6 +155,35 @@ test("email claims use a bounded processing lease and reclaim interrupted work w
   assert.deepEqual(stale.attempts(), [{ messageId: "mail-stale", attempt: 2, status: "FAILED", errorCode: "worker-interrupted", attemptedAt: now }]);
 });
 
+test("a processing message with a missing lease is reclaimed once and stale claimers lose", async () => {
+  const now = new Date("2026-10-06T12:00:00.000Z");
+  const missingLease = createMockOutboxDatabase({
+    id: "mail-missing-lease",
+    idempotencyKey: "mail-missing-lease",
+    kind: "EMAIL_TWO_FACTOR",
+    recipientEmail: "owner@example.invalid",
+    locale: "en",
+    payload: encryptedTestEmailPayload(),
+    status: "PROCESSING",
+    attemptCount: 2,
+    availableAt: new Date(0),
+    sentAt: null,
+    terminalFailedAt: null,
+    processingLeaseExpiresAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0)
+  });
+
+  const claims = await Promise.all([
+    claimNextEmailMessage(now, missingLease.client as never),
+    claimNextEmailMessage(now, missingLease.client as never)
+  ]);
+  assert.equal(claims.filter(Boolean).length, 1);
+  assert.equal(claims.find(Boolean)?.attemptCount, 3);
+  assert.deepEqual(missingLease.attempts(), [{ messageId: "mail-missing-lease", attempt: 2, status: "FAILED", errorCode: "worker-interrupted", attemptedAt: now }]);
+  assert.ok(missingLease.message().processingLeaseExpiresAt instanceof Date);
+});
+
 test("a stale final attempt is terminalized without sending again", async () => {
   const now = new Date("2026-10-06T12:00:00.000Z");
   const stale = createMockOutboxDatabase({
@@ -346,6 +375,9 @@ function createMockOutboxDatabase(initialMessage: Record<string, unknown>, optio
               (message.availableAt as Date) <= (condition.availableAt as { lte: Date }).lte;
           }
           if (status === "PROCESSING") {
+            if (condition.processingLeaseExpiresAt === null) {
+              return message.status === status && message.processingLeaseExpiresAt === null;
+            }
             const leaseWhere = condition.processingLeaseExpiresAt as { lte: Date } | undefined;
             const lease = message.processingLeaseExpiresAt as Date | null;
             return message.status === status && Boolean(lease && leaseWhere && lease <= leaseWhere.lte);
@@ -357,7 +389,9 @@ function createMockOutboxDatabase(initialMessage: Record<string, unknown>, optio
       async updateMany({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) {
         const leaseWhere = where.processingLeaseExpiresAt as { lte?: Date } | undefined;
         const lease = message.processingLeaseExpiresAt as Date | null;
-        const leaseMatches = !leaseWhere || Boolean(lease && leaseWhere.lte && lease <= leaseWhere.lte);
+        const leaseMatches = where.processingLeaseExpiresAt === null
+          ? lease === null
+          : !leaseWhere || Boolean(lease && leaseWhere.lte && lease <= leaseWhere.lte);
         const matches = where.id === message.id && where.status === message.status &&
           (where.attemptCount === undefined || where.attemptCount === message.attemptCount) && leaseMatches;
         if (!matches) return { count: 0 };

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseApprovedProductionPointer, planApprovedProductionAttempt, withExclusiveAgentLock } from "./production-approval-agent.mjs";
+import { verifyRemoteMainHead } from "./production-main-head-check.mjs";
 
 const approved = {
   version: 1, source_commit: "a".repeat(40), approved_by: "bielxdh3",
@@ -28,6 +29,36 @@ test("the agent never repeats or overwrites an unresolved production attempt", (
   }
   assert.throws(() => planApprovedProductionAttempt(approved, { sha: "oops", status: "success" }));
   assert.equal(planApprovedProductionAttempt(approved, { sha: "b".repeat(40), status: "success" }), "deploy");
+});
+
+test("a main advance during production preflight blocks the latch and deployment", () => {
+  const source = readFileSync(new URL("./production-approval-agent.mjs", import.meta.url), "utf8");
+  const preflightIndex = source.indexOf('exec("npm", ["run", "preflight:prod"])');
+  const finalHeadCheck = source.indexOf("verifyRemoteMainHead(pointer.source_commit,");
+  const attemptLatch = source.indexOf('writeState(stateFile, { sha: pointer.source_commit, status: "attempted" })');
+  const deploy = source.indexOf('exec("npm", ["run", "deploy:prod"])');
+
+  assert.ok(preflightIndex >= 0 && finalHeadCheck > preflightIndex && attemptLatch > finalHeadCheck && deploy > attemptLatch);
+  assert.match(source.slice(finalHeadCheck, attemptLatch), /\(command, args\) => exec\(command, args\)/u);
+
+  let remoteMain = approved.source_commit;
+  let latched = false;
+  let deployed = false;
+  const advanceMainDuringPreflight = () => { remoteMain = "f".repeat(40); };
+  const continueDeployment = () => {
+    advanceMainDuringPreflight();
+    verifyRemoteMainHead(approved.source_commit, () => `${remoteMain}\trefs/heads/main\n`);
+    latched = true;
+    deployed = true;
+  };
+
+  assert.equal(verifyRemoteMainHead(approved.source_commit, () => `${remoteMain}\trefs/heads/main\n`), approved.source_commit);
+  assert.throws(
+    continueDeployment,
+    /main changed after approval preflight/u,
+  );
+  assert.equal(latched, false);
+  assert.equal(deployed, false);
 });
 
 test("atomic lock refuses a concurrent deployment and releases on normal completion", { skip: process.platform !== "linux" }, async () => {

@@ -33,8 +33,11 @@ test("pending Interaction indexes nested client and authenticated session withou
     const adapter = new PrismaOidcAdapter("Interaction", database as never);
     await adapter.upsert("before-login", { params: { client_id: "client" } } as never, 300);
     await adapter.upsert("after-login", { params: { client_id: "client" }, session: { accountId: "user" } } as never, 300);
+    await adapter.upsert("login-result", { params: { client_id: "client" }, result: { login: { accountId: "result-user" } } } as never, 300);
     assert.deepEqual(rows.map(({ create }) => [create.clientIdHash, create.accountIdHash]), [
-      [hashOidcIdentifier("client"), null], [hashOidcIdentifier("client"), hashOidcIdentifier("user")]
+      [hashOidcIdentifier("client"), null],
+      [hashOidcIdentifier("client"), hashOidcIdentifier("user")],
+      [hashOidcIdentifier("client"), hashOidcIdentifier("result-user")]
     ]);
   } finally {
     if (previous === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
@@ -56,6 +59,29 @@ test("expired OIDC artifacts are deleted using the indexed expiry cutoff", async
 
   assert.equal(await deleteExpiredOidcArtifacts(database as never, now), 3);
   assert.deepEqual(calls, [{ where: { expiresAt: { lte: now } } }]);
+});
+
+test("an unavailable client-secret decryption key makes the client unavailable without throwing", async () => {
+  const previous = process.env.VIRKI_OIDC_ADAPTER_KEY;
+  delete process.env.VIRKI_OIDC_ADAPTER_KEY;
+  try {
+    const database = {
+      projectConnection: {
+        findUnique: async () => ({
+          clientId: "client-id",
+          clientSecretCiphertext: "v1.synthetic.synthetic.synthetic",
+          name: "Synthetic project",
+          origin: "https://project.example.invalid",
+          redirectUris: ["https://project.example.invalid/callback"],
+          enabled: true
+        })
+      }
+    };
+    assert.equal(await new PrismaOidcAdapter("Client", database as never).find("client-id"), undefined);
+  } finally {
+    if (previous === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
+    else process.env.VIRKI_OIDC_ADAPTER_KEY = previous;
+  }
 });
 
 test("OIDC artifact consume uses compare-and-set so a code cannot be replayed concurrently", async () => {

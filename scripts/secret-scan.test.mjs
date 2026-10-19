@@ -130,3 +130,41 @@ test("scanner covers prefixed keys in tracked formats and every credential URL o
     assert.equal(result.stderr.includes(".env.example:"), false);
   } finally { rmSync(repository, { recursive: true, force: true }); }
 });
+
+test("scanner blocks template-literal and multiline credentials plus private JWKs without printing values", () => {
+  const repository = mkdtempSync(path.join(tmpdir(), "virki-secret-modern-formats-"));
+  const templateValue = ["synthetic", "template", "credential", "0123456789abcdef"].join("-");
+  const multilineValue = ["synthetic", "multiline", "credential", "0123456789abcdef"].join("-");
+  const jwkValue = ["synthetic", "jwk", "private", "0123456789abcdef"].join("-");
+
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    writeFileSync(path.join(repository, "settings.ts"), `export const APP_SECRET = \`${templateValue}\`;\nconst apiKey =\n  "${multilineValue}";\n`);
+    writeFileSync(path.join(repository, "private-jwk.json"), JSON.stringify({
+      kty: "EC",
+      crv: "P-256",
+      x: "public-coordinate-fixture",
+      y: "public-coordinate-fixture",
+      d: jwkValue
+    }));
+    writeFileSync(path.join(repository, "public-jwk.json"), JSON.stringify({
+      kty: "EC",
+      crv: "P-256",
+      x: "public-coordinate-fixture",
+      y: "public-coordinate-fixture"
+    }));
+    execFileSync("git", ["add", "."], { cwd: repository });
+
+    const result = spawnSync(process.execPath, [scannerPath], { cwd: repository, encoding: "utf8" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /settings\.ts:1 application-key-assignment/u);
+    assert.match(result.stderr, /settings\.ts:2 (?:generic-secret-assignment|multiline-secret-assignment)/u);
+    assert.match(result.stderr, /private-jwk\.json:1 private-jwk/u);
+    assert.doesNotMatch(result.stderr, /public-jwk\.json:/u);
+    for (const value of [templateValue, multilineValue, jwkValue]) {
+      assert.equal(`${result.stdout}${result.stderr}`.includes(value), false);
+    }
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});

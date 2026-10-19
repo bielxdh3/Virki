@@ -7,6 +7,7 @@ import {
   ELEVATION_SCOPE_ACTIONS,
   UI_ELEVATION_SCOPES,
   isElevationCeremonyOpen,
+  requireSecurityElevationInTransaction,
   resolveElevationDuration
 } from "./administration";
 
@@ -50,4 +51,42 @@ test("administrative password reuse is a specific mutation rejection", () => {
   const error = new AdministrativePasswordReuseError();
   assert.ok(error instanceof AdministrationMutationError);
   assert.equal(error.name, "AdministrativePasswordReuseError");
+});
+
+for (const lockTarget of ["session", "elevation"] as const) test(`transactional elevation rechecks ${lockTarget} expiry after a lock wait`, async () => {
+  const now = new Date();
+  const expiresAt = new Date(Date.now() + 120);
+  const sessionExpiresAt = lockTarget === "session" ? expiresAt : new Date(Date.now() + 60_000);
+  const elevationExpiresAt = lockTarget === "elevation" ? expiresAt : new Date(Date.now() + 60_000);
+  const waitUntilExpired = async () => {
+    const remaining = expiresAt.getTime() - Date.now() + 10;
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  };
+  const transaction = {
+    $queryRaw: async (parts: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = parts.join("");
+      if (sql.includes('FROM "User" u JOIN "Session"') && sql.includes("FOR UPDATE OF u, s")) {
+        if (lockTarget === "session") await waitUntilExpired();
+        return [{ id: "session" }]; // The SELECT predicate was evaluated before its row-lock wait.
+      }
+      if (sql.includes('FROM "User" u JOIN "Session"')) {
+        const checkedAt = values.filter((value): value is Date => value instanceof Date).at(-1) ?? now;
+        return sessionExpiresAt > checkedAt ? [{ id: "session" }] : [];
+      }
+      if (sql.includes('FROM "SecurityElevation"') && sql.includes("FOR UPDATE")) {
+        if (lockTarget === "elevation") await waitUntilExpired();
+        return [{ id: "elevation" }]; // The SELECT predicate was evaluated before its row-lock wait.
+      }
+      if (sql.includes('FROM "SecurityElevation"')) {
+        const checkedAt = values.filter((value): value is Date => value instanceof Date).at(-1) ?? now;
+        return elevationExpiresAt > checkedAt ? [{ id: "elevation" }] : [];
+      }
+      throw new Error("Unexpected SQL in the elevation authorization test.");
+    }
+  };
+
+  await assert.rejects(
+    requireSecurityElevationInTransaction(transaction as never, "admin-id", "session-id", "ADMIN_RECOVERY_REGENERATE", now),
+    AdministrationMutationError
+  );
 });

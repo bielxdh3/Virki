@@ -5,6 +5,7 @@ import { DEVICE_COOKIE_NAME, verifyLoginEmailCode, verifyLoginRecoveryCode, veri
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../../lib/surface";
 import { createLoginResponseAfterRequiredAudit, createVerifiedLoginAudit, type LoginSurface, type LoginVerificationFactor } from "../../../../lib/login-audit";
+import { getLoginRedirectPath } from "../../../../lib/login-redirect";
 import { SESSION_COOKIE_NAME, getSessionCookieOptions } from "@virki/auth";
 import { readBoundedFormData } from "../../../../lib/request-form";
 import { recordSecurityDenial } from "../../../../lib/audit-denial";
@@ -87,7 +88,7 @@ async function sessionResponse(
   return createLoginResponseAfterRequiredAudit(
     () => writeAuditLogRequired({ ...createVerifiedLoginAudit(session.userId, surface, factor, requestMetadata), sessionRef: hashAuditSessionReference(session.id), actorRole: surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined }),
     () => {
-      const response = NextResponse.redirect(new URL(returnTo ?? recoveredFallback ?? (surface === "hub" ? "/admin/accounts" : "/"), baseUrl), { status: 303 });
+      const response = NextResponse.redirect(new URL(getLoginRedirectPath(returnTo, recoveredFallback, surface === "hub" ? "/admin/accounts" : "/"), baseUrl), { status: 303 });
       response.cookies.set(SESSION_COOKIE_NAME, session.token, getSessionCookieOptions(session.expiresAt));
       return response;
     },

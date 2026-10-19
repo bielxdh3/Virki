@@ -4,46 +4,46 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildChromiumEnvironment, buildServiceEnvironment, getServiceCommand, platformEnvironmentVariableNames } from "./isolated-service.mjs";
 import { runCleanupSteps, validateAuditCleanupDatabase } from "./global-setup.mts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-test("audit cleanup database uses the exact validated disposable target and maintenance role", () => {
+test("audit fixture cleanup uses the exact validated disposable target and migration role", () => {
   const previousNodeEnv = process.env.NODE_ENV;
   const previousConfirmation = process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM;
   const runtimeDatabaseUrl = ["postgresql:/", "/virki_runtime_test:", "runtime-only@127.0.0.1:55432/virki_e2e_test?schema=public"].join("");
-  const cleanupDatabaseUrl = ["postgresql:/", "/virki_audit_maintenance:", "maintenance-only@127.0.0.1:55432/virki_e2e_test?schema=public"].join("");
+  const cleanupDatabaseUrl = ["postgresql:/", "/virki_migrator:", "migrator-only@127.0.0.1:55432/virki_e2e_test?schema=public"].join("");
   process.env.NODE_ENV = "test";
   process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM = "disposable";
   try {
     const target = validateAuditCleanupDatabase(cleanupDatabaseUrl, runtimeDatabaseUrl);
     assert.equal(target.protocol, "postgresql:");
-    assert.equal(target.username, "virki_audit_maintenance");
+    assert.equal(target.username, "virki_migrator");
     assert.equal(target.hostname, "127.0.0.1");
     assert.equal(target.port, "55432");
     assert.equal(target.pathname, "/virki_e2e_test");
     assert.equal(target.search, "?schema=public");
 
     const mismatches = [
-      cleanupDatabaseUrl.replace("virki_audit_maintenance", "virki_runtime_test"),
+      cleanupDatabaseUrl.replace("virki_migrator", "virki_runtime_test"),
       cleanupDatabaseUrl.replace("127.0.0.1:55432", "localhost:55432"),
       cleanupDatabaseUrl.replace(":55432/", ":55433/"),
       cleanupDatabaseUrl.replace("/virki_e2e_test", "/virki_other_test"),
       cleanupDatabaseUrl.replace("schema=public", "schema=other"),
-      cleanupDatabaseUrl.replace(":maintenance-only@", "@"),
+      cleanupDatabaseUrl.replace(":migrator-only@", "@"),
       cleanupDatabaseUrl.replace("?schema=public", "?schema=public#fragment")
     ];
     for (const mismatch of mismatches) {
       assert.throws(
         () => validateAuditCleanupDatabase(mismatch, runtimeDatabaseUrl),
-        { message: "E2E audit cleanup requires the maintenance role on the exact validated disposable database." }
+        { message: "E2E audit fixture cleanup requires the migration role on the exact validated disposable database." }
       );
     }
     assert.throws(
       () => validateAuditCleanupDatabase(undefined, runtimeDatabaseUrl),
-      { message: "E2E audit cleanup requires the maintenance role on the exact validated disposable database." }
+      { message: "E2E audit fixture cleanup requires the migration role on the exact validated disposable database." }
     );
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
@@ -198,9 +198,11 @@ test("service children receive only their E2E allowlist and required OS paths", 
     CLOUDFLARE_ACCESS_AUDIENCE: "fixture-audience",
     CLOUDFLARE_TEAM_DOMAIN: "http://127.0.0.1:3010",
     VIRKI_E2E_ACCESS_DIAGNOSTICS: "true",
+    VIRKI_E2E_LOW05_DIAGNOSTICS: "true",
     VIRKI_E2E_TLS_KEY_PATH: "C:\\Temp\\fixture-key.pem",
     VIRKI_E2E_TLS_CERTIFICATE_PATH: "C:\\Temp\\fixture-cert.pem",
     VIRKI_CSRF_SIGNING_KEY: "a".repeat(64),
+    VIRKI_RATE_LIMIT_HASH_SECRET: "r".repeat(64),
     NODE_EXTRA_CA_CERTS: join(tmpdir(), "fixture-ca-cert.pem"),
     VIRKI_TOTP_ENCRYPTION_KEY: "e2e-totp-key-sentinel",
     VIRKI_EMAIL_OUTBOX_KEY: "e2e-email-key-sentinel"
@@ -214,7 +216,7 @@ test("service children receive only their E2E allowlist and required OS paths", 
       allowed: [
         "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_HUB_HOSTNAME", "VIRKI_PORTAL_HOSTNAME",
         "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
-        "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
+        "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_E2E_LOW05_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_RATE_LIMIT_HASH_SECRET", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
         "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY"
       ]
     },
@@ -375,9 +377,15 @@ test("Chromium receives only required platform variables and never Virki secrets
 
 test("Hub readiness checks its listening port while the browser verifies the private TLS CA", () => {
   const configPath = resolve(repositoryRoot, "playwright.config.mts");
+  const configUrl = pathToFileURL(configPath).href;
+  assert.equal(fileURLToPath(new URL(configUrl)), configPath);
+  assert.match(configUrl, /^file:\/\/\//);
+  if (process.platform === "win32") {
+    assert.match(configUrl, /^file:\/\/\/[a-z]:\//i);
+  }
   const inspector = `
     process.argv.push("--list");
-    const { default: config } = await import(${JSON.stringify(configPath)});
+    const { default: config } = await import(${JSON.stringify(configUrl)});
     const hub = config.webServer.find(({ command }) => command.includes("isolated-service.mjs hub"));
     process.stdout.write(JSON.stringify({ port: hub?.port, url: hub?.url, ignoreHTTPSErrors: config.use?.ignoreHTTPSErrors }));
   `;

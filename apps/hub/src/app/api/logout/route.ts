@@ -106,6 +106,7 @@ export async function POST(request: NextRequest) {
   }
 
   const response = NextResponse.redirect(redirectUrl, { status: 303 });
+  response.headers.set("Cache-Control", "no-store");
   response.cookies.set(SESSION_COOKIE_NAME, "", getExpiredSessionCookieOptions());
 
   return response;

@@ -5,6 +5,7 @@ import { prisma } from "@virki/database";
 import { decryptEmailPayload } from "./email";
 import { hashPassword } from "./index";
 import { encryptTotpSecret } from "./security";
+import type { ElevationScope } from "./elevation-scopes";
 
 export const integrationEnabled = process.env.VIRKI_INTEGRATION_ENABLED === "true";
 export const integrationOptions = { skip: integrationEnabled ? false : "disposable integration database not configured" } as const;
@@ -38,6 +39,27 @@ export async function createTestUser(input: {
     select: { id: true }
   });
   return { id: user.id, email, password };
+}
+
+export async function seedAdminSessionWithElevation(userId: string, scope: ElevationScope, now = new Date()): Promise<{ sessionId: string; elevationId: string }> {
+  const session = await prisma.session.create({
+    data: { userId, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000) },
+    select: { id: true }
+  });
+  const elevation = await prisma.securityElevation.create({
+    data: {
+      userId,
+      sessionId: session.id,
+      requestKey: randomBytes(24).toString("base64url"),
+      protocolVersion: 1,
+      scope,
+      challengeHash: "integration-fixture",
+      status: "ACTIVE",
+      expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
+    },
+    select: { id: true }
+  });
+  return { sessionId: session.id, elevationId: elevation.id };
 }
 
 // Decrypts queued (never sent) outbox payloads so tests can follow emailed codes and links.

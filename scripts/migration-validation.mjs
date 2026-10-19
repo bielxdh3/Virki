@@ -70,7 +70,7 @@ try {
       assert.equal(recoveryBefore.length, 1);
       assert.match(recoveryBefore[0].idempotencyKey, /^account-recovery:[A-Za-z0-9_-]{32}$/u, "Expected a legacy recovery outbox key that the migration must rewrite.");
       assert.equal(await client.deviceChallenge.count(), 3, "Expected every challenge fixture to exist before the additive migration.");
-      assert.equal(await client.accountRecoveryRequest.count(), 2, "Expected every recovery request fixture to exist before the additive migration.");
+      assert.equal(await client.accountRecoveryRequest.count(), 3, "Expected every recovery request fixture to exist before the additive migration.");
 
       for (const migration of additiveDirectories) {
         await cp(path.join(migrationsRoot, migration), path.join(temporaryMigrationsDirectory, migration), { recursive: true });
@@ -232,7 +232,7 @@ async function verifyMigrationTransformations() {
       user: { select: { email: true, emailNormalized: true } },
     },
   });
-  assert.equal(await client.accountRecoveryRequest.count(), 2, "Migration must preserve all account recovery request rows.");
+  assert.equal(await client.accountRecoveryRequest.count(), 3, "Migration must preserve all account recovery request rows.");
   assert.deepEqual(recoveryRequests.map(({ id, userId, status }) => ({ id, userId, status })), [
     { id: "validation-recovery-fallback", userId: "validation-recovery-fallback-user", status: "APPROVED" },
     { id: "validation-recovery-normalized", userId: "validation-recovery-normalized-user", status: "PENDING" },
@@ -242,6 +242,68 @@ async function verifyMigrationTransformations() {
     const email = request.user.emailNormalized ?? request.user.email;
     assert.equal(request.emailAddressHash, sha256(email.trim().toLowerCase()), "Migration must hash the email belonging to the linked recovery request user.");
   }
+
+  await verifyUnresolvedLegacyStateFixtures();
+}
+
+async function verifyUnresolvedLegacyStateFixtures() {
+  const users = await client.user.findMany({
+    where: { id: { in: ["validation-email-null", "validation-email-case-upper", "validation-email-case-lower", "validation-email-unicode", "validation-account-diverged-active", "validation-account-diverged-inactive"] } },
+    orderBy: { id: "asc" },
+    select: { id: true, email: true, emailNormalized: true, isActive: true, accountStatus: true },
+  });
+  assert.deepEqual(users, [
+    { id: "validation-account-diverged-active", email: "active-flag@fixture.invalid", emailNormalized: "active-flag@fixture.invalid", isActive: true, accountStatus: "INACTIVE" },
+    { id: "validation-account-diverged-inactive", email: "inactive-flag@fixture.invalid", emailNormalized: "inactive-flag@fixture.invalid", isActive: false, accountStatus: "ACTIVE" },
+    { id: "validation-email-case-lower", email: "case@fixture.invalid", emailNormalized: "case@fixture.invalid", isActive: true, accountStatus: "ACTIVE" },
+    { id: "validation-email-case-upper", email: "Case@fixture.invalid", emailNormalized: "Case@fixture.invalid", isActive: true, accountStatus: "ACTIVE" },
+    { id: "validation-email-null", email: "Nullable@fixture.invalid", emailNormalized: null, isActive: true, accountStatus: "ACTIVE" },
+    { id: "validation-email-unicode", email: "İndex@fixture.invalid", emailNormalized: "i̇ndex@fixture.invalid", isActive: true, accountStatus: "ACTIVE" },
+  ], "Migration must preserve legacy nullable/case/Unicode email values and divergent account-state flags pending a canonical repair rule.");
+
+  const orphanedElevation = await client.securityElevation.findUnique({
+    where: { id: "validation-elevation-orphan-session" },
+    select: { sessionId: true, status: true, user: { select: { id: true } } },
+  });
+  assert.deepEqual(orphanedElevation, {
+    sessionId: "validation-missing-session",
+    status: "ACTIVE",
+    user: { id: "validation-recovery-normalized-user" },
+  }, "Migrations must preserve an orphaned session reference without guessing whether the legacy row should be deleted or revoked.");
+  assert.equal(await client.session.count({ where: { id: "validation-missing-session" } }), 0);
+
+  const stalledMessage = await client.emailOutboxMessage.findUnique({
+    where: { id: "validation-stalled-email" },
+    select: {
+      status: true,
+      attemptCount: true,
+      updatedAt: true,
+      processingLeaseExpiresAt: true,
+      deliveryAttempts: { orderBy: { attempt: "asc" }, select: { attempt: true, status: true } },
+    },
+  });
+  assert.equal(stalledMessage?.status, "PROCESSING");
+  assert.equal(stalledMessage?.attemptCount, 2);
+  assert.equal(stalledMessage?.processingLeaseExpiresAt?.getTime(), stalledMessage?.updatedAt.getTime(), "The processing lease migration uses updatedAt to seed existing PROCESSING rows.");
+  assert.deepEqual(stalledMessage?.deliveryAttempts, [
+    { attempt: 1, status: "FAILED" },
+    { attempt: 2, status: "FAILED" },
+  ], "Migration must preserve bounded retry history for a stalled message.");
+
+  const orphanedGrantor = await client.userProjectGrant.findUnique({
+    where: { id: "validation-orphan-grantor" },
+    select: { grantedByUserId: true, revokedAt: true },
+  });
+  assert.equal(orphanedGrantor?.grantedByUserId, "validation-missing-grantor", "Migration must not invent a grantor or erase an unreferenced grantor value.");
+
+  const reviewedRecovery = await client.accountRecoveryRequest.findUnique({
+    where: { id: "validation-reviewed-recovery" },
+    select: { reviewedByUserId: true, reviewedByUser: { select: { id: true } } },
+  });
+  assert.deepEqual(reviewedRecovery, {
+    reviewedByUserId: "validation-recovery-normalized-user",
+    reviewedByUser: { id: "validation-recovery-normalized-user" },
+  }, "Migration must preserve the reviewer relation attached to an approved recovery request.");
 }
 
 function sha256(value) {
@@ -396,14 +458,33 @@ function seedMigrationTransformFixtures() {
 BEGIN;
 INSERT INTO "User" ("id", "email", "emailNormalized", "displayName", "passwordHash", "role", "isActive", "accountStatus", "secondFactorMethod", "createdAt", "updatedAt") VALUES
   ('validation-recovery-normalized-user', 'Primary@validation.invalid', 'primary@validation.invalid', 'Primary recovery fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('validation-recovery-fallback-user', 'Fallback@validation.invalid', NULL, 'Fallback recovery fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+  ('validation-recovery-fallback-user', 'Fallback@validation.invalid', NULL, 'Fallback recovery fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-email-null', 'Nullable@fixture.invalid', NULL, 'Nullable email fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-email-case-upper', 'Case@fixture.invalid', 'Case@fixture.invalid', 'Uppercase email fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-email-case-lower', 'case@fixture.invalid', 'case@fixture.invalid', 'Lowercase email fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-email-unicode', 'İndex@fixture.invalid', 'i̇ndex@fixture.invalid', 'Unicode email fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-account-diverged-active', 'active-flag@fixture.invalid', 'active-flag@fixture.invalid', 'Divergent active fixture', 'fixture-password-hash', 'USER'::"UserRole", true, 'INACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-account-diverged-inactive', 'inactive-flag@fixture.invalid', 'inactive-flag@fixture.invalid', 'Divergent inactive fixture', 'fixture-password-hash', 'USER'::"UserRole", false, 'ACTIVE'::"AccountStatus", 'EMAIL'::"SecondFactorMethod", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "SecurityElevation" ("id", "requestKey", "userId", "sessionId", "protocolVersion", "scope", "challengeHash", "status", "expiresAt", "createdAt", "updatedAt") VALUES
+  ('validation-elevation-orphan-session', 'validation-orphan-elevation-key', 'validation-recovery-normalized-user', 'validation-missing-session', 1, 'ACCOUNT_STATE_CHANGE', 'fixture-challenge-hash', 'ACTIVE'::"SecurityElevationStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "EmailOutboxMessage" ("id", "idempotencyKey", "kind", "recipientEmail", "locale", "payload", "status", "attemptCount", "availableAt", "createdAt", "updatedAt") VALUES
+  ('validation-stalled-email', 'validation-stalled-email-key', 'PASSWORD_CHANGED'::"EmailMessageKind", 'nullable@fixture.invalid', 'en', '{"fixture":true}'::jsonb, 'PROCESSING'::"OutboxMessageStatus", 2, CURRENT_TIMESTAMP - INTERVAL '2 hours', CURRENT_TIMESTAMP - INTERVAL '2 hours', CURRENT_TIMESTAMP - INTERVAL '2 hours');
+INSERT INTO "EmailDeliveryAttempt" ("id", "messageId", "attempt", "status", "errorCode", "attemptedAt") VALUES
+  ('validation-stalled-attempt-1', 'validation-stalled-email', 1, 'FAILED'::"DeliveryAttemptStatus", 'fixture-retry', CURRENT_TIMESTAMP - INTERVAL '3 hours'),
+  ('validation-stalled-attempt-2', 'validation-stalled-email', 2, 'FAILED'::"DeliveryAttemptStatus", 'fixture-retry', CURRENT_TIMESTAMP - INTERVAL '2 hours');
+INSERT INTO "ProjectConnection" ("id", "name", "slug", "origin", "clientId", "clientSecretCiphertext", "redirectUris", "createdAt", "updatedAt") VALUES
+  ('validation-grant-connection', 'Validation connection', 'validation-grant', 'https://fixture.invalid', 'validation-grant-client', 'fixture-secret-ciphertext', '[]'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+INSERT INTO "UserProjectGrant" ("id", "userId", "connectionId", "grantedByUserId", "createdAt") VALUES
+  ('validation-orphan-grantor', 'validation-email-null', 'validation-grant-connection', 'validation-missing-grantor', CURRENT_TIMESTAMP);
 INSERT INTO "DeviceChallenge" ("id", "userId", "ceremonyId", "deviceIdHash", "codeHash", "status", "expiresAt", "consumedAt") VALUES
   ('validation-challenge-pending', 'validation-recovery-normalized-user', 'validation-ceremony-pending', 'fixture-device-hash', 'fixture-code-hash', 'PENDING'::"DeviceChallengeStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', NULL),
   ('validation-challenge-verified', 'validation-recovery-normalized-user', 'validation-ceremony-verified', 'fixture-device-hash', 'fixture-code-hash', 'VERIFIED'::"DeviceChallengeStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', NULL),
   ('validation-challenge-consumed', 'validation-recovery-normalized-user', 'validation-ceremony-consumed', 'fixture-device-hash', 'fixture-code-hash', 'VERIFIED'::"DeviceChallengeStatus", CURRENT_TIMESTAMP + INTERVAL '10 minutes', CURRENT_TIMESTAMP);
 INSERT INTO "AccountRecoveryRequest" ("id", "requestKey", "userId", "emailChallengeHash", "status", "expiresAt", "createdAt", "updatedAt") VALUES
   ('validation-recovery-normalized', 'recovery-key-normalized-fixture', 'validation-recovery-normalized-user', 'fixture-email-challenge-hash', 'PENDING'::"RecoveryRequestStatus", CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('validation-recovery-fallback', 'recovery-key-fallback-fixture', 'validation-recovery-fallback-user', 'fixture-email-challenge-hash', 'APPROVED'::"RecoveryRequestStatus", CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+  ('validation-recovery-fallback', 'recovery-key-fallback-fixture', 'validation-recovery-fallback-user', 'fixture-email-challenge-hash', 'APPROVED'::"RecoveryRequestStatus", CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('validation-reviewed-recovery', 'reviewed-recovery-key-fixture', 'validation-email-null', 'fixture-email-challenge-hash', 'APPROVED'::"RecoveryRequestStatus", CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+UPDATE "AccountRecoveryRequest" SET "reviewedByUserId" = 'validation-recovery-normalized-user' WHERE "id" = 'validation-reviewed-recovery';
 COMMIT;
 `;
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextResponse } from "next/server";
-import { getRecoveryCookieName, getRecoveryCookieOptions, LEGACY_RECOVERY_COOKIE } from "./recovery";
+import { getRecoveryCookieName, getRecoveryCookieOptions, LEGACY_RECOVERY_COOKIE, requiresRecoveryRequestSwitch } from "./recovery";
 import { clearRecoveryCookie, setRecoveryCookie } from "../app/recover/recovery-cookie";
 
 test("production recovery cookie satisfies the __Host- prefix rules", () => {
@@ -19,6 +19,12 @@ test("development uses a distinct plain cookie name for safe legacy expiry over 
   assert.equal(getRecoveryCookieName(env), "virki_recovery_v2");
   assert.equal(getRecoveryCookieOptions(new Date(0), env).secure, false);
   assert.deepEqual(LEGACY_RECOVERY_COOKIE, { name: "virki_recovery", path: "/recover" });
+});
+
+test("reopening the same recovery request does not prompt to switch links", () => {
+  assert.equal(requiresRecoveryRequestSwitch(null, "request-123"), false);
+  assert.equal(requiresRecoveryRequestSwitch("request-123", "request-123"), false);
+  assert.equal(requiresRecoveryRequestSwitch("request-456", "request-123"), true);
 });
 
 test("Next.js serializes __Host- recovery cookie expiration with Secure and root path", () => {

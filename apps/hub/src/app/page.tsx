@@ -5,6 +5,7 @@ import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../lib/auth";
 import { getSurface, trustedReturnTo } from "../lib/surface";
+import { ProtectedPageLifecycle } from "./protected-page-lifecycle";
 
 export const dynamic = "force-dynamic";
 
@@ -32,8 +33,9 @@ export default async function HomePage() {
 
   return (
     <>
+      <ProtectedPageLifecycle />
       <a className="skip-link" href="#main-content">Ir para o conteúdo</a>
-      <main className="admin-main">
+      <main className="admin-main" data-protected-page-content>
       <header className="page-header">
         <div className="portal-brand"><img src="/hub-mark.svg" alt="" /><div><p className="eyebrow">Virki</p><h1>Projetos</h1></div></div>
         <div><a className="text-link" href="/account/security">Minha conta</a>

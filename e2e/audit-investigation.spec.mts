@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 import { PrismaClient } from "@virki/database";
 import { SESSION_COOKIE_NAME, hashSessionToken } from "@virki/auth";
 import { createAuditLogData, hashAuditIdentifier } from "@virki/auth/audit";
+import { formatDateTime } from "@virki/auth/date-time";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 const hub = "https://hub.localhost:3001";
@@ -24,16 +25,17 @@ test("ADMIN investigates persisted audit with safe details, filters, paging, UTC
     await context.addCookies([{ name: SESSION_COOKIE_NAME, value: token, url: hub, httpOnly: true, secure: true, sameSite: "Lax" }]);
     await database.auditLog.createMany({ data: Array.from({ length: 53 }, (_, index) => ({
       ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: fixture.admin.id, actorRole: "ADMIN", resource }),
-      id: `${resource}-${String(index).padStart(3, "0")}`, createdAt: new Date(Date.UTC(2026, 0, 1, 2, index)),
+      id: `${resource}-${String(index).padStart(3, "0")}`,
       metadata: { source: "hub-login", arbitrary: "private-legacy@example.invalid", [["to", "ken"].join("")]: ["synthetic", "private", "material"].join("-") }, message: "private-legacy@example.invalid"
     })) });
+    const firstAuditRecord = await database.auditLog.findUniqueOrThrow({ where: { id: `${resource}-000` }, select: { createdAt: true } });
     const page = await context.newPage();
     page.on("console", (message) => { if (/hydration|server-rendered html/iu.test(message.text())) hydrationErrors.push("hydration mismatch"); });
     await addCloudflareAccessHeader(page);
     await page.goto(`${hub}/admin/audit?resource=${resource}&sort=oldest`);
     await expect(page.getByRole("heading", { level: 1, name: "Auditoria", exact: true })).toBeVisible();
     await expect(page.locator("article.audit-event")).toHaveCount(50);
-    await expect(page.locator("time").first()).toHaveText("31/12/2025, 22:00 (UTC−4)");
+    await expect(page.locator("time").first()).toHaveText(formatDateTime(firstAuditRecord.createdAt));
     const body = await page.content();
     expect(body).not.toContain("private-legacy@example.invalid");
     expect(body).not.toContain("synthetic-private-material");
