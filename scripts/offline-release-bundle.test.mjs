@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdtempSync, mkdirSync, openSync, readFileSync,
+  readdirSync, renameSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { prepareOfflineReleaseBundle, verifySourceTarAgainstGit } from "./lib/offline-release-bundle.mjs";
+import { verifySourceTarFdAgainstGit } from "./lib/offline-source-tar-verifier.mjs";
 
 const SOURCE = "https://github.com/bielxdh3/Virki.git";
 const LABEL_SOURCE = "https://github.com/bielxdh3/Virki";
@@ -83,6 +85,64 @@ function setup(t, { sha256 = false } = {}) {
   const options = { repositoryRoot, revision, stagingParent, ciManifestPath, images: IMAGE_IDS, runner };
   return { root, revision, repositoryRoot, stagingParent, ciManifestPath, options, runLog };
 }
+
+function existingSource(t) {
+  const f = setup(t);
+  const filename = path.join(f.root, "existing-source.tar");
+  execFileSync("git", ["archive", "--format=tar", `--output=${filename}`, f.revision],
+    { cwd: f.repositoryRoot });
+  const line = git(f.repositoryRoot, "ls-tree", "HEAD");
+  const match = /^(100644|100755) blob ([0-9a-f]{40})\t(.+)$/u.exec(line);
+  assert.ok(match);
+  return { ...f, filename,
+    objects: new Map([[match[3], { mode: match[1], type: "blob", id: match[2] }]]),
+    timestamp: Number(git(f.repositoryRoot, "show", "-s", "--format=%ct", f.revision)) };
+}
+
+test("FD-bound source verifier reads the original inode after its filename is renamed", (t) => {
+  const f = existingSource(t);
+  const fd = openSync(f.filename, "r");
+  t.after(() => closeSync(fd));
+  const before = fstatSync(fd, { bigint: true });
+  const contentHash = createHash("sha256").update(readFileSync(f.filename)).digest("hex");
+  renameSync(f.filename, path.join(f.root, "renamed-source"));
+  const result = verifySourceTarFdAgainstGit(fd, f.revision, f.objects, f.timestamp);
+  assert.equal(result.sha256, contentHash);
+  assert.equal(result.sizeBytes, Number(before.size));
+});
+
+test("FD-bound source verifier never reopens a filename replaced by a different TAR", (t) => {
+  const f = existingSource(t);
+  const original = readFileSync(f.filename);
+  const fd = openSync(f.filename, "r");
+  t.after(() => closeSync(fd));
+  renameSync(f.filename, path.join(f.root, "pinned-source"));
+  const changed = Buffer.from(original);
+  const offset = changed.indexOf(Buffer.from("controlled fixture"));
+  assert.ok(offset > 0);
+  changed[offset] ^= 1;
+  writeFileSync(f.filename, changed);
+  assert.deepEqual(verifySourceTarFdAgainstGit(fd, f.revision, f.objects, f.timestamp), {
+    sha256: createHash("sha256").update(original).digest("hex"), sizeBytes: original.length,
+  });
+  assert.throws(() => verifySourceTarAgainstGit(f.filename, f.revision, f.objects, f.timestamp),
+    /blob content differs from Git/u);
+});
+
+test("FD-bound source verifier rejects in-place mutation after the fd was pinned", (t) => {
+  const f = existingSource(t);
+  const fd = openSync(f.filename, "r+");
+  t.after(() => closeSync(fd));
+  const before = fstatSync(fd, { bigint: true });
+  const contents = readFileSync(f.filename);
+  const offset = contents.indexOf(Buffer.from("controlled fixture"));
+  assert.ok(offset > 0);
+  writeSync(fd, Buffer.from("X"), 0, 1, offset);
+  assert.throws(() => verifySourceTarFdAgainstGit(fd, f.revision, f.objects, f.timestamp, before),
+    /changed|metadata/u);
+  assert.throws(() => verifySourceTarFdAgainstGit(fd, f.revision, f.objects, f.timestamp),
+    /blob content differs from Git/u);
+});
 
 test("builds exact HEAD tar and immutable-ID Docker save archives, returning measured inventory", async (t) => {
   const fixture = setup(t);

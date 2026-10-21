@@ -46,17 +46,38 @@ export function safeTreePath(entry) {
 // GNU sparse/longname/link entries, base-256 numbers, and arbitrary PAX keys
 // are intentionally unsupported. No archive member is extracted or executed.
 export function verifySourceTarAgainstGit(filename, expectedRevision, expectedObjects, expectedCommitTimestamp) {
-  if (!Number.isSafeInteger(expectedCommitTimestamp) || expectedCommitTimestamp < 0) {
-    reject("authenticated Git commit timestamp is required for source tar verification");
-  }
   const pathStat = lstatSync(filename, { bigint: true });
   if (!pathStat.isFile() || pathStat.isSymbolicLink() || pathStat.nlink !== 1n ||
       pathStat.size < 1024n || pathStat.size > BigInt(MAX_ARCHIVE_BYTES) ||
       pathStat.size % BigInt(TAR_BLOCK) !== 0n) reject("source tar is not a bounded regular archive");
   const fd = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const original = fstatSync(fd, { bigint: true });
-    if (!sameStat(original, pathStat)) reject("source tar changed before verification");
+    const verified = verifySourceTarFdAgainstGit(fd, expectedRevision, expectedObjects,
+      expectedCommitTimestamp, pathStat);
+    if (!sameStat(pathStat, lstatSync(filename, { bigint: true }))) {
+      reject("source tar metadata changed during verification");
+    }
+    return verified;
+  } finally { closeSync(fd); }
+}
+
+// The caller owns and closes `fd`. This entrypoint never opens a pathname;
+// its source bytes, identity and mutation checks come solely from the pinned FD.
+// `expectedStat` optionally binds the FD to metadata recorded before other
+// independent trust checks (e.g. a host-provisioned Git object store).
+export function verifySourceTarFdAgainstGit(fd, expectedRevision, expectedObjects,
+  expectedCommitTimestamp, expectedStat) {
+  if (!Number.isSafeInteger(fd) || fd < 0) reject("source tar requires an open file descriptor");
+  if (!Number.isSafeInteger(expectedCommitTimestamp) || expectedCommitTimestamp < 0) {
+    reject("authenticated Git commit timestamp is required for source tar verification");
+  }
+  const original = fstatSync(fd, { bigint: true });
+  if (!original.isFile() || original.isSymbolicLink() || original.nlink !== 1n ||
+      original.size < 1024n || original.size > BigInt(MAX_ARCHIVE_BYTES) ||
+      original.size % BigInt(TAR_BLOCK) !== 0n) reject("source tar is not a bounded regular archive");
+  if (expectedStat !== undefined && !sameStat(original, expectedStat)) {
+    reject("source tar changed before verification");
+  }
     const length = Number(original.size);
     let position = 0;
     let totalMembers = 0;
@@ -154,8 +175,7 @@ export function verifySourceTarAgainstGit(filename, expectedRevision, expectedOb
           if (chunk.subarray(0, n).some((value) => value !== 0)) reject("trailing tar payload");
           remaining -= n;
         }
-        if (!sameStat(original, fstatSync(fd, { bigint: true })) ||
-            !sameStat(original, lstatSync(filename, { bigint: true }))) {
+        if (!sameStat(original, fstatSync(fd, { bigint: true }))) {
           reject("source tar metadata changed during verification");
         }
         return Object.freeze({ sha256: archiveDigest.digest("hex"), sizeBytes: length });
@@ -229,5 +249,4 @@ export function verifySourceTarAgainstGit(filename, expectedRevision, expectedOb
       if (totalMembers > expectedObjects.size) reject("excess tar member count");
     }
     reject("source tar lacks final zero terminator");
-  } finally { closeSync(fd); }
 }

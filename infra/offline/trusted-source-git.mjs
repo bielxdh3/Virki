@@ -3,7 +3,7 @@ import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync,
   readdirSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { verifySourceTarAgainstGit } from "../../scripts/lib/offline-source-tar-verifier.mjs";
+import { verifySourceTarFdAgainstGit } from "../../scripts/lib/offline-source-tar-verifier.mjs";
 import { inspectUntrustedOfflineCandidate } from "./trusted-host-entry.mjs";
 
 // These locations are independently installed by the host administrator.
@@ -220,26 +220,36 @@ async function inspectSource(request) {
     (tarBefore.mode & 0o7777n) === 0o600n &&
     tarBefore.size === BigInt(candidateArchiveSizeBytes),
   "candidate source archive must be root-owned 0600, single-link regular file");
-  const pin = readRootPin(trustedShaPinPath);
-  requireIt(pin.sha === candidateSourceSha, "candidate SHA differs from independent host pin");
-  const rootBefore = requirePrivateDirectory(trustedGitDirectory, "independent bare Git directory");
-  requireNoGitAliases(trustedGitDirectory);
-  const source = authenticatedGitTree(trustedGitDirectory, pin.sha);
-  // Existing streaming parser hashes actual TAR member contents as Git blobs,
-  // and independently compares file modes, directory entries and timestamp.
-  const verified = verifySourceTarAgainstGit(sourceArchivePath, pin.sha, source.objects, source.timestamp);
-  requireIt(verified.sha256 === candidateArchiveSha256 &&
-    verified.sizeBytes === candidateArchiveSizeBytes,
-  "source archive differs from candidate's declared digest or size");
-  requireNoGitAliases(trustedGitDirectory);
-  requireIt(same(tarBefore, lstatSync(sourceArchivePath, { bigint: true })) &&
-    same(candidateBefore, lstatSync(candidateRoot, { bigint: true })) &&
-    same(rootBefore, lstatSync(trustedGitDirectory, { bigint: true })) &&
-    same(pin.info, lstatSync(trustedShaPinPath, { bigint: true })),
-  "trusted pin, Git repository or candidate changed during inspection");
-  return Object.freeze({ status: "INDEPENDENT_GIT_SOURCE_PREVIEW_ONLY",
-    deployAuthorized: false, sourceSha: pin.sha, archiveSha256: verified.sha256,
-    archiveSizeBytes: verified.sizeBytes, treeEntries: source.objects.size });
+  // Keep this exact inode open throughout the independent SHA/Git inspections.
+  // The parser consumes only this FD, even if the pathname changes meanwhile.
+  const sourceFd = openSync(sourceArchivePath,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    requireIt(same(tarBefore, fstatSync(sourceFd, { bigint: true })),
+      "candidate source archive changed during open");
+    const pin = readRootPin(trustedShaPinPath);
+    requireIt(pin.sha === candidateSourceSha, "candidate SHA differs from independent host pin");
+    const rootBefore = requirePrivateDirectory(trustedGitDirectory, "independent bare Git directory");
+    requireNoGitAliases(trustedGitDirectory);
+    const source = authenticatedGitTree(trustedGitDirectory, pin.sha);
+    // The existing streaming parser still authenticates actual Git blobs,
+    // file modes, directory entries and the canonical commit timestamp.
+    const verified = verifySourceTarFdAgainstGit(sourceFd, pin.sha, source.objects,
+      source.timestamp, tarBefore);
+    requireIt(verified.sha256 === candidateArchiveSha256 &&
+      verified.sizeBytes === candidateArchiveSizeBytes,
+    "source archive differs from candidate's declared digest or size");
+    requireNoGitAliases(trustedGitDirectory);
+    requireIt(same(tarBefore, fstatSync(sourceFd, { bigint: true })) &&
+      same(tarBefore, lstatSync(sourceArchivePath, { bigint: true })) &&
+      same(candidateBefore, lstatSync(candidateRoot, { bigint: true })) &&
+      same(rootBefore, lstatSync(trustedGitDirectory, { bigint: true })) &&
+      same(pin.info, lstatSync(trustedShaPinPath, { bigint: true })),
+    "trusted pin, Git repository or candidate changed during inspection");
+    return Object.freeze({ status: "INDEPENDENT_GIT_SOURCE_PREVIEW_ONLY",
+      deployAuthorized: false, sourceSha: pin.sha, archiveSha256: verified.sha256,
+      archiveSizeBytes: verified.sizeBytes, treeEntries: source.objects.size });
+  } finally { closeSync(sourceFd); }
 }
 
 /** Caller-provided trust locations are useful only for adversarial preview tests.
