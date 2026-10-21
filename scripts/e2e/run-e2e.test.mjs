@@ -246,6 +246,65 @@ test("production Hub E2E proxy establishes a fresh upstream TCP connection per r
   }
 });
 
+test("production Hub E2E proxy closes OIDC interaction issuer sockets between GETs", async () => {
+  const { createProductionHubProxyRequestHandler } = await import("./start-production-hub.mjs");
+  const issuerSockets = [];
+  const nextConnectionHeaders = [];
+  const issuer = createServer((request, response) => {
+    issuerSockets.push({ path: request.url, socket: request.socket });
+    response.writeHead(303, { location: "/next", "cache-control": "no-store" });
+    response.end();
+  });
+  await new Promise((resolveListen) => issuer.listen(0, "127.0.0.1", resolveListen));
+  const issuerAgent = new Agent({ keepAlive: true });
+  const next = createServer((request, response) => {
+    nextConnectionHeaders.push({ path: request.url, connection: request.headers.connection });
+    const issuerRequest = httpRequest({
+      hostname: "127.0.0.1",
+      port: issuer.address().port,
+      path: request.url,
+      method: request.method,
+      headers: { ...request.headers, host: `127.0.0.1:${issuer.address().port}` },
+      agent: issuerAgent
+    }, (issuerResponse) => {
+      response.writeHead(issuerResponse.statusCode, issuerResponse.headers);
+      issuerResponse.pipe(response);
+    });
+    issuerRequest.once("error", (error) => response.destroy(error));
+    request.pipe(issuerRequest);
+  });
+  await new Promise((resolveListen) => next.listen(0, "127.0.0.1", resolveListen));
+  const proxy = createServer(createProductionHubProxyRequestHandler(next.address().port));
+  await new Promise((resolveListen) => proxy.listen(0, "127.0.0.1", resolveListen));
+
+  const fetch = (path) => new Promise((resolveResponse, rejectResponse) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: proxy.address().port,
+      path,
+      method: "GET",
+      headers: { host: "portal.localhost", connection: "keep-alive" }
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolveResponse(response.statusCode));
+      response.once("error", rejectResponse);
+    });
+    request.once("error", rejectResponse);
+    request.end();
+  });
+  try {
+    for (const path of ["/api/health", "/api/health", "/interaction/abcdefgh", "/interaction/abcdefgh"]) {
+      assert.equal(await fetch(path), 303);
+    }
+    assert.deepEqual(nextConnectionHeaders.map((item) => item.connection), ["keep-alive", "keep-alive", "close", "close"]);
+    assert.equal(issuerSockets[0].socket, issuerSockets[1].socket, "ordinary GETs still reuse the issuer's live keep-alive socket");
+    assert.notEqual(issuerSockets[2].socket, issuerSockets[3].socket, "consecutive interactions use different issuer sockets");
+  } finally {
+    issuerAgent.destroy();
+    await Promise.all([proxy, next, issuer].map((server) => new Promise((resolveClose) => server.close(resolveClose))));
+  }
+});
+
 test("production Hub proxy records only sanitized upstream socket phase when OIDC interaction resets before headers", async () => {
   const { createProductionHubProxyRequestHandler } = await import("./start-production-hub.mjs");
   const attempts = [];

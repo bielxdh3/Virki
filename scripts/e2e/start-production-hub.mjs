@@ -126,6 +126,13 @@ export function createProductionHubProxyRequestHandler(targetPort = nextPort, jw
     forwardedHeaders["x-forwarded-for"] = incomingRequest.socket.remoteAddress ?? "127.0.0.1";
     forwardedHeaders["cf-connecting-ip"] = incomingRequest.socket.remoteAddress ?? "127.0.0.1";
 
+    // Next's internal httpxy forwards this hop-by-hop header to the issuer.
+    // Closing after each OIDC interaction GET avoids reusing an issuer socket
+    // that can end after sending redirect headers but before completing them.
+    if (incomingRequest.method === "GET" && /^\/interaction\/[A-Za-z0-9_-]{8,80}(?:\?|$)/u.test(incomingRequest.url ?? "")) {
+      forwardedHeaders.connection = "close";
+    }
+
     proxyToLocalPort(incomingRequest, outgoingResponse, targetPort, forwardedHeaders, (upstreamResponse) => {
       const low05Route = classifyLow05Url(incomingRequest.url ?? "/", process.env.VIRKI_PORTAL_URL ?? "https://portal.localhost").route;
       if (process.env.VIRKI_E2E_LOW05_DIAGNOSTICS === "true" && ["account-security", "login"].includes(low05Route)) {
