@@ -4,7 +4,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdtempSync, readFileSync, 
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { recordOfflineReleaseAcceptance, validateOfflineLedgerTransition } from "./lib/offline-release-ledger.mjs";
+import { completeOfflineReleaseAcceptance, recordOfflineReleaseAcceptance, validateOfflineLedgerTransition } from "./lib/offline-release-ledger.mjs";
 
 const predecessor = "a".repeat(40);
 const next = "b".repeat(40);
@@ -13,8 +13,16 @@ const digest = "1".repeat(64);
 const approval = "2".repeat(64);
 const nonce = "3".repeat(32);
 const LOCK = ".offline-release.lock";
+const FINISHING = ".offline-release.finalizing";
 const LEDGER = "ledger.json";
+const healthReportSha256 = "7".repeat(64);
 const moduleUrl = new URL("./lib/offline-release-ledger.mjs", import.meta.url).href;
+// The production guard has no injectable kernel fallback. This isolated test
+// switch exercises Linux inode/fsync operations in a Docker Desktop WSL kernel;
+// it is not evidence of a native-Linux host rehearsal.
+const simulatedNative = process.platform === "linux" &&
+  /microsoft|wsl/iu.test(os.release()) && process.env.VIRKI_LEDGER_TEST_SIMULATE_NATIVE === "1";
+if (simulatedNative) os.release = () => "linux-ledger-test-only";
 const nativeKernel = process.platform === "linux" && !/microsoft|wsl/iu.test(os.release());
 
 function fixture(t) {
@@ -41,6 +49,7 @@ function assertLatch(directory) {
 
 function commandScript(extra = "") {
   return `
+    ${simulatedNative ? 'import os from "node:os"; os.release = () => "linux-ledger-test-only";' : ""}
     ${extra}
     const { recordOfflineReleaseAcceptance } = await import(${JSON.stringify(moduleUrl)});
     recordOfflineReleaseAcceptance(JSON.parse(process.env.VIRKI_TEST_LEDGER_REQUEST));
@@ -51,6 +60,21 @@ function runChild(request, extra = "") {
   return spawnSync(process.execPath, ["--input-type=module", "-e", commandScript(extra)], {
     encoding: "utf8", timeout: 10_000,
     env: { ...process.env, VIRKI_TEST_LEDGER_REQUEST: JSON.stringify(request) },
+  });
+}
+
+function runCompletionChild(request, extra = "") {
+  const code = `
+    ${simulatedNative ? 'import os from "node:os"; os.release = () => "linux-ledger-test-only";' : ""}
+    ${extra}
+    const { completeOfflineReleaseAcceptance } = await import(${JSON.stringify(moduleUrl)});
+    completeOfflineReleaseAcceptance(JSON.parse(process.env.VIRKI_TEST_LEDGER_REQUEST));
+  `;
+  return spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+    encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, VIRKI_TEST_LEDGER_REQUEST: JSON.stringify({
+      ...request, observedActiveSha: request.nextSha, healthReportSha256,
+    }) },
   });
 }
 
@@ -112,25 +136,56 @@ if (!nativeKernel) {
     }
   });
 
-  test("durably appends one approval and removes only its own successful lock", (t) => {
+  test("durably records an attempted release, blocks next release until independently confirmed completion", (t) => {
     const request = fixture(t);
     const result = recordOfflineReleaseAcceptance(request);
-    assert.deepEqual(Object.keys(result).sort(), ["headSha", "sequence"].sort());
+    assert.deepEqual(Object.keys(result).sort(), ["pendingSha", "sequence", "status"].sort());
     assert.equal(result.sequence, 1);
-    assert.equal(result.headSha, next);
+    assert.equal(result.pendingSha, next);
+    assert.equal(result.status, "attempted");
+    assert.equal(state(request.directory).entries.length, 0);
+    assertLatch(request.directory);
+    const followOn = { ...request, priorSha: next, nextSha: later, sequence: 2,
+      nonce: "4".repeat(32), approvalDigest: "5".repeat(64), manifestSha256: "6".repeat(64) };
+    assert.throws(() => recordOfflineReleaseAcceptance(followOn));
+    assert.equal(state(request.directory).entries.length, 0);
+    assert.equal(completeOfflineReleaseAcceptance({ ...request, observedActiveSha: next,
+      healthReportSha256 }).status, "completed");
     assert.deepEqual(state(request.directory).entries[0], {
       sequence: 1, priorSha: predecessor, nextSha: next, manifestSha256: digest,
       nonce, approvalDigest: approval,
     });
     assert.equal(existsSync(path.join(request.directory, LOCK)), false);
+    assert.equal(existsSync(path.join(request.directory, FINISHING)), false);
     assert.deepEqual(readdirSync(request.directory), [LEDGER]);
     assert.equal(lstatSync(path.join(request.directory, LEDGER)).mode & 0o777, 0o600);
     assert.equal(lstatSync(path.join(request.directory, LEDGER)).uid, process.getuid());
-    assert.equal(recordOfflineReleaseAcceptance({
-      ...request, priorSha: next, nextSha: later, sequence: 2, nonce: "4".repeat(32),
-      approvalDigest: "5".repeat(64), manifestSha256: "6".repeat(64),
-    }).sequence, 2);
-    assert.equal(state(request.directory).entries.length, 2);
+    assert.equal(recordOfflineReleaseAcceptance(followOn).sequence, 2);
+    assert.equal(state(request.directory).entries.length, 1);
+    assertLatch(request.directory);
+  });
+
+  test("a successful recorder process followed by crash before activation keeps new attempts blocked", (t) => {
+    const request = fixture(t);
+    const child = runChild(request);
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(state(request.directory).entries.length, 0);
+    assertLatch(request.directory);
+    assert.throws(() => recordOfflineReleaseAcceptance({ ...request, priorSha: next,
+      nextSha: later, sequence: 2, nonce: "4".repeat(32),
+      approvalDigest: "5".repeat(64), manifestSha256: "6".repeat(64) }));
+  });
+
+  test("completion refuses forged health or identity without consuming pending approval", (t) => {
+    const request = fixture(t);
+    recordOfflineReleaseAcceptance(request);
+    for (const changes of [{ observedActiveSha: predecessor, healthReportSha256 },
+      { observedActiveSha: next, healthReportSha256: "unverified" },
+      { observedActiveSha: next, healthReportSha256, manifestSha256: "f".repeat(64) }]) {
+      assert.throws(() => completeOfflineReleaseAcceptance({ ...request, ...changes }));
+      assert.equal(state(request.directory).entries.length, 0);
+      assertLatch(request.directory);
+    }
   });
 
   test("rejects unsafe argument shapes before creating any lock", async (t) => {
@@ -215,6 +270,7 @@ if (!nativeKernel) {
     await t.test("stale sequence after a prior success", (t2) => {
       const request = fixture(t2);
       recordOfflineReleaseAcceptance(request);
+      completeOfflineReleaseAcceptance({ ...request, observedActiveSha: next, healthReportSha256 });
       assert.throws(() => recordOfflineReleaseAcceptance(request));
       assert.equal(state(request.directory).entries.length, 1);
       assertLatch(request.directory);
@@ -223,6 +279,7 @@ if (!nativeKernel) {
       await t.test(type, (t2) => {
         const request = fixture(t2);
         recordOfflineReleaseAcceptance(request);
+        completeOfflineReleaseAcceptance({ ...request, observedActiveSha: next, healthReportSha256 });
         const laterRequest = {
           ...request, priorSha: next, nextSha: later, sequence: 2,
           nonce: "4".repeat(32), approvalDigest: "5".repeat(64), manifestSha256: "6".repeat(64),
@@ -243,18 +300,21 @@ if (!nativeKernel) {
     const children = Array.from({ length: 2 }, () => new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ["--input-type=module", "-e", commandScript()], {
         env: { ...process.env, VIRKI_TEST_LEDGER_REQUEST: JSON.stringify(request) },
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "pipe"],
       });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
       child.once("error", reject);
-      child.once("exit", (code, signal) => resolve({ code, signal }));
+      child.once("close", (code, signal) => resolve({ code, signal, stderr }));
     }));
     const observed = await Promise.all(children);
-    assert.equal(observed.filter(({ code }) => code === 0).length, 1);
+    assert.equal(observed.filter(({ code }) => code === 0).length, 1, JSON.stringify(observed));
     assert.equal(observed.filter(({ code }) => code !== 0).length, 1);
-    assert.equal(state(request.directory).entries.length, 1);
+    assert.equal(state(request.directory).entries.length, 0);
+    assertLatch(request.directory);
   });
 
-  test("SIGKILL during temporary file write keeps previous ledger and durable fail-closed latch", (t) => {
+  test("SIGKILL during attempt journal write keeps previous ledger and durable fail-closed latch", (t) => {
     const request = fixture(t);
     const child = runChild(request, `
       import fs from "node:fs";
@@ -263,7 +323,7 @@ if (!nativeKernel) {
       let writes = 0;
       fs.writeSync = (fd, ...args) => {
         writes += 1;
-        if (writes === 2) {
+        if (writes === 1) {
           originalWrite(fd, Buffer.from("partial"));
           process.kill(process.pid, "SIGKILL");
         }
@@ -274,9 +334,47 @@ if (!nativeKernel) {
     assert.equal(child.signal, "SIGKILL", `child unexpectedly exited: ${child.status} ${child.stderr}`);
     assert.equal(state(request.directory).entries.length, 0);
     assertLatch(request.directory);
-    assert.equal(readdirSync(request.directory).some((name) => name.startsWith(".pending-")), true);
+    assert.equal(readdirSync(request.directory).includes(LOCK), true);
     assert.throws(() => recordOfflineReleaseAcceptance(request));
     assert.equal(state(request.directory).entries.length, 0);
+  });
+
+  test("SIGKILL while finalizing cannot silently advance the release or remove the latch", (t) => {
+    const request = fixture(t);
+    recordOfflineReleaseAcceptance(request);
+    const child = runCompletionChild(request, `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      fs.renameSync = () => process.kill(process.pid, "SIGKILL");
+      syncBuiltinESMExports();
+    `);
+    assert.equal(child.signal, "SIGKILL", child.stderr);
+    assert.equal(state(request.directory).entries.length, 0);
+    assertLatch(request.directory);
+    assert.equal(existsSync(path.join(request.directory, FINISHING)), true);
+    assert.throws(() => completeOfflineReleaseAcceptance({ ...request,
+      observedActiveSha: next, healthReportSha256 }));
+    assert.throws(() => recordOfflineReleaseAcceptance({ ...request, priorSha: next,
+      nextSha: later, sequence: 2, nonce: "4".repeat(32),
+      approvalDigest: "5".repeat(64), manifestSha256: "6".repeat(64) }));
+  });
+
+  test("SIGKILL after durable ledger rename but before unlock leaves manual recovery latch", (t) => {
+    const request = fixture(t);
+    recordOfflineReleaseAcceptance(request);
+    const child = runCompletionChild(request, `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      fs.unlinkSync = () => process.kill(process.pid, "SIGKILL");
+      syncBuiltinESMExports();
+    `);
+    assert.equal(child.signal, "SIGKILL", child.stderr);
+    assert.equal(state(request.directory).entries.length, 1);
+    assertLatch(request.directory);
+    assert.equal(existsSync(path.join(request.directory, FINISHING)), true);
+    assert.throws(() => recordOfflineReleaseAcceptance({ ...request, priorSha: next,
+      nextSha: later, sequence: 2, nonce: "4".repeat(32),
+      approvalDigest: "5".repeat(64), manifestSha256: "6".repeat(64) }));
   });
 
   test("a persisted lock or partial transaction is never automatically deleted", (t) => {

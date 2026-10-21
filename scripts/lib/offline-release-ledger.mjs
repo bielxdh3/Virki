@@ -13,6 +13,7 @@ import path from "node:path";
 // This component deliberately refuses to invent its own trust anchor.
 const LEDGER_NAME = "ledger.json";
 const LOCK_NAME = ".offline-release.lock";
+const FINALIZING_NAME = ".offline-release.finalizing";
 const MAX_ENTRIES = 1024;
 const MAX_LEDGER_BYTES = 1024 * 1024;
 const SHA = /^[a-f0-9]{40}$/u;
@@ -148,14 +149,55 @@ function writeAll(fd, bytes) {
   }
 }
 
+function attemptBytes(accepted) {
+  return Buffer.from(JSON.stringify({
+    status: "attempted", sequence: accepted.sequence,
+    priorSha: accepted.priorSha, nextSha: accepted.nextSha,
+    manifestSha256: accepted.manifestSha256, nonce: accepted.nonce,
+    approvalDigest: accepted.approvalDigest,
+  }));
+}
+
+function inspectPendingAttempt(dir, accepted) {
+  const pathname = path.join(dir, LOCK_NAME);
+  const fd = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    const lexical = lstatSync(pathname);
+    ownPrivateFile(opened, "file", 0o600);
+    invariant(lexical.isFile() && !lexical.isSymbolicLink() &&
+      opened.dev === lexical.dev && opened.ino === lexical.ino &&
+      opened.size === attemptBytes(accepted).length,
+    "pending attempt lock has unsafe identity or length");
+    const bytes = readFileSync(fd);
+    invariant(bytes.equals(attemptBytes(accepted)) &&
+      fstatSync(fd).size === opened.size,
+    "pending attempt differs from independently verified release identity");
+    return opened;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function inspectOwnedLock(dir, name, expected) {
+  const pathname = path.join(dir, name);
+  const observed = lstatSync(pathname);
+  invariant(observed.isFile() && !observed.isSymbolicLink() &&
+    observed.dev === expected.dev && observed.ino === expected.ino &&
+    observed.nlink === 1 && observed.uid === process.getuid() &&
+    (observed.mode & 0o7777) === 0o600,
+  "release operation lock changed during completion");
+}
+
 /**
- * Record a previously VERIFIED manifest and owner approval in an independently
- * bootstrapped native-Linux private ledger. The caller must already have
- * verified both signatures; SHA and digest arguments are opaque identifiers.
+ * Reserve a previously VERIFIED manifest and owner approval as an ATTEMPT,
+ * without moving the accepted ledger head. The durable, exclusive lock
+ * persists across process exits and must not be removed until a separately
+ * trusted host verifies that the deployment became healthy and calls
+ * completeOfflineReleaseAcceptance. This is not deployment authorization.
  *
- * The owner is responsible for manually reconciling any retained .lock or
- * .pending-* file following interruption. A successful write removes its own
- * lock; a failed operation after acquiring it leaves a permanent latch.
+ * The owner must manually reconcile an interrupted attempt. Never clear a
+ * persisted lock to retry automatically, even if the ledger itself is intact.
  *
  * @param {{directory:string,manifestSha256:string,priorSha:string,nextSha:string,
  *   nonce:string,sequence:number,approvalDigest:string}} request
@@ -167,48 +209,91 @@ export function recordOfflineReleaseAcceptance(request) {
   const accepted = validateRequest(request);
   const { fd: directoryFd, dir } = openTrustedDirectory(accepted.directory);
   let lockFd;
-  let temporaryFd;
   try {
     const lockPath = path.join(dir, LOCK_NAME);
     // O_EXCL is the cross-process admission boundary. Existing lock always
     // fails closed (including stale lock left by SIGKILL); never steal it.
     lockFd = openSync(lockPath, CREATE_NEW, 0o600);
     ownPrivateFile(fstatSync(lockFd), "file", 0o600);
-    writeAll(lockFd, Buffer.from(JSON.stringify({ pid: process.pid, reason: "unresolved-until-success" })));
-    fsyncSync(lockFd);
     fsyncSync(directoryFd);
 
     const state = openAndCheckLedger(dir);
+    const updated = validateOfflineLedgerTransition(state, accepted);
+    invariant(Buffer.byteLength(JSON.stringify(updated)) <= MAX_LEDGER_BYTES, "ledger has reached capacity");
+    writeAll(lockFd, attemptBytes(accepted));
+    fsyncSync(lockFd);
+    inspectOwnedLock(dir, LOCK_NAME, fstatSync(lockFd));
+    closeSync(lockFd);
+    lockFd = undefined;
+    return Object.freeze({ pendingSha: accepted.nextSha, sequence: accepted.sequence, status: "attempted" });
+  } finally {
+    // The durable attempt lock is deliberately retained, including on errors.
+    if (lockFd !== undefined) closeSync(lockFd);
+    closeSync(directoryFd);
+  }
+}
+
+/**
+ * Commit the reserved transition ONLY AFTER a separately installed trusted
+ * host verifier has checked the active revision and complete service health.
+ * observedActiveSha and healthReportSha256 are opaque claims: this persistence
+ * primitive does NOT verify the health report or establish caller authority.
+ * Never invoke it with assertions from an uploaded source or release bundle.
+ * A crash before return leaves a durable unresolved latch for manual recovery.
+ */
+export function completeOfflineReleaseAcceptance(request) {
+  invariant(process.platform === "linux" && !/microsoft|wsl/iu.test(os.release()) &&
+    typeof process.getuid === "function" && constants.O_NOFOLLOW && constants.O_DIRECTORY,
+  "native Linux and O_NOFOLLOW are required");
+  const accepted = validateRequest(request);
+  invariant(request.observedActiveSha === accepted.nextSha &&
+    DIGEST.test(request.healthReportSha256),
+  "independent health proof or deployed revision is missing");
+  const { fd: directoryFd, dir } = openTrustedDirectory(accepted.directory);
+  let finalizingFd;
+  let temporaryFd;
+  try {
+    const state = openAndCheckLedger(dir);
     const updated = Buffer.from(JSON.stringify(validateOfflineLedgerTransition(state, accepted)));
     invariant(updated.length <= MAX_LEDGER_BYTES, "ledger has reached capacity");
+    const attemptStat = inspectPendingAttempt(dir, accepted);
+    const finalizingPath = path.join(dir, FINALIZING_NAME);
+    // A second finalizer and crash retries cannot both commit the transition.
+    finalizingFd = openSync(finalizingPath, CREATE_NEW, 0o600);
+    ownPrivateFile(fstatSync(finalizingFd), "file", 0o600);
+    writeAll(finalizingFd, Buffer.from(JSON.stringify({ pid: process.pid, state: "finalizing" })));
+    fsyncSync(finalizingFd);
+    fsyncSync(directoryFd);
+    const finalizingStat = fstatSync(finalizingFd);
+    invariant(readdirSync(dir).sort().join("\0") ===
+      [FINALIZING_NAME, LOCK_NAME, LEDGER_NAME].sort().join("\0"),
+    "unresolved or foreign ledger transaction files");
+    inspectOwnedLock(dir, LOCK_NAME, attemptStat);
 
-    const tempPath = path.join(dir, `.pending-${randomBytes(16).toString("hex")}`);
-    temporaryFd = openSync(tempPath, CREATE_NEW, 0o600);
+    const pendingPath = path.join(dir, `.pending-${randomBytes(16).toString("hex")}`);
+    temporaryFd = openSync(pendingPath, CREATE_NEW, 0o600);
     ownPrivateFile(fstatSync(temporaryFd), "file", 0o600);
     writeAll(temporaryFd, updated);
     fsyncSync(temporaryFd);
     closeSync(temporaryFd);
     temporaryFd = undefined;
 
-    // File data is durable before the atomic replace; dir fsync makes the
-    // rename durable before the success lock is removed and synced again.
-    renameSync(tempPath, path.join(dir, LEDGER_NAME));
+    inspectOwnedLock(dir, LOCK_NAME, attemptStat);
+    inspectOwnedLock(dir, FINALIZING_NAME, finalizingStat);
+    renameSync(pendingPath, path.join(dir, LEDGER_NAME));
     fsyncSync(directoryFd);
-    const lockMeta = fstatSync(lockFd);
-    const onDiskLock = lstatSync(lockPath);
-    invariant(onDiskLock.isFile() && !onDiskLock.isSymbolicLink() &&
-      onDiskLock.ino === lockMeta.ino && onDiskLock.dev === lockMeta.dev &&
-      onDiskLock.nlink === 1, "lock inode was replaced");
-    closeSync(lockFd);
-    lockFd = undefined;
-    unlinkSync(lockPath);
+    inspectOwnedLock(dir, LOCK_NAME, attemptStat);
+    inspectOwnedLock(dir, FINALIZING_NAME, finalizingStat);
+    // Only successful, durable ledger completion removes the attempt latch.
+    unlinkSync(path.join(dir, LOCK_NAME));
+    unlinkSync(finalizingPath);
     fsyncSync(directoryFd);
-    return Object.freeze({ headSha: accepted.nextSha, sequence: accepted.sequence });
+    return Object.freeze({ headSha: accepted.nextSha, sequence: accepted.sequence, status: "completed" });
   } finally {
-    // No catch removes a lock or a temporary file. Interrupted attempts must
-    // be reconciled independently by a trusted operator before further use.
+    // Never remove finalizing/attempt files on failure; an incomplete commit
+    // must remain impossible to replay without explicit manual reconciliation.
     if (temporaryFd !== undefined) closeSync(temporaryFd);
-    if (lockFd !== undefined) closeSync(lockFd);
+    if (finalizingFd !== undefined) closeSync(finalizingFd);
     closeSync(directoryFd);
   }
 }
