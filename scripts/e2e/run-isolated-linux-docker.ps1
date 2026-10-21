@@ -428,7 +428,7 @@ try {
   if (-not $E2EOnly -and -not $IntegrationOnly -and -not $UnitOnly) {
     Invoke-Stage 'runtime' @('bash', '-lc', 'node --version && npm --version && uname -s')
     Invoke-LoggedStage 'secrets-scan' 'secrets-scan' 'npm run secrets:scan'
-    Invoke-LoggedStage 'production-revision-tests' 'production-revision' 'npm run test:production-revision'
+    Invoke-LoggedStage 'production-revision-tests' 'production-revision' 'npm run test:production-revision && npm run test:offline:source-git:root'
     Invoke-LoggedStage 'backup-inventory-tests' 'backup-inventory' 'npm run test:backup:inventory'
     Invoke-LoggedStage -Name 'production-operations-tests' -LogName 'production-operations' -CommandText 'bash -n scripts/production-server.sh && node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs' -EvidenceLogPath $productionOperationsEvidencePath -CaptureFullOutput
     $script:productionOperationsFailures = @(Get-TapFailureManifest -Path $productionOperationsEvidencePath)

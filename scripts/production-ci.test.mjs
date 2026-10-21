@@ -11,6 +11,8 @@ import { classifyExactShaWorkflow, evaluateExactShaCi, evaluateExactShaRelease, 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
+const packageScripts = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).scripts;
+const isolatedRunner = readFileSync(path.join(repositoryRoot, "scripts", "e2e", "run-isolated-linux-docker.ps1"), "utf8");
 const codeqlWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql.yml"), "utf8");
 const codeqlEvidenceWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql-evidence.yml"), "utf8");
 const approvalWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "approve-production.yml"), "utf8");
@@ -315,6 +317,33 @@ test("private GHCR images publish only after exact main-push builds pass on both
   assert.ok(workflow.includes("Store exact-run image digests in private GHCR evidence"));
   assert.ok(!workflow.includes("actions/upload-artifact"));
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
+});
+
+test("privileged source Git tests stay mandatory in isolated root Linux CI and the local production stage", () => {
+  assert.doesNotMatch(packageScripts["test:production-revision"], /infra\/offline\/trusted-source-git\.test\.mjs/u);
+  assert.equal(packageScripts["test:offline:source-git:root"], "node --test infra/offline/trusted-source-git.test.mjs");
+
+  const validate = workflow.replace(/\r\n/gu, "\n").match(/\n {2}validate:\n([\s\S]*?)(?=\n {2}[a-z][a-z-]*:\n|$)/u)?.[1] ?? "";
+  assert.match(validate, /runs-on: ubuntu-latest/u);
+  assert.match(validate, /name: Production control tests\n {8}run: npm run test:production-revision/u);
+  const rootStep = validate.match(/ {6}- name: Native root trusted source Git tests\n {8}run: \|\n((?: {10}[^\n]*\n)+)/u)?.[1] ?? "";
+  assert.ok(rootStep, "root-only tests require an explicit, non-optional CI step");
+  for (const guard of [
+    /docker run --rm/u,
+    /--network none/u,
+    /--read-only/u,
+    /--cap-drop ALL/u,
+    /--security-opt no-new-privileges/u,
+    /--user 0:0/u,
+    /--mount type=bind,source="\$GITHUB_WORKSPACE",target=\/workspace,readonly/u,
+    /--tmpfs \/var\/lib:rw,nosuid,nodev,size=128m,mode=0700/u,
+    /--tmpfs \/tmp:rw,nosuid,nodev,size=128m,mode=1777/u,
+    /--workdir \/workspace/u,
+    /node:22\.23\.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8/u,
+    /npm run test:offline:source-git:root/u,
+  ]) assert.match(rootStep, guard);
+  assert.doesNotMatch(rootStep, /--privileged|--network host|--cap-add|--device|secrets\.|--mount [^\n]*\/var\/run\/docker\.sock/u);
+  assert.match(isolatedRunner, /Invoke-LoggedStage 'production-revision-tests' 'production-revision' 'npm run test:production-revision && npm run test:offline:source-git:root'/u);
 });
 
 test("authenticated E2E uses the real PostgreSQL role initializer and scoped disposable credentials", () => {
