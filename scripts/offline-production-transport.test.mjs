@@ -68,7 +68,8 @@ function fixture(t) {
   }
   const builder = generateKeyPairSync("ed25519");
   const owner = generateKeyPairSync("ed25519");
-  const pin = ({ publicKey }) => ({
+  const pin = ({ publicKey }, keyId) => ({
+    keyId,
     publicKeyPem: publicKey.export({ type: "spki", format: "pem" }),
     pinSha256: hash(publicKey.export({ type: "spki", format: "der" })),
   });
@@ -100,9 +101,10 @@ function fixture(t) {
   writeFileSync(path.join(candidateDirectory, "manifest.json"), bytes, { flag: "wx", mode: 0o600 });
   writeFileSync(path.join(candidateDirectory, "signatures.json"), JSON.stringify(signatures), { flag: "wx", mode: 0o600 });
   const policy = {
-    version: 1, mode: "offline-signed-v1", enabled: true, ownerAssuranceAccepted: true,
+    version: 2, mode: "offline-signed-v1", enabled: true, ownerAssuranceAccepted: true,
     hostIdentitySha256: hostIdentity, ledgerAnchorSha: predecessor, platform: "linux/amd64",
-    builder: pin(builder), owner: pin(owner), revokedPins: [],
+    builder: pin(builder, "builder-test-2026"), owner: pin(owner, "owner-test-2026"),
+    revokedKeyIds: [], revokedPinsSha256: [],
   };
   const operator = {
     version: 1, mode: "offline-signed-v1", enabled: true, expectedRevision: revision,
@@ -195,7 +197,8 @@ test("fails closed on altered owner pin or revoked owner key before contacting a
   const original = readFileSync(p);
   for (const mutation of [
     (data) => { data.owner.pinSha256 = digest("f"); },
-    (data) => { data.revokedPins = [data.owner.pinSha256]; },
+    (data) => { data.revokedPinsSha256 = [data.owner.pinSha256]; },
+    (data) => { data.revokedKeyIds = [data.owner.keyId]; },
     (data) => { data.ownerAssuranceAccepted = false; },
     (data) => { data.hostIdentitySha256 = digest("0"); },
   ]) {
