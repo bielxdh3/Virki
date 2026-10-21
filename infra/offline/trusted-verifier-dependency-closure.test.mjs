@@ -15,6 +15,13 @@ const HOST_ENTRIES = Object.freeze([
   "infra/offline/trusted-image-loader.mjs",
   "infra/offline/trusted-source-git.mjs",
 ]);
+// Native verifier modules use only these builtins. In particular, loading
+// node:module, node:vm or worker_threads would allow aliased code-loaders to
+// evade a static ESM dependency inventory without a new security review.
+const AUDITED_NODE_BUILTINS = new Set([
+  "node:child_process", "node:crypto", "node:fs", "node:fs/promises",
+  "node:os", "node:path", "node:url",
+]);
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 // Fail closed on any executable dependency we cannot statically account for.
@@ -49,6 +56,14 @@ function importsIn(source) {
     if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
       assert.notEqual(node.expression.text, "Function", "dynamic evaluation is forbidden");
     }
+    if (ts.isPropertyAccessExpression(node)) {
+      assert.notEqual(node.name.text, "getBuiltinModule", "dynamic builtin loader is forbidden");
+    }
+    if (ts.isElementAccessExpression(node) && node.argumentExpression &&
+        ts.isStringLiteral(node.argumentExpression)) {
+      assert.notEqual(node.argumentExpression.text, "getBuiltinModule",
+        "dynamic builtin loader is forbidden");
+    }
     ts.forEachChild(node, visit);
   }
   visit(parsed);
@@ -69,7 +84,11 @@ function discoverClosure(sourceRoot, entries = HOST_ENTRIES) {
     found.add(relative);
     const source = readFileSync(full, "utf8");
     for (const specifier of importsIn(source)) {
-      if (specifier.startsWith("node:")) continue;
+      if (specifier.startsWith("node:")) {
+        assert.ok(AUDITED_NODE_BUILTINS.has(specifier),
+          `unreviewed native builtin dependency: ${specifier}`);
+        continue;
+      }
       assert.ok(specifier.startsWith("./") || specifier.startsWith("../"),
         `untrusted package/builtin dependency: ${specifier}`);
       assert.ok(specifier.endsWith(".mjs") && !specifier.includes("?") && !specifier.includes("#"),
@@ -118,6 +137,9 @@ test("unreviewed static import, dynamic import, package import and vanished impo
     `${original}\nexport { injected } from "./not-a-pinned-module.mjs";\n`,
     `${original}\nexport{injected}from"./not-a-pinned-module.mjs";\n`,
     `${original}\nexport*from"./not-a-pinned-module.mjs";\n`,
+    `${original}\nimport { createRequire as cr } from "node:module"; const load = cr(import.meta.url); load("./nonpinned.cjs");\n`,
+    `${original}\nconst load = process.getBuiltinModule("module").createRequire(import.meta.url); load("./nonpinned.cjs");\n`,
+    `${original}\nimport { runInNewContext as run } from "node:vm"; run("require('./nonpinned.cjs')");\n`,
   ]) {
     writeFileSync(target, altered);
     assert.throws(() => {
