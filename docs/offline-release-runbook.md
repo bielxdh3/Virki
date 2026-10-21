@@ -41,8 +41,12 @@ hosted CodeQL approval or as permission to deploy.
 ## Host trust and stop conditions
 
 1. Independent, root-owned, already-installed native Linux/amd64 verifier;
-   fixed policy and revocations in `/etc/virki/offline-release`, durable replay
-   ledger in `/var/lib/virki/offline-release`. **No installer or trust root may
+   **v2 trust policy** and revocations in `/etc/virki/offline-release`, durable replay
+   ledger in `/var/lib/virki/offline-release`. Both `revokedKeyIds` and
+   `revokedPinsSha256` must be independently synchronized with the owner's
+   revocation decisions; merely revoking a signer ID on a development PC does
+   not revoke its host-pinned key. The old pin-only v1 policy fails closed.
+   **No installer or trust root may
    originate from a candidate archive.** WSL is not an acceptable target.
 2. Verify host identity, independent builder/owner Ed25519 key pins, explicit
    owner assurance flag, revocations, predecessor, sequence, validity window,
