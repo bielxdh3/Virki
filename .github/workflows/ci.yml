@@ -129,6 +129,27 @@ jobs:
             node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 \
             npm run test:offline:source-git:root
 
+      - name: Disposable offline owner approval and restore rehearsal
+        run: |
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --user 0:0 \
+            --pids-limit 256 \
+            --memory 512m \
+            --mount type=bind,source="$GITHUB_WORKSPACE",target=/workspace,readonly \
+            --tmpfs /var/lib:rw,nosuid,nodev,size=128m,mode=0700 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --env npm_config_cache=/tmp/npm-cache \
+            --workdir /workspace \
+            node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 \
+            npm run test:offline:rehearsal
+
+      - name: Disposable native offline coordinator fault rehearsal
+        run: npm run test:offline:coordinator:container
+
       - name: Native Linux production operations tests
         run: |
           bash -n scripts/production-server.sh
