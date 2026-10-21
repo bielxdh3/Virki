@@ -5,6 +5,8 @@ import {
   chmodSync, copyFileSync, linkSync, mkdtempSync, renameSync, rmSync,
   symlinkSync, writeFileSync,
 } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -108,6 +110,26 @@ test("read-only pinned preview validates original archive, returns no Docker aut
   assert.equal(Object.isFrozen(preview), true);
   assert.equal(Object.hasOwn(preview, "fd"), false);
   assert.equal(Object.hasOwn(preview, "authorizationToken"), false);
+});
+
+test("preview opens TAR exactly once and parses through the original pinned descriptor", async (t) => {
+  const f = fixture(t);
+  const originalOpen = fsPromises.open;
+  const opened = [];
+  fsPromises.open = async (...args) => {
+    opened.push(args[0]);
+    if (opened.length > 1) throw new Error("second filesystem open forbidden by test");
+    return originalOpen(...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    const result = await inspectUntrustedPinnedImageForPreview(f.inputs);
+    assert.equal(result.archiveSha256, sha(f.archive));
+    assert.deepEqual(opened, [f.archivePath]);
+  } finally {
+    fsPromises.open = originalOpen;
+    syncBuiltinESMExports();
+  }
 });
 
 test("rejects path swap after no-follow FD pinning even with a valid replacement image", async (t) => {

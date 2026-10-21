@@ -3,7 +3,7 @@ import { constants, lstatSync, realpathSync } from "node:fs";
 import { open } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { verifyOfflineDockerSaveTar } from "../../scripts/lib/offline-docker-tar-verifier.mjs";
+import { verifyOfflineDockerSaveTarFromHandle } from "../../scripts/lib/offline-docker-tar-verifier.mjs";
 import { verifyTrustedHostOfflineCandidate } from "./trusted-host-entry.mjs";
 
 // Installed host policy and ledger currently provide only INSPECTED_ONLY /
@@ -151,12 +151,11 @@ export async function inspectUntrustedPinnedImageForPreview(request = {}) {
         !same(pinned, lstatSync(archivePath, { bigint: true }))) {
       refuse("archive changed after hashing");
     }
-    // Existing rigorous TAR parser checks config, every layer's uncompressed
-    // diff_id, tags, OCI graph, owner metadata, and entire archive SHA-256.
-    // It currently accepts a PATH, not an already opened FD; this is safe for
-    // non-authorizing preview only. An active loader needs an FD-bound verifier.
-    const proof = await verifyOfflineDockerSaveTar({
-      archivePath, role, expectedImageId, expectedRevision,
+    // Parse and authenticate through this exact borrowed FileHandle. Reopening
+    // archivePath after the first hash would introduce a second-inode race.
+    // The parser does not close or change the cursor of our pinned handle.
+    const proof = await verifyOfflineDockerSaveTarFromHandle({
+      fileHandle: handle, role, expectedImageId, expectedRevision,
       expectedArchiveSha256, expectedArchiveSizeBytes,
     });
     const second = await hashPinned(handle, expectedArchiveSizeBytes);
