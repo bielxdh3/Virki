@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { constants, linkSync, mkdtempSync, readSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { verifyOfflineDockerSaveTar } from "./lib/offline-docker-tar-verifier.mjs";
+import { verifyOfflineDockerSaveTar, verifyOfflineDockerSaveTarFromHandle } from "./lib/offline-docker-tar-verifier.mjs";
 
 const REVISION = "fbac177b91414ff8d047cef40cc9920d0ba882cd";
 const SOURCE = "https://github.com/bielxdh3/Virki";
@@ -354,4 +355,63 @@ test("rejects symlink and hardlinked input even when contents match the expected
   rmSync(alias);
   linkSync(original, alias);
   await assert.rejects(verifyOfflineDockerSaveTar(fixture.args), /rejected/u);
+});
+
+test("borrowed FileHandle authenticates classic and OCI TARs without consuming or closing descriptor", async (t) => {
+  for (const fixture of [setup(t), setupOci(t, { legacyMetadata: true })]) {
+    const fileHandle = await open(fixture.args.archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const { archivePath: _unused, ...expected } = fixture.args;
+      const proof = await verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle });
+      assert.equal(proof.imageId, fixture.args.expectedImageId);
+      assert.equal(proof.archiveSha256, fixture.args.expectedArchiveSha256);
+      assert.equal(proof.layerCount, 1);
+      // The FD remains owned by the caller and positional reads preserve its cursor.
+      const first = Buffer.alloc(512);
+      assert.equal(readSync(fileHandle.fd, first, 0, 512, null), 512);
+      assert.ok(first.equals(fixture.archiveBytes.subarray(0, 512)));
+      assert.equal((await verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle })).archiveSha256,
+        fixture.args.expectedArchiveSha256);
+    } finally {
+      await fileHandle.close();
+    }
+  }
+});
+
+test("renaming original and installing a different valid TAR cannot redirect borrowed FileHandle", async (t) => {
+  const original = setup(t);
+  const replacement = setup(t, { source: "https://attacker.invalid/other" });
+  const fileHandle = await open(original.args.archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const { archivePath: _unused, ...expected } = original.args;
+    renameSync(original.args.archivePath, path.join(original.directory, "retired.tar"));
+    renameSync(replacement.args.archivePath, original.args.archivePath);
+    assert.equal((await verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle })).archiveSha256,
+      original.args.expectedArchiveSha256);
+    await assert.rejects(verifyOfflineDockerSaveTar(original.args), /rejected/u);
+  } finally {
+    await fileHandle.close();
+  }
+});
+
+test("borrowed FileHandle rejects in-place mutation, truncated content and wrong pin", async (t) => {
+  const fixture = setup(t);
+  const fileHandle = await open(fixture.args.archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const { archivePath: _unused, ...expected } = fixture.args;
+  try {
+    await assert.rejects(verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle,
+      expectedArchiveSha256: "f".repeat(64) }), /rejected/u);
+    const changed = Buffer.from(fixture.archiveBytes);
+    changed[changed.length - 1] = 1;
+    writeFileSync(fixture.args.archivePath, changed);
+    await assert.rejects(verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle }), /rejected/u);
+    writeFileSync(fixture.args.archivePath, changed.subarray(0, changed.length - 512));
+    await assert.rejects(verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle }), /rejected/u);
+  } finally {
+    await fileHandle.close();
+  }
+  await assert.rejects(verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle }), /rejected|EBADF/u);
+  await assert.rejects(verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle: -1 }), /rejected/u);
+  await assert.rejects(verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle: fixture.args.archivePath }), /rejected/u);
+  await assert.rejects(verifyOfflineDockerSaveTarFromHandle({ ...expected, fileHandle: { fd: 1 } }), /rejected/u);
 });

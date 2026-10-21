@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, lstatSync } from "node:fs";
+import { constants, fstatSync, lstatSync, read as readFd } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
 
@@ -221,6 +221,17 @@ function ensureNoAliases(filename) {
   }
 }
 
+// Use the operating system's positional read on the caller's original FD.
+// Never resolve or reopen a pathname from the FD-based entrypoint.
+function readPinned(archiveFd, buffer, offset, length, position) {
+  return new Promise((resolve, reject) => {
+    readFd(archiveFd, buffer, offset, length, position, (error, bytesRead) => {
+      if (error) reject(error);
+      else resolve({ bytesRead });
+    });
+  });
+}
+
 function validateDockerConfig(raw, imageId, revision) {
   if (sha256(raw) !== imageId.slice(7)) refuse("config SHA-256 differs from expected image ID");
   const config = strictJson(raw, "image config");
@@ -301,32 +312,85 @@ const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
  * Docker image IDs are config digests, not registry manifest digests. The caller
  * must reverify before use and separately enforce host/owner policy.
  */
-export async function verifyOfflineDockerSaveTar({
-  archivePath, expectedImageId, expectedRevision, expectedArchiveSha256,
-  expectedArchiveSizeBytes, role,
-} = {}) {
+function validateExpectedIdentity({
+  expectedImageId, expectedRevision, expectedArchiveSha256, expectedArchiveSizeBytes, role,
+}) {
   if (!["runtime", "migrator"].includes(role) ||
       !IMAGE_ID.test(expectedImageId ?? "") ||
       !GIT_SHA.test(expectedRevision ?? "") ||
       !ARCHIVE_SHA.test(expectedArchiveSha256 ?? "") ||
       !Number.isSafeInteger(expectedArchiveSizeBytes) ||
       expectedArchiveSizeBytes < 1024 || expectedArchiveSizeBytes > MAX_ARCHIVE ||
-      expectedArchiveSizeBytes % 512 !== 0 ||
-      typeof archivePath !== "string" || archivePath.length > 4096 ||
+      expectedArchiveSizeBytes % 512 !== 0) {
+    refuse("invalid expected Docker archive identity");
+  }
+}
+
+/**
+ * Preview verifier for an already-open, caller-owned FileHandle.
+ * It reads exclusively through fileHandle.fd, never opens the archive by
+ * pathname, and leaves the handle open with its sequential cursor untouched.
+ *
+ * The caller must keep the handle open and exclusively owned until this promise
+ * settles, pin the source/ownership policy, and prevent writes to the inode.
+ * A content hash and before/after fstat reject observable mutations but cannot
+ * make a concurrently writable inode into an atomic filesystem snapshot.
+ * This result is content inspection, never a Docker load/deploy capability.
+ */
+export async function verifyOfflineDockerSaveTarFromHandle(request = {}) {
+  if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Object.keys(request).sort().join(",") !== [
+        "fileHandle", "expectedImageId", "expectedRevision", "expectedArchiveSha256",
+        "expectedArchiveSizeBytes", "role",
+      ].sort().join(",") ||
+      !request.fileHandle || typeof request.fileHandle !== "object" ||
+      typeof request.fileHandle.read !== "function" ||
+      typeof request.fileHandle.stat !== "function" ||
+      typeof request.fileHandle.close !== "function" ||
+      !Number.isSafeInteger(request.fileHandle.fd) || request.fileHandle.fd < 0) {
+    refuse("invalid caller-owned Docker archive FileHandle or expected identity fields");
+  }
+  validateExpectedIdentity(request);
+  return verifyPinnedArchive(request.fileHandle.fd, request);
+}
+
+/**
+ * Original pathname preview entrypoint. Keeps its no-follow path checks and
+ * reuses the FD-bound parser after opening the file exactly once.
+ */
+export async function verifyOfflineDockerSaveTar({
+  archivePath, expectedImageId, expectedRevision, expectedArchiveSha256,
+  expectedArchiveSizeBytes, role,
+} = {}) {
+  const expected = {
+    expectedImageId, expectedRevision, expectedArchiveSha256, expectedArchiveSizeBytes, role,
+  };
+  validateExpectedIdentity(expected);
+  if (typeof archivePath !== "string" || archivePath.length > 4096 ||
       archivePath.includes("\0") || !path.isAbsolute(archivePath) ||
       path.normalize(archivePath) !== archivePath ||
       !Number.isInteger(constants.O_NOFOLLOW) || !Number.isInteger(constants.O_NONBLOCK)) {
-    refuse("invalid expected Docker archive identity or safe-file capabilities");
+    refuse("invalid Docker archive pathname or safe-file capabilities");
   }
   ensureNoAliases(archivePath);
   const pathBefore = lstatSync(archivePath, { bigint: true });
   ensureRegular(pathBefore);
   if (pathBefore.size !== BigInt(expectedArchiveSizeBytes)) refuse("archive length differs from expected");
-  const fd = await open(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const handle = await open(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const before = await fd.stat({ bigint: true });
+    return await verifyPinnedArchive(handle.fd, expected, archivePath, pathBefore);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function verifyPinnedArchive(archiveFd, {
+  expectedImageId, expectedRevision, expectedArchiveSha256, expectedArchiveSizeBytes, role,
+}, archivePath, pathBefore) {
+    const before = fstatSync(archiveFd, { bigint: true });
     ensureRegular(before);
-    if (!sameFile(pathBefore, before)) refuse("archive path changed during opening");
+    if (before.size !== BigInt(expectedArchiveSizeBytes)) refuse("archive length differs from expected");
+    if (pathBefore && !sameFile(pathBefore, before)) refuse("archive path changed during opening");
     let offset = 0;
     const hasher = createHash("sha256");
     async function readExactly(length) {
@@ -336,7 +400,7 @@ export async function verifyOfflineDockerSaveTar({
       const buffer = Buffer.allocUnsafe(length);
       let read = 0;
       while (read < length) {
-        const result = await fd.read(buffer, read, length - read, offset + read);
+        const result = await readPinned(archiveFd, buffer, read, length - read, offset + read);
         if (result.bytesRead <= 0) refuse("unexpected end of Docker TAR");
         read += result.bytesRead;
       }
@@ -416,11 +480,11 @@ export async function verifyOfflineDockerSaveTar({
     if (!ended || offset !== expectedArchiveSizeBytes) refuse("incomplete Docker TAR structure");
     const archiveSha256 = hasher.digest("hex");
     if (archiveSha256 !== expectedArchiveSha256) refuse("Docker TAR SHA-256 differs from trusted inventory");
-    if (!sameFile(before, await fd.stat({ bigint: true })) ||
-        !sameFile(before, lstatSync(archivePath, { bigint: true }))) {
+    if (!sameFile(before, fstatSync(archiveFd, { bigint: true })) ||
+        (archivePath && !sameFile(before, lstatSync(archivePath, { bigint: true })))) {
       refuse("Docker TAR changed during verification");
     }
-    ensureNoAliases(archivePath);
+    if (archivePath) ensureNoAliases(archivePath);
     const configName = `${expectedImageId.slice(7)}.json`;
     if (!files.has("manifest.json")) refuse("Docker save manifest missing");
     let config;
@@ -442,7 +506,7 @@ export async function verifyOfflineDockerSaveTar({
         const buffer = Buffer.alloc(member.size);
         let received = 0;
         while (received < member.size) {
-          const { bytesRead } = await fd.read(buffer, received,
+          const { bytesRead } = await readPinned(archiveFd, buffer, received,
             Math.min(READ_BLOCK, member.size - received), member.contentOffset + received);
           if (bytesRead <= 0) refuse("OCI metadata read truncated");
           received += bytesRead;
@@ -600,17 +664,14 @@ export async function verifyOfflineDockerSaveTar({
         refuse("unreferenced Docker directory entry");
       }
     }
-    if (!sameFile(before, await fd.stat({ bigint: true })) ||
-        !sameFile(before, lstatSync(archivePath, { bigint: true }))) {
+    if (!sameFile(before, fstatSync(archiveFd, { bigint: true })) ||
+        (archivePath && !sameFile(before, lstatSync(archivePath, { bigint: true })))) {
       refuse("Docker TAR changed while validating OCI graph");
     }
-    ensureNoAliases(archivePath);
+    if (archivePath) ensureNoAliases(archivePath);
     return Object.freeze({
       role, imageId: expectedImageId, revision: expectedRevision, source: SOURCE,
       platform: "linux/amd64", user: config.user, archiveSha256,
       archiveSizeBytes: expectedArchiveSizeBytes, layerCount: orderedLayerDigests.length,
     });
-  } finally {
-    await fd.close();
-  }
 }
