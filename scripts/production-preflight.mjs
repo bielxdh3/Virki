@@ -47,6 +47,13 @@ printf 'VIRKI_PROBE_PLATFORM=linux-native\\n'
 printf 'VIRKI_PROBE_MARKER=valid\\n'
 `;
 
+// Explicitly opted-in offline validation must not depend on a GHCR credential.
+// Keep the hosted probe unchanged: it still requires its dedicated read token.
+const OFFLINE_PROBE_SCRIPT = PROBE_SCRIPT.replace(
+  "for name in .env .env.oidc .env.oidc-data .ghcr-read-token; do",
+  "for name in .env .env.oidc .env.oidc-data; do",
+);
+
 export const DOCKER_SCRIPT = `
 set -eu
 root=$2
@@ -179,7 +186,11 @@ export async function runProductionPreflight({
   execute = run,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   config: operatorConfig = readProductionConfig(),
+  mode = "hosted",
 } = {}) {
+  if (mode !== "hosted" && mode !== "offline") {
+    return { status: 1, lines: ["Unknown production preflight release mode."] };
+  }
   if (!isValidProductionConfig(operatorConfig)) {
     return { status: 1, lines: ["Private production operator configuration is missing or invalid."] };
   }
@@ -200,7 +211,8 @@ export async function runProductionPreflight({
   let identity = "";
   const lines = [];
   for (let attempt = 1; attempt <= PROBE_COUNT; attempt += 1) {
-    const result = runRemoteScript(PROBE_SCRIPT, "probe", execute, operatorConfig);
+    const result = runRemoteScript(mode === "offline" ? OFFLINE_PROBE_SCRIPT : PROBE_SCRIPT,
+      "probe", execute, operatorConfig);
     if (!probeIsValid(result)) {
       return { status: 1, lines: [`SSH preflight failed on probe ${attempt}; ${describeProbeFailure(result)}`] };
     }
