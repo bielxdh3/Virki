@@ -464,6 +464,9 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     expect(backState.forms).toBe(false);
     await page.goForward({ waitUntil: "domcontentloaded" });
     await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
+    // A URL match can precede hydration; avoid racing the next history traversal
+    // against the returning portal document's initial navigation lifecycle.
+    await expect(page.getByRole("heading", { level: 1, name: "Projetos", exact: true })).toBeVisible();
     const repeatHistoryBackResponse = await goBackToProtectedPage(page);
     expect(repeatHistoryBackResponse.status).toBe(200);
     expect(isLow05ProtectedDocumentCacheControl(repeatHistoryBackResponse.cacheControl, hubMode)).toBe(true);
