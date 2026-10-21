@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, request as httpRequest } from "node:http";
+import { Agent, createServer, request as httpRequest } from "node:http";
 import { dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildE2ECommand, shouldBuildProductionHub } from "./run-e2e.mjs";
 import { buildServiceEnvironment, getServiceCommand } from "./isolated-service.mjs";
 import { redactBrowserE2ELog } from "./redact-browser-e2e-log.mjs";
@@ -334,6 +335,116 @@ test("production Hub proxy differentiates connection failure before TCP connect 
     assert.equal(JSON.stringify(observedFailures).includes("HIGHLY_PRIVATE"), false);
   } finally {
     await new Promise((resolveClose) => proxy.close(resolveClose));
+  }
+});
+
+test("Next child diagnostic preloader activates only in an isolated production E2E child", () => {
+  const script = pathToFileURL(resolve(scriptDirectory, "start-production-hub.mjs")).href;
+  const childCode = 'import http from "node:http"; process.stdout.write(String(http.request.name) + "\\n");';
+  const runChild = (enabled) => spawnSync(process.execPath, ["--import", script, "--input-type=module", "-e", childCode], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      VIRKI_E2E_HUB_MODE: "production",
+      VIRKI_E2E_NEXT_ISSUER_DIAGNOSTICS: enabled ? "1" : "0"
+    }
+  });
+  const enabled = runChild(true);
+  assert.equal(enabled.status, 0, enabled.stderr);
+  assert.match(enabled.stderr, /E2E_NEXT_ISSUER \{"event":"instrumented"\}/u);
+  assert.match(enabled.stdout, /diagnosticHttpRequest/u);
+  const disabled = runChild(false);
+  assert.equal(disabled.status, 0, disabled.stderr);
+  assert.doesNotMatch(disabled.stderr, /E2E_NEXT_ISSUER/u);
+  assert.doesNotMatch(disabled.stdout, /diagnosticHttpRequest/u);
+  const source = readFileSync(new URL("./start-production-hub.mjs", import.meta.url), "utf8");
+  assert.match(source, /"--import",\s*pathToFileURL\(fileURLToPath\(import\.meta\.url\)\)\.href/u);
+  assert.match(source, /VIRKI_E2E_NEXT_ISSUER_DIAGNOSTICS:\s*"1"/u);
+});
+
+test("Next child diagnostic records local upstream socket reuse and response lifecycle without credentials", async () => {
+  const { installNextIssuerTransportDiagnostics } = await import("./start-production-hub.mjs");
+  const captured = [];
+  const received = [];
+  const upstream = createServer((req, res) => {
+    received.push({ path: req.url, cookie: req.headers.cookie, authorization: req.headers.authorization, peerPort: req.socket.remotePort });
+    req.resume();
+    res.writeHead(303, { location: "/auth?code=PRIVATE_RESPONSE_CODE", "set-cookie": "private=PRIVATE_RESPONSE_COOKIE" });
+    res.end();
+  });
+  await new Promise((resolveListen) => upstream.listen(0, "127.0.0.1", resolveListen));
+  const agent = new Agent({ keepAlive: true });
+  const mockHttp = { request: (...args) => httpRequest(...args) };
+  const original = mockHttp.request;
+  const stop = installNextIssuerTransportDiagnostics({
+    httpModule: mockHttp,
+    issuerPort: upstream.address().port,
+    emit: (item) => captured.push(item)
+  });
+  const secret = "PRIVATE_TOKEN_SESSION_COOKIE_SECRET";
+  const send = () => new Promise((resolveResponse, rejectResponse) => {
+    const req = mockHttp.request({
+      hostname: "127.0.0.1",
+      port: upstream.address().port,
+      agent,
+      method: "POST",
+      path: `/interaction/abcdefgh?state=${secret}`,
+      headers: { cookie: `virki_session=${secret}`, authorization: `Bearer ${secret}`, "content-type": "text/plain" }
+    }, (res) => {
+      res.resume();
+      res.on("end", () => resolveResponse(res.statusCode));
+    });
+    req.once("error", rejectResponse);
+    req.end(secret);
+  });
+  try {
+    assert.equal(await send(), 303);
+    assert.equal(await send(), 303);
+    assert.equal(received.length, 2);
+    assert.equal(received[0].peerPort, received[1].peerPort, "real agent reused its upstream socket");
+    assert.ok(received.every((entry) => entry.cookie?.includes(secret) && entry.authorization?.includes(secret) && entry.path?.includes(secret)), "request semantics unchanged");
+    assert.ok(captured.some((event) => event.event === "socket" && event.reused === true), "reused socket detected");
+    assert.equal(captured.filter((event) => event.event === "response" && event.status === 303).length, 2);
+    assert.equal(captured.filter((event) => event.event === "response-end").length, 2);
+    assert.ok(captured.every((event) => Object.keys(event).every((key) => ["event", "request", "socket", "route", "method", "reused", "connecting", "status", "code", "hadError", "complete"].includes(key))));
+    const serialized = JSON.stringify(captured);
+    for (const sensitive of [secret, "PRIVATE_RESPONSE_CODE", "PRIVATE_RESPONSE_COOKIE", "Bearer", "virki_session", "127.0.0.1", String(upstream.address().port)]) {
+      assert.equal(serialized.includes(sensitive), false, `no diagnostic leakage: ${sensitive}`);
+    }
+    assert.ok(captured.every((event) => !Object.values(event).some((value) => typeof value === "string" && value.includes("/interaction/"))));
+  } finally {
+    stop();
+    assert.equal(mockHttp.request, original, "installed hook is reversible");
+    agent.destroy();
+    await new Promise((resolveClose) => upstream.close(resolveClose));
+  }
+});
+
+test("Next child diagnostic classifies true issuer reset without swallowing errors, request retry or leaking errors", async () => {
+  const { installNextIssuerTransportDiagnostics } = await import("./start-production-hub.mjs");
+  let attempts = 0;
+  const upstream = createServer((req) => {
+    attempts++;
+    req.socket.destroy(Object.assign(new Error("PRIVATE_ERROR_MESSAGE"), { code: "ECONNRESET" }));
+  });
+  await new Promise((resolveListen) => upstream.listen(0, "127.0.0.1", resolveListen));
+  const captured = [];
+  const httpModule = { request: (...args) => httpRequest(...args) };
+  const stop = installNextIssuerTransportDiagnostics({ httpModule, issuerPort: upstream.address().port, emit: (event) => captured.push(event) });
+  try {
+    const error = await new Promise((resolveError, rejectError) => {
+      const request = httpModule.request({ hostname: "127.0.0.1", port: upstream.address().port, path: "/interaction/abcdefgh?token=PRIVATE_ERROR_MESSAGE" }, () => rejectError(new Error("unexpected response")));
+      request.once("error", resolveError);
+      request.end();
+    });
+    assert.equal(error.code, "ECONNRESET", "caller observes unchanged transport failure");
+    assert.equal(attempts, 1, "diagnostic never retries OAuth");
+    assert.ok(captured.some((event) => event.event === "request-error" && event.code === "ECONNRESET"));
+    assert.equal(JSON.stringify(captured).includes("PRIVATE_ERROR_MESSAGE"), false);
+  } finally {
+    stop();
+    await new Promise((resolveClose) => upstream.close(resolveClose));
   }
 });
 
