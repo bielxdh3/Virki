@@ -4,7 +4,7 @@ import { runWithAuditContext, writeAuditLog } from "@virki/auth/audit";
 import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAttemptInTransaction, getSessionByToken, hashAuditIdentifier, hashAuditSessionReference, isTrustedClientAddress, writeAuditLogRequired } from "@virki/auth";
 import { prisma } from "@virki/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
-import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
+import { installAuditResponseGate, requireAuditBeforeResponse, useNativeOidcResponse } from "./audit-gate";
 import { readInteractionDetailsOrRespond } from "./interaction-error";
 import { createProviderEventAudit } from "./provider-audit";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
@@ -364,6 +364,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
   if (["login", "virki_session", "virki_assurance"].includes(interaction.prompt.name) || interaction.session?.accountId !== session.user.id) {
     const authentication = getOidcAuthenticationContext(session.authenticationMethods, essentialAcr.values);
     requireAuditBeforeResponse(context.res, writeAuditLogRequired({ eventType: "SSO_INTERACTION_COMPLETED", result: "SUCCESS", actorUserId: session.user.id, actorRole: session.user.role === "USER" ? "USER" : undefined, sessionRef: hashAuditSessionReference(session.id), resource: "sso.interaction", metadata: { requestRef: hashAuditIdentifier(uid) } }));
+    useNativeOidcResponse(context);
     await provider.interactionFinished(context.req, context.res, {
       login: { accountId: session.user.id, ts: Math.floor(session.createdAt.getTime() / 1_000), ...authentication }
     }, { mergeWithLastSubmission: false });
@@ -401,6 +402,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
   if (Array.isArray(missingClaims) && missingClaims.every((claim) => typeof claim === "string")) grant.addOIDCClaims(missingClaims);
   const grantId = await grant.save();
   requireAuditBeforeResponse(context.res, writeAuditLogRequired({ eventType: "SSO_INTERACTION_COMPLETED", result: "SUCCESS", actorUserId: session.user.id, actorRole: "USER", sessionRef: hashAuditSessionReference(session.id), resource: "sso.interaction", metadata: { requestRef: hashAuditIdentifier(uid) } }));
+  useNativeOidcResponse(context);
   await provider.interactionFinished(context.req, context.res, { consent: { grantId } }, { mergeWithLastSubmission: true });
 }
 
@@ -414,6 +416,7 @@ function auditProviderEvent(eventName: string, rawContext: unknown, error?: unkn
 
 async function denyInteraction(context: KoaContextWithOIDC): Promise<void> {
   await writeAuditLog({ eventType: "SSO_INTERACTION_DENIED", result: "DENIED", resource: "sso.interaction" });
+  useNativeOidcResponse(context);
   await provider.interactionFinished(context.req, context.res, {
     error: "access_denied",
     error_description: "Access denied."

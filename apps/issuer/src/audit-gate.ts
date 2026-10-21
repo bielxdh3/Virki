@@ -21,6 +21,11 @@ type BufferedResponseOperation = {
   discard: (error: Error) => void;
 };
 
+/** oidc-provider ends the native response itself; Koa must not append a second response while the audit gate defers end(). */
+export function useNativeOidcResponse(context: { respond?: boolean }): void {
+  context.respond = false;
+}
+
 export function requireAuditBeforeResponse(response: ServerResponse, write: Promise<void>): void {
   const previous = pendingAuditWrites.get(response);
   const pending = Promise.all(previous ? [previous, write] : [write]).then(() => undefined);
