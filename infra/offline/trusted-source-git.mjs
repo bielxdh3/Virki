@@ -3,7 +3,7 @@ import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync,
   readdirSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { verifySourceTarAgainstGit } from "../../scripts/lib/offline-release-bundle.mjs";
+import { verifySourceTarAgainstGit } from "../../scripts/lib/offline-source-tar-verifier.mjs";
 import { inspectUntrustedOfflineCandidate } from "./trusted-host-entry.mjs";
 
 // These locations are independently installed by the host administrator.

@@ -14,9 +14,12 @@ import { prepareOfflineTrustedReleasePolicy } from "../../scripts/lib/offline-tr
 // Uploaded release TARs never provide source code, public-key pins or policy.
 export const AUDITED_VERIFIER_FILES = Object.freeze([
   "infra/offline/trusted-host-entry.mjs",
+  "infra/offline/trusted-host-installer.mjs",
   "infra/offline/trusted-image-loader.mjs",
+  "infra/offline/trusted-source-git.mjs",
   "scripts/lib/offline-docker-tar-verifier.mjs",
   "scripts/lib/offline-release-attestation.mjs",
+  "scripts/lib/offline-source-tar-verifier.mjs",
   "scripts/lib/offline-trusted-release-policy.mjs",
 ]);
 
@@ -25,6 +28,10 @@ const OPERATOR_FILES = Object.freeze([
 ]);
 const POLICY_DIRECTORY = "/etc/virki/offline-release";
 const LEDGER_DIRECTORY = "/var/lib/virki/offline-release";
+const UNTRUSTED_STAGING_ROOTS = Object.freeze([
+  LEDGER_DIRECTORY + "/staging",
+  "/var/lib/virki/offline-staging",
+]);
 const VERIFIER_DIRECTORY = "/usr/local/lib/virki/offline-release";
 const PIN_FIELDS = ["version", "mode", "files", "trustPolicySha256", "ledgerSha256"];
 const FILE_FIELDS = ["path", "sha256"];
@@ -127,6 +134,17 @@ function canonicalAbsolute(dirname, label) {
   requireIt(realpathSync.native(dirname) === dirname,
     label + " points through a filesystem alias");
   return dirname;
+}
+
+// Called only after native canonical-path checks by the privileged preview.
+// Kept pure so both former and current candidate staging roots are covered
+// by regression tests without attempting any root-owned host provisioning.
+export function assertIndependentVerifierRoots({ sourceDirectory, operatorDirectory } = {}) {
+  requireIt(typeof sourceDirectory === "string" && typeof operatorDirectory === "string" &&
+    UNTRUSTED_STAGING_ROOTS.every((root) =>
+      [sourceDirectory, operatorDirectory].every((candidate) =>
+        candidate !== root && !candidate.startsWith(root + "/"))),
+  "untrusted staging cannot supply verifier or trusted operator pins");
 }
 function ensureFileParents(sourceDirectory, relativePath) {
   const segments = relativePath.split("/");
@@ -262,9 +280,7 @@ export function previewTrustedHostVerifierProvisioning(request = {}) {
     !sourceDirectory.startsWith(operatorDirectory + path.sep) &&
     !operatorDirectory.startsWith(sourceDirectory + path.sep),
   "source and operator trust roots must be disjoint");
-  requireIt(!sourceDirectory.startsWith(LEDGER_DIRECTORY + "/staging") &&
-    !operatorDirectory.startsWith(LEDGER_DIRECTORY + "/staging"),
-  "untrusted staging cannot supply verifier or trusted operator pins");
+  assertIndependentVerifierRoots({ sourceDirectory, operatorDirectory });
   const operator = readProtectedOperatorDirectory(operatorDirectory);
   const trustedPins = prepareTrustedVerifierPinSet({
     pinsBytes: operator["verifier-pins.json"],

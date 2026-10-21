@@ -11,10 +11,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   AUDITED_VERIFIER_FILES,
+  assertIndependentVerifierRoots,
   inspectAuditedVerifierFiles,
   prepareTrustedVerifierPinSet,
   previewTrustedHostVerifierProvisioning,
 } from "./trusted-host-installer.mjs";
+import { TRUSTED_OFFLINE_STAGING_PATH } from "./trusted-image-loader.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const sha = (char) => char.repeat(40);
@@ -149,7 +151,7 @@ test("source inspector measures every separately pinned verifier file without ex
   const result = inspectAuditedVerifierFiles({ sourceDirectory: f.sourceDirectory, files: f.files });
   assert.equal(result.status, "AUDITED_SOURCE_BYTES_MATCH_ONLY");
   assert.deepEqual(result.files, f.files);
-  assert.equal(result.files.length, 5);
+  assert.equal(result.files.length, AUDITED_VERIFIER_FILES.length);
   assert.equal(Object.hasOwn(result, "installAuthorized"), false);
   assert.equal(Object.hasOwn(result, "deployAuthorized"), false);
 });
@@ -210,4 +212,23 @@ test("direct script invocation never installs or signals successful activation",
   assert.notEqual(response.status, 0);
   assert.match(response.stderr, /refused|blocked/iu);
   assert.equal(response.stdout, "");
+});
+
+test("independent verifier and operator origins refuse old and current candidate staging roots", () => {
+  assert.equal(TRUSTED_OFFLINE_STAGING_PATH, "/var/lib/virki/offline-staging");
+  for (const root of ["/var/lib/virki/offline-release/staging", TRUSTED_OFFLINE_STAGING_PATH]) {
+    for (const candidate of [root, root + "/nested/private-source"]) {
+      assert.throws(() => assertIndependentVerifierRoots({
+        sourceDirectory: candidate, operatorDirectory: "/etc/virki/offline-release",
+      }), /untrusted staging/u);
+      assert.throws(() => assertIndependentVerifierRoots({
+        sourceDirectory: "/usr/local/lib/virki/offline-release",
+        operatorDirectory: candidate,
+      }), /untrusted staging/u);
+    }
+  }
+  assert.doesNotThrow(() => assertIndependentVerifierRoots({
+    sourceDirectory: "/var/lib/virki/offline-staging-reviewed",
+    operatorDirectory: "/etc/virki/offline-release",
+  }));
 });
