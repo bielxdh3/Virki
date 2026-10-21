@@ -10,8 +10,18 @@ import path from "node:path";
 import test from "node:test";
 import {
   compareUntrustedLoadedImageForPreview, inspectUntrustedPinnedImageForPreview, loadTrustedOfflineImage,
-  previewTrustedOfflineImageLoad,
+  previewTrustedOfflineImageLoad, TRUSTED_OFFLINE_STAGING_PATH,
 } from "./trusted-image-loader.mjs";
+
+test("native offline candidate staging remains disjoint from exclusive replay ledger and source-Git roots", () => {
+  const roots = ["/var/lib/virki/offline-release", "/var/lib/virki/offline-source"];
+  assert.equal(path.posix.isAbsolute(TRUSTED_OFFLINE_STAGING_PATH), true);
+  for (const root of roots) {
+    const relative = path.posix.relative(root, TRUSTED_OFFLINE_STAGING_PATH);
+    assert.equal(relative === ".." || relative.startsWith("../"), true,
+      `staging ${TRUSTED_OFFLINE_STAGING_PATH} must be outside exclusive root ${root}`);
+  }
+});
 
 const REVISION = "fbac177b91414ff8d047cef40cc9920d0ba882cd";
 const SOURCE = "https://github.com/bielxdh3/Virki";
@@ -175,9 +185,9 @@ test("protected loader rejects user-claimed trust tokens and direct Docker load 
   for (const request of [
     {},
     { role: "runtime", admissionToken: "APPROVED" },
-    { candidateDirectory: "/var/lib/virki/offline-release/staging", role: "runtime",
+    { candidateDirectory: TRUSTED_OFFLINE_STAGING_PATH, role: "runtime",
       trusted: true, deployAuthorized: true },
-    { candidateDirectory: "/var/lib/virki/offline-release/staging", role: "migrator" },
+    { candidateDirectory: TRUSTED_OFFLINE_STAGING_PATH, role: "migrator" },
   ]) {
     await assert.rejects(loadTrustedOfflineImage(request), /refused/u);
   }

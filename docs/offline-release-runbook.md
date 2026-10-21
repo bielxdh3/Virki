@@ -48,6 +48,11 @@ hosted CodeQL approval or as permission to deploy.
    not revoke its host-pinned key. The old pin-only v1 policy fails closed.
    **No installer or trust root may
    originate from a candidate archive.** WSL is not an acceptable target.
+   The replay-ledger root is exclusive to its protected ledger file and its
+   transient atomic lock. The candidate staging directory must instead be the
+   independent sibling `/var/lib/virki/offline-staging` (owner-only 0700), never
+   `/var/lib/virki/offline-release/staging` or a child of the trusted source-Git
+   store `/var/lib/virki/offline-source`.
 2. Verify host identity, independent builder/owner Ed25519 key pins, explicit
    owner assurance flag, revocations, predecessor, sequence, validity window,
    source/archive/report digests, OCI layer/config identities, full source Git

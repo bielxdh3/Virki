@@ -12,7 +12,10 @@ import { verifyTrustedHostOfflineCandidate } from "./trusted-host-entry.mjs";
 // accept a caller's claimed authorization, token or injected Docker command.
 // The safe future transfer is a root-pinned, verified regular-file FD passed as
 // child stdin (stdio[0]=fd) to docker load. No import uses an archive pathname.
-const FIXED_STAGING = "/var/lib/virki/offline-release/staging";
+// The release ledger enforces an exclusive root containing only ledger.json.
+// Staging must never be created beneath that ledger root or the independently
+// protected source-Git object store; both would reject otherwise valid trust.
+export const TRUSTED_OFFLINE_STAGING_PATH = "/var/lib/virki/offline-staging";
 const MAX_ARCHIVE = 8 * 1024 * 1024 * 1024;
 const READ_BLOCK = 64 * 1024;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/u;
@@ -226,13 +229,13 @@ export function compareUntrustedLoadedImageForPreview({ imageInspect, verifiedIm
 export async function previewTrustedOfflineImageLoad(request = {}) {
   requireNativeRoot();
   exact(request, ["candidateDirectory", "role"], "trusted preview request");
-  if (request.candidateDirectory !== FIXED_STAGING ||
+  if (request.candidateDirectory !== TRUSTED_OFFLINE_STAGING_PATH ||
       !["runtime", "migrator"].includes(request.role) ||
-      realpathSync.native(FIXED_STAGING) !== FIXED_STAGING) {
+      realpathSync.native(TRUSTED_OFFLINE_STAGING_PATH) !== TRUSTED_OFFLINE_STAGING_PATH) {
     refuse("expected the fixed owner-protected staging directory");
   }
   const checked = await verifyTrustedHostOfflineCandidate({
-    candidateDirectory: FIXED_STAGING,
+    candidateDirectory: TRUSTED_OFFLINE_STAGING_PATH,
   });
   if (checked.deployAuthorized !== false ||
       checked.status !== "INSPECTED_ONLY_RELEASE_BLOCKED") {
@@ -256,7 +259,7 @@ export async function previewTrustedOfflineImageLoad(request = {}) {
 export async function loadTrustedOfflineImage(request = {}) {
   requireNativeRoot();
   exact(request, ["candidateDirectory", "role"], "trusted loader request");
-  if (request.candidateDirectory !== FIXED_STAGING ||
+  if (request.candidateDirectory !== TRUSTED_OFFLINE_STAGING_PATH ||
       !["runtime", "migrator"].includes(request.role)) {
     refuse("untrusted candidate location or image role");
   }
