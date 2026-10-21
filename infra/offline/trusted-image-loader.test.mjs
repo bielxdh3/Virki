@@ -172,6 +172,9 @@ test("pinned FD itself reads original bytes after a filename swap (no Docker dae
 
 test("in-place TAR replacement during pinned inspection also fails closed", async (t) => {
   const f = fixture(t);
+  // The disposable attacker must have write access to exercise the mutation.
+  // A 0400 fixture can fail at writeFileSync before the verifier is tested.
+  chmodSync(f.archivePath, 0o600);
   await assert.rejects(inspectUntrustedPinnedImageForPreview({
     ...f.inputs,
     afterPinnedOpen: () => {
