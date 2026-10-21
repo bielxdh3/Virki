@@ -1,8 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyLow05NavigationError, classifyLow05Url, describeLow05Response, summarizeLow05ProxyBoundary } from "./low05-diagnostics.mjs";
+import { classifyLow05NavigationError, classifyLow05Url, describeLow05Response, isLow05ProtectedDocumentCacheControl, summarizeLow05ProxyBoundary } from "./low05-diagnostics.mjs";
 
 const portalUrl = "https://portal.localhost:3001";
+
+test("LOW-05 history document requires exact no-store in production and permits only Next dev's known override", () => {
+  const productionHeader = "private, no-store, max-age=0, must-revalidate";
+  const nextDevHeader = "no-cache, must-revalidate";
+  assert.equal(isLow05ProtectedDocumentCacheControl(productionHeader, "production"), true);
+  assert.equal(isLow05ProtectedDocumentCacheControl(nextDevHeader, "production"), false);
+  assert.equal(isLow05ProtectedDocumentCacheControl(productionHeader, "development"), true);
+  assert.equal(isLow05ProtectedDocumentCacheControl(nextDevHeader, "development"), true);
+  for (const invalid of ["", "no-cache", "no-store", "private, max-age=0, must-revalidate", "public, no-cache, must-revalidate", "no-cache, must-revalidate, max-age=60"]) {
+    assert.equal(isLow05ProtectedDocumentCacheControl(invalid, "development"), false, invalid);
+    assert.equal(isLow05ProtectedDocumentCacheControl(invalid, "production"), false, invalid);
+  }
+  assert.equal(isLow05ProtectedDocumentCacheControl(nextDevHeader, "unknown"), false);
+});
 
 test("LOW-05 URL diagnostics preserve only allowlisted route and returnTo categories", () => {
   assert.deepEqual(

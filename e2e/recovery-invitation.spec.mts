@@ -8,9 +8,10 @@ import { hashEmailAddress, hashRecoveryRequestKey, requestAccountRecovery } from
 // @ts-expect-error The disposable-database guard is a JavaScript safety helper without a declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 // @ts-expect-error The LOW-05 diagnostics helper is a JavaScript test-only redaction boundary.
-import { classifyLow05NavigationError, classifyLow05Url, describeLow05Response } from "../scripts/e2e/low05-diagnostics.mjs";
+import { classifyLow05NavigationError, classifyLow05Url, describeLow05Response, isLow05ProtectedDocumentCacheControl } from "../scripts/e2e/low05-diagnostics.mjs";
 
 const portalUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://portal.localhost" : "https://portal.localhost:3001";
+const hubMode = process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
 const sessionCookieName = getSessionCookieName({ NODE_ENV: process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development" });
 const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
 
@@ -426,7 +427,9 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
     const historyBackResponse = await goBackToProtectedPage(page);
     expect(historyBackResponse.status).toBe(200);
-    expect(historyBackResponse.cacheControl).toBe("private, no-store, max-age=0, must-revalidate");
+    // Next dev overwrites the protected Proxy header when rendering documents.
+    // Production browser history always requires the full no-store policy.
+    expect(isLow05ProtectedDocumentCacheControl(historyBackResponse.cacheControl, hubMode)).toBe(true);
     // Protected history traversal deliberately reloads the document during hydration.
     // Retry only reads interrupted by a real navigation, never failed security assertions.
     const browserCacheEvidence = await readDuringStableNavigation(page, async () => {
@@ -463,7 +466,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
     const repeatHistoryBackResponse = await goBackToProtectedPage(page);
     expect(repeatHistoryBackResponse.status).toBe(200);
-    expect(repeatHistoryBackResponse.cacheControl).toBe("private, no-store, max-age=0, must-revalidate");
+    expect(isLow05ProtectedDocumentCacheControl(repeatHistoryBackResponse.cacheControl, hubMode)).toBe(true);
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
     const repeatBackState = await inspectSensitiveBrowserState(page, sensitiveValues);
     expect(repeatBackState.dom).toBe(false);
