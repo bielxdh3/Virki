@@ -12,6 +12,7 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 const HOST_ENTRIES = Object.freeze([
   "infra/offline/trusted-host-installer.mjs",
   "infra/offline/trusted-host-entry.mjs",
+  "infra/offline/trusted-image-import.mjs",
   "infra/offline/trusted-image-loader.mjs",
   "infra/offline/trusted-release-coordinator.mjs",
   "infra/offline/trusted-source-git.mjs",
@@ -37,6 +38,7 @@ const AUDITED_PROCESS_PROPERTIES = new Set([
   "platform", "arch", "getuid", "argv", "stderr", "exitCode",
 ]);
 const TRUSTED_GIT_SOURCE = "infra/offline/trusted-source-git.mjs";
+const TRUSTED_IMAGE_IMPORT = "infra/offline/trusted-image-import.mjs";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 // Fail closed on any executable dependency we cannot statically account for.
@@ -48,8 +50,24 @@ function importsIn(source, relative) {
   const parsed = ts.createSourceFile("audited-verifier.mjs", source,
     ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   assert.equal(parsed.parseDiagnostics.length, 0, "unparseable verifier source is forbidden");
+  if (relative === TRUSTED_IMAGE_IMPORT) {
+    for (const [name, literal] of [
+      ["DOCKER_EXE", "/run/virki-offline-import/docker"],
+      ["DOCKER_SOCKET", "/run/virki-offline-import/docker.sock"],
+      ["DOCKER_EXE_PIN", "/etc/virki/offline-import-cli.sha256"],
+    ]) {
+      const declarations = parsed.statements
+        .filter(ts.isVariableStatement)
+        .flatMap((entry) => [...entry.declarationList.declarations])
+        .filter((entry) => ts.isIdentifier(entry.name) && entry.name.text === name);
+      assert.ok(declarations.length === 1 && ts.isStringLiteral(declarations[0].initializer) &&
+        declarations[0].initializer.text === literal,
+      "native import executable, signature pin and dedicated daemon paths are immutable");
+    }
+  }
   const dependencies = [];
   let gitExecCalls = 0;
+  let dockerSpawnCalls = 0;
   function visit(node) {
     if (ts.isIdentifier(node)) {
       assert.ok(!FORBIDDEN_RUNTIME_IDENTIFIERS.has(node.text),
@@ -67,6 +85,13 @@ function importsIn(source, relative) {
         assert.ok(relative === TRUSTED_GIT_SOURCE && (imported || directCall),
           "execFileSync may only be imported or directly invoked by trusted source Git");
       }
+      if (node.text === "spawnSync") {
+        const imported = ts.isImportSpecifier(node.parent) && node.parent.name === node &&
+          !node.parent.propertyName;
+        const directCall = ts.isCallExpression(node.parent) && node.parent.expression === node;
+        assert.ok(relative === TRUSTED_IMAGE_IMPORT && (imported || directCall),
+          "spawnSync is permitted only in trusted native image import");
+      }
     }
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       if (node.moduleSpecifier) {
@@ -76,11 +101,13 @@ function importsIn(source, relative) {
         dependencies.push(node.moduleSpecifier.text);
         if (node.moduleSpecifier.text === "node:child_process") {
           const imports = ts.isImportDeclaration(node) && node.importClause?.namedBindings;
-          assert.ok(relative === TRUSTED_GIT_SOURCE && imports &&
+          const expectedName = relative === TRUSTED_GIT_SOURCE ? "execFileSync"
+            : relative === TRUSTED_IMAGE_IMPORT ? "spawnSync" : null;
+          assert.ok(expectedName && imports &&
             ts.isNamedImports(imports) && imports.elements.length === 1 &&
-            imports.elements[0].name.text === "execFileSync" &&
+            imports.elements[0].name.text === expectedName &&
             !imports.elements[0].propertyName && !node.importClause.name,
-          "child_process is permitted only as the exact trusted Git execFileSync import");
+          "child_process must be an exact pinned Git or image-import command");
         }
       }
     }
@@ -130,6 +157,22 @@ function importsIn(source, relative) {
             ts.isStringLiteral(entry) && entry.text === ["ignore", "pipe", "pipe"][index]),
         "only the fixed native /usr/bin/git invocation is permitted");
       }
+      if (ts.isIdentifier(node.expression) && node.expression.text === "spawnSync") {
+        dockerSpawnCalls++;
+        let enclosing = node.parent;
+        while (enclosing && !ts.isFunctionLike(enclosing)) enclosing = enclosing.parent;
+        assert.ok(relative === TRUSTED_IMAGE_IMPORT &&
+          ts.isFunctionDeclaration(enclosing) && enclosing.name?.text === "docker" &&
+          node.arguments.length === 3 &&
+          ts.isIdentifier(node.arguments[0]) && node.arguments[0].text === "DOCKER_EXE" &&
+          node.arguments[1].getText(parsed).replace(/\s+/gu, "") ===
+            '["--host",DOCKER_HOST,...args]' &&
+          ts.isObjectLiteralExpression(node.arguments[2]) &&
+          node.arguments[2].properties.some((property) =>
+            ts.isPropertyAssignment(property) && property.name.getText(parsed) === "shell" &&
+            property.initializer.kind === ts.SyntaxKind.FalseKeyword),
+        "Docker spawn must use only the reviewed fixed executable and host without shell");
+      }
       if (ts.isIdentifier(node.expression)) {
         assert.ok(!["require", "createRequire", "eval", "Function"].includes(node.expression.text),
           "dynamic module evaluation and CommonJS loading are forbidden");
@@ -159,6 +202,8 @@ function importsIn(source, relative) {
   visit(parsed);
   assert.equal(gitExecCalls, relative === TRUSTED_GIT_SOURCE ? 1 : 0,
     "exactly one audited Git subprocess invocation is required");
+  assert.equal(dockerSpawnCalls, relative === TRUSTED_IMAGE_IMPORT ? 1 : 0,
+    "exactly one audited native Docker subprocess invocation is required");
   return dependencies;
 }
 
@@ -210,6 +255,7 @@ test("installed host entries have an exactly pinned, deterministic and closed ex
     "every executable transitive dependency must be independently pinned in sorted order");
   assert.ok(graph.includes("infra/offline/trusted-source-git.mjs"));
   assert.ok(graph.includes("infra/offline/trusted-release-coordinator.mjs"));
+  assert.ok(graph.includes("infra/offline/trusted-image-import.mjs"));
   assert.ok(graph.includes("scripts/lib/offline-release-ledger.mjs"));
   assert.ok(graph.includes("scripts/lib/offline-source-tar-verifier.mjs"));
   assert.ok(!graph.includes("scripts/lib/offline-release-bundle.mjs"),
@@ -284,6 +330,28 @@ test("host static audit refuses executable loader aliases and unauthorized subpr
   }
 });
 
+test("native Docker invocation must remain a single audited fixed-executable, fixed-endpoint spawn", (t) => {
+  const dest = copyAuditedTo(t);
+  const filename = path.join(dest, "infra", "offline", "trusted-image-import.mjs");
+  const original = readFileSync(filename, "utf8");
+  for (const modified of [
+    original.replace('const DOCKER_EXE = "/run/virki-offline-import/docker";',
+      'const DOCKER_EXE = "/bin/sh";'),
+    original.replace('["--host", DOCKER_HOST, ...args]',
+      '["-c", "id", ...args]'),
+    original.replace("shell: false,", "shell: true,"),
+    original + '\nimport { execFileSync } from "node:child_process";\n',
+    original + '\nconst attack = spawnSync;\n',
+  ]) {
+    writeFileSync(filename, modified);
+    assert.throws(() => {
+      const closure = discoverClosure(dest);
+      assert.deepEqual(closure, AUDITED_VERIFIER_FILES);
+      assert.match(readFileSync(filename, "utf8"), /DOCKER_EXE/u);
+    });
+  }
+});
+
 test("changed source checker or TAR parser bytes fail independent source digest pins", (t) => {
   const dest = copyAuditedTo(t);
   const pins = AUDITED_VERIFIER_FILES.map((relative) => ({
@@ -292,7 +360,8 @@ test("changed source checker or TAR parser bytes fail independent source digest 
   assert.equal(inspectAuditedVerifierFiles({ sourceDirectory: dest, files: pins }).files.length,
     AUDITED_VERIFIER_FILES.length);
   for (const relative of ["infra/offline/trusted-source-git.mjs", "scripts/lib/offline-source-tar-verifier.mjs",
-    "infra/offline/trusted-release-coordinator.mjs", "scripts/lib/offline-release-ledger.mjs"]) {
+    "infra/offline/trusted-release-coordinator.mjs", "scripts/lib/offline-release-ledger.mjs",
+    "infra/offline/trusted-image-import.mjs"]) {
     const target = path.join(dest, ...relative.split("/"));
     const before = readFileSync(target);
     writeFileSync(target, Buffer.concat([before, Buffer.from("\n// altered parser bytes\n")]));

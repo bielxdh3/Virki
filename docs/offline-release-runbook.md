@@ -60,10 +60,11 @@ hosted CodeQL approval or as permission to deploy.
    passing this check cannot replace independently reviewed verifier bytes,
    separately approved root-owned SHA-256 pins, safe native installation or
    executable-bytes-at-use-point verification. It grants no release authority.
-   The audited dependency inventory now requires **10 pinned modules**, including
-   `trusted-release-coordinator.mjs` and the durable `offline-release-ledger.mjs`.
-   Former eight-module operator pinsets fail closed. An operator must separately
-   audit and approve all 10 current SHA-256 digests; no automatic pin migration
+   The audited dependency inventory now requires **11 pinned modules**, including
+   `trusted-release-coordinator.mjs`, the durable `offline-release-ledger.mjs`
+   and the separately gated `trusted-image-import.mjs`. Former eight- and
+   ten-module operator pinsets fail closed. An operator must independently
+   audit and approve all 11 current SHA-256 digests; no automatic pin migration
    or implied installation is permitted.
 2. Verify host identity, independent builder/owner Ed25519 key pins, explicit
    owner assurance flag, revocations, predecessor, sequence, validity window,
@@ -103,6 +104,48 @@ use the host's trust roots, machine ID, Git pin or production ledger.
 This destructive-path fixture is deliberately excluded from ordinary
 `test:production-revision` and must be run separately. A successful
 `staged` result from it is never release authorization.
+
+## Isolated, untagged native image import (development boundary)
+
+`infra/offline/trusted-image-import.mjs` is an independent, installed-host-only
+import boundary. Its sole public request contains the root-owned private candidate
+directory and the exact `runtime` or `migrator` role; uploaded code cannot
+inject an image digest, signer, trust token, subprocess or Docker host.
+It invokes the independently installed coordinator, which validates the signed
+owner/builder manifest, Git source, host identity and exclusive ledger attempt
+before any Docker execution. All failures retain the durable attempted lock.
+
+After admission, it validates the signed digest of a private, root-owned copy
+and parses the full Docker TAR through the same file descriptor. It then unlinks
+that copy and fsyncs its parent directory **before** passing its read-only FD
+directly as Docker stdin. Replacing or modifying the uploaded TAR while Docker
+reads cannot mutate the detached inode. It calls only the separately owner-pinned
+`/run/virki-offline-import/docker` CLI with the dedicated
+`unix:///run/virki-offline-import/docker.sock` endpoint; its binary SHA-256
+must match the independently provisioned root:root 0600
+`/etc/virki/offline-import-cli.sha256` file. The dedicated executable and
+daemon socket directory must be root-owned and inaccessible to non-root users.
+The caller never chooses the Docker executable or socket.
+
+The importer refuses a preexisting image ID and validates the newly loaded
+image's exact content ID, revision/source labels, Linux/amd64 architecture,
+non-root user and empty tag/digest aliases. Its only successful result is
+`IMPORTED_UNTAGGED_ATTEMPT_LOCKED`. It **never tags or starts containers,
+deploys, finalizes the ledger, or modifies production services**. A failed
+post-load comparison is a fail-closed refusal, not an atomic rollback of bytes
+already imported into the isolated daemon; the administrator must reconcile
+that daemon and the durable attempted state manually.
+
+The explicit coordinator fixture exercises a simulated Docker executable
+inside an ephemeral pinned-Node container with root-only temporary mounts
+for `/etc`, `/var/lib`, `/usr/local/lib/virki` and `/run`. It uses no
+actual Docker daemon, no host Docker socket and no production resources.
+Passing these tests does not prove a real isolated Docker-in-Docker import,
+an independently installed operator binary, production-ready runtime, or
+authorization to deploy. This module must not be installed or invoked on the
+production host until its 11-file byte inventory, separate executable pin,
+trusted isolated daemon lifecycle and broader release policy are independently
+reviewed and approved.
 
 ## Evidence and disposition
 

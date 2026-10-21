@@ -14,6 +14,7 @@ const args = [
   "--tmpfs", "/etc:rw,nosuid,nodev,noexec,size=16m,mode=755",
   "--tmpfs", "/var/lib:rw,nosuid,nodev,noexec,size=256m,mode=755",
   "--tmpfs", "/usr/local/lib/virki:rw,nosuid,nodev,noexec,size=16m,mode=700",
+  "--tmpfs", "/run:rw,exec,nosuid,nodev,size=32m,mode=755",
   "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777",
   "--mount", `type=bind,src=${sourceRoot},dst=/workspace,readonly`,
   "--workdir", "/workspace",

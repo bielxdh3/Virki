@@ -88,6 +88,7 @@ test("a complete external audit pin set accepts distinct v2 owner/builder keys a
 test("operator-protected pin bytes cannot omit, duplicate, reorder or replace an audited verifier dependency", (t) => {
   const f = setup(t);
   const previousInventory = f.files.filter((entry) => ![
+    "infra/offline/trusted-image-import.mjs",
     "infra/offline/trusted-release-coordinator.mjs",
     "scripts/lib/offline-release-ledger.mjs",
   ].includes(entry.path));
@@ -96,6 +97,7 @@ test("operator-protected pin bytes cannot omit, duplicate, reorder or replace an
   const bad = [
     // Reject valid old-format pin sets after expanding the authority graph.
     { ...f.pins, files: previousInventory },
+    { ...f.pins, files: f.files.filter((entry) => entry.path !== "infra/offline/trusted-image-import.mjs") },
     { ...f.pins, files: f.files.slice(1) },
     { ...f.pins, files: [...f.files.slice(0, -1), f.files[0]] },
     { ...f.pins, files: [...f.files].reverse() },

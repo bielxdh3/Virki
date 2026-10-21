@@ -1,0 +1,47 @@
+#!/usr/local/bin/node
+// Disposable Docker CLI sink. ONLY mounted over /usr/bin/docker within the
+// purpose-built --network none, read-only root regression container.
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+const root = "/run/virki-offline-import/";
+const args = process.argv.slice(2);
+const host = "unix:///run/virki-offline-import/docker.sock";
+if (args[0] !== "--host" || args[1] !== host ||
+    args[2] !== "image" || !["inspect", "load"].includes(args[3])) {
+  process.exit(19);
+}
+appendFileSync(root + "calls", args.join(" ") + "\n");
+if (args[3] === "inspect") {
+  if (args.length !== 7 || args[4] !== "--type" || args[5] !== "image" ||
+      !/^sha256:[a-f0-9]{64}$/u.test(args[6])) process.exit(20);
+  if (!existsSync(root + "loaded.json")) process.exit(1);
+  const loaded = JSON.parse(readFileSync(root + "loaded.json", "utf8"));
+  if (loaded[0].Id !== args[6]) process.exit(1);
+  if (existsSync(root + "wrong-inspect")) loaded[0].Config.User = "root";
+  process.stdout.write(JSON.stringify(loaded));
+  process.exit(0);
+}
+if (args.length !== 5 || args[4] !== "--quiet") process.exit(21);
+// Mutate the ORIGINAL candidate pathname before consuming stdin. The isolated
+// coordinator must already have detached its verified read-only copy.
+if (existsSync(root + "mutate-source")) {
+  const pathname = readFileSync(root + "mutate-source", "utf8");
+  const content = readFileSync(pathname);
+  content[content.length - 1] = content[content.length - 1] ^ 1;
+  writeFileSync(pathname, content);
+}
+const archive = readFileSync(0);
+writeFileSync(root + "consumed.sha256",
+  createHash("sha256").update(archive).digest("hex"));
+// The fixture TAR places the image config before its other members.
+const name = archive.subarray(0, 100).toString("ascii").replace(/\0.*$/u, "");
+if (!/^[a-f0-9]{64}\.json$/u.test(name)) process.exit(22);
+const length = Number.parseInt(archive.subarray(124, 136).toString("ascii").replace(/\0.*$/u, "").trim(), 8);
+const config = JSON.parse(archive.subarray(512, 512 + length).toString("utf8"));
+writeFileSync(root + "loaded.json", JSON.stringify([{
+  Id: "sha256:" + name.slice(0, 64),
+  Os: config.os, Architecture: config.architecture,
+  Config: { User: config.config.User, Labels: config.config.Labels },
+  RepoTags: null, RepoDigests: null,
+}]));
+process.stdout.write("Loaded untagged image");
