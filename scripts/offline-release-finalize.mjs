@@ -32,6 +32,7 @@ const REPORT_LIMIT = 16 * 1024 * 1024;
 const MANIFEST_LIMIT = 8192;
 const READ_BYTES = 64 * 1024;
 const HASH = /^[0-9a-f]{64}$/u;
+const KEY_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/u;
 const B64_SIGNATURE = /^[A-Za-z0-9+/]{86}==$/u;
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 const WRITE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
@@ -164,7 +165,16 @@ function requiredSignatures(signatures) {
 function checkedTrustInputs(keys, expected, digest) {
   requireFields(keys, ["builder", "owner"], "independent public-key trust anchors");
   for (const role of ["builder", "owner"]) {
-    requireFields(keys[role], ["publicKeyPem", "pinSha256"], `${role} public key`);
+    // The exact v2 schema is provisioned independently by the owner and
+    // installed host policy. Never drop key IDs to satisfy a legacy signer.
+    requireFields(keys[role], ["keyId", "publicKeyPem", "pinSha256"], `${role} public key`);
+    if (typeof keys[role].keyId !== "string" || !KEY_ID.test(keys[role].keyId)) {
+      refuse(`${role} independently pinned key ID is invalid`);
+    }
+  }
+  if (keys.builder.keyId === keys.owner.keyId ||
+      keys.builder.pinSha256 === keys.owner.pinSha256) {
+    refuse("builder and owner need distinct independently pinned identities");
   }
   requireFields(expected, EXPECTED_FIELDS, "independent release identity");
   if (typeof digest !== "string" || !HASH.test(digest)) refuse("independently reviewed manifest SHA-256 is missing");

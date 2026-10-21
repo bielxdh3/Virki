@@ -20,8 +20,8 @@ const INPUTS = ["manifest.json", "source.tar", "runtime.tar", "migrator.tar", "c
   "scanner-report.json", "finding-review.json", "runtime-smoke.json", "migrator-smoke.json", "backup-restore.json"];
 const OUTPUTS = [...INPUTS, "signatures.json"].sort();
 
-function keyPin(publicKey) {
-  return { publicKeyPem: publicKey.export({ format: "pem", type: "spki" }),
+function keyPin(publicKey, keyId) {
+  return { keyId, publicKeyPem: publicKey.export({ format: "pem", type: "spki" }),
     pinSha256: hash(publicKey.export({ format: "der", type: "spki" })) };
 }
 
@@ -85,7 +85,8 @@ function fixture(t, atSeconds = NOW) {
   };
   const options = {
     unsignedDirectory, outputParent, signatures,
-    trustedKeys: { builder: keyPin(builder.publicKey), owner: keyPin(owner.publicKey) },
+    trustedKeys: { builder: keyPin(builder.publicKey, "builder-test-2026"),
+      owner: keyPin(owner.publicKey, "owner-test-2026") },
     expected, reviewedManifestSha256, nowSeconds: atSeconds,
   };
   return { root, data, manifest, manifestBytes, builder, owner, unsignedDirectory,
@@ -134,6 +135,13 @@ test("rejects missing/swapped signatures, unreviewed hash and untrusted pins bef
     { trustedKeys: { ...f.options.trustedKeys, owner: f.options.trustedKeys.builder } },
     { trustedKeys: { ...f.options.trustedKeys, builder: {
       ...f.options.trustedKeys.builder, pinSha256: hex("0") } } },
+    { trustedKeys: { ...f.options.trustedKeys, builder: {
+      ...f.options.trustedKeys.builder, keyId: "!unsafe!" } } },
+    { trustedKeys: { ...f.options.trustedKeys, builder: {
+      ...f.options.trustedKeys.builder, keyId: f.options.trustedKeys.owner.keyId } } },
+    { trustedKeys: { ...f.options.trustedKeys, owner: {
+      publicKeyPem: f.options.trustedKeys.owner.publicKeyPem,
+      pinSha256: f.options.trustedKeys.owner.pinSha256 } } },
     { trustedKeys: undefined },
     { expected: { ...f.options.expected, sourceSha: PREDECESSOR } },
     { expected: { ...f.options.expected, hostIdentitySha256: hex("0") } },
