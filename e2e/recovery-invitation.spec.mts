@@ -427,19 +427,24 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     const historyBackResponse = await goBackToProtectedPage(page);
     expect(historyBackResponse.status).toBe(200);
     expect(historyBackResponse.cacheControl).toBe("private, no-store, max-age=0, must-revalidate");
-    const browserCacheEvidence = await page.evaluate(() => {
-      type NotRestoredReasonTree = { reasons?: Array<{ reason: string }>; children?: NotRestoredReasonTree[] };
-      type NavigationWithNotRestoredReasons = PerformanceNavigationTiming & { notRestoredReasons?: NotRestoredReasonTree | null };
-      const navigation = performance.getEntriesByType("navigation")[0] as NavigationWithNotRestoredReasons | undefined;
-      const collectReasons = (tree: NotRestoredReasonTree | null | undefined): string[] => tree
-        ? [...(tree.reasons ?? []).map(({ reason }) => reason), ...(tree.children ?? []).flatMap(collectReasons)]
-        : [];
-      return {
-        pagehidePersisted: window.sessionStorage.getItem("virki-low05-security-pagehide-persisted"),
-        pageshowPersisted: window.sessionStorage.getItem("virki-low05-security-pageshow-persisted"),
-        lifecycleEvents: JSON.parse(window.sessionStorage.getItem("virki-low05-security-lifecycle-events") ?? "[]") as Array<{ type: string; persisted: boolean }>,
-        notRestoredReasons: collectReasons(navigation?.notRestoredReasons)
-      };
+    // Protected history traversal deliberately reloads the document during hydration.
+    // Retry only reads interrupted by a real navigation, never failed security assertions.
+    const browserCacheEvidence = await readDuringStableNavigation(page, async () => {
+      await expect(page).toHaveURL(`${portalUrl}/account/security`);
+      return page.evaluate(() => {
+        type NotRestoredReasonTree = { reasons?: Array<{ reason: string }>; children?: NotRestoredReasonTree[] };
+        type NavigationWithNotRestoredReasons = PerformanceNavigationTiming & { notRestoredReasons?: NotRestoredReasonTree | null };
+        const navigation = performance.getEntriesByType("navigation")[0] as NavigationWithNotRestoredReasons | undefined;
+        const collectReasons = (tree: NotRestoredReasonTree | null | undefined): string[] => tree
+          ? [...(tree.reasons ?? []).map(({ reason }) => reason), ...(tree.children ?? []).flatMap(collectReasons)]
+          : [];
+        return {
+          pagehidePersisted: window.sessionStorage.getItem("virki-low05-security-pagehide-persisted"),
+          pageshowPersisted: window.sessionStorage.getItem("virki-low05-security-pageshow-persisted"),
+          lifecycleEvents: JSON.parse(window.sessionStorage.getItem("virki-low05-security-lifecycle-events") ?? "[]") as Array<{ type: string; persisted: boolean }>,
+          notRestoredReasons: collectReasons(navigation?.notRestoredReasons)
+        };
+      });
     });
     console.log(`LOW-05 browser history probe: cache-control=${securityCacheControl || "unobserved"}; pagehide.persisted=${browserCacheEvidence.pagehidePersisted ?? "unobserved"}; pageshow.persisted=${browserCacheEvidence.pageshowPersisted ?? "unobserved"}; lifecycle=${JSON.stringify(browserCacheEvidence.lifecycleEvents)}; notRestoredReasons=${browserCacheEvidence.notRestoredReasons.join(",") || "none"}`);
     console.log(`LOW-05 production browser: chromium=${browser.version()}; document-cache-control=${securityCacheControl}; begin-action-cache-control=${beginAction.cacheControl}; recovery-action-cache-control=${activateAction.cacheControl}`);
@@ -459,6 +464,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     const repeatHistoryBackResponse = await goBackToProtectedPage(page);
     expect(repeatHistoryBackResponse.status).toBe(200);
     expect(repeatHistoryBackResponse.cacheControl).toBe("private, no-store, max-age=0, must-revalidate");
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
     const repeatBackState = await inspectSensitiveBrowserState(page, sensitiveValues);
     expect(repeatBackState.dom).toBe(false);
     expect(repeatBackState.accessibility).toBe(false);
@@ -521,23 +527,40 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
   }
 });
 
+async function readDuringStableNavigation<T>(page: import("@playwright/test").Page, read: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await page.waitForLoadState("load", { timeout: 10_000 });
+      return await read();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === 3 || !/(?:execution context was destroyed|page is navigating|frame was detached)/iu.test(message)) {
+        throw error;
+      }
+    }
+  }
+  throw new Error("The browser document did not stabilize after navigation.");
+}
+
 async function inspectSensitiveBrowserState(page: import("@playwright/test").Page, sensitiveValues: string[]) {
-  const html = await page.content();
-  const accessibleSnapshot = await page.locator("body").ariaSnapshot();
-  const pageState = await page.evaluate(() => ({
-    history: JSON.stringify(window.history.state ?? null),
-    storage: [window.localStorage, window.sessionStorage].flatMap((storage) => Object.keys(storage).map((key) => storage.getItem(key) ?? "")).join("\n"),
-    forms: Array.from(document.forms).flatMap((form) => Array.from(form.elements).map((element) => "value" in element ? String(element.value ?? "") : "")).join("\n"),
-    dom: document.documentElement.outerHTML
-  }));
-  const containsValue = (text: string) => sensitiveValues.some((value) => value.length > 0 && text.includes(value));
-  return {
-    dom: containsValue(html) || containsValue(pageState.dom),
-    accessibility: containsValue(accessibleSnapshot),
-    history: containsValue(pageState.history),
-    storage: containsValue(pageState.storage),
-    forms: containsValue(pageState.forms)
-  };
+  return readDuringStableNavigation(page, async () => {
+    const html = await page.content();
+    const accessibleSnapshot = await page.locator("body").ariaSnapshot();
+    const pageState = await page.evaluate(() => ({
+      history: JSON.stringify(window.history.state ?? null),
+      storage: [window.localStorage, window.sessionStorage].flatMap((storage) => Object.keys(storage).map((key) => storage.getItem(key) ?? "")).join("\n"),
+      forms: Array.from(document.forms).flatMap((form) => Array.from(form.elements).map((element) => "value" in element ? String(element.value ?? "") : "")).join("\n"),
+      dom: document.documentElement.outerHTML
+    }));
+    const containsValue = (text: string) => sensitiveValues.some((value) => value.length > 0 && text.includes(value));
+    return {
+      dom: containsValue(html) || containsValue(pageState.dom),
+      accessibility: containsValue(accessibleSnapshot),
+      history: containsValue(pageState.history),
+      storage: containsValue(pageState.storage),
+      forms: containsValue(pageState.forms)
+    };
+  });
 }
 
 function currentTotpCode(secret: string, now = Date.now()): string {
