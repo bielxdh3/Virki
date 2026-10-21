@@ -245,6 +245,98 @@ test("production Hub E2E proxy establishes a fresh upstream TCP connection per r
   }
 });
 
+test("production Hub proxy records only sanitized upstream socket phase when OIDC interaction resets before headers", async () => {
+  const { createProductionHubProxyRequestHandler } = await import("./start-production-hub.mjs");
+  const attempts = [];
+  const observedFailures = [];
+  const upstream = createServer((request) => {
+    attempts.push(request.method);
+    request.socket.destroy();
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", resolveListen);
+  });
+  const proxy = createServer(createProductionHubProxyRequestHandler(
+    upstream.address().port,
+    undefined,
+    (details) => observedFailures.push(details)
+  ));
+  await new Promise((resolveListen, rejectListen) => {
+    proxy.once("error", rejectListen);
+    proxy.listen(0, "127.0.0.1", resolveListen);
+  });
+
+  const marker = "HIGHLY_PRIVATE_E2E_INTERACTION_MARKER";
+  const secretBody = "code=HIGHLY_PRIVATE_E2E_POST_BODY";
+  try {
+    const response = await new Promise((resolveResponse, rejectResponse) => {
+      const request = httpRequest({
+        hostname: "127.0.0.1",
+        port: proxy.address().port,
+        method: "POST",
+        path: `/interaction/${marker}?state=${marker}`,
+        headers: { host: "portal.localhost", "content-type": "application/x-www-form-urlencoded" }
+      }, (incoming) => {
+        const chunks = [];
+        incoming.on("data", (chunk) => chunks.push(chunk));
+        incoming.on("end", () => resolveResponse({ status: incoming.statusCode, cacheControl: incoming.headers["cache-control"], body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      request.on("error", rejectResponse);
+      request.end(secretBody);
+    });
+    assert.deepEqual(response, { status: 502, cacheControl: "no-store", body: "Hub unavailable" });
+    assert.deepEqual(attempts, ["POST"], "a potentially state-changing OIDC interaction is never retried");
+    assert.equal(observedFailures.length, 1);
+    assert.equal(observedFailures[0].code, "ECONNRESET");
+    assert.equal(observedFailures[0].method, "POST");
+    assert.equal(observedFailures[0].route, "oidc-interaction");
+    assert.equal(observedFailures[0].phase, "connected-before-headers");
+    assert.equal(observedFailures[0].clientAborted, false);
+    assert.equal(JSON.stringify(observedFailures).includes(marker), false);
+    assert.equal(JSON.stringify(observedFailures).includes(secretBody), false);
+    assert.deepEqual(Object.keys(observedFailures[0]).sort(), ["clientAborted", "code", "method", "phase", "route"]);
+  } finally {
+    await Promise.all([upstream, proxy].map((server) => new Promise((resolveClose) => server.close(resolveClose))));
+  }
+});
+
+test("production Hub proxy differentiates connection failure before TCP connect without leaking URL queries", async () => {
+  const { createProductionHubProxyRequestHandler } = await import("./start-production-hub.mjs");
+  const unused = createServer();
+  await new Promise((resolveListen, rejectListen) => {
+    unused.once("error", rejectListen);
+    unused.listen(0, "127.0.0.1", resolveListen);
+  });
+  const disconnectedPort = unused.address().port;
+  await new Promise((resolveClose) => unused.close(resolveClose));
+
+  const observedFailures = [];
+  const proxy = createServer(createProductionHubProxyRequestHandler(disconnectedPort, undefined, (details) => observedFailures.push(details)));
+  await new Promise((resolveListen, rejectListen) => {
+    proxy.once("error", rejectListen);
+    proxy.listen(0, "127.0.0.1", resolveListen);
+  });
+  try {
+    const response = await new Promise((resolveResponse, rejectResponse) => {
+      const request = httpRequest({ hostname: "127.0.0.1", port: proxy.address().port, path: "/api/health?password=HIGHLY_PRIVATE", headers: { host: "portal.localhost" } }, (incoming) => {
+        incoming.resume();
+        incoming.on("end", () => resolveResponse(incoming.statusCode));
+      });
+      request.on("error", rejectResponse);
+      request.end();
+    });
+    assert.equal(response, 502);
+    assert.equal(observedFailures.length, 1);
+    assert.equal(observedFailures[0].code, "ECONNREFUSED");
+    assert.equal(observedFailures[0].phase, "tcp-connect-pending");
+    assert.equal(observedFailures[0].route, "other");
+    assert.equal(JSON.stringify(observedFailures).includes("HIGHLY_PRIVATE"), false);
+  } finally {
+    await new Promise((resolveClose) => proxy.close(resolveClose));
+  }
+});
+
 test("production Hub proxy exposes only the synthetic Access fixture endpoints on its dedicated host", async () => {
   const productionHub = await import("./start-production-hub.mjs");
   const accessRequests = [];

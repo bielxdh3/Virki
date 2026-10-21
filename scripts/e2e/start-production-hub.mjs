@@ -18,7 +18,7 @@ const accessJwksPort = 3010;
 const syntheticAccessHost = "access.e2e.invalid";
 const startTimeoutMs = 120_000;
 
-export function createProductionHubProxyRequestHandler(targetPort = nextPort, jwksPort = accessJwksPort) {
+export function createProductionHubProxyRequestHandler(targetPort = nextPort, jwksPort = accessJwksPort, onUpstreamFailure = reportProxyFailure) {
   return (incomingRequest, outgoingResponse) => {
     const requestHost = incomingRequest.headers.host;
     if (!requestHost) {
@@ -32,7 +32,7 @@ export function createProductionHubProxyRequestHandler(targetPort = nextPort, jw
       (incomingRequest.method === "POST" && incomingRequest.url === "/__test__/keys")
     );
     if (isSyntheticAccessJwksRequest) {
-      proxyToLocalPort(incomingRequest, outgoingResponse, jwksPort, { ...incomingRequest.headers, host: `127.0.0.1:${jwksPort}` });
+      proxyToLocalPort(incomingRequest, outgoingResponse, jwksPort, { ...incomingRequest.headers, host: `127.0.0.1:${jwksPort}` }, undefined, onUpstreamFailure);
       return;
     }
 
@@ -56,14 +56,18 @@ export function createProductionHubProxyRequestHandler(targetPort = nextPort, jw
       }
       outgoingResponse.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
       upstreamResponse.pipe(outgoingResponse);
-    });
+    }, onUpstreamFailure);
   };
 }
 
 function proxyToLocalPort(incomingRequest, outgoingResponse, port, headers, onResponse = (upstreamResponse) => {
   outgoingResponse.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
   upstreamResponse.pipe(outgoingResponse);
-}) {
+}, onUpstreamFailure = reportProxyFailure) {
+  let socketAssigned = false;
+  let tcpConnected = false;
+  let responseStarted = false;
+  let clientAborted = false;
   const upstreamRequest = httpRequest({
     hostname: hubHost,
     port,
@@ -74,16 +78,37 @@ function proxyToLocalPort(incomingRequest, outgoingResponse, port, headers, onRe
     // A stale pooled socket can reset during OIDC redirects and turn a valid callback into a spurious 502.
     agent: false
   }, onResponse);
+  upstreamRequest.on("socket", (socket) => {
+    socketAssigned = true;
+    tcpConnected = !socket.connecting;
+    socket.once("connect", () => { tcpConnected = true; });
+  });
+  upstreamRequest.on("response", () => { responseStarted = true; });
   upstreamRequest.on("error", (error) => {
     const candidateCode = error && typeof error === "object" && "code" in error ? error.code : undefined;
     const errorCode = typeof candidateCode === "string" && /^[A-Z0-9_]{1,32}$/u.test(candidateCode) ? candidateCode : "UNKNOWN";
-    process.stderr.write(`Production Hub E2E proxy upstream failed (code=${errorCode}).\n`);
+    onUpstreamFailure({
+      code: errorCode,
+      method: ["GET", "HEAD", "POST"].includes(incomingRequest.method) ? incomingRequest.method : "other",
+      route: /^\/interaction\/[A-Za-z0-9_-]{8,80}(?:\?|$)/u.test(incomingRequest.url ?? "") ? "oidc-interaction" : "other",
+      phase: responseStarted ? "response-started" : !socketAssigned ? "socket-unassigned" : !tcpConnected ? "tcp-connect-pending" : "connected-before-headers",
+      clientAborted
+    });
     if (!outgoingResponse.headersSent) outgoingResponse.writeHead(502, { "cache-control": "no-store" });
     outgoingResponse.end("Hub unavailable");
   });
-  incomingRequest.on("aborted", () => upstreamRequest.destroy());
+  incomingRequest.on("aborted", () => {
+    clientAborted = true;
+    upstreamRequest.destroy();
+  });
   incomingRequest.pipe(upstreamRequest);
   return upstreamRequest;
+}
+
+function reportProxyFailure(details) {
+  // Error messages, URLs, cookies, OAuth IDs, socket addresses and request
+  // bodies are intentionally excluded from this fixture-only diagnostic.
+  process.stderr.write(`Production Hub E2E proxy upstream failed ${JSON.stringify(details)}.\n`);
 }
 
 async function startProductionHub() {
