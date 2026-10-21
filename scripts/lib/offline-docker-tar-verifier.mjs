@@ -3,9 +3,9 @@ import { constants, lstatSync } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
 
-// Pure read-only inspection of the classic single-image Docker-save TAR format.
-// Docker/Containerd OCI-layout save variants (index.json/oci-layout/blobs/) are
-// intentionally unsupported until their separate descriptor graph is verified.
+// Pure read-only inspection of single-image Docker-save classic and OCI hybrid
+// TARs. Each OCI blob and the full index -> manifest -> config/layers descriptor
+// graph must agree with content digests, sizes, and the Docker save manifest.
 // Do not load/extract archives here. The caller must authenticate the expected
 // image ID and TAR digest independently (e.g. through the owner-signed manifest).
 const SOURCE = "https://github.com/bielxdh3/Virki";
@@ -21,6 +21,11 @@ const MAX_MEMBERS = 1024;
 const MAX_LAYERS = 256;
 const READ_BLOCK = 64 * 1024;
 const DECODER = new TextDecoder("utf-8", { fatal: true });
+const OCI_INDEX = "application/vnd.oci.image.index.v1+json";
+const OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json";
+const OCI_CONFIG = "application/vnd.oci.image.config.v1+json";
+const OCI_LAYER = "application/vnd.oci.image.layer.v1.tar";
+const OCI_BLOB = /^blobs\/sha256\/([0-9a-f]{64})$/u;
 
 function refuse(reason) {
   throw new Error(`Offline Docker TAR rejected: ${reason}`);
@@ -28,6 +33,12 @@ function refuse(reason) {
 
 function record(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactKeys(object, keys, label) {
+  if (!record(object) || Object.keys(object).sort().join(",") !== [...keys].sort().join(",")) {
+    refuse(`${label} has unexpected or missing fields`);
+  }
 }
 
 // JSON.parse silently accepts repeated keys, including \u-escaped collisions.
@@ -255,10 +266,32 @@ function validateManifest(raw, expectedImageId, layerHashes) {
   return { configName, layers: image.Layers };
 }
 
+function ociDescriptor(object, mediaType, files, label, allowPlatform = false) {
+  const keys = ["digest", "mediaType", "size"];
+  if (allowPlatform && Object.hasOwn(object ?? {}, "platform")) keys.push("platform");
+  exactKeys(object, keys, label);
+  if (object.mediaType !== mediaType || !IMAGE_ID.test(object.digest) ||
+      !Number.isSafeInteger(object.size) || object.size < 1) {
+    refuse(`${label} unsupported media type, digest or length`);
+  }
+  const name = `blobs/sha256/${object.digest.slice(7)}`;
+  const file = files.get(name);
+  if (!file || file.size !== object.size || file.digest !== object.digest.slice(7)) {
+    refuse(`${label} blob content or size does not match descriptor`);
+  }
+  if (allowPlatform && object.platform !== undefined) {
+    exactKeys(object.platform, ["os", "architecture"], `${label} platform`);
+    if (object.platform.os !== "linux" || object.platform.architecture !== "amd64") {
+      refuse(`${label} platform differs from linux/amd64`);
+    }
+  }
+  return { name, file };
+}
+
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 /**
- * Independently verify the complete classic Docker-save archive and each layer's
+ * Independently verify the complete Docker-save archive and each layer's
  * uncompressed SHA-256 against its content-addressed image config. Uses one
  * pinned O_NOFOLLOW FD, absolute reads and bounded memory; never calls Docker.
  *
@@ -314,6 +347,7 @@ export async function verifyOfflineDockerSaveTar({
     async function readMember(size, collect) {
       const digest = createHash("sha256");
       const chunks = [];
+      const contentOffset = offset;
       for (let remain = size; remain > 0;) {
         const next = await readExactly(Math.min(remain, READ_BLOCK));
         digest.update(next);
@@ -324,7 +358,8 @@ export async function verifyOfflineDockerSaveTar({
       if (padding && (await readExactly(padding)).some((byte) => byte !== 0)) {
         refuse("nonzero TAR padding");
       }
-      return { digest: digest.digest("hex"), data: collect ? Buffer.concat(chunks) : null };
+      return { digest: digest.digest("hex"), size, contentOffset,
+        data: collect ? Buffer.concat(chunks) : null };
     }
     const files = new Map();
     const dirs = new Set();
@@ -354,22 +389,28 @@ export async function verifyOfflineDockerSaveTar({
       const configName = `${expectedImageId.slice(7)}.json`;
       const isConfig = entry.name === configName;
       const isManifest = entry.name === "manifest.json";
+      const isOciMetadata = entry.name === "index.json" || entry.name === "oci-layout";
       const isRepository = entry.name === "repositories";
       const isLayer = /^[a-f0-9]{64}\/layer\.tar$/u.test(entry.name);
+      const isOciBlob = OCI_BLOB.test(entry.name);
       const isAux = /^[a-f0-9]{64}\/(?:VERSION|json)$/u.test(entry.name);
-      if (!isConfig && !isManifest && !isRepository && !isLayer && !isAux) {
+      if (!isConfig && !isManifest && !isOciMetadata &&
+          !isRepository && !isLayer && !isOciBlob && !isAux) {
         refuse("unexpected member in Docker TAR");
       }
       const max = isConfig ? MAX_CONFIG : isManifest ? MAX_MANIFEST :
-        (isLayer ? MAX_ARCHIVE : MAX_AUXILIARY);
+        (isLayer || isOciBlob ? MAX_ARCHIVE : MAX_AUXILIARY);
       if (entry.size > max || (isLayer && entry.size < 1024)) {
         refuse("unsafe Docker TAR member length");
       }
-      if (!isLayer) {
+      if (!isLayer && !isOciBlob) {
         collectedBytes += entry.size;
         if (collectedBytes > MAX_COLLECTED) refuse("excessive collected Docker TAR metadata");
       }
-      const result = await readMember(entry.size, !isLayer);
+      const result = await readMember(entry.size, !isLayer && !isOciBlob);
+      if (isOciBlob && result.digest !== entry.name.slice("blobs/sha256/".length)) {
+        refuse("OCI blob SHA-256 does not match its content-addressed path");
+      }
       files.set(entry.name, result);
     }
     if (!ended || offset !== expectedArchiveSizeBytes) refuse("incomplete Docker TAR structure");
@@ -381,33 +422,170 @@ export async function verifyOfflineDockerSaveTar({
     }
     ensureNoAliases(archivePath);
     const configName = `${expectedImageId.slice(7)}.json`;
-    if (!files.has(configName) || !files.has("manifest.json")) {
-      refuse("image config or Docker manifest missing");
+    if (!files.has("manifest.json")) refuse("Docker save manifest missing");
+    let config;
+    let orderedLayerDigests;
+    let allowedFiles;
+    if (files.has("index.json") || files.has("oci-layout")) {
+      if (!files.has("index.json") || !files.has("oci-layout")) {
+        refuse("incomplete OCI layout");
+      }
+      // Metadata blobs are bounded and read by absolute offset from the pinned FD.
+      const cached = new Map();
+      let cachedBytes = 0;
+      async function readOciMetadata(name, max) {
+        const member = files.get(name);
+        if (!member || member.size > max) refuse("OCI metadata is missing or oversized");
+        if (cached.has(name)) return cached.get(name);
+        cachedBytes += member.size;
+        if (cachedBytes > MAX_COLLECTED) refuse("too much OCI metadata retained in memory");
+        const buffer = Buffer.alloc(member.size);
+        let received = 0;
+        while (received < member.size) {
+          const { bytesRead } = await fd.read(buffer, received,
+            Math.min(READ_BLOCK, member.size - received), member.contentOffset + received);
+          if (bytesRead <= 0) refuse("OCI metadata read truncated");
+          received += bytesRead;
+        }
+        if (sha256(buffer) !== member.digest) refuse("OCI metadata mutated after initial read");
+        cached.set(name, buffer);
+        return buffer;
+      }
+      const index = strictJson(files.get("index.json").data, "OCI index");
+      exactKeys(index, ["schemaVersion", "mediaType", "manifests"], "OCI index");
+      if (index.schemaVersion !== 2 || index.mediaType !== OCI_INDEX ||
+          !Array.isArray(index.manifests) || index.manifests.length !== 1) {
+        refuse("OCI index must select exactly one image");
+      }
+      const selectedDescriptor = ociDescriptor(index.manifests[0], OCI_MANIFEST, files, "OCI manifest", true);
+      const selectedManifest = await readOciMetadata(selectedDescriptor.name, MAX_MANIFEST);
+      const manifest = strictJson(selectedManifest, "OCI image manifest");
+      exactKeys(manifest, ["schemaVersion", "mediaType", "config", "layers"], "OCI image manifest");
+      if (manifest.schemaVersion !== 2 || manifest.mediaType !== OCI_MANIFEST ||
+          !Array.isArray(manifest.layers) || manifest.layers.length < 1 ||
+          manifest.layers.length > MAX_LAYERS) refuse("unsupported OCI image manifest");
+      const configDescriptor = ociDescriptor(manifest.config, OCI_CONFIG, files, "OCI config");
+      const configPath = `blobs/sha256/${expectedImageId.slice(7)}`;
+      if (configDescriptor.name !== configPath) refuse("OCI config not equal expected image ID");
+      const configRaw = await readOciMetadata(configPath, MAX_CONFIG);
+      config = validateDockerConfig(configRaw, expectedImageId, expectedRevision);
+      const layers = manifest.layers.map((layer, i) =>
+        ociDescriptor(layer, OCI_LAYER, files, `OCI layer ${i}`));
+      orderedLayerDigests = layers.map((layer) => `sha256:${layer.file.digest}`);
+      const referenced = new Set([selectedDescriptor.name, configPath]);
+      for (const layer of layers) {
+        if (referenced.has(layer.name)) refuse("duplicate OCI blob descriptor");
+        referenced.add(layer.name);
+      }
+      const legacyNames = [...files.keys()].filter((name) => OCI_BLOB.test(name) && !referenced.has(name));
+      // Docker Desktop 29 emits one extra content-addressed legacy metadata
+      // JSON blob per layer. Its IDs form exactly one ancestry chain ending in
+      // a final image metadata record. Unrelated blobs stay forbidden.
+      if (legacyNames.length) {
+        if (legacyNames.length !== layers.length) refuse("unreferenced OCI blobs do not match layer lineage");
+        const metadata = [];
+        const byId = new Map();
+        for (const name of legacyNames) {
+          const value = strictJson(await readOciMetadata(name, MAX_AUXILIARY), "Docker layer legacy metadata");
+          if (!record(value) || !/^[a-f0-9]{64}$/u.test(value.id ?? "") ||
+              (value.parent !== undefined && !/^[a-f0-9]{64}$/u.test(value.parent)) ||
+              !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(value.created ?? "") ||
+              value.os !== "linux" || !record(value.container_config) || byId.has(value.id)) {
+            refuse("invalid Docker legacy layer metadata identity");
+          }
+          metadata.push({ name, value });
+          byId.set(value.id, value);
+        }
+        const roots = metadata.filter(({ value }) => value.parent === undefined);
+        const parentIds = new Set(metadata.map(({ value }) => value.parent).filter(Boolean));
+        const leaves = metadata.filter(({ value }) => !parentIds.has(value.id));
+        if (roots.length !== 1 || leaves.length !== 1 || parentIds.size !== metadata.length - 1) {
+          refuse("Docker legacy layer ancestry is not a single chain");
+        }
+        const leaf = leaves[0].value;
+        for (const { value } of metadata) {
+          const expectedFields = ["id", "created", "container_config", "os"];
+          if (value.parent !== undefined) expectedFields.push("parent");
+          if (value === leaf) expectedFields.push("config", "architecture");
+          exactKeys(value, expectedFields, "Docker legacy layer metadata");
+          if (value !== leaf && (value.config !== undefined || value.architecture !== undefined)) {
+            refuse("unexpected final image metadata on intermediate layer");
+          }
+        }
+        if (leaf.architecture !== "amd64" || !record(leaf.config) ||
+            leaf.config.User !== "node:node" || !record(leaf.config.Labels) ||
+            leaf.config.Labels["org.opencontainers.image.revision"] !== expectedRevision ||
+            leaf.config.Labels["org.opencontainers.image.source"] !== SOURCE) {
+          refuse("Docker legacy final image identity differs from OCI config");
+        }
+        const visited = new Set();
+        let current = leaf;
+        while (current) {
+          if (visited.has(current.id)) refuse("Docker legacy layer lineage cycle");
+          visited.add(current.id);
+          current = current.parent === undefined ? null : byId.get(current.parent);
+          if (current === undefined) refuse("Docker legacy layer lineage missing parent");
+        }
+        if (visited.size !== metadata.length) refuse("Docker legacy layer lineage disconnected");
+        for (const name of legacyNames) referenced.add(name);
+      }
+      const dockerManifest = strictJson(files.get("manifest.json").data, "Docker save manifest");
+      if (!Array.isArray(dockerManifest) || dockerManifest.length !== 1) {
+        refuse("Docker save must contain a single image");
+      }
+      const docker = dockerManifest[0];
+      exactKeys(docker, ["Config", "RepoTags", "Layers", "LayerSources"], "Docker save OCI manifest");
+      if (docker.Config !== configPath ||
+          !(docker.RepoTags === null || (Array.isArray(docker.RepoTags) && docker.RepoTags.length === 0)) ||
+          !Array.isArray(docker.Layers) || docker.Layers.length !== layers.length ||
+          !record(docker.LayerSources) || Object.keys(docker.LayerSources).length !== layers.length) {
+        refuse("Docker save manifest and OCI graph mismatch");
+      }
+      for (let i = 0; i < layers.length; i += 1) {
+        if (docker.Layers[i] !== layers[i].name) refuse("Docker layer order mismatches OCI graph");
+        const digest = orderedLayerDigests[i];
+        exactKeys(docker.LayerSources[digest], ["digest", "mediaType", "size"], "Docker layer source");
+        if (docker.LayerSources[digest].digest !== digest ||
+            docker.LayerSources[digest].mediaType !== OCI_LAYER ||
+            docker.LayerSources[digest].size !== layers[i].file.size) {
+          refuse("Docker layer source descriptor mismatch");
+        }
+      }
+      if (Object.keys(docker.LayerSources).some((key) => !orderedLayerDigests.includes(key))) {
+        refuse("unrelated Docker layer source");
+      }
+      const layout = strictJson(files.get("oci-layout").data, "OCI layout");
+      exactKeys(layout, ["imageLayoutVersion"], "OCI layout");
+      if (layout.imageLayoutVersion !== "1.0.0") refuse("unsupported OCI layout");
+      allowedFiles = new Set(["manifest.json", "oci-layout", "index.json", ...referenced]);
+    } else {
+      if (!files.has(configName)) refuse("image config missing");
+      config = validateDockerConfig(files.get(configName).data, expectedImageId, expectedRevision);
+      const layerHashes = new Map([...files].filter(([name]) =>
+        /^[a-f0-9]{64}\/layer\.tar$/u.test(name))
+        .map(([name, value]) => [name, value.digest]));
+      const manifest = validateManifest(files.get("manifest.json").data, expectedImageId, layerHashes);
+      orderedLayerDigests = manifest.layers.map((name) => `sha256:${layerHashes.get(name)}`);
+      allowedFiles = new Set([configName, "manifest.json", ...manifest.layers]);
+      for (const name of manifest.layers) {
+        const directory = name.slice(0, -"/layer.tar".length);
+        for (const suffix of ["json", "VERSION"]) allowedFiles.add(`${directory}/${suffix}`);
+      }
     }
-    const config = validateDockerConfig(files.get(configName).data, expectedImageId, expectedRevision);
-    const layerHashes = new Map([...files].filter(([name]) =>
-      /^[a-f0-9]{64}\/layer\.tar$/u.test(name))
-      .map(([name, value]) => [name, value.digest]));
-    const manifest = validateManifest(files.get("manifest.json").data, expectedImageId, layerHashes);
-    if (manifest.layers.length !== config.diffIds.length) refuse("image layer count differs from config diff_ids");
-    for (let i = 0; i < manifest.layers.length; i += 1) {
-      if (`sha256:${layerHashes.get(manifest.layers[i])}` !== config.diffIds[i]) {
+    if (orderedLayerDigests.length !== config.diffIds.length) {
+      refuse("image layer count differs from config diff_ids");
+    }
+    for (let i = 0; i < orderedLayerDigests.length; i += 1) {
+      if (orderedLayerDigests[i] !== config.diffIds[i]) {
         refuse("layer uncompressed SHA-256 differs from content-addressed config diff_id");
       }
     }
-    const allowedFiles = new Set([configName, "manifest.json", ...manifest.layers]);
     if (files.has("repositories")) {
       const repositories = strictJson(files.get("repositories").data, "repositories");
       if (!record(repositories) || Object.keys(repositories).length !== 0) {
         refuse("Docker repository tags cannot be imported");
       }
       allowedFiles.add("repositories");
-    }
-    for (const name of manifest.layers) {
-      if (name.endsWith("/layer.tar")) {
-        const directory = name.slice(0, -"/layer.tar".length);
-        for (const suffix of ["json", "VERSION"]) allowedFiles.add(`${directory}/${suffix}`);
-      }
     }
     for (const [name, file] of files) {
       if (!allowedFiles.has(name)) refuse("unreferenced Docker TAR member");
@@ -422,10 +600,15 @@ export async function verifyOfflineDockerSaveTar({
         refuse("unreferenced Docker directory entry");
       }
     }
+    if (!sameFile(before, await fd.stat({ bigint: true })) ||
+        !sameFile(before, lstatSync(archivePath, { bigint: true }))) {
+      refuse("Docker TAR changed while validating OCI graph");
+    }
+    ensureNoAliases(archivePath);
     return Object.freeze({
       role, imageId: expectedImageId, revision: expectedRevision, source: SOURCE,
       platform: "linux/amd64", user: config.user, archiveSha256,
-      archiveSizeBytes: expectedArchiveSizeBytes, layerCount: manifest.layers.length,
+      archiveSizeBytes: expectedArchiveSizeBytes, layerCount: orderedLayerDigests.length,
     });
   } finally {
     await fd.close();

@@ -83,6 +83,159 @@ function setup(t, options = {}) {
   return { args, files, config, configBytes, configId, layerBytes, layerPath, directory, archiveBytes };
 }
 
+// Containerd-backed Docker 29 exports a Docker manifest.json AND an OCI
+// index/manifest/config/layer descriptor graph in the same tarball.
+function setupOci(t, changes = {}) {
+  const layerBytes = changes.layerBytes ?? tar([{ name: "usr/local/bin/app", bytes: Buffer.from("hello") }]);
+  const layerDigest = sha256(layerBytes);
+  const layerPath = `blobs/sha256/${layerDigest}`;
+  const config = {
+    os: changes.os ?? "linux", architecture: changes.architecture ?? "amd64",
+    config: {
+      User: changes.user ?? "node:node",
+      Labels: {
+        "org.opencontainers.image.revision": changes.revision ?? REVISION,
+        "org.opencontainers.image.source": changes.source ?? SOURCE,
+      },
+    },
+    rootfs: { type: "layers", diff_ids: [`sha256:${changes.diffId ?? layerDigest}`] },
+  };
+  const configBytes = changes.configBytes ?? json(config);
+  const configId = sha256(configBytes);
+  const configPath = `blobs/sha256/${configId}`;
+  const ociManifest = {
+    schemaVersion: 2, mediaType: "application/vnd.oci.image.manifest.v1+json",
+    config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: `sha256:${configId}`, size: configBytes.length },
+    layers: [{
+      mediaType: "application/vnd.oci.image.layer.v1.tar",
+      digest: `sha256:${layerDigest}`, size: layerBytes.length,
+    }],
+  };
+  const ociManifestBytes = changes.ociManifestBytes ?? json(ociManifest);
+  const manifestId = sha256(ociManifestBytes);
+  const ociIndex = {
+    schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json",
+    manifests: [{
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: `sha256:${manifestId}`,
+      size: ociManifestBytes.length,
+      ...(changes.platform ? { platform: changes.platform } : {}),
+    }],
+  };
+  const classicManifest = [{
+    Config: configPath, RepoTags: changes.tags ?? null,
+    Layers: [layerPath],
+    LayerSources: {
+      [`sha256:${layerDigest}`]: {
+        mediaType: "application/vnd.oci.image.layer.v1.tar",
+        size: layerBytes.length, digest: `sha256:${layerDigest}`,
+      },
+    },
+  }];
+  const files = [
+    { name: "blobs/", type: "5" },
+    { name: "blobs/sha256/", type: "5" },
+    { name: configPath, bytes: configBytes },
+    { name: layerPath, bytes: layerBytes },
+    { name: `blobs/sha256/${manifestId}`, bytes: ociManifestBytes },
+    { name: "index.json", bytes: changes.indexBytes ?? json(ociIndex) },
+    { name: "manifest.json", bytes: changes.dockerManifestBytes ?? json(classicManifest) },
+    { name: "oci-layout", bytes: changes.layoutBytes ?? json({ imageLayoutVersion: "1.0.0" }) },
+    ...(changes.legacyMetadata ? (() => {
+      const metadata = typeof changes.legacyMetadata === "object"
+        ? changes.legacyMetadata
+        : {
+            id: "b".repeat(64), created: "2026-10-21T12:34:56.000000000Z",
+            container_config: {}, os: "linux", architecture: "amd64",
+            config: { User: config.config.User, Labels: config.config.Labels },
+          };
+      const bytes = json(metadata);
+      return [{ name: `blobs/sha256/${sha256(bytes)}`, bytes }];
+    })() : []),
+    ...(changes.extraFiles ?? []),
+  ];
+  const fixture = setup(t, {
+    entries: files,
+    imageId: changes.imageId ?? configId,
+  });
+  return {
+    ...fixture, files, config, configId, configPath, layerPath, layerDigest,
+    ociIndex, ociManifest, classicManifest, manifestId,
+  };
+}
+
+test("verifies actual Docker 29 OCI layout image graph, layer bytes and source identity", async (t) => {
+  const fixture = setupOci(t);
+  const proof = await verifyOfflineDockerSaveTar(fixture.args);
+  assert.equal(proof.imageId, `sha256:${fixture.configId}`);
+  assert.equal(proof.platform, "linux/amd64");
+  assert.equal(proof.archiveSha256, fixture.args.expectedArchiveSha256);
+  assert.equal(proof.layerCount, 1);
+  assert.equal(proof.user, "node:node");
+});
+
+test("verifies Docker 29's content-addressed legacy layer history for one layer", async (t) => {
+  const fixture = setupOci(t, { legacyMetadata: true });
+  const proof = await verifyOfflineDockerSaveTar(fixture.args);
+  assert.equal(proof.imageId, `sha256:${fixture.configId}`);
+  assert.equal(proof.layerCount, 1);
+});
+
+for (const [name, legacyMetadata] of [
+  ["noncanonical legacy image ID", { id: "../escape", created: "2026-10-21T12:34:56Z", container_config: {}, os: "linux", architecture: "amd64", config: { User: "node:node", Labels: { "org.opencontainers.image.revision": REVISION, "org.opencontainers.image.source": SOURCE } } }],
+  ["orphan parent", { id: "b".repeat(64), parent: "a".repeat(64), created: "2026-10-21T12:34:56Z", container_config: {}, os: "linux", architecture: "amd64", config: { User: "node:node", Labels: { "org.opencontainers.image.revision": REVISION, "org.opencontainers.image.source": SOURCE } } }],
+  ["wrong legacy user", { id: "b".repeat(64), created: "2026-10-21T12:34:56Z", container_config: {}, os: "linux", architecture: "amd64", config: { User: "root", Labels: { "org.opencontainers.image.revision": REVISION, "org.opencontainers.image.source": SOURCE } } }],
+  ["wrong legacy revision", { id: "b".repeat(64), created: "2026-10-21T12:34:56Z", container_config: {}, os: "linux", architecture: "amd64", config: { User: "node:node", Labels: { "org.opencontainers.image.revision": "f".repeat(40), "org.opencontainers.image.source": SOURCE } } }],
+  ["unexpected legacy commands", { id: "b".repeat(64), created: "2026-10-21T12:34:56Z", container_config: {}, os: "linux", architecture: "amd64", config: { User: "node:node", Labels: { "org.opencontainers.image.revision": REVISION, "org.opencontainers.image.source": SOURCE } }, bogus: true }],
+]) {
+  test(`rejects forged Docker legacy metadata: ${name}`, async (t) => {
+    const fixture = setupOci(t, { legacyMetadata });
+    await assert.rejects(verifyOfflineDockerSaveTar(fixture.args), /rejected/u);
+  });
+}
+
+for (const [name, change] of [
+  ["wrong revision", { revision: "f".repeat(40) }],
+  ["wrong source", { source: "https://attacker.invalid/repo" }],
+  ["wrong OS", { os: "windows" }],
+  ["wrong architecture", { architecture: "arm64" }],
+  ["root", { user: "root" }],
+  ["bad image ID", { imageId: "f".repeat(64) }],
+  ["config diff_id mismatch", { diffId: "f".repeat(64) }],
+  ["mismatched descriptor platform", { platform: { os: "linux", architecture: "arm64" } }],
+  ["unreferenced foreign blobs", { extraFiles: [{ name: `blobs/sha256/${"a".repeat(64)}`, bytes: Buffer.from("evil") }] }],
+  ["unexpected PAX", { extraFiles: [{ name: "PaxHeader", type: "x", bytes: Buffer.from("bad") }] }],
+  ["OCI layout version changed", { layoutBytes: json({ imageLayoutVersion: "1.0.1" }) }],
+  ["OCI index descriptor size forged", { indexBytes: json({ schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [{ mediaType: "application/vnd.oci.image.manifest.v1+json", digest: `sha256:${"a".repeat(64)}`, size: 1 }] }) }],
+  ["OCI index has no manifest", { indexBytes: json({ schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [] }) }],
+  ["duplicate index key", { indexBytes: Buffer.from('{"schemaVersion":2,"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}') }],
+]) {
+  test(`rejects forged OCI layout: ${name}`, async (t) => {
+    const fixture = setupOci(t, change);
+    await assert.rejects(verifyOfflineDockerSaveTar(fixture.args), /rejected/u);
+  });
+}
+
+test("rejects descriptor graph tampering even with a rehashed outer archive", async (t) => {
+  const base = setupOci(t);
+  const badLayer = {
+    ...base.ociManifest,
+    layers: [{ ...base.ociManifest.layers[0], size: base.ociManifest.layers[0].size + 1 }],
+  };
+  const wrongLayerSize = setupOci(t, { ociManifestBytes: json(badLayer) });
+  await assert.rejects(verifyOfflineDockerSaveTar(wrongLayerSize.args), /rejected/u);
+  const badMediaType = {
+    ...base.ociManifest,
+    layers: [{ ...base.ociManifest.layers[0], mediaType: "application/vnd.oci.image.layer.v1.tar+gzip" }],
+  };
+  const compressed = setupOci(t, { ociManifestBytes: json(badMediaType) });
+  await assert.rejects(verifyOfflineDockerSaveTar(compressed.args), /rejected/u);
+  const replacementLayer = setupOci(t, {
+    extraFiles: [{ name: "blobs/sha256/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", bytes: Buffer.from("forged blob") }],
+  });
+  await assert.rejects(verifyOfflineDockerSaveTar(replacementLayer.args), /rejected/u);
+});
+
 test("verifies a real Docker-save-shaped TAR without extracting or running Docker", async (t) => {
   const fixture = setup(t);
   const proof = await verifyOfflineDockerSaveTar(fixture.args);
