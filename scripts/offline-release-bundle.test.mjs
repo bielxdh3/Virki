@@ -180,7 +180,12 @@ test("rejects a valid but substituted source tar even if its paths are individua
   const runner = async (program, args, options) => {
     if (program === "git" && args[0] === "archive") {
       const output = args.find((arg) => arg.startsWith("--output=")).slice("--output=".length);
-      execFileSync("tar", ["--format=ustar", "-cf", output, "-C", substitutePath, "harmless.txt"]);
+      // The substituted archive must retain canonical Git owner and commit
+      // metadata. Otherwise the verifier rejects an earlier independent
+      // invariant and this test never exercises the missing-Git-member gate.
+      const commitTime = git(f.repositoryRoot, "show", "-s", "--format=%ct", f.revision);
+      execFileSync("tar", ["--format=ustar", "--owner=root:0", "--group=root:0",
+        `--mtime=@${commitTime}`, "-cf", output, "-C", substitutePath, "harmless.txt"]);
       return "";
     }
     return base(program, args, options);

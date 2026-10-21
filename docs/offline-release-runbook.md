@@ -53,6 +53,13 @@ hosted CodeQL approval or as permission to deploy.
    independent sibling `/var/lib/virki/offline-staging` (owner-only 0700), never
    `/var/lib/virki/offline-release/staging` or a child of the trusted source-Git
    store `/var/lib/virki/offline-source`.
+   The repository's `trusted-verifier-dependency-closure` check audits static
+   ESM imports and selected runtime launch surfaces (including the single
+   approved native Git command). It is a regression guard, **not** a sandbox
+   or a complete proof against arbitrary JavaScript evaluation. In particular,
+   passing this check cannot replace independently reviewed verifier bytes,
+   separately approved root-owned SHA-256 pins, safe native installation or
+   executable-bytes-at-use-point verification. It grants no release authority.
 2. Verify host identity, independent builder/owner Ed25519 key pins, explicit
    owner assurance flag, revocations, predecessor, sequence, validity window,
    source/archive/report digests, OCI layer/config identities, full source Git

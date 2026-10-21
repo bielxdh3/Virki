@@ -22,25 +22,56 @@ const AUDITED_NODE_BUILTINS = new Set([
   "node:child_process", "node:crypto", "node:fs", "node:fs/promises",
   "node:os", "node:path", "node:url",
 ]);
+// A static import inventory is meaningful only if the host source cannot
+// silently obtain a runtime evaluator or an unreviewed process launcher.
+// This is defense in depth; it is NOT an authorization to install or deploy.
+const FORBIDDEN_RUNTIME_IDENTIFIERS = new Set([
+  "Function", "AsyncFunction", "GeneratorFunction", "AsyncGeneratorFunction",
+  "eval", "require", "createRequire", "getBuiltinModule", "globalThis", "global", "Reflect",
+]);
+const FORBIDDEN_RUNTIME_PROPERTIES = new Set([
+  "constructor", "mainModule", "_linkedBinding", "binding", "dlopen",
+]);
+const TRUSTED_GIT_SOURCE = "infra/offline/trusted-source-git.mjs";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 // Fail closed on any executable dependency we cannot statically account for.
 // All installed host files use static, literal ESM imports; intentionally
 // reject import attributes, dynamic imports, package imports and CJS escapes.
-function importsIn(source) {
+function importsIn(source, relative) {
   // A regex for `import ` misses legal minified syntax such as `import"x"`
   // or `export*from"x"`; use the actual JavaScript grammar instead.
   const parsed = ts.createSourceFile("audited-verifier.mjs", source,
     ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   assert.equal(parsed.parseDiagnostics.length, 0, "unparseable verifier source is forbidden");
   const dependencies = [];
+  let gitExecCalls = 0;
   function visit(node) {
+    if (ts.isIdentifier(node)) {
+      assert.ok(!FORBIDDEN_RUNTIME_IDENTIFIERS.has(node.text),
+        `runtime evaluator or dynamic loader identifier is forbidden: ${node.text}`);
+      if (node.text === "execFileSync") {
+        const imported = ts.isImportSpecifier(node.parent) && node.parent.name === node &&
+          !node.parent.propertyName;
+        const directCall = ts.isCallExpression(node.parent) && node.parent.expression === node;
+        assert.ok(relative === TRUSTED_GIT_SOURCE && (imported || directCall),
+          "execFileSync may only be imported or directly invoked by trusted source Git");
+      }
+    }
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       if (node.moduleSpecifier) {
         assert.ok(ts.isStringLiteral(node.moduleSpecifier) &&
           !node.attributes && !node.assertClause,
         "verifier modules require literal imports without attributes");
         dependencies.push(node.moduleSpecifier.text);
+        if (node.moduleSpecifier.text === "node:child_process") {
+          const imports = ts.isImportDeclaration(node) && node.importClause?.namedBindings;
+          assert.ok(relative === TRUSTED_GIT_SOURCE && imports &&
+            ts.isNamedImports(imports) && imports.elements.length === 1 &&
+            imports.elements[0].name.text === "execFileSync" &&
+            !imports.elements[0].propertyName && !node.importClause.name,
+          "child_process is permitted only as the exact trusted Git execFileSync import");
+        }
       }
     }
     assert.ok(!ts.isImportEqualsDeclaration(node) && !ts.isImportTypeNode(node),
@@ -48,6 +79,47 @@ function importsIn(source) {
     if (ts.isCallExpression(node)) {
       assert.notEqual(node.expression.kind, ts.SyntaxKind.ImportKeyword,
         "dynamic import is forbidden");
+      if (ts.isIdentifier(node.expression) && node.expression.text === "execFileSync") {
+        gitExecCalls++;
+        let enclosing = node.parent;
+        while (enclosing && !ts.isFunctionLike(enclosing)) enclosing = enclosing.parent;
+        const argv = node.arguments[1];
+        const gitDir = ts.isArrayLiteralExpression(argv) && argv.elements[1];
+        const trailing = ts.isArrayLiteralExpression(argv) && argv.elements[2];
+        assert.ok(relative === TRUSTED_GIT_SOURCE &&
+          ts.isFunctionDeclaration(enclosing) && enclosing.name?.text === "git" &&
+          node.arguments.length === 3 &&
+          ts.isStringLiteral(node.arguments[0]) &&
+          node.arguments[0].text === "/usr/bin/git" &&
+          ts.isArrayLiteralExpression(argv) && argv.elements.length === 3 &&
+          ts.isStringLiteral(argv.elements[0]) && argv.elements[0].text === "--no-pager" &&
+          ts.isTemplateExpression(gitDir) && gitDir.head.text === "--git-dir=" &&
+          gitDir.templateSpans.length === 1 &&
+          ts.isIdentifier(gitDir.templateSpans[0].expression) &&
+          gitDir.templateSpans[0].expression.text === "repo" &&
+          gitDir.templateSpans[0].literal.text === "" &&
+          ts.isSpreadElement(trailing) && ts.isIdentifier(trailing.expression) &&
+          trailing.expression.text === "args" &&
+          ts.isObjectLiteralExpression(node.arguments[2]) &&
+          node.arguments[2].properties.length === 6 &&
+          node.arguments[2].properties.every((property, index) =>
+            ts.isPropertyAssignment(property) &&
+            ts.isIdentifier(property.name) &&
+            property.name.text === ["env", "encoding", "timeout", "maxBuffer", "windowsHide", "stdio"][index]) &&
+          ts.isIdentifier(node.arguments[2].properties[0].initializer) &&
+          node.arguments[2].properties[0].initializer.text === "GIT_ENV" &&
+          ts.isStringLiteral(node.arguments[2].properties[1].initializer) &&
+          node.arguments[2].properties[1].initializer.text === "buffer" &&
+          ts.isNumericLiteral(node.arguments[2].properties[2].initializer) &&
+          node.arguments[2].properties[2].initializer.text === "30000" &&
+          node.arguments[2].properties[3].initializer.getText(parsed).replace(/\s+/gu, "") === "32*1024*1024" &&
+          node.arguments[2].properties[4].initializer.kind === ts.SyntaxKind.TrueKeyword &&
+          ts.isArrayLiteralExpression(node.arguments[2].properties[5].initializer) &&
+          node.arguments[2].properties[5].initializer.elements.length === 3 &&
+          node.arguments[2].properties[5].initializer.elements.every((entry, index) =>
+            ts.isStringLiteral(entry) && entry.text === ["ignore", "pipe", "pipe"][index]),
+        "only the fixed native /usr/bin/git invocation is permitted");
+      }
       if (ts.isIdentifier(node.expression)) {
         assert.ok(!["require", "createRequire", "eval", "Function"].includes(node.expression.text),
           "dynamic module evaluation and CommonJS loading are forbidden");
@@ -58,15 +130,25 @@ function importsIn(source) {
     }
     if (ts.isPropertyAccessExpression(node)) {
       assert.notEqual(node.name.text, "getBuiltinModule", "dynamic builtin loader is forbidden");
+      assert.ok(!FORBIDDEN_RUNTIME_PROPERTIES.has(node.name.text),
+        "runtime executable access through reflective properties is forbidden");
     }
     if (ts.isElementAccessExpression(node) && node.argumentExpression &&
         ts.isStringLiteral(node.argumentExpression)) {
       assert.notEqual(node.argumentExpression.text, "getBuiltinModule",
         "dynamic builtin loader is forbidden");
+      assert.ok(!FORBIDDEN_RUNTIME_PROPERTIES.has(node.argumentExpression.text),
+        "runtime executable access through reflective properties is forbidden");
+    }
+    if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression) &&
+        node.expression.text === "process") {
+      assert.fail("computed process builtin and executable module access is forbidden");
     }
     ts.forEachChild(node, visit);
   }
   visit(parsed);
+  assert.equal(gitExecCalls, relative === TRUSTED_GIT_SOURCE ? 1 : 0,
+    "exactly one audited Git subprocess invocation is required");
   return dependencies;
 }
 
@@ -83,7 +165,7 @@ function discoverClosure(sourceRoot, entries = HOST_ENTRIES) {
     assert.ok(stat.isFile() && !stat.isSymbolicLink(), `missing or linked dependency ${relative}`);
     found.add(relative);
     const source = readFileSync(full, "utf8");
-    for (const specifier of importsIn(source)) {
+    for (const specifier of importsIn(source, relative)) {
       if (specifier.startsWith("node:")) {
         assert.ok(AUDITED_NODE_BUILTINS.has(specifier),
           `unreviewed native builtin dependency: ${specifier}`);
@@ -151,6 +233,41 @@ test("unreviewed static import, dynamic import, package import and vanished impo
   const missing = path.join(dest, "scripts", "lib", "offline-source-tar-verifier.mjs");
   rmSync(missing);
   assert.throws(() => discoverClosure(dest));
+});
+
+test("host static audit refuses executable loader aliases and unauthorized subprocess launches", (t) => {
+  const dest = copyAuditedTo(t);
+  const target = path.join(dest, "infra", "offline", "trusted-source-git.mjs");
+  const original = readFileSync(target, "utf8");
+  const injections = [
+    'const F = Function; F("return import(\\"./nonpinned.mjs\\")")();',
+    'const F = globalThis["Function"]; F("return import(\\"./nonpinned.mjs\\")")();',
+    'const F = global["Function"]; F("return import(\\"./nonpinned.mjs\\")")();',
+    'const launch = process["get" + "BuiltinModule"]("child_process").spawnSync; launch("/bin/sh", ["-c", "id"]);',
+    'import { spawnSync as launch } from "node:child_process"; launch(process.execPath, ["./nonpinned.mjs"]);',
+    'import { execFileSync as run } from "node:child_process"; run(process.execPath, ["./nonpinned.mjs"]);',
+    'const run = execFileSync; run(process.execPath, ["./nonpinned.mjs"]);',
+    'execFileSync(process.execPath, ["./nonpinned.mjs"]);',
+    'execFileSync("/usr/bin/git", ["--no-pager"], {});',
+    'function unreviewedGit() { return execFileSync("/usr/bin/git", ["--no-pager"], {}); }',
+  ];
+  for (const injected of injections) {
+    writeFileSync(target, `${original}\n${injected}\n`);
+    assert.throws(() => {
+      const closure = discoverClosure(dest);
+      assert.deepEqual(closure, AUDITED_VERIFIER_FILES);
+    }, `must reject unauthorized execution: ${injected}`);
+  }
+  for (const [before, after] of [
+    ["timeout: 30000", "timeout: 0"],
+    ["windowsHide: true", "windowsHide: false"],
+    ['encoding: "buffer"', 'encoding: "utf8"'],
+    ['stdio: ["ignore", "pipe", "pipe"]', 'stdio: ["inherit", "inherit", "inherit"]'],
+  ]) {
+    assert.ok(original.includes(before), `missing expected audited native Git option: ${before}`);
+    writeFileSync(target, original.replace(before, after));
+    assert.throws(() => discoverClosure(dest), `must refuse changed native Git option: ${before}`);
+  }
 });
 
 test("changed source checker or TAR parser bytes fail independent source digest pins", (t) => {
