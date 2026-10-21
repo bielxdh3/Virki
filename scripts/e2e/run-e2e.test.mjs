@@ -441,34 +441,34 @@ test("Next child diagnostic records local upstream socket reuse and response lif
     issuerPort: upstream.address().port,
     emit: (item) => captured.push(item)
   });
-  const secret = "PRIVATE_TOKEN_SESSION_COOKIE_SECRET";
+  const syntheticMarker = "fixture-sensitive-payload-marker";
   const send = () => new Promise((resolveResponse, rejectResponse) => {
     const req = mockHttp.request({
       hostname: "127.0.0.1",
       port: upstream.address().port,
       agent,
       method: "POST",
-      path: `/interaction/abcdefgh?state=${secret}`,
-      headers: { cookie: `virki_session=${secret}`, authorization: `Bearer ${secret}`, "content-type": "text/plain" }
+      path: `/interaction/abcdefgh?state=${syntheticMarker}`,
+      headers: { cookie: `virki_session=${syntheticMarker}`, authorization: `Bearer ${syntheticMarker}`, "content-type": "text/plain" }
     }, (res) => {
       res.resume();
       res.on("end", () => resolveResponse(res.statusCode));
     });
     req.once("error", rejectResponse);
-    req.end(secret);
+    req.end(syntheticMarker);
   });
   try {
     assert.equal(await send(), 303);
     assert.equal(await send(), 303);
     assert.equal(received.length, 2);
     assert.equal(received[0].peerPort, received[1].peerPort, "real agent reused its upstream socket");
-    assert.ok(received.every((entry) => entry.cookie?.includes(secret) && entry.authorization?.includes(secret) && entry.path?.includes(secret)), "request semantics unchanged");
+    assert.ok(received.every((entry) => entry.cookie?.includes(syntheticMarker) && entry.authorization?.includes(syntheticMarker) && entry.path?.includes(syntheticMarker)), "request semantics unchanged");
     assert.ok(captured.some((event) => event.event === "socket" && event.reused === true), "reused socket detected");
     assert.equal(captured.filter((event) => event.event === "response" && event.status === 303).length, 2);
     assert.equal(captured.filter((event) => event.event === "response-end").length, 2);
     assert.ok(captured.every((event) => Object.keys(event).every((key) => ["event", "request", "socket", "route", "method", "reused", "connecting", "status", "code", "hadError", "complete"].includes(key))));
     const serialized = JSON.stringify(captured);
-    for (const sensitive of [secret, "PRIVATE_RESPONSE_CODE", "PRIVATE_RESPONSE_COOKIE", "Bearer", "virki_session", "127.0.0.1", String(upstream.address().port)]) {
+    for (const sensitive of [syntheticMarker, "PRIVATE_RESPONSE_CODE", "PRIVATE_RESPONSE_COOKIE", "Bearer", "virki_session", "127.0.0.1", String(upstream.address().port)]) {
       assert.equal(serialized.includes(sensitive), false, `no diagnostic leakage: ${sensitive}`);
     }
     assert.ok(captured.every((event) => !Object.values(event).some((value) => typeof value === "string" && value.includes("/interaction/"))));
