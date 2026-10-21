@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
 import { inspectProductionSource, ProductionRevisionError, runCommand } from "./lib/production-revision.mjs";
 import { verifyExactShaCi } from "./lib/production-ci.mjs";
+import { requireOfflineReleaseCapacity } from "./lib/offline-release-capacity.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 export const SSH_OPTIONS = [
@@ -187,6 +188,7 @@ export async function runProductionPreflight({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   config: operatorConfig = readProductionConfig(),
   mode = "hosted",
+  offlineArtifacts,
 } = {}) {
   if (mode !== "hosted" && mode !== "offline") {
     return { status: 1, lines: ["Unknown production preflight release mode."] };
@@ -240,11 +242,29 @@ export async function runProductionPreflight({
     return { status: 1, lines: [...lines, "Remote Docker, Compose, locking, or disk preflight failed."] };
   }
 
+  let capacity;
+  if (mode === "offline") {
+    if (lineValue(docker.stdout, "VIRKI_PLATFORM=") !== "linux/amd64") {
+      return { status: 1, lines: [...lines, "Offline release requires native linux/amd64."] };
+    }
+    // df reports GiB rounded to 0.1; subtract the full rounding unit so no
+    // capacity is inadvertently conjured by display precision. Inputs must be
+    // measured independently and repeated by the trusted host before use.
+    const freeGiB = Number(lineValue(docker.stdout, "VIRKI_DISK_FREE_GB="));
+    const safeFreeBytes = Math.floor((freeGiB - 0.1) * 1024 ** 3);
+    try {
+      capacity = requireOfflineReleaseCapacity({ ...offlineArtifacts, freeBytes: safeFreeBytes });
+    } catch {
+      return { status: 1, lines: [...lines, "Offline release disk budget is unproven or insufficient; no transfer authorized."] };
+    }
+  }
+
   lines.push("SSH preflight passed with a stable native Linux identity.");
   lines.push(`Remote Docker ${lineValue(docker.stdout, "VIRKI_DOCKER_VERSION=")} / Compose ${lineValue(docker.stdout, "VIRKI_COMPOSE_VERSION=")}.`);
   lines.push(`Remote Docker platform ${lineValue(docker.stdout, "VIRKI_PLATFORM=")}.`);
   lines.push(`Remote free disk ${lineValue(docker.stdout, "VIRKI_DISK_FREE_GB=")} GB; deManage container names observed ${lineValue(docker.stdout, "VIRKI_DEMANAGE_COUNT=")}.`);
-  return { status: 0, lines, platform: lineValue(docker.stdout, "VIRKI_PLATFORM=") };
+  return { status: 0, lines, platform: lineValue(docker.stdout, "VIRKI_PLATFORM="),
+    ...(capacity ? { capacity } : {}) };
 }
 
 export async function runAcceptedProductionPreflight({
