@@ -1,5 +1,5 @@
 import { execFileSync, type ChildProcess } from "node:child_process";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdtemp, rmdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -12,11 +12,14 @@ import { Prisma, PrismaClient } from "@virki/database";
 import { assertDisposableCoreTestDatabase } from "../core-test-database-safety.mjs";
 // @ts-expect-error The isolated E2E service runner is JavaScript without a declaration file.
 import { startIsolatedService } from "./isolated-service.mjs";
+// @ts-expect-error This JavaScript fixture helper has no declaration file.
+import { readE2eOidcPrivateConfiguration } from "./oidc-private-config.mjs";
 
 const E2E_DATABASE_ENV = "VIRKI_E2E_DATABASE_URL";
 const AUDIT_CLEANUP_DATABASE_ENV = "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL";
 const FIXTURE_FILE_ENV = "VIRKI_E2E_AUTH_FIXTURE_FILE";
 const OIDC_PRIVATE_CONFIG_ENV = "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE";
+const portalIssuerUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://portal.localhost" : "https://portal.localhost:3001";
 
 type AccountFixture = {
   id: string;
@@ -29,6 +32,7 @@ type AccountFixture = {
 type FixtureState = {
   user: AccountFixture;
   recoveryTargetUser: AccountFixture;
+  accountSwitchUser: AccountFixture;
   admin: AccountFixture;
   recoveryReviewer: AccountFixture;
   projectName: string;
@@ -77,6 +81,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   const disabledProjectClientId = `${projectClientId}-disabled`;
   const userEmail = `${runId}.user@e2e.invalid`;
   const recoveryTargetEmail = `${runId}.recovery-target@e2e.invalid`;
+  const accountSwitchEmail = `${runId}.account-switch@e2e.invalid`;
   const adminEmail = `${runId}.admin@e2e.invalid`;
   const projectName = `E2E project ${runId.slice(0, 8)}`;
   const ungrantedProjectName = `E2E ungranted project ${runId.slice(0, 8)}`;
@@ -89,6 +94,11 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
   };
   const recoveryTargetUser: Omit<AccountFixture, "id"> = {
     email: recoveryTargetEmail,
+    password: randomBytes(32).toString("base64url"),
+    deviceToken: randomBytes(32).toString("base64url")
+  };
+  const accountSwitchUser: Omit<AccountFixture, "id"> = {
+    email: accountSwitchEmail,
     password: randomBytes(32).toString("base64url"),
     deviceToken: randomBytes(32).toString("base64url")
   };
@@ -107,7 +117,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
 
   let temporaryDirectory: string | undefined;
   let fixtureFile: string | undefined;
-  let oidcPrivateConfigWritten = false;
+  let oidcPrivateConfigLoaded = false;
   let oidcIssuerProcess: ChildProcess | undefined;
   let seeded: FixtureState | undefined;
   let setupStage = "temporary-fixture-storage";
@@ -117,9 +127,10 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     await restrictTemporaryDirectory(temporaryDirectory);
 
     setupStage = "credential-preparation";
-    const [userPasswordHash, recoveryTargetUserPasswordHash, adminPasswordHash, reviewerPasswordHash, reviewerAdministrativePasswordHash] = await Promise.all([
+    const [userPasswordHash, recoveryTargetUserPasswordHash, accountSwitchUserPasswordHash, adminPasswordHash, reviewerPasswordHash, reviewerAdministrativePasswordHash] = await Promise.all([
       hashPassword(user.password),
       hashPassword(recoveryTargetUser.password),
+      hashPassword(accountSwitchUser.password),
       hashPassword(admin.password),
       hashPassword(recoveryReviewer.password),
       hashPassword(reviewerAdministrativePassword)
@@ -127,23 +138,12 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     const now = new Date();
     const rememberedUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const oidcSecret = randomBytes(48).toString("base64url");
-    const oidcEncryptionKey = randomBytes(32).toString("hex");
+    setupStage = "oidc-private-config";
+    const { adapterKey: oidcEncryptionKey, signingKeyId } = readE2eOidcPrivateConfiguration(oidcPrivateConfigFile);
+    oidcPrivateConfigLoaded = true;
     const clientSecretCiphertext = encryptOidcClientSecret(oidcSecret, {
       VIRKI_OIDC_ADAPTER_KEY: oidcEncryptionKey
     });
-    const signingKey = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" });
-    const signingKeyId = randomUUID();
-    const signingJwks = {
-      keys: [{ ...signingKey, kid: signingKeyId, use: "sig", alg: "ES256" }]
-    };
-    const cookieKey = randomBytes(32).toString("base64url");
-    setupStage = "oidc-private-config";
-    await writeFile(oidcPrivateConfigFile, JSON.stringify({
-      adapterKey: oidcEncryptionKey,
-      cookieKey,
-      signingJwks
-    }), { encoding: "utf8", flag: "wx", mode: 0o600 });
-    oidcPrivateConfigWritten = true;
 
     setupStage = "fixture-database-seed";
     const records = await prisma.$transaction(async (transaction) => {
@@ -166,6 +166,19 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
           emailNormalized: recoveryTargetUser.email,
           displayName: "E2E Recovery Target",
           passwordHash: recoveryTargetUserPasswordHash,
+          role: "USER",
+          isActive: true,
+          accountStatus: "ACTIVE",
+          emailVerifiedAt: now
+        },
+        select: { id: true }
+      });
+      const accountSwitchUserRecord = await transaction.user.create({
+        data: {
+          email: accountSwitchUser.email,
+          emailNormalized: accountSwitchUser.email,
+          displayName: "E2E Account Switch User",
+          passwordHash: accountSwitchUserPasswordHash,
           role: "USER",
           isActive: true,
           accountStatus: "ACTIVE",
@@ -249,12 +262,16 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
         data: { userId: recoveryTargetUserRecord.id, connectionId: connection.id }
       });
       await transaction.userProjectGrant.create({
+        data: { userId: accountSwitchUserRecord.id, connectionId: connection.id }
+      });
+      await transaction.userProjectGrant.create({
         data: { userId: userRecord.id, connectionId: disabledConnection.id }
       });
       await transaction.trustedDevice.createMany({
         data: [
           { userId: userRecord.id, deviceIdHash: hashDeviceToken(user.deviceToken), rememberedUntil, strongVerifiedAt: now },
           { userId: recoveryTargetUserRecord.id, deviceIdHash: hashDeviceToken(recoveryTargetUser.deviceToken), rememberedUntil, strongVerifiedAt: now },
+          { userId: accountSwitchUserRecord.id, deviceIdHash: hashDeviceToken(accountSwitchUser.deviceToken), rememberedUntil, strongVerifiedAt: now },
           { userId: adminRecord.id, deviceIdHash: hashDeviceToken(admin.deviceToken), rememberedUntil, strongVerifiedAt: now },
           { userId: recoveryReviewerRecord.id, deviceIdHash: hashDeviceToken(recoveryReviewer.deviceToken), rememberedUntil, strongVerifiedAt: now }
         ]
@@ -263,6 +280,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
       return {
         userId: userRecord.id,
         recoveryTargetUserId: recoveryTargetUserRecord.id,
+        accountSwitchUserId: accountSwitchUserRecord.id,
         adminId: adminRecord.id,
         recoveryReviewerId: recoveryReviewerRecord.id,
         projectConnectionId: connection.id,
@@ -274,6 +292,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
     seeded = {
       user: { ...user, id: records.userId },
       recoveryTargetUser: { ...recoveryTargetUser, id: records.recoveryTargetUserId },
+      accountSwitchUser: { ...accountSwitchUser, id: records.accountSwitchUserId },
       admin: { ...admin, id: records.adminId },
       recoveryReviewer: { ...recoveryReviewer, id: records.recoveryReviewerId },
       projectName,
@@ -303,19 +322,19 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | voi
       ...process.env,
       DATABASE_URL: databaseUrl,
       VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: oidcPrivateConfigFile,
-      VIRKI_OIDC_ISSUER: "https://portal.localhost:3001",
+      VIRKI_OIDC_ISSUER: portalIssuerUrl,
       VIRKI_OIDC_BIND_ADDRESS: "127.0.0.1",
       OIDC_ISSUER_PORT: "3003"
     }, { manageProcessLifecycle: false }) as ChildProcess;
     oidcIssuerProcess = startedOidcIssuer;
     setupStage = "issuer-readiness";
-    await waitForOidcIssuer(startedOidcIssuer, signingKeyId);
+    await waitForOidcIssuer(startedOidcIssuer, signingKeyId, portalIssuerUrl);
   } catch {
     const failures = await runCleanupSteps([
       ["issuer-stop", () => stopIsolatedService(oidcIssuerProcess)],
       ["fixture-records", async () => { if (seeded) await removeFixtureRecords(prisma, auditCleanupPrisma, seeded); }],
       ["fixture-files", async () => { if (temporaryDirectory) await removeTemporaryFixture(fixtureFile, temporaryDirectory); }],
-      ["issuer-config", async () => { if (oidcPrivateConfigWritten) await removeFile(oidcPrivateConfigFile); }],
+      ["issuer-config", async () => { if (oidcPrivateConfigLoaded) await removeFile(oidcPrivateConfigFile); }],
       ["runtime-disconnect", () => prisma.$disconnect()],
       ["audit-disconnect", () => auditCleanupPrisma.$disconnect()]
     ]);
@@ -383,7 +402,7 @@ export async function runCleanupSteps(steps: readonly (readonly [CleanupStage, (
 }
 
 async function removeFixtureRecords(prisma: PrismaClient, auditCleanupPrisma: PrismaClient, fixture: FixtureState): Promise<void> {
-  const userIds = [fixture.user.id, fixture.recoveryTargetUser.id, fixture.admin.id, fixture.recoveryReviewer.id];
+  const userIds = [fixture.user.id, fixture.recoveryTargetUser.id, fixture.accountSwitchUser.id, fixture.admin.id, fixture.recoveryReviewer.id];
   // DELETE without RETURNING needs SELECT only on the fixture actor predicate.
   try {
     await auditCleanupPrisma.$executeRaw(Prisma.sql`DELETE FROM public."AuditLog" WHERE "actorUserId" IN (${Prisma.join(userIds)})`);
@@ -398,19 +417,21 @@ async function removeFixtureRecords(prisma: PrismaClient, auditCleanupPrisma: Pr
           OR: [
             { clientIdHash: hashOidcIdentifier(fixture.projectClientId) },
             { accountIdHash: hashOidcIdentifier(fixture.user.id) },
-            { accountIdHash: hashOidcIdentifier(fixture.recoveryTargetUser.id) }
+            { accountIdHash: hashOidcIdentifier(fixture.recoveryTargetUser.id) },
+            { accountIdHash: hashOidcIdentifier(fixture.accountSwitchUser.id) }
           ]
         }
       });
       await transaction.emailOutboxMessage.deleteMany({
         where: {
           recipientEmail: {
-            in: [fixture.user.email, fixture.recoveryTargetUser.email, fixture.admin.email, fixture.recoveryReviewer.email]
+            in: [fixture.user.email, fixture.recoveryTargetUser.email, fixture.accountSwitchUser.email, fixture.admin.email, fixture.recoveryReviewer.email]
           }
         }
       });
       await transaction.user.deleteMany({ where: { id: fixture.user.id, email: fixture.user.email, role: "USER" } });
       await transaction.user.deleteMany({ where: { id: fixture.recoveryTargetUser.id, email: fixture.recoveryTargetUser.email, role: "USER" } });
+      await transaction.user.deleteMany({ where: { id: fixture.accountSwitchUser.id, email: fixture.accountSwitchUser.email, role: "USER" } });
       await transaction.user.deleteMany({ where: { id: fixture.admin.id, email: fixture.admin.email, role: "ADMIN" } });
       await transaction.user.deleteMany({ where: { id: fixture.recoveryReviewer.id, email: fixture.recoveryReviewer.email, role: "ADMIN" } });
       await transaction.projectConnection.deleteMany({
@@ -436,7 +457,7 @@ async function removeFixtureRecords(prisma: PrismaClient, auditCleanupPrisma: Pr
   }
 }
 
-async function waitForOidcIssuer(child: ChildProcess, expectedSigningKeyId: string): Promise<void> {
+async function waitForOidcIssuer(child: ChildProcess, expectedSigningKeyId: string, expectedIssuer: string): Promise<void> {
   const readinessUrl = "http://127.0.0.1:3003/.well-known/openid-configuration";
   const jwksUrl = "http://127.0.0.1:3003/jwks";
   const deadline = Date.now() + 30_000;
@@ -451,7 +472,7 @@ async function waitForOidcIssuer(child: ChildProcess, expectedSigningKeyId: stri
         const response = await fetch(readinessUrl, { signal: AbortSignal.timeout(500) });
         if (response.ok) {
           const metadata: unknown = await response.json();
-          if (metadata && typeof metadata === "object" && "issuer" in metadata && metadata.issuer === "https://portal.localhost:3001") {
+          if (metadata && typeof metadata === "object" && "issuer" in metadata && metadata.issuer === expectedIssuer) {
             const keysResponse = await fetch(jwksUrl, { signal: AbortSignal.timeout(500) });
             const keySet: unknown = keysResponse.ok ? await keysResponse.json() : undefined;
             const hasRunKey = keySet && typeof keySet === "object" && "keys" in keySet && Array.isArray(keySet.keys) &&

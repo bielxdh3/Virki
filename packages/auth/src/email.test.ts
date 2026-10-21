@@ -15,6 +15,18 @@ import {
   renderEmailMessage
 } from "./email";
 
+test("invitation display names are rendered only in a plain-text body", () => {
+  const displayName = "<img src=x onerror=alert(1)>";
+  const message = renderEmailMessage("ACCOUNT_INVITATION", "pt-BR", {
+    displayName,
+    recipientEmail: "recipient@example.invalid",
+    actionUrl: "https://portal.example.invalid/recover/open?request=synthetic"
+  });
+
+  assert.equal(message.text.startsWith(`${displayName},\n`), true);
+  assert.equal(Object.hasOwn(message, "html"), false);
+});
+
 test("production email is unavailable without a real transport or outbox key", () => {
   assert.deepEqual(getEmailTransportStatus({ NODE_ENV: "production" }), {
     state: "unavailable",

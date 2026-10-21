@@ -6,6 +6,7 @@ export const OIDC_AUTH_BUCKET_LIMIT = 30;
 export const OIDC_TOKEN_LIMIT = 600;
 
 export type RateLimitCheck = { identifier: string; maxAttempts: number };
+export type PublicOidcRateLimitEndpoint = "userinfo" | "session-end" | "auth-action";
 
 /** Ceiling first, then the bucket. The cookie only selects a bucket; it is never trusted for authentication. */
 export function selectAuthRateLimits(clientAddress: string, sessionCookieValue: string | null): RateLimitCheck[] {
@@ -30,6 +31,36 @@ export function selectInteractionRateLimits(clientAddress: string, sessionCookie
     { identifier: `oidc-interaction-source:${clientAddress}`, maxAttempts: OIDC_AUTH_SOURCE_CEILING },
     { identifier: bucket, maxAttempts: OIDC_AUTH_BUCKET_LIMIT }
   ];
+}
+
+export function getPublicOidcRateLimitEndpoint(method: string, path: string): PublicOidcRateLimitEndpoint | null {
+  if (method !== "GET" && method !== "POST") return null;
+  if (path === "/me") return "userinfo";
+  if (path === "/session/end") return "session-end";
+  if (/^\/auth\/[A-Za-z0-9_-]{8,80}$/u.test(path)) return "auth-action";
+  return null;
+}
+
+export function selectPublicOidcRateLimits(
+  clientAddress: string,
+  sessionCookieValue: string | null,
+  endpoint: PublicOidcRateLimitEndpoint
+): RateLimitCheck[] {
+  const bucket = sessionCookieValue
+    ? `oidc-public-${endpoint}-browser:${createHash("sha256").update(sessionCookieValue).digest("hex")}`
+    : `oidc-public-${endpoint}-anonymous:${clientAddress}`;
+  return [
+    { identifier: `oidc-public-source:${endpoint}:${clientAddress}`, maxAttempts: OIDC_AUTH_SOURCE_CEILING },
+    { identifier: bucket, maxAttempts: OIDC_AUTH_BUCKET_LIMIT }
+  ];
+}
+
+export function isNonCanonicalOidcEndpointPath(path: string): boolean {
+  const canonicalPaths = ["/auth", "/token", "/token/revocation", "/me", "/session/end", "/jwks"];
+  const lowerWithoutTrailingSlashes = path.toLowerCase().replace(/\/+$/u, "");
+  if (canonicalPaths.includes(lowerWithoutTrailingSlashes) && path !== lowerWithoutTrailingSlashes) return true;
+  if (/^\/auth\/[A-Za-z0-9_-]{8,80}\/?$/iu.test(path) && !/^\/auth\/[A-Za-z0-9_-]{8,80}$/u.test(path)) return true;
+  return false;
 }
 
 export function selectRateLimitAudit(clientAddress: string): RateLimitCheck {

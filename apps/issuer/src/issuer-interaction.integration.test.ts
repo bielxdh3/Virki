@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { createServer } from "node:net";
+import { connect as connectTcp, createServer } from "node:net";
 import { after, before, test } from "node:test";
 import { createSession, SESSION_COOKIE_NAME } from "@virki/auth";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
@@ -49,6 +49,76 @@ after(async () => {
     await new Promise<void>((resolve) => child.once("exit", () => resolve()));
   }
   await prisma.$disconnect();
+});
+
+test("actual issuer returns 400 for an invalid request target and keeps serving", integrationOptions, async () => {
+  const reservation = createServer();
+  await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
+  const address = reservation.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve) => reservation.close(() => resolve()));
+  const isolatedOrigin = `http://127.0.0.1:${port}`;
+  const key = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" });
+  const isolatedChild = spawn(process.execPath, ["--import", "tsx", "apps/issuer/src/server.ts"], {
+    windowsHide: true,
+    env: { ...process.env, VIRKI_OIDC_ISSUER: isolatedOrigin, OIDC_ISSUER_PORT: String(port), VIRKI_OIDC_BIND_ADDRESS: "127.0.0.1",
+      VIRKI_AUDIT_HASH_SECRET: randomBytes(32).toString("hex"),
+      VIRKI_OIDC_COOKIE_KEY: randomBytes(32).toString("base64url"),
+      VIRKI_OIDC_SIGNING_JWKS: JSON.stringify({ keys: [{ ...key, kid: "malformed-target-test", alg: "ES256", use: "sig" }] }) },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stderr = "";
+  isolatedChild.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Isolated issuer did not start within 15 seconds.")), 15_000);
+      isolatedChild.once("exit", (code) => { clearTimeout(timeout); reject(new Error(`Isolated issuer exited before startup (${code}): ${stderr}`)); });
+      isolatedChild.stdout?.on("data", (chunk) => {
+        if (String(chunk).includes("Virki OIDC issuer ready.")) { clearTimeout(timeout); resolve(); }
+      });
+    });
+
+    const malformedResponse = await new Promise<string>((resolve, reject) => {
+      const socket = connectTcp(port, "127.0.0.1");
+      const chunks: Buffer[] = [];
+      socket.setTimeout(5_000, () => socket.destroy(new Error("Malformed-target request timed out.")));
+      socket.once("connect", () => socket.write("GET //:80 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"));
+      socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      socket.once("end", () => resolve(Buffer.concat(chunks).toString("latin1")));
+      socket.once("error", reject);
+    }).catch(() => "");
+    assert.match(malformedResponse, /^HTTP\/1\.1 400\b/u, `Expected a controlled 400; issuer stderr: ${stderr}`);
+    assert.equal(isolatedChild.exitCode, null, "Malformed input must not terminate the issuer process.");
+
+    const validResponse = await fetch(`${isolatedOrigin}/.well-known/openid-configuration`);
+    assert.equal(validResponse.status, 200);
+    assert.equal((await validResponse.json() as { issuer?: string }).issuer, isolatedOrigin);
+  } finally {
+    if (isolatedChild.exitCode === null && isolatedChild.signalCode === null) {
+      const exited = new Promise<void>((resolve) => isolatedChild.once("exit", () => resolve()));
+      isolatedChild.kill();
+      await exited;
+    }
+  }
+});
+
+test("actual issuer rejects endpoint aliases and rate-limits the public userinfo route", integrationOptions, async () => {
+  for (const path of ["/AUTH", "/auth/", "/AUTH/", "/AUTH/abcdefgh"]) {
+    const response = await fetch(`${origin}${path}`, { redirect: "manual" });
+    assert.equal(response.status, 404, `${path} must not reach a provider alias route`);
+    assert.equal(response.headers.get("location"), null);
+  }
+  const methodAlias = await fetch(`${origin}/auth`, { method: "POST", redirect: "manual" });
+  assert.equal(methodAlias.status, 405);
+  assert.equal(methodAlias.headers.get("allow"), "GET");
+
+  const headers = { "cf-connecting-ip": "198.51.100.204" };
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 31; attempt += 1) response = await fetch(`${origin}/me`, { headers, redirect: "manual" });
+  assert.equal(response?.status, 429, "the public userinfo route must stop after its anonymous per-IP quota");
+  assert.equal(response?.headers.get("retry-after"), "900");
 });
 
 async function seed() {
@@ -121,6 +191,34 @@ for (const request of reauthenticationRequests) {
     assert.ok(result.searchParams.get("code"), `Authorization must finish after reauthentication; got ${result.pathname}.`);
   });
 }
+
+test("actual issuer keeps ACR2 after prompt-login account switching to a fresh password-only session", integrationOptions, async () => {
+  const original = await seed();
+  const switched = await createTestUser({ label: "issuer-account-switch" });
+  await prisma.userProjectGrant.create({ data: { userId: switched.id, connectionId: original.connectionId } });
+
+  const oldSession = await createSession(original.userId);
+  await prisma.session.updateMany({ where: { userId: original.userId }, data: { createdAt: new Date(Date.now() - 60_000) } });
+  const client = browser();
+  client.setSession(oldSession.token);
+
+  const login = await client.follow(authorization(original.clientId, {
+    prompt: "login",
+    max_age: "0",
+    acr_values: "urn:virki:loa:2"
+  }));
+  assert.equal(login.pathname, "/login");
+  assert.equal(login.searchParams.get("reauth"), "1");
+
+  // Model a completed password-only sign-in as a different account during the same interaction.
+  const switchedPasswordSession = await createSession(switched.id);
+  client.setSession(switchedPasswordSession.token);
+  const result = await client.follow(new URL(login.searchParams.get("returnTo")!, origin).href);
+  assert.equal(result.pathname, "/login", "A fresh account switch cannot satisfy the requested MFA assurance.");
+  assert.equal(result.searchParams.get("reauth"), "1");
+  assert.equal(result.searchParams.get("error"), null);
+  assert.equal(result.searchParams.get("code"), null);
+});
 
 test("real client explicit claims consent finishes and includes the requested ID token claim", integrationOptions, async () => {
   const fixture = await seed();

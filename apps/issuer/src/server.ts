@@ -9,9 +9,9 @@ import { readInteractionDetailsOrRespond } from "./interaction-error";
 import { createProviderEventAudit } from "./provider-audit";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { readIssuer } from "./issuer-config";
-import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isInteractionPath, isTokenEndpoint, selectAuthRateLimits, selectInteractionRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
+import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_PROVIDER_CLAIMS, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const issuer = readIssuer(process.env);
 const signingJwks = readSigningJwks(process.env.VIRKI_OIDC_SIGNING_JWKS);
@@ -96,11 +96,7 @@ const provider = new Provider(issuer, {
     id_token_signed_response_alg: "ES256"
   },
   scopes: ["openid", "profile", "email"],
-  claims: {
-    openid: ["sub"],
-    profile: ["name"],
-    email: ["email", "email_verified"]
-  },
+  claims: OIDC_PROVIDER_CLAIMS,
   features: {
     devInteractions: { enabled: false },
     clientCredentials: { enabled: false },
@@ -137,8 +133,8 @@ const provider = new Provider(issuer, {
     }
   },
   findAccount: async (_context, id): Promise<Account | undefined> => {
-    const user = await prisma.user.findUnique({ where: { id }, select: { id: true, email: true, displayName: true, emailVerifiedAt: true, isActive: true, accountStatus: true } });
-    if (!user?.isActive || user.accountStatus !== "ACTIVE") return undefined;
+    const user = await prisma.user.findUnique({ where: { id }, select: { id: true, email: true, displayName: true, emailVerifiedAt: true, role: true, isActive: true, accountStatus: true } });
+    if (!user || !isOidcAccountEligible(user)) return undefined;
     return {
       accountId: user.id,
       async claims() {
@@ -176,6 +172,11 @@ const authorizationRequestStartedAt = new WeakMap<object, number>();
 provider.use(async (rawContext, next) => {
   const context = rawContext as KoaContextWithOIDC;
   setIssuerSensitiveResponseCachePolicy(context.res, context.path);
+  if (isNonCanonicalOidcEndpointPath(context.path)) {
+    context.status = 404;
+    context.body = { error: "invalid_request" };
+    return;
+  }
   if (context.path === "/auth") {
     if (context.method !== "GET") {
       context.status = 405;
@@ -194,6 +195,12 @@ provider.use(async (rawContext, next) => {
   } else if (isTokenEndpoint(context.method, context.path)) {
     const authorization = getString(context.req.headers.authorization) ?? undefined;
     if (await rateLimitRequest(context, (address) => selectTokenRateLimits(address, authorization))) return;
+  } else {
+    const endpoint = getPublicOidcRateLimitEndpoint(context.method, context.path);
+    if (endpoint) {
+      const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
+      if (await rateLimitRequest(context, (address) => selectPublicOidcRateLimits(address, sessionCookie, endpoint))) return;
+    }
   }
 
   const match = isInteractionPath(context.path) ? context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u) : null;
@@ -275,7 +282,16 @@ const server = createServer((request, response) => {
   installAuditResponseGate(response);
   const requestId = randomUUID();
   response.setHeader("x-virki-request-id", requestId);
-  const path = new URL(request.url ?? "/", issuer).pathname;
+  let path: string;
+  try {
+    path = new URL(request.url ?? "/", issuer).pathname;
+  } catch {
+    response.statusCode = 400;
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Content-Type", "text/plain; charset=utf-8");
+    response.end("Bad Request");
+    return;
+  }
   const route = /^\/(?:token(?:\/revocation)?|auth|jwks|me|session\/end)$/u.test(path) ? path : /^\/(?:interaction|auth)\/[A-Za-z0-9_-]{8,80}$/u.test(path) ? `/${path.split("/")[1]}/:id` : undefined;
   runWithAuditContext({ requestId, service: "issuer", route, method: request.method }, () => providerCallback(request, response));
 });
@@ -427,13 +443,21 @@ async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: s
   }
   if (!isTrustedClientAddress(clientAddress)) return false;
   const now = new Date();
-  const allowed = await prisma.$transaction(async (transaction) => {
-    for (const check of select(clientAddress)) {
-      const attempt = await consumeRateLimitAttemptInTransaction(transaction, check.identifier, now, check.maxAttempts);
-      if (!attempt.allowed) return false;
-    }
+  let allowed: boolean;
+  try {
+    allowed = await prisma.$transaction(async (transaction) => {
+      for (const check of select(clientAddress)) {
+        const attempt = await consumeRateLimitAttemptInTransaction(transaction, check.identifier, now, check.maxAttempts);
+        if (!attempt.allowed) return false;
+      }
+      return true;
+    });
+  } catch {
+    context.status = 503;
+    context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
+    context.body = { error: "temporarily_unavailable" };
     return true;
-  });
+  }
   if (allowed) return false;
   await writeRateLimitAuditOnce(clientAddress, now, "rate-limited");
   context.status = 429;

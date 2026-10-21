@@ -55,6 +55,7 @@ jobs:
             ready=true
             ci_run=''
             codeql_run=''
+            codeql_evidence_run=''
             for workflow in CI CodeQL; do
               selection="$(node scripts/production-run-selector.mjs --name "$workflow" --sha "$TARGET_SHA" "$RUNNER_TEMP/runs.json")"
               read -r run_state selected_run <<< "$selection"
@@ -69,8 +70,35 @@ jobs:
                 *) ready=false ;;
               esac
             done
+            if [[ "$ready" == true ]]; then
+              gh run list --repo "$GITHUB_REPOSITORY" --workflow codeql-evidence.yml --event workflow_run \
+                --json databaseId,displayTitle,status,conclusion,event,headBranch,createdAt --limit 1000 \
+                > "$RUNNER_TEMP/codeql-evidence-runs.json"
+              evidence_selection="$(node scripts/production-codeql-evidence-selector.mjs --sha "$TARGET_SHA" --analysis-run "$codeql_run" "$RUNNER_TEMP/codeql-evidence-runs.json")"
+              read -r evidence_state evidence_run_id <<< "$evidence_selection"
+              case "$evidence_state" in
+                PASS)
+                  [[ "$evidence_run_id" =~ ^[1-9][0-9]*$ ]] || {
+                    echo "::error::Exact-SHA CodeQL evidence publisher returned an invalid run ID."
+                    exit 1
+                  }
+                  gh run view "$evidence_run_id" --repo "$GITHUB_REPOSITORY" --log > "$RUNNER_TEMP/codeql-evidence-publisher.log"
+                  node scripts/production-codeql-evidence-log-check.mjs --sha "$TARGET_SHA" --analysis-run "$codeql_run" --log "$RUNNER_TEMP/codeql-evidence-publisher.log"
+                  codeql_evidence_run="$evidence_run_id"
+                  ;;
+                FAIL)
+                  echo "::error::The latest exact-SHA CodeQL evidence publication failed."
+                  exit 1
+                  ;;
+                BLOCKED)
+                  echo "::error::Exact-SHA CodeQL evidence publication could not be linked to the analysis run."
+                  exit 1
+                  ;;
+                *) ready=false ;;
+              esac
+            fi
             if [[ "$ready" == true ]]; then break; fi
-            echo "::notice::Waiting for exact-SHA main CI and CodeQL (attempt $attempt/100)."
+            echo "::notice::Waiting for exact-SHA main CI, CodeQL, and its evidence publication (attempt $attempt/100)."
             sleep 15
           done
           [[ "$ready" == true ]] || {
@@ -90,11 +118,13 @@ jobs:
           done
           echo "ci_run=$ci_run" >> "$GITHUB_OUTPUT"
           echo "codeql_run=$codeql_run" >> "$GITHUB_OUTPUT"
+          echo "codeql_evidence_run=$codeql_evidence_run" >> "$GITHUB_OUTPUT"
 
       - name: Publish approved revision pointer only
         env:
           CI_RUN: ${{ steps.gate.outputs.ci_run }}
           CODEQL_RUN: ${{ steps.gate.outputs.codeql_run }}
+          CODEQL_EVIDENCE_RUN: ${{ steps.gate.outputs.codeql_evidence_run }}
         shell: bash
         run: |
           set -euo pipefail
@@ -124,6 +154,7 @@ jobs:
             echo "- Source commit: $TARGET_SHA"
             echo "- Verified CI: $CI_RUN"
             echo "- Verified CodeQL: $CODEQL_RUN"
+            echo "- Verified CodeQL evidence publication: $CODEQL_EVIDENCE_RUN"
             echo "- This is an approval pointer, NOT evidence of a deployment."
             echo "- The separate server-side agent must validate GHCR/SARIF digests, migrations, backups, network isolation, health and rollback before applying it."
             echo "- Without a configured server agent, production remains unchanged."

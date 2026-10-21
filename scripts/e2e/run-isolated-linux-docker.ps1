@@ -2,6 +2,7 @@ param(
   [switch]$E2EOnly,
   [switch]$IntegrationOnly,
   [switch]$UnitOnly,
+  [string]$IntegrationTestFile,
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$PlaywrightArguments = @()
 )
@@ -37,9 +38,9 @@ if ($LASTEXITCODE -ne 0 -or $repositoryBranch -notmatch '^[A-Za-z0-9._/-]{1,240}
   throw 'The isolated Docker snapshot requires a named local branch with a supported ref name.'
 }
 $runId = [Guid]::NewGuid().ToString('N').Substring(0, 10)
-$evidenceRoot = Join-Path $repoRoot '.superpowers/sdd/2026-10-19-virki-final-gates/runs'
+$evidenceRoot = Join-Path $repoRoot '.virki-mission-tmp/isolated-runs'
 $runEvidenceDirectory = Join-Path $evidenceRoot $runId
-$evidenceIgnore = (& git -C $repoRoot check-ignore --quiet '.superpowers/sdd/2026-10-19-virki-final-gates/runs')
+$evidenceIgnore = (& git -C $repoRoot check-ignore --quiet '.virki-mission-tmp/isolated-runs')
 if ($LASTEXITCODE -ne 0) { throw 'The isolated run evidence directory must be Git-ignored.' }
 New-Item -ItemType Directory -Path $runEvidenceDirectory -ErrorAction Stop | Out-Null
 $productionOperationsEvidencePath = Join-Path $runEvidenceDirectory 'production-operations-tests.tap.log'
@@ -119,6 +120,17 @@ if ($E2EOnly) { $selectedStageCount++ }
 if ($IntegrationOnly) { $selectedStageCount++ }
 if ($UnitOnly) { $selectedStageCount++ }
 if ($selectedStageCount -gt 1) { throw 'Choose only one isolated runner stage.' }
+if ($IntegrationTestFile) {
+  if (-not $IntegrationOnly) { throw 'An isolated integration test file requires -IntegrationOnly.' }
+  if ($IntegrationTestFile -notmatch '^(apps|packages)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.integration\.test\.ts$') {
+    throw 'The isolated integration test file must be a repository-relative *.integration.test.ts path under apps/ or packages/.'
+  }
+  $integrationTestPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $IntegrationTestFile.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
+  $repoPrefix = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+  if (-not $integrationTestPath.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $integrationTestPath -PathType Leaf)) {
+    throw 'The isolated integration test file must resolve to a file inside this repository.'
+  }
+}
 
 function Invoke-Stage {
   param([string]$Name, [string[]]$Command, [string[]]$Environment = @(), [string]$EvidenceLogPath)
@@ -221,6 +233,8 @@ try {
     'docs/final-local-security-gates-report.md',
     'docs/index-query-plan-evidence.md',
     'docs/legacy-data-closure-plan.md',
+    'docs/security-triage-a21-review-2026-10-20.md',
+    'docs/security-triage-closeout-2026-10-20.md',
     'docs/superpowers/plans/2026-10-19-virki-final-four-findings.md',
     'e2e/recovery-invitation.spec.mts',
     'packages/auth/src/elevation-authorization.ts',
@@ -230,6 +244,8 @@ try {
     'scripts/e2e/start-production-hub.mjs',
     'scripts/e2e/low05-diagnostics.mjs',
     'scripts/e2e/low05-diagnostics.test.mjs',
+    'scripts/e2e/oidc-private-config.mjs',
+    'scripts/e2e/redact-browser-e2e-log.mjs',
     'scripts/e2e/run-isolated-linux-docker.ps1',
     'scripts/e2e/run-e2e.mjs',
     'scripts/e2e/run-e2e.test.mjs'
@@ -314,6 +330,9 @@ try {
   }
 
   $runnerCreateArguments = @('create', '--name', $runnerName, '--network', 'bridge')
+  if ($env:VIRKI_E2E_HUB_MODE -eq 'production') {
+    $runnerCreateArguments += @('--add-host', 'access.e2e.invalid:127.0.0.1')
+  }
   if ($script:ownedResources.browserVolume) {
     $runnerCreateArguments += @('--mount', ($browserVolumeMount + ',readonly'), '--env', ('VIRKI_E2E_CHROMIUM_EXECUTABLE_PATH=' + $browserExecutablePath))
   }
@@ -421,11 +440,12 @@ try {
   }
   if (-not $E2EOnly -and -not $UnitOnly) {
     $integrationEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $urls.integration), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
-    Invoke-LoggedStage -Name 'integration-tests' -LogName 'integration-tests' -CommandText 'npm run test:integration' -Environment $integrationEnvironment -EvidenceLogPath $integrationTestsEvidencePath -CaptureFullOutput
+    $integrationCommand = 'npm run test:integration' + $(if ($IntegrationTestFile) { ' -- ' + $IntegrationTestFile } else { '' })
+    Invoke-LoggedStage -Name 'integration-tests' -LogName 'integration-tests' -CommandText $integrationCommand -Environment $integrationEnvironment -EvidenceLogPath $integrationTestsEvidencePath -CaptureFullOutput
     $script:integrationTestFailures = @(Get-TapFailureManifest -Path $integrationTestsEvidencePath)
   }
   if (-not $IntegrationOnly -and -not $UnitOnly) {
-    $playwrightCommand = @('bash', '-lc', 'npm run test:e2e -- "$@" > /tmp/browser-e2e.log 2>&1; status=$?; tail -n 80 /tmp/browser-e2e.log; exit $status', 'virki-e2e')
+    $playwrightCommand = @('bash', '-lc', 'set -o pipefail; npm run test:e2e -- "$@" 2>&1 | node scripts/e2e/redact-browser-e2e-log.mjs > /tmp/browser-e2e.log; status=$?; cat /tmp/browser-e2e.log; exit $status', 'virki-e2e')
     if ($PlaywrightArguments.Count -gt 0) { $playwrightCommand += $PlaywrightArguments }
     $e2eEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('VIRKI_E2E_DATABASE_URL=' + $urls.e2e), '--env', ('VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL=' + $urls.migrator), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
     if ($env:VIRKI_E2E_HUB_MODE -eq 'production') { $e2eEnvironment += @('--env', 'VIRKI_E2E_HUB_MODE=production', '--env', 'VIRKI_E2E_HUB_BUILD_READY=true') }

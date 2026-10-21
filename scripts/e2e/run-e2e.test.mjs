@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildE2ECommand, shouldBuildProductionHub } from "./run-e2e.mjs";
 import { buildServiceEnvironment, getServiceCommand } from "./isolated-service.mjs";
+import { redactBrowserE2ELog } from "./redact-browser-e2e-log.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "../..");
@@ -75,9 +76,12 @@ test("production Hub E2E uses the production start adapter", () => {
   }
 });
 
-test("production E2E mode is limited to the Hub child environment", () => {
+test("production Hub E2E aligns issuer and Hub cookie runtime modes", () => {
   const tlsDirectory = mkdtempSync(resolve(tmpdir(), "virki-prod-hub-env-"));
   const tlsPath = (name) => resolve(tlsDirectory, name);
+  const privateAdapterKey = "b".repeat(64);
+  const privateOidcConfigPath = tlsPath("issuer-config.json");
+  writeFileSync(privateOidcConfigPath, JSON.stringify({ adapterKey: privateAdapterKey }), { encoding: "utf8", mode: 0o600 });
   const source = {
     PATH: process.env.PATH ?? process.env.Path ?? "",
     HOME: process.env.HOME ?? "",
@@ -94,20 +98,36 @@ test("production E2E mode is limited to the Hub child environment", () => {
     VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsPath("server-cert.pem"),
     NODE_EXTRA_CA_CERTS: tlsPath("test-ca-cert.pem"),
     VIRKI_CSRF_SIGNING_KEY: "a".repeat(64),
+    VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: privateOidcConfigPath,
+    VIRKI_OIDC_ISSUER: "https://portal.localhost",
+    VIRKI_OIDC_BIND_ADDRESS: "127.0.0.1",
+    OIDC_ISSUER_PORT: "3003",
+    VIRKI_RATE_LIMIT_HASH_SECRET: "a".repeat(64),
     VIRKI_E2E_HUB_MODE: "production"
   };
   try {
     const hub = buildServiceEnvironment("hub", source, process.platform);
+    const issuer = buildServiceEnvironment("issuer", { ...source, NODE_ENV: "development" }, process.platform);
     const publicSite = buildServiceEnvironment("public-site", source, process.platform);
     assert.equal(hub.NODE_ENV, "production");
+    assert.equal(issuer.NODE_ENV, "production", "the production Hub and OIDC issuer must select the same host-only session cookie name");
     assert.equal(hub.VIRKI_E2E_HUB_MODE, "production");
+    assert.equal(issuer.VIRKI_RATE_LIMIT_HASH_SECRET, source.VIRKI_RATE_LIMIT_HASH_SECRET, "production OIDC rate limits must receive their isolated HMAC key");
+    assert.equal(hub.VIRKI_OIDC_ADAPTER_KEY, privateAdapterKey);
+    assert.equal(Object.hasOwn(hub, "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE"), false);
     assert.equal(Object.hasOwn(hub, "VIRKI_CORE_TEST_DATABASE_CONFIRM"), false);
     assert.equal(publicSite.NODE_ENV, "development");
     assert.equal(Object.hasOwn(publicSite, "VIRKI_E2E_HUB_MODE"), false);
+    assert.equal(Object.hasOwn(publicSite, "VIRKI_OIDC_ADAPTER_KEY"), false);
     assert.throws(
       () => buildServiceEnvironment("hub", { ...source, VIRKI_CORE_TEST_DATABASE_CONFIRM: undefined }, process.platform),
       /explicit disposable-database marker/u,
       "production Hub E2E still requires the explicit disposable-database marker"
+    );
+    assert.throws(
+      () => buildServiceEnvironment("issuer", { ...source, VIRKI_RATE_LIMIT_HASH_SECRET: undefined }, process.platform),
+      /OIDC issuer E2E configuration is incomplete/u,
+      "production OIDC issuer refuses to start without its rate-limit HMAC key"
     );
     assert.throws(
     () => buildServiceEnvironment("hub", { ...source, DATABASE_URL: "postgresql://virki_test@remote.example.invalid:5432/virki_e2e_test" }, process.platform),
@@ -182,6 +202,87 @@ test("production Hub proxy preserves no-store responses and forwards the browser
   }
 });
 
+test("production Hub proxy exposes only the synthetic Access fixture endpoints on its dedicated host", async () => {
+  const productionHub = await import("./start-production-hub.mjs");
+  const accessRequests = [];
+  const hubRequests = [];
+  const accessFixture = createServer((request, response) => {
+    accessRequests.push({ method: request.method, url: request.url });
+    if (request.method === "GET" && request.url === "/cdn-cgi/access/certs") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "application/json" }).end('{"keys":[]}');
+      return;
+    }
+    if (request.method === "POST" && request.url === "/__test__/keys") {
+      request.resume();
+      response.writeHead(204).end();
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  const hub = createServer((request, response) => {
+    hubRequests.push({ method: request.method, url: request.url, host: request.headers.host });
+    response.writeHead(200).end("hub-fixture");
+  });
+  for (const server of [accessFixture, hub]) {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(0, "127.0.0.1", resolveListen);
+    });
+  }
+  const proxy = createServer(productionHub.createProductionHubProxyRequestHandler(hub.address().port, accessFixture.address().port));
+  await new Promise((resolveListen, rejectListen) => {
+    proxy.once("error", rejectListen);
+    proxy.listen(0, "127.0.0.1", resolveListen);
+  });
+
+  const request = (method, path, host) => new Promise((resolveResponse, rejectResponse) => {
+    const incoming = httpRequest({
+      hostname: "127.0.0.1",
+      port: proxy.address().port,
+      method,
+      path,
+      headers: { host }
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolveResponse({
+        status: response.statusCode,
+        body: Buffer.concat(chunks).toString("utf8")
+      }));
+    });
+    incoming.once("error", rejectResponse);
+    incoming.end();
+  });
+
+  try {
+    assert.deepEqual(await request("GET", "/cdn-cgi/access/certs", "access.e2e.invalid"), {
+      status: 200,
+      body: '{"keys":[]}'
+    });
+    assert.deepEqual(await request("POST", "/__test__/keys", "access.e2e.invalid"), { status: 204, body: "" });
+    assert.deepEqual(await request("GET", "/__test__/keys", "access.e2e.invalid"), { status: 200, body: "hub-fixture" });
+    assert.deepEqual(await request("GET", "/cdn-cgi/access/certs", "other.e2e.invalid"), { status: 200, body: "hub-fixture" });
+    assert.deepEqual(accessRequests, [
+      { method: "GET", url: "/cdn-cgi/access/certs" },
+      { method: "POST", url: "/__test__/keys" }
+    ]);
+    assert.deepEqual(hubRequests, [
+      { method: "GET", url: "/__test__/keys", host: "access.e2e.invalid" },
+      { method: "GET", url: "/cdn-cgi/access/certs", host: "other.e2e.invalid" }
+    ]);
+  } finally {
+    await Promise.all([accessFixture, hub, proxy].map((server) => new Promise((resolveClose) => server.close(resolveClose))));
+  }
+});
+
+test("production E2E runner resolves its synthetic Access host to container loopback", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  assert.match(script, /if \(\$env:VIRKI_E2E_HUB_MODE -eq 'production'\)\s*\{\s*\$runnerCreateArguments \+= @\('--add-host', 'access\.e2e\.invalid:127\.0\.0\.1'\)/u);
+  const playwrightConfig = readFileSync(new URL("../../playwright.config.mts", import.meta.url), "utf8");
+  assert.match(playwrightConfig, /productionHubMode \? "https:\/\/access\.e2e\.invalid" : "http:\/\/127\.0\.0\.1:3010"/u);
+  assert.match(playwrightConfig, /subjectAltName=DNS:portal\.localhost,DNS:hub\.localhost,DNS:access\.e2e\.invalid,IP:127\.0\.0\.1/u);
+});
+
 test("isolated Linux runner clones the current local branch instead of a fixed repository branch", () => {
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
   assert.match(script, /git -C \$repoRoot branch --show-current/u);
@@ -214,6 +315,7 @@ test("isolated Linux snapshot explicitly permits this remediation's new source a
     "apps/public-site/src/app/public-origin.ts",
     "packages/auth/src/elevation-authorization.ts",
     "packages/auth/src/legacy-data-inventory.integration.test.ts",
+    "scripts/e2e/redact-browser-e2e-log.mjs",
     "scripts/e2e/start-production-hub.mjs",
     "scripts/admin-elevation-boundary.test.mjs"
   ]) assert.ok(script.includes(`'${file}'`), file);
@@ -287,7 +389,9 @@ test("isolated runner retains complete TAP output for integration and production
   assert.match(script, /integrationTestsLog\s*=\s*if \(Test-Path -LiteralPath \$integrationTestsEvidencePath\)/u, "the durable manifest points to the integration TAP artifact");
   assert.match(script, /integrationTestsFailureCount\s*=\s*\$script:integrationTestFailures\.Count/u, "the durable manifest counts integration TAP failures");
   assert.ok(script.includes("run-manifest.json"), "run metadata has a durable artifact path");
-  assert.ok(script.includes(".superpowers/sdd/2026-10-19-virki-final-gates/runs"), "artifacts are stored in the ignored goal evidence area");
+  assert.ok(script.includes(".virki-mission-tmp/isolated-runs"), "artifacts are stored in the ignored mission evidence area");
+  assert.ok(script.includes("An isolated integration test file requires -IntegrationOnly."), "targeted integration runs are restricted to the integration-only stage");
+  assert.ok(script.includes("*.integration.test.ts"), "targeted integration runs accept only integration test files");
   assert.ok(script.includes("Join-Path $evidenceRoot $runId"), "each run gets a unique artifact directory");
   assert.ok(/Invoke-LoggedStage -Name 'production-operations-tests'[^\r\n]*-EvidenceLogPath \$productionOperationsEvidencePath -CaptureFullOutput/u.test(script), "production-operations output is retained without truncation");
   assert.ok(/Invoke-LoggedStage -Name 'integration-tests'[^\r\n]*-EvidenceLogPath \$integrationTestsEvidencePath -CaptureFullOutput/u.test(script), "integration output is retained without truncation");
@@ -308,4 +412,33 @@ test("isolated runner retains complete TAP output for integration and production
   const cleanupIndex = script.indexOf("& docker rm --force --volumes $runnerName");
   assert.ok(manifestWriteIndex !== -1 && cleanupIndex > manifestWriteIndex, "artifacts are persisted before owned-container cleanup");
   assert.match(script, /WriteAllText\(\$runManifestPath[\s\S]*?\} finally \{\s*Write-Output "[^\r\n]*Removing only temporary resources created by this run\."/u, "owned-resource cleanup has its own finally block around evidence persistence");
+});
+
+test("browser E2E output redacts URL queries, fragments and credential-bearing headers", () => {
+  const input = [
+    'Error: page.goto failed at https://hub.localhost/recover/open?request=SAFE_TEST_VALUE&next=%2Fadmin#one-time-proof',
+    'Relative path /auth/callback?code=SAFE_TEST_CODE&state=SAFE_TEST_STATE was rejected.',
+    'Authorization: Bearer SAFE_TEST_BEARER',
+    'Set-Cookie: session=SAFE_TEST_COOKIE; Secure; HttpOnly',
+    'ordinary failure: net::ERR_CONNECTION_REFUSED at https://hub.localhost/admin/connections'
+  ].join("\n");
+
+  const actual = redactBrowserE2ELog(input);
+
+  assert.equal(actual, [
+    'Error: page.goto failed at https://hub.localhost/recover/open?[REDACTED_QUERY]',
+    'Relative path /auth/callback?[REDACTED_QUERY] was rejected.',
+    'Authorization: [REDACTED]',
+    'Set-Cookie: [REDACTED]',
+    'ordinary failure: net::ERR_CONNECTION_REFUSED at https://hub.localhost/admin/connections'
+  ].join("\n"));
+  for (const marker of ["SAFE_TEST_VALUE", "SAFE_TEST_CODE", "SAFE_TEST_STATE", "SAFE_TEST_BEARER", "SAFE_TEST_COOKIE", "one-time-proof"]) {
+    assert.equal(actual.includes(marker), false, `log output does not retain ${marker}`);
+  }
+});
+
+test("full isolated runner stores complete browser output only after redaction", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  assert.match(script, /npm run test:e2e -- "\$@" 2>&1 \| node scripts\/e2e\/redact-browser-e2e-log\.mjs > \/tmp\/browser-e2e\.log/u);
+  assert.match(script, /status=\$\?; cat \/tmp\/browser-e2e\.log; exit \$status/u);
 });

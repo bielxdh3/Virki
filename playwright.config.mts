@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { buildChromiumEnvironment } from "./scripts/e2e/isolated-service.mjs";
 import { createWindowsCaTrust } from "./scripts/e2e/windows-ca-trust.mjs";
 import { reuseE2eEmailOutboxKey, reuseE2eRuntimeDirectory } from "./scripts/e2e/runtime-artifacts.mjs";
+import { createE2eOidcPrivateConfiguration } from "./scripts/e2e/oidc-private-config.mjs";
 import { assertDirectPlaywrightPlatform } from "./scripts/e2e/run-e2e.mjs";
 
 // @ts-expect-error This JavaScript safety helper has no declaration file.
@@ -19,7 +20,7 @@ const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
 const portalUrl = productionHubMode ? "https://portal.localhost" : "https://portal.localhost:3001";
 const hubUrl = productionHubMode ? "https://hub.localhost" : "https://hub.localhost:3001";
 const hubListenerPort = productionHubMode ? 443 : 3001;
-const accessTeamDomain = "http://127.0.0.1:3010";
+const accessTeamDomain = productionHubMode ? "https://access.e2e.invalid" : "http://127.0.0.1:3010";
 const accessAudience = "virki-e2e-access-audience";
 const registrationTokenEnv = "VIRKI_E2E_JWKS_REGISTRATION_TOKEN";
 const registrationTokenInitializedEnv = "VIRKI_E2E_JWKS_REGISTRATION_TOKEN_INITIALIZED";
@@ -104,6 +105,9 @@ try {
       const kid = randomUUID();
       const publicJwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
       writeFileSync(accessSigningKeyPath, JSON.stringify({ kid, publicJwk, privateKey: privateKey.export({ format: "pem", type: "pkcs8" }) }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+      // Playwright starts webServer processes before globalSetup; the Hub reads
+      // the adapter key before the database fixtures are seeded.
+      createE2eOidcPrivateConfiguration(oidcPrivateConfigPath);
     }
   }
 } catch {
@@ -155,6 +159,8 @@ const publicSiteEnv = {
 const hubEnv = {
   ...localOnlyEnv,
   VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
+  // The isolated Hub launcher extracts only adapterKey and omits this path from its child env.
+  VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: oidcPrivateConfigPath,
   VIRKI_E2E_TLS_KEY_PATH: tlsKeyPath,
   VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath,
   ...(process.env.VIRKI_E2E_HUB_MODE === "production" ? { NODE_ENV: "production", VIRKI_E2E_HUB_MODE: "production" } : {})
@@ -167,6 +173,7 @@ process.env.VIRKI_AUDIT_HASH_SECRET = auditHashSecret;
 process.env.VIRKI_E2E_TLS_KEY_PATH = tlsKeyPath;
 process.env.VIRKI_E2E_TLS_CERTIFICATE_PATH = tlsCertificatePath;
 process.env.VIRKI_E2E_TLS_CA_CERTIFICATE_PATH = tlsCaCertificatePath;
+process.env.NODE_EXTRA_CA_CERTS = tlsCaCertificatePath;
 process.env.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE = oidcPrivateConfigPath;
 process.env.VIRKI_E2E_ACCESS_SIGNING_KEY_FILE = accessSigningKeyPath;
 process.env.VIRKI_EMAIL_OUTBOX_KEY = emailOutboxKey;
@@ -194,14 +201,16 @@ export default defineConfig({
         "--disable-sync",
         "--no-default-browser-check",
         "--disable-extensions",
-        "--host-resolver-rules=MAP portal.localhost 127.0.0.1,MAP hub.localhost 127.0.0.1"
+        "--host-resolver-rules=MAP portal.localhost 127.0.0.1,MAP hub.localhost 127.0.0.1,MAP access.e2e.invalid 127.0.0.1"
       ]
     }
   },
   webServer: [
     {
       command: "node scripts/e2e/isolated-service.mjs jwks",
-      url: `${accessTeamDomain}/cdn-cgi/access/certs`,
+      // The webServer probe cannot use this run's private CA. Probe the local service directly;
+      // production-mode JWT validation still uses the HTTPS synthetic Access origin.
+      url: `${productionHubMode ? "http://127.0.0.1:3010" : accessTeamDomain}/cdn-cgi/access/certs`,
       reuseExistingServer: false,
       timeout: 30_000,
       stdout: "pipe",
@@ -262,14 +271,14 @@ function generateLocalTlsPair(keyPath: string, certificatePath: string, caKeyPat
       "-out", csrPath,
       "-sha256",
       "-subj", "/CN=portal.localhost",
-      "-addext", "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,IP:127.0.0.1"
+      "-addext", "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,DNS:access.e2e.invalid,IP:127.0.0.1"
     ], { stdio: "ignore" });
     writeFileSync(extensionsPath, [
       "[server_cert]",
       "basicConstraints=critical,CA:FALSE",
       "keyUsage=critical,digitalSignature,keyEncipherment",
       "extendedKeyUsage=serverAuth",
-      "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,IP:127.0.0.1",
+      "subjectAltName=DNS:portal.localhost,DNS:hub.localhost,DNS:access.e2e.invalid,IP:127.0.0.1",
       "subjectKeyIdentifier=hash",
       "authorityKeyIdentifier=keyid,issuer",
       ""
@@ -303,6 +312,7 @@ $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::n
 $subjectAltNames = [System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
 $subjectAltNames.AddDnsName('portal.localhost')
 $subjectAltNames.AddDnsName('hub.localhost')
+$subjectAltNames.AddDnsName('access.e2e.invalid')
 $subjectAltNames.AddIpAddress([System.Net.IPAddress]::Loopback)
 $request.CertificateExtensions.Add($subjectAltNames.Build())
 $request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
@@ -336,7 +346,7 @@ $rsa.Dispose()
 function assertLocalTlsPair(certificatePath: string, caCertificatePath: string): void {
   const certificate = new X509Certificate(readFileSync(certificatePath));
   const caCertificate = new X509Certificate(readFileSync(caCertificatePath));
-  if (certificate.ca || !caCertificate.ca || !certificate.verify(caCertificate.publicKey) || !certificate.checkHost("portal.localhost")) {
+  if (certificate.ca || !caCertificate.ca || !certificate.verify(caCertificate.publicKey) || !certificate.checkHost("portal.localhost") || !certificate.checkHost("access.e2e.invalid")) {
     throw new Error("Generated E2E TLS certificate is not a valid server leaf signed by the test CA.");
   }
 }

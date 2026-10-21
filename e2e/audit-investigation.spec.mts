@@ -2,12 +2,14 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { PrismaClient } from "@virki/database";
-import { SESSION_COOKIE_NAME, hashSessionToken } from "@virki/auth";
+import { hashSessionToken } from "@virki/auth";
+import { getSessionCookieName } from "@virki/auth/constants";
 import { createAuditLogData, hashAuditIdentifier } from "@virki/auth/audit";
 import { formatDateTime } from "@virki/auth/date-time";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
-const hub = "https://hub.localhost:3001";
+const hub = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://hub.localhost" : "https://hub.localhost:3001";
+const sessionCookieName = getSessionCookieName({ NODE_ENV: process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : process.env.NODE_ENV });
 test.use({ channel: "chromium" });
 test.skip(!process.env.VIRKI_E2E_DATABASE_URL, "Requires an explicit disposable PostgreSQL fixture.");
 
@@ -22,7 +24,7 @@ test("ADMIN investigates persisted audit with safe details, filters, paging, UTC
   const hydrationErrors: string[] = [];
   try {
     const session = await database.session.create({ data: { userId: fixture.admin.id, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 600_000), authenticationMethods: ["pwd", "otp", "mfa"] } });
-    await context.addCookies([{ name: SESSION_COOKIE_NAME, value: token, url: hub, httpOnly: true, secure: true, sameSite: "Lax" }]);
+    await context.addCookies([{ name: sessionCookieName, value: token, url: hub, httpOnly: true, secure: true, sameSite: "Lax" }]);
     await database.auditLog.createMany({ data: Array.from({ length: 53 }, (_, index) => ({
       ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: fixture.admin.id, actorRole: "ADMIN", resource }),
       id: `${resource}-${String(index).padStart(3, "0")}`,
@@ -35,19 +37,68 @@ test("ADMIN investigates persisted audit with safe details, filters, paging, UTC
     await page.goto(`${hub}/admin/audit?resource=${resource}&sort=oldest`);
     await expect(page.getByRole("heading", { level: 1, name: "Auditoria", exact: true })).toBeVisible();
     await expect(page.locator("article.audit-event")).toHaveCount(50);
-    await expect(page.locator("time").first()).toHaveText(formatDateTime(firstAuditRecord.createdAt));
+    await expect(page.locator("article.audit-event:visible")).toHaveCount(50);
+    await expect(page.locator("article.audit-event:visible time").first()).toHaveText(formatDateTime(firstAuditRecord.createdAt));
     const body = await page.content();
     expect(body).not.toContain("private-legacy@example.invalid");
     expect(body).not.toContain("synthetic-private-material");
     expect(body).not.toContain(fixture.admin.email);
     expect(body).not.toContain(`${resource}-052`);
-    const detail = page.locator("article.audit-event details").first();
+    const detail = page.locator("article.audit-event details:visible").first();
+    const detailSummary = detail.locator("summary");
     await expect(detail).not.toHaveAttribute("open");
-    await detail.locator("summary").focus();
-    await page.keyboard.press("Enter");
+    await detailSummary.evaluate((node) => {
+      const summary = node as HTMLElement;
+      summary.dataset.e2eKeydown = "none";
+      summary.addEventListener("keydown", (event) => {
+        summary.dataset.e2eKeydown = `${event.key}:${summary.ownerDocument.activeElement === summary}`;
+      }, { once: true });
+    });
+    await detailSummary.focus();
+    const focusState = await detailSummary.evaluate((node) => {
+      const summary = node as HTMLElement;
+      const parent = summary.parentElement;
+      const style = getComputedStyle(summary);
+      const parentStyle = parent ? getComputedStyle(parent) : null;
+      const ancestorLayout = [];
+      let ancestor: HTMLElement | null = summary;
+      while (ancestor && ancestorLayout.length < 8) {
+        const ancestorStyle = getComputedStyle(ancestor);
+        ancestorLayout.push({
+          tag: ancestor.tagName,
+          display: ancestorStyle.display,
+          visibility: ancestorStyle.visibility,
+          rects: ancestor.getClientRects().length,
+          hidden: ancestor.hasAttribute("hidden"),
+          inert: ancestor.hasAttribute("inert")
+        });
+        ancestor = ancestor.parentElement;
+      }
+      return {
+        active: summary.ownerDocument.activeElement === summary,
+        connected: summary.isConnected,
+        tabIndex: summary.tabIndex,
+        parentIsDetails: parent?.tagName === "DETAILS",
+        parentOpen: parent?.tagName === "DETAILS" ? (parent as HTMLDetailsElement).open : false,
+        display: style.display,
+        visibility: style.visibility,
+        rectCount: summary.getClientRects().length,
+        parentDisplay: parentStyle?.display ?? "missing",
+        parentVisibility: parentStyle?.visibility ?? "missing",
+        parentRectCount: parent?.getClientRects().length ?? 0,
+        ancestorLayout
+      };
+    });
+    expect(focusState.active, `native summary did not receive focus (${JSON.stringify(focusState)})`).toBe(true);
+    await detailSummary.press("Space");
+    const keyboardState = await detail.evaluate((node) => ({
+      open: (node as HTMLDetailsElement).open,
+      keydown: node.querySelector("summary")?.getAttribute("data-e2e-keydown") ?? "missing"
+    }));
+    expect(keyboardState, `native details did not open from focused keyboard input (open=${keyboardState.open}; keydown=${keyboardState.keydown})`).toMatchObject({ open: true });
     await expect(detail).toHaveAttribute("open", "");
     await expect(detail.locator("pre")).toContainText(hashAuditIdentifier(fixture.admin.id));
-    await expect(detail.locator("summary")).toBeFocused();
+    await expect(detailSummary).toBeFocused();
     for (const viewport of [{ width: 375, height: 812 }, { width: 812, height: 375 }, { width: 1280, height: 800 }]) {
       await page.setViewportSize(viewport);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -61,18 +112,18 @@ test("ADMIN investigates persisted audit with safe details, filters, paging, UTC
     });
     expect(contrast).toBeGreaterThan(4.5);
     await page.getByRole("link", { name: "Próxima página", exact: true }).click();
-    await expect(page.locator("article.audit-event")).toHaveCount(3);
+    await expect(page.locator("article.audit-event:visible")).toHaveCount(3);
     expect(new URL(page.url()).searchParams.get("resource")).toBe(resource);
     await page.getByRole("link", { name: "Página anterior", exact: true }).click();
-    await expect(page.locator("article.audit-event")).toHaveCount(50);
+    await expect(page.locator("article.audit-event:visible")).toHaveCount(50);
     await page.getByLabel("Busca por prefixo", { exact: true }).fill("AUTH_LOGIN");
     await page.getByRole("combobox", { name: "Resultado", exact: true }).selectOption("FAILURE");
     await page.getByRole("combobox", { name: "Ordenação", exact: true }).selectOption("newest");
     await page.getByRole("button", { name: "Buscar eventos", exact: true }).click();
-    await expect(page.locator("article.audit-event").first()).toContainText(`${resource}-052`);
+    await expect(page.locator("article.audit-event:visible").first()).toContainText(`${resource}-052`);
     await page.getByLabel("ID exato do evento", { exact: true }).fill(`${resource}-000`);
     await page.getByRole("button", { name: "Buscar eventos", exact: true }).click();
-    await expect(page.locator("article.audit-event")).toHaveCount(1);
+    await expect(page.locator("article.audit-event:visible")).toHaveCount(1);
     const roleResource = `${resource}.roles`;
     await database.auditLog.createMany({ data: [
       { ...createAuditLogData({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", actorUserId: fixture.admin.id, actorRole: "ADMIN", resource: roleResource }), id: `${roleResource}.admin` },
@@ -82,16 +133,16 @@ test("ADMIN investigates persisted audit with safe details, filters, paging, UTC
     for (const [actorRole, eventId, displayedRole] of [["ADMIN", "admin", "ADMIN"], ["USER", "user", "USER"], ["SYSTEM", "system", "Indisponível"]] as const) {
       await page.goto(`${hub}/admin/audit?resource=${roleResource}&actorRole=${actorRole}`);
       await expect(page.getByRole("combobox", { name: "Papel do ator", exact: true })).toHaveValue(actorRole);
-      await expect(page.locator("article.audit-event")).toHaveCount(1);
-      await expect(page.locator("article.audit-event").first()).toContainText(`${roleResource}.${eventId}`);
-      const roleDetail = page.locator("article.audit-event details").first();
+      await expect(page.locator("article.audit-event:visible")).toHaveCount(1);
+      await expect(page.locator("article.audit-event:visible").first()).toContainText(`${roleResource}.${eventId}`);
+      const roleDetail = page.locator("article.audit-event:visible details:visible").first();
       await roleDetail.locator("summary").click();
       await expect(roleDetail.locator("pre")).toContainText(`"papelVerificado": "${displayedRole}"`);
     }
     await page.goto(`${hub}/admin/audit?resource=missing.resource`);
     await expect(page.getByText("Nenhum evento corresponde aos filtros.", { exact: false })).toBeVisible();
     await page.goto(`${hub}/admin/audit?from=2026-02-30&to=2026-03-01`);
-    await expect(page.getByRole("alert")).toContainText("Filtros inválidos");
+    await expect(page.locator("p.form-error[role='alert']")).toContainText("Filtros inválidos");
     await page.getByRole("link", { name: "Limpar filtros", exact: true }).click();
     await expect(page.getByLabel("Busca por prefixo", { exact: true })).toHaveValue("");
     await database.session.update({ where: { id: session.id }, data: { revokedAt: new Date() } });
@@ -108,12 +159,12 @@ test("audit search and details reject USER and missing Access before reading row
   try {
     const token = randomBytes(32).toString("base64url");
     await database.session.create({ data: { userId: fixture.user.id, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 600_000) } });
-    await context.addCookies([{ name: SESSION_COOKIE_NAME, value: token, url: hub, httpOnly: true, secure: true, sameSite: "Lax" }]);
+    await context.addCookies([{ name: sessionCookieName, value: token, url: hub, httpOnly: true, secure: true, sameSite: "Lax" }]);
     const page = await context.newPage();
     expect((await page.goto(`${hub}/admin/audit?q=AUTH_LOGIN`))?.status()).toBe(403);
     await addCloudflareAccessHeader(page);
     await page.goto(`${hub}/admin/audit?q=AUTH_LOGIN`);
     await expect(page.getByRole("heading", { level: 1, name: "Auditoria", exact: true })).toHaveCount(0);
-    await expect(page.locator("article.audit-event")).toHaveCount(0);
+    await expect(page.locator("article.audit-event:visible")).toHaveCount(0);
   } finally { await context.close(); await database.$disconnect(); }
 });

@@ -4,14 +4,17 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest, createServer as createHttpsServer } from "node:https";
 import { TLSSocket } from "node:tls";
-import { DEVICE_COOKIE_NAME } from "@virki/auth/constants";
+import { getDeviceCookieName } from "@virki/auth/constants";
+import { decryptEmailPayload } from "@virki/auth/email";
 import { PrismaClient } from "@virki/database";
 import { expect, test, type BrowserContext } from "@playwright/test";
 
 // @ts-expect-error This existing JavaScript safety helper has no declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 
-const portalUrl = "https://portal.localhost:3001";
+const portalUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://portal.localhost" : "https://portal.localhost:3001";
+const deviceCookieName = getDeviceCookieName({ NODE_ENV: process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : process.env.NODE_ENV });
+const portal = new URL(portalUrl);
 const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
 const hasFixture = Boolean(fixturePath && existsSync(fixturePath));
 
@@ -19,6 +22,8 @@ test.skip(!process.env.VIRKI_E2E_DATABASE_URL?.trim() || !hasFixture, "OIDC E2E 
 
 type OidcFixture = {
   user: { id: string; email: string; password: string; deviceToken: string };
+  recoveryTargetUser: { id: string; email: string; password: string; deviceToken: string };
+  accountSwitchUser: { id: string; email: string; password: string; deviceToken: string };
   projectConnectionId: string;
   oidc: { clientId: string; clientSecret: string };
 };
@@ -35,6 +40,7 @@ test.beforeAll(async () => {
 });
 
 test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and cannot replay the code", async ({ browser }) => {
+  test.setTimeout(180_000);
   const keyPath = process.env.VIRKI_E2E_TLS_KEY_PATH;
   const certificatePath = process.env.VIRKI_E2E_TLS_CERTIFICATE_PATH;
   const caCertificatePath = process.env.VIRKI_E2E_TLS_CA_CERTIFICATE_PATH;
@@ -47,7 +53,9 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
   }
   const callbacks: URL[] = [];
   const callbackWaiters: Array<(url: URL) => void> = [];
+  let callbackRequestCount = 0;
   const receiveCallback = (url: URL) => {
+    callbackRequestCount++;
     const waiter = callbackWaiters.shift();
     if (waiter) waiter(url);
     else callbacks.push(url);
@@ -74,6 +82,11 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
   });
 
   let context: BrowserContext | undefined;
+  let weakerSessionContext: BrowserContext | undefined;
+  const databaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
+  if (!databaseUrl) throw new Error("OIDC E2E requires the explicit disposable database fixture.");
+  assertDisposableCoreTestDatabase(databaseUrl, process.env);
+  const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
   try {
     await new Promise<void>((resolve, reject) => {
       callbackServer.once("error", reject);
@@ -100,24 +113,150 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const tokenPath = issuerEndpointPath(discovery.token_endpoint, "/token");
     const jwksPath = issuerEndpointPath(discovery.jwks_uri, "/jwks");
     const userinfoPath = issuerEndpointPath(discovery.userinfo_endpoint, "/me");
-    const makeAuthorizationUrl = (challenge: string, requestState: string, requestNonce: string) => {
+    const makeAuthorizationUrl = (challenge: string, requestState: string, requestNonce: string, extraParameters: Record<string, string> = {}) => {
       const url = new URL(authorizationPath, portalUrl);
       url.search = new URLSearchParams({
         client_id: fixture.oidc.clientId,
         redirect_uri: callbackUri,
         response_type: "code",
         scope: "openid profile email",
+        claims: JSON.stringify({ id_token: { acr: { essential: true }, amr: { essential: true }, auth_time: { essential: true } } }),
         state: requestState,
         nonce: requestNonce,
         code_challenge: challenge,
-        code_challenge_method: "S256"
+        code_challenge_method: "S256",
+        ...extraParameters
       }).toString();
       return url;
     };
 
+    const exchangeAndVerify = async (input: {
+      authorizationCode: string;
+      verifier: string;
+      requestNonce: string;
+      expectedSubject: string;
+      expectedEmail: string;
+      expectedAcr: string;
+      requestStartedAtMs?: number;
+      requiresMfa?: boolean;
+    }) => {
+      const tokenForm = new URLSearchParams({
+        grant_type: "authorization_code",
+        code: input.authorizationCode,
+        redirect_uri: callbackUri,
+        code_verifier: input.verifier
+      }).toString();
+      const clientAuthorization = `Basic ${Buffer.from(`${fixture.oidc.clientId}:${fixture.oidc.clientSecret}`, "utf8").toString("base64")}`;
+      const tokenResponse = await requestHub(tokenPath, {
+        ca: caCertificate,
+        method: "POST",
+        headers: {
+          authorization: clientAuthorization,
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": String(Buffer.byteLength(tokenForm))
+        },
+        body: tokenForm
+      });
+      expect(tokenResponse.status).toBe(200);
+      const tokenSet = parseJsonObject(tokenResponse.body, "OIDC token response is invalid.");
+      const idToken = readString(tokenSet.id_token);
+      const accessToken = readString(tokenSet.access_token);
+      if (!idToken || !accessToken) throw new Error("OIDC token response omitted a required token.");
+      const [headerPart, claimsPart, signaturePart, extraPart] = idToken.split(".");
+      if (!headerPart || !claimsPart || !signaturePart || extraPart !== undefined) throw new Error("OIDC ID token is malformed.");
+      const header = parseJwtSegment(headerPart);
+      const claims = parseJwtSegment(claimsPart);
+      expect(header.alg).toBe("ES256");
+      const jwksResponse = await requestHub(jwksPath, { ca: caCertificate });
+      expect(jwksResponse.status).toBe(200);
+      const jwks = parseJsonObject(jwksResponse.body, "OIDC JWKS response is invalid.");
+      if (!Array.isArray(jwks.keys)) throw new Error("OIDC JWKS did not contain signing keys.");
+      const signingKey = jwks.keys.find((item) => isRecord(item) && item.kid === header.kid);
+      if (!isRecord(signingKey)) throw new Error("OIDC ID token signing key was not published in JWKS.");
+      expect(signingKey.kty === "EC" && signingKey.crv === "P-256" && signingKey.use === "sig" && signingKey.alg === "ES256").toBe(true);
+      expect(Object.hasOwn(signingKey, "d")).toBe(false);
+      expect(verifySignature(
+        "sha256",
+        Buffer.from(`${headerPart}.${claimsPart}`, "ascii"),
+        { key: createPublicKey({ key: signingKey as unknown as NodeJsonWebKey, format: "jwk" }), dsaEncoding: "ieee-p1363" },
+        Buffer.from(signaturePart, "base64url")
+      )).toBe(true);
+
+      const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+      expect(claims.iss).toBe(portalUrl);
+      expect(claims.sub).toBe(input.expectedSubject);
+      expect(audience).toContain(fixture.oidc.clientId);
+      expect(claims.nonce).toBe(input.requestNonce);
+      expect(typeof claims.exp === "number" && claims.exp > Math.floor(Date.now() / 1_000)).toBe(true);
+      expect(claims.acr).toBe(input.expectedAcr);
+      const authenticationMethods = claims.amr;
+      expect(Array.isArray(authenticationMethods) && authenticationMethods.every((method) => typeof method === "string")).toBe(true);
+      if (!Array.isArray(authenticationMethods)) throw new Error("OIDC ID token omitted authentication methods.");
+      expect(authenticationMethods).toContain("pwd");
+      if (input.requiresMfa) {
+        expect(authenticationMethods).toContain("otp");
+        expect(authenticationMethods).toContain("mfa");
+      } else {
+        expect(authenticationMethods).not.toContain("mfa");
+      }
+      if (input.requestStartedAtMs !== undefined) {
+        expect(typeof claims.auth_time === "number" && claims.auth_time >= Math.floor(input.requestStartedAtMs / 1_000)).toBe(true);
+      } else {
+        expect(typeof claims.auth_time).toBe("number");
+      }
+
+      const userinfoResponse = await requestHub(userinfoPath, {
+        ca: caCertificate,
+        headers: { authorization: `Bearer ${accessToken}` }
+      });
+      expect(userinfoResponse.status).toBe(200);
+      const userinfo = parseJsonObject(userinfoResponse.body, "OIDC UserInfo response is invalid.");
+      expect(userinfo.sub).toBe(input.expectedSubject);
+      expect(userinfo.email).toBe(input.expectedEmail);
+      expect(userinfo.email_verified).toBe(true);
+      return { tokenForm, clientAuthorization, accessToken, claims, userinfo };
+    };
+
+    const runAuthorizationFlow = async (input: {
+      page: import("@playwright/test").Page;
+      account: OidcFixture["user"];
+      expectedAcr: string;
+      extraParameters?: Record<string, string>;
+      expectedSubject?: string;
+      expectedEmail?: string;
+      requiresMfa?: boolean;
+      forceLogin?: boolean;
+    }) => {
+      const verifier = randomOpaqueValue();
+      const challenge = createHash("sha256").update(verifier, "ascii").digest("base64url");
+      const requestState = randomOpaqueValue();
+      const requestNonce = randomOpaqueValue();
+      const requestStartedAtMs = Date.now();
+      await input.page.goto(makeAuthorizationUrl(challenge, requestState, requestNonce, input.extraParameters).href);
+      await completePortalLoginIfNeeded(input.page, input.account, input.forceLogin ?? true, prisma);
+      const callback = await waitForAuthorizationCallback(input.page, callbackUri, nextCallback, []);
+      expect(callback.origin).toBe(new URL(callbackUri).origin);
+      expect(callback.pathname).toBe("/callback");
+      expect(callback.searchParams.getAll("state")).toHaveLength(1);
+      expect(callback.searchParams.get("state")).toBe(requestState);
+      expect(callback.searchParams.has("error")).toBe(false);
+      const authorizationCode = callback.searchParams.get("code");
+      if (!authorizationCode || callback.searchParams.getAll("code").length !== 1) throw new Error("OIDC callback did not contain exactly one authorization code.");
+      return exchangeAndVerify({
+        authorizationCode,
+        verifier,
+        requestNonce,
+        expectedSubject: input.expectedSubject ?? input.account.id,
+        expectedEmail: input.expectedEmail ?? input.account.email,
+        expectedAcr: input.expectedAcr,
+        requestStartedAtMs,
+        requiresMfa: input.requiresMfa
+      });
+    };
+
     context = await browser.newContext();
     await context.addCookies([{
-      name: DEVICE_COOKIE_NAME,
+      name: deviceCookieName,
       value: fixture.user.deviceToken,
       url: portalUrl,
       httpOnly: true,
@@ -125,25 +264,30 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       sameSite: "Lax"
     }]);
     const page = await context.newPage();
-    const flowResponses: string[] = [];
+    const flowResponses: Array<Promise<string>> = [];
     page.on("response", (response) => {
-      const responseUrl = new URL(response.url());
-      if (responseUrl.origin !== portalUrl || !["document", "fetch", "xhr"].includes(response.request().resourceType())) return;
-      const path = safeOidcPagePath(responseUrl.pathname);
-      const redirect = response.status() >= 300 && response.status() < 400
-        ? safeOidcRedirect(response.headers()["location"], responseUrl, callbackUri)
-        : "";
-      const loginDenial = responseUrl.pathname === "/api/login" && response.status() === 403
-        ? ` (${loginDenialDiagnostic(response.headers())}; request-origin=${safeOriginKind(response.request().headers().origin, portalUrl)})`
-        : "";
-      flowResponses.push(`${response.request().method()} ${path} ${response.status()}${redirect}${loginDenial}`);
+      flowResponses.push(summarizeOidcResponse(response, callbackUri));
       if (flowResponses.length > 16) flowResponses.shift();
     });
+    const interactionAuditSince = new Date();
     await page.goto(makeAuthorizationUrl(codeChallenge, state, nonce).href);
-    await completePortalLoginIfNeeded(page, true);
+    await completePortalLoginIfNeeded(page, fixture.user, true, prisma, false, flowResponses);
 
-    const callback = await waitForAuthorizationCallback(page, callbackUri, nextCallback, flowResponses);
-    expect(flowResponses).toContain("GET /auth/[route] 303 -> callback/callback");
+    let callback: URL;
+    try {
+      callback = await waitForAuthorizationCallback(page, callbackUri, nextCallback, flowResponses, () => callbackRequestCount);
+    } catch (error) {
+      const interactionEvents = await prisma.auditLog.findMany({
+        where: { resource: { in: ["sso.interaction", "sso.provider"] }, createdAt: { gte: interactionAuditSince } },
+        select: { eventType: true, result: true },
+        orderBy: { createdAt: "asc" },
+        take: 20
+      });
+      const auditSummary = interactionEvents.map(({ eventType, result }) => `${eventType}:${result}`).join(",") || "none";
+      const failure = error instanceof Error ? error.message : "unknown OIDC callback failure";
+      throw new Error(`${failure}; interactionAudit=${auditSummary}`, { cause: error });
+    }
+    expect((await Promise.all(flowResponses)).filter(Boolean)).toContain("GET /auth/[route] 303 -> callback/callback");
     expect(callback.origin === new URL(callbackUri).origin).toBe(true);
     expect(callback.pathname === "/callback").toBe(true);
     expect(callback.searchParams.getAll("state")).toHaveLength(1);
@@ -154,66 +298,16 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       throw new Error("OIDC callback did not contain exactly one authorization code.");
     }
 
-    const tokenForm = new URLSearchParams({
-      grant_type: "authorization_code",
-      code: authorizationCode,
-      redirect_uri: callbackUri,
-      code_verifier: codeVerifier
-    }).toString();
-    const clientAuthorization = `Basic ${Buffer.from(`${fixture.oidc.clientId}:${fixture.oidc.clientSecret}`, "utf8").toString("base64")}`;
-    const tokenResponse = await requestHub(tokenPath, {
-      ca: caCertificate,
-      method: "POST",
-      headers: {
-        authorization: clientAuthorization,
-        "content-type": "application/x-www-form-urlencoded",
-        "content-length": String(Buffer.byteLength(tokenForm))
-      },
-      body: tokenForm
+    const initialToken = await exchangeAndVerify({
+      authorizationCode,
+      verifier: codeVerifier,
+      requestNonce: nonce,
+      expectedSubject: fixture.user.id,
+      expectedEmail: fixture.user.email,
+      expectedAcr: "urn:virki:loa:1",
+      requestStartedAtMs: Date.now() - 30_000
     });
-    expect(tokenResponse.status).toBe(200);
-    const tokenSet = parseJsonObject(tokenResponse.body, "OIDC token response is invalid.");
-    const idToken = readString(tokenSet.id_token);
-    if (!idToken) throw new Error("OIDC token response did not contain an ID token.");
-    const accessToken = readString(tokenSet.access_token);
-    if (!accessToken) throw new Error("OIDC token response did not contain an access token.");
-    const [headerPart, claimsPart, signaturePart, extraPart] = idToken.split(".");
-    if (!headerPart || !claimsPart || !signaturePart || extraPart !== undefined) throw new Error("OIDC ID token is malformed.");
-    const header = parseJwtSegment(headerPart);
-    const claims = parseJwtSegment(claimsPart);
-    expect(header.alg === "ES256").toBe(true);
-    const jwksResponse = await requestHub(jwksPath, { ca: caCertificate });
-    expect(jwksResponse.status).toBe(200);
-    const jwks = parseJsonObject(jwksResponse.body, "OIDC JWKS response is invalid.");
-    if (!Array.isArray(jwks.keys)) throw new Error("OIDC JWKS did not contain signing keys.");
-    const signingKey = jwks.keys.find((item) => isRecord(item) && item.kid === header.kid);
-    if (!isRecord(signingKey)) throw new Error("OIDC ID token signing key was not published in JWKS.");
-    expect(signingKey.kty === "EC" && signingKey.crv === "P-256" && signingKey.use === "sig" && signingKey.alg === "ES256").toBe(true);
-    expect(Object.hasOwn(signingKey, "d")).toBe(false);
-    const signatureValid = verifySignature(
-      "sha256",
-      Buffer.from(`${headerPart}.${claimsPart}`, "ascii"),
-      { key: createPublicKey({ key: signingKey as unknown as NodeJsonWebKey, format: "jwk" }), dsaEncoding: "ieee-p1363" },
-      Buffer.from(signaturePart, "base64url")
-    );
-    expect(signatureValid).toBe(true);
-
-    const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    expect(claims.iss === portalUrl).toBe(true);
-    expect(claims.sub === fixture.user.id).toBe(true);
-    expect(audience.includes(fixture.oidc.clientId)).toBe(true);
-    expect(claims.nonce === nonce).toBe(true);
-    expect(typeof claims.exp === "number" && claims.exp > Math.floor(Date.now() / 1_000)).toBe(true);
-
-    const userinfoResponse = await requestHub(userinfoPath, {
-      ca: caCertificate,
-      headers: { authorization: `Bearer ${accessToken}` }
-    });
-    expect(userinfoResponse.status).toBe(200);
-    const userinfo = parseJsonObject(userinfoResponse.body, "OIDC UserInfo response is invalid.");
-    expect(userinfo.sub === fixture.user.id).toBe(true);
-    expect(userinfo.email === fixture.user.email).toBe(true);
-    expect(userinfo.email_verified === true).toBe(true);
+    const { tokenForm, clientAuthorization } = initialToken;
 
     const replayResponse = await requestHub(tokenPath, {
       ca: caCertificate,
@@ -235,7 +329,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const rejectedNonce = randomOpaqueValue();
     flowResponses.length = 0;
     await page.goto(makeAuthorizationUrl(expectedChallenge, rejectedState, rejectedNonce).href);
-    await completePortalLoginIfNeeded(page);
+    await completePortalLoginIfNeeded(page, fixture.user, false, prisma);
     const rejectedCallback = await waitForAuthorizationCallback(page, callbackUri, nextCallback, flowResponses);
     expect(rejectedCallback.searchParams.get("state") === rejectedState).toBe(true);
     const rejectedCode = rejectedCallback.searchParams.get("code");
@@ -262,12 +356,90 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     expect(wrongVerifierResponse.status).toBe(400);
     const wrongVerifierBody = parseJsonObject(wrongVerifierResponse.body, "OIDC PKCE rejection response is invalid.");
     expect(wrongVerifierBody.error === "invalid_grant").toBe(true);
+
+    await runAuthorizationFlow({
+      page,
+      account: fixture.user,
+      expectedAcr: "urn:virki:loa:2",
+      requiresMfa: true,
+      extraParameters: { prompt: "login" }
+    });
+    await runAuthorizationFlow({
+      page,
+      account: fixture.user,
+      expectedAcr: "urn:virki:loa:2",
+      requiresMfa: true,
+      extraParameters: { max_age: "0" }
+    });
+
+    await context.addCookies([{
+      name: deviceCookieName,
+      value: fixture.accountSwitchUser.deviceToken,
+      url: portalUrl,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax"
+    }]);
+    const switchedAccountToken = await runAuthorizationFlow({
+      page,
+      account: fixture.accountSwitchUser,
+      expectedAcr: "urn:virki:loa:2",
+      expectedSubject: fixture.accountSwitchUser.id,
+      expectedEmail: fixture.accountSwitchUser.email,
+      requiresMfa: true,
+      extraParameters: { prompt: "login" }
+    });
+    expect(switchedAccountToken.claims.sub).not.toBe(fixture.user.id);
+    expect(switchedAccountToken.userinfo.sub).not.toBe(fixture.user.id);
+
+    weakerSessionContext = await browser.newContext();
+    await weakerSessionContext.addCookies([{
+      name: deviceCookieName,
+      value: fixture.user.deviceToken,
+      url: portalUrl,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax"
+    }]);
+    const weakerSessionPage = await weakerSessionContext.newPage();
+    const weakerVerifier = randomOpaqueValue();
+    const weakerChallenge = createHash("sha256").update(weakerVerifier, "ascii").digest("base64url");
+    const weakerState = randomOpaqueValue();
+    const weakerNonce = randomOpaqueValue();
+    const weakerRequestStartedAtMs = Date.now();
+    await weakerSessionPage.goto(makeAuthorizationUrl(weakerChallenge, weakerState, weakerNonce, {
+      max_age: "0",
+      acr_values: "urn:virki:loa:2"
+    }).href);
+    await completePortalLoginIfNeeded(weakerSessionPage, fixture.user, true, prisma, true);
+    await completePortalLoginIfNeeded(weakerSessionPage, fixture.user, true, prisma);
+    const steppedUpCallback = await waitForAuthorizationCallback(weakerSessionPage, callbackUri, nextCallback, []);
+    expect(steppedUpCallback.searchParams.get("state")).toBe(weakerState);
+    const steppedUpCode = steppedUpCallback.searchParams.get("code");
+    if (!steppedUpCode) throw new Error("OIDC step-up callback did not contain an authorization code.");
+    const steppedUpToken = await exchangeAndVerify({
+      authorizationCode: steppedUpCode,
+      verifier: weakerVerifier,
+      requestNonce: weakerNonce,
+      expectedSubject: fixture.user.id,
+      expectedEmail: fixture.user.email,
+      expectedAcr: "urn:virki:loa:2",
+      requestStartedAtMs: weakerRequestStartedAtMs,
+      requiresMfa: true
+    });
+    expect(steppedUpToken.claims.amr).toEqual(expect.arrayContaining(["pwd", "otp", "mfa"]));
   } finally {
     try {
       await context?.close();
     } finally {
-      if (callbackServer.listening) {
-        await new Promise<void>((resolve) => callbackServer.close(() => resolve()));
+      try {
+        await weakerSessionContext?.close();
+      } finally {
+        try {
+          await prisma.$disconnect();
+        } finally {
+          if (callbackServer.listening) await new Promise<void>((resolve) => callbackServer.close(() => resolve()));
+        }
       }
     }
   }
@@ -285,11 +457,11 @@ function requestHub(path: string, options: {
     let tlsSocket: TLSSocket | undefined;
     const request = httpsRequest({
       hostname: "127.0.0.1",
-      port: 3001,
+      port: Number(portal.port || "443"),
       path,
       method: options.method ?? "GET",
-      headers: { ...options.headers, Host: "portal.localhost:3001" },
-      servername: "portal.localhost",
+      headers: { ...options.headers, Host: portal.host },
+      servername: portal.hostname,
       ca: options.ca
     }, (response) => {
       const chunks: Buffer[] = [];
@@ -313,13 +485,13 @@ function requestHub(path: string, options: {
       const expectedFingerprint = options.expectedCertificate ? new X509Certificate(options.expectedCertificate).fingerprint256 : "unavailable";
       const caFingerprint = new X509Certificate(options.ca).fingerprint256;
       const authorizationError = socket?.authorizationError ? String(socket.authorizationError).replace(/[^A-Z0-9_-]/giu, "").slice(0, 80) : "none";
-      reject(new Error(`OIDC HTTPS request for ${path} to portal.localhost failed (${code}; peer=${peerFingerprint}; peerSubject=${peerSubject}; peerIssuer=${peerIssuer}; peerChain=${peerChain}; opensslPeerChain=${opensslPeerChain}; expectedLeaf=${expectedFingerprint}; trustedCA=${caFingerprint}; authorization=${authorizationError}).`));
+      reject(new Error(`OIDC HTTPS request for ${path} to ${portal.host} failed (${code}; peer=${peerFingerprint}; peerSubject=${peerSubject}; peerIssuer=${peerIssuer}; peerChain=${peerChain}; opensslPeerChain=${opensslPeerChain}; expectedLeaf=${expectedFingerprint}; trustedCA=${caFingerprint}; authorization=${authorizationError}).`));
     });
     request.end(options.body);
   });
 }
 
-function loginDenialDiagnostic(headers: Record<string, string>): string {
+function loginDenialDiagnostic(routeReason: string | null, proxyReason: string | null): string {
   const ceremonyStages = new Set([
     "transaction-start",
     "account-lookup",
@@ -373,7 +545,6 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     "role-mismatch",
     "security-ceremony-unavailable"
   ]);
-  const routeReason = headers["x-virki-e2e-login-reason"];
   if (routeReason) {
     const stage = routeReason.startsWith("security-ceremony-unavailable-")
       ? routeReason.slice("security-ceremony-unavailable-".length)
@@ -381,7 +552,6 @@ function loginDenialDiagnostic(headers: Record<string, string>): string {
     const recognized = allowedReasons.has(routeReason) || ceremonyStages.has(stage);
     return `login-route:${recognized ? routeReason : "unrecognized"}`;
   }
-  const proxyReason = headers["x-virki-e2e-access-reason"];
   if (proxyReason) {
     const stage = proxyReason.startsWith("security-ceremony-unavailable-")
       ? proxyReason.slice("security-ceremony-unavailable-".length)
@@ -415,8 +585,8 @@ function safeOpenSslPeerChain(caPath: string | undefined): string {
   let output: string;
   try {
     output = execFileSync("openssl", [
-      "s_client", "-connect", "127.0.0.1:3001", "-servername", "portal.localhost",
-      "-verify_hostname", "portal.localhost", "-verify_return_error", "-verify", "5",
+      "s_client", "-connect", `127.0.0.1:${Number(portal.port || "443")}`, "-servername", portal.hostname,
+      "-verify_hostname", portal.hostname, "-verify_return_error", "-verify", "5",
       "-CAfile", caPath, "-no-CApath", "-showcerts"
     ], { encoding: "utf8", input: "", timeout: 5_000, maxBuffer: 64 * 1024 });
   } catch (error) {
@@ -442,39 +612,97 @@ function safeCommonName(value: unknown): string {
   return text.replace(/[^\p{L}\p{N} ._-]/gu, "").slice(0, 80) || "unavailable";
 }
 
-async function completePortalLoginIfNeeded(page: import("@playwright/test").Page, required = false): Promise<void> {
+async function completePortalLoginIfNeeded(
+  page: import("@playwright/test").Page,
+  account: OidcFixture["user"],
+  required: boolean,
+  prisma: PrismaClient,
+  expectFollowupReauthentication = false,
+  flowResponses: Array<Promise<string>> = []
+): Promise<void> {
   const emailInput = page.getByLabel("E-mail", { exact: true });
-  if (!required && !(await emailInput.isVisible())) return;
-  await expect(emailInput).toBeVisible({ timeout: 10_000 });
+  if (!required && !(await emailInput.isVisible().catch(() => false))) return;
+  try {
+    await expect(emailInput).toBeVisible({ timeout: 10_000 });
+  } catch {
+    const currentUrl = new URL(page.url());
+    const cookies = await page.context().cookies(portalUrl).catch(() => []);
+    const centralSessionCookiePresent = cookies.some((cookie) => cookie.name === "virki_session" || cookie.name === "__Host-virki_session");
+    const deviceCookiePresent = cookies.some((cookie) => cookie.name === "virki_device" || cookie.name === "__Host-virki_device");
+    const alerts = await page.getByRole("alert").allTextContents().catch(() => []);
+    const safeAlert = alerts.map(sanitizeDiagnosticText).filter(Boolean).slice(0, 2).join(" | ") || "none";
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    const origin = currentUrl.origin === portalUrl ? "portal" : currentUrl.origin === "https://127.0.0.1" ? "callback" : "other";
+    throw new Error(`OIDC login form was not displayed (origin=${origin}; pagePath=${safeOidcPagePath(currentUrl.pathname)}; bodyState=${classifyOidcPageContent(bodyText)}; centralSessionCookiePresent=${centralSessionCookiePresent}; deviceCookiePresent=${deviceCookiePresent}; alert=${safeAlert}; responses=${(await Promise.all(flowResponses)).filter(Boolean).join(",") || "none"}).`);
+  }
   const documentOrigin = await page.evaluate(() => window.origin);
-  await emailInput.fill(fixture.user.email);
-  await page.getByLabel("Senha", { exact: true }).fill(fixture.user.password);
+  await emailInput.fill(account.email);
+  await page.getByLabel("Senha", { exact: true }).fill(account.password);
   const loginResponsePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === "/api/login" && response.request().method() === "POST"
   );
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
   const loginResponse = await loginResponsePromise;
-  const requestOrigin = loginResponse.request().headers().origin;
+  const requestOrigin = await loginResponse.request().headerValue("origin");
   if (loginResponse.status() === 403) {
-    throw new Error(`OIDC login POST was denied (${loginDenialDiagnostic(loginResponse.headers())}; document-origin=${safeOriginKind(documentOrigin, portalUrl)}; request-origin=${safeOriginKind(requestOrigin, portalUrl)}).`);
+    const [loginReason, proxyReason] = await Promise.all([
+      loginResponse.headerValue("x-virki-e2e-login-reason"),
+      loginResponse.headerValue("x-virki-e2e-access-reason")
+    ]);
+    throw new Error(`OIDC login POST was denied (${loginDenialDiagnostic(loginReason, proxyReason)}; document-origin=${safeOriginKind(documentOrigin, portalUrl)}; request-origin=${safeOriginKind(requestOrigin, portalUrl)}).`);
   }
   expect(documentOrigin).toBe(portalUrl);
   expect(requestOrigin).toBe(portalUrl);
-  const location = loginResponse.headers().location;
+  const location = await loginResponse.headerValue("location");
   if (loginResponse.status() === 303 && location) {
     const redirect = new URL(location, portalUrl);
     if (redirect.pathname === "/login" && redirect.searchParams.get("error") === "1") {
-      throw new Error(`OIDC login was rejected (${loginDenialDiagnostic(loginResponse.headers())}).`);
+      const [loginReason, proxyReason] = await Promise.all([
+        loginResponse.headerValue("x-virki-e2e-login-reason"),
+        loginResponse.headerValue("x-virki-e2e-access-reason")
+      ]);
+      throw new Error(`OIDC login was rejected (${loginDenialDiagnostic(loginReason, proxyReason)}).`);
     }
+    if (redirect.pathname === "/login/verify") await completePortalEmailVerification(page, account, redirect, prisma);
+  }
+  if (expectFollowupReauthentication) {
+    await page.waitForURL((url) => url.pathname === "/login" && url.searchParams.get("reauth") === "1", { timeout: 15_000 });
+    return;
   }
   await expect(emailInput).toBeHidden({ timeout: 10_000 });
+}
+
+async function completePortalEmailVerification(
+  page: import("@playwright/test").Page,
+  account: OidcFixture["user"],
+  verificationUrl: URL,
+  prisma: PrismaClient
+): Promise<void> {
+  const ceremonyId = verificationUrl.searchParams.get("ceremony") ?? "";
+  if (!ceremonyId || verificationUrl.searchParams.get("factor") !== "email") throw new Error("OIDC login requested an unsupported second factor.");
+  await page.waitForURL((url) => url.pathname === "/login/verify" && url.searchParams.get("ceremony") === ceremonyId, { timeout: 15_000 });
+  const message = await prisma.emailOutboxMessage.findFirst({
+    where: {
+      idempotencyKey: `security-ceremony:${ceremonyId}`,
+      recipientEmail: account.email,
+      kind: { in: ["EMAIL_TWO_FACTOR", "NEW_DEVICE_VERIFICATION"] }
+    },
+    select: { payload: true }
+  });
+  if (!message) throw new Error("OIDC login verification message is unavailable.");
+  const code = decryptEmailPayload(message.payload).code;
+  if (!/^\d{6}$/u.test(code ?? "")) throw new Error("OIDC login verification message is invalid.");
+  await page.getByLabel("Código", { exact: true }).fill(code);
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.waitForURL((url) => url.pathname !== "/login/verify", { timeout: 15_000 });
 }
 
 async function waitForAuthorizationCallback(
   page: import("@playwright/test").Page,
   callbackUri: string,
   nextCallback: () => Promise<URL>,
-  flowResponses: string[]
+  flowResponses: Array<Promise<string>>,
+  callbackRequestsReceived: () => number = () => 0
 ): Promise<URL> {
   const callbackOrigin = new URL(callbackUri).origin;
   const callback = nextCallback();
@@ -483,6 +711,9 @@ async function waitForAuthorizationCallback(
   } catch {
     const currentUrl = new URL(page.url());
     const pathname = currentUrl.pathname;
+    const cookies = await page.context().cookies(portalUrl).catch(() => []);
+    const centralSessionCookiePresent = cookies.some((cookie) => cookie.name === "virki_session" || cookie.name === "__Host-virki_session");
+    const deviceCookiePresent = cookies.some((cookie) => cookie.name === "virki_device" || cookie.name === "__Host-virki_device");
     const origin = currentUrl.origin === callbackOrigin ? "callback" : currentUrl.origin === portalUrl ? "portal" : "other";
     const pageState = pathname === "/login" ? "login"
       : pathname === "/login/verify" ? "login-verification"
@@ -496,7 +727,15 @@ async function waitForAuthorizationCallback(
     const safeAlert = alerts.map(sanitizeDiagnosticText).filter(Boolean).slice(0, 2).join(" | ") || "none";
     const bodyText = await page.locator("body").innerText().catch(() => "");
     const bodyState = classifyOidcPageContent(bodyText);
-    throw new Error(`OIDC browser did not reach its callback (origin=${origin}; pageState=${pageState}; pagePath=${pagePath}; bodyState=${bodyState}; loginFormVisible=${loginFormVisible}; alert=${safeAlert}; responses=${flowResponses.join(",") || "none"}).`);
+    const issuerProbe = await page.evaluate(async () => {
+      try {
+        const response = await fetch("/jwks", { cache: "no-store" });
+        return `status-${response.status};request-id-${response.headers.has("x-virki-request-id") ? "present" : "missing"}`;
+      } catch {
+        return "unreachable";
+      }
+    }).catch(() => "unavailable");
+    throw new Error(`OIDC browser did not reach its callback (origin=${origin}; pageState=${pageState}; pagePath=${pagePath}; bodyState=${bodyState}; callbackRequestCount=${callbackRequestsReceived()}; loginFormVisible=${loginFormVisible}; centralSessionCookiePresent=${centralSessionCookiePresent}; deviceCookiePresent=${deviceCookiePresent}; alert=${safeAlert}; issuerProbe=${issuerProbe}; responses=${(await Promise.all(flowResponses)).filter(Boolean).join(",") || "none"}).`);
   }
   return callback;
 }
@@ -525,9 +764,44 @@ function safeOidcRedirect(location: string | undefined, responseUrl: URL, callba
   }
 }
 
+async function summarizeOidcResponse(response: import("@playwright/test").Response, callbackUri: string): Promise<string> {
+  const responseUrl = new URL(response.url());
+  if (responseUrl.origin !== portalUrl || !["document", "fetch", "xhr"].includes(response.request().resourceType())) return "";
+  const [location, retryAfter, issuerRequestId, contentType, loginReason, proxyReason] = await Promise.all([
+    response.headerValue("location"),
+    response.headerValue("retry-after"),
+    response.headerValue("x-virki-request-id"),
+    response.headerValue("content-type"),
+    response.headerValue("x-virki-e2e-login-reason"),
+    response.headerValue("x-virki-e2e-access-reason")
+  ]);
+  const path = safeOidcPagePath(responseUrl.pathname);
+  const redirect = response.status() >= 300 && response.status() < 400 ? safeOidcRedirect(location ?? undefined, responseUrl, callbackUri) : "";
+  const retry = response.status() === 429 || response.status() === 503 ? ` retry-after=${retryAfter ? "set" : "absent"}` : "";
+  const requestOrigin = responseUrl.pathname === "/api/login" && response.status() === 403
+    ? safeOriginKind(await response.request().headerValue("origin") ?? undefined, portalUrl)
+    : "";
+  const denial = responseUrl.pathname === "/api/login" && response.status() === 403
+    ? ` (${loginDenialDiagnostic(loginReason, proxyReason)}; request-origin=${requestOrigin})`
+    : "";
+  const failure = response.status() >= 500
+    ? ` issuer-request-id=${issuerRequestId ? "present" : "missing"};content-type=${classifyContentType(contentType)}`
+    : "";
+  return `${response.request().method()} ${path} ${response.status()}${retry}${redirect}${denial}${failure}`;
+}
+
+function classifyContentType(value: string | null): string {
+  const mediaType = value?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType === "text/html") return "html";
+  if (mediaType === "application/json" || mediaType === "application/problem+json") return "json";
+  if (mediaType?.startsWith("text/")) return "text";
+  return mediaType ? "other" : "missing";
+}
+
 function classifyOidcPageContent(value: string): string {
   const text = value.toLowerCase();
   if (!text.trim()) return "empty";
+  if (text.includes("hub unavailable")) return "hub-proxy-unavailable";
   if (/\b404\b|not found|não encontrado/iu.test(text)) return "not-found";
   if (/\b500\b|internal server error|application error|erro interno/iu.test(text)) return "server-error";
   if (/access denied|forbidden|acesso negado/iu.test(text)) return "access-denied";
@@ -597,9 +871,13 @@ function randomOpaqueValue(): string {
 }
 
 function isOidcFixture(value: unknown): value is OidcFixture {
-  if (!isRecord(value) || !isRecord(value.user) || !isRecord(value.oidc)) return false;
+  if (!isRecord(value) || !isRecord(value.user) || !isRecord(value.recoveryTargetUser) || !isRecord(value.accountSwitchUser) || !isRecord(value.oidc)) return false;
   return typeof value.user.id === "string" && typeof value.user.email === "string" &&
     typeof value.user.password === "string" && typeof value.user.deviceToken === "string" &&
+    typeof value.recoveryTargetUser.id === "string" && typeof value.recoveryTargetUser.email === "string" &&
+    typeof value.recoveryTargetUser.password === "string" && typeof value.recoveryTargetUser.deviceToken === "string" &&
+    typeof value.accountSwitchUser.id === "string" && typeof value.accountSwitchUser.email === "string" &&
+    typeof value.accountSwitchUser.password === "string" && typeof value.accountSwitchUser.deviceToken === "string" &&
     typeof value.projectConnectionId === "string" && typeof value.oidc.clientId === "string" &&
     typeof value.oidc.clientSecret === "string";
 }

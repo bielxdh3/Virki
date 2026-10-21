@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
-import { SESSION_COOKIE_NAME, DEVICE_COOKIE_NAME } from "@virki/auth/constants";
+import { getDeviceCookieName, getSessionCookieName } from "@virki/auth/constants";
 import { hashSessionToken, verifyPassword } from "@virki/auth";
 import { decryptEmailPayload } from "@virki/auth/email";
 import { getPendingAccountRecoveryQueueWhere } from "@virki/auth/security";
@@ -12,8 +12,11 @@ import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 // @ts-expect-error This JavaScript safety helper has no declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 
-const portalUrl = "https://portal.localhost:3001";
-const hubUrl = "https://hub.localhost:3001";
+const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
+const portalUrl = productionHubMode ? "https://portal.localhost" : "https://portal.localhost:3001";
+const hubUrl = productionHubMode ? "https://hub.localhost" : "https://hub.localhost:3001";
+const sessionCookieName = getSessionCookieName({ NODE_ENV: productionHubMode ? "production" : process.env.NODE_ENV });
+const deviceCookieName = getDeviceCookieName({ NODE_ENV: productionHubMode ? "production" : process.env.NODE_ENV });
 const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
 const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
 const hasFixture = Boolean(fixturePath && existsSync(fixturePath));
@@ -81,7 +84,7 @@ test("ADMIN restarts a failed credential setup challenge with a fresh same-origi
       userId: fixture.admin.id, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 600_000), authenticationMethods: ["pwd", "otp", "mfa"]
     }, select: { id: true } });
     sessionId = session.id;
-    await context.addCookies([{ name: SESSION_COOKIE_NAME, value: token, url: hubUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
+    await context.addCookies([{ name: sessionCookieName, value: token, url: hubUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
     const page = await context.newPage();
     await addCloudflareAccessHeader(page);
     await page.goto(`${hubUrl}/admin/security`);
@@ -131,10 +134,67 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
   const prisma = createE2ePrismaClient();
   let firstHydrationMismatchPhase: string | undefined;
   let adminJourneyPhase = "initialization";
+  let lifecycleConnectionSlug: string | undefined;
+  const oneTimeSecrets = new Map<"created" | "rotated", string>();
   try {
     await rememberDevice(context, hubUrl, fixture.admin.deviceToken);
+    await context.addInitScript(() => {
+      const key = "virki-e2e-oidc-secret-lifecycle";
+      window.addEventListener("pageshow", (event) => {
+        localStorage.setItem(`${key}:pageshow`, event.persisted ? "persisted" : "not-persisted");
+        const navigation = performance.getEntriesByType("navigation")[0] as (PerformanceNavigationTiming & { notRestoredReasons?: { reasons?: Array<{ reason?: unknown }> } }) | undefined;
+        localStorage.setItem(`${key}:navigation`, navigation?.type ?? "unknown");
+        const reasons = (navigation?.notRestoredReasons?.reasons ?? [])
+          .slice(0, 8)
+          .map(({ reason }) => typeof reason === "string" ? reason.replace(/[^a-z0-9_-]/giu, "").slice(0, 40) : "unknown")
+          .filter(Boolean);
+        localStorage.setItem(`${key}:notRestoredReasons`, reasons.join(",") || "none");
+      });
+    });
     const page = await context.newPage();
     const hubPageResponses = observeHubPageResponses(page, "/admin/connections");
+    const hubPagePolicies = observeHubResponsePolicies(page, "/admin/connections");
+    const initialAdminRouteResponses: Promise<{ status: number; origin: string; pathname: string; locationPath: string; accessReasonHeaderPresent: boolean }>[] = [];
+    const loginFlowResponses: Promise<{ method: string; pathname: string; status: number; locationPath: string }>[] = [];
+    page.on("response", (response) => {
+      const responseUrl = new URL(response.url());
+      if (responseUrl.origin === hubUrl && ["/api/login", "/login", "/login/verify", "/admin/accounts"].includes(responseUrl.pathname)) {
+        loginFlowResponses.push((async () => {
+          const locationHeader = await response.headerValue("location");
+          let locationPath = "none";
+          if (locationHeader) {
+            try {
+              const location = new URL(locationHeader, hubUrl);
+              locationPath = location.origin === hubUrl ? location.pathname : "external";
+            } catch {
+              locationPath = "invalid";
+            }
+          }
+          return { method: response.request().method(), pathname: responseUrl.pathname, status: response.status(), locationPath };
+        })());
+      }
+      if (responseUrl.origin !== hubUrl || responseUrl.pathname !== "/admin/accounts" || response.request().resourceType() !== "document") return;
+      initialAdminRouteResponses.push((async () => {
+        const locationHeader = await response.headerValue("location");
+        const accessReasonHeader = await response.headerValue("x-virki-e2e-access-reason");
+        let locationPath = "none";
+        if (locationHeader) {
+          try {
+            const location = new URL(locationHeader, hubUrl);
+            locationPath = location.origin === hubUrl ? location.pathname : "external";
+          } catch {
+            locationPath = "invalid";
+          }
+        }
+        return {
+          status: response.status(),
+          origin: responseUrl.origin,
+          pathname: responseUrl.pathname,
+          locationPath,
+          accessReasonHeaderPresent: Boolean(accessReasonHeader)
+        };
+      })());
+    });
     page.on("console", (message) => {
       if (/hydration|server-rendered html/iu.test(message.text())) {
         firstHydrationMismatchPhase ??= adminJourneyPhase;
@@ -142,16 +202,70 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     });
     await addCloudflareAccessHeader(page);
     adminJourneyPhase = "initial-admin-page-and-login";
-    await page.goto(`${hubUrl}/admin/accounts`);
+    const adminUserState = await prisma.user.findUnique({
+      where: { id: fixture.admin.id },
+      select: { role: true, isActive: true, accountStatus: true }
+    });
+    const administrativeCredentialState = await prisma.administrativeCredential.findUnique({
+      where: { userId: fixture.admin.id },
+      select: { status: true }
+    });
+    const activeElevationCount = await prisma.securityElevation.count({
+      where: { userId: fixture.admin.id, status: "ACTIVE", OR: [{ manualUntilRevoked: true }, { expiresAt: { gt: new Date() } }] }
+    });
+    const initialAdminResponse = await page.goto(`${hubUrl}/admin/accounts`);
+    const initialAdminRouteObservations = await Promise.all(initialAdminRouteResponses);
+    const initialHubCookies = (await context.cookies(hubUrl)).map(({ name, domain, path, httpOnly, secure, sameSite }) => ({ name, domain, path, httpOnly, secure, sameSite }));
+    console.info(`Production Hub initial ADMIN route: ${JSON.stringify({
+      hubOrigin: new URL(hubUrl).origin,
+      accessIssuerOrigin: process.env.VIRKI_E2E_ACCESS_ISSUER ? new URL(process.env.VIRKI_E2E_ACCESS_ISSUER).origin : "missing",
+      directResponseStatus: initialAdminResponse?.status() ?? null,
+      responseChain: initialAdminRouteObservations,
+      cookies: initialHubCookies,
+      adminRole: adminUserState?.role ?? "missing",
+      adminActive: Boolean(adminUserState?.isActive && adminUserState.accountStatus === "ACTIVE"),
+      administrativeCredentialStatus: administrativeCredentialState?.status ?? "missing",
+      activeElevationCount,
+      sessionCookiePresent: initialHubCookies.some(({ name }) => name === sessionCookieName),
+      rememberedDeviceCookiePresent: initialHubCookies.some(({ name }) => name === deviceCookieName)
+    })}`);
     await expect(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
     await signIn(page, fixture.admin);
-    const sessionCookie = (await context.cookies(hubUrl)).find((cookie) => cookie.name === SESSION_COOKIE_NAME);
+    const sessionCookie = (await context.cookies(hubUrl)).find((cookie) => cookie.name === sessionCookieName);
+    const postLoginCookies = (await context.cookies(hubUrl)).map(({ name, domain, path, httpOnly, secure, sameSite }) => ({ name, domain, path, httpOnly, secure, sameSite }));
+    const activeSessionCount = await prisma.session.count({ where: { userId: fixture.admin.id, revokedAt: null, expiresAt: { gt: new Date() } } });
+    console.info(`Production Hub login result: ${JSON.stringify({
+      currentPath: new URL(page.url()).pathname,
+      responses: await Promise.all(loginFlowResponses),
+      cookies: postLoginCookies,
+      sessionCookiePresent: Boolean(sessionCookie),
+      activeSessionCount
+    })}`);
     expect(sessionCookie?.value).toBeTruthy();
     if (!sessionCookie) throw new Error("Authenticated E2E session cookie was not created.");
 
     await expect(page).toHaveURL(`${hubUrl}/admin/accounts`);
     await expect(page.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
     await assertAdminSkipLink(page);
+
+    adminJourneyPhase = "authenticated-return-target-allowlist";
+    for (const target of [
+      { returnTo: "/account/security", expectedPath: "/account/security", heading: "Segurança" },
+      { returnTo: "https://attacker.invalid/", expectedPath: "/admin/accounts", heading: "Contas" }
+    ]) {
+      const returnContext = await browser.newContext();
+      try {
+        const returnPage = await returnContext.newPage();
+        await addCloudflareAccessHeader(returnPage);
+        await returnPage.goto(`${hubUrl}/login?returnTo=${encodeURIComponent(target.returnTo)}`);
+        await signIn(returnPage, fixture.admin);
+        await expect(returnPage).toHaveURL(`${hubUrl}${target.expectedPath}`);
+        await expect(returnPage.getByRole("heading", { level: 1, name: target.heading, exact: true })).toBeVisible();
+      } finally {
+        await returnContext.close();
+      }
+    }
+
     await page.getByRole("link", { name: "Acessos", exact: true }).click();
     await expect(page).toHaveURL(`${hubUrl}/admin/access`);
     await expect(page.getByRole("heading", { level: 1, name: "Acessos", exact: true })).toBeVisible();
@@ -162,6 +276,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await page.getByRole("link", { name: "Conexões", exact: true }).click();
     await expect(page).toHaveURL(`${hubUrl}/admin/connections`);
     await assertAdminSkipLink(page);
+    console.info("ADMIN connections main-document policy: " + await hubPagePolicies());
     const projectRow = page.locator("article").filter({ hasText: fixture.projectName });
     const editDetails = projectRow.locator("details").filter({ hasText: "Editar configuração" });
     // Native <details> clicks during React hydration mutate the SSR open
@@ -325,6 +440,188 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
 
     await page.getByRole("link", { name: "Conexões", exact: true }).click();
     await expect(page).toHaveURL(hubUrl + "/admin/connections");
+    lifecycleConnectionSlug = `secret-lifecycle-${randomBytes(8).toString("hex")}`;
+    const lifecycleOrigin = `https://${lifecycleConnectionSlug}.example.invalid`;
+    const createConnectionForm = page.getByRole("button", { name: "Registrar conexão", exact: true }).locator("xpath=ancestor::form[1]");
+    await createConnectionForm.getByLabel("Nome", { exact: true }).fill("One-time secret lifecycle fixture");
+    await createConnectionForm.getByLabel("Identificador (slug)", { exact: true }).fill(lifecycleConnectionSlug);
+    await createConnectionForm.getByLabel("Origem HTTPS", { exact: true }).fill(lifecycleOrigin);
+    await createConnectionForm.getByLabel("Redirect URIs exatas", { exact: true }).fill(`${lifecycleOrigin}/oidc/callback`);
+    adminJourneyPhase = "created-secret-ui-action";
+    await createConnectionForm.getByRole("button", { name: "Registrar conexão", exact: true }).click();
+    const creationSecretPanel = page.locator("[data-sensitive-one-time-value='true']").filter({ hasText: "Credenciais exibidas uma vez" });
+    await expect(creationSecretPanel).toBeVisible();
+    oneTimeSecrets.set("created", await creationSecretPanel.locator("code").nth(1).innerText());
+    expect(/^[A-Za-z0-9_-]{64}$/u.test(oneTimeSecrets.get("created") ?? ""), "created one-time secret has the expected format").toBe(true);
+    const createdConnection = await prisma.projectConnection.findUnique({ where: { slug: lifecycleConnectionSlug }, select: { clientId: true } });
+    expect(createdConnection?.clientId).toMatch(/^biel_[A-Za-z0-9_-]{24}$/u);
+
+    adminJourneyPhase = "created-secret-pagehide-navigation-back";
+    await page.evaluate(() => {
+      const key = "virki-e2e-oidc-secret-lifecycle";
+      localStorage.removeItem(`${key}:created-pagehide`);
+      localStorage.removeItem(`${key}:created-pageshow`);
+      localStorage.removeItem(`${key}:created-navigation`);
+      localStorage.removeItem(`${key}:created-notRestoredReasons`);
+      localStorage.removeItem(`${key}:created-pagehide-persisted`);
+      localStorage.removeItem(`${key}:created-same-document-restored`);
+      const documentMarker = {};
+      Object.defineProperty(window, "__virkiCreatedSecretDocumentMarker", { value: documentMarker, configurable: true });
+      window.addEventListener("pagehide", (event) => {
+        const panel = document.querySelector("[data-sensitive-one-time-value='true']");
+        localStorage.setItem(`${key}:created-pagehide`, panel ? "still-visible" : "scrubbed");
+        localStorage.setItem(`${key}:created-pagehide-persisted`, event.persisted ? "true" : "false");
+      }, { once: true });
+      window.addEventListener("pageshow", (event) => {
+        localStorage.setItem(`${key}:created-pageshow`, event.persisted ? "persisted" : "not-persisted");
+        const restoredMarker = (window as Window & { __virkiCreatedSecretDocumentMarker?: object }).__virkiCreatedSecretDocumentMarker;
+        localStorage.setItem(`${key}:created-same-document-restored`, event.persisted && restoredMarker === documentMarker ? "true" : "false");
+        const navigation = performance.getEntriesByType("navigation")[0] as (PerformanceNavigationTiming & { notRestoredReasons?: { reasons?: Array<{ reason?: unknown }> } }) | undefined;
+        localStorage.setItem(`${key}:created-navigation`, navigation?.type ?? "unknown");
+        const reasons = (navigation?.notRestoredReasons?.reasons ?? []).slice(0, 8).map(({ reason }) => typeof reason === "string" ? reason.replace(/[^a-z0-9_-]/giu, "").slice(0, 40) : "unknown");
+        localStorage.setItem(`${key}:created-notRestoredReasons`, reasons.join(",") || "none");
+      });
+    });
+    await page.goto(`${hubUrl}/admin/accounts`);
+    await expect(page.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+    const creationBackResponse = await page.goBack();
+    await expect(page).toHaveURL(hubUrl + "/admin/connections");
+    const lifecycleConnectionRow = page.locator("article.connection-row").filter({ hasText: lifecycleConnectionSlug });
+    await expect(lifecycleConnectionRow).toBeVisible();
+    await expect(page.locator("[data-sensitive-one-time-value='true']")).toHaveCount(0);
+    const creationSecretAbsentFromHtml = !(await page.content()).includes(oneTimeSecrets.get("created") ?? "");
+    const creationSecretAbsentFromAccessibility = !(await page.locator("body").ariaSnapshot()).includes(oneTimeSecrets.get("created") ?? "");
+    expect(creationSecretAbsentFromHtml, "created one-time secret is absent from page HTML").toBe(true);
+    expect(creationSecretAbsentFromAccessibility, "created one-time secret is absent from the accessibility tree").toBe(true);
+    const creationLifecycleSignals = {
+      ...(await page.evaluate(() => ({
+      pagehide: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:created-pagehide"),
+      pagehidePersisted: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:created-pagehide-persisted"),
+      pageshow: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:created-pageshow") ?? localStorage.getItem("virki-e2e-oidc-secret-lifecycle:pageshow"),
+      sameDocumentRestored: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:created-same-document-restored") ?? (localStorage.getItem("virki-e2e-oidc-secret-lifecycle:pageshow") === "not-persisted" ? "false" : "not-observed"),
+      navigation: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:created-navigation") ?? localStorage.getItem("virki-e2e-oidc-secret-lifecycle:navigation"),
+      notRestoredReasons: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:created-notRestoredReasons") ?? localStorage.getItem("virki-e2e-oidc-secret-lifecycle:notRestoredReasons")
+      }))),
+      backResponse: Boolean(creationBackResponse)
+    };
+    expect(creationLifecycleSignals.pagehide).toBe("scrubbed");
+    if (creationLifecycleSignals.pagehidePersisted === "true") {
+      expect(creationLifecycleSignals.pageshow).toBe("persisted");
+      expect(creationLifecycleSignals.sameDocumentRestored).toBe("true");
+    }
+    if (creationLifecycleSignals.pageshow === "persisted") expect(creationLifecycleSignals.sameDocumentRestored).toBe("true");
+    if (creationLifecycleSignals.pagehidePersisted === "false") {
+      expect(creationLifecycleSignals.pageshow).toBe("not-persisted");
+      expect(creationLifecycleSignals.sameDocumentRestored).toBe("false");
+    }
+    console.info(`OIDC created-secret lifecycle: history=back; responseObserved=${creationLifecycleSignals.backResponse}; pagehide=${creationLifecycleSignals.pagehide}; pagehide.persisted=${creationLifecycleSignals.pagehidePersisted ?? "not-observed"}; pageshow.persisted=${creationLifecycleSignals.pageshow ?? "not-observed"}; sameDocumentRestored=${creationLifecycleSignals.sameDocumentRestored ?? "not-observed"}; navigation=${creationLifecycleSignals.navigation ?? "unknown"}; notRestoredReasons=${creationLifecycleSignals.notRestoredReasons ?? "unknown"}`);
+    const creationReloadResponse = await page.reload();
+    expect(creationReloadResponse?.status()).toBe(200);
+    await expect(page.locator("[data-sensitive-one-time-value='true']")).toHaveCount(0);
+    const creationSecretAbsentAfterReload = !(await page.content()).includes(oneTimeSecrets.get("created") ?? "");
+    const creationSecretAbsentFromAccessibilityAfterReload = !(await page.locator("body").ariaSnapshot()).includes(oneTimeSecrets.get("created") ?? "");
+    expect(creationSecretAbsentAfterReload, "created one-time secret is absent after a fresh document reload").toBe(true);
+    expect(creationSecretAbsentFromAccessibilityAfterReload, "created one-time secret is absent from accessibility after a fresh document reload").toBe(true);
+    await page.goto(`${hubUrl}/admin/accounts`);
+    const creationReloadBackResponse = await page.goBack();
+    await expect(page).toHaveURL(hubUrl + "/admin/connections");
+    await expect(page.locator("[data-sensitive-one-time-value='true']")).toHaveCount(0);
+    const creationSecretAbsentAfterReloadBack = !(await page.content()).includes(oneTimeSecrets.get("created") ?? "");
+    const creationSecretAbsentFromAccessibilityAfterReloadBack = !(await page.locator("body").ariaSnapshot()).includes(oneTimeSecrets.get("created") ?? "");
+    expect(creationSecretAbsentAfterReloadBack, "created one-time secret is absent after a reload followed by Back").toBe(true);
+    expect(creationSecretAbsentFromAccessibilityAfterReloadBack, "created one-time secret is absent from accessibility after a reload followed by Back").toBe(true);
+    const creationFallbackPageshow = await page.evaluate(() => localStorage.getItem("virki-e2e-oidc-secret-lifecycle:pageshow"));
+    expect(creationFallbackPageshow).toBe("not-persisted");
+    const creationFallbackNavigation = await page.evaluate(() => (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)?.type ?? "unknown");
+    console.info(`OIDC created-secret fallback: reloadResponse=${Boolean(creationReloadResponse)}; backResponseObserved=${Boolean(creationReloadBackResponse)}; pageshow.persisted=${creationFallbackPageshow}; navigation=${creationFallbackNavigation}; secretAbsent=true`);
+    oneTimeSecrets.delete("created");
+
+    adminJourneyPhase = "rotated-secret-action";
+    await lifecycleConnectionRow.getByRole("button", { name: "Rotacionar secret", exact: true }).click();
+    const rotationSecretPanel = lifecycleConnectionRow.locator("[data-sensitive-one-time-value='true']");
+    await expect(rotationSecretPanel).toBeVisible();
+    oneTimeSecrets.set("rotated", await rotationSecretPanel.locator("code").innerText());
+    expect(/^[A-Za-z0-9_-]{64}$/u.test(oneTimeSecrets.get("rotated") ?? ""), "rotated one-time secret has the expected format").toBe(true);
+
+    adminJourneyPhase = "rotated-secret-pagehide-navigation-back";
+    await page.evaluate(() => {
+      const key = "virki-e2e-oidc-secret-lifecycle";
+      localStorage.removeItem(`${key}:rotated-pagehide`);
+      localStorage.removeItem(`${key}:rotated-pageshow`);
+      localStorage.removeItem(`${key}:rotated-navigation`);
+      localStorage.removeItem(`${key}:rotated-notRestoredReasons`);
+      localStorage.removeItem(`${key}:rotated-pagehide-persisted`);
+      localStorage.removeItem(`${key}:rotated-same-document-restored`);
+      const documentMarker = {};
+      Object.defineProperty(window, "__virkiRotatedSecretDocumentMarker", { value: documentMarker, configurable: true });
+      window.addEventListener("pagehide", (event) => {
+        const panel = document.querySelector("[data-sensitive-one-time-value='true']");
+        localStorage.setItem(`${key}:rotated-pagehide`, panel ? "still-visible" : "scrubbed");
+        localStorage.setItem(`${key}:rotated-pagehide-persisted`, event.persisted ? "true" : "false");
+      }, { once: true });
+      window.addEventListener("pageshow", (event) => {
+        localStorage.setItem(`${key}:rotated-pageshow`, event.persisted ? "persisted" : "not-persisted");
+        const restoredMarker = (window as Window & { __virkiRotatedSecretDocumentMarker?: object }).__virkiRotatedSecretDocumentMarker;
+        localStorage.setItem(`${key}:rotated-same-document-restored`, event.persisted && restoredMarker === documentMarker ? "true" : "false");
+        const navigation = performance.getEntriesByType("navigation")[0] as (PerformanceNavigationTiming & { notRestoredReasons?: { reasons?: Array<{ reason?: unknown }> } }) | undefined;
+        localStorage.setItem(`${key}:rotated-navigation`, navigation?.type ?? "unknown");
+        const reasons = (navigation?.notRestoredReasons?.reasons ?? []).slice(0, 8).map(({ reason }) => typeof reason === "string" ? reason.replace(/[^a-z0-9_-]/giu, "").slice(0, 40) : "unknown");
+        localStorage.setItem(`${key}:rotated-notRestoredReasons`, reasons.join(",") || "none");
+      });
+    });
+    await page.goto(`${hubUrl}/admin/accounts`);
+    await expect(page.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+    const rotationBackResponse = await page.goBack();
+    await expect(page).toHaveURL(hubUrl + "/admin/connections");
+    await expect(page.getByRole("heading", { level: 1, name: "Conexões", exact: true })).toBeVisible();
+    await expect(page.locator("[data-sensitive-one-time-value='true']")).toHaveCount(0);
+    const rotationSecretAbsentFromHtml = !(await page.content()).includes(oneTimeSecrets.get("rotated") ?? "");
+    const rotationSecretAbsentFromAccessibility = !(await page.locator("body").ariaSnapshot()).includes(oneTimeSecrets.get("rotated") ?? "");
+    expect(rotationSecretAbsentFromHtml, "rotated one-time secret is absent from page HTML").toBe(true);
+    expect(rotationSecretAbsentFromAccessibility, "rotated one-time secret is absent from the accessibility tree").toBe(true);
+    const rotationLifecycleSignals = {
+      ...(await page.evaluate(() => ({
+      pagehide: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:rotated-pagehide"),
+      pagehidePersisted: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:rotated-pagehide-persisted"),
+      pageshow: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:rotated-pageshow") ?? localStorage.getItem("virki-e2e-oidc-secret-lifecycle:pageshow"),
+      sameDocumentRestored: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:rotated-same-document-restored") ?? (localStorage.getItem("virki-e2e-oidc-secret-lifecycle:pageshow") === "not-persisted" ? "false" : "not-observed"),
+      navigation: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:rotated-navigation") ?? localStorage.getItem("virki-e2e-oidc-secret-lifecycle:navigation"),
+      notRestoredReasons: localStorage.getItem("virki-e2e-oidc-secret-lifecycle:rotated-notRestoredReasons") ?? localStorage.getItem("virki-e2e-oidc-secret-lifecycle:notRestoredReasons")
+      }))),
+      backResponse: Boolean(rotationBackResponse)
+    };
+    expect(rotationLifecycleSignals.pagehide).toBe("scrubbed");
+    if (rotationLifecycleSignals.pagehidePersisted === "true") {
+      expect(rotationLifecycleSignals.pageshow).toBe("persisted");
+      expect(rotationLifecycleSignals.sameDocumentRestored).toBe("true");
+    }
+    if (rotationLifecycleSignals.pageshow === "persisted") expect(rotationLifecycleSignals.sameDocumentRestored).toBe("true");
+    if (rotationLifecycleSignals.pagehidePersisted === "false") {
+      expect(rotationLifecycleSignals.pageshow).toBe("not-persisted");
+      expect(rotationLifecycleSignals.sameDocumentRestored).toBe("false");
+    }
+    console.info(`OIDC rotated-secret lifecycle: history=back; responseObserved=${rotationLifecycleSignals.backResponse}; pagehide=${rotationLifecycleSignals.pagehide}; pagehide.persisted=${rotationLifecycleSignals.pagehidePersisted ?? "not-observed"}; pageshow.persisted=${rotationLifecycleSignals.pageshow ?? "not-observed"}; sameDocumentRestored=${rotationLifecycleSignals.sameDocumentRestored ?? "not-observed"}; navigation=${rotationLifecycleSignals.navigation ?? "unknown"}; notRestoredReasons=${rotationLifecycleSignals.notRestoredReasons ?? "unknown"}`);
+    const rotationReloadResponse = await page.reload();
+    expect(rotationReloadResponse?.status()).toBe(200);
+    await expect(page.locator("[data-sensitive-one-time-value='true']")).toHaveCount(0);
+    const rotationSecretAbsentAfterReload = !(await page.content()).includes(oneTimeSecrets.get("rotated") ?? "");
+    const rotationSecretAbsentFromAccessibilityAfterReload = !(await page.locator("body").ariaSnapshot()).includes(oneTimeSecrets.get("rotated") ?? "");
+    expect(rotationSecretAbsentAfterReload, "rotated one-time secret is absent after a fresh document reload").toBe(true);
+    expect(rotationSecretAbsentFromAccessibilityAfterReload, "rotated one-time secret is absent from accessibility after a fresh document reload").toBe(true);
+    await page.goto(`${hubUrl}/admin/accounts`);
+    const rotationReloadBackResponse = await page.goBack();
+    await expect(page).toHaveURL(hubUrl + "/admin/connections");
+    await expect(page.locator("[data-sensitive-one-time-value='true']")).toHaveCount(0);
+    const rotationSecretAbsentAfterReloadBack = !(await page.content()).includes(oneTimeSecrets.get("rotated") ?? "");
+    const rotationSecretAbsentFromAccessibilityAfterReloadBack = !(await page.locator("body").ariaSnapshot()).includes(oneTimeSecrets.get("rotated") ?? "");
+    expect(rotationSecretAbsentAfterReloadBack, "rotated one-time secret is absent after a reload followed by Back").toBe(true);
+    expect(rotationSecretAbsentFromAccessibilityAfterReloadBack, "rotated one-time secret is absent from accessibility after a reload followed by Back").toBe(true);
+    const rotationFallbackPageshow = await page.evaluate(() => localStorage.getItem("virki-e2e-oidc-secret-lifecycle:pageshow"));
+    expect(rotationFallbackPageshow).toBe("not-persisted");
+    const rotationFallbackNavigation = await page.evaluate(() => (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)?.type ?? "unknown");
+    console.info(`OIDC rotated-secret fallback: reloadResponse=${Boolean(rotationReloadResponse)}; backResponseObserved=${Boolean(rotationReloadBackResponse)}; pageshow.persisted=${rotationFallbackPageshow}; navigation=${rotationFallbackNavigation}; secretAbsent=true`);
+    oneTimeSecrets.delete("rotated");
+
     const activeProjectRow = page.locator("article").filter({ hasText: fixture.projectName });
     const activeEditDetails = activeProjectRow.locator("details").filter({ hasText: "Editar configuração" });
     await expect(activeEditDetails).toHaveAttribute("data-hydrated", "true");
@@ -427,7 +724,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const accesslessContext = await browser.newContext();
     try {
       await accesslessContext.addCookies([{
-        name: SESSION_COOKIE_NAME,
+        name: sessionCookieName,
         value: sessionCookie.value,
         url: hubUrl,
         httpOnly: true,
@@ -445,7 +742,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(page).toHaveURL(`${hubUrl}/login`);
 
     await context.addCookies([{
-      name: SESSION_COOKIE_NAME,
+      name: sessionCookieName,
       value: sessionCookie.value,
       url: hubUrl,
       httpOnly: true,
@@ -458,9 +755,11 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     expect(firstHydrationMismatchPhase, `Hydration mismatch first occurred during ${firstHydrationMismatchPhase ?? "no phase"}`).toBeUndefined();
     adminJourneyPhase = "complete";
   } finally {
+    oneTimeSecrets.clear();
     if (adminJourneyPhase !== "complete") {
       console.error(`E2E ADMIN journey stopped during phase=${adminJourneyPhase}; firstHydrationMismatchPhase=${firstHydrationMismatchPhase ?? "none"}.`);
     }
+    if (lifecycleConnectionSlug) await prisma.projectConnection.deleteMany({ where: { slug: lifecycleConnectionSlug } }).catch(() => undefined);
     await context.close().catch(() => undefined);
     await prisma.$disconnect();
   }
@@ -596,7 +895,7 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
             user: { select: { role: true, isActive: true, accountStatus: true } }
           }
         }),
-        reviewerContext.cookies(hubUrl).then((cookies) => cookies.find((cookie) => cookie.name === SESSION_COOKIE_NAME))
+        reviewerContext.cookies(hubUrl).then((cookies) => cookies.find((cookie) => cookie.name === sessionCookieName))
       ]);
       const reviewerSession = sessionCookie
         ? await prisma.session.findUnique({
@@ -651,38 +950,15 @@ test("ADMIN recovery is Access-protected, role-bound, independently approved, an
     await expect(reviewerPage).toHaveURL(`${hubUrl}/admin/security?status=recovery#admin-content`);
 
     const approvalMessage = await readLatestRecoveryEmail(prisma, fixture.admin.email, "account-recovery-approved:");
-    expect(new URL(approvalMessage.actionUrl ?? "https://invalid.invalid").origin).toBe(hubUrl);
-    await hubPage.goto(approvalMessage.actionUrl!);
-    await expect(hubPage.getByRole("status")).toContainText("Outro link está aberto nesta sessão.");
-    await expect(hubPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
-    const recoveryCookiesBeforeSwitch = await hubContext.cookies(hubUrl);
-    const candidateRecoveryKey = recoveryCookiesBeforeSwitch.find((cookie) => cookie.name.includes("recovery_candidate"))?.value;
-    const switchResponses: string[] = [];
-    hubPage.on("response", (response) => {
-      const request = response.request();
-      const responseUrl = new URL(response.url());
-      if (request.method() !== "POST" || responseUrl.origin !== hubUrl) return;
-      const rawRedirect = response.headers()["x-action-redirect"]?.split(";")[0];
-      let redirectSummary = "none";
-      if (rawRedirect) {
-        try {
-          const redirectUrl = new URL(rawRedirect, hubUrl);
-          redirectSummary = `${redirectUrl.origin}${redirectUrl.pathname}?${[...redirectUrl.searchParams.keys()].join(",")}`;
-        } catch { redirectSummary = "unparseable"; }
-      }
-      switchResponses.push(`${response.status()} ${responseUrl.pathname} redirect=${redirectSummary}`);
-    });
-    await hubPage.getByRole("button", { name: "Continuar com este link", exact: true }).click();
-    try {
-      await expect(hubPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
-    } catch {
-      const currentUrl = new URL(hubPage.url());
-      const recoveryCookiesAfterSwitch = await hubContext.cookies(hubUrl);
-      const activeRecoveryKey = recoveryCookiesAfterSwitch.find((cookie) => cookie.name.includes("recovery_v2") || cookie.name.includes("__Host-virki_recovery"))?.value;
-      const candidateStillPresent = recoveryCookiesAfterSwitch.some((cookie) => cookie.name.includes("recovery_candidate") && Boolean(cookie.value));
-      const heading = await hubPage.getByRole("heading", { level: 1 }).textContent().catch(() => null);
-      throw new Error(`Recovery link switch did not complete (origin=${currentUrl.origin}; path=${currentUrl.pathname}; queryKeys=${[...currentUrl.searchParams.keys()].join(",")}; heading=${heading ?? "missing"}; candidateBefore=${Boolean(candidateRecoveryKey)}; candidateAfter=${candidateStillPresent}; activeMatchesCandidate=${Boolean(candidateRecoveryKey && activeRecoveryKey === candidateRecoveryKey)}; responses=${switchResponses.join("|") || "none"}).`);
-    }
+    const approvalUrl = new URL(approvalMessage.actionUrl ?? "https://invalid.invalid");
+    expect(approvalUrl.origin).toBe(hubUrl);
+    await hubPage.goto(approvalUrl.toString());
+    await expect(hubPage.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
+    await expect(hubPage.getByLabel("Nova senha", { exact: true })).toBeVisible();
+    const recoveryCookies = await hubContext.cookies(hubUrl);
+    const activeRecoveryKey = recoveryCookies.find((cookie) => cookie.name.includes("recovery_v2") || cookie.name.includes("__Host-virki_recovery"))?.value;
+    expect(activeRecoveryKey).toBe(approvalUrl.searchParams.get("request"));
+    expect(recoveryCookies.some((cookie) => cookie.name.includes("recovery_candidate"))).toBe(false);
     await hubPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
     await hubPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     await expect(hubPage).toHaveURL(`${hubUrl}/login?recovered=1`);
@@ -808,7 +1084,7 @@ async function readLatestRecoveryEmail(prisma: PrismaClient, email: string, idem
 
 async function rememberDevice(context: BrowserContext, url: string, deviceToken: string): Promise<void> {
   await context.addCookies([{
-    name: DEVICE_COOKIE_NAME,
+    name: deviceCookieName,
     value: deviceToken,
     url,
     httpOnly: true,
@@ -881,6 +1157,34 @@ async function completeLoginEmailVerification(page: import("@playwright/test").P
   } catch {
     throw new Error("E2E login email verification was not accepted.");
   }
+}
+
+function observeHubResponsePolicies(page: import("@playwright/test").Page, pathname: string): () => Promise<string> {
+  const pending: Promise<string>[] = [];
+  page.on("response", (response) => {
+    const responseUrl = new URL(response.url());
+    if (responseUrl.origin !== hubUrl || responseUrl.pathname !== pathname || response.request().resourceType() !== "document") return;
+    pending.push(Promise.all([
+      response.headerValue("cache-control"),
+      response.headerValue("pragma"),
+      response.headerValue("expires"),
+      response.headerValue("permissions-policy"),
+      response.headerValue("strict-transport-security"),
+      response.headerValue("content-security-policy")
+    ]).then(([cacheControl, pragma, expires, permissionsPolicy, strictTransportSecurity, contentSecurityPolicy]) => JSON.stringify({
+      method: response.request().method(),
+      resourceType: response.request().resourceType(),
+      pathname,
+      status: response.status(),
+      cacheControl: cacheControl ?? "absent",
+      pragma: pragma ?? "absent",
+      expires: expires ?? "absent",
+      permissionsPolicy: permissionsPolicy ?? "absent",
+      strictTransportSecurity: strictTransportSecurity ?? "absent",
+      contentSecurityPolicy: (contentSecurityPolicy ?? "absent").replace(/'nonce-[^']+'/giu, "'nonce-[redacted]'")
+    })).catch(() => JSON.stringify({ pathname, status: response.status(), policy: "unavailable" })));
+  });
+  return async () => JSON.stringify((await Promise.all(pending)).slice(-4));
 }
 
 function observeHubPageResponses(page: import("@playwright/test").Page, pathname: "/admin/connections" | "/recover"): () => Promise<string> {

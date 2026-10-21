@@ -4,7 +4,7 @@ import { SignJWT } from "jose";
 import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
 import type { Page } from "@playwright/test";
 
-const HUB_URL = "https://hub.localhost:3001";
+const HUB_URL = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://hub.localhost" : "https://hub.localhost:3001";
 
 type RegisteredSigningKey = { kid: string; privateKey: KeyObject };
 

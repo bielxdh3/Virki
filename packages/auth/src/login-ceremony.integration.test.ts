@@ -18,12 +18,14 @@ import {
   LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT,
   type LoginCeremonyStart,
   requestAccountRecovery,
+  regenerateRecoveryCodes,
   SecurityMutationError,
   startLoginCeremony,
   verifyAccountRecoveryEmail,
   verifyLoginEmailCode,
   verifyLoginRecoveryCode,
   verifyLoginTotpCode,
+  verifyRecoveryCode,
   verifyTotpCode
 } from "./security";
 
@@ -63,6 +65,22 @@ async function seedOidcArtifact(userId: string): Promise<void> {
 
 async function countOidcArtifacts(userId: string): Promise<number> {
   return prisma.oidcArtifact.count({ where: { accountIdHash: hashOidcIdentifier(userId) } });
+}
+
+async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const blocked = await prisma.$queryRaw<Array<{ waiters: number }>>`
+      SELECT count(*)::int AS waiters
+      FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
+        AND query LIKE ${`%${queryFragment}%`}
+    `;
+    if ((blocked[0]?.waiters ?? 0) >= 1) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment}.`);
 }
 
 // Email-factor login from a device. An untrusted candidate token is replaced by the server, so the
@@ -287,6 +305,69 @@ test("disabling TOTP purges OIDC artifacts and revokes sessions for that account
   assert.equal(await countOidcArtifacts(other.id), 1);
   const stored = await prisma.session.findUniqueOrThrow({ where: { id: session.id }, select: { revokedAt: true } });
   assert.notEqual(stored.revokedAt, null);
+});
+
+test("recovery-code verification rechecks active account state under the account lock", integrationOptions, async () => {
+  const user = await createTestUser({ label: "recovery-code-account-lock" });
+  const code = generateRecoveryCode();
+  const recoveryCode = await prisma.recoveryCode.create({ data: { userId: user.id, codeHash: hashRecoveryCode(code) }, select: { id: true } });
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+    locked();
+    await gate;
+    await transaction.user.update({ where: { id: user.id }, data: { accountStatus: "BLOCKED" } });
+  }, { timeout: 10_000 });
+  await ready;
+
+  const verification = verifyRecoveryCode(user.id, code).then((ok) => ({ ok: true as const, value: ok }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE");
+  } finally {
+    release();
+  }
+  await blocker;
+  const outcome = await verification;
+  assert.equal(outcome.ok, false, "a blocked account must not consume a recovery code");
+  if (!outcome.ok) assert.ok(outcome.error instanceof SecurityMutationError);
+  assert.equal((await prisma.recoveryCode.findUniqueOrThrow({ where: { id: recoveryCode.id }, select: { usedAt: true } })).usedAt, null);
+});
+
+test("recovery-code regeneration rechecks active account state under the account lock", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const user = await createTestUser({ totpSecret: secret, label: "recovery-code-regeneration-lock" });
+  const now = new Date();
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+    locked();
+    await gate;
+    await transaction.user.update({ where: { id: user.id }, data: { accountStatus: "BLOCKED" } });
+  }, { timeout: 10_000 });
+  await ready;
+
+  const regeneration = regenerateRecoveryCodes(user.id, totpAt(secret, now), now).then((codes) => ({ ok: true as const, codes }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE");
+  } finally {
+    release();
+  }
+  await blocker;
+  const outcome = await regeneration;
+  assert.equal(outcome.ok, false, "a blocked account must not rotate recovery codes");
+  if (!outcome.ok) assert.ok(outcome.error instanceof SecurityMutationError);
+  assert.equal(await prisma.recoveryCode.count({ where: { userId: user.id } }), 0);
+  assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id }, select: { lastUsedStep: true } })).lastUsedStep, null);
 });
 
 test("an approved account recovery purges OIDC artifacts for that account only", integrationOptions, async () => {

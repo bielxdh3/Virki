@@ -204,7 +204,14 @@ export function installAuditResponseGate(response: ServerResponse): void {
       return response;
     }
     if (!beginWaitingForAudit()) return originalEnd(...args);
-    enqueue(getChunkByteLength(args[0], args[1]), () => { originalEnd(...args); }, (error) => getCallback(args)?.(error));
+    const bytes = getChunkByteLength(args[0], args[1]);
+    const callback = getCallback(args);
+    if (!Number.isSafeInteger(bytes) || bufferedBytes + bytes > MAX_PENDING_RESPONSE_BYTES) {
+      failClosed();
+      callback?.(new Error("OIDC response exceeded the bounded audit buffer."));
+      return response;
+    }
+    enqueue(bytes, () => { originalEnd(...args); }, (error) => callback?.(error));
     return response;
   }) as ServerResponse["end"];
 }

@@ -14,14 +14,25 @@ const requireFromRepository = createRequire(join(repositoryRoot, "package.json")
 const hubHost = "127.0.0.1";
 const hubPort = 443;
 const nextPort = 3002;
+const accessJwksPort = 3010;
+const syntheticAccessHost = "access.e2e.invalid";
 const startTimeoutMs = 120_000;
 
-export function createProductionHubProxyRequestHandler(targetPort = nextPort) {
+export function createProductionHubProxyRequestHandler(targetPort = nextPort, jwksPort = accessJwksPort) {
   return (incomingRequest, outgoingResponse) => {
     const requestHost = incomingRequest.headers.host;
     if (!requestHost) {
       outgoingResponse.writeHead(400, { "cache-control": "no-store" });
       outgoingResponse.end();
+      return;
+    }
+
+    const isSyntheticAccessJwksRequest = requestHost.toLowerCase() === syntheticAccessHost && (
+      (incomingRequest.method === "GET" && incomingRequest.url === "/cdn-cgi/access/certs") ||
+      (incomingRequest.method === "POST" && incomingRequest.url === "/__test__/keys")
+    );
+    if (isSyntheticAccessJwksRequest) {
+      proxyToLocalPort(incomingRequest, outgoingResponse, jwksPort, { ...incomingRequest.headers, host: `127.0.0.1:${jwksPort}` });
       return;
     }
 
@@ -32,13 +43,7 @@ export function createProductionHubProxyRequestHandler(targetPort = nextPort) {
     forwardedHeaders["x-forwarded-for"] = incomingRequest.socket.remoteAddress ?? "127.0.0.1";
     forwardedHeaders["cf-connecting-ip"] = incomingRequest.socket.remoteAddress ?? "127.0.0.1";
 
-    const upstreamRequest = httpRequest({
-      hostname: hubHost,
-      port: targetPort,
-      method: incomingRequest.method,
-      path: incomingRequest.url,
-      headers: forwardedHeaders
-    }, (upstreamResponse) => {
+    proxyToLocalPort(incomingRequest, outgoingResponse, targetPort, forwardedHeaders, (upstreamResponse) => {
       const low05Route = classifyLow05Url(incomingRequest.url ?? "/", process.env.VIRKI_PORTAL_URL ?? "https://portal.localhost").route;
       if (process.env.VIRKI_E2E_LOW05_DIAGNOSTICS === "true" && ["account-security", "login"].includes(low05Route)) {
         process.stdout.write(`LOW05_PROXY_BOUNDARY ${JSON.stringify(summarizeLow05ProxyBoundary({
@@ -52,14 +57,30 @@ export function createProductionHubProxyRequestHandler(targetPort = nextPort) {
       outgoingResponse.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
       upstreamResponse.pipe(outgoingResponse);
     });
-
-    upstreamRequest.on("error", () => {
-      if (!outgoingResponse.headersSent) outgoingResponse.writeHead(502, { "cache-control": "no-store" });
-      outgoingResponse.end("Hub unavailable");
-    });
-    incomingRequest.on("aborted", () => upstreamRequest.destroy());
-    incomingRequest.pipe(upstreamRequest);
   };
+}
+
+function proxyToLocalPort(incomingRequest, outgoingResponse, port, headers, onResponse = (upstreamResponse) => {
+  outgoingResponse.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+  upstreamResponse.pipe(outgoingResponse);
+}) {
+  const upstreamRequest = httpRequest({
+    hostname: hubHost,
+    port,
+    method: incomingRequest.method,
+    path: incomingRequest.url,
+    headers
+  }, onResponse);
+  upstreamRequest.on("error", (error) => {
+    const candidateCode = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    const errorCode = typeof candidateCode === "string" && /^[A-Z0-9_]{1,32}$/u.test(candidateCode) ? candidateCode : "UNKNOWN";
+    process.stderr.write(`Production Hub E2E proxy upstream failed (code=${errorCode}).\n`);
+    if (!outgoingResponse.headersSent) outgoingResponse.writeHead(502, { "cache-control": "no-store" });
+    outgoingResponse.end("Hub unavailable");
+  });
+  incomingRequest.on("aborted", () => upstreamRequest.destroy());
+  incomingRequest.pipe(upstreamRequest);
+  return upstreamRequest;
 }
 
 async function startProductionHub() {

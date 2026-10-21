@@ -5,6 +5,12 @@ const PASSWORD_ACR = "urn:virki:loa:1";
 const AUTH_REQUEST_MARKER_TTL_MS = 15 * 60 * 1_000;
 
 export const OIDC_SUPPORTED_ACR_VALUES = [PASSWORD_ACR, MULTI_FACTOR_ACR] as const;
+export const OIDC_PROVIDER_CLAIMS = {
+  amr: null,
+  openid: ["sub"],
+  profile: ["name"],
+  email: ["email", "email_verified"]
+};
 export const OIDC_DISCOVERY_CONFIGURATION = {
   acrValues: [...OIDC_SUPPORTED_ACR_VALUES],
   features: { claimsParameter: { enabled: true } }
@@ -16,6 +22,10 @@ export function requiresProjectAccessInteraction(
   hasActiveGrant: boolean
 ): boolean {
   return Boolean(accountId && clientId && !hasActiveGrant);
+}
+
+export function isOidcAccountEligible(account: { role: string; isActive: boolean; accountStatus: string } | null | undefined): boolean {
+  return Boolean(account && account.role === "USER" && account.isActive && account.accountStatus === "ACTIVE");
 }
 
 export type ProjectGrantAuthorizationState = {

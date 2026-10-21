@@ -1,9 +1,11 @@
 import { rmSync } from "node:fs";
 import { CANONICAL_VIRKI_REPOSITORY, normalizeRevision, ProductionRevisionError } from "./production-revision.mjs";
 import { evaluateCodeqlSarif, readSarifDirectory } from "../codeql-sarif-policy.mjs";
-import { downloadGhcrEvidence, evidenceTag } from "./ghcr-evidence.mjs";
+import { downloadGhcrEvidence, evidenceDigestFromRunLog, evidenceTag } from "./ghcr-evidence.mjs";
+import { selectCodeqlEvidenceRun } from "./codeql-evidence-selection.mjs";
 
 const RUN_FIELDS = "databaseId,headSha,status,conclusion,event,headBranch,createdAt";
+const CODEQL_EVIDENCE_RUN_FIELDS = "databaseId,displayTitle,status,conclusion,event,headBranch,createdAt";
 const WORKFLOWS = ["ci.yml", "codeql.yml"];
 
 function buildRunArgs(workflow, revision) {
@@ -66,10 +68,37 @@ export function evaluateExactShaRelease(ciRuns, codeqlRuns, expectedRevision) {
   return { status, ci, codeql };
 }
 
-function verifyExactShaSarifArtifact({ revision, runId, execute, repositoryRoot, retrieveEvidence }) {
+function verifyExactShaCodeqlEvidencePublication({ revision, analysisRunId, execute, repositoryRoot }) {
+  const runsResult = execute("gh", [
+    "run", "list", "--repo", CANONICAL_VIRKI_REPOSITORY,
+    "--workflow", "codeql-evidence.yml", "--event", "workflow_run",
+    "--json", CODEQL_EVIDENCE_RUN_FIELDS, "--limit", "1000"
+  ], { cwd: repositoryRoot });
+  if (!runsResult || runsResult.status !== 0 || typeof runsResult.stdout !== "string") return { status: "BLOCKED" };
+
+  let runs;
+  try {
+    runs = JSON.parse(runsResult.stdout);
+  } catch {
+    return { status: "BLOCKED" };
+  }
+  const selected = selectCodeqlEvidenceRun(runs, revision, analysisRunId);
+  if (selected.status !== "PASS") return selected;
+
+  const logResult = execute("gh", ["run", "view", String(selected.runId), "--repo", CANONICAL_VIRKI_REPOSITORY, "--log"], { cwd: repositoryRoot });
+  if (!logResult || logResult.status !== 0 || typeof logResult.stdout !== "string") return { status: "BLOCKED", runId: selected.runId };
+  try {
+    evidenceDigestFromRunLog(logResult.stdout, { revision, runId: analysisRunId, kind: "codeql" });
+  } catch {
+    return { status: "BLOCKED", runId: selected.runId };
+  }
+  return { status: "PASS", runId: selected.runId };
+}
+
+function verifyExactShaSarifArtifact({ revision, runId, logRunId, execute, repositoryRoot, retrieveEvidence }) {
   let evidence;
   try {
-    evidence = retrieveEvidence({ revision, runId, kind: "codeql", execute, repositoryRoot });
+    evidence = retrieveEvidence({ revision, runId, logRunId, kind: "codeql", execute, repositoryRoot });
     const policy = evaluateCodeqlSarif(readSarifDirectory(evidence.contents));
     return policy.ok
       ? { status: "PASS", artifactName: `virki-evidence:${evidenceTag(revision, runId, "codeql")}`, totalResults: policy.totalResults, violations: 0 }
@@ -113,9 +142,25 @@ export function verifyExactShaCi({ revision, execute, repositoryRoot, retrieveEv
     return { ok: false, status: release.status, lines };
   }
 
+  const publication = verifyExactShaCodeqlEvidencePublication({
+    revision: expected,
+    analysisRunId: release.codeql.runId,
+    execute,
+    repositoryRoot
+  });
+  if (publication.status !== "PASS") {
+    const message = publication.status === "PENDING"
+      ? `Exact-SHA CodeQL evidence publication is pending for analysis run ${release.codeql.runId}.`
+      : publication.status === "FAIL"
+        ? `Exact-SHA CodeQL evidence publication failed for analysis run ${release.codeql.runId}.`
+        : `Exact-SHA CodeQL evidence publication is missing or invalid for analysis run ${release.codeql.runId}.`;
+    return { ok: false, status: publication.status, lines: [message] };
+  }
+
   const sarif = verifyExactShaSarifArtifact({
     revision: expected,
     runId: release.codeql.runId,
+    logRunId: publication.runId,
     execute,
     repositoryRoot,
     retrieveEvidence
@@ -135,6 +180,7 @@ export function verifyExactShaCi({ revision, execute, repositoryRoot, retrieveEv
     status: "PASS",
     runId: release.ci.runId,
     codeqlRunId: release.codeql.runId,
+    codeqlEvidenceRunId: publication.runId,
     sarifArtifactName: sarif.artifactName,
     sarifResults: sarif.totalResults,
     lines: ["Exact-SHA CI, CodeQL, reviewed SARIF policy, and retained GHCR evidence checks passed for " + expected + "."]

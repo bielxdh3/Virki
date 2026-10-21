@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { codeqlEvidenceRunDisplayTitle, selectCodeqlEvidenceRun } from "./lib/codeql-evidence-selection.mjs";
 import { classifyExactShaWorkflow, evaluateExactShaCi, evaluateExactShaRelease, verifyExactShaCi } from "./lib/production-ci.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
@@ -43,6 +45,26 @@ const run = (overrides = {}) => ({
   createdAt: "2026-10-04T12:00:00Z",
   ...overrides,
 });
+const evidencePublisherRun = (overrides = {}) => ({
+  databaseId: 98765,
+  displayTitle: `CodeQL evidence for ${revision} (analysis run 67890)`,
+  status: "completed",
+  conclusion: "success",
+  event: "workflow_run",
+  headBranch: "main",
+  headSha: "f".repeat(40),
+  createdAt: "2026-10-04T12:10:00Z",
+  ...overrides,
+});
+const publisherLog = `Analyze JavaScript / TypeScript\tStore reviewed CodeQL SARIF in private GHCR evidence\t2026-10-11T04:00:00Z VIRKI_EVIDENCE_DIGEST revision=${revision} run=67890 kind=codeql platform=none digest=sha256:${"a".repeat(64)}\n`;
+
+function githubRunResponse(args) {
+  const workflowName = args[args.indexOf("--workflow") + 1];
+  if (workflowName === "ci.yml") return [run({ databaseId: 12345 })];
+  if (workflowName === "codeql.yml") return [run({ databaseId: 67890 })];
+  if (workflowName === "codeql-evidence.yml") return [evidencePublisherRun()];
+  return [];
+}
 
 test("accepts only the latest successful main push for the exact SHA", () => {
   assert.deepEqual(evaluateExactShaCi([run()], revision), { ok: true });
@@ -71,39 +93,110 @@ test("release policy independently classifies exact-SHA CI and CodeQL outcomes",
   assert.equal(evaluateExactShaRelease([run()], [run({ event: "pull_request" })], revision).status, "BLOCKED");
 });
 
+test("CodeQL evidence selects the completed trusted publisher linked to the exact analysis run", () => {
+  const title = codeqlEvidenceRunDisplayTitle(revision, 67890);
+  assert.deepEqual(selectCodeqlEvidenceRun([evidencePublisherRun({ displayTitle: title })], revision, 67890), {
+    status: "PASS",
+    runId: 98765
+  });
+  assert.deepEqual(selectCodeqlEvidenceRun([evidencePublisherRun({ displayTitle: `CodeQL evidence for ${revision} (analysis run 67891)` })], revision, 67890), {
+    status: "PENDING"
+  });
+  assert.deepEqual(selectCodeqlEvidenceRun([evidencePublisherRun({ status: "in_progress", conclusion: null })], revision, 67890), {
+    status: "PENDING",
+    runId: 98765
+  });
+  const olderSuccess = evidencePublisherRun({ databaseId: 98764, createdAt: "2026-10-04T12:10:00Z" });
+  const newerFailure = evidencePublisherRun({ databaseId: 98766, conclusion: "failure", createdAt: "2026-10-04T12:11:00Z" });
+  assert.deepEqual(selectCodeqlEvidenceRun([olderSuccess, newerFailure], revision, 67890), {
+    status: "FAIL",
+    runId: 98766
+  });
+  assert.deepEqual(selectCodeqlEvidenceRun([evidencePublisherRun({ event: "push" })], revision, 67890), {
+    status: "BLOCKED"
+  });
+  assert.deepEqual(selectCodeqlEvidenceRun([evidencePublisherRun({ headBranch: "attacker-branch" })], revision, 67890), {
+    status: "BLOCKED"
+  });
+  assert.deepEqual(selectCodeqlEvidenceRun([], revision, 67890), { status: "PENDING" });
+});
+
+test("CodeQL evidence command-line gates parse the exact publisher and analysis IDs", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-codeql-evidence-cli-"));
+  const runsPath = path.join(directory, "runs.json");
+  const logPath = path.join(directory, "publisher.log");
+  try {
+    writeFileSync(runsPath, JSON.stringify([evidencePublisherRun()]));
+    const selection = spawnSync(process.execPath, [
+      path.join(repositoryRoot, "scripts", "production-codeql-evidence-selector.mjs"),
+      "--sha", revision, "--analysis-run", "67890", runsPath
+    ], { encoding: "utf8" });
+    assert.equal(selection.status, 0, selection.stderr);
+    assert.equal(selection.stdout, "PASS 98765\n");
+
+    writeFileSync(logPath, publisherLog);
+    const verified = spawnSync(process.execPath, [
+      path.join(repositoryRoot, "scripts", "production-codeql-evidence-log-check.mjs"),
+      "--sha", revision, "--analysis-run", "67890", "--log", logPath
+    ], { encoding: "utf8" });
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.equal(verified.stdout, "Exact-SHA CodeQL evidence digest marker verified.\n");
+
+    writeFileSync(logPath, publisherLog.replace("run=67890", "run=67891"));
+    const rejected = spawnSync(process.execPath, [
+      path.join(repositoryRoot, "scripts", "production-codeql-evidence-log-check.mjs"),
+      "--sha", revision, "--analysis-run", "67890", "--log", logPath
+    ], { encoding: "utf8" });
+    assert.equal(rejected.status, 1);
+    assert.equal(rejected.stderr, "CodeQL evidence log verification failed: exact digest marker is missing or invalid.\n");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed", () => {
   const calls = [];
   const result = verifyExactShaCi({
     revision,
     repositoryRoot: "/repo",
-    retrieveEvidence: ({ revision: observed, runId, kind }) => {
+    retrieveEvidence: ({ revision: observed, runId, logRunId, kind }) => {
       assert.equal(observed, revision);
       assert.equal(runId, 67890);
+      assert.equal(logRunId, 98765, "the digest log belongs to the evidence publisher run");
       assert.equal(kind, "codeql");
       return fakeEvidence()();
     },
     execute: (command, args, options) => {
       calls.push({ command, args, options });
-      const workflowName = args[args.indexOf("--workflow") + 1];
-      return { status: 0, stdout: JSON.stringify([run({ databaseId: workflowName === "ci.yml" ? 12345 : 67890 })]) };
+      if (args[0] === "run" && args[1] === "view") return { status: 0, stdout: publisherLog };
+      return { status: 0, stdout: JSON.stringify(githubRunResponse(args)) };
     },
   });
   assert.equal(result.ok, true);
   assert.equal(result.runId, 12345);
   assert.equal(result.codeqlRunId, 67890);
+  assert.equal(result.codeqlEvidenceRunId, 98765);
   assert.equal(result.sarifArtifactName, `virki-evidence:${revision}-67890-codeql`);
   assert.equal(result.sarifResults, 1);
-  assert.equal(calls.length, 2);
-  for (const call of calls.slice(0, 2)) {
+  assert.equal(calls.length, 4);
+  for (const call of calls.slice(0, 3)) {
     assert.equal(call.command, "gh");
     assert.equal(call.args[call.args.indexOf("--repo") + 1], "bielxdh3/Virki");
-    assert.ok(call.args.includes("--commit"));
-    assert.ok(call.args.includes(revision));
-    assert.ok(call.args.includes("databaseId,headSha,status,conclusion,event,headBranch,createdAt"));
     assert.equal(call.options.cwd, "/repo");
   }
+  assert.ok(calls[0].args.includes("--commit"));
+  assert.ok(calls[0].args.includes(revision));
+  assert.ok(calls[1].args.includes("--commit"));
+  assert.ok(calls[1].args.includes(revision));
+  assert.ok(calls[0].args.includes("databaseId,headSha,status,conclusion,event,headBranch,createdAt"));
+  assert.ok(calls[1].args.includes("databaseId,headSha,status,conclusion,event,headBranch,createdAt"));
   assert.ok(calls.some(({ args }) => args.includes("ci.yml")));
   assert.ok(calls.some(({ args }) => args.includes("codeql.yml")));
+  const evidenceRunList = calls[2].args;
+  assert.ok(evidenceRunList.includes("codeql-evidence.yml"));
+  assert.ok(evidenceRunList.includes("workflow_run"));
+  assert.ok(evidenceRunList.includes("databaseId,displayTitle,status,conclusion,event,headBranch,createdAt"));
+  assert.deepEqual(calls[3].args, ["run", "view", "98765", "--repo", "bielxdh3/Virki", "--log"]);
 
   const unavailable = verifyExactShaCi({
     revision,
@@ -122,12 +215,14 @@ test("the GitHub CLI query is pinned to the exact workflow SHA and fails closed"
 });
 
 test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF policy", () => {
-  const runsResponse = (workflowName) => JSON.stringify([run({ databaseId: workflowName === "ci.yml" ? 12345 : 67890 })]);
+  const runsResponse = (args) => JSON.stringify(githubRunResponse(args));
   const unavailable = verifyExactShaCi({
     revision,
     repositoryRoot: "/repo",
     retrieveEvidence: () => { throw new Error("registry inaccessible"); },
-    execute: (_command, args) => ({ status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) })
+    execute: (_command, args) => args[0] === "run" && args[1] === "view"
+      ? { status: 0, stdout: publisherLog }
+      : { status: 0, stdout: runsResponse(args) }
   });
   assert.deepEqual(unavailable, {
     ok: false,
@@ -148,12 +243,51 @@ test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF 
     revision,
     repositoryRoot: "/repo",
     retrieveEvidence: fakeEvidence(unreviewed),
-    execute: (_command, args) => ({ status: 0, stdout: runsResponse(args[args.indexOf("--workflow") + 1]) })
+    execute: (_command, args) => args[0] === "run" && args[1] === "view"
+      ? { status: 0, stdout: publisherLog }
+      : { status: 0, stdout: runsResponse(args) }
   });
   assert.deepEqual(rejected, {
     ok: false,
     status: "FAIL",
     lines: ["Reviewed exact-SHA CodeQL SARIF policy did not pass."]
+  });
+});
+
+test("an exact-SHA CodeQL run cannot pass before its matching evidence publication completes", () => {
+  const result = verifyExactShaCi({
+    revision,
+    repositoryRoot: "/repo",
+    execute: (_command, args) => {
+      const workflowName = args[args.indexOf("--workflow") + 1];
+      if (workflowName === "ci.yml") return { status: 0, stdout: JSON.stringify([run({ databaseId: 12345 })]) };
+      if (workflowName === "codeql.yml") return { status: 0, stdout: JSON.stringify([run({ databaseId: 67890 })]) };
+      return { status: 0, stdout: JSON.stringify([]) };
+    }
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    status: "PENDING",
+    lines: ["Exact-SHA CodeQL evidence publication is pending for analysis run 67890."]
+  });
+});
+
+test("a publisher log naming another CodeQL run cannot satisfy the exact-SHA evidence gate", () => {
+  const result = verifyExactShaCi({
+    revision,
+    repositoryRoot: "/repo",
+    retrieveEvidence: () => assert.fail("SARIF must not be downloaded after a mismatched publisher log."),
+    execute: (_command, args) => {
+      if (args[0] === "run" && args[1] === "view") {
+        return { status: 0, stdout: publisherLog.replace("run=67890", "run=67891") };
+      }
+      return { status: 0, stdout: JSON.stringify(githubRunResponse(args)) };
+    }
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    status: "BLOCKED",
+    lines: ["Exact-SHA CodeQL evidence publication is missing or invalid for analysis run 67890."]
   });
 });
 
@@ -237,10 +371,19 @@ test("CodeQL analysis has no package-write credential and trusted main publicati
   assert.match(codeqlEvidenceWorkflow, /actions: read/u);
   assert.match(codeqlEvidenceWorkflow, /actions\/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8\.0\.2/u);
   assert.match(codeqlEvidenceWorkflow, /github\.event\.workflow_run\.head_sha/u);
+  assert.match(codeqlEvidenceWorkflow, /run-name: CodeQL evidence for \$\{\{ github\.event\.workflow_run\.head_sha \}\} \(analysis run \$\{\{ github\.event\.workflow_run\.id \}\}\)/u);
   assert.match(codeqlEvidenceWorkflow, /node scripts\/codeql-sarif-policy\.mjs/u);
   assert.ok(codeqlEvidenceWorkflow.indexOf("node scripts/codeql-sarif-policy.mjs") < codeqlEvidenceWorkflow.indexOf('docker push "$ref"'));
   assert.match(codeqlEvidenceWorkflow, /codeql-sarif-\$\{\{ github\.event\.workflow_run\.id \}\}/u);
   assert.doesNotMatch(codeqlEvidenceWorkflow, /pull_request_target/u);
+});
+
+test("production approval waits for the exact CodeQL evidence publication and checks its analysis marker", () => {
+  assert.match(approvalWorkflow, /gh run list --repo "\$GITHUB_REPOSITORY" --workflow codeql-evidence\.yml --event workflow_run/u);
+  assert.match(approvalWorkflow, /production-codeql-evidence-selector\.mjs --sha "\$TARGET_SHA" --analysis-run "\$codeql_run"/u);
+  assert.match(approvalWorkflow, /gh run view "\$evidence_run_id" --repo "\$GITHUB_REPOSITORY" --log/u);
+  assert.match(approvalWorkflow, /production-codeql-evidence-log-check\.mjs --sha "\$TARGET_SHA" --analysis-run "\$codeql_run" --log/u);
+  assert.match(approvalWorkflow, /Waiting for exact-SHA main CI, CodeQL, and its evidence publication/u);
 });
 
 test("production approval selects the latest successful exact main-push run by workflow and SHA", () => {

@@ -403,6 +403,7 @@ model SecurityElevation {
   userId             String
   sessionId          String
   protocolVersion    Int
+  credentialKeyVersion Int?
   scope              String
   challengeHash      String
   status             SecurityElevationStatus @default(PENDING)

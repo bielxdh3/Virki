@@ -141,9 +141,11 @@ test("grant-bound OIDC artifacts lock and recheck active account, connection, an
       $transaction: async (callback: (transaction: unknown) => Promise<void>) => callback({
         $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
           calls.push({ kind: "lock", sql: strings.join("?"), values });
-          return [{ id: "active-grant", redirectUris: ["https://project.example.invalid/callback"] }];
+          return calls.length === 1
+            ? [{ id: "active-grant", redirectUris: ["https://project.example.invalid/callback"] }]
+            : [{ id: "provider-grant" }];
         },
-        oidcArtifact: { findUnique: async () => { calls.push({ kind: "grant-check" }); return { expiresAt: new Date(Date.now() + 60_000) }; }, upsert: async () => { calls.push({ kind: "upsert" }); } }
+        oidcArtifact: { upsert: async () => { calls.push({ kind: "upsert" }); } }
       }),
       oidcArtifact: { upsert: async () => { calls.push({ kind: "unexpected-direct-upsert" }); } },
       projectConnection: {}
@@ -155,11 +157,12 @@ test("grant-bound OIDC artifacts lock and recheck active account, connection, an
       grantId: "provider-grant-id"
     } as never, 300);
 
-    assert.deepEqual(calls.map(({ kind }) => kind), ["lock", "grant-check", "upsert"]);
+    assert.deepEqual(calls.map(({ kind }) => kind), ["lock", "lock", "upsert"]);
     assert.match(calls[0].sql ?? "", /grant_record\."revokedAt" IS NULL[\s\S]*account_record\."role" = 'USER'[\s\S]*account_record\."isActive" = TRUE[\s\S]*account_record\."accountStatus" = 'ACTIVE'[\s\S]*connection_record\."enabled" = TRUE/u);
     assert.match(calls[0].sql ?? "", /FOR UPDATE OF grant_record, account_record, connection_record/u);
     assert.match(calls[0].sql ?? "", /connection_record\."redirectUris" AS "redirectUris"/u);
     assert.deepEqual(calls[0].values, ["user-id", "client-id"]);
+    assert.match(calls[1].sql ?? "", /FROM "OidcArtifact"[\s\S]*"model" = 'Grant'[\s\S]*FOR UPDATE/u);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
     else process.env.VIRKI_OIDC_ADAPTER_KEY = original;
@@ -283,8 +286,11 @@ test("grant-bound token persistence fails closed when the provider Grant artifac
   try {
     const database = {
       $transaction: async (callback: (transaction: unknown) => Promise<void>) => callback({
-        $queryRaw: async () => [{ id: "active-grant", redirectUris: ["https://project.example.invalid/callback"] }],
-        oidcArtifact: { findUnique: async () => grant, upsert: async () => { upserted = true; } }
+        $queryRaw: async (query: TemplateStringsArray) => {
+          if (query.join("").includes('FROM "UserProjectGrant"')) return [{ id: "active-grant", redirectUris: ["https://project.example.invalid/callback"] }];
+          return grant && (!grant.expiresAt || grant.expiresAt > new Date()) ? [{ id: "provider-grant" }] : [];
+        },
+        oidcArtifact: { upsert: async () => { upserted = true; } }
       }),
       oidcArtifact: {},
       projectConnection: {}
@@ -304,14 +310,18 @@ test("grant-bound token persistence fails closed when the provider Grant artifac
   }
 });
 
-test("replaying a grant revokes its provider Grant and all grant-bound tokens atomically", async () => {
+test("replaying a grant locks its provider Grant before deleting grant-bound artifacts", async () => {
   const calls: unknown[] = [];
   const database = {
-    oidcArtifact: { deleteMany: async (args: unknown) => { calls.push(args); return { count: 2 }; } }
+    $transaction: async (operation: (transaction: unknown) => Promise<void>) => operation({
+      $queryRaw: async (query: TemplateStringsArray) => { calls.push(query.join("")); return []; },
+      oidcArtifact: { deleteMany: async (args: unknown) => { calls.push(args); return { count: 2 }; } }
+    })
   };
   await new PrismaOidcAdapter("AuthorizationCode", database as never).revokeByGrantId("one-time-grant");
-  assert.equal(calls.length, 1);
-  const where = (calls[0] as { where: { OR: Array<Record<string, string>> } }).where;
+  assert.equal(calls.length, 2);
+  assert.match(String(calls[0]), /FROM "OidcArtifact"[\s\S]*FOR UPDATE/u);
+  const where = (calls[1] as { where: { OR: Array<Record<string, string>> } }).where;
   assert.equal(where.OR.length, 2);
   assert.equal(where.OR[0].grantHash, where.OR[1].idHash);
   assert.equal(where.OR[1].model, "Grant");

@@ -58,8 +58,9 @@ export function evidenceTag(revision, runId, kind, platform = "") {
 }
 
 // Reads only from a stopped OCI image. The image is never executed.
-export function downloadGhcrEvidence({ revision, runId, kind, platform = "", execute, repositoryRoot }) {
+export function downloadGhcrEvidence({ revision, runId, logRunId = runId, kind, platform = "", execute, repositoryRoot }) {
   const tag = evidenceTag(revision, runId, kind, platform);
+  if (!Number.isSafeInteger(logRunId) || logRunId <= 0) throw new ProductionRevisionError("COMMAND_FAILED");
   const directory = mkdtempSync(path.join(os.tmpdir(), "virki-private-evidence-"));
   const authDir = path.join(directory, "auth");
   const evidenceDir = path.join(directory, "contents");
@@ -79,7 +80,7 @@ export function downloadGhcrEvidence({ revision, runId, kind, platform = "", exe
     const pkg = JSON.parse(response);
     if (pkg.visibility !== "private" || pkg.owner?.login !== "bielxdh3"
       || pkg.repository?.full_name !== CANONICAL_VIRKI_REPOSITORY) throw new ProductionRevisionError("COMMAND_FAILED");
-    const log = run("gh", ["run", "view", String(runId), "--repo", CANONICAL_VIRKI_REPOSITORY, "--log"]);
+    const log = run("gh", ["run", "view", String(logRunId), "--repo", CANONICAL_VIRKI_REPOSITORY, "--log"]);
     const digest = evidenceDigestFromRunLog(log, { revision, runId, kind, platform });
     reference = `${PACKAGE}@${digest}`;
     const token = registry.token ?? run("gh", ["auth", "token"]);

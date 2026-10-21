@@ -14,7 +14,7 @@ import {
   type ElevationDuration,
   type ElevationScope
 } from "@virki/auth/administration";
-import { hashAuditIdentifier, writeAuditLogInTransaction } from "@virki/auth";
+import { hashAuditIdentifier, hashAuditSessionReference, writeAuditLogInTransaction } from "@virki/auth";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -83,7 +83,7 @@ export async function revokeElevationAction(formData: FormData): Promise<void> {
     if (!elevation) return false;
     const result = await transaction.securityElevation.updateMany({ where: { id: elevation.id, status: "ACTIVE" }, data: { status: "REVOKED", revokedAt: new Date() } });
     if (result.count !== 1) return false;
-    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
+    await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(session.id), resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
     return true;
   });
   if (!revoked) redirect("/admin/security?error=elevation#admin-content");
@@ -97,7 +97,7 @@ export async function revokeOtherSessionsAction(formData: FormData): Promise<voi
   const session = await requireAdminMutation(formData, "admin-sessions-revoke");
   await prisma.$transaction(async (transaction) => {
     const result = await transaction.session.updateMany({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null }, data: { revokedAt: new Date() } });
-    if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other active admin sessions revoked.", metadata: { revokedCount: result.count } });
+    if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(session.id), resource: "session", message: "Other active admin sessions revoked.", metadata: { revokedCount: result.count } });
   });
   revalidatePath("/admin/security");
   redirect("/admin/security?status=sessions#admin-content");
@@ -131,6 +131,7 @@ export async function recoverAdminCredentialAction(_state: SecurityFormState, fo
   try {
     const recoveryCodes = await recoverAdministrativeCredential({
       actor: session.user,
+      sessionId: session.id,
       normalPassword: readFormRawString(formData, "normalPassword"),
       recoveryCode: readFormString(formData, "recoveryCode"),
       newPassword: readFormRawString(formData, "newPassword")

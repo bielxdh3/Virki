@@ -274,6 +274,7 @@ export async function regenerateRecoveryCodes(userId: string, code: string, now 
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
   await prisma.$transaction(async (transaction) => {
+    if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "ACTIVE") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -292,6 +293,7 @@ export async function verifyRecoveryCode(userId: string, code: string): Promise<
   if (code.length > 64) throw new SecurityMutationError();
   const normalizedHash = hashRecoveryCode(code);
   return prisma.$transaction(async (transaction) => {
+    if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
     const row = await transaction.recoveryCode.findFirst({ where: { userId, codeHash: normalizedHash, usedAt: null }, select: { id: true } });
     if (!row) return false;
     const consumed = await transaction.recoveryCode.updateMany({ where: { id: row.id, usedAt: null }, data: { usedAt: new Date() } });

@@ -271,6 +271,51 @@ test("queued duplicate response.end calls cannot crash the issuer or append data
   assert.equal(server.listening, true);
 });
 
+test("invalid response.end chunks fail closed before they enter the bounded audit buffer", async (context) => {
+  let finishAudit!: () => void;
+  let reachGate!: () => void;
+  const allowAudit = new Promise<void>((resolve) => { finishAudit = resolve; });
+  const requestReachedGate = new Promise<void>((resolve) => { reachGate = resolve; });
+  const callbackErrors: string[] = [];
+  let responseErrors = 0;
+  const server = createServer((request, response) => {
+    response.on("error", (error) => { responseErrors++; callbackErrors.push(error.message); });
+    installAuditResponseGate(response);
+    if (request.url === "/invalid-end") {
+      requireAuditBeforeResponse(response, allowAudit);
+      response.statusCode = 200;
+      const onEnd = (error?: Error): void => {
+        if (error) callbackErrors.push(error.message);
+      };
+      response.end({ invalid: true } as never, onEnd);
+      reachGate();
+      return;
+    }
+    response.statusCode = 204;
+    response.end();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const address = server.address() as AddressInfo;
+  const responsePromise = fetch(`http://127.0.0.1:${address.port}/invalid-end`, { redirect: "manual" });
+  await requestReachedGate;
+  finishAudit();
+  const response = await responsePromise;
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "temporarily_unavailable" });
+  assert.equal(callbackErrors.length, 1);
+  assert.match(callbackErrors[0] ?? "", /bounded audit buffer/u);
+  assert.equal(responseErrors, 0);
+  assert.equal(server.listening, true);
+});
+
 test("a required audit registered while the response waits is included before release", async (context) => {
   let finishFirstAudit!: () => void;
   let finishSecondAudit!: () => void;
