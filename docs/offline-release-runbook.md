@@ -60,6 +60,11 @@ hosted CodeQL approval or as permission to deploy.
    passing this check cannot replace independently reviewed verifier bytes,
    separately approved root-owned SHA-256 pins, safe native installation or
    executable-bytes-at-use-point verification. It grants no release authority.
+   The audited dependency inventory now requires **10 pinned modules**, including
+   `trusted-release-coordinator.mjs` and the durable `offline-release-ledger.mjs`.
+   Former eight-module operator pinsets fail closed. An operator must separately
+   audit and approve all 10 current SHA-256 digests; no automatic pin migration
+   or implied installation is permitted.
 2. Verify host identity, independent builder/owner Ed25519 key pins, explicit
    owner assurance flag, revocations, predecessor, sequence, validity window,
    source/archive/report digests, OCI layer/config identities, full source Git

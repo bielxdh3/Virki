@@ -209,7 +209,7 @@ function fsyncTree(dirname) {
 }
 
 /**
- * Rehearses one all-or-none publication of eight independently pinned modules
+ * Rehearses one all-or-none publication of ten independently pinned modules
  * under /tmp/virki-native-stage-fixture-XXXXXX/staging/published only. The
  * protected policy MUST already have been provisioned by the fixture's owner.
  * Caller-controlled pins can never confer deployment or host-install approval.

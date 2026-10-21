@@ -16,9 +16,11 @@ export const AUDITED_VERIFIER_FILES = Object.freeze([
   "infra/offline/trusted-host-entry.mjs",
   "infra/offline/trusted-host-installer.mjs",
   "infra/offline/trusted-image-loader.mjs",
+  "infra/offline/trusted-release-coordinator.mjs",
   "infra/offline/trusted-source-git.mjs",
   "scripts/lib/offline-docker-tar-verifier.mjs",
   "scripts/lib/offline-release-attestation.mjs",
+  "scripts/lib/offline-release-ledger.mjs",
   "scripts/lib/offline-source-tar-verifier.mjs",
   "scripts/lib/offline-trusted-release-policy.mjs",
 ]);

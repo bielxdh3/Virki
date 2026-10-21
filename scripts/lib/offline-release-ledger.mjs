@@ -261,7 +261,9 @@ export function completeOfflineReleaseAcceptance(request) {
     // A second finalizer and crash retries cannot both commit the transition.
     finalizingFd = openSync(finalizingPath, CREATE_NEW, 0o600);
     ownPrivateFile(fstatSync(finalizingFd), "file", 0o600);
-    writeAll(finalizingFd, Buffer.from(JSON.stringify({ pid: process.pid, state: "finalizing" })));
+    // A persisted finalization latch does not need a process identifier: its
+    // exclusive inode and durable state establish the interruption boundary.
+    writeAll(finalizingFd, Buffer.from(JSON.stringify({ state: "finalizing" })));
     fsyncSync(finalizingFd);
     fsyncSync(directoryFd);
     const finalizingStat = fstatSync(finalizingFd);

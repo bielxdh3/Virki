@@ -93,11 +93,11 @@ function deniedUnpublished(f) {
   assert.deepEqual(readdirSync(f.stagingDirectory), []);
 }
 
-test("native root fixture publishes exactly eight operator-pinned private modules in one directory rename", onlyNative, (t) => {
+test("native root fixture publishes exactly ten operator-pinned private modules in one directory rename", onlyNative, (t) => {
   const f = setup(t);
   const result = rehearseTrustedNativeVerifierStaging(f.request);
   assert.equal(result.status, "DISPOSABLE_NATIVE_LINUX_STAGING_REHEARSAL_ONLY");
-  assert.equal(result.auditedSourceCount, 8);
+  assert.equal(result.auditedSourceCount, 10);
   assert.equal(result.operatorPinsSha256, digest(f.pinsBytes));
   assert.equal(Object.hasOwn(result, "installAuthorized"), false);
   assert.equal(Object.hasOwn(result, "deployAuthorized"), false);
@@ -107,7 +107,7 @@ test("native root fixture publishes exactly eight operator-pinned private module
   assertPublished(f);
 });
 
-test("pinned eight-file inventory refuses altered bytes, missing dependencies and operator digest edits", onlyNative, (t) => {
+test("pinned ten-file inventory refuses altered bytes, missing dependencies and operator digest edits", onlyNative, (t) => {
   for (const mutate of [
     (f) => writeFileSync(f.sourcePath(3), "different module bytes"),
     (f) => rmSync(f.sourcePath(5)),
@@ -216,7 +216,7 @@ test("candidate cannot publish unexpected modules, late modified bytes or a link
   }
 });
 
-test("SIGKILL before and after fsynced directory rename leaves no partially published eight-file set", onlyNative, (t) => {
+test("SIGKILL before and after fsynced directory rename leaves no partially published ten-file set", onlyNative, (t) => {
   const fixtureModule = fileURLToPath(new URL("./trusted-native-stage-fixture.mjs", import.meta.url));
   for (const phase of ["beforePublish", "afterPublish"]) {
     const f = setup(t);

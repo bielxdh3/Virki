@@ -13,6 +13,7 @@ const HOST_ENTRIES = Object.freeze([
   "infra/offline/trusted-host-installer.mjs",
   "infra/offline/trusted-host-entry.mjs",
   "infra/offline/trusted-image-loader.mjs",
+  "infra/offline/trusted-release-coordinator.mjs",
   "infra/offline/trusted-source-git.mjs",
 ]);
 // Native verifier modules use only these builtins. In particular, loading
@@ -208,6 +209,8 @@ test("installed host entries have an exactly pinned, deterministic and closed ex
   assert.deepEqual(AUDITED_VERIFIER_FILES, graph,
     "every executable transitive dependency must be independently pinned in sorted order");
   assert.ok(graph.includes("infra/offline/trusted-source-git.mjs"));
+  assert.ok(graph.includes("infra/offline/trusted-release-coordinator.mjs"));
+  assert.ok(graph.includes("scripts/lib/offline-release-ledger.mjs"));
   assert.ok(graph.includes("scripts/lib/offline-source-tar-verifier.mjs"));
   assert.ok(!graph.includes("scripts/lib/offline-release-bundle.mjs"),
     "builder/CI modules cannot be evaluated by host-native source verification");
@@ -288,7 +291,8 @@ test("changed source checker or TAR parser bytes fail independent source digest 
   }));
   assert.equal(inspectAuditedVerifierFiles({ sourceDirectory: dest, files: pins }).files.length,
     AUDITED_VERIFIER_FILES.length);
-  for (const relative of ["infra/offline/trusted-source-git.mjs", "scripts/lib/offline-source-tar-verifier.mjs"]) {
+  for (const relative of ["infra/offline/trusted-source-git.mjs", "scripts/lib/offline-source-tar-verifier.mjs",
+    "infra/offline/trusted-release-coordinator.mjs", "scripts/lib/offline-release-ledger.mjs"]) {
     const target = path.join(dest, ...relative.split("/"));
     const before = readFileSync(target);
     writeFileSync(target, Buffer.concat([before, Buffer.from("\n// altered parser bytes\n")]));
