@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
-  closeSync, constants, existsSync, fsyncSync, lstatSync, openSync,
+  closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, openSync,
   readFileSync, realpathSync, renameSync, unlinkSync, writeSync,
 } from "node:fs";
 import os from "node:os";
@@ -94,9 +94,21 @@ function checkedPath(root, relative, allowAbsent = false) {
 }
 function readBytes(root, relative) {
   const file = checkedPath(root, relative);
-  const bytes = readFileSync(file);
-  check(bytes.length > 0 && bytes.length <= MAX_BYTES, "invalid fixture file size");
-  return bytes;
+  const before = lstatSync(file, { bigint: true });
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const unchanged = (stat) => [
+    "dev", "ino", "uid", "gid", "mode", "nlink", "size", "mtimeNs", "ctimeNs",
+  ].every((key) => stat[key] === before[key]);
+  try {
+    check(unchanged(fstatSync(fd, { bigint: true })), "fixture file changed before reading");
+    const bytes = readFileSync(fd);
+    check(bytes.length > 0 && bytes.length <= MAX_BYTES &&
+      BigInt(bytes.length) === before.size &&
+      unchanged(fstatSync(fd, { bigint: true })) &&
+      unchanged(lstatSync(file, { bigint: true })),
+    "fixture file changed during reading");
+    return bytes;
+  } finally { closeSync(fd); }
 }
 function readJson(root, relative) {
   const bytes = readBytes(root, relative);
@@ -226,8 +238,10 @@ function unlock(root, id) {
  */
 export function rehearseDisposableOfflineRecovery(request, options = {}) {
   exact(request, ["fixtureRoot", "expectedPreviousSha", "candidateSha"], "invalid request");
-  exact(options, ["onPhase"], "test instrumentation must be explicit");
-  check(typeof options.onPhase === "function", "test phase hook required");
+  check(options && typeof options === "object" && !Array.isArray(options) &&
+    Object.keys(options).every((key) => key === "onPhase") &&
+    (options.onPhase === undefined || typeof options.onPhase === "function"),
+  "invalid disposable test instrumentation");
   const root = fixtureRoot(request.fixtureRoot);
   const { expectedPreviousSha: oldSha, candidateSha: newSha } = request;
   const initialDigest = preflight(root, request);
@@ -237,7 +251,7 @@ export function rehearseDisposableOfflineRecovery(request, options = {}) {
   let attempted = false;
   const checkpoint = (phase) => {
     record(root, id, phase, oldSha, newSha);
-    options.onPhase(phase);
+    options.onPhase?.(phase);
   };
   try {
     // Recheck AFTER the exclusive reservation to reject preflight races.
@@ -248,14 +262,15 @@ export function rehearseDisposableOfflineRecovery(request, options = {}) {
     "fixture changed between preflight and reservation");
     record(root, id, "attempted", oldSha, newSha);
     attempted = true;
-    options.onPhase("attempted");
+    options.onPhase?.("attempted");
     replaceJson(root, "state/routing.json", { maintenance: true, runningSha: null });
     checkpoint("maintenance");
 
     const originalBytes = readBytes(root, "database/database.json");
     check(digest(originalBytes) === initialDigest, "database changed before backup");
-    backupRelative = `backups/${id}.dump`;
-    writeNew(root, backupRelative, originalBytes);
+    const newBackup = `backups/${id}.dump`;
+    writeNew(root, newBackup, originalBytes);
+    backupRelative = newBackup;
     check(digest(readBytes(root, backupRelative)) === initialDigest,
       "persisted backup does not match live data");
     checkpoint("backup-verified");
@@ -285,6 +300,24 @@ export function rehearseDisposableOfflineRecovery(request, options = {}) {
     checkpoint("candidate-running");
     healthy(root, newSha, control(root).route);
     checkpoint("health-passed");
+
+    // An application process could mutate protected account state while it is
+    // warming up. Re-verify both copies and the original snapshot immediately
+    // before recording completion, including after test fault hooks.
+    check(digest(readBytes(root, backupRelative)) === initialDigest,
+      "verified rollback backup changed before activation");
+    check(revision(root, oldSha).schemaVersion === JSON.parse(originalBytes.toString("utf8")).schemaVersion,
+      "predecessor no longer matches the rollback snapshot");
+    const live = database(root);
+    const clone = readJson(root, cloneRelative);
+    check(JSON.stringify(live) === JSON.stringify(clone) &&
+      JSON.stringify(live.accounts) ===
+        JSON.stringify(JSON.parse(originalBytes.toString("utf8")).accounts),
+    "live identity state differs from verified migrated restore");
+    const finalRoute = control(root).route;
+    check(finalRoute.maintenance === true && finalRoute.runningSha === newSha,
+      "candidate became routed before durable completion");
+    healthy(root, newSha, finalRoute);
 
     // Publish completion BEFORE reopening the route. An interrupted publish
     // cannot serve an unrecorded candidate; an orphan lock still blocks retry.
@@ -323,7 +356,8 @@ export function rehearseDisposableOfflineRecovery(request, options = {}) {
     } catch (rollbackFailure) {
       try { record(root, id, "rollback-blocked", oldSha, newSha); } catch { /* retain attempted lock */ }
       throw new AggregateError([error, rollbackFailure],
-        "Disposable recovery failed and safe rollback is blocked; attempted lock retained");
+        "Disposable recovery failed and safe rollback is blocked; attempted lock retained",
+        { cause: rollbackFailure });
     }
     throw error;
   }

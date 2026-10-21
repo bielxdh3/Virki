@@ -8,14 +8,12 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   inspectDisposableOfflineRecovery, rehearseDisposableOfflineRecovery,
 } from "./disposable-recovery-coordinator.mjs";
 
 const OLD = "a".repeat(40);
 const NEW = "b".repeat(40);
-const modulePath = fileURLToPath(new URL("./disposable-recovery-coordinator.mjs", import.meta.url));
 process.env.VIRKI_DISPOSABLE_RECOVERY_TEST = "1";
 
 function fixture(t, candidateHealth = "ok") {
@@ -112,6 +110,14 @@ test("full offline rehearsal reserves attempt, validates restored clone, migrate
   assert.throws(() => f.run(), /predecessor is not active/u);
 });
 
+test("default hook-free API runs fixture successfully with no hidden external dependencies", (t) => {
+  const f = fixture(t);
+  const result = rehearseDisposableOfflineRecovery(f.request);
+  assert.equal(result.deployAuthorized, false);
+  assert.equal(result.status, "DISPOSABLE_RECOVERY_REHEARSAL_PASSED");
+  assert.equal(f.read("state/active.json").revision, NEW);
+});
+
 test("every injected stage failure rolls back exact data and resumes prior healthy app", async (t) => {
   for (const phase of [
     "attempted", "maintenance", "backup-verified", "restore-verified",
@@ -134,6 +140,39 @@ test("every injected stage failure rolls back exact data and resumes prior healt
 test("unhealthy candidate fails closed after migration and restores predecessor", (t) => {
   const f = fixture(t, "fail");
   assert.throws(() => f.run(), /health or database schema mismatch/u);
+  assertRecovered(f);
+});
+
+test("tampering with account rows in restored clone rejects migration before live mutation", (t) => {
+  const f = fixture(t);
+  assert.throws(() => f.run((phase) => {
+    if (phase === "restore-verified") {
+      const name = readdirSync(path.join(f.root, "restores"))[0];
+      f.put(path.join("restores", name), { schemaVersion: 1, accounts: ["intruder"] });
+    }
+  }), /migration changed account data on disposable restore/u);
+  assertRecovered(f);
+  assert.equal(f.read("state/journal.json").events.some((entry) => entry.phase === "live-migrated"), false);
+});
+
+test("app-side identity mutation after health fails closed and is reversed from backup", (t) => {
+  const f = fixture(t);
+  assert.throws(() => f.run((phase) => {
+    if (phase === "health-passed") {
+      f.put("database/database.json", { schemaVersion: 2, accounts: ["intruder", "user"] });
+    }
+  }), /live identity state differs from verified migrated restore/u);
+  assertRecovered(f);
+});
+
+test("candidate descriptor swap after health blocks activation and restores old release", (t) => {
+  const f = fixture(t);
+  assert.throws(() => f.run((phase) => {
+    if (phase === "health-passed") {
+      f.put(`releases/${NEW}/release.json`,
+        { revision: NEW, schemaVersion: 2, health: "fail" });
+    }
+  }), /health or database schema mismatch/u);
   assertRecovered(f);
 });
 
