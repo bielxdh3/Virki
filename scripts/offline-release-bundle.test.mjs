@@ -1,0 +1,219 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { prepareOfflineReleaseBundle } from "./lib/offline-release-bundle.mjs";
+
+const SOURCE = "https://github.com/bielxdh3/Virki.git";
+const LABEL_SOURCE = "https://github.com/bielxdh3/Virki";
+const EMPTY = createHash("sha256").update("").digest("hex");
+const STAGES = ["tooling-policy-dependencies", "tooling-policy-tests", "chromium-dependencies",
+  "production-hub-build", "runtime", "secrets-scan", "production-revision-tests",
+  "backup-inventory-tests", "production-operations-tests", "public-site-tests",
+  "unit-tests", "integration-tests", "browser-e2e", "lint", "typecheck",
+  "prisma-validate", "build", "windows-ca-helper-tests", "worktree-diff-check"];
+const IMAGE_IDS = { runtime: `sha256:${"a".repeat(64)}`, migrator: `sha256:${"b".repeat(64)}` };
+
+function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
+function manifest(revision) {
+  const base = Date.parse("2026-10-21T14:00:00Z");
+  return {
+    runId: "e5f8bc3d5c", sourceBranch: "main", sourceHead: revision,
+    startedUtc: new Date(base).toISOString(), finishedUtc: new Date(base + 300_000).toISOString(),
+    nodeVersion: "v22.23.3", npmVersion: "10.9.9", stagedPatchSha256: EMPTY,
+    workingTreePatchSha256: EMPTY, untrackedFiles: [],
+    unitTestsFailureCount: 0, unitTestsFailures: [], integrationTestsFailureCount: 0,
+    integrationTestsFailures: [], productionOperationsFailureCount: 0, productionOperationsFailures: [],
+    exitCode: 0, failedStages: [],
+    stages: STAGES.map((name, i) => ({ name,
+      startedUtc: new Date(base + i * 10_000 + 1_000).toISOString(),
+      finishedUtc: new Date(base + i * 10_000 + 2_000).toISOString(), durationMs: 1000, exitCode: 0 })),
+  };
+}
+
+function setup(t) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "virki-bundle-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repositoryRoot = path.join(root, "repo");
+  const stagingParent = path.join(root, "stages");
+  mkdirSync(repositoryRoot);
+  mkdirSync(stagingParent, { mode: 0o700 });
+  git(repositoryRoot, "init", "-b", "main");
+  git(repositoryRoot, "config", "user.email", "fixture@example.test");
+  git(repositoryRoot, "config", "user.name", "Fixture");
+  writeFileSync(path.join(repositoryRoot, "README.md"), "controlled fixture\n");
+  git(repositoryRoot, "add", "README.md");
+  git(repositoryRoot, "commit", "-m", "fixture");
+  const revision = git(repositoryRoot, "rev-parse", "HEAD");
+  git(repositoryRoot, "remote", "add", "origin", SOURCE);
+  git(repositoryRoot, "update-ref", "refs/remotes/origin/main", revision);
+  const ciManifestPath = path.join(root, "ci.json");
+  writeFileSync(ciManifestPath, JSON.stringify(manifest(revision)));
+  const payloadDir = path.join(root, "payload");
+  mkdirSync(payloadDir);
+  writeFileSync(path.join(payloadDir, "contents"), "standalone save fixture");
+  const runLog = [];
+  const runner = async (program, args, options = {}) => {
+    runLog.push({ program, args: [...args] });
+    if (program === "docker") {
+      if (args[0] === "image" && args[1] === "inspect") {
+        const role = Object.keys(IMAGE_IDS).find((value) => IMAGE_IDS[value] === args[2]);
+        if (!role) throw new Error("image missing");
+        return JSON.stringify([{
+          Id: IMAGE_IDS[role], Size: 18432, Os: "linux", Architecture: "amd64",
+          Config: { User: "node:node", Labels: {
+            "org.opencontainers.image.revision": revision,
+            "org.opencontainers.image.source": LABEL_SOURCE,
+          } },
+        }]);
+      }
+      if (args[0] === "save") {
+        assert.deepEqual(args.slice(0, 2), ["save", "--output"]);
+        execFileSync("tar", ["-cf", args[2], "-C", payloadDir, "contents"]);
+        return "";
+      }
+      throw new Error(`unexpected Docker command ${args.join(" ")}`);
+    }
+    return execFileSync(program, args, { cwd: options.cwd, env: options.env, input: options.input,
+      encoding: "utf8", maxBuffer: 2 * 1024 * 1024 });
+  };
+  const options = { repositoryRoot, revision, stagingParent, ciManifestPath, images: IMAGE_IDS, runner };
+  return { root, revision, repositoryRoot, stagingParent, ciManifestPath, options, runLog };
+}
+
+test("builds exact HEAD tar and immutable-ID Docker save archives, returning measured inventory", async (t) => {
+  const fixture = setup(t);
+  const bundle = await prepareOfflineReleaseBundle(fixture.options);
+  assert.equal(bundle.inventory.source_sha, fixture.revision);
+  assert.equal(bundle.inventory.repository, SOURCE);
+  assert.equal(bundle.inventory.platform, "linux/amd64");
+  assert.equal(bundle.inventory.runtime_image.image_id, IMAGE_IDS.runtime);
+  assert.equal(bundle.inventory.migrator_image.image_id, IMAGE_IDS.migrator);
+  assert.equal(bundle.ciEvidence.stageCount, 19);
+  assert.equal(bundle.inventory.source_archive_sha256,
+    createHash("sha256").update(readFileSync(bundle.sourceArchivePath)).digest("hex"));
+  assert.equal(readdirSync(bundle.directory).sort().join(","), "ci.json,migrator.tar,runtime.tar,source.tar");
+  assert.equal(fixture.runLog.filter((call) => call.program === "docker" && call.args[0] === "save").length, 2);
+  assert.ok(fixture.runLog.filter((call) => call.program === "docker" && call.args[0] === "save")
+    .every((call) => Object.values(IMAGE_IDS).includes(call.args[3])));
+});
+
+test("rejects dirty tracked, staged, untracked, wrong branch, shifted origin SHA and foreign remote", async (t) => {
+  const f = setup(t);
+  writeFileSync(path.join(f.repositoryRoot, "README.md"), "dirty");
+  await assert.rejects(prepareOfflineReleaseBundle(f.options));
+  git(f.repositoryRoot, "checkout", "--", "README.md");
+  writeFileSync(path.join(f.repositoryRoot, "new.txt"), "untracked");
+  await assert.rejects(prepareOfflineReleaseBundle(f.options));
+  rmSync(path.join(f.repositoryRoot, "new.txt"));
+  writeFileSync(path.join(f.repositoryRoot, "README.md"), "staged");
+  git(f.repositoryRoot, "add", "README.md");
+  await assert.rejects(prepareOfflineReleaseBundle(f.options));
+  git(f.repositoryRoot, "reset", "--hard", "HEAD");
+  git(f.repositoryRoot, "switch", "-c", "other");
+  await assert.rejects(prepareOfflineReleaseBundle(f.options));
+  git(f.repositoryRoot, "switch", "main");
+  git(f.repositoryRoot, "update-ref", "refs/remotes/origin/main", "0".repeat(40));
+  await assert.rejects(prepareOfflineReleaseBundle(f.options));
+  git(f.repositoryRoot, "update-ref", "refs/remotes/origin/main", f.revision);
+  git(f.repositoryRoot, "remote", "set-url", "origin", "https://example.test/foreign.git");
+  await assert.rejects(prepareOfflineReleaseBundle(f.options));
+  assert.deepEqual(readdirSync(f.stagingParent), []);
+});
+
+test("rejects missing image, changed revision/platform/user, partial archive and unexpected aliases; cleans owned staging", async (t) => {
+  const f = setup(t);
+  const base = f.options.runner;
+  for (const variant of ["missing", "wrong-label", "wrong-platform", "root", "partial", "alias"]) {
+    const runner = async (program, args, opts) => {
+      if (program === "docker" && variant === "missing" && args[0] === "image") throw new Error("missing image");
+      if (program === "docker" && args[0] === "image" && ["wrong-label", "wrong-platform", "root"].includes(variant)) {
+        const values = JSON.parse(await base(program, args, opts));
+        if (variant === "wrong-label") values[0].Config.Labels["org.opencontainers.image.revision"] = "f".repeat(40);
+        if (variant === "wrong-platform") values[0].Architecture = "arm64";
+        if (variant === "root") values[0].Config.User = "root";
+        return JSON.stringify(values);
+      }
+      if (program === "docker" && variant === "partial" && args[0] === "save") {
+        writeFileSync(args[2], "incomplete tar");
+        return "";
+      }
+      if (program === "docker" && variant === "alias" && args[0] === "save") {
+        assert.ok(Object.values(IMAGE_IDS).includes(args[3]));
+        throw new Error("unexpected failure for alias test");
+      }
+      return base(program, args, opts);
+    };
+    await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), variant);
+    assert.deepEqual(readdirSync(f.stagingParent), []);
+  }
+});
+
+test("rejects symlink output parent and unsafe source tree links, invalid CI and stale Git SHA", async (t) => {
+  const f = setup(t);
+  const symlink = path.join(f.root, "alias");
+  symlinkSync(f.stagingParent, symlink, "dir");
+  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, stagingParent: symlink }));
+  writeFileSync(f.ciManifestPath, "{}");
+  await assert.rejects(prepareOfflineReleaseBundle(f.options));
+  writeFileSync(f.ciManifestPath, JSON.stringify(manifest(f.revision)));
+  git(f.repositoryRoot, "config", "core.symlinks", "true");
+  symlinkSync("README.md", path.join(f.repositoryRoot, "linked-file"));
+  git(f.repositoryRoot, "add", "linked-file");
+  git(f.repositoryRoot, "commit", "-m", "link");
+  const linkedRevision = git(f.repositoryRoot, "rev-parse", "HEAD");
+  git(f.repositoryRoot, "update-ref", "refs/remotes/origin/main", linkedRevision);
+  writeFileSync(f.ciManifestPath, JSON.stringify(manifest(linkedRevision)));
+  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, revision: linkedRevision }));
+  assert.deepEqual(readdirSync(f.stagingParent), []);
+});
+
+test("rejects a valid but substituted source tar even if its paths are individually safe", async (t) => {
+  const f = setup(t);
+  const base = f.options.runner;
+  const substitutePath = path.join(f.root, "substitute");
+  mkdirSync(substitutePath);
+  writeFileSync(path.join(substitutePath, "harmless.txt"), "wrong content");
+  const runner = async (program, args, options) => {
+    if (program === "git" && args[0] === "archive") {
+      const output = args.find((arg) => arg.startsWith("--output=")).slice("--output=".length);
+      execFileSync("tar", ["-cf", output, "-C", substitutePath, "harmless.txt"]);
+      return "";
+    }
+    return base(program, args, options);
+  };
+  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), /source archive does not match Git tree/);
+  assert.deepEqual(readdirSync(f.stagingParent), []);
+});
+
+test("rejects export-ignore attributes from the committed SHA", async (t) => {
+  const f = setup(t);
+  writeFileSync(path.join(f.repositoryRoot, ".gitattributes"), "README.md export-ignore\n");
+  git(f.repositoryRoot, "add", ".gitattributes");
+  git(f.repositoryRoot, "commit", "-m", "export-ignore");
+  const revision = git(f.repositoryRoot, "rev-parse", "HEAD");
+  git(f.repositoryRoot, "update-ref", "refs/remotes/origin/main", revision);
+  writeFileSync(f.ciManifestPath, JSON.stringify(manifest(revision)));
+  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, revision }), /archive attributes/);
+  assert.deepEqual(readdirSync(f.stagingParent), []);
+});
+
+test("rejects image identity changes between initial inspect and saved artifacts", async (t) => {
+  const f = setup(t);
+  const base = f.options.runner;
+  let inspections = 0;
+  const runner = async (program, args, options) => {
+    const output = await base(program, args, options);
+    if (program !== "docker" || args[0] !== "image") return output;
+    inspections += 1;
+    if (inspections <= 2) return output;
+    const value = JSON.parse(output);
+    value[0].Size += 1;
+    return JSON.stringify(value);
+  };
+  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), /metadata shifted/);
+  assert.deepEqual(readdirSync(f.stagingParent), []);
+});
