@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants, chmodSync, closeSync, fstatSync, lstatSync, mkdirSync, openSync,
-  readFileSync, realpathSync, readdirSync, rmdirSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
+  readFileSync, readSync, realpathSync, readdirSync, rmdirSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { inventoryOfflineArtifacts } from "./offline-artifact-inventory.mjs";
 import { validateOfflineCiEvidence } from "./offline-ci-evidence.mjs";
@@ -10,6 +10,9 @@ const SOURCE = "https://github.com/bielxdh3/Virki.git";
 const OCI_SOURCE = "https://github.com/bielxdh3/Virki";
 const SHA = /^[0-9a-f]{40}$/u;
 const IMAGE_ID = /^sha256:[0-9a-f]{64}$/u;
+const MAX_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024;
+const TAR_BLOCK = 512;
+const READ_BLOCK = 64 * 1024;
 const FILENAMES = new Set(["ci.json", "source.tar", "runtime.tar", "migrator.tar"]);
 const RESERVED = new Set([".env", ".npmrc", ".dev.vars", ".ghcr-read-token", ".production.operator.json",
   ".virki-release", ".virki-production-host", "backups", "backup", "dumps", "releases",
@@ -127,6 +130,7 @@ async function gitSourceGate(repositoryRoot, revision, runner) {
   }
   const raw = await gitRaw("ls-tree", "-r", "-t", "-z", "--full-tree", revision);
   const paths = [];
+  const objects = new Map();
   const unique = new Set();
   for (const record of raw.split("\0")) {
     if (!record) continue;
@@ -135,6 +139,7 @@ async function gitSourceGate(repositoryRoot, revision, runner) {
         !safeTreePath(match[4]) || unique.has(match[4].toLowerCase())) reject("unsafe source tree entry");
     unique.add(match[4].toLowerCase());
     paths.push(match[4]);
+    objects.set(match[4], { mode: match[1], type: match[2], id: match[3] });
   }
   if (!paths.length) reject("empty source tree");
   const attrs = await runner("git", ["check-attr", "--cached", "-z", "export-ignore", "export-subst", "--stdin"],
@@ -145,7 +150,7 @@ async function gitSourceGate(repositoryRoot, revision, runner) {
     if (!paths.includes(cells[i]) || !["export-ignore", "export-subst"].includes(cells[i + 1]) ||
         !["unspecified", "unset", "false"].includes(cells[i + 2])) reject("Git archive attributes could alter source");
   }
-  return { env, git, paths };
+  return { env, git, paths, objects };
 }
 
 async function readDockerImage(imageId, role, revision, runner) {
@@ -174,6 +179,183 @@ function requireTarEntries(list, role) {
     reject(`${role} tar archive listing is unsafe`);
   }
   return entries.map((entry) => entry.replace(/\/$/u, ""));
+}
+
+// Strict read-only ustar/PAX subset. The format is parsed locally from the
+// pinned inode; neither `tar -tf` nor the archive producer authenticates bytes.
+// GNU sparse/longname/link entries, base-256 numbers, and arbitrary PAX keys
+// are intentionally unsupported. No archive member is extracted or executed.
+export function verifySourceTarAgainstGit(filename, expectedRevision, expectedObjects) {
+  const pathStat = lstatSync(filename, { bigint: true });
+  if (!pathStat.isFile() || pathStat.isSymbolicLink() || pathStat.nlink !== 1n ||
+      pathStat.size < 1024n || pathStat.size > BigInt(MAX_ARCHIVE_BYTES) ||
+      pathStat.size % BigInt(TAR_BLOCK) !== 0n) reject("source tar is not a bounded regular archive");
+  const fd = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const original = fstatSync(fd, { bigint: true });
+    if (!sameStat(original, pathStat)) reject("source tar changed before verification");
+    const length = Number(original.size);
+    let position = 0;
+    let totalMembers = 0;
+    let localPath;
+    let globalSeen = false;
+    const archiveDigest = createHash("sha256");
+    const seen = new Set();
+    const small = Buffer.allocUnsafe(TAR_BLOCK);
+    const chunk = Buffer.allocUnsafe(READ_BLOCK);
+    const decode = new TextDecoder("utf-8", { fatal: true });
+
+    function readExactly(size, buffer) {
+      if (position + size > length) reject("truncated source tar member");
+      let filled = 0;
+      while (filled < size) {
+        const n = readSync(fd, buffer, filled, size - filled, position);
+        if (n <= 0) reject("truncated source tar read");
+        archiveDigest.update(buffer.subarray(filled, filled + n));
+        position += n;
+        filled += n;
+      }
+    }
+    function textField(buffer, start, end) {
+      const slice = buffer.subarray(start, end);
+      const nul = slice.indexOf(0);
+      if (nul !== -1 && slice.subarray(nul).some((n) => n !== 0)) reject("tar text field has hidden bytes");
+      return decode.decode(nul === -1 ? slice : slice.subarray(0, nul));
+    }
+    function octal(buffer, start, end) {
+      const field = buffer.subarray(start, end).toString("ascii");
+      if (!/^[ 0]*[0-7]+[\0 ]*$/u.test(field) && !/^[ 0]+[\0 ]*$/u.test(field)) {
+        reject("unsupported tar numeric field");
+      }
+      const digits = field.replace(/^[ 0]+/u, "").replace(/[\0 ]+$/u, "");
+      const value = digits ? parseInt(digits, 8) : 0;
+      if (!Number.isSafeInteger(value)) reject("tar numeric value is excessive");
+      return value;
+    }
+    function dataHash(size, expectedId) {
+      const digest = createHash(expectedId.length === 40 ? "sha1" : "sha256");
+      digest.update(Buffer.from(`blob ${size}\0`));
+      let remaining = size;
+      while (remaining > 0) {
+        const n = Math.min(remaining, READ_BLOCK);
+        readExactly(n, chunk);
+        digest.update(chunk.subarray(0, n));
+        remaining -= n;
+      }
+      if (digest.digest("hex") !== expectedId) reject("source tar blob content differs from Git");
+    }
+    function consumePadding(size) {
+      const extra = (TAR_BLOCK - (size % TAR_BLOCK)) % TAR_BLOCK;
+      if (extra) {
+        readExactly(extra, small);
+        if (small.subarray(0, extra).some((n) => n !== 0)) reject("nonzero tar padding");
+      }
+    }
+    function paxAttributes(size) {
+      if (size <= 0 || size > 64 * 1024) reject("unsupported PAX payload length");
+      const data = Buffer.alloc(size);
+      readExactly(size, data);
+      consumePadding(size);
+      const attributes = new Map();
+      let offset = 0;
+      while (offset < data.length) {
+        const space = data.indexOf(0x20, offset);
+        if (space < 0 || space - offset > 6) reject("malformed PAX record length");
+        const digits = data.toString("ascii", offset, space);
+        if (!/^[1-9][0-9]*$/u.test(digits)) reject("malformed PAX length");
+        const sizeOfRecord = Number(digits);
+        if (!Number.isSafeInteger(sizeOfRecord) || sizeOfRecord < space - offset + 4 ||
+            offset + sizeOfRecord > data.length || data[offset + sizeOfRecord - 1] !== 0x0a) {
+          reject("invalid PAX record framing");
+        }
+        const body = decode.decode(data.subarray(space + 1, offset + sizeOfRecord - 1));
+        const separator = body.indexOf("=");
+        if (separator < 1 || attributes.has(body.slice(0, separator))) reject("duplicate or malformed PAX key");
+        attributes.set(body.slice(0, separator), body.slice(separator + 1));
+        offset += sizeOfRecord;
+      }
+      return attributes;
+    }
+    while (position < length) {
+      readExactly(TAR_BLOCK, small);
+      if (small.every((value) => value === 0)) {
+        // Two terminating NUL blocks followed solely by zero padding.
+        if (localPath || seen.size !== expectedObjects.size || totalMembers === 0) {
+          reject("source tar ends with missing or pending members");
+        }
+        let remaining = length - position;
+        if (remaining < TAR_BLOCK) reject("missing tar end-of-archive block");
+        while (remaining > 0) {
+          const n = Math.min(remaining, READ_BLOCK);
+          readExactly(n, chunk);
+          if (chunk.subarray(0, n).some((value) => value !== 0)) reject("trailing tar payload");
+          remaining -= n;
+        }
+        if (!sameStat(original, fstatSync(fd, { bigint: true })) ||
+            !sameStat(original, lstatSync(filename, { bigint: true }))) {
+          reject("source tar metadata changed during verification");
+        }
+        return Object.freeze({ sha256: archiveDigest.digest("hex"), sizeBytes: length });
+      }
+      const suppliedChecksum = octal(small, 148, 156);
+      let computed = 0;
+      for (let i = 0; i < TAR_BLOCK; i += 1) {
+        computed += i >= 148 && i < 156 ? 32 : small[i];
+      }
+      if (suppliedChecksum !== computed || textField(small, 257, 263) !== "ustar" ||
+          textField(small, 263, 265) !== "00") reject("invalid ustar header or checksum");
+      const mode = octal(small, 100, 108);
+      const size = octal(small, 124, 136);
+      const kind = String.fromCharCode(small[156]);
+      const prefix = textField(small, 345, 500);
+      const headerName = textField(small, 0, 100);
+      const rawName = prefix ? `${prefix}/${headerName}` : headerName;
+      if (!rawName || size > length - position) reject("invalid tar name or member size");
+      if (kind === "g" || kind === "x") {
+        if (kind === "g" && (globalSeen || totalMembers > 0 || localPath)) {
+          reject("unexpected global PAX metadata");
+        }
+        if (kind === "x" && localPath !== undefined) reject("stacked local PAX metadata");
+        const attributes = paxAttributes(size);
+        if (kind === "g") {
+          globalSeen = true;
+          if (attributes.size !== 1 || attributes.get("comment") !== expectedRevision) {
+            reject("untrusted global PAX metadata");
+          }
+        } else {
+          if (attributes.size !== 1 || !safeTreePath(attributes.get("path"))) {
+            reject("untrusted local PAX metadata");
+          }
+          localPath = attributes.get("path");
+        }
+        continue;
+      }
+      const entry = localPath ?? rawName.replace(/\/$/u, "");
+      localPath = undefined;
+      if (!safeTreePath(entry) || seen.has(entry)) reject("unknown, unsafe or duplicate tar member");
+      const expected = expectedObjects.get(entry);
+      if (!expected) reject("source tar contains a member missing from Git");
+      if (textField(small, 157, 257) !== "") reject("tar link target is unsupported");
+      if (expected.type === "tree") {
+        if (kind !== "5" || size !== 0 || ![0o755, 0o775].includes(mode)) {
+          reject("Git tree directory type or mode differs");
+        }
+      } else {
+        const expectedMode = expected.mode === "100755" ? 0o755 : 0o644;
+        // Git's archive default tar.umask=0002 gives 0664/0775 rather than
+        // 0644/0755. Only group-write may vary; executable bits must match.
+        if (!["0", "\0"].includes(kind) || ![expectedMode, expectedMode | 0o020].includes(mode)) {
+          reject("Git blob file type or mode differs");
+        }
+        dataHash(size, expected.id);
+      }
+      consumePadding(size);
+      seen.add(entry);
+      totalMembers += 1;
+      if (totalMembers > expectedObjects.size) reject("excess tar member count");
+    }
+    reject("source tar lacks final zero terminator");
+  } finally { closeSync(fd); }
 }
 
 function reserveArchive(filename) {
@@ -255,10 +437,7 @@ export async function prepareOfflineReleaseBundle({
     await runner("git", ["archive", "--format=tar", `--output=${sourceArchivePath}`, revision],
       { cwd: repo, env: git.env });
     assertSameArchive(sourceArchivePath, pinned.get(sourceArchivePath));
-    const sourceEntries = requireTarEntries(await runner("tar", ["-tf", sourceArchivePath]), "source");
-    if (sourceEntries.length !== git.paths.length ||
-        new Set(sourceEntries).size !== sourceEntries.length ||
-        sourceEntries.some((entry) => !git.paths.includes(entry))) reject("source archive does not match Git tree listing");
+    const sourceVerified = verifySourceTarAgainstGit(sourceArchivePath, revision, git.objects);
     for (const [role, target] of [["runtime", runtimeArchivePath], ["migrator", migratorArchivePath]]) {
       await runner("docker", ["save", "--output", target, imageMetadata[role].imageId]);
       assertSameArchive(target, pinned.get(target));
@@ -273,6 +452,10 @@ export async function prepareOfflineReleaseBundle({
     writeFileSync(path.join(directory, "ci.json"), bytes, { flag: "wx", mode: 0o600 });
     const inventory = await inventoryOfflineArtifacts({ artifactRoot: directory, sourceArchivePath,
       runtimeArchivePath, migratorArchivePath, expectedRevision: revision, images: imageMetadata });
+    if (inventory.source_archive_sha256 !== sourceVerified.sha256 ||
+        inventory.source_archive_size_bytes !== sourceVerified.sizeBytes) {
+      reject("source tar was changed after authenticated blob verification");
+    }
     if (!sameDirectory(identity, lstatSync(directory, { bigint: true })) ||
         !sameDirectory(beforeParent, lstatSync(parent, { bigint: true }))) reject("staging identity changed");
     return Object.freeze({ directory, sourceArchivePath, runtimeArchivePath, migratorArchivePath,

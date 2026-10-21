@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync,
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { prepareOfflineReleaseBundle } from "./lib/offline-release-bundle.mjs";
+import { prepareOfflineReleaseBundle, verifySourceTarAgainstGit } from "./lib/offline-release-bundle.mjs";
 
 const SOURCE = "https://github.com/bielxdh3/Virki.git";
 const LABEL_SOURCE = "https://github.com/bielxdh3/Virki";
@@ -34,14 +34,14 @@ function manifest(revision) {
   };
 }
 
-function setup(t) {
+function setup(t, { sha256 = false } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "virki-bundle-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repositoryRoot = path.join(root, "repo");
   const stagingParent = path.join(root, "stages");
   mkdirSync(repositoryRoot);
   mkdirSync(stagingParent, { mode: 0o700 });
-  git(repositoryRoot, "init", "-b", "main");
+  git(repositoryRoot, "init", "-b", "main", ...(sha256 ? ["--object-format=sha256"] : []));
   git(repositoryRoot, "config", "user.email", "fixture@example.test");
   git(repositoryRoot, "config", "user.name", "Fixture");
   writeFileSync(path.join(repositoryRoot, "README.md"), "controlled fixture\n");
@@ -180,13 +180,99 @@ test("rejects a valid but substituted source tar even if its paths are individua
   const runner = async (program, args, options) => {
     if (program === "git" && args[0] === "archive") {
       const output = args.find((arg) => arg.startsWith("--output=")).slice("--output=".length);
-      execFileSync("tar", ["-cf", output, "-C", substitutePath, "harmless.txt"]);
+      execFileSync("tar", ["--format=ustar", "-cf", output, "-C", substitutePath, "harmless.txt"]);
       return "";
     }
     return base(program, args, options);
   };
-  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), /source archive does not match Git tree/);
+  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), /source tar contains a member missing from Git/);
   assert.deepEqual(readdirSync(f.stagingParent), []);
+});
+
+test("rejects valid tar with the exact Git member name but attacker-altered blob bytes", async (t) => {
+  const f = setup(t);
+  const base = f.options.runner;
+  const replacement = path.join(f.root, "replacement");
+  mkdirSync(replacement);
+  writeFileSync(path.join(replacement, "README.md"), "ATTACKER CONTROLLED BYTES\n");
+  const runner = async (program, args, opts) => {
+    if (program === "git" && args[0] === "archive") {
+      const output = args.find((part) => part.startsWith("--output=")).slice("--output=".length);
+      execFileSync("tar", ["--format=ustar", "-cf", output, "-C", replacement, "README.md"]);
+      return "";
+    }
+    return base(program, args, opts);
+  };
+  await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), /blob|content|tar/u);
+  assert.deepEqual(readdirSync(f.stagingParent), []);
+});
+
+test("rejects same-name source members with changed executable mode, duplicates, and PAX metadata", async (t) => {
+  const f = setup(t);
+  const base = f.options.runner;
+  for (const variant of ["mode", "duplicate", "pax"]) {
+    const runner = async (program, args, opts) => {
+      if (program === "git" && args[0] === "archive") {
+        const output = args.find((part) => part.startsWith("--output=")).slice("--output=".length);
+        if (variant === "mode") {
+          execFileSync("tar", ["--format=ustar", "--mode=0600", "-cf", output, "-C", f.repositoryRoot, "README.md"]);
+        } else if (variant === "duplicate") {
+          execFileSync("tar", ["--format=ustar", "-cf", output, "-C", f.repositoryRoot, "README.md", "README.md"]);
+        } else {
+          execFileSync("tar", ["--format=pax", "-cf", output, "-C", f.repositoryRoot, "README.md"]);
+        }
+        return "";
+      }
+      return base(program, args, opts);
+    };
+    await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), variant);
+    assert.deepEqual(readdirSync(f.stagingParent), []);
+  }
+});
+
+test("accepts real Git archive with executable blob, directory, and long UTF-8 PAX path", async (t) => {
+  const f = setup(t);
+  const folder = "unicode-ç-".repeat(8);
+  const filename = `build-${"a".repeat(62)}.sh`;
+  mkdirSync(path.join(f.repositoryRoot, folder));
+  writeFileSync(path.join(f.repositoryRoot, folder, filename), "#!/bin/sh\necho verified\n");
+  git(f.repositoryRoot, "add", ".");
+  git(f.repositoryRoot, "update-index", "--chmod=+x", `${folder}/${filename}`);
+  git(f.repositoryRoot, "config", "core.filemode", "false");
+  git(f.repositoryRoot, "commit", "-m", "nested executable and long path");
+  const revision = git(f.repositoryRoot, "rev-parse", "HEAD");
+  git(f.repositoryRoot, "update-ref", "refs/remotes/origin/main", revision);
+  writeFileSync(f.ciManifestPath, JSON.stringify(manifest(revision)));
+  const base = f.options.runner;
+  const runner = async (program, args, opts) => {
+    const output = await base(program, args, opts);
+    if (program === "docker" && args[0] === "image") {
+      const value = JSON.parse(output);
+      value[0].Config.Labels["org.opencontainers.image.revision"] = revision;
+      return JSON.stringify(value);
+    }
+    return output;
+  };
+  const bundle = await prepareOfflineReleaseBundle({ ...f.options, revision, runner });
+  assert.equal(bundle.inventory.source_sha, revision);
+  assert.ok(bundle.inventory.source_archive_size_bytes > 0);
+});
+
+test("authenticates a Git SHA-256 repository using 64-character blob object IDs", async (t) => {
+  const f = setup(t, { sha256: true });
+  const revision = git(f.repositoryRoot, "rev-parse", "HEAD");
+  assert.match(revision, /^[0-9a-f]{64}$/u);
+  const archive = path.join(f.root, "sha256.tar");
+  execFileSync("git", ["archive", "--format=tar", `--output=${archive}`, revision], { cwd: f.repositoryRoot });
+  const [entry] = git(f.repositoryRoot, "ls-tree", "-r", "HEAD").split("\n");
+  const match = /^(100644|100755) blob ([0-9a-f]{64})\t(.+)$/u.exec(entry);
+  assert.ok(match);
+  assert.doesNotThrow(() => verifySourceTarAgainstGit(archive, revision, new Map([
+    [match[3], { mode: match[1], type: "blob", id: match[2] }],
+  ])));
+  // Release policy currently requires a 40-hex commit even though the blob
+  // verifier understands both object-hash formats.
+  await assert.rejects(prepareOfflineReleaseBundle(f.options), /invalid release inputs/);
 });
 
 test("rejects export-ignore attributes from the committed SHA", async (t) => {
