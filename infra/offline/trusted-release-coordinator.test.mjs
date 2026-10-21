@@ -1,19 +1,40 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
+  readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { encodeCanonicalOfflineReleaseManifest } from "../../scripts/lib/offline-release-attestation.mjs";
 
-// Execute ONLY in an ephemeral Linux container, never on the administrator's
-// host: these tests create fixed-path root trust stores under /etc and /var.
+// Execute ONLY inside an ephemeral, isolated Linux container. The tests write
+// /etc/machine-id and recursively clear fixture paths under /etc and /var/lib.
+// The environment opt-in and /.dockerenv are insufficient isolation proof.
+// Confirm ALL of the writable test roots are empty, genuine tmpfs mounts
+// before even copying the fixture implementation.
+const TMPFS_MAGIC = 0x01021994;
+const fixtureMounts = ["/etc", "/var/lib", "/usr/local/lib/virki"];
+const isolatedRoots = fixtureMounts.every((directory) => {
+  try {
+    const stat = lstatSync(directory);
+    return statfsSync(directory).type === TMPFS_MAGIC &&
+      stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === 0 &&
+      realpathSync.native(directory) === directory;
+  } catch {
+    return false;
+  }
+});
 if (process.env.VIRKI_COORDINATOR_DISPOSABLE_CONTAINER !== "1" ||
     !existsSync("/.dockerenv") || process.platform !== "linux" ||
-    process.arch !== "x64" || process.getuid?.() !== 0) {
-  throw new Error("Trusted coordinator integration test requires disposable root Linux container");
+    process.arch !== "x64" || process.getuid?.() !== 0 || !isolatedRoots ||
+    existsSync("/etc/machine-id") || existsSync("/etc/virki") ||
+    existsSync("/var/lib/virki") ||
+    readdirSync("/usr/local/lib/virki").length !== 0) {
+  throw new Error("Coordinator fixture refused: empty isolated tmpfs /etc, /var/lib and /usr/local/lib/virki inside disposable root Linux container required");
 }
 const realRelease = os.release;
 // Docker Desktop containers inherit the WSL kernel; simulate ONLY that kernel

@@ -85,6 +85,20 @@ hosted CodeQL approval or as permission to deploy.
    Piping their unverified source script to `bash` is expressly forbidden for
    offline release. No deployed marker may claim hosted CI success.
 
+## Disposable coordinator regression (explicit opt-in)
+
+Run `npm run test:offline:coordinator:container` only where the pinned
+Node 22.23.3 Docker image is already cached. The dedicated launcher uses
+`docker run --rm --network none --read-only`, an immutable image digest,
+a read-only checkout mount, `--cap-drop=ALL`, and isolated `tmpfs` mounts
+for `/etc`, `/var/lib`, `/usr/local/lib/virki`, and `/tmp`.
+The test refuses to start unless the protected directories are empty
+real tmpfs mounts inside a disposable root container. Its fixtures never
+use the host's trust roots, machine ID, Git pin or production ledger.
+This destructive-path fixture is deliberately excluded from ordinary
+`test:production-revision` and must be run separately. A successful
+`staged` result from it is never release authorization.
+
 ## Evidence and disposition
 
 Before approval, retain the exact final SHA, `run-manifest.json` with all
