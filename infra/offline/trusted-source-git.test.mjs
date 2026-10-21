@@ -10,6 +10,26 @@ import {
 } from "./trusted-source-git.mjs";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+
+test("fixed trusted Git store is disjoint from the exclusive protected release ledger", () => {
+  // Portable check of the native-host trust layout. The Linux root-only
+  // integration tests below verify ownership, 0700 mode and alias rejection.
+  const source = readFileSync(new URL("./trusted-source-git.mjs", import.meta.url), "utf8");
+  const policy = readFileSync(new URL("../../scripts/lib/offline-trusted-release-policy.mjs", import.meta.url), "utf8");
+  const fixedPath = (contents, name) => {
+    const found = new RegExp(`^const ${name} = "([^"]+)";$`, "mu").exec(contents);
+    assert.ok(found, `missing host-pinned ${name} directory`);
+    return found[1];
+  };
+  const trustedGit = fixedPath(source, "FIXED_TRUSTED_GIT");
+  const ledgerDirectory = fixedPath(policy, "LEDGER_DIRECTORY");
+  assert.equal(trustedGit, "/var/lib/virki/offline-source/trusted.git");
+  assert.equal(ledgerDirectory, "/var/lib/virki/offline-release");
+  assert.ok(path.posix.isAbsolute(trustedGit));
+  assert.ok(!trustedGit.startsWith(`${ledgerDirectory}/`));
+  assert.ok(!ledgerDirectory.startsWith(`${trustedGit}/`));
+});
+
 function git(args, options = {}) {
   return execFileSync("git", args, { encoding: "utf8", timeout: 10000,
     env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",

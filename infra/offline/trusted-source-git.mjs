@@ -8,7 +8,8 @@ import { inspectUntrustedOfflineCandidate } from "./trusted-host-entry.mjs";
 
 // These locations are independently installed by the host administrator.
 // Never load them from the candidate, its manifest, environment or CLI.
-const FIXED_TRUSTED_GIT = "/var/lib/virki/offline-release/trusted-source.git";
+// This root-owned 0700 bare store must stay outside the ledger-only directory.
+const FIXED_TRUSTED_GIT = "/var/lib/virki/offline-source/trusted.git";
 const FIXED_HOST_PIN = "/etc/virki/offline-source-commit.sha";
 const REVISION = /^[0-9a-f]{40}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
