@@ -281,7 +281,7 @@ export async function prepareOfflineReleaseBundle({
     try { removeOwnedStaging(directory, identity); }
     catch (cleanupError) {
       throw new AggregateError([error, cleanupError],
-        "Offline preparation failed and staging needs manual inspection", { cause: error });
+        "Offline preparation failed and staging needs manual inspection", { cause: cleanupError });
     }
     throw error;
   }
