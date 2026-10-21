@@ -128,6 +128,20 @@ test("protected email values are encrypted at rest and reconstruct only in memor
   });
 });
 
+test("protected email values reject shortened authentic GCM tags", () => {
+  const env = { NODE_ENV: "test" };
+  const payload = protectEmailPayload({ publicValues: {}, protectedValues: { code: "123456" } }, env);
+  assert.ok(payload.protectedValues);
+  const shortened = {
+    ...payload,
+    protectedValues: {
+      ...payload.protectedValues,
+      tag: Buffer.from(payload.protectedValues.tag, "base64url").subarray(0, 4).toString("base64url")
+    }
+  };
+  assert.throws(() => decryptEmailPayload(shortened, env));
+});
+
 test("deterministic transport and localized templates stay provider-neutral", async () => {
   const testTransport = createDeterministicTestTransport();
   await testTransport.transport.send(

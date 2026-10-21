@@ -184,7 +184,7 @@ export function encryptTotpSecret(secret: string, env: NodeJS.ProcessEnv = proce
 export function decryptTotpSecret(value: string, env: NodeJS.ProcessEnv = process.env): string {
   const [version, ivValue, tagValue, ciphertextValue] = value.split(":");
   if (version !== `v${TOTP_KEY_VERSION}` || !ivValue || !tagValue || !ciphertextValue) throw new SecurityMutationError();
-  const decipher = createDecipheriv("aes-256-gcm", getTotpKey(env), Buffer.from(ivValue, "base64url"));
+  const decipher = createDecipheriv("aes-256-gcm", getTotpKey(env), Buffer.from(ivValue, "base64url"), { authTagLength: 16 });
   decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
   return Buffer.concat([decipher.update(Buffer.from(ciphertextValue, "base64url")), decipher.final()]).toString("utf8");
 }
