@@ -3,6 +3,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import os from "node:os";
 import test from "node:test";
 import { encodeCanonicalOfflineReleaseManifest, verifyOfflineReleaseAttestation } from "./lib/offline-release-attestation.mjs";
+import { approveOfflineReleaseManually } from "./lib/offline-release-approval.mjs";
 import {
   prepareOfflineTrustedReleasePolicy,
   verifyInstalledOfflineRelease,
@@ -15,7 +16,8 @@ const now = 1_800_000_000;
 const prior = sha("a");
 const next = sha("b");
 const hash = (source) => createHash("sha256").update(source).digest("hex");
-const keyPin = (key) => ({
+const keyPin = (key, keyId) => ({
+  keyId,
   publicKeyPem: key.export({ type: "spki", format: "pem" }),
   pinSha256: hash(key.export({ type: "spki", format: "der" })),
 });
@@ -25,16 +27,19 @@ function fixture() {
   const builder = generateKeyPairSync("ed25519");
   const owner = generateKeyPairSync("ed25519");
   const policy = {
-    version: 1,
+    // Host policy v2 deliberately refuses the legacy pin-only policy: a
+    // revocation by signer keyId cannot be represented in the v1 format.
+    version: 2,
     mode: "offline-signed-v1",
     enabled: true,
     ownerAssuranceAccepted: true,
     hostIdentitySha256: host,
     ledgerAnchorSha: prior,
     platform: "linux/amd64",
-    builder: keyPin(builder.publicKey),
-    owner: keyPin(owner.publicKey),
-    revokedPins: [],
+    builder: keyPin(builder.publicKey, "trusted-builder-2026"),
+    owner: keyPin(owner.publicKey, "trusted-owner-2026"),
+    revokedKeyIds: [],
+    revokedPinsSha256: [],
   };
   const ledger = { version: 1, anchorSha: prior, entries: [] };
   const manifest = {
@@ -104,6 +109,8 @@ test("validates pinned host policy and ledger then verifies both genuine domain-
   assert.equal(prepared.hostIdentitySha256, host);
   assert.equal(prepared.predecessorSha, prior);
   assert.equal(prepared.lastSequence, 0);
+  assert.equal(prepared.trustedKeys.builder.keyId, "trusted-builder-2026");
+  assert.equal(prepared.trustedKeys.owner.keyId, "trusted-owner-2026");
   const result = verifyOfflineReleaseAttestation({
     manifestBytes: sample.manifestBytes,
     signatures: sample.signatures,
@@ -123,14 +130,34 @@ test("rejects unsigned, disabled, unauthorised or unpinned trust policy", async 
     ["wrong platform", (s) => { s.policy.platform = "linux/arm64"; }],
     ["forged host", (s) => { s.policy.hostIdentitySha256 = digest("0"); }],
     ["same key", (s) => { s.policy.owner = s.policy.builder; }],
-    ["owner revoked", (s) => { s.policy.revokedPins = [s.policy.owner.pinSha256]; }],
-    ["builder revoked", (s) => { s.policy.revokedPins = [s.policy.builder.pinSha256]; }],
+    ["owner pin revoked", (s) => { s.policy.revokedPinsSha256 = [s.policy.owner.pinSha256]; }],
+    ["builder pin revoked", (s) => { s.policy.revokedPinsSha256 = [s.policy.builder.pinSha256]; }],
+    ["owner keyId revoked but pin NOT revoked", (s) => { s.policy.revokedKeyIds = [s.policy.owner.keyId]; }],
+    ["builder keyId revoked but pin NOT revoked", (s) => { s.policy.revokedKeyIds = [s.policy.builder.keyId]; }],
+    ["legacy pin-only policy forbidden", (s) => {
+      s.policy.version = 1;
+      s.policy.builder = { publicKeyPem: s.policy.builder.publicKeyPem, pinSha256: s.policy.builder.pinSha256 };
+      s.policy.owner = { publicKeyPem: s.policy.owner.publicKeyPem, pinSha256: s.policy.owner.pinSha256 };
+      delete s.policy.revokedKeyIds;
+      delete s.policy.revokedPinsSha256;
+      s.policy.revokedPins = [];
+    }],
+    ["unrecognized policy version", (s) => { s.policy.version = 1; }],
+    ["reassigned duplicate signer keyIds", (s) => { s.policy.owner.keyId = s.policy.builder.keyId; }],
+    ["missing builder keyId", (s) => { delete s.policy.builder.keyId; }],
+    ["malformed builder keyId", (s) => { s.policy.builder.keyId = "builder id"; }],
+    ["oversized builder keyId", (s) => { s.policy.builder.keyId = "b".repeat(65); }],
+    ["unexpected embedded keyId alias", (s) => { s.policy.builder.identity = "trusted-builder-2026"; }],
     ["forged owner pin", (s) => { s.policy.owner.pinSha256 = digest("0"); }],
     ["invalid owner PEM", (s) => { s.policy.owner.publicKeyPem = "bad"; }],
     ["unexpected private key", (s) => { s.policy.owner.privateKeyPem = "secret"; }],
     ["unknown policy field", (s) => { s.policy.extra = "accepted"; }],
-    ["duplicate revocation", (s) => { s.policy.revokedPins = [digest("f"), digest("f")]; }],
-    ["oversized revocation list", (s) => { s.policy.revokedPins = Array.from({length: 129}, (_, i) => i.toString(16).padStart(64, "0")); }],
+    ["duplicate pin revocation", (s) => { s.policy.revokedPinsSha256 = [digest("f"), digest("f")]; }],
+    ["duplicate key ID revocation", (s) => { s.policy.revokedKeyIds = ["former-owner", "former-owner"]; }],
+    ["malformed key ID revocation", (s) => { s.policy.revokedKeyIds = ["from bundle/../../etc"]; }],
+    ["oversized pin revocation list", (s) => { s.policy.revokedPinsSha256 = Array.from({length: 129}, (_, i) => i.toString(16).padStart(64, "0")); }],
+    ["oversized ID revocation list", (s) => { s.policy.revokedKeyIds = Array.from({length: 129}, (_, i) => `retired-${i}`); }],
+    ["unrecognized old pin revocation field", (s) => { s.policy.revokedPins = []; }],
   ]) {
     await t.test(name, () => {
       const sample = fixture();
@@ -138,6 +165,58 @@ test("rejects unsigned, disabled, unauthorised or unpinned trust policy", async 
       assert.throws(() => prepare(sample));
     });
   }
+});
+
+test("host independently enforces signer-compatible key-ID and public-pin revocation semantics", () => {
+  const sample = fixture();
+  sample.policy.revokedKeyIds = ["retired-builder-2025", "retired-owner-2025"];
+  sample.policy.revokedPinsSha256 = [digest("f")];
+  const prepared = prepare(sample);
+  assert.equal(prepared.trustedKeys.builder.keyId, sample.policy.builder.keyId);
+  assert.equal(prepared.trustedKeys.owner.keyId, sample.policy.owner.keyId);
+  assert.equal(verifyOfflineReleaseAttestation({
+    manifestBytes: sample.manifestBytes, signatures: sample.signatures,
+    trustedKeys: prepared.trustedKeys, expected: sample.expected, nowSeconds: now,
+  }).sourceSha, next);
+  // Revocation is evaluated against the fixed-root host policy's own key IDs.
+  // No key identifier is accepted from candidate or manifest inputs.
+  sample.policy.revokedKeyIds = [sample.policy.builder.keyId];
+  assert.throws(() => prepare(sample), /revoked/u);
+  sample.policy.revokedKeyIds = [];
+  sample.policy.revokedPinsSha256 = [sample.policy.builder.pinSha256];
+  assert.throws(() => prepare(sample), /revoked/u);
+});
+
+test("independent owner signer and fixed-root host both refuse a revoked builder ID without a revoked pin", () => {
+  const sample = fixture();
+  const revokedBuilderId = sample.policy.builder.keyId;
+  const reviewedManifestSha256 = hash(sample.manifestBytes);
+  const signerPolicy = {
+    version: 1, mode: "EXPLICIT_OWNER_MANUAL_OFFLINE_V1", enabled: true,
+    builderKeyId: revokedBuilderId, ownerKeyId: sample.policy.owner.keyId,
+    notBeforeSeconds: now - 100, notAfterSeconds: now + 100,
+    revokedKeyIds: [revokedBuilderId], revokedPinsSha256: [],
+  };
+  const signerInput = {
+    manifestBytes: sample.manifestBytes,
+    builderSignatureBase64: sample.signatures.builder,
+    trustedKeys: { builder: sample.policy.builder, owner: sample.policy.owner },
+    ownerPrivateKey: sample.owner.privateKey,
+    reviewedManifestSha256,
+    expected: sample.expected,
+    nowSeconds: now,
+    trustedPolicy: signerPolicy,
+    ownerAcknowledgement: {
+      manifestSha256: reviewedManifestSha256, codeql: "NOT_RUN", hostedCi: "NOT_RUN",
+      localEvidence: "LOCAL_ONLY", sast: "SEMGREP_OSS_IS_NOT_CODEQL",
+      reducedAssuranceAcceptance: "I_EXPLICITLY_ACCEPT_REDUCED_OFFLINE_ASSURANCE",
+    },
+  };
+  assert.throws(() => approveOfflineReleaseManually(signerInput), /revoked/u);
+  // This is separately provisioned host state, not an ID supplied via a bundle.
+  sample.policy.revokedKeyIds = [revokedBuilderId];
+  assert.equal(sample.policy.revokedPinsSha256.length, 0);
+  assert.throws(() => prepare(sample), /revoked/u);
 });
 
 test("rejects unknown, replayed, skipped or corrupt ledger history", async (t) => {

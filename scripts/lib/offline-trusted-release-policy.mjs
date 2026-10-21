@@ -19,7 +19,11 @@ const LEDGER_LIMIT = 1024 * 1024;
 const SHA = /^[a-f0-9]{40}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const NONCE = /^[a-f0-9]{32}$/u;
-const POLICY_FIELDS = ["version", "mode", "enabled", "ownerAssuranceAccepted", "hostIdentitySha256", "ledgerAnchorSha", "platform", "builder", "owner", "revokedPins"];
+// Identical keyId grammar and dual revocation domains to the independent
+// manual signer policy; identifiers and public keys are provisioned here by
+// the host operator, never taken from an uploaded manifest or candidate.
+const KEY_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/u;
+const POLICY_FIELDS = ["version", "mode", "enabled", "ownerAssuranceAccepted", "hostIdentitySha256", "ledgerAnchorSha", "platform", "builder", "owner", "revokedKeyIds", "revokedPinsSha256"];
 const ENTRY_FIELDS = ["sequence", "priorSha", "nextSha", "manifestSha256", "nonce", "approvalDigest"];
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 const DIRECTORY_FLAGS = FILE_FLAGS | constants.O_DIRECTORY;
@@ -51,7 +55,9 @@ function parseCanonicalJson(bytes, max, fields, label) {
   return parsed;
 }
 function pinnedPublicKey(entry, role) {
-  exactRecord(entry, ["publicKeyPem", "pinSha256"], role + " public-key schema invalid");
+  exactRecord(entry, ["keyId", "publicKeyPem", "pinSha256"], role + " public-key schema invalid");
+  expect(typeof entry.keyId === "string" && KEY_ID.test(entry.keyId),
+    role + " independently pinned key ID is missing or malformed");
   expect(typeof entry.publicKeyPem === "string" && entry.publicKeyPem.length <= 2048 &&
     DIGEST.test(entry.pinSha256), role + " key material invalid");
   let key;
@@ -63,7 +69,13 @@ function pinnedPublicKey(entry, role) {
   expect(key.asymmetricKeyType === "ed25519", role + " key must be Ed25519");
   const pin = createHash("sha256").update(key.export({ type: "spki", format: "der" })).digest("hex");
   expect(pin === entry.pinSha256, role + " public key mismatches owner-pinned hash");
-  return Object.freeze({ publicKeyPem: entry.publicKeyPem, pinSha256: pin });
+  return Object.freeze({ keyId: entry.keyId, publicKeyPem: entry.publicKeyPem, pinSha256: pin });
+}
+function validateRevoked(values, pattern, label) {
+  expect(Array.isArray(values) && values.length <= 128 &&
+    values.every((value) => typeof value === "string" && pattern.test(value)) &&
+    new Set(values).size === values.length,
+  label + " revocations malformed or duplicated");
 }
 function checkLedger(ledger) {
   expect(ledger.version === 1 && SHA.test(ledger.anchorSha) &&
@@ -99,20 +111,25 @@ export function prepareOfflineTrustedReleasePolicy({
   expect(typeof measuredHostIdentitySha256 === "string" && DIGEST.test(measuredHostIdentitySha256),
     "independently measured host identity required");
   const policy = parseCanonicalJson(policyBytes, POLICY_LIMIT, POLICY_FIELDS, "trust policy");
-  expect(policy.version === 1 && policy.mode === "offline-signed-v1" &&
+  // Policy v1 contained only pin revocations; accepting it would ignore ID
+  // revocations made under the manually approved signer policy. Refuse it
+  // until the operator independently provisions a complete v2 host policy.
+  expect(policy.version === 2 && policy.mode === "offline-signed-v1" &&
     policy.enabled === true && policy.ownerAssuranceAccepted === true &&
     policy.platform === "linux/amd64", "offline policy not explicitly accepted");
   expect(policy.hostIdentitySha256 === measuredHostIdentitySha256, "trusted host marker mismatch");
   expect(SHA.test(policy.ledgerAnchorSha), "protected ledger anchor pin invalid");
   const builder = pinnedPublicKey(policy.builder, "builder");
   const owner = pinnedPublicKey(policy.owner, "owner");
-  expect(builder.pinSha256 !== owner.pinSha256, "builder and owner keys must differ");
-  expect(Array.isArray(policy.revokedPins) && policy.revokedPins.length <= 128 &&
-    policy.revokedPins.every((pin) => typeof pin === "string" && DIGEST.test(pin)) &&
-    new Set(policy.revokedPins).size === policy.revokedPins.length,
-  "revocation list malformed or duplicated");
-  expect(!policy.revokedPins.includes(builder.pinSha256) &&
-    !policy.revokedPins.includes(owner.pinSha256), "pinned signing key is revoked");
+  expect(builder.pinSha256 !== owner.pinSha256 && builder.keyId !== owner.keyId,
+    "builder and owner keys must have distinct independently pinned IDs and keys");
+  validateRevoked(policy.revokedKeyIds, KEY_ID, "key ID");
+  validateRevoked(policy.revokedPinsSha256, DIGEST, "public-key pin");
+  expect(!policy.revokedKeyIds.includes(builder.keyId) &&
+    !policy.revokedKeyIds.includes(owner.keyId) &&
+    !policy.revokedPinsSha256.includes(builder.pinSha256) &&
+    !policy.revokedPinsSha256.includes(owner.pinSha256),
+  "pinned signing key is revoked by independently installed ID or public-key pin");
   const ledger = parseCanonicalJson(ledgerBytes, LEDGER_LIMIT,
     ["version", "anchorSha", "entries"], "protected ledger");
   expect(ledger.anchorSha === policy.ledgerAnchorSha, "ledger does not match independently pinned anchor");
