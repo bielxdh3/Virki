@@ -207,6 +207,73 @@ test("rejects valid tar with the exact Git member name but attacker-altered blob
   assert.deepEqual(readdirSync(f.stagingParent), []);
 });
 
+test("rejects TAR headers that forge owner IDs, names, or extraction metadata", async (t) => {
+  const f = setup(t);
+  const base = f.options.runner;
+  const rewriteNumber = (header, start, value) => {
+    header.write(`${value.toString(8).padStart(7, "0")}\0`, start, 8, "ascii");
+  };
+  for (const variant of ["uid", "gid", "uname", "gname", "deviceMajor", "deviceMinor", "mtime"]) {
+    const runner = async (program, args, opts) => {
+      const result = await base(program, args, opts);
+      if (program === "git" && args[0] === "archive") {
+        const output = args.find((arg) => arg.startsWith("--output=")).slice("--output=".length);
+        const tar = readFileSync(output);
+        let offset = 0;
+        while (offset < tar.length) {
+          const header = tar.subarray(offset, offset + 512);
+          const kind = String.fromCharCode(header[156]);
+          if (kind === "0" || kind === "\0") {
+            if (variant === "uid") rewriteNumber(header, 108, 1234);
+            if (variant === "gid") rewriteNumber(header, 116, 1234);
+            if (variant === "uname") { header.fill(0, 265, 297); header.write("attacker", 265); }
+            if (variant === "gname") { header.fill(0, 297, 329); header.write("attacker", 297); }
+            if (variant === "deviceMajor") rewriteNumber(header, 329, 1234);
+            if (variant === "deviceMinor") rewriteNumber(header, 337, 1234);
+            if (variant === "mtime") rewriteNumber(header, 136, 42);
+            header.fill(32, 148, 156);
+            const checksum = header.reduce((total, byte) => total + byte, 0);
+            header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+            writeFileSync(output, tar);
+            return result;
+          }
+          const size = parseInt(header.toString("ascii", 124, 136).replace(/\0.*/u, "").trim(), 8);
+          offset += 512 + Math.ceil(size / 512) * 512;
+        }
+        throw new Error("source tar regular header absent");
+      }
+      return result;
+    };
+    await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), /owner|metadata|tar|mtime|time/iu, variant);
+    assert.deepEqual(readdirSync(f.stagingParent), [], variant);
+  }
+});
+
+test("Git's canonical ustar ownership and timestamp are stable in a real archive", (t) => {
+  const f = setup(t);
+  const archive = path.join(f.root, "real-source.tar");
+  execFileSync("git", ["archive", "--format=tar", `--output=${archive}`, f.revision], { cwd: f.repositoryRoot });
+  const tar = readFileSync(archive);
+  let offset = 0;
+  while (offset < tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    const kind = String.fromCharCode(header[156]);
+    if (kind === "0" || kind === "\0") {
+      const octal = (start, end) => parseInt(header.toString("ascii", start, end).replace(/\0.*/u, "").trim(), 8);
+      const name = (start, end) => header.toString("utf8", start, end).replace(/\0.*$/u, "");
+      assert.deepEqual({ uid: octal(108, 116), gid: octal(116, 124), uname: name(265, 297),
+        gname: name(297, 329), major: octal(329, 337), minor: octal(337, 345),
+        mtime: octal(136, 148) },
+      { uid: 0, gid: 0, uname: "root", gname: "root", major: 0, minor: 0,
+        mtime: Number(git(f.repositoryRoot, "show", "-s", "--format=%ct", f.revision)) });
+      return;
+    }
+    const size = parseInt(header.toString("ascii", 124, 136).replace(/\0.*/u, "").trim(), 8);
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  assert.fail("missing Git regular header");
+});
+
 test("rejects same-name source members with changed executable mode, duplicates, and PAX metadata", async (t) => {
   const f = setup(t);
   const base = f.options.runner;
@@ -269,7 +336,7 @@ test("authenticates a Git SHA-256 repository using 64-character blob object IDs"
   assert.ok(match);
   assert.doesNotThrow(() => verifySourceTarAgainstGit(archive, revision, new Map([
     [match[3], { mode: match[1], type: "blob", id: match[2] }],
-  ])));
+  ]), Number(git(f.repositoryRoot, "show", "-s", "--format=%ct", revision))));
   // Release policy currently requires a 40-hex commit even though the blob
   // verifier understands both object-hash formats.
   await assert.rejects(prepareOfflineReleaseBundle(f.options), /invalid release inputs/);

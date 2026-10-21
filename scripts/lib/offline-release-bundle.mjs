@@ -142,6 +142,10 @@ async function gitSourceGate(repositoryRoot, revision, runner) {
     objects.set(match[4], { mode: match[1], type: match[2], id: match[3] });
   }
   if (!paths.length) reject("empty source tree");
+  const timestampRaw = await git("show", "-s", "--format=%ct", revision);
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(timestampRaw) ||
+      !Number.isSafeInteger(Number(timestampRaw))) reject("Git commit timestamp is invalid");
+  const commitTimestamp = Number(timestampRaw);
   const attrs = await runner("git", ["check-attr", "--cached", "-z", "export-ignore", "export-subst", "--stdin"],
     { cwd: repositoryRoot, env, input: paths.join("\0") + "\0" });
   const cells = attrs.split("\0").filter(Boolean);
@@ -150,7 +154,7 @@ async function gitSourceGate(repositoryRoot, revision, runner) {
     if (!paths.includes(cells[i]) || !["export-ignore", "export-subst"].includes(cells[i + 1]) ||
         !["unspecified", "unset", "false"].includes(cells[i + 2])) reject("Git archive attributes could alter source");
   }
-  return { env, git, paths, objects };
+  return { env, git, paths, objects, commitTimestamp };
 }
 
 async function readDockerImage(imageId, role, revision, runner) {
@@ -185,7 +189,10 @@ function requireTarEntries(list, role) {
 // pinned inode; neither `tar -tf` nor the archive producer authenticates bytes.
 // GNU sparse/longname/link entries, base-256 numbers, and arbitrary PAX keys
 // are intentionally unsupported. No archive member is extracted or executed.
-export function verifySourceTarAgainstGit(filename, expectedRevision, expectedObjects) {
+export function verifySourceTarAgainstGit(filename, expectedRevision, expectedObjects, expectedCommitTimestamp) {
+  if (!Number.isSafeInteger(expectedCommitTimestamp) || expectedCommitTimestamp < 0) {
+    reject("authenticated Git commit timestamp is required for source tar verification");
+  }
   const pathStat = lstatSync(filename, { bigint: true });
   if (!pathStat.isFile() || pathStat.isSymbolicLink() || pathStat.nlink !== 1n ||
       pathStat.size < 1024n || pathStat.size > BigInt(MAX_ARCHIVE_BYTES) ||
@@ -304,6 +311,17 @@ export function verifySourceTarAgainstGit(filename, expectedRevision, expectedOb
       }
       if (suppliedChecksum !== computed || textField(small, 257, 263) !== "ustar" ||
           textField(small, 263, 265) !== "00") reject("invalid ustar header or checksum");
+      // All headers, including PAX metadata, must retain Git archive's
+      // deterministic owner/group and commit timestamp. Root tar extraction
+      // can otherwise apply attacker-selected ownership or modification time
+      // even when each Git blob's contents and pathname match exactly.
+      if (octal(small, 108, 116) !== 0 || octal(small, 116, 124) !== 0 ||
+          textField(small, 265, 297) !== "root" || textField(small, 297, 329) !== "root" ||
+          octal(small, 329, 337) !== 0 || octal(small, 337, 345) !== 0 ||
+          octal(small, 136, 148) !== expectedCommitTimestamp ||
+          small.subarray(500, 512).some((value) => value !== 0)) {
+        reject("source tar owner or extraction metadata differs from canonical Git archive");
+      }
       const mode = octal(small, 100, 108);
       const size = octal(small, 124, 136);
       const kind = String.fromCharCode(small[156]);
@@ -437,7 +455,7 @@ export async function prepareOfflineReleaseBundle({
     await runner("git", ["archive", "--format=tar", `--output=${sourceArchivePath}`, revision],
       { cwd: repo, env: git.env });
     assertSameArchive(sourceArchivePath, pinned.get(sourceArchivePath));
-    const sourceVerified = verifySourceTarAgainstGit(sourceArchivePath, revision, git.objects);
+    const sourceVerified = verifySourceTarAgainstGit(sourceArchivePath, revision, git.objects, git.commitTimestamp);
     for (const [role, target] of [["runtime", runtimeArchivePath], ["migrator", migratorArchivePath]]) {
       await runner("docker", ["save", "--output", target, imageMetadata[role].imageId]);
       assertSameArchive(target, pinned.get(target));
