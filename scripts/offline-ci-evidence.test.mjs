@@ -92,6 +92,28 @@ test("rejects malformed, oversized or ambiguous raw bytes", async (suite) => {
   }
 });
 
+test("rejects duplicate root, escaped and nested keys while preserving ordinary pretty JSON", () => {
+  const manifest = goodManifest();
+  const base = JSON.stringify(manifest);
+  const pretty = JSON.stringify(manifest, null, 2);
+  assert.equal(validateOfflineCiEvidence(Buffer.from(pretty), revision).ok, true);
+  const attempts = [
+    base.replace('"exitCode":0', '"exitCode":1,"exitCode":0'),
+    base.replace('"exitCode":0', '"exit\\u0043ode":1,"exitCode":0'),
+    base.replace('"failedStages":[]', '"failedStages":["masked"],"failedStages":[]'),
+    base.replace('"durationMs":1000', '"durationMs":-1,"durationMs":1000'),
+    base.replace('"name":"tooling-policy-dependencies"', '"name":"fake","name":"tooling-policy-dependencies"'),
+    base.replace('"untrackedFiles":[]', '"untrackedFiles":[{"name":"a","name":"b"}]'),
+    base.replace('"stages":[', '"unknownAuthorize":true,"stages":['),
+    base.replace('"durationMs":1000', '"unreviewed":true,"durationMs":1000'),
+  ];
+  for (const [index, altered] of attempts.entries()) {
+    assert.notEqual(altered, base, `fixture mutation ${index} must apply`);
+    assert.throws(() => validateOfflineCiEvidence(Buffer.from(altered), revision),
+      /Invalid offline CI manifest/u, `invalid CI evidence variant ${index} must fail`);
+  }
+});
+
 test("rejects fabricated, duplicated, partial and nonzero stages", async (suite) => {
   const cases = {
     "missing stage": (m) => { m.stages.pop(); },
