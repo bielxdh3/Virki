@@ -15,6 +15,7 @@ const revision = "a".repeat(40);
 const predecessor = "b".repeat(40);
 const now = 1_800_000_000;
 const repo = "https://github.com/bielxdh3/Virki.git";
+const ociSource = "https://github.com/bielxdh3/Virki";
 const source = Buffer.from("source tar fixture");
 const runtime = Buffer.from("runtime image tar fixture");
 const migrator = Buffer.from("migrator image tar fixture");
@@ -47,9 +48,9 @@ function fixture(t) {
   ]) writeFileSync(file, bytes, { mode: 0o600, flag: "wx" });
   const images = {
     runtime: { role: "runtime", imageId: `sha256:${digest("c")}`, sizeBytes: 1024, os: "linux", architecture: "amd64",
-      labels: { "org.opencontainers.image.revision": revision, "org.opencontainers.image.source": repo } },
+      labels: { "org.opencontainers.image.revision": revision, "org.opencontainers.image.source": ociSource } },
     migrator: { role: "migrator", imageId: `sha256:${digest("d")}`, sizeBytes: 2048, os: "linux", architecture: "amd64",
-      labels: { "org.opencontainers.image.revision": revision, "org.opencontainers.image.source": repo } },
+      labels: { "org.opencontainers.image.revision": revision, "org.opencontainers.image.source": ociSource } },
   };
   const hostState = {
     sourceSha: revision,
