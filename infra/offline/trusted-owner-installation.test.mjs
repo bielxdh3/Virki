@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import {
   chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
-  readdirSync, renameSync, rmSync, statfsSync, symlinkSync, writeFileSync,
+  renameSync, rmSync, statfsSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +21,7 @@ const SHA = (char) => char.repeat(64);
 const domain = Buffer.from("Virki/offline-verifier/owner-install/v1\0");
 const moduleFile = fileURLToPath(new URL("./trusted-owner-installation.mjs", import.meta.url));
 const canonical = (data) => Buffer.from(JSON.stringify(data));
+const interpreterPin = enabled ? sha(readFileSync(process.execPath)) : null;
 
 function ownerKey(keyId) {
   const pair = generateKeyPairSync("ed25519");
@@ -80,7 +81,9 @@ function setup(t) {
     version: 1, mode: "virki-owner-bootstrap-v1", hostIdentitySha256: host,
     signerKeyId: bootstrapSigner.keyId,
     ownerPublicKeySha256: bootstrapSigner.pinSha256,
-    installerSha256: sha(readFileSync(moduleFile)), maxValiditySeconds: 3600,
+    installerSha256: sha(readFileSync(moduleFile)),
+    nodeExecutablePath: process.execPath, nodeExecutableSha256: interpreterPin,
+    maxValiditySeconds: 3600,
     revokedKeyIds: [], revokedApprovalIds: [],
   });
   file(bootstrap, "bootstrap-policy.json", bootstrapPolicy);
@@ -177,6 +180,9 @@ test("tamper, missing independent consent, invalid signature, revoked keys, bad 
     (f) => { const policy = JSON.parse(f.bootstrapPolicy);
       policy.revokedApprovalIds = [f.approval.approvalId];
       file(f.locations.bootstrap, "bootstrap-policy.json", canonical(policy)); },
+    (f) => { const policy = JSON.parse(f.bootstrapPolicy);
+      policy.nodeExecutableSha256 = SHA("c");
+      file(f.locations.bootstrap, "bootstrap-policy.json", canonical(policy)); },
     (f) => file(f.locations.operator, "trust-policy.json", Buffer.from("{}")),
     (f) => file(f.locations.operator, "ledger.json", Buffer.from("{}")),
     (f) => file(f.locations.operator, "verifier-pins.json", Buffer.from("{}")),
@@ -187,6 +193,7 @@ test("tamper, missing independent consent, invalid signature, revoked keys, bad 
     (f) => writeFileSync(path.join(f.locations.source, "extra.mjs"), "injected"),
     (f) => chmodSync(f.sourceFile(1), 0o666),
     (f) => chmodSync(f.locations.bootstrap, 0o777),
+    (f) => symlinkSync(path.join(f.locations.source, "missing"), f.locations.code),
   ];
   for (const attack of attacks) {
     const f = setup(t);
@@ -212,6 +219,15 @@ test("independent signature cannot authorize malformed policy or forged ledger e
     f.resignOperator(corruption);
     noPublish(f);
   }
+  const reused = setup(t);
+  reused.resignOperator({ releasePolicyMutation(policy) {
+    policy.owner = {
+      keyId: reused.bootstrapSigner.keyId,
+      publicKeyPem: reused.bootstrapSigner.publicKeyPem,
+      pinSha256: reused.bootstrapSigner.pinSha256,
+    };
+  } });
+  noPublish(reused);
 });
 
 test("duplicate JSON fields and symlinked or writable independently owned files are denied", fixtureOnly, (t) => {

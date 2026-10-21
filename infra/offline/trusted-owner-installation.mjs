@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, readFileSync, readdirSync, realpathSync, renameSync, statfsSync,
+  openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, statfsSync,
   writeSync,
 } from "node:fs";
 import os from "node:os";
@@ -160,7 +160,7 @@ function checkPins(pins, policyBytes, ledgerBytes) {
       "unreviewed executable module");
   });
 }
-function checkOfflineHostPolicy(policyBytes, ledgerBytes, host) {
+function checkOfflineHostPolicy(policyBytes, ledgerBytes, host, bootstrapSignerPin) {
   const policy = json(policyBytes, ["version", "mode", "enabled", "ownerAssuranceAccepted",
     "hostIdentitySha256", "ledgerAnchorSha", "platform", "builder", "owner",
     "revokedKeyIds", "revokedPinsSha256"], "independently reviewed host policy");
@@ -185,6 +185,8 @@ function checkOfflineHostPolicy(policyBytes, ledgerBytes, host) {
   }
   demand(pins[0].keyId !== pins[1].keyId && pins[0].pinSha256 !== pins[1].pinSha256,
     "release builder and owner must be independent");
+  demand(pins.every((entry) => entry.pinSha256 !== bootstrapSignerPin),
+    "installation authority must use a separate Ed25519 key from release signers");
   for (const [array, pattern] of [[policy.revokedKeyIds, KEY_ID], [policy.revokedPinsSha256, SHA]]) {
     demand(Array.isArray(array) && array.length <= 128 &&
       array.every((entry) => typeof entry === "string" && pattern.test(entry)) &&
@@ -256,11 +258,13 @@ function parseApproval(bytes, trust, state, pins, policyBytes, ledgerBytes, host
 }
 function strictBootstrap(bytes, ownerPem) {
   const policy = json(bytes, ["version", "mode", "hostIdentitySha256", "signerKeyId",
-    "ownerPublicKeySha256", "installerSha256", "maxValiditySeconds", "revokedKeyIds",
-    "revokedApprovalIds"], "independent bootstrap policy");
+    "ownerPublicKeySha256", "installerSha256", "nodeExecutablePath",
+    "nodeExecutableSha256", "maxValiditySeconds", "revokedKeyIds", "revokedApprovalIds"],
+  "independent bootstrap policy");
   demand(policy.version === 1 && policy.mode === "virki-owner-bootstrap-v1" &&
     SHA.test(policy.hostIdentitySha256) && SHA.test(policy.installerSha256) &&
-    SHA.test(policy.ownerPublicKeySha256) && KEY_ID.test(policy.signerKeyId) &&
+    SHA.test(policy.ownerPublicKeySha256) && SHA.test(policy.nodeExecutableSha256) &&
+    typeof policy.nodeExecutablePath === "string" && KEY_ID.test(policy.signerKeyId) &&
     Number.isSafeInteger(policy.maxValiditySeconds) &&
     policy.maxValiditySeconds > 0 && policy.maxValiditySeconds <= 86400 &&
     Array.isArray(policy.revokedKeyIds) && policy.revokedKeyIds.length <= 128 &&
@@ -276,6 +280,46 @@ function strictBootstrap(bytes, ownerPem) {
     hash(key.export({ type: "spki", format: "der" })) === policy.ownerPublicKeySha256,
   "independent owner signing key pin mismatch");
   return { ...policy, key, raw: bytes };
+}
+function verifyNativeInterpreter(trust) {
+  const executable = process.execPath;
+  demand(process.versions.node.split(".")[0] === "22" &&
+    executable === trust.nodeExecutablePath && path.isAbsolute(executable) &&
+    path.normalize(executable) === executable &&
+    realpathSync.native(executable) === executable,
+  "native Node 22 executable does not match independently installed interpreter path");
+  for (let dir = path.dirname(executable); ; dir = path.dirname(dir)) {
+    const st = lstatSync(dir, { bigint: true });
+    demand(st.isDirectory() && !st.isSymbolicLink() && st.uid === 0n &&
+      st.gid === 0n && (st.mode & 0o022n) === 0n,
+    "unsafe native interpreter path owner or permissions");
+    if (path.dirname(dir) === dir) break;
+  }
+  const before = lstatSync(executable, { bigint: true });
+  demand(before.isFile() && !before.isSymbolicLink() && before.nlink === 1n &&
+    before.uid === 0n && before.gid === 0n &&
+    (before.mode & 0o022n) === 0n && (before.mode & 0o111n) !== 0n &&
+    before.size > 0n && before.size <= 256n * 1024n * 1024n,
+  "unsafe native interpreter executable metadata");
+  const fd = openSync(executable, READ_FLAGS);
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    demand(same(before, opened), "native interpreter inode changed at opening");
+    const digest = createHash("sha256");
+    const block = Buffer.allocUnsafe(64 * 1024);
+    let cursor = 0;
+    while (cursor < Number(opened.size)) {
+      const count = readSync(fd, block, 0,
+        Math.min(block.length, Number(opened.size) - cursor), cursor);
+      demand(count > 0, "native interpreter binary truncated while reading");
+      digest.update(block.subarray(0, count));
+      cursor += count;
+    }
+    demand(same(opened, fstatSync(fd, { bigint: true })) &&
+      same(opened, lstatSync(executable, { bigint: true })) &&
+      digest.digest("hex") === trust.nodeExecutableSha256,
+    "native interpreter binary differs from independently pinned SHA-256");
+  } finally { closeSync(fd); }
 }
 function identityDigest() {
   const filename = "/etc/machine-id";
@@ -328,6 +372,12 @@ function fsyncDir(dirname) {
   const fd = openSync(dirname, DIR_FLAGS);
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
+function lexicalEntryExists(filename) {
+  try { lstatSync(filename); return true; } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
 function writeNew(filename, bytes) {
   const fd = openSync(filename, NEW_FLAGS, 0o600);
   try {
@@ -377,7 +427,8 @@ function publish(parent, basename, payload, fixture) {
   privateDir(parent, fixture);
   const temp = path.join(parent, ".verifier-install-pending");
   const target = path.join(parent, basename);
-  demand(!existsSync(temp) && !existsSync(target), "existing or interrupted installation");
+  demand(!lexicalEntryExists(temp) && !lexicalEntryExists(target),
+    "existing, linked or interrupted installation");
   if (Array.isArray(payload)) writeTree(temp, payload, fixture);
   else {
     mkdirSync(temp, { mode: 0o700 });
@@ -385,7 +436,7 @@ function publish(parent, basename, payload, fixture) {
     fsyncDir(temp);
   }
   fsyncDir(parent);
-  demand(!existsSync(target), "installation destination appeared during staging");
+  demand(!lexicalEntryExists(target), "installation destination appeared during staging");
   renameSync(temp, target);
   fsyncDir(parent);
   privateDir(target, fixture);
@@ -404,7 +455,7 @@ export function installOwnerApprovedVerifier(request = {}, { onPhase } = {}) {
   for (const d of [bootstrap, source, operator]) privateDir(d, fixture);
   for (const dest of Object.values(destinations)) {
     privateDir(path.dirname(dest), fixture);
-    demand(!existsSync(dest), "destination already installed");
+    demand(!lexicalEntryExists(dest), "destination already installed or linked");
   }
   directoryEntries(bootstrap, EXPECTED_BOOTSTRAP, fixture);
   directoryEntries(operator, EXPECTED_OPERATOR, fixture);
@@ -412,6 +463,7 @@ export function installOwnerApprovedVerifier(request = {}, { onPhase } = {}) {
   const keyBytes = readPrivate(bootstrap, "owner-key.pem", 4096, fixture);
   const trust = strictBootstrap(policyBytes, keyBytes);
   demand(trust.hostIdentitySha256 === host, "independent bootstrap host binding invalid");
+  verifyNativeInterpreter(trust);
   const ownBytes = readFileSync(fileURLToPath(import.meta.url));
   demand(hash(ownBytes) === trust.installerSha256, "bootstrap executable is not independently pinned");
   if (!fixture) {
@@ -430,7 +482,7 @@ export function installOwnerApprovedVerifier(request = {}, { onPhase } = {}) {
   const pins = json(pinsBytes, ["version", "mode", "files", "trustPolicySha256", "ledgerSha256"],
     "operator pin inventory");
   checkPins(pins, trustPolicyBytes, ledgerBytes);
-  checkOfflineHostPolicy(trustPolicyBytes, ledgerBytes, host);
+  checkOfflineHostPolicy(trustPolicyBytes, ledgerBytes, host, trust.ownerPublicKeySha256);
   const sourceBytes = pins.files.map((entry) => {
     const bytes = readonlySource(source, entry.path, fixture);
     demand(hash(bytes) === entry.sha256, "source file differs from independently pinned digest");
