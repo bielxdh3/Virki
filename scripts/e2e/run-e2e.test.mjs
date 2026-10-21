@@ -202,6 +202,49 @@ test("production Hub proxy preserves no-store responses and forwards the browser
   }
 });
 
+test("production Hub E2E proxy establishes a fresh upstream TCP connection per request", async () => {
+  const { createProductionHubProxyRequestHandler } = await import("./start-production-hub.mjs");
+  const upstreamPorts = [];
+  const upstream = createServer((request, response) => {
+    upstreamPorts.push(request.socket.remotePort);
+    request.resume();
+    response.writeHead(200, { "cache-control": "no-store" });
+    response.end("ok");
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", resolveListen);
+  });
+  const proxy = createServer(createProductionHubProxyRequestHandler(upstream.address().port));
+  await new Promise((resolveListen, rejectListen) => {
+    proxy.once("error", rejectListen);
+    proxy.listen(0, "127.0.0.1", resolveListen);
+  });
+
+  const fetchThroughProxy = () => new Promise((resolveResponse, rejectResponse) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: proxy.address().port,
+      path: "/api/health",
+      headers: { host: "portal.localhost" }
+    }, (response) => {
+      response.resume();
+      response.on("end", () => resolveResponse(response.statusCode));
+    });
+    request.once("error", rejectResponse);
+    request.end();
+  });
+
+  try {
+    assert.equal(await fetchThroughProxy(), 200);
+    assert.equal(await fetchThroughProxy(), 200);
+    assert.equal(upstreamPorts.length, 2);
+    assert.equal(new Set(upstreamPorts).size, 2, "the proxy must not pool stale upstream sockets");
+  } finally {
+    await Promise.all([upstream, proxy].map((server) => new Promise((resolveClose) => server.close(resolveClose))));
+  }
+});
+
 test("production Hub proxy exposes only the synthetic Access fixture endpoints on its dedicated host", async () => {
   const productionHub = await import("./start-production-hub.mjs");
   const accessRequests = [];

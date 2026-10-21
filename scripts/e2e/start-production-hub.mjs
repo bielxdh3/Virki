@@ -69,7 +69,10 @@ function proxyToLocalPort(incomingRequest, outgoingResponse, port, headers, onRe
     port,
     method: incomingRequest.method,
     path: incomingRequest.url,
-    headers
+    headers,
+    // This disposable E2E proxy must not reuse an idle upstream socket that Next.js may have closed.
+    // A stale pooled socket can reset during OIDC redirects and turn a valid callback into a spurious 502.
+    agent: false
   }, onResponse);
   upstreamRequest.on("error", (error) => {
     const candidateCode = error && typeof error === "object" && "code" in error ? error.code : undefined;
