@@ -264,7 +264,11 @@ export async function runProductionPreflight({
   lines.push(`Remote Docker platform ${lineValue(docker.stdout, "VIRKI_PLATFORM=")}.`);
   lines.push(`Remote free disk ${lineValue(docker.stdout, "VIRKI_DISK_FREE_GB=")} GB; deManage container names observed ${lineValue(docker.stdout, "VIRKI_DEMANAGE_COUNT=")}.`);
   return { status: 0, lines, platform: lineValue(docker.stdout, "VIRKI_PLATFORM="),
-    ...(capacity ? { capacity } : {}) };
+    ...(mode === "offline" ? {
+      capacity,
+      deployAuthorized: false,
+      limitation: "Operator-provided disk/image/DB sizes are not independently measured by the trusted host. This is a read-only connectivity and preliminary budget probe, never a release authorization.",
+    } : {}) };
 }
 
 export async function runAcceptedProductionPreflight({

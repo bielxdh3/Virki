@@ -54,6 +54,8 @@ test("explicit offline preflight does not require GHCR but retains the three sec
   assert.equal(result.status, 0);
   assert.equal(result.platform, "linux/amd64");
   assert.equal(result.capacity.ok, true);
+  assert.equal(result.deployAuthorized, false);
+  assert.match(result.limitation, /never a release authorization/u);
   assert.equal(environment.commands.length, 10);
   for (const { args, script } of environment.commands.slice(1, 9)) {
     assert.match(args.at(-1), /^bash -s -- probe \/srv\/virki$/u);
