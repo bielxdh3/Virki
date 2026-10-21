@@ -5,7 +5,10 @@ import path from "node:path";
 
 // This module inventories caller-supplied artifacts. It does not parse tar,
 // attest the provenance of Docker metadata, sign anything, or permit deploys.
-const SOURCE = "https://github.com/bielxdh3/Virki.git";
+const GIT_REMOTE = "https://github.com/bielxdh3/Virki.git";
+// Dockerfile OCI labels deliberately omit `.git` from the canonical Git
+// remote. These are distinct identities: never rewrite a claimed OCI label.
+const OCI_SOURCE = "https://github.com/bielxdh3/Virki";
 const FULL_SHA = /^[0-9a-f]{40}$/u;
 const IMAGE_ID = /^sha256:[0-9a-f]{64}$/u;
 const MAX_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024;
@@ -76,7 +79,7 @@ function verifyDockerMetadata(metadata, role, revision) {
       metadata.sizeBytes <= 0 || metadata.os !== "linux" || metadata.architecture !== "amd64" ||
       !metadata.labels || typeof metadata.labels !== "object" || Array.isArray(metadata.labels) ||
       metadata.labels["org.opencontainers.image.revision"] !== revision ||
-      metadata.labels["org.opencontainers.image.source"] !== SOURCE) {
+      metadata.labels["org.opencontainers.image.source"] !== OCI_SOURCE) {
     refuse(`${role} Docker metadata does not match exact image role, revision, source or platform`);
   }
   return metadata.imageId;
@@ -173,7 +176,7 @@ export async function inventoryOfflineArtifacts({
 
     return Object.freeze({
       source_sha: expectedRevision,
-      repository: SOURCE,
+      repository: GIT_REMOTE,
       platform: "linux/amd64",
       source_archive_sha256: source.sha256,
       source_archive_size_bytes: source.sizeBytes,

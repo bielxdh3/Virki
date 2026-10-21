@@ -11,6 +11,7 @@ import { inventoryOfflineArtifacts } from "./lib/offline-artifact-inventory.mjs"
 
 const REVISION = "fbac177b91414ff8d047cef40cc9920d0ba882cd";
 const SOURCE = "https://github.com/bielxdh3/Virki.git";
+const OCI_SOURCE = "https://github.com/bielxdh3/Virki";
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const image = (role, hex) => ({
   role,
@@ -20,7 +21,7 @@ const image = (role, hex) => ({
   architecture: "amd64",
   labels: {
     "org.opencontainers.image.revision": REVISION,
-    "org.opencontainers.image.source": SOURCE,
+    "org.opencontainers.image.source": OCI_SOURCE,
   },
 });
 
