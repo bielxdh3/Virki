@@ -32,6 +32,9 @@ const FORBIDDEN_RUNTIME_IDENTIFIERS = new Set([
 const FORBIDDEN_RUNTIME_PROPERTIES = new Set([
   "constructor", "mainModule", "_linkedBinding", "binding", "dlopen",
 ]);
+const AUDITED_PROCESS_PROPERTIES = new Set([
+  "platform", "arch", "getuid", "argv", "stderr", "exitCode",
+]);
 const TRUSTED_GIT_SOURCE = "infra/offline/trusted-source-git.mjs";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -50,6 +53,12 @@ function importsIn(source, relative) {
     if (ts.isIdentifier(node)) {
       assert.ok(!FORBIDDEN_RUNTIME_IDENTIFIERS.has(node.text),
         `runtime evaluator or dynamic loader identifier is forbidden: ${node.text}`);
+      if (node.text === "process") {
+        assert.ok(ts.isPropertyAccessExpression(node.parent) &&
+          node.parent.expression === node &&
+          AUDITED_PROCESS_PROPERTIES.has(node.parent.name.text),
+        "process must be used only through reviewed direct properties; aliases are forbidden");
+      }
       if (node.text === "execFileSync") {
         const imported = ts.isImportSpecifier(node.parent) && node.parent.name === node &&
           !node.parent.propertyName;
@@ -244,6 +253,8 @@ test("host static audit refuses executable loader aliases and unauthorized subpr
     'const F = globalThis["Function"]; F("return import(\\"./nonpinned.mjs\\")")();',
     'const F = global["Function"]; F("return import(\\"./nonpinned.mjs\\")")();',
     'const launch = process["get" + "BuiltinModule"]("child_process").spawnSync; launch("/bin/sh", ["-c", "id"]);',
+    'const p = process; p["get" + "BuiltinModule"]("child_process").spawnSync("/bin/true", []);',
+    'const { getBuiltinModule: load } = process; load("child_process").spawnSync("/bin/true", []);',
     'import { spawnSync as launch } from "node:child_process"; launch(process.execPath, ["./nonpinned.mjs"]);',
     'import { execFileSync as run } from "node:child_process"; run(process.execPath, ["./nonpinned.mjs"]);',
     'const run = execFileSync; run(process.execPath, ["./nonpinned.mjs"]);',
