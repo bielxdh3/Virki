@@ -108,7 +108,7 @@ export function runProductionShellRehearsal(f, names, expression, options = {}) 
   assert.ok(root.startsWith(os.tmpdir() + path.sep));
   assert.ok(!root.includes("\n") && !root.includes("'"));
   assert.ok(Array.isArray(names) && names.every((name) => exposedFunctions.has(name)));
-  assert.ok(/^[a-zA-Z0-9_; '\-]+$/u.test(expression), "Only constant rehearsal commands allowed");
+  assert.ok(/^[a-zA-Z0-9_; ' -]+$/u.test(expression), "Only constant rehearsal commands allowed");
   const failure = options.failure ?? "none";
   assert.ok(["none", "clone-migration", "production-migration", "health", "migration-status"].includes(failure));
   const revision = options.revisions ?? candidate;
