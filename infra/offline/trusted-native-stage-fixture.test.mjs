@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import {
-  chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readdirSync, renameSync, rmSync, statfsSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -13,7 +13,8 @@ import { AUDITED_VERIFIER_FILES } from "./trusted-host-installer.mjs";
 import { rehearseTrustedNativeVerifierStaging } from "./trusted-native-stage-fixture.mjs";
 
 const native = process.platform === "linux" && process.arch === "x64" &&
-  process.getuid?.() === 0 && statfsSync(os.tmpdir()).type === 0x01021994;
+  process.getuid?.() === 0 && statfsSync(os.tmpdir()).type === 0x01021994 &&
+  process.env.VIRKI_DISPOSABLE_STAGE_REHEARSAL === "1" && existsSync("/.dockerenv");
 const onlyNative = { skip: native ? false : "Disposable native Linux/amd64 root fixture required" };
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const sh = (char) => char.repeat(40);
