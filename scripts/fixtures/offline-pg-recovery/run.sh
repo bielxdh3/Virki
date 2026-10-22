@@ -55,7 +55,7 @@ test "$protected_count" = t ||
   { echo 'Representative security data is incomplete' >&2; exit 133; }
 
 case "${1:-}" in
-  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race)
+  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored)
     export VIRKI_OFFLINE_PG_CASE="$1"
     case "$1" in
       happy)
@@ -74,6 +74,40 @@ case "${1:-}" in
         sh /workspace/scripts/lib/offline-pg-disposable-controller.sh reconcile > /dev/null 2>"$fixture/reconcile.err" || exit 115
         test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 116
         test -f "$fixture/.attempted" || exit 117
+        ;;
+      crash_admit)
+        ( sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" ) &
+        pid=$!
+        wait "$pid" && exit 136
+        test -f "$fixture/.attempted" || exit 137
+        test "$(psql -X -qAt -d virki_control -c 'SELECT count(*) FROM recovery_attempt')" = 0 || exit 138
+        VIRKI_OFFLINE_PG_CASE=happy
+        export VIRKI_OFFLINE_PG_CASE
+        if sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/replay.err"; then exit 139; fi
+        test "$(psql -X -qAt -d virki_control -c 'SELECT count(*) FROM recovery_attempt')" = 0 || exit 140
+        ;;
+      crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored)
+        ( sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" ) &
+        pid=$!
+        wait "$pid" && exit 141
+        test -f "$fixture/.attempted" && test -s "$fixture/virki.dump" || exit 142
+        phase="$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')"
+        case "$phase" in rollback_started|rollback_proven|rollback_rebuild|rollback_restored) ;; *) exit 143;; esac
+        VIRKI_OFFLINE_PG_CASE=happy
+        export VIRKI_OFFLINE_PG_CASE
+        if test "$1" = crash_rollback_clone; then
+          # The owned rollback clone exists with incomplete SQL content.
+          # Automatic deletion would hide uncertainty: explicit operator STOP.
+          if sh /workspace/scripts/lib/offline-pg-disposable-controller.sh reconcile > /dev/null 2>"$fixture/reconcile.err"; then exit 144; fi
+          test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rollback_started || exit 145
+          test "$(psql -X -qAt -d postgres -c "SELECT count(*) FROM pg_database WHERE datname='virki_source'")" = 1 || exit 146
+        else
+          sh /workspace/scripts/lib/offline-pg-disposable-controller.sh reconcile > /dev/null 2>"$fixture/reconcile.err" || exit 147
+          test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 148
+          current_inventory="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/inventory.psql 2>"$fixture/pg-error")"
+          test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 149
+        fi
+        test -f "$fixture/.attempted" || exit 150
         ;;
       fail_live)
         sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" || exit 118

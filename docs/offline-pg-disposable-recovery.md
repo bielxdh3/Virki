@@ -20,15 +20,21 @@ npm run test:offline:pg:container
 ```
 
 The launcher runs the pre-cached, immutable PostgreSQL 17 Alpine image pinned
-by digest in `infra/docker-compose.core-test.yml`. Every case has a freshly
-created, randomly named and exclusively labelled Docker container, with:
+by digest in `infra/docker-compose.core-test.yml`. It accepts only the
+explicit local Windows Docker Desktop Linux named pipe
+(`npipe:////./pipe/dockerDesktopLinuxEngine`), checks the responding engine
+identity, and ignores caller-supplied Docker contexts/remote endpoints. It
+refuses other hosts until a separately reviewed local-only capability exists.
+Every case has a freshly created, randomly named and exclusively labelled
+Docker container, with:
 
 - no network, published port, host Docker socket, production SSH or remote DB;
 - no mounted writable host path and a read-only source checkout mount;
 - `postgres` UID 70, all capabilities dropped, no new privileges and
   separate owner-only tmpfs mounts for PGDATA and temporary backups;
-- automatic `--rm`, plus a best-effort final cleanup that requires matching
-  the exact random ownership label before force-removing the **same** instance;
+- automatic `--rm`, plus final cleanup that requires matching the exact
+  random owner label and name before force-removing the container by its
+  **immutable Docker ID**; an unknown or mismatched owner is never removed;
 - scrubbed, bounded test output. Synthetic security records, dumps, SQL errors,
   connection strings and PostgreSQL log data stay in the private tmpfs.
 
@@ -67,12 +73,30 @@ audit log, email outbox/delivery and OIDC artifact rows, and calls
 The adversarial matrix includes a modified TOTP ciphertext, deleted TOTP
 ciphertext column, intentionally failed live migration, corrupted backup,
 SIGKILL between live migration and final health, two competing attempts,
-and rejection of an injected PostgreSQL URL. A killed child leaves an
+SIGKILL between exclusive file latch and journal INSERT, and rejection of an
+injected PostgreSQL URL. A killed child leaves an
 inspectable database journal and exclusive filesystem latch while its
 disposable PostgreSQL supervisor survives. An explicit `reconcile` operation
 rechecks the backup and restores the original data/schema; retries are never
 automatic. Failed restoration preserves the maintenance state and attempted
 marker. The latch remains after successful fixture rollback.
+
+The rollback journal adds `rollback_started`, `rollback_proven`,
+`rollback_rebuild`, and `rollback_restored` checkpoints. A resumed operation
+reuses an already present rollback database **only after** verifying its
+entire protected inventory and schema against the source backup. It safely
+recreates the owned source fixture if a crash interrupted its drop, creation or
+restore. Separate tests SIGKILL the process at each boundary and verify the
+original User, MFA, recovery, audit, outbox and security-policy data after
+manual reconciliation. If a crash leaves a **partially created rollback clone**,
+reconciliation refuses it and preserves the attempt latch for explicit manual
+inspection. The fixture never silently deletes an unverified rollback clone.
+
+Admission first creates and synchronizes the exclusive `.attempted` marker,
+then requires its *own* unique PostgreSQL journal INSERT to return an inserted
+row. An already-existing `attempted` row is insufficient to authorize the
+second process. An interrupted admission before the SQL commit leaves an orphan
+marker and prevents automatic retries.
 
 ## What these tests do **not** prove
 

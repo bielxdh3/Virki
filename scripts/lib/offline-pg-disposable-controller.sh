@@ -64,15 +64,23 @@ require_ledger() {
   require_equal "$(control "SELECT count(*) FROM recovery_attempt")" 1 'missing unique attempted journal'
 }
 admit() {
-  # Fixed id+single INSERT is the unique admission lock. Crash leaves this row.
-  # A second caller can neither steal nor silently reset a previous attempt.
-  control "INSERT INTO recovery_attempt(id,phase) VALUES (1,'attempted') ON CONFLICT DO NOTHING" > /dev/null ||
-    refuse 'journal insert failed'
-  require_equal "$(last_phase)" attempted 'prior attempt is unresolved'
-  # POSIX noclobber is the independent local filesystem latch. This must never
-  # be removed automatically, including after successful fixture rollback.
+  # Create exclusive owner latch BEFORE writing the PG journal. A crash after
+  # journal INSERT but before latch creation could otherwise let another
+  # process claim the predecessor's attempted row as its own. A crash in the
+  # opposite order leaves an orphan latch, which safely blocks all retries.
   ( set -C; printf '%s\n' 'attempted' > "$fixture/.attempted" ) 2>/dev/null ||
     refuse 'attempt latch already exists'
+  sync -f "$fixture/.attempted" > /dev/null 2>"$fixture/pg-error" ||
+    refuse 'cannot synchronize attempt latch'
+  sync -f "$fixture" > /dev/null 2>"$fixture/pg-error" ||
+    refuse 'cannot synchronize fixture directory'
+  crash_point latch_created
+  # Require that OUR INSERT actually won the unique constraint. Observing an
+  # existing 'attempted' row is never sufficient provenance of admission.
+  inserted="$(control "INSERT INTO recovery_attempt(id,phase) VALUES (1,'attempted') ON CONFLICT DO NOTHING RETURNING id")" ||
+    refuse 'journal insert failed'
+  require_equal "$inserted" 1 'prior journal already reserved'
+  require_equal "$(last_phase)" attempted 'journal reservation changed'
 }
 run_backup() {
   pg_dump -Fc --no-owner --no-privileges -d "$source_db" > "$backup" 2>"$fixture/pg-error" ||
@@ -92,6 +100,7 @@ restore_into() {
   test "$(sql postgres "SELECT count(*) FROM pg_database WHERE datname='$target'")" = 0 ||
     refuse 'restore target already exists'
   createdb "$target" > /dev/null 2>"$fixture/pg-error" || refuse 'create disposable database failed'
+  if test "$target" = "$rollback_db"; then crash_point rollback_clone_created; fi
   verify_backup
   pg_restore --exit-on-error --no-owner --no-privileges -d "$target" "$backup" > /dev/null 2>"$fixture/pg-error" || refuse 'pg_restore refused archive'
 }
@@ -106,28 +115,66 @@ assert_schema() {
 }
 rollback() {
   verify_backup
-  # Validate independent restore BEFORE touching old database. A broken
-  # archive leaves maintenance locked and old data untouched when possible.
-  restore_into "$rollback_db"
+  # Persist each irreversible boundary in the separate control database.
+  # The physical operation may finish before its next journal commit: every
+  # replay checks the ACTUAL database state and never trusts the phase alone.
+  phase="$(last_phase)"
+  case "$phase" in
+    live_migrated) record rollback_started live_migrated ;;
+    rollback_started|rollback_proven|rollback_rebuild|rollback_restored) ;;
+    *) refuse 'rollback journal phase is unsupported' ;;
+  esac
+  # Reuse ONLY an existing independently VERIFIED clone. Never overwrite,
+  # clean, or delete a partially restored clone automatically. Operator must
+  # inspect such a fixture separately while the attempted latch remains.
+  if test "$(sql postgres "SELECT count(*) FROM pg_database WHERE datname='$rollback_db'")" = 0; then
+    restore_into "$rollback_db"
+  fi
   assert_fingerprint "$rollback_db" "$baseline_fingerprint"
   assert_schema "$rollback_db"
-  # All writer clients are stopped by this fixture. No production equivalent.
-  dropdb "$source_db" > /dev/null 2>"$fixture/pg-error" || refuse 'rollback source was not quiescent'
-  createdb "$source_db" > /dev/null 2>"$fixture/pg-error" || refuse 'rollback target creation failed'
+  if test "$(last_phase)" = rollback_started; then
+    record rollback_proven rollback_started
+  fi
+  crash_point rollback_proven
+  if test "$(last_phase)" = rollback_restored; then
+    # This state is only allowed after a prior full pg_restore. Any changed
+    # data/structure now is an independent integrity incident, not a reason
+    # to overwrite another database without review.
+    assert_fingerprint "$source_db" "$baseline_fingerprint"
+    assert_schema "$source_db"
+    record rolled_back rollback_restored
+    return
+  fi
+  if test "$(last_phase)" = rollback_proven; then
+    record rollback_rebuild rollback_proven
+  fi
+  require_equal "$(last_phase)" rollback_rebuild 'rollback rebuild admission missing'
+  # All writer clients are stopped by this disposable fixture. A native host
+  # must independently prove quiescence before any analogous data mutation.
+  dropdb --if-exists "$source_db" > /dev/null 2>"$fixture/pg-error" ||
+    refuse 'rollback source was not quiescent'
+  crash_point rollback_dropped
+  createdb "$source_db" > /dev/null 2>"$fixture/pg-error" ||
+    refuse 'rollback target creation failed'
+  crash_point rollback_created
   pg_restore --exit-on-error --no-owner --no-privileges -d "$source_db" "$backup" > /dev/null 2>"$fixture/pg-error" || refuse 'rollback restore failed'
+  crash_point rollback_loaded
   assert_fingerprint "$source_db" "$baseline_fingerprint"
   assert_schema "$source_db"
-  record rolled_back live_migrated
+  record rollback_restored rollback_rebuild
+  crash_point rollback_restored
+  record rolled_back rollback_restored
   # Attempt latch intentionally retained. Operator must reconcile.
 }
 crash_point() {
-  if test "${VIRKI_OFFLINE_PG_CASE:-}" = crash_live && test "$1" = live_migrated; then
-    kill -KILL "$$"
-  fi
+  case "${VIRKI_OFFLINE_PG_CASE:-}:$1" in
+    crash_live:live_migrated|crash_admit:latch_created|crash_rollback_clone:rollback_clone_created|crash_rollback_proven:rollback_proven|crash_rollback_dropped:rollback_dropped|crash_rollback_created:rollback_created|crash_rollback_loaded:rollback_loaded|crash_rollback_restored:rollback_restored)
+      kill -KILL "$$" ;;
+  esac
 }
 attempt() {
   case "${VIRKI_OFFLINE_PG_CASE:-}" in
-    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race) ;;
+    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored) ;;
     *) refuse 'unsupported fixture case';;
   esac
   baseline_fingerprint="$(fingerprint "$source_db")"
@@ -167,11 +214,12 @@ attempt() {
   if test "${VIRKI_OFFLINE_PG_CASE}" = corrupt_backup; then
     printf '%s' 'broken' > "$backup"
   fi
-  if test "${VIRKI_OFFLINE_PG_CASE}" = fail_live ||
-    test "${VIRKI_OFFLINE_PG_CASE}" = corrupt_backup; then
-    rollback
-    return
-  fi
+  case "${VIRKI_OFFLINE_PG_CASE}" in
+    fail_live|corrupt_backup|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored)
+      rollback
+      return
+      ;;
+  esac
   require_equal "$(sql "$source_db" 'SELECT count(*) FROM "User" WHERE "offlineFixtureAdditive" IS NOT NULL')" 0 'fixture health failed'
   assert_fingerprint "$source_db" "$baseline_fingerprint"
   record completed live_migrated
@@ -183,7 +231,11 @@ case "${1:-}" in
     # Safe status only. No passwords, dumps, queries or user data.
     control 'SELECT phase FROM recovery_attempt WHERE id=1' ;;
   reconcile)
-    require_equal "$(last_phase)" live_migrated 'reconciliation requires interrupted live migration'
+    case "$(last_phase)" in
+      live_migrated|rollback_started|rollback_proven|rollback_rebuild|rollback_restored) ;;
+      *) refuse 'reconciliation requires an interrupted, uncommitted rollback' ;;
+    esac
+    test -f "$fixture/.attempted" || refuse 'attempt latch missing during reconciliation'
     baseline_fingerprint="$(cat "$fixture/baseline.sha256")"
     rollback
     ;;
