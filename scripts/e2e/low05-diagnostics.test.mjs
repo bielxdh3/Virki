@@ -11,7 +11,11 @@ test("LOW-05 history document requires exact no-store in production and permits 
   assert.equal(isLow05ProtectedDocumentCacheControl(nextDevHeader, "production"), false);
   assert.equal(isLow05ProtectedDocumentCacheControl(productionHeader, "development"), true);
   assert.equal(isLow05ProtectedDocumentCacheControl(nextDevHeader, "development"), true);
-  for (const invalid of ["", "no-cache", "no-store", "private, max-age=0, must-revalidate", "public, no-cache, must-revalidate", "no-cache, must-revalidate, max-age=60"]) {
+  assert.equal(isLow05ProtectedDocumentCacheControl("no-store", "development"), true,
+    "Next 16.4.2 development cache policy must prohibit document storage");
+  assert.equal(isLow05ProtectedDocumentCacheControl("no-store", "production"), false,
+    "production still requires the full protected-document private/no-store policy");
+  for (const invalid of ["", "no-cache", "public, no-store", "private, max-age=0, must-revalidate", "public, no-cache, must-revalidate", "no-cache, must-revalidate, max-age=60"]) {
     assert.equal(isLow05ProtectedDocumentCacheControl(invalid, "development"), false, invalid);
     assert.equal(isLow05ProtectedDocumentCacheControl(invalid, "production"), false, invalid);
   }

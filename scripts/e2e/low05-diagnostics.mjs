@@ -1,10 +1,13 @@
 const SESSION_COOKIE_NAMES = ["__Host-virki_session", "virki_session"];
 
-// Next dev overwrites the Proxy Cache-Control for rendered documents. Production
-// history traversal must still enforce the exact sensitive-page no-store policy.
+// Next dev overwrites the Proxy Cache-Control for rendered documents. Since
+// Next 16.4.2, its local development navigation may emit exactly `no-store`
+// instead of the older `no-cache, must-revalidate`. A development-only exact
+// no-store is strictly non-storable; production must still enforce the full
+// private, no-store, max-age=0, must-revalidate protected-document policy.
 export function isLow05ProtectedDocumentCacheControl(value, hubMode) {
   if (value === "private, no-store, max-age=0, must-revalidate") return true;
-  return hubMode === "development" && value === "no-cache, must-revalidate";
+  return hubMode === "development" && (value === "no-cache, must-revalidate" || value === "no-store");
 }
 
 export function classifyLow05Url(value, portalUrl) {

@@ -487,7 +487,8 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     expect(historyBackResponse.status).toBe(200);
     // Next dev overwrites the protected Proxy header when rendering documents.
     // Production browser history always requires the full no-store policy.
-    expect(isLow05ProtectedDocumentCacheControl(historyBackResponse.cacheControl, hubMode)).toBe(true);
+    expect(isLow05ProtectedDocumentCacheControl(historyBackResponse.cacheControl, hubMode),
+      `LOW-05 secure history reload header in ${hubMode}: ${historyBackResponse.cacheControl || "absent"}`).toBe(true);
     // Protected history traversal deliberately reloads the document during hydration.
     // Retry only reads interrupted by a real navigation, never failed security assertions.
     const browserCacheEvidence = await readDuringStableNavigation(page, async () => {
@@ -524,7 +525,8 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     await goForwardToPortalPage(page, firstPortalOrigin);
     const repeatHistoryBackResponse = await goBackToProtectedPage(page, firstSecurityReloadOrigin);
     expect(repeatHistoryBackResponse.status).toBe(200);
-    expect(isLow05ProtectedDocumentCacheControl(repeatHistoryBackResponse.cacheControl, hubMode)).toBe(true);
+    expect(isLow05ProtectedDocumentCacheControl(repeatHistoryBackResponse.cacheControl, hubMode),
+      `LOW-05 repeat secure history reload header in ${hubMode}: ${repeatHistoryBackResponse.cacheControl || "absent"}`).toBe(true);
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
     const repeatBackState = await inspectSensitiveBrowserState(page, sensitiveValues);
     expect(repeatBackState.dom).toBe(false);
