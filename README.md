@@ -73,4 +73,9 @@ npm run test:production-revision
 npm run build
 ```
 
+`test:backup:restore` is an opt-in local Windows Docker Desktop Linux test.
+Set `VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER=1` before running; see
+[the disposable PostgreSQL validation guide](docs/offline-pg-disposable-recovery.md)
+for environment restrictions and cleanup behavior.
+
 CI also checks production dependencies, the Docker image boundary, Compose configuration, and exact revision labels. Successful main pushes build, smoke-test, and retain runtime and migration images for both supported Linux architectures for 14 days. See [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md), and [docs/operations.md](docs/operations.md).

@@ -5,8 +5,11 @@
 The checked-in `scripts/backup-restore-validation.mjs` already exercises the
 application's Prisma migration deployment, representative account/MFA/recovery/
 audit/outbox records, `pg_dump --format=custom`, and `pg_restore
---exit-on-error`. Its Docker launcher publishes a randomly selected loopback
-port and uses Prisma through the host test environment. The separate offline
+--exit-on-error`. Its Docker launcher requires an explicit local Windows
+Docker Desktop Linux named-pipe opt-in, uses a pinned PostgreSQL digest already
+cached locally, publishes a randomly selected loopback port, and runs Prisma
+against generated disposable credentials. It refuses ambient Docker/Compose,
+PostgreSQL, database URL, or Node environment overrides. The separate offline
 proof here reuses **that same checked-in migration.sql tree** and the real
 PostgreSQL `pg_dump`/`pg_restore` programs while constraining the entire
 backup/migration/rollback transaction to one disposable, unnetworked database
@@ -14,6 +17,32 @@ container. It does not duplicate the full existing Prisma data seeding or
 misrepresent its own SQL invocations as a Prisma engine migration deployment.
 
 ## Running
+
+For the full Prisma migration and backup/restore validation, in Windows
+PowerShell with Docker Desktop's Linux engine running:
+
+```powershell
+$env:VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER = '1'
+npm run test:backup:restore
+Remove-Item Env:VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER
+```
+
+This validation refuses other platforms, contexts, remote Docker hosts,
+inherited database credentials and an uncached pinned image. It uses the
+installed Docker Desktop executable at
+`C:\Program Files\Docker\Docker\resources\bin\docker.exe` and its explicit
+Linux `npipe:////./pipe/dockerDesktopLinuxEngine` endpoint. No host Docker
+socket or host directory is mounted. Its data directory is a disposable tmpfs;
+every created container is labelled with an unpredictable owner token and
+checked for the exact immutable Docker ID, image, network, mounts and engine
+identity before use and force-removal. Failures that prevent independent owner
+verification refuse deletion and require manual operator inspection. Docker
+CLI stdout/stderr and Prisma failure logs are redacted to avoid leaking
+synthetic credentials, URLs, dump contents and account records. The test uses
+synthetic account/admin, TOTP, recovery, audit, outbox and delivery records,
+and proves no real production backup's restore capability.
+
+For the separate offline SQL crash/recovery fixture:
 
 ```bash
 npm run test:offline:pg:container
