@@ -24,6 +24,7 @@ const domain = Buffer.from("Virki/offline-verifier/owner-install/v1\0");
 const moduleFile = fileURLToPath(new URL("./trusted-owner-installation.mjs", import.meta.url));
 const canonical = (data) => Buffer.from(JSON.stringify(data));
 const interpreterPin = enabled ? sha(readFileSync(process.execPath)) : null;
+const nativeGitPin = enabled ? sha(readFileSync("/usr/bin/git")) : null;
 
 function ownerKey(keyId) {
   const pair = generateKeyPairSync("ed25519");
@@ -87,6 +88,7 @@ function setup(t, { realSource = false } = {}) {
     ownerPublicKeySha256: bootstrapSigner.pinSha256,
     installerSha256: sha(readFileSync(moduleFile)),
     nodeExecutablePath: process.execPath, nodeExecutableSha256: interpreterPin,
+    gitExecutableSha256: nativeGitPin,
     maxValiditySeconds: 3600,
     revokedKeyIds: [], revokedApprovalIds: [],
   });
@@ -186,6 +188,9 @@ test("tamper, missing independent consent, invalid signature, revoked keys, bad 
       file(f.locations.bootstrap, "bootstrap-policy.json", canonical(policy)); },
     (f) => { const policy = JSON.parse(f.bootstrapPolicy);
       policy.nodeExecutableSha256 = SHA("c");
+      file(f.locations.bootstrap, "bootstrap-policy.json", canonical(policy)); },
+    (f) => { const policy = JSON.parse(f.bootstrapPolicy);
+      policy.gitExecutableSha256 = SHA("c");
       file(f.locations.bootstrap, "bootstrap-policy.json", canonical(policy)); },
     (f) => file(f.locations.operator, "trust-policy.json", Buffer.from("{}")),
     (f) => file(f.locations.operator, "ledger.json", Buffer.from("{}")),

@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 // root-owned file at BOOTSTRAP_ENTRY, with its SHA-256 in the already installed
 // bootstrap policy. No release, Docker or process execution occurs here.
 const BOOTSTRAP_ENTRY = "/usr/local/lib/virki/offline-bootstrap/trusted-owner-installation.mjs";
+const TRUSTED_GIT_EXECUTABLE = "/usr/bin/git";
 const BOOTSTRAP_ROOT = "/etc/virki/offline-bootstrap";
 const SOURCE_ROOT = "/var/lib/virki/owner-reviewed-verifier";
 const OPERATOR_ROOT = "/etc/virki/offline-verifier-operator";
@@ -263,11 +264,13 @@ function parseApproval(bytes, trust, state, pins, policyBytes, ledgerBytes, host
 function strictBootstrap(bytes, ownerPem) {
   const policy = json(bytes, ["version", "mode", "hostIdentitySha256", "signerKeyId",
     "ownerPublicKeySha256", "installerSha256", "nodeExecutablePath",
-    "nodeExecutableSha256", "maxValiditySeconds", "revokedKeyIds", "revokedApprovalIds"],
+    "nodeExecutableSha256", "gitExecutableSha256", "maxValiditySeconds",
+    "revokedKeyIds", "revokedApprovalIds"],
   "independent bootstrap policy");
   demand(policy.version === 1 && policy.mode === "virki-owner-bootstrap-v1" &&
     SHA.test(policy.hostIdentitySha256) && SHA.test(policy.installerSha256) &&
     SHA.test(policy.ownerPublicKeySha256) && SHA.test(policy.nodeExecutableSha256) &&
+    SHA.test(policy.gitExecutableSha256) &&
     typeof policy.nodeExecutablePath === "string" && KEY_ID.test(policy.signerKeyId) &&
     Number.isSafeInteger(policy.maxValiditySeconds) &&
     policy.maxValiditySeconds > 0 && policy.maxValiditySeconds <= 86400 &&
@@ -285,18 +288,16 @@ function strictBootstrap(bytes, ownerPem) {
   "independent owner signing key pin mismatch");
   return { ...policy, key, raw: bytes };
 }
-function verifyNativeInterpreter(trust) {
-  const executable = process.execPath;
-  demand(process.versions.node.split(".")[0] === "22" &&
-    executable === trust.nodeExecutablePath && path.isAbsolute(executable) &&
+function verifyPinnedNativeExecutable(executable, expectedDigest, label) {
+  demand(path.isAbsolute(executable) &&
     path.normalize(executable) === executable &&
     realpathSync.native(executable) === executable,
-  "native Node 22 executable does not match independently installed interpreter path");
+  label + " path is not the independently reviewed canonical executable");
   for (let dir = path.dirname(executable); ; dir = path.dirname(dir)) {
     const st = lstatSync(dir, { bigint: true });
     demand(st.isDirectory() && !st.isSymbolicLink() && st.uid === 0n &&
       st.gid === 0n && (st.mode & 0o022n) === 0n,
-    "unsafe native interpreter path owner or permissions");
+    "unsafe " + label + " path owner or permissions");
     if (path.dirname(dir) === dir) break;
   }
   const before = lstatSync(executable, { bigint: true });
@@ -304,26 +305,38 @@ function verifyNativeInterpreter(trust) {
     before.uid === 0n && before.gid === 0n &&
     (before.mode & 0o022n) === 0n && (before.mode & 0o111n) !== 0n &&
     before.size > 0n && before.size <= 256n * 1024n * 1024n,
-  "unsafe native interpreter executable metadata");
+  "unsafe " + label + " executable metadata");
   const fd = openSync(executable, READ_FLAGS);
   try {
     const opened = fstatSync(fd, { bigint: true });
-    demand(same(before, opened), "native interpreter inode changed at opening");
+    demand(same(before, opened), label + " inode changed at opening");
     const digest = createHash("sha256");
     const block = Buffer.allocUnsafe(64 * 1024);
     let cursor = 0;
     while (cursor < Number(opened.size)) {
       const count = readSync(fd, block, 0,
         Math.min(block.length, Number(opened.size) - cursor), cursor);
-      demand(count > 0, "native interpreter binary truncated while reading");
+      demand(count > 0, label + " binary truncated while reading");
       digest.update(block.subarray(0, count));
       cursor += count;
     }
     demand(same(opened, fstatSync(fd, { bigint: true })) &&
       same(opened, lstatSync(executable, { bigint: true })) &&
-      digest.digest("hex") === trust.nodeExecutableSha256,
-    "native interpreter binary differs from independently pinned SHA-256");
+      digest.digest("hex") === expectedDigest,
+    label + " binary differs from independently pinned SHA-256");
   } finally { closeSync(fd); }
+}
+function verifyNativeInterpreter(trust) {
+  demand(process.versions.node.split(".")[0] === "22" &&
+    process.execPath === trust.nodeExecutablePath,
+  "native Node 22 executable path does not match independent bootstrap policy");
+  verifyPinnedNativeExecutable(process.execPath, trust.nodeExecutableSha256, "Node 22");
+}
+function verifyNativeGit(trust) {
+  // The sealed verifier source checker invokes exactly /usr/bin/git. No git
+  // subprocess is ever started to validate its path, type, inode or digest.
+  verifyPinnedNativeExecutable(TRUSTED_GIT_EXECUTABLE,
+    trust.gitExecutableSha256, "native Git");
 }
 function identityDigest() {
   const filename = "/etc/machine-id";
@@ -474,6 +487,7 @@ export function measureInstalledTrustedVerifierAtUseTime(request = {}) {
   const trust = strictBootstrap(bootstrapPolicyBytes, ownerKeyBytes);
   demand(trust.hostIdentitySha256 === host, "use-time host differs from installed bootstrap");
   verifyNativeInterpreter(trust);
+  verifyNativeGit(trust);
   const bootstrapCode = fixture ? readFileSync(bootstrapEntry) :
     readPrivate(path.dirname(bootstrapEntry), path.basename(bootstrapEntry), MAX_CODE);
   demand(hash(bootstrapCode) === trust.installerSha256,
@@ -561,6 +575,7 @@ export function installOwnerApprovedVerifier(request = {}, { onPhase } = {}) {
   const trust = strictBootstrap(policyBytes, keyBytes);
   demand(trust.hostIdentitySha256 === host, "independent bootstrap host binding invalid");
   verifyNativeInterpreter(trust);
+  verifyNativeGit(trust);
   const ownBytes = readFileSync(fileURLToPath(import.meta.url));
   demand(hash(ownBytes) === trust.installerSha256, "bootstrap executable is not independently pinned");
   if (!fixture) {

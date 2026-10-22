@@ -34,7 +34,8 @@ the following keys, in order: `version` (1), `mode`
 `ownerPublicKeySha256` (SHA-256 of Ed25519 SPKI DER), `installerSha256`
 (hash of independently installed bootstrap executable bytes),
 `nodeExecutablePath`, `nodeExecutableSha256` (hash of exact trusted Node 22
-interpreter binary), `maxValiditySeconds` (1 to 86400), `revokedKeyIds`,
+interpreter binary), `gitExecutableSha256` (hash of the reviewed native
+`/usr/bin/git` binary), `maxValiditySeconds` (1 to 86400), `revokedKeyIds`,
 `revokedApprovalIds`. Arrays must contain unique, valid identifiers. Revocations
 are enforced before signature acceptance. A public key is not trusted just
 because it appears in an installation bundle; its exact DER digest must already
@@ -141,7 +142,8 @@ ledger head, image IDs or expected source hashes.
 
 Every call independently rechecks the immutable root/owner-protected bootstrap
 policy, its Ed25519 public-key pin, the exact SHA-256 of the bootstrap module,
-the Node 22 executable's canonical path and SHA-256, and the measured host
+the Node 22 executable's canonical path and SHA-256, the root-owned native
+`/usr/bin/git` executable's fixed path and SHA-256, and the measured host
 identity. It then requires the protected `.installation-lock` and a canonical
 `installation-state.json` with `status: "installed"`, positive exact sequence,
 and the SHA-256 digest of the signed owner approval. The approval's signature,
@@ -180,8 +182,9 @@ that the modules later loaded by another process are the exact bytes just
 measured: an installed-verifier invocation must protect its execution and
 loader boundary, with remeasurement within that boundary and prevention of
 post-check replacement, before it can be a production authority. An audited
-Node binary hash alone does not attest every dynamic library, preload or Node
-startup argument. Those dependencies, witness semantics and end-to-end native
+Node/Git binary hashes alone do not attest every dynamic library, helper,
+preload or Node startup argument. Neither binary is executed by this check.
+Those dependencies, witness semantics and end-to-end native
 host rehearsal remain blockers. **PRODUCTION NO-GO.**
 
 ## Disposable native validation
