@@ -369,6 +369,7 @@ export async function rehearseProtectedNativeOfflineRecovery(request = {}, optio
   requireIt(accepted.status === "attempted" && accepted.pendingSha === plan.nextSha &&
     accepted.sequence === plan.sequence, "attempted reservation does not match protected context");
   let maintenance = false;
+  let ledgerFinalizationStarted = false;
   let backupRelative;
   const step = (phase) => checkpoint(root, plan, phase, options.afterPhase);
   try {
@@ -431,6 +432,11 @@ export async function rehearseProtectedNativeOfflineRecovery(request = {}, optio
     "live data differs from verified restored clone or maintenance escaped");
     putJson(root, "state/active.json", { revision: plan.nextSha });
     step("activated-under-maintenance");
+    // Once finalization begins, the ledger can commit its head before its
+    // caller receives a result. NEVER roll back a candidate after this point:
+    // an interrupted ledger could already have committed the next SHA.
+    ledgerFinalizationStarted = true;
+    step("finalizing-ledger");
     // This is a FAKE fixture health report. The ledger persistence primitive
     // cannot establish real operational authority from its digest.
     const final = completeOfflineReleaseAcceptance({
@@ -448,6 +454,12 @@ export async function rehearseProtectedNativeOfflineRecovery(request = {}, optio
       originalBackupSha256: originalDigest,
     });
   } catch (error) {
+    if (ledgerFinalizationStarted) {
+      // Keep the current routing/maintenance evidence for manual reconciliation.
+      // No automated rollback or lock removal can safely interpret a partial
+      // success of the independent ledger finalization primitive.
+      throw error;
+    }
     if (maintenance) {
       try { rollback(root, plan, originalDigest, backupRelative); }
       catch (failure) {
@@ -460,4 +472,30 @@ export async function rehearseProtectedNativeOfflineRecovery(request = {}, optio
     // attempted ledger lock or accept the same nonce/sequence after a failure.
     throw error;
   }
+}
+
+/**
+ * Read-only crash evidence. Even a completed fixture is non-authorizing.
+ * Never removes a stale ledger lock or alters an interrupted transaction.
+ */
+export function inspectProtectedNativeOfflineRecoveryFixture(request = {}) {
+  strictKeys(request, ["fixtureRoot"], "fixture request");
+  const root = rootGate(request.fixtureRoot);
+  const active = readJson(root, "state/active.json");
+  const route = readJson(root, "state/routing.json");
+  const journal = readJson(root, "state/journal.json");
+  const ledger = readJson(root, "operator/ledger/ledger.json");
+  const pending = existsSync(pathname(root, "operator/ledger/.offline-release.lock"));
+  const finalizing = existsSync(pathname(root, "operator/ledger/.offline-release.finalizing"));
+  const status = pending || finalizing
+    ? "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION"
+    : "DISPOSABLE_REHEARSAL_INSPECTION_ONLY";
+  return Object.freeze({
+    status, deployAuthorized: false,
+    activeSha: active.revision,
+    maintenance: route.maintenance,
+    lastCheckpoint: journal.steps.at(-1) ?? null,
+    pendingAttempt: pending, finalizing,
+    acceptedEntries: ledger.entries.length,
+  });
 }

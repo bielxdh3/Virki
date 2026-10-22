@@ -8,7 +8,9 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { rehearseProtectedNativeOfflineRecovery } from "./trusted-native-recovery-fixture.mjs";
+import {
+  inspectProtectedNativeOfflineRecoveryFixture, rehearseProtectedNativeOfflineRecovery,
+} from "./trusted-native-recovery-fixture.mjs";
 
 // Can create and remove only dedicated tmpfs fixture paths. No Docker socket
 // or installed policy directory is mounted in this container.
@@ -151,6 +153,8 @@ function childScript() {
     await rehearseProtectedNativeOfflineRecovery({fixtureRoot:process.argv[1]}, {
       afterPhase(phase) {
         if (process.argv[2] === "crash" && phase === "live-migrated") process.kill(process.pid, "SIGKILL");
+        if (process.argv[2] === "finalize-crash" && phase === "finalizing-ledger")
+          process.kill(process.pid, "SIGKILL");
         if (process.argv[2] === "hold" && phase === "attempted") {
           const end = Date.now() + 300;
           while (Date.now() < end) {}
@@ -205,10 +209,15 @@ test("native recovery rehearsal reserves one ledger attempt for two distinct pin
   assert.deepEqual(f.read("state/journal.json").steps, [
     "attempted", "loaded-runtime", "loaded-migrator", "maintenance",
     "backup-verified", "restore-verified", "restore-migrated", "live-migrated",
-    "candidate-healthy", "activated-under-maintenance", "completed",
+    "candidate-healthy", "activated-under-maintenance", "finalizing-ledger", "completed",
   ]);
   assert.deepEqual(f.read(`releases/${OLD}.json`),
     { revision: OLD, schemaVersion: 1, health: "ok" });
+  assert.deepEqual(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }), {
+    status: "DISPOSABLE_REHEARSAL_INSPECTION_ONLY", deployAuthorized: false,
+    activeSha: NEW, maintenance: false, lastCheckpoint: "completed",
+    pendingAttempt: false, finalizing: false, acceptedEntries: 1,
+  });
 });
 
 test("each after-admission phase failure preserves attempted ledger lock and restores old data when maintenance began", nativeOnly, async (t) => {
@@ -236,6 +245,64 @@ test("candidate health failure restores old DB with all security metadata and le
   await assert.rejects(f.run(), /candidate health refused/u);
   retainedPredecessor(f);
   assert.deepEqual(f.read("backups/1.dump"), f.oldData);
+});
+
+test("finalization boundary holds maintenance and never rolls back a potentially committed ledger head", nativeOnly, async (t) => {
+  const f = fixture(t);
+  await assert.rejects(f.run((phase) => {
+    if (phase === "finalizing-ledger") throw new Error("injected finalization interruption");
+  }), /injected finalization interruption/u);
+  assert.equal(f.read("database/live.json").schemaVersion, 2);
+  assert.equal(f.status().active.revision, NEW);
+  assert.equal(f.status().route.maintenance, true);
+  assert.equal(f.status().locked, true);
+  assert.deepEqual(f.status().entries, []);
+  assert.deepEqual(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }), {
+    status: "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION",
+    deployAuthorized: false, activeSha: NEW, maintenance: true,
+    lastCheckpoint: "finalizing-ledger", pendingAttempt: true,
+    finalizing: false, acceptedEntries: 0,
+  });
+});
+
+test("error after durable ledger commit never rewrites accepted head back to predecessor", nativeOnly, async (t) => {
+  const f = fixture(t);
+  await assert.rejects(f.run((phase) => {
+    if (phase === "completed") throw new Error("injected failure after ledger commit");
+  }), /injected failure after ledger commit/u);
+  assert.equal(f.read("database/live.json").schemaVersion, 2);
+  assert.equal(f.status().active.revision, NEW);
+  assert.equal(f.status().route.runningSha, NEW);
+  assert.equal(f.status().locked, false);
+  assert.equal(f.status().entries.length, 1);
+});
+
+test("foreign or interrupted finalization latch blocks ledger completion and keeps maintenance for manual review", nativeOnly, async (t) => {
+  const f = fixture(t);
+  await assert.rejects(f.run((phase) => {
+    if (phase === "finalizing-ledger") {
+      f.put("operator/ledger/.offline-release.finalizing", { state: "finalizing" });
+    }
+  }), /EEXIST|finalizing|interrupted transaction files/u);
+  const evidence = inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root });
+  assert.equal(evidence.pendingAttempt, true);
+  assert.equal(evidence.finalizing, true);
+  assert.equal(evidence.maintenance, true);
+  assert.equal(evidence.activeSha, NEW);
+  assert.equal(evidence.acceptedEntries, 0);
+});
+
+test("runtime identity or full database mutation before final health blocks commit and restores all data", nativeOnly, async (t) => {
+  const f = fixture(t);
+  await assert.rejects(f.run((phase) => {
+    if (phase === "candidate-healthy") {
+      const live = f.read("database/live.json");
+      live.secrets.sessionKey = "tampered";
+      f.put("database/live.json", live);
+    }
+  }), /migration changed protected user, security, audit or recovery data/u);
+  retainedPredecessor(f);
+  assert.deepEqual(f.status().entries, []);
 });
 
 test("mutated second archive after first protected load refuses role 2 without fallback", nativeOnly, async (t) => {
@@ -288,6 +355,23 @@ test("crash between live migration and health retains maintenance, old activatio
   assert.equal(f.read("database/live.json").schemaVersion, 2);
   assert.deepEqual(f.status().entries, []);
   assert.equal(f.read("state/journal.json").steps.at(-1), "live-migrated");
+});
+
+test("SIGKILL at finalization leaves new release under maintenance and the ledger pending for reconciliation", nativeOnly, (t) => {
+  const f = fixture(t);
+  const child = runChild(f.root, "finalize-crash");
+  assert.equal(child.signal, "SIGKILL", child.stderr);
+  assert.equal(f.status().locked, true);
+  assert.equal(f.status().route.maintenance, true);
+  assert.equal(f.status().active.revision, NEW);
+  assert.equal(f.read("database/live.json").schemaVersion, 2);
+  assert.deepEqual(f.status().entries, []);
+  assert.deepEqual(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }), {
+    status: "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION",
+    deployAuthorized: false, activeSha: NEW, maintenance: true,
+    lastCheckpoint: "finalizing-ledger", pendingAttempt: true,
+    finalizing: false, acceptedEntries: 0,
+  });
 });
 
 test("two competing processes share one real O_EXCL ledger reservation", nativeOnly, async (t) => {
