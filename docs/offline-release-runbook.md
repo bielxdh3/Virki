@@ -274,6 +274,62 @@ partial image import. Independent owner installation and real disposable
 isolated daemon tests, plus fresh code inventory/digest approvals, are
 prerequisites. This design is **not implemented** by the read-only probe.
 
+### Supervised same-FD protocol experiment (no Docker authorization)
+
+`infra/offline/native-supervisor/fd-lifecycle-fixture.c` implements a
+separate, explicitly disposable Linux-native supervisor/protocol experiment.
+`npm run test:offline:supervisor:container` compiles it using GCC inside a
+digest-pinned Node 22 image, with networking disabled, all capabilities
+dropped, read-only filesystem and repository, `no-new-privileges`, and a
+single executable tmpfs at `/tmp`. The launcher does not mount a host
+Docker socket, access the production host, or permit container privilege
+escalation. A real Docker-in-Docker daemon is **not launched**: a privileged
+Docker-in-Docker runner could see underlying host kernel resources, and the
+present cap-drop/no-network fixture cannot establish its independent cgroup,
+PID namespace, mount namespace and data-root filesystem controls.
+
+The test-only supervisor forks and owns its own fake Unix-stream service
+under a randomly generated root-owned private
+`/tmp/virki-supervisor-*/engine.sock` directory, retains a `pidfd_open`
+descriptor to the exact child, and connects once using `SOCK_CLOEXEC`.
+Before and after each synthetic HTTP-like exchange it reads `SO_PEERCRED`
+from that **same connected socket FD**, checks the child's Linux start
+ticks and pidfd liveness, and compares its mount, network and PID namespace
+identifiers and cgroup-v2 path against the initial `/proc` snapshot.
+Only fixed, bounded synthetic `POST /images/load`, `GET /images/.../json`
+and `GET /info` requests with a fake marker are allowed. They are **not
+valid Docker import requests**: no archive is loaded and the fake daemon
+cannot interpret or forward Docker API operations. A strict reply matcher
+rejects extra bytes, unexpected content, half-closed connections and an
+interrupted or nonresponsive fake daemon. The parent closes the socket,
+terminates and reaps the child, and closes the pidfd before reporting.
+
+The adversarial tests demonstrate continuity of the kernel peer identity
+across the entire *synthetic* operation; they also cover daemon death before
+or during the exchange, response tampering, smuggled bytes, dishonest
+root-directory responses, timeouts and attempted mode/path escape. Even
+the positive fixture reports `isolatedNamespacesApproved:false`,
+`dockerLoadAuthorized:false` and `deployAuthorized:false`. Its child
+shares the test container's cgroup and namespaces; an independently
+reviewed owner-provisioned service unit, immutable pinset, dedicated
+daemon binary/RootDir, mount-ID binding and durable restart fencing remain
+absent. The native code explicitly has **no production entrypoint**, is
+not installed, and is not added to the existing 11-module verifier graph.
+
+To move beyond the experiment, commission an independent security review
+of an owner-signed native service installer and constrained supervisor:
+verify executable content by pinned inode before launch, create a dedicated
+process and cgroup with locked mount/net/pid namespaces, prove that no
+real Docker socket, production volume or data root is reachable, pin the
+daemon executable and data-root mount ID, supervise PID/FD lifecycle through
+every real Docker API request on the same connection, verify real daemon
+responses and reconcile partial imports without authorizing deploy. Test
+this on a dedicated ephemeral native Linux VM (not a privileged container
+sharing a production daemon), including root-owned socket proxies, daemon
+restarts, disconnects, cgroup movement, mount swaps and kernel audit logs.
+Until that external proof is reviewed, **a socket, pidfd, owner pin, or
+successful fake-service test cannot grant Docker import authorization**.
+
 ## Evidence and disposition
 
 ### Independent ledger witness read (non-authorizing prototype)
