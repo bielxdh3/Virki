@@ -8,7 +8,7 @@ import { hashEmailAddress, hashRecoveryRequestKey, requestAccountRecovery } from
 // @ts-expect-error The disposable-database guard is a JavaScript safety helper without a declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 // @ts-expect-error The LOW-05 diagnostics helper is a JavaScript test-only redaction boundary.
-import { classifyLow05NavigationError, classifyLow05Url, describeLow05Response, isLow05ProtectedDocumentCacheControl } from "../scripts/e2e/low05-diagnostics.mjs";
+import { classifyLow05NavigationError, classifyLow05RequestBoundary, classifyLow05Url, describeLow05Response, isLow05ProtectedDocumentCacheControl } from "../scripts/e2e/low05-diagnostics.mjs";
 
 const portalUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://portal.localhost" : "https://portal.localhost:3001";
 const hubMode = process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
@@ -352,9 +352,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
       initialUrl,
       finalUrl: classifyLow05Url(page.url(), portalUrl),
       requestBoundary: {
-        origin: portalUrl.startsWith("https://portal.localhost") ? "portal" : "other",
-        scheme: portalUrl.startsWith("https://") ? "https" : "other",
-        originHasExplicitPort: Boolean(new URL(portalUrl).port),
+        ...classifyLow05RequestBoundary(portalUrl, hubMode),
         productionHubMode: process.env.VIRKI_E2E_HUB_MODE === "production"
       },
       gotoResponse: unauthenticatedResponse ? { method: "GET", ...describeLow05Response(unauthenticatedResponse, unauthenticatedResponse.url(), portalUrl) } : null,

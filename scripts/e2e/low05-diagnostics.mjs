@@ -36,6 +36,22 @@ export function classifyLow05Url(value, portalUrl) {
   return { origin: "portal", route, returnTo };
 }
 
+export function classifyLow05RequestBoundary(portalUrl, hubMode) {
+  let parsed;
+  try { parsed = new URL(portalUrl); }
+  catch { return { origin: "other", scheme: "other", originHasExplicitPort: false }; }
+  const expectedOrigin = new URL(hubMode === "production"
+    ? "https://portal.localhost"
+    : "https://portal.localhost:3001").origin;
+  return {
+    // Require the exact scheme, hostname and effective port. Prefix matching
+    // could otherwise mislabel an attacker-controlled hostname as portal proof.
+    origin: parsed.origin === expectedOrigin ? "portal" : "other",
+    scheme: parsed.protocol === "https:" ? "https" : "other",
+    originHasExplicitPort: Boolean(parsed.port),
+  };
+}
+
 export function describeLow05Response(response, url, portalUrl) {
   const rawHeaders = typeof response?.headers === "function" ? response.headers() : response?.headers;
   const headers = rawHeaders && typeof rawHeaders === "object" ? rawHeaders : {};
