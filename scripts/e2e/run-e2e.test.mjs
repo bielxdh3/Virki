@@ -619,7 +619,7 @@ test("isolated Linux runner clones the current local branch instead of a fixed r
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
   assert.match(script, /git -C \$repoRoot branch --show-current/u);
   assert.match(script, /git clone --branch \$repositoryBranch/u);
-  const clonedHeadCheckIndex = script.indexOf("$clonedHeadOutput = & docker exec --workdir /workspace $runnerName git rev-parse HEAD");
+  const clonedHeadCheckIndex = script.indexOf("$clonedHeadOutput = Invoke-PinnedDocker exec --workdir /workspace $runnerName git rev-parse HEAD");
   const patchApplyIndex = script.indexOf("git apply --binary /tmp/staged.patch");
   assert.ok(clonedHeadCheckIndex !== -1 && patchApplyIndex > clonedHeadCheckIndex, "the cloned base HEAD is verified before local patches are applied");
   assert.ok(script.includes("$clonedHead -cne $sourceHead"), "the isolated clone must match the captured source commit");
@@ -653,58 +653,39 @@ test("isolated Linux snapshot explicitly permits this remediation's new source a
   ]) assert.ok(script.includes(`'${file}'`), file);
 });
 
-test("isolated runner removes only resources whose creation succeeded", () => {
+test("isolated runner journals reviewed Docker create operations and removes verified resource identities", () => {
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
-  const resources = [
-    {
-      name: "snapshot",
-      create: "New-Item -ItemType Directory -Path $snapshotDirectory -ErrorAction Stop",
-      owned: "$script:ownedResources.snapshot = $true",
-      cleanup: "if ($script:ownedResources.snapshot) {"
-    },
-    {
-      name: "network",
-      create: "& docker network create --driver bridge --internal $networkName",
-      owned: "$script:ownedResources.network = $true",
-      cleanup: "if ($script:ownedResources.network) { & docker network rm $networkName"
-    },
-    {
-      name: "database container",
-      create: "& docker create --name $databaseName --network $networkName",
-      owned: "$script:ownedResources.database = $true",
-      cleanup: "if ($script:ownedResources.database) { & docker rm --force --volumes $databaseName"
-    },
-    {
-      name: "browser cache volume",
-      create: "& docker volume create $browserVolumeName",
-      owned: "$script:ownedResources.browserVolume = $true",
-      cleanup: "if ($script:ownedResources.browserVolume) { & docker volume rm $browserVolumeName"
-    },
-    {
-      name: "browser seed container",
-      create: "& docker create --name $browserSeedName --network none",
-      owned: "$script:ownedResources.browserSeed = $true",
-      cleanup: "if ($script:ownedResources.browserSeed) { & docker rm --force $browserSeedName"
-    },
-    {
-      name: "runner container",
-      create: "$runnerCreateArguments = @('create', '--name', $runnerName, '--network', 'bridge')",
-      owned: "$script:ownedResources.runner = $true",
-      cleanup: "if ($script:ownedResources.runner) { & docker rm --force --volumes $runnerName"
-    }
-  ];
-
-  for (const resource of resources) {
-    const createIndex = script.indexOf(resource.create);
-    const ownedIndex = script.indexOf(resource.owned, createIndex);
-    assert.notEqual(createIndex, -1, `${resource.name} creation is present`);
-    assert.ok(ownedIndex > createIndex, `${resource.name} ownership is recorded after creation`);
-    if (resource.name !== "snapshot") {
-      const failureIndex = script.indexOf("if ($LASTEXITCODE -ne 0)", createIndex);
-      assert.ok(failureIndex > createIndex && failureIndex < ownedIndex, `${resource.name} failure is checked before ownership`);
-    }
-    assert.ok(script.includes(resource.cleanup), `${resource.name} cleanup is ownership guarded`);
+  for (const kind of ["network", "bootstrapNetwork", "database", "browserVolume", "browserSeed", "runner"]) {
+    assert.ok(script.includes(`Invoke-CreateOwnedDockerResource '${kind}'`), `${kind} creation is reviewed`);
+    assert.ok(script.includes(`'${kind}'`), `${kind} has a named owner record`);
   }
+  assert.match(script, /Write-DockerMutationJournal 'MUTATION_PENDING'/u);
+  assert.match(script, /Write-DockerMutationJournal 'MUTATION_ACKNOWLEDGED'/u);
+  assert.match(script, /Write-DockerMutationJournal 'RECONCILIATION_REQUIRED'/u);
+  assert.match(script, /Assert-OwnedDockerIdentity \$Kind \$name \$id \$id/u);
+  assert.match(script, /Invoke-PinnedDocker container rm --force --volumes \$id/u);
+  assert.match(script, /if \(-not \$script:ownedResources\[\$Kind\]\) \{ return \}/u);
+});
+
+test("isolated Windows Docker runner pins a signed absolute CLI and local endpoint on every invocation", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  assert.match(script, /C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker\.exe/u);
+  assert.match(script, /Get-AuthenticodeSignature/u);
+  assert.match(script, /npipe:\/\/\/\/\.\/pipe\/dockerDesktopLinuxEngine/u);
+  assert.match(script, /function Invoke-PinnedDocker/u);
+  assert.match(script, /& \$script:dockerCli --host \$script:dockerHost @DockerArguments/u);
+  assert.doesNotMatch(script, /& docker(?:\s|\r|\n)/u, "no mutable PATH Docker command may remain");
+});
+
+test("isolated Windows runner refuses cleanup by mutable Docker resource names", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  assert.match(script, /function Invoke-OwnedDockerCleanup/u);
+  assert.match(script, /org\.virki\.e2e\.owner/u);
+  assert.match(script, /MUTATION_PENDING/u);
+  assert.doesNotMatch(script, /docker rm --force --volumes \$runnerName/u);
+  assert.doesNotMatch(script, /docker rm --force --volumes \$databaseName/u);
+  assert.doesNotMatch(script, /docker volume rm \$browserVolumeName/u);
+  assert.doesNotMatch(script, /docker network rm \$networkName/u);
 });
 
 test("isolated runner retains complete TAP output for integration and production-operations stages", () => {
@@ -741,9 +722,9 @@ test("isolated runner retains complete TAP output for integration and production
   assert.match(script, /Assert-RunnerFileSha256 \('\/workspace\/' \+ \$relativeManifestPath\) \$expectedFile\.sha256/u, "each untracked file hash is verified after Docker copy");
   assert.match(script, /Sort-Object -Property path -Culture 'en-US' -CaseSensitive/u, "untracked provenance is deterministically sorted");
   const manifestWriteIndex = script.indexOf("[System.IO.File]::WriteAllText($runManifestPath");
-  const cleanupIndex = script.indexOf("& docker rm --force --volumes $runnerName");
+  const cleanupIndex = script.indexOf("Invoke-OwnedDockerCleanup $resourceKind");
   assert.ok(manifestWriteIndex !== -1 && cleanupIndex > manifestWriteIndex, "artifacts are persisted before owned-container cleanup");
-  assert.match(script, /WriteAllText\(\$runManifestPath[\s\S]*?\} finally \{\s*Write-Output "[^\r\n]*Removing only temporary resources created by this run\."/u, "owned-resource cleanup has its own finally block around evidence persistence");
+  assert.match(script, /WriteAllText\(\$runManifestPath[\s\S]*?\} finally \{\s*Write-Output "[^\r\n]*Removing only independently verified owned Docker IDs\."/u, "owned-resource cleanup has its own finally block around evidence persistence");
 });
 
 test("browser E2E output redacts URL queries, fragments and credential-bearing headers", () => {

@@ -33,30 +33,52 @@ if ($playwrightArgumentsJson) {
   $PlaywrightArguments = [string[]]$decodedPlaywrightArguments
 }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-# This launcher CREATES and later removes disposable Docker resources. A Docker
-# context can point at an arbitrary remote daemon even when its name looks
-# local. Restrict this development runner to the known Windows Desktop Linux
-# pipe, and reject environment overrides before the first Docker mutation.
-# This is a test-runner safety fence, NOT an attestation of a production daemon.
+# Resolve no executable or daemon through PATH, active context, or Docker
+# configuration. The signed binary resides under the protected Program Files
+# tree, and each invocation names the local Linux Desktop pipe explicitly.
 if ($env:DOCKER_HOST -or $env:DOCKER_CONTEXT -or $env:DOCKER_CONFIG) {
   throw 'Isolated E2E requires an unoverridden local Docker Desktop Linux context.'
 }
 if (-not [System.Environment]::OSVersion.Platform.Equals([System.PlatformID]::Win32NT)) {
   throw 'Isolated E2E is restricted to the Windows Docker Desktop local runner.'
 }
-$dockerContext = (& docker context show 2>$null)
-if ($LASTEXITCODE -ne 0 -or ($dockerContext | Out-String).Trim() -cne 'desktop-linux') {
-  throw 'Isolated E2E refuses a non-Desktop or unverified Docker context.'
+$script:dockerCli = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe'
+$script:dockerHost = 'npipe:////./pipe/dockerDesktopLinuxEngine'
+if (-not (Test-Path -LiteralPath $script:dockerCli -PathType Leaf)) {
+  throw 'Isolated E2E requires the installed Docker Desktop executable.'
 }
-$dockerEndpoint = (& docker context inspect desktop-linux --format '{{.Endpoints.docker.Host}}' 2>$null)
-if ($LASTEXITCODE -ne 0 -or ($dockerEndpoint | Out-String).Trim() -cne 'npipe:////./pipe/dockerDesktopLinuxEngine') {
-  throw 'Isolated E2E refuses any remote or unexpected Docker engine endpoint.'
+$signature = Get-AuthenticodeSignature -LiteralPath $script:dockerCli
+if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
+    -not $signature.SignerCertificate.Subject.StartsWith('CN=Docker Inc,', [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw 'Isolated E2E requires a valid Docker Inc-signed Desktop executable.'
+}
+function Invoke-PinnedDocker {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArguments)
+  & $script:dockerCli --host $script:dockerHost @DockerArguments
+}
+function Invoke-DockerObservation {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArguments)
+  # Windows PowerShell 5 may promote stderr from an expected nonzero Docker
+  # inspect into a terminating error under Stop. Capture the result and code,
+  # then let callers accept only exact expected missing-object diagnostics.
+  $priorPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $lines = @(Invoke-PinnedDocker @DockerArguments 2>&1 | ForEach-Object { $_.ToString() })
+    return [pscustomobject]@{ Status = $LASTEXITCODE; Output = ($lines -join "`n") }
+  } finally {
+    $ErrorActionPreference = $priorPreference
+  }
+}
+$dockerProbe = Invoke-PinnedDocker version --format '{{.Server.Os}}|{{.Server.Arch}}' 2>$null
+if ($LASTEXITCODE -ne 0 -or ($dockerProbe | Out-String).Trim() -cne 'linux|amd64') {
+  throw 'Isolated E2E refuses an unverified local Linux/amd64 Docker endpoint.'
 }
 $repositoryBranch = (& git -C $repoRoot branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $repositoryBranch -notmatch '^[A-Za-z0-9._/-]{1,240}$') {
   throw 'The isolated Docker snapshot requires a named local branch with a supported ref name.'
 }
-$runId = [Guid]::NewGuid().ToString('N').Substring(0, 10)
+$runId = [Guid]::NewGuid().ToString('N')
 $evidenceRoot = Join-Path $repoRoot '.virki-mission-tmp/isolated-runs'
 $runEvidenceDirectory = Join-Path $evidenceRoot $runId
 $evidenceIgnore = (& git -C $repoRoot check-ignore --quiet '.virki-mission-tmp/isolated-runs')
@@ -67,6 +89,7 @@ $unitTestsEvidencePath = Join-Path $runEvidenceDirectory 'unit-tests.tap.log'
 $integrationTestsEvidencePath = Join-Path $runEvidenceDirectory 'integration-tests.tap.log'
 $browserE2EEvidencePath = Join-Path $runEvidenceDirectory 'browser-e2e-output.log'
 $runManifestPath = Join-Path $runEvidenceDirectory 'run-manifest.json'
+$dockerMutationJournalPath = Join-Path $runEvidenceDirectory 'docker-mutations.jsonl'
 $runStartedAt = [DateTimeOffset]::UtcNow
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $snapshotDirectory = Join-Path $tempRoot ('virki-e2e-' + $runId)
@@ -75,6 +98,7 @@ $bundlePath = Join-Path $snapshotDirectory 'repository.bundle'
 $stagedPatchPath = Join-Path $snapshotDirectory 'staged.patch'
 $workingPatchPath = Join-Path $snapshotDirectory 'working-tree.patch'
 $networkName = 'virki-e2e-' + $runId
+$bootstrapNetworkName = 'virki-e2e-bootstrap-' + $runId
 $databaseName = 'virki-e2e-postgres-' + $runId
 $runnerName = 'virki-e2e-runner-' + $runId
 $playwrightBrowserImage = 'mcr.microsoft.com/playwright@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27'
@@ -82,6 +106,24 @@ $browserVolumeName = 'virki-e2e-browser-' + $runId
 $browserSeedName = 'virki-e2e-browser-seed-' + $runId
 $browserExecutablePath = '/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell'
 $browserVolumeMount = 'type=volume,source=' + $browserVolumeName + ',target=/ms-playwright/chromium_headless_shell-1243'
+$script:dockerOwnerLabel = 'org.virki.e2e.owner=' + $runId
+$script:dockerResourceNames = @{
+  network = $networkName
+  bootstrapNetwork = $bootstrapNetworkName
+  database = $databaseName
+  runner = $runnerName
+  browserVolume = $browserVolumeName
+  browserSeed = $browserSeedName
+}
+$script:ownedDockerIds = @{
+  network = $null
+  bootstrapNetwork = $null
+  database = $null
+  runner = $null
+  browserSeed = $null
+}
+$script:ownedDockerVolume = $null
+$script:dockerMutationUncertain = $false
 $passwords = @{
   bootstrap = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
   runtime = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
@@ -109,6 +151,7 @@ $script:stageManifest = [System.Collections.Generic.List[object]]::new()
 $script:ownedResources = [ordered]@{
   snapshot = $false
   network = $false
+  bootstrapNetwork = $false
   database = $false
   runner = $false
   browserVolume = $false
@@ -134,6 +177,133 @@ Write-Output ("ISOLATED_RUN_ID=" + $runId)
 Write-Output ("SOURCE_BRANCH=" + $repositoryBranch)
 Write-Output ("SOURCE_HEAD=" + $sourceHead)
 
+# A successful CLI status alone is not ownership evidence. Record the intent
+# durably BEFORE creating or removing any resource. If an ACK or inspection
+# fails, retain the record for manual reconciliation; never delete by a name.
+function Write-DockerMutationJournal {
+  param([string]$State, [string]$Kind, [string]$Name, [string]$Identity = '')
+  $record = [ordered]@{
+    timestampUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    owner = $runId
+    state = $State
+    kind = $Kind
+    name = $Name
+    identity = $Identity
+  }
+  $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($record | ConvertTo-Json -Compress) + "`n")
+  $stream = [System.IO.FileStream]::new($dockerMutationJournalPath,
+    [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+  try {
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function Assert-OwnedDockerIdentity {
+  param([string]$Kind, [string]$Name, [string]$Lookup, [string]$ExpectedId = '',
+    [object]$ExpectedVolume = $null)
+  $dockerKind = if ($Kind -eq 'browserVolume') { 'volume' } elseif ($Kind -in @('network', 'bootstrapNetwork')) { 'network' } else { 'container' }
+  $observation = Invoke-DockerObservation $dockerKind inspect $Lookup
+  if ($observation.Status -ne 0) { throw "Owned Docker $Kind inspection failed; reconcile using the mutation journal." }
+  try { $entries = @(($observation.Output.Trim() | ConvertFrom-Json -ErrorAction Stop)) }
+  catch { throw 'Owned Docker inspection returned malformed JSON.' }
+  if ($entries.Count -ne 1) { throw 'Owned Docker inspection must identify exactly one resource.' }
+  $entry = $entries[0]
+  $labels = if ($dockerKind -eq 'container') { $entry.Config.Labels } else { $entry.Labels }
+  $observedName = if ($dockerKind -eq 'container') { '/' + $Name } else { $Name }
+  if ($entry.Name -cne $observedName -or $null -eq $labels -or
+      $labels.'org.virki.e2e.owner' -cne $runId) {
+    throw "Docker resource $Kind failed owner/name verification."
+  }
+  if ($dockerKind -ne 'volume') {
+    if ($entry.Id -cnotmatch '^[a-f0-9]{64}$' -or $entry.Id -cne $ExpectedId) {
+      throw "Docker resource $Kind changed its immutable identity."
+    }
+  } else {
+    if (-not $entry.CreatedAt -or -not $entry.Mountpoint -or -not $entry.Driver) {
+      throw 'Owned volume has no durable identity metadata.'
+    }
+    if ($null -ne $ExpectedVolume -and
+        ($entry.CreatedAt -cne $ExpectedVolume.CreatedAt -or
+         $entry.Mountpoint -cne $ExpectedVolume.Mountpoint -or
+         $entry.Driver -cne $ExpectedVolume.Driver)) {
+      throw 'Owned volume identity changed since its creation.'
+    }
+  }
+  return $entry
+}
+
+function Invoke-CreateOwnedDockerResource {
+  param([string]$Kind, [string]$Name, [string[]]$DockerArguments)
+  if ($script:ownedResources[$Kind] -or $script:dockerMutationUncertain) {
+    throw 'Refusing repeated or uncertain Docker creation.'
+  }
+  if ($Kind -eq 'browserVolume') {
+    $existing = Invoke-DockerObservation volume inspect $Name
+    if ($existing.Status -eq 0 -or $existing.Output -notmatch '(?i)\bno such volume\b') {
+      throw 'Refusing to create or reuse an existing/uncertain Docker volume.'
+    }
+  }
+  Write-DockerMutationJournal 'MUTATION_PENDING' $Kind $Name
+  try {
+    $answer = @(Invoke-PinnedDocker @DockerArguments 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Docker $Kind creation ACK is uncertain." }
+    $identifier = ($answer | Out-String).Trim()
+    if ($Kind -eq 'browserVolume') {
+      if ($identifier -cne $Name) { throw 'Unexpected Docker volume create result.' }
+      $record = Assert-OwnedDockerIdentity $Kind $Name $Name
+      $script:ownedDockerVolume = [ordered]@{
+        CreatedAt = $record.CreatedAt
+        Mountpoint = $record.Mountpoint
+        Driver = $record.Driver
+      }
+    } else {
+      if ($identifier -cnotmatch '^[a-f0-9]{64}$') { throw 'Docker create did not return an immutable resource ID.' }
+      $null = Assert-OwnedDockerIdentity $Kind $Name $identifier $identifier
+      $script:ownedDockerIds[$Kind] = $identifier
+    }
+    $script:ownedResources[$Kind] = $true
+    Write-DockerMutationJournal 'MUTATION_ACKNOWLEDGED' $Kind $Name $identifier
+    return $identifier
+  } catch {
+    $script:dockerMutationUncertain = $true
+    Write-DockerMutationJournal 'RECONCILIATION_REQUIRED' $Kind $Name
+    throw
+  }
+}
+
+function Invoke-OwnedDockerCleanup {
+  param([string]$Kind)
+  if (-not $script:ownedResources[$Kind]) { return }
+  $name = $script:dockerResourceNames[$Kind]
+  $id = if ($Kind -eq 'browserVolume') { $name } else { $script:ownedDockerIds[$Kind] }
+  if (-not $id) { throw "Owned Docker $Kind has no verified resource identity." }
+  $null = Assert-OwnedDockerIdentity $Kind $name $id $id $script:ownedDockerVolume
+  Write-DockerMutationJournal 'REMOVE_PENDING' $Kind $name $id
+  try {
+    switch ($Kind) {
+      { $_ -in @('network', 'bootstrapNetwork') } { $null = @(Invoke-PinnedDocker network rm $id 2>&1) }
+      'browserVolume' { $null = @(Invoke-PinnedDocker volume rm $name 2>&1) }
+      'browserSeed' { $null = @(Invoke-PinnedDocker container rm --force $id 2>&1) }
+      default { $null = @(Invoke-PinnedDocker container rm --force --volumes $id 2>&1) }
+    }
+    if ($LASTEXITCODE -ne 0) { throw "Docker $Kind removal ACK is uncertain." }
+    $dockerKind = if ($Kind -eq 'browserVolume') { 'volume' } elseif ($Kind -in @('network', 'bootstrapNetwork')) { 'network' } else { 'container' }
+    $postRemoval = Invoke-DockerObservation $dockerKind inspect $id
+    if ($postRemoval.Status -eq 0 -or $postRemoval.Output -notmatch '(?i)(No such (?:object|container|network|volume):|\bno such volume\b)') {
+      throw "Docker $Kind absence could not be confirmed."
+    }
+    Write-DockerMutationJournal 'REMOVE_CONFIRMED' $Kind $name $id
+    $script:ownedResources[$Kind] = $false
+  } catch {
+    $script:dockerMutationUncertain = $true
+    Write-DockerMutationJournal 'RECONCILIATION_REQUIRED' $Kind $name $id
+    throw
+  }
+}
+
 $selectedStageCount = 0
 if ($E2EOnly) { $selectedStageCount++ }
 if ($IntegrationOnly) { $selectedStageCount++ }
@@ -157,13 +327,13 @@ function Invoke-Stage {
   $startedAt = [DateTimeOffset]::UtcNow
   $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
   if ($EvidenceLogPath) {
-    $stageOutput = @(& docker exec --workdir /workspace @Environment $script:runnerName @Command 2>&1)
+    $stageOutput = @(Invoke-PinnedDocker exec --workdir /workspace @Environment $script:runnerName @Command 2>&1)
     $exitCode = $LASTEXITCODE
     $stageLines = [string[]]@($stageOutput | ForEach-Object { $_.ToString() })
     [System.IO.File]::WriteAllLines($EvidenceLogPath, $stageLines, [System.Text.UTF8Encoding]::new($false))
     foreach ($line in $stageLines) { Write-Output $line }
   } else {
-    & docker exec --workdir /workspace @Environment $script:runnerName @Command
+    Invoke-PinnedDocker exec --workdir /workspace @Environment $script:runnerName @Command
     $exitCode = $LASTEXITCODE
   }
   $stopwatch.Stop()
@@ -209,7 +379,7 @@ function Get-TapFailureManifest {
 
 function Assert-RunnerFileSha256 {
   param([string]$ContainerPath, [string]$ExpectedSha256, [string]$Description)
-  $hashOutput = & docker exec $script:runnerName sha256sum -- $ContainerPath
+  $hashOutput = Invoke-PinnedDocker exec $script:runnerName sha256sum -- $ContainerPath
   if ($LASTEXITCODE -ne 0) { throw ("Could not verify the copied " + $Description + " in the Linux runner.") }
   $hashFields = [string]$hashOutput -split '\s+'
   $actualSha256 = $hashFields[0]
@@ -294,64 +464,65 @@ try {
   $script:untrackedFileEvidence = @($untrackedEvidence | Sort-Object -Property path -Culture 'en-US' -CaseSensitive)
 
   if (-not $IntegrationOnly -and -not $UnitOnly) {
-    $browserImageId = & docker image inspect --format '{{.Id}}' $playwrightBrowserImage 2>$null
+    $browserImageId = Invoke-PinnedDocker image inspect --format '{{.Id}}' $playwrightBrowserImage 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $browserImageId) { throw 'The pinned Playwright browser image is not installed locally; refusing to download browser binaries.' }
-    & docker volume create $browserVolumeName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create the temporary Chromium cache volume.' }
-    $script:ownedResources.browserVolume = $true
-    & docker create --name $browserSeedName --network none `
-      --mount $browserVolumeMount `
-      --entrypoint /bin/bash $playwrightBrowserImage -lc 'sleep infinity' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the temporary Chromium cache from the installed image.' }
-    $script:ownedResources.browserSeed = $true
-    & docker start $browserSeedName | Out-Null
+    $null = Invoke-CreateOwnedDockerResource 'browserVolume' $browserVolumeName @(
+      'volume', 'create', '--label', $script:dockerOwnerLabel, $browserVolumeName)
+    $browserSeedName = Invoke-CreateOwnedDockerResource 'browserSeed' $browserSeedName @(
+      'create', '--name', $browserSeedName, '--network', 'none', '--label', $script:dockerOwnerLabel,
+      '--mount', $browserVolumeMount, '--entrypoint', '/bin/bash', $playwrightBrowserImage, '-lc', 'sleep infinity')
+    Invoke-PinnedDocker start $browserSeedName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the temporary Chromium cache volume.' }
-    & docker exec $browserSeedName test -x $browserExecutablePath
+    Invoke-PinnedDocker exec $browserSeedName test -x $browserExecutablePath
     if ($LASTEXITCODE -ne 0) { throw 'The pinned Playwright image does not contain the expected Chromium headless shell.' }
-    & docker rm --force $browserSeedName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not remove the temporary Chromium image container.' }
-    $script:ownedResources.browserSeed = $false
+    Invoke-OwnedDockerCleanup 'browserSeed'
     $script:browserImage = $playwrightBrowserImage
   }
 
-  & docker network create --driver bridge --internal $networkName | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not create the private Docker network.' }
-  $script:ownedResources.network = $true
-  & docker create --name $databaseName --network $networkName --network-alias postgres `
-    --tmpfs '/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m' `
-    --health-cmd 'pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_e2e_test' `
-    --health-interval 1s --health-timeout 3s --health-retries 90 `
-    --env 'POSTGRES_DB=virki_e2e_test' --env 'POSTGRES_USER=virki_bootstrap' `
-    --env "POSTGRES_PASSWORD=$($passwords.bootstrap)" `
-    --env "VIRKI_RUNTIME_DB_PASSWORD=$($passwords.runtime)" `
-    --env "VIRKI_MIGRATOR_DB_PASSWORD=$($passwords.migrator)" `
-    --env "VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD=$($passwords.audit)" `
-    --env "VIRKI_E2E_DATABASE_PASSWORD=$($passwords.test)" `
-    'postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24' | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not create the disposable PostgreSQL container.' }
-  $script:ownedResources.database = $true
+  $networkName = Invoke-CreateOwnedDockerResource 'network' $networkName @(
+    'network', 'create', '--driver', 'bridge', '--internal', '--label', $script:dockerOwnerLabel,
+    $networkName)
+  # Dependency installation needs egress, but must not share Docker's ambient
+  # default bridge with existing host containers.
+  $bootstrapNetworkName = Invoke-CreateOwnedDockerResource 'bootstrapNetwork' $bootstrapNetworkName @(
+    'network', 'create', '--driver', 'bridge', '--label', $script:dockerOwnerLabel,
+    $bootstrapNetworkName)
+  $databaseName = Invoke-CreateOwnedDockerResource 'database' $databaseName @(
+    'create', '--name', $databaseName, '--network', $networkName,
+    '--network-alias', 'postgres', '--label', $script:dockerOwnerLabel,
+    '--tmpfs', '/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m',
+    '--health-cmd', 'pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_e2e_test',
+    '--health-interval', '1s', '--health-timeout', '3s', '--health-retries', '90',
+    '--env', 'POSTGRES_DB=virki_e2e_test', '--env', 'POSTGRES_USER=virki_bootstrap',
+    '--env', ("POSTGRES_PASSWORD=" + $passwords.bootstrap),
+    '--env', ("VIRKI_RUNTIME_DB_PASSWORD=" + $passwords.runtime),
+    '--env', ("VIRKI_MIGRATOR_DB_PASSWORD=" + $passwords.migrator),
+    '--env', ("VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD=" + $passwords.audit),
+    '--env', ("VIRKI_E2E_DATABASE_PASSWORD=" + $passwords.test),
+    'postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24')
 
-  & docker cp (Join-Path $repoRoot 'infra/postgres-init/10-virki-database-roles.sh') ($databaseName + ':/docker-entrypoint-initdb.d/10-virki-database-roles.sh') | Out-Null
+  Invoke-PinnedDocker cp (Join-Path $repoRoot 'infra/postgres-init/10-virki-database-roles.sh') ($databaseName + ':/docker-entrypoint-initdb.d/10-virki-database-roles.sh') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not copy the database role initializer.' }
-  & docker cp (Join-Path $repoRoot 'scripts/e2e/20-virki-e2e-runtime-test-role.sh') ($databaseName + ':/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh') | Out-Null
+  Invoke-PinnedDocker cp (Join-Path $repoRoot 'scripts/e2e/20-virki-e2e-runtime-test-role.sh') ($databaseName + ':/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not copy the E2E role initializer.' }
-  & docker start $databaseName | Out-Null
+  Invoke-PinnedDocker start $databaseName | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not start the disposable PostgreSQL container.' }
 
   $databaseReady = $false
   for ($attempt = 0; $attempt -lt 90; $attempt++) {
-    $health = (& docker inspect --format '{{.State.Health.Status}}' $databaseName 2>$null).Trim()
+    $health = (Invoke-PinnedDocker inspect --format '{{.State.Health.Status}}' $databaseName 2>$null).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the disposable PostgreSQL health state.' }
     if ($health -eq 'healthy') { $databaseReady = $true; break }
     if ($health -eq 'unhealthy') { break }
     Start-Sleep -Seconds 1
   }
   if (-not $databaseReady) {
-    & docker logs $databaseName
+    Invoke-PinnedDocker logs $databaseName
     throw 'Disposable PostgreSQL did not become healthy within 90 seconds.'
   }
 
-  $runnerCreateArguments = @('create', '--name', $runnerName, '--network', 'bridge')
+  $runnerCreateArguments = @('create', '--name', $runnerName, '--network', $bootstrapNetworkName,
+    '--label', $script:dockerOwnerLabel)
   if ($env:VIRKI_E2E_HUB_MODE -eq 'production') {
     $runnerCreateArguments += @('--add-host', 'access.e2e.invalid:127.0.0.1')
   }
@@ -359,48 +530,47 @@ try {
     $runnerCreateArguments += @('--mount', ($browserVolumeMount + ',readonly'), '--env', ('VIRKI_E2E_CHROMIUM_EXECUTABLE_PATH=' + $browserExecutablePath))
   }
   $runnerCreateArguments += @('--entrypoint', '/bin/bash', 'node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8', '-lc', 'sleep infinity')
-  & docker @runnerCreateArguments | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not create the isolated Playwright runner.' }
-  $script:ownedResources.runner = $true
-  & docker cp $bundlePath ($runnerName + ':/tmp/virki.bundle')
+  $runnerName = Invoke-CreateOwnedDockerResource 'runner' $runnerName $runnerCreateArguments
+  $script:runnerName = $runnerName
+  Invoke-PinnedDocker cp $bundlePath ($runnerName + ':/tmp/virki.bundle')
   if ($LASTEXITCODE -ne 0) { throw 'Could not copy the temporary Git bundle.' }
-  & docker cp $stagedPatchPath ($runnerName + ':/tmp/staged.patch')
+  Invoke-PinnedDocker cp $stagedPatchPath ($runnerName + ':/tmp/staged.patch')
   if ($LASTEXITCODE -ne 0) { throw 'Could not copy the staged worktree patch.' }
-  & docker cp $workingPatchPath ($runnerName + ':/tmp/working-tree.patch')
+  Invoke-PinnedDocker cp $workingPatchPath ($runnerName + ':/tmp/working-tree.patch')
   if ($LASTEXITCODE -ne 0) { throw 'Could not copy the unstaged worktree patch.' }
-  & docker start $runnerName | Out-Null
+  Invoke-PinnedDocker start $runnerName | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not start the isolated Playwright runner.' }
   Assert-RunnerFileSha256 '/tmp/staged.patch' $script:stagedPatchSha256 'staged patch'
   Assert-RunnerFileSha256 '/tmp/working-tree.patch' $script:workingTreePatchSha256 'unstaged patch'
-  & docker network connect $networkName $runnerName | Out-Null
+  Invoke-PinnedDocker network connect $networkName $runnerName | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not connect the runner to the private database network.' }
 
-  & docker exec $runnerName bash -lc 'apt-get update -qq && apt-get install -y --no-install-recommends git libnss3-tools'
+  Invoke-PinnedDocker exec $runnerName bash -lc 'apt-get update -qq && apt-get install -y --no-install-recommends git libnss3-tools'
   if ($LASTEXITCODE -ne 0) { throw 'Could not install Linux Git and Chromium NSS tooling.' }
-  $nodeVersion = (& docker exec $runnerName node --version).Trim()
-  $npmVersion = (& docker exec $runnerName npm --version).Trim()
+  $nodeVersion = (Invoke-PinnedDocker exec $runnerName node --version).Trim()
+  $npmVersion = (Invoke-PinnedDocker exec $runnerName npm --version).Trim()
   $script:nodeVersion = $nodeVersion
   $script:npmVersion = $npmVersion
   Write-Output "Linux runtime: Node $nodeVersion, npm $npmVersion"
   if ($nodeVersion -notmatch '^v22\.' -or [version]$npmVersion -lt [version]'10.9.3' -or [version]$npmVersion -ge [version]'11.0.0') {
     throw 'The Linux runner does not satisfy the repository Node/npm engines.'
   }
-  & docker exec $runnerName git clone --branch $repositoryBranch /tmp/virki.bundle /workspace
+  Invoke-PinnedDocker exec $runnerName git clone --branch $repositoryBranch /tmp/virki.bundle /workspace
   if ($LASTEXITCODE -ne 0) { throw 'Could not clone the temporary Git snapshot.' }
-  $clonedHeadOutput = & docker exec --workdir /workspace $runnerName git rev-parse HEAD
+  $clonedHeadOutput = Invoke-PinnedDocker exec --workdir /workspace $runnerName git rev-parse HEAD
   if ($LASTEXITCODE -ne 0) { throw 'Could not read the cloned source HEAD.' }
   $clonedHead = $clonedHeadOutput.Trim()
   if ($clonedHead -cne $sourceHead) { throw 'The cloned snapshot does not match the source HEAD captured for this run.' }
-  & docker exec --workdir /workspace $runnerName bash -lc 'if [ -s /tmp/staged.patch ]; then git apply --binary /tmp/staged.patch; fi; if [ -s /tmp/working-tree.patch ]; then git apply --binary /tmp/working-tree.patch; fi'
+  Invoke-PinnedDocker exec --workdir /workspace $runnerName bash -lc 'if [ -s /tmp/staged.patch ]; then git apply --binary /tmp/staged.patch; fi; if [ -s /tmp/working-tree.patch ]; then git apply --binary /tmp/working-tree.patch; fi'
   if ($LASTEXITCODE -ne 0) { throw 'Could not apply the current worktree changes to the temporary clone.' }
   foreach ($relativePath in $untrackedFiles) {
     $relativeDirectory = Split-Path -Parent $relativePath
     if ($relativeDirectory) {
-      & docker exec $runnerName mkdir -p ('/workspace/' + $relativeDirectory.Replace('\', '/'))
+      Invoke-PinnedDocker exec $runnerName mkdir -p ('/workspace/' + $relativeDirectory.Replace('\', '/'))
       if ($LASTEXITCODE -ne 0) { throw 'Could not prepare a parent directory for an untracked snapshot file.' }
     }
     $snapshotPath = Join-Path $snapshotUntrackedDirectory $relativePath
-    & docker cp $snapshotPath ($runnerName + ':/workspace/' + $relativePath.Replace('\', '/')) | Out-Null
+    Invoke-PinnedDocker cp $snapshotPath ($runnerName + ':/workspace/' + $relativePath.Replace('\', '/')) | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not copy an untracked test file into the temporary clone.' }
     $relativeManifestPath = $relativePath.Replace('\', '/')
     $expectedFile = @($script:untrackedFileEvidence | Where-Object { $_.path -eq $relativeManifestPath })[0]
@@ -408,30 +578,31 @@ try {
     Assert-RunnerFileSha256 ('/workspace/' + $relativeManifestPath) $expectedFile.sha256 ('untracked file ' + $relativeManifestPath)
   }
 
-  & docker exec $runnerName bash -lc 'mkdir -p /workspace/packages/database/generated /workspace/prisma/generated /workspace/apps/hub/.next /workspace/apps/public-site/.next /workspace/apps/issuer/.next /workspace/test-results /workspace/playwright-report'
+  Invoke-PinnedDocker exec $runnerName bash -lc 'mkdir -p /workspace/packages/database/generated /workspace/prisma/generated /workspace/apps/hub/.next /workspace/apps/public-site/.next /workspace/apps/issuer/.next /workspace/test-results /workspace/playwright-report'
   if ($LASTEXITCODE -ne 0) { throw 'Could not prepare isolated workspace output directories.' }
-  & docker exec --workdir /workspace $runnerName npm ci
+  Invoke-PinnedDocker exec --workdir /workspace $runnerName npm ci
   if ($LASTEXITCODE -ne 0) { throw 'Locked Linux dependency installation failed.' }
   Invoke-Stage 'tooling-policy-dependencies' @('bash', '-lc', 'npm ls @prisma/config deepmerge-ts --all')
   Invoke-LoggedStage 'tooling-policy-tests' 'tooling-policy' 'node scripts/tooling-audit-policy.mjs && node --test scripts/tooling-audit-policy.test.mjs'
   if (-not $IntegrationOnly -and -not $UnitOnly) {
-    $script:playwrightVersion = (& docker exec --workdir /workspace $runnerName npx playwright --version).Trim()
+    $script:playwrightVersion = (Invoke-PinnedDocker exec --workdir /workspace $runnerName npx playwright --version).Trim()
     if ($LASTEXITCODE -ne 0 -or $script:playwrightVersion -ne 'Version 1.63.0') { throw 'The installed Playwright package does not match the preinstalled browser image.' }
-    $script:browserRevision = (& docker exec --workdir /workspace $runnerName node -e "const b=require('./node_modules/playwright-core/browsers.json').browsers.find((x)=>x.name==='chromium-headless-shell');if(!b)process.exit(1);process.stdout.write(String(b.revision))").Trim()
+    $script:browserRevision = (Invoke-PinnedDocker exec --workdir /workspace $runnerName node -e "const b=require('./node_modules/playwright-core/browsers.json').browsers.find((x)=>x.name==='chromium-headless-shell');if(!b)process.exit(1);process.stdout.write(String(b.revision))").Trim()
     if ($LASTEXITCODE -ne 0 -or $script:browserRevision -ne '1243') { throw 'The locked Playwright browser revision does not match the preinstalled image.' }
     Invoke-LoggedStage 'chromium-dependencies' 'chromium-dependencies' 'npx playwright install-deps chromium'
     if ($script:ownedResources.browserVolume) {
-      $script:browserVersion = (& docker exec $runnerName $browserExecutablePath --version).Trim()
+      $script:browserVersion = (Invoke-PinnedDocker exec $runnerName $browserExecutablePath --version).Trim()
       if ($LASTEXITCODE -ne 0 -or -not $script:browserVersion) { throw 'The preinstalled Chromium headless shell did not start.' }
       Write-Output "Chromium: $($script:browserVersion) from $playwrightBrowserImage"
     }
   }
 
-  & docker network disconnect bridge $runnerName | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not disconnect the runner egress network.' }
-  & docker exec --workdir /workspace --env ("DATABASE_URL=" + $urls.runtime) --env ("MIGRATION_DATABASE_URL=" + $urls.migrator) $runnerName npm run prisma:migrate:deploy
+  Invoke-PinnedDocker network disconnect $bootstrapNetworkName $runnerName | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not disconnect the runner bootstrap egress network.' }
+  Invoke-OwnedDockerCleanup 'bootstrapNetwork'
+  Invoke-PinnedDocker exec --workdir /workspace --env ("DATABASE_URL=" + $urls.runtime) --env ("MIGRATION_DATABASE_URL=" + $urls.migrator) $runnerName npm run prisma:migrate:deploy
   if ($LASTEXITCODE -ne 0) { throw 'Committed migrations did not apply to the disposable database.' }
-  & docker exec --detach $runnerName node -e "const net=require('node:net');net.createServer(s=>{const d=net.connect(5432,'postgres');s.pipe(d);d.pipe(s)}).listen(5432,'127.0.0.1')"
+  Invoke-PinnedDocker exec --detach $runnerName node -e "const net=require('node:net');net.createServer(s=>{const d=net.connect(5432,'postgres');s.pipe(d);d.pipe(s)}).listen(5432,'127.0.0.1')"
   if ($LASTEXITCODE -ne 0) { throw 'Could not start the loopback-only integration database proxy.' }
 
   if ($env:VIRKI_E2E_HUB_MODE -eq 'production') {
@@ -506,6 +677,8 @@ try {
       playwrightVersion = $script:playwrightVersion
       browserRevision = $script:browserRevision
       browserVersion = $script:browserVersion
+      dockerMutationJournal = [System.IO.Path]::GetFileName($dockerMutationJournalPath)
+      dockerMutationUncertain = $script:dockerMutationUncertain
       stagedPatchSha256 = $script:stagedPatchSha256
       workingTreePatchSha256 = $script:workingTreePatchSha256
       untrackedFiles = @($script:untrackedFileEvidence)
@@ -515,7 +688,9 @@ try {
       integrationTestsLog = if (Test-Path -LiteralPath $integrationTestsEvidencePath) { [System.IO.Path]::GetFileName($integrationTestsEvidencePath) } else { $null }
       integrationTestsFailureCount = $script:integrationTestFailures.Count
       integrationTestsFailures = @($script:integrationTestFailures)
-      exitCode = if ($script:runFailed) { 1 } else { 0 }
+      # Until verified cleanup completes, even passing stages are NOT PASS.
+      exitCode = 1
+      dockerCleanupVerified = $false
       failedStages = $failedStages
       stages = @($script:stageManifest)
       browserE2ELog = if (Test-Path -LiteralPath $browserE2EEvidencePath) { [System.IO.Path]::GetFileName($browserE2EEvidencePath) } else { $null }
@@ -525,20 +700,40 @@ try {
     }
     [System.IO.File]::WriteAllText($runManifestPath, ($runManifest | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
     Write-Output ('RUN_EVIDENCE_DIRECTORY=' + $runEvidenceDirectory)
-    Write-Output ('RUN_MANIFEST_JSON=' + ($runManifest | ConvertTo-Json -Depth 6 -Compress))
   } finally {
-    Write-Output "`nRemoving only temporary resources created by this run."
-    if ($script:ownedResources.runner) { & docker rm --force --volumes $runnerName 2>$null | Out-Null }
-    if ($script:ownedResources.database) { & docker rm --force --volumes $databaseName 2>$null | Out-Null }
-    if ($script:ownedResources.browserSeed) { & docker rm --force $browserSeedName 2>$null | Out-Null }
-    if ($script:ownedResources.browserVolume) { & docker volume rm $browserVolumeName 2>$null | Out-Null }
-    if ($script:ownedResources.network) { & docker network rm $networkName 2>$null | Out-Null }
+    Write-Output "`nRemoving only independently verified owned Docker IDs."
+    $cleanupFailures = [System.Collections.Generic.List[string]]::new()
+    foreach ($resourceKind in @('runner', 'database', 'browserSeed', 'browserVolume', 'bootstrapNetwork', 'network')) {
+      try {
+        Invoke-OwnedDockerCleanup $resourceKind
+      } catch {
+        $cleanupFailures.Add($resourceKind)
+        Write-Output ("Docker cleanup needs independent reconciliation: " + $resourceKind)
+      }
+    }
     if ($script:ownedResources.snapshot) {
       $resolvedSnapshot = [System.IO.Path]::GetFullPath($snapshotDirectory)
       if ($resolvedSnapshot.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and $resolvedSnapshot -ne $tempRoot -and (Test-Path -LiteralPath $resolvedSnapshot)) {
         Remove-Item -LiteralPath $resolvedSnapshot -Recurse -Force
       }
     }
-    Write-Output 'Owned temporary resources removed.'
+    if ($script:dockerMutationUncertain -or $cleanupFailures.Count -gt 0) {
+      $script:runFailed = $true
+      Write-DockerMutationJournal 'RECONCILIATION_REQUIRED' 'run' $runId
+      if ($null -ne $runManifest) {
+        $runManifest.exitCode = 1
+        $runManifest.dockerMutationUncertain = $true
+        [System.IO.File]::WriteAllText($runManifestPath, ($runManifest | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
+        Write-Output ('RUN_MANIFEST_JSON=' + ($runManifest | ConvertTo-Json -Depth 6 -Compress))
+      }
+      throw ("Isolated E2E Docker ownership is unresolved; inspect " + $dockerMutationJournalPath)
+    }
+    if ($null -ne $runManifest) {
+      $runManifest.dockerCleanupVerified = $true
+      $runManifest.exitCode = if ($script:runFailed) { 1 } else { 0 }
+      [System.IO.File]::WriteAllText($runManifestPath, ($runManifest | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
+      Write-Output ('RUN_MANIFEST_JSON=' + ($runManifest | ConvertTo-Json -Depth 6 -Compress))
+    }
+    Write-Output 'All recorded disposable Docker identities were removed.'
   }
 }
