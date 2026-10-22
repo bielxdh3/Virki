@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import Koa from "koa";
+import { errors } from "oidc-provider";
 import test from "node:test";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { readInteractionDetailsOrRespond } from "./interaction-error";
 
-test("interaction lookup failures return a generic HTTP error with issuer security headers", async () => {
+test("interaction lookup backend failure returns generic 503 with issuer security headers", async () => {
   const app = new Koa();
   app.use(async (context) => {
     setIssuerSecurityHeaders(context.res);
@@ -25,7 +26,7 @@ test("interaction lookup failures return a generic HTTP error with issuer securi
     const address = server.address();
     assert.ok(address && typeof address !== "string");
     const response = await fetch(`http://127.0.0.1:${address.port}/interaction/abcdefgh`);
-    assert.equal(response.status, 400);
+    assert.equal(response.status, 503);
     assert.equal(response.headers.get("content-security-policy")?.includes("default-src 'none'"), true);
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");
     assert.equal(response.headers.get("cache-control"), "no-store");
@@ -36,4 +37,14 @@ test("interaction lookup failures return a generic HTTP error with issuer securi
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   }
+});
+
+test("expired interaction session remains a bounded generic client error", async () => {
+  const state = { status: 0, body: null as unknown };
+  const result = await readInteractionDetailsOrRespond(state, async () => {
+    throw new errors.SessionNotFound("private stale-session detail");
+  });
+  assert.deepEqual(result, { ok: false });
+  assert.equal(state.status, 400);
+  assert.deepEqual(state.body, { error: "invalid_request" });
 });

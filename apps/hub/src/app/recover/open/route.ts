@@ -2,9 +2,8 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { getAccountRecoveryRequestId } from "@virki/auth/security";
 import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
-import { requiresRecoveryRequestSwitch } from "../../../lib/recovery";
+import { RECOVERY_COOKIE_NAME, requiresRecoveryRequestSwitch } from "../../../lib/recovery";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { RECOVERY_COOKIE_NAME } from "../../../lib/recovery";
 import { setRecoveryCandidateCookie, setRecoveryCookie } from "../recovery-cookie";
 
 export const dynamic = "force-dynamic";

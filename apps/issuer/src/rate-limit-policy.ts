@@ -34,9 +34,13 @@ export function selectInteractionRateLimits(clientAddress: string, sessionCookie
 }
 
 export function getPublicOidcRateLimitEndpoint(method: string, path: string): PublicOidcRateLimitEndpoint | null {
-  if (method !== "GET" && method !== "POST") return null;
+  // oidc-provider serves UserInfo for HEAD as well as GET/POST. HEAD must not
+  // escape the database-backed quota simply because it returns no body.
+  if (method !== "GET" && method !== "POST" && method !== "HEAD") return null;
   if (path === "/me") return "userinfo";
   if (path === "/session/end") return "session-end";
+  if (method === "POST" && path === "/session/end/confirm") return "session-end";
+  if ((method === "GET" || method === "HEAD") && path === "/session/end/success") return "session-end";
   if (/^\/auth\/[A-Za-z0-9_-]{8,80}$/u.test(path)) return "auth-action";
   return null;
 }
@@ -44,9 +48,19 @@ export function getPublicOidcRateLimitEndpoint(method: string, path: string): Pu
 export function selectPublicOidcRateLimits(
   clientAddress: string,
   sessionCookieValue: string | null,
-  endpoint: PublicOidcRateLimitEndpoint
+  endpoint: PublicOidcRateLimitEndpoint,
+  authorization?: string
 ): RateLimitCheck[] {
-  const bucket = sessionCookieValue
+  // UserInfo is called by relying parties with an access token, not a Virki
+  // browser session. Use a digest as an untrusted *bucket selector*, never as
+  // authentication; the shared source ceiling remains effective against token
+  // rotation and invalid bearer-token floods.
+  const bearer = endpoint === "userinfo" && typeof authorization === "string" &&
+    /^Bearer [A-Za-z0-9._~+/-]{8,4096}={0,2}$/u.test(authorization)
+    ? authorization.slice(7) : null;
+  const bucket = bearer
+    ? `oidc-public-userinfo-bearer:${createHash("sha256").update(bearer).digest("hex")}`
+    : sessionCookieValue
     ? `oidc-public-${endpoint}-browser:${createHash("sha256").update(sessionCookieValue).digest("hex")}`
     : `oidc-public-${endpoint}-anonymous:${clientAddress}`;
   return [
@@ -56,10 +70,13 @@ export function selectPublicOidcRateLimits(
 }
 
 export function isNonCanonicalOidcEndpointPath(path: string): boolean {
-  const canonicalPaths = ["/auth", "/token", "/token/revocation", "/me", "/session/end", "/jwks"];
+  const canonicalPaths = ["/auth", "/token", "/token/revocation", "/me", "/session/end", "/session/end/confirm", "/session/end/success", "/jwks", "/.well-known/openid-configuration", "/.well-known/oauth-authorization-server"];
   const lowerWithoutTrailingSlashes = path.toLowerCase().replace(/\/+$/u, "");
   if (canonicalPaths.includes(lowerWithoutTrailingSlashes) && path !== lowerWithoutTrailingSlashes) return true;
-  if (/^\/auth\/[A-Za-z0-9_-]{8,80}\/?$/iu.test(path) && !/^\/auth\/[A-Za-z0-9_-]{8,80}$/u.test(path)) return true;
+  // The portal proxy admits up to 160 UID chars. Reject anything the issuer
+  // does not intentionally meter instead of passing it to provider routing.
+  if (/^\/auth\/[A-Za-z0-9_-]{1,160}\/?$/iu.test(path) && !/^\/auth\/[A-Za-z0-9_-]{8,80}$/u.test(path)) return true;
+  if (/^\/interaction\/[A-Za-z0-9_-]{8,80}\/?$/iu.test(path) && !isInteractionPath(path)) return true;
   return false;
 }
 

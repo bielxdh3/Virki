@@ -185,6 +185,11 @@ export function approveOfflineReleaseManually({
     reject("owner has not supplied the exact reviewed manifest SHA-256");
   }
   validateAcknowledgement(ownerAcknowledgement, snapshot.manifestSha256);
+  // Defense in depth: the canonical encoder already enforces safe integer
+  // bounds, but the owner's acceptance gate must not rely on JS undefined
+  // comparisons if the encoder's contract changes.
+  requireSafeInteger(snapshot.manifest.issued_at, 1, "manifest issue time");
+  requireSafeInteger(snapshot.manifest.expires_at, 1, "manifest expiry time");
   if (snapshot.manifest.issued_at > nowSeconds || snapshot.manifest.expires_at <= nowSeconds) {
     reject("release manifest is expired or not yet valid");
   }

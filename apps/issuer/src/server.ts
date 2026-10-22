@@ -169,6 +169,7 @@ securityDataCleanupTimer.unref();
 
 provider.proxy = true;
 const authorizationRequestStartedAt = new WeakMap<object, number>();
+let lastRateLimitStorageOutageLogMs = 0;
 provider.use(async (rawContext, next) => {
   const context = rawContext as KoaContextWithOIDC;
   setIssuerSensitiveResponseCachePolicy(context.res, context.path);
@@ -199,7 +200,8 @@ provider.use(async (rawContext, next) => {
     const endpoint = getPublicOidcRateLimitEndpoint(context.method, context.path);
     if (endpoint) {
       const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
-      if (await rateLimitRequest(context, (address) => selectPublicOidcRateLimits(address, sessionCookie, endpoint))) return;
+      const bearerAuthorization = getString(context.req.headers.authorization) ?? undefined;
+      if (await rateLimitRequest(context, (address) => selectPublicOidcRateLimits(address, sessionCookie, endpoint, bearerAuthorization))) return;
     }
   }
 
@@ -456,6 +458,14 @@ async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: s
       return true;
     });
   } catch {
+    // Rate-limit storage failure must be observable, but never expose a DB
+    // exception, Authorization header, CF address or a session identifier.
+    // Throttle diagnostics while the database is down to avoid log flooding.
+    const timestamp = Date.now();
+    if (timestamp - lastRateLimitStorageOutageLogMs >= 60_000) {
+      lastRateLimitStorageOutageLogMs = timestamp;
+      console.error("OIDC rate limiter storage unavailable; refusing request with 503.");
+    }
     context.status = 503;
     context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
     context.body = { error: "temporarily_unavailable" };

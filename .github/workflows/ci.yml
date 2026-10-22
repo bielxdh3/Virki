@@ -115,6 +115,7 @@ jobs:
         run: npm run test:production-revision
 
       - name: Root-protected offline transport test fixtures
+        if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
         # The normal runner cannot open the fixture's 0700 root-only trust
         # directory. Keep the positive-path tamper tests mandatory under a
         # bounded sudo Node process; no SSH, Docker or deploy commands run.
@@ -168,6 +169,7 @@ jobs:
           node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
 
       - name: Verify native machine-id inode race defenses as root
+        if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
         # This test uses private temporary instrumented module copies; it
         # neither changes /etc/machine-id nor authorizes production admission.
         run: sudo "$(command -v node)" --test infra/offline/trusted-owner-machine-id-race.test.mjs

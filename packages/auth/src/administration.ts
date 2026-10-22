@@ -58,6 +58,9 @@ export async function completeAdministrativeCredentialSetup(input: {
   await assertNotNormalPassword(admin.passwordHash, input.newPassword);
   const passwordHash = await hashPassword(input.newPassword);
   const recoveryCodes = await prisma.$transaction(async (transaction) => {
+    // Lock the session together with the ADMIN row. A revoked/expired session
+    // after the preliminary password check must not activate a credential.
+    await lockAdminSessionInTransaction(transaction, input.actor.id, input.sessionId, now);
     const lockedAdmin = await transaction.$queryRaw<Array<{ id: string }>>`
       SELECT "id"
       FROM "User"
@@ -243,6 +246,15 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
 }
 
 async function createEmailElevationCeremony(input: { userId: string; sessionId: string; scope: string; kind: "ADMIN_EMAIL_VERIFICATION"; recipientEmail: string; displayName: string | null; locale: EmailLocale; now: Date; expiresAt?: Date; manualUntilRevoked?: boolean; credentialKeyVersion?: number; audit?: AuditLogInput }): Promise<string> {
+  // Initial ADMIN credential setup precedes existence of a credential and
+  // legitimately has no version. Every other elevation must bind to the
+  // currently locked credential key version, never write a silent null.
+  if (input.scope === ADMIN_CREDENTIAL_SETUP_SCOPE) {
+    if (input.credentialKeyVersion !== undefined) throw new AdministrationMutationError();
+  } else if (!Number.isSafeInteger(input.credentialKeyVersion) ||
+             typeof input.credentialKeyVersion !== "number" || input.credentialKeyVersion < 1) {
+    throw new AdministrationMutationError();
+  }
   const sendAttempt = await prisma.$transaction((transaction) => consumeRateLimitAttemptInTransaction(transaction, `admin-email-ceremony:${input.userId}`, input.now, 10));
   if (!sendAttempt.allowed) throw new AdministrationMutationError();
   const requestKey = randomBytes(24).toString("base64url");

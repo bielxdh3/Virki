@@ -83,6 +83,15 @@ test("owner refusal for unreviewed digest, foreign digest, malformed manifest or
     assert.throws(() => signOfflineOwnerApproval({ manifestBytes, reviewedManifestSha256, ownerPrivateKey: owner.privateKey }));
   }
   assert.throws(() => signOfflineOwnerApproval({ manifestBytes, reviewedManifestSha256: correct, ownerPrivateKey: owner.publicKey }));
+  for (const forgedPrivateKey of [
+    { type: "private", asymmetricKeyType: "ed25519" },
+    Object.create({ type: "private", asymmetricKeyType: "ed25519" }),
+  ]) {
+    assert.throws(() => signOfflineOwnerApproval({ manifestBytes, reviewedManifestSha256: correct, ownerPrivateKey: forgedPrivateKey }),
+      /independently protected Ed25519 private key/u);
+    assert.throws(() => signOfflineBuilderManifest({ manifestBytes, builderPrivateKey: forgedPrivateKey }),
+      /independently protected Ed25519 private key/u);
+  }
   assert.throws(() => signOfflineBuilderManifest({ manifestBytes, builderPrivateKey: owner.publicKey }));
   const wrongAlgorithm = generateKeyPairSync("rsa", { modulusLength: 2048 });
   assert.throws(() => signOfflineBuilderManifest({ manifestBytes, builderPrivateKey: wrongAlgorithm.privateKey }));

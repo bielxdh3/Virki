@@ -1,4 +1,4 @@
-import { createHash, sign } from "node:crypto";
+import { createHash, KeyObject, sign } from "node:crypto";
 import { encodeCanonicalOfflineReleaseManifest } from "./offline-release-attestation.mjs";
 
 // Manual, offline-only cryptographic primitive. These helpers neither read
@@ -27,7 +27,7 @@ function ensureCanonicalBytes(bytes) {
 
 function requirePrivateEd25519(key) {
   // The caller owns key custody. Never log or stringify key material.
-  if (!key || typeof key !== "object" || key.type !== "private" ||
+  if (!(key instanceof KeyObject) || key.type !== "private" ||
       key.asymmetricKeyType !== "ed25519") {
     throw new Error("Offline signing requires an independently protected Ed25519 private key.");
   }

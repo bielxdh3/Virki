@@ -60,6 +60,11 @@ test("token limiter matches the provider router's case and trailing-slash aliase
 test("public OIDC endpoints with database-backed work have source and browser quotas", () => {
   assert.equal(getPublicOidcRateLimitEndpoint("GET", "/me"), "userinfo");
   assert.equal(getPublicOidcRateLimitEndpoint("POST", "/me"), "userinfo");
+  assert.equal(getPublicOidcRateLimitEndpoint("HEAD", "/me"), "userinfo");
+  assert.equal(getPublicOidcRateLimitEndpoint("POST", "/session/end/confirm"), "session-end");
+  assert.equal(getPublicOidcRateLimitEndpoint("GET", "/session/end/success"), "session-end");
+  assert.equal(getPublicOidcRateLimitEndpoint("HEAD", "/session/end/success"), "session-end");
+  assert.equal(getPublicOidcRateLimitEndpoint("HEAD", "/session/end/confirm"), null);
   assert.equal(getPublicOidcRateLimitEndpoint("GET", "/session/end"), "session-end");
   assert.equal(getPublicOidcRateLimitEndpoint("GET", "/auth/abcdefgh"), "auth-action");
   assert.equal(getPublicOidcRateLimitEndpoint("GET", "/auth/short"), null);
@@ -72,6 +77,17 @@ test("public OIDC endpoints with database-backed work have source and browser qu
   assert.match(checks[1].identifier, /^oidc-public-userinfo-browser:[a-f0-9]{64}$/u);
   assert.equal(checks[1].maxAttempts, 30);
   assert.equal(checks[1].identifier.includes("browser-secret"), false);
+  const tokenA = selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "Bearer token-for-client-a");
+  const tokenB = selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "Bearer token-for-client-b");
+  assert.equal(tokenA[0].identifier, tokenB[0].identifier, "shared IP ceiling must survive token rotation");
+  assert.notEqual(tokenA[1].identifier, tokenB[1].identifier, "independent RP tokens must not collide in an anonymous bucket");
+  assert.match(tokenA[1].identifier, /^oidc-public-userinfo-bearer:[a-f0-9]{64}$/u);
+  assert.equal(tokenA[1].identifier.includes("token-for-client-a"), false);
+  assert.equal(tokenA[1].maxAttempts, 30);
+  assert.equal(selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "Bearer bad")[1].identifier,
+    "oidc-public-userinfo-anonymous:203.0.113.11");
+  assert.notEqual(tokenA[1].identifier,
+    selectPublicOidcRateLimits("203.0.113.11", null, "userinfo")[1].identifier);
   assert.notEqual(
     selectPublicOidcRateLimits("203.0.113.11", null, "session-end")[1].identifier,
     selectPublicOidcRateLimits("203.0.113.11", null, "auth-action")[1].identifier
@@ -79,13 +95,16 @@ test("public OIDC endpoints with database-backed work have source and browser qu
 });
 
 test("noncanonical OIDC endpoint aliases are detectable before provider routing", () => {
-  for (const alias of ["/AUTH", "/auth/", "/AUTH/", "/TOKEN", "/token/", "/ME/", "/SESSION/END/"]) {
+  for (const alias of ["/AUTH", "/auth/", "/AUTH/", "/TOKEN", "/token/", "/ME/", "/SESSION/END/", "/SESSION/END/CONFIRM", "/session/end/confirm/", "/SESSION/END/SUCCESS", "/session/end/success/", "/Interaction/abcdefgh", "/interaction/abcdefgh/", "/.WELL-KNOWN/openid-configuration", "/.well-known/openid-configuration/"]) {
     assert.equal(isNonCanonicalOidcEndpointPath(alias), true, alias);
   }
   for (const canonical of ["/auth", "/token", "/token/revocation", "/me", "/session/end", "/auth/abcdefgh", "/unknown"]) {
     assert.equal(isNonCanonicalOidcEndpointPath(canonical), false, canonical);
   }
   assert.equal(isNonCanonicalOidcEndpointPath("/AUTH/abcdefgh"), true);
+  assert.equal(isNonCanonicalOidcEndpointPath(`/auth/${"a".repeat(81)}`), true,
+    "provider UID lengths admitted by the proxy must not bypass issuer route constraints");
+  assert.equal(isNonCanonicalOidcEndpointPath(`/AUTH/${"a".repeat(160)}`), true);
 });
 
 test("interaction routes are matched and have bounded source and browser rate buckets", () => {

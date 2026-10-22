@@ -427,3 +427,41 @@ test("a delayed native OIDC interactionFinished 303 stays complete when Koa auto
   assert.equal(received.complete, true);
   assert.deepEqual(serverErrors, []);
 });
+
+test("native interaction failure after respond=false is a bounded generic error, not a hanging connection", async (context) => {
+  const observedErrors: string[] = [];
+  const app = new Koa();
+  app.on("error", (error: Error) => { observedErrors.push(error.message); });
+  app.use(async (koaContext) => {
+    useNativeOidcResponse(koaContext);
+    // Models oidc-provider.interactionFinished() rejecting before it writes
+    // headers. The Koa native-response opt-out must not produce a timeout.
+    await Promise.reject(new Error("private interaction provider failure"));
+  });
+  const koaCallback = app.callback();
+  const server = createServer((request, response) => {
+    setIssuerSecurityHeaders(response);
+    installAuditResponseGate(response);
+    koaCallback(request, response);
+  });
+  server.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    if (server.listening) resolve();
+    else server.once("listening", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const response = await fetch(`http://127.0.0.1:${address.port}/interaction/abcdefgh`, {
+    signal: AbortSignal.timeout(3_000),
+  });
+  assert.equal(response.status, 500);
+  assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/u);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.doesNotMatch(await response.text(), /private interaction provider failure/u);
+  assert.equal(observedErrors.length, 1);
+});

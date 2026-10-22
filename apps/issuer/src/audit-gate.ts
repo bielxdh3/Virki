@@ -1,4 +1,5 @@
 import type { ServerResponse } from "node:http";
+import { setIssuerSecurityHeaders } from "./http-security";
 
 const pendingAuditWrites = new WeakMap<ServerResponse, Promise<void>>();
 const pendingAuditWaiters = new WeakMap<ServerResponse, () => void>();
@@ -175,6 +176,13 @@ export function installAuditResponseGate(response: ServerResponse): void {
 
   response.writeHead = ((...args: Parameters<ServerResponse["writeHead"]>) => {
     if (state === "failed" || isResponseClosed()) return response;
+    // Koa's context.onerror clears all headers when downstream
+    // interactionFinished() throws. Restore issuer baseline policy on the
+    // actual error response, not on the already-aborted application context.
+    if (response.statusCode >= 400) {
+      setIssuerSecurityHeaders(response);
+      response.setHeader("cache-control", "no-store");
+    }
     if (!beginWaitingForAudit()) return originalWriteHead(...args);
     enqueue(0, () => { originalWriteHead(...args); });
     return response;

@@ -20,7 +20,7 @@ const approvalWorkflow = readFileSync(path.join(repositoryRoot, ".github", "work
 
 test("Ubuntu Validate re-executes root-protected offline transport assertions, not just non-root skips", () => {
   assert.match(workflow,
-    /validate:[\s\S]*?runs-on: ubuntu-latest[\s\S]*?run: npm run test:production-revision[\s\S]*?run: sudo "\$\(command -v node\)" --test scripts\/offline-production-transport\.test\.mjs/u);
+    /validate:[\s\S]*?runs-on: ubuntu-latest[\s\S]*?run: npm run test:production-revision[\s\S]*?name: Root-protected offline transport test fixtures\s+if: \$\{\{ runner\.environment == 'github-hosted' && runner\.os == 'Linux' && github\.repository == 'bielxdh3\/Virki' \}\}[\s\S]*?run: sudo "\$\(command -v node\)" --test scripts\/offline-production-transport\.test\.mjs/u);
   const source = readFileSync(path.join(repositoryRoot, "scripts", "offline-production-transport.test.mjs"), "utf8");
   assert.match(source, /rootProtectedLinuxOnly = \{ skip: !nativeLinux \|\| process\.getuid\?\.\(\) !== 0 \}/u);
   assert.match(source, /test\("even newly re-signed local CI with failed stage is refused before Git or SSH", rootProtectedLinuxOnly/u);
@@ -423,7 +423,7 @@ test("Docker safety inventory and native-image smoke checks are mandatory withou
 test("hosted Linux CI explicitly executes native machine-id race regression with root privileges", () => {
   const normalized = workflow.replace(/\r\n/gu, "\n");
   const command = 'sudo "$(command -v node)" --test infra/offline/trusted-owner-machine-id-race.test.mjs';
-  assert.match(normalized, /- name: Verify native machine-id inode race defenses as root\n(?:[^\n]*\n){0,4}\s+run: sudo "\$\(command -v node\)" --test infra\/offline\/trusted-owner-machine-id-race\.test\.mjs/u);
+  assert.match(normalized, /- name: Verify native machine-id inode race defenses as root\n {8}if: \$\{\{ runner\.environment == 'github-hosted' && runner\.os == 'Linux' && github\.repository == 'bielxdh3\/Virki' \}\}\n(?:[^\n]*\n){0,4}\s+run: sudo "\$\(command -v node\)" --test infra\/offline\/trusted-owner-machine-id-race\.test\.mjs/u);
   assert.ok(normalized.includes(command), "root-only native race tests cannot disappear from CI unnoticed");
   assert.ok(!normalized.includes("|| true " + command), "the native test must fail the job on failure");
 });
