@@ -278,36 +278,58 @@ prerequisites. This design is **not implemented** by the read-only probe.
 
 `infra/offline/native-supervisor/fd-lifecycle-fixture.c` implements a
 separate, explicitly disposable Linux-native supervisor/protocol experiment.
-`npm run test:offline:supervisor:container` compiles it using GCC inside a
-digest-pinned Node 22 image, with networking disabled, all capabilities
-dropped, read-only filesystem and repository, `no-new-privileges`, and a
-single executable tmpfs at `/tmp`. The launcher does not mount a host
-Docker socket, access the production host, or permit container privilege
-escalation. A real Docker-in-Docker daemon is **not launched**: a privileged
-Docker-in-Docker runner could see underlying host kernel resources, and the
-present cap-drop/no-network fixture cannot establish its independent cgroup,
-PID namespace, mount namespace and data-root filesystem controls.
+`npm run test:offline:supervisor:container` is **not an automatic Docker
+invocation**. It requires an explicit `VIRKI_DISPOSABLE_SUPERVISOR_RUN_DOCKER=1`
+on Windows, an installed Docker Desktop CLI at the reviewed absolute path, and
+the fixed local Linux named pipe
+`npipe:////./pipe/dockerDesktopLinuxEngine`. An empty temporary Docker
+configuration and scrubbed environment ignore ambient Docker contexts,
+remote sockets and credential settings. The test image is digest-pinned,
+never pulled, and runs with networking disabled, all capabilities dropped,
+read-only filesystem/repository, `no-new-privileges`, and one executable
+tmpfs at `/tmp`. The container receives a randomized ownership label and
+immutable container-ID file; any cleanup is limited to a full 64-hex ID whose
+inspected label matches this run. Failure to verify ownership must never lead
+to wildcard/name cleanup. The launcher does not mount a host Docker socket.
+No real Docker-in-Docker daemon is started or authorized.
+
+For local development **without contacting Docker at all**, native C fixtures
+also run with root inside a separately opted-in Ubuntu WSL2 test VM:
+`VIRKI_DISPOSABLE_SUPERVISOR_TEST=1
+VIRKI_DISPOSABLE_SUPERVISOR_WSL_TEST=1 node --test
+infra/offline/native-supervisor/fd-lifecycle-fixture.test.mjs`.
+The fixture verifies the WSL2 kernel identifier and compiles the C binary
+into a transient protected `/tmp` directory. WSL2 is **not** a production
+supervisor isolation proof and is not a substitute for native service tests.
 
 The test-only supervisor forks and owns its own fake Unix-stream service
 under a randomly generated root-owned private
 `/tmp/virki-supervisor-*/engine.sock` directory, retains a `pidfd_open`
 descriptor to the exact child, and connects once using `SOCK_CLOEXEC`.
-Before and after each synthetic HTTP-like exchange it reads `SO_PEERCRED`
+Before and after each synthetic framed exchange it reads `SO_PEERCRED`
 from that **same connected socket FD**, checks the child's Linux start
 ticks and pidfd liveness, and compares its mount, network and PID namespace
 identifiers and cgroup-v2 path against the initial `/proc` snapshot.
-Only fixed, bounded synthetic `POST /images/load`, `GET /images/.../json`
-and `GET /info` requests with a fake marker are allowed. They are **not
-valid Docker import requests**: no archive is loaded and the fake daemon
-cannot interpret or forward Docker API operations. A strict reply matcher
-rejects extra bytes, unexpected content, half-closed connections and an
-interrupted or nonresponsive fake daemon. The parent closes the socket,
-terminates and reaps the child, and closes the pidfd before reporting.
+Only fixed synthetic `LOAD`, `INSPECT` and `INFO` phase requests with fresh
+kernel-generated 128-bit transaction challenges are allowed. Every fake
+`ACK` must echo the same phase and nonce; replayed or prequeued acknowledgments
+for a previous request cannot satisfy a subsequent phase. These are **not
+valid Docker HTTP requests**: no archive is loaded, and no fake service can
+interpret or forward Docker API operations. One absolute `CLOCK_MONOTONIC`
+deadline covers the complete three-phase exchange, including individual
+reads, writes and delays. The parser checks for surplus bytes after each
+response, then half-closes the client socket after `INFO` and requires clean
+peer EOF to reject even a late trailing payload. Cleanup first attempts
+`SIGTERM`, then bounded `SIGKILL` and nonblocking `waitpid` reaping.
 
 The adversarial tests demonstrate continuity of the kernel peer identity
 across the entire *synthetic* operation; they also cover daemon death before
-or during the exchange, response tampering, smuggled bytes, dishonest
-root-directory responses, timeouts and attempted mode/path escape. Even
+or during the exchange, response tampering, three prequeued syntactically
+valid responses, late trailing bytes, slow-trickle deadlines, TERM-ignoring
+children, fake negative root-directory responses and mode/path escape. The
+`fake-rootdir` case remains a **synthetic negative acknowledgment**, not
+proof against a syntactically valid malicious real Docker `/info` response.
+Even
 the positive fixture reports `isolatedNamespacesApproved:false`,
 `dockerLoadAuthorized:false` and `deployAuthorized:false`. Its child
 shares the test container's cgroup and namespaces; an independently
@@ -315,6 +337,12 @@ reviewed owner-provisioned service unit, immutable pinset, dedicated
 daemon binary/RootDir, mount-ID binding and durable restart fencing remain
 absent. The native code explicitly has **no production entrypoint**, is
 not installed, and is not added to the existing 11-module verifier graph.
+In a WSL2 test, the child likewise shares the WSL test VM's namespaces;
+there is no dedicated independently owner-approved isolation boundary.
+`SO_PEERCRED` identifies the socket's connect-time peer, not necessarily the
+writer of every subsequent response if the FD is transferred using
+`SCM_RIGHTS` or inherited by another process. A pidfd bound to the original
+child alone does not close that handoff gap. **Production NO-GO.**
 
 To move beyond the experiment, commission an independent security review
 of an owner-signed native service installer and constrained supervisor:
