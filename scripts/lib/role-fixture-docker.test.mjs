@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -316,6 +316,104 @@ test("rejects unpinned migration build, unsafe privileges, and missing Buildx pu
   assert.doesNotThrow(() => verifyOfficialBuildx(good));
   assert.throws(() => verifyOfficialBuildx({ ...good, canonicalize: () => "C:\\untrusted\\docker-buildx.exe" }), /signed Docker Desktop Buildx/u);
   assert.throws(() => verifyOfficialBuildx({ ...good, authenticate: () => ({ status: 1, stdout: "" }) }), /signed Docker Desktop Buildx/u);
+});
+
+const roleImageBuild = ["buildx", "build", "--load", "--platform", "linux/amd64",
+  "--progress", "plain", "--file", "infra/Dockerfile.prod", "--target", "migrator",
+  "--build-arg", `VIRKI_BUILD_REVISION=${"f".repeat(40)}`,
+  "--label", `virki.role-test.run=${runId}`, "--tag", `virki-role-test-migrator:${runId}`, "."];
+
+test("RED→GREEN: Windows Buildx executes only signed ProgramFiles binary with fresh private config and pinned default builder", () => {
+  const hostile = mkdtempSync(path.join(os.tmpdir(), "virki-hostile-buildx-"));
+  const userDocker = path.join(hostile, ".docker");
+  const userPlugin = path.join(userDocker, "cli-plugins", "docker-buildx.exe");
+  const pluginExtra = path.join(hostile, "cliPluginsExtraDirs");
+  const calls = [];
+  try {
+    mkdirSync(path.dirname(userPlugin), { recursive: true });
+    mkdirSync(pluginExtra);
+    writeFileSync(userPlugin, "malicious unsigned plugin");
+    writeFileSync(path.join(userDocker, "config.json"), JSON.stringify({ cliPluginsExtraDirs: [pluginExtra] }));
+    const guard = new OwnedRoleDocker({
+      runId, cwd: "E:\\Virki\\.worktrees\\safe-test", platform: "win32",
+      env: { HOME: hostile, USERPROFILE: hostile, APPDATA: hostile },
+      journal: () => {},
+      invoke: (exe, argv, options) => {
+        calls.push({ exe, argv, env: options.env });
+        if (exe === "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe" && argv[2] === "info") {
+          return { status: 0, stdout: JSON.stringify({
+            OSType: "linux", OperatingSystem: "Docker Desktop", ID: "LOCALENGINE1234",
+          }) };
+        }
+        if (exe === "C:\\Program Files\\Docker\\cli-plugins\\docker-buildx.exe" && argv[2] === "inspect") {
+          return { status: 0, stdout: "Name: default\nDriver: docker\nNodes:\nName: default\nEndpoint: default\nStatus: running\n" };
+        }
+        if (exe === "C:\\Program Files\\Docker\\cli-plugins\\docker-buildx.exe" && argv[2] === "build") {
+          return { status: 0, stdout: "verified local build" };
+        }
+        throw Error(`Attempt to execute unreviewed command: ${exe} ${argv.join(" ")}`);
+      },
+    });
+    assert.equal(guard.call(roleImageBuild).status, 0);
+    const pluginCalls = calls.filter(({ exe }) => exe.endsWith("docker-buildx.exe"));
+    assert.deepEqual(pluginCalls.map(({ argv }) => argv.slice(0, 4)), [
+      ["--builder", "default", "inspect", "default"],
+      ["--builder", "default", "build", "--load"],
+    ]);
+    assert.ok(pluginCalls.every(({ exe, env }) =>
+      exe === "C:\\Program Files\\Docker\\cli-plugins\\docker-buildx.exe" &&
+      env.DOCKER_HOST === "npipe:////./pipe/dockerDesktopLinuxEngine" &&
+      env.DOCKER_CONFIG && env.BUILDX_CONFIG.startsWith(env.DOCKER_CONFIG) &&
+      env.DOCKER_CONFIG !== userDocker && env.DOCKER_CONFIG !== hostile &&
+      !Object.hasOwn(env, "DOCKER_CONTEXT") && !Object.hasOwn(env, "BUILDX_BUILDER")));
+    assert.equal(calls.some(({ exe, argv }) => exe === userPlugin || argv.includes("buildx")), false);
+    assert.ok(pluginCalls.every(({ env }) => !existsSync(env.DOCKER_CONFIG)));
+  } finally { rmSync(hostile, { recursive: true, force: true }); }
+});
+
+test("RED→GREEN: remote/shadow Buildx builder preflight prevents image build", () => {
+  for (const inspect of [
+    "Name: default\nDriver: docker-container\nNodes:\nEndpoint: remote\nStatus: running\n",
+    "Name: attacker\nDriver: docker\nNodes:\nEndpoint: default\nStatus: running\n",
+    "Name: default\nDriver: docker\nNodes:\nEndpoint: tcp://attacker:2375\nStatus: running\n",
+  ]) {
+    const contacted = [];
+    const guard = new OwnedRoleDocker({
+      runId, cwd: "E:\\Virki\\.worktrees\\safe-test", platform: "win32", env: {}, journal: () => {},
+      invoke: (exe, argv) => {
+        contacted.push({ exe, argv });
+        if (argv[2] === "info") return { status: 0, stdout: JSON.stringify({
+          OSType: "linux", OperatingSystem: "Docker Desktop", ID: "LOCALENGINE1234",
+        }) };
+        if (argv[2] === "inspect") return { status: 0, stdout: inspect };
+        throw Error("Build must never execute after unsafe Buildx inspect");
+      },
+    });
+    assert.throws(() => guard.call(roleImageBuild), /Buildx.*builder|builder.*Buildx/u);
+    assert.equal(contacted.some(({ argv }) => argv[2] === "build"), false);
+  }
+});
+
+test("RED→GREEN: config injection between Buildx preflight and build fails closed", () => {
+  const contacted = [];
+  const guard = new OwnedRoleDocker({
+    runId, cwd: "E:\\Virki\\.worktrees\\safe-test", platform: "win32", env: {}, journal: () => {},
+    invoke: (exe, argv, options) => {
+      contacted.push(argv);
+      if (argv[2] === "info") return { status: 0, stdout: JSON.stringify({
+        OSType: "linux", OperatingSystem: "Docker Desktop", ID: "LOCALENGINE1234",
+      }) };
+      if (argv[2] === "inspect") {
+        writeFileSync(path.join(options.env.DOCKER_CONFIG, "config.json"),
+          JSON.stringify({ cliPluginsExtraDirs: ["C:\\untrusted\\plugins"] }));
+        return { status: 0, stdout: "Name: default\nDriver: docker\nNodes:\nName: default\nEndpoint: default\nStatus: running\n" };
+      }
+      throw Error("Unsafe build attempt");
+    },
+  });
+  assert.throws(() => guard.call(roleImageBuild), /private configuration identity\/contents changed/u);
+  assert.equal(contacted.some((argv) => argv[2] === "build"), false);
+  assert.equal(guard.uncertain, true);
 });
 
 test("pins allowed migrator command to the verified image digest rather than mutable tag", () => {
