@@ -53,8 +53,10 @@ if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
   throw 'Isolated E2E requires a valid Docker Inc-signed Desktop executable.'
 }
 function Invoke-PinnedDocker {
-  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArguments)
-  & $script:dockerCli --host $script:dockerHost @DockerArguments
+  # Windows PowerShell 5.1 interprets literal Docker/Node flags such as `-e`
+  # as abbreviated PowerShell common parameters when a param() exists, even
+  # with ValueFromRemainingArguments. Use only the unbound argument array.
+  & $script:dockerCli --host $script:dockerHost @args
 }
 function Invoke-DockerObservation {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArguments)
@@ -102,17 +104,15 @@ $bootstrapNetworkName = 'virki-e2e-bootstrap-' + $runId
 $databaseName = 'virki-e2e-postgres-' + $runId
 $runnerName = 'virki-e2e-runner-' + $runId
 $playwrightBrowserImage = 'mcr.microsoft.com/playwright@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27'
-$browserVolumeName = 'virki-e2e-browser-' + $runId
 $browserSeedName = 'virki-e2e-browser-seed-' + $runId
 $browserExecutablePath = '/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell'
-$browserVolumeMount = 'type=volume,source=' + $browserVolumeName + ',target=/ms-playwright/chromium_headless_shell-1243'
+$browserVolumeMount = $null
 $script:dockerOwnerLabel = 'org.virki.e2e.owner=' + $runId
 $script:dockerResourceNames = @{
   network = $networkName
   bootstrapNetwork = $bootstrapNetworkName
   database = $databaseName
   runner = $runnerName
-  browserVolume = $browserVolumeName
   browserSeed = $browserSeedName
 }
 $script:ownedDockerIds = @{
@@ -122,7 +122,7 @@ $script:ownedDockerIds = @{
   runner = $null
   browserSeed = $null
 }
-$script:ownedDockerVolume = $null
+$script:browserAnonymousVolume = $null
 $script:dockerMutationUncertain = $false
 $passwords = @{
   bootstrap = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
@@ -154,7 +154,6 @@ $script:ownedResources = [ordered]@{
   bootstrapNetwork = $false
   database = $false
   runner = $false
-  browserVolume = $false
   browserSeed = $false
 }
 $script:runFailed = $false
@@ -202,9 +201,8 @@ function Write-DockerMutationJournal {
 }
 
 function Assert-OwnedDockerIdentity {
-  param([string]$Kind, [string]$Name, [string]$Lookup, [string]$ExpectedId = '',
-    [object]$ExpectedVolume = $null)
-  $dockerKind = if ($Kind -eq 'browserVolume') { 'volume' } elseif ($Kind -in @('network', 'bootstrapNetwork')) { 'network' } else { 'container' }
+  param([string]$Kind, [string]$Name, [string]$Lookup, [string]$ExpectedId = '')
+  $dockerKind = if ($Kind -in @('network', 'bootstrapNetwork')) { 'network' } else { 'container' }
   $observation = Invoke-DockerObservation $dockerKind inspect $Lookup
   if ($observation.Status -ne 0) { throw "Owned Docker $Kind inspection failed; reconcile using the mutation journal." }
   try { $entries = @(($observation.Output.Trim() | ConvertFrom-Json -ErrorAction Stop)) }
@@ -217,20 +215,8 @@ function Assert-OwnedDockerIdentity {
       $labels.'org.virki.e2e.owner' -cne $runId) {
     throw "Docker resource $Kind failed owner/name verification."
   }
-  if ($dockerKind -ne 'volume') {
-    if ($entry.Id -cnotmatch '^[a-f0-9]{64}$' -or $entry.Id -cne $ExpectedId) {
-      throw "Docker resource $Kind changed its immutable identity."
-    }
-  } else {
-    if (-not $entry.CreatedAt -or -not $entry.Mountpoint -or -not $entry.Driver) {
-      throw 'Owned volume has no durable identity metadata.'
-    }
-    if ($null -ne $ExpectedVolume -and
-        ($entry.CreatedAt -cne $ExpectedVolume.CreatedAt -or
-         $entry.Mountpoint -cne $ExpectedVolume.Mountpoint -or
-         $entry.Driver -cne $ExpectedVolume.Driver)) {
-      throw 'Owned volume identity changed since its creation.'
-    }
+  if ($entry.Id -cnotmatch '^[a-f0-9]{64}$' -or $entry.Id -cne $ExpectedId) {
+    throw "Docker resource $Kind changed its immutable identity."
   }
   return $entry
 }
@@ -240,30 +226,14 @@ function Invoke-CreateOwnedDockerResource {
   if ($script:ownedResources[$Kind] -or $script:dockerMutationUncertain) {
     throw 'Refusing repeated or uncertain Docker creation.'
   }
-  if ($Kind -eq 'browserVolume') {
-    $existing = Invoke-DockerObservation volume inspect $Name
-    if ($existing.Status -eq 0 -or $existing.Output -notmatch '(?i)\bno such volume\b') {
-      throw 'Refusing to create or reuse an existing/uncertain Docker volume.'
-    }
-  }
   Write-DockerMutationJournal 'MUTATION_PENDING' $Kind $Name
   try {
     $answer = @(Invoke-PinnedDocker @DockerArguments 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "Docker $Kind creation ACK is uncertain." }
     $identifier = ($answer | Out-String).Trim()
-    if ($Kind -eq 'browserVolume') {
-      if ($identifier -cne $Name) { throw 'Unexpected Docker volume create result.' }
-      $record = Assert-OwnedDockerIdentity $Kind $Name $Name
-      $script:ownedDockerVolume = [ordered]@{
-        CreatedAt = $record.CreatedAt
-        Mountpoint = $record.Mountpoint
-        Driver = $record.Driver
-      }
-    } else {
-      if ($identifier -cnotmatch '^[a-f0-9]{64}$') { throw 'Docker create did not return an immutable resource ID.' }
-      $null = Assert-OwnedDockerIdentity $Kind $Name $identifier $identifier
-      $script:ownedDockerIds[$Kind] = $identifier
-    }
+    if ($identifier -cnotmatch '^[a-f0-9]{64}$') { throw 'Docker create did not return an immutable resource ID.' }
+    $null = Assert-OwnedDockerIdentity $Kind $Name $identifier $identifier
+    $script:ownedDockerIds[$Kind] = $identifier
     $script:ownedResources[$Kind] = $true
     Write-DockerMutationJournal 'MUTATION_ACKNOWLEDGED' $Kind $Name $identifier
     return $identifier
@@ -278,22 +248,30 @@ function Invoke-OwnedDockerCleanup {
   param([string]$Kind)
   if (-not $script:ownedResources[$Kind]) { return }
   $name = $script:dockerResourceNames[$Kind]
-  $id = if ($Kind -eq 'browserVolume') { $name } else { $script:ownedDockerIds[$Kind] }
+  $id = $script:ownedDockerIds[$Kind]
   if (-not $id) { throw "Owned Docker $Kind has no verified resource identity." }
-  $null = Assert-OwnedDockerIdentity $Kind $name $id $id $script:ownedDockerVolume
+  $null = Assert-OwnedDockerIdentity $Kind $name $id $id
   Write-DockerMutationJournal 'REMOVE_PENDING' $Kind $name $id
   try {
     switch ($Kind) {
       { $_ -in @('network', 'bootstrapNetwork') } { $null = @(Invoke-PinnedDocker network rm $id 2>&1) }
-      'browserVolume' { $null = @(Invoke-PinnedDocker volume rm $name 2>&1) }
-      'browserSeed' { $null = @(Invoke-PinnedDocker container rm --force $id 2>&1) }
+      # Removing the seed by its immutable container ID also removes only its
+      # Docker-managed anonymous volume. Never invoke `volume rm <name>`:
+      # a mutable volume name could be rebound to a foreign volume after inspect.
+      'browserSeed' { $null = @(Invoke-PinnedDocker container rm --force --volumes $id 2>&1) }
       default { $null = @(Invoke-PinnedDocker container rm --force --volumes $id 2>&1) }
     }
     if ($LASTEXITCODE -ne 0) { throw "Docker $Kind removal ACK is uncertain." }
-    $dockerKind = if ($Kind -eq 'browserVolume') { 'volume' } elseif ($Kind -in @('network', 'bootstrapNetwork')) { 'network' } else { 'container' }
+    $dockerKind = if ($Kind -in @('network', 'bootstrapNetwork')) { 'network' } else { 'container' }
     $postRemoval = Invoke-DockerObservation $dockerKind inspect $id
     if ($postRemoval.Status -eq 0 -or $postRemoval.Output -notmatch '(?i)(No such (?:object|container|network|volume):|\bno such volume\b)') {
       throw "Docker $Kind absence could not be confirmed."
+    }
+    if ($Kind -eq 'browserSeed' -and $script:browserAnonymousVolume) {
+      $volumeAfter = Invoke-DockerObservation volume inspect $script:browserAnonymousVolume
+      if ($volumeAfter.Status -eq 0 -or $volumeAfter.Output -notmatch '(?i)\bno such volume\b') {
+        throw 'Docker-managed anonymous browser volume was not removed with the owned seed container.'
+      }
     }
     Write-DockerMutationJournal 'REMOVE_CONFIRMED' $Kind $name $id
     $script:ownedResources[$Kind] = $false
@@ -466,16 +444,26 @@ try {
   if (-not $IntegrationOnly -and -not $UnitOnly) {
     $browserImageId = Invoke-PinnedDocker image inspect --format '{{.Id}}' $playwrightBrowserImage 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $browserImageId) { throw 'The pinned Playwright browser image is not installed locally; refusing to download browser binaries.' }
-    $null = Invoke-CreateOwnedDockerResource 'browserVolume' $browserVolumeName @(
-      'volume', 'create', '--label', $script:dockerOwnerLabel, $browserVolumeName)
+    # An anonymous engine-owned volume is attached to an owned seed container.
+    # Docker removes it atomically via `container rm --volumes <immutable-id>`
+    # after the runner is removed; we never delete any named volume.
     $browserSeedName = Invoke-CreateOwnedDockerResource 'browserSeed' $browserSeedName @(
       'create', '--name', $browserSeedName, '--network', 'none', '--label', $script:dockerOwnerLabel,
-      '--mount', $browserVolumeMount, '--entrypoint', '/bin/bash', $playwrightBrowserImage, '-lc', 'sleep infinity')
+      '--mount', 'type=volume,target=/ms-playwright/chromium_headless_shell-1243',
+      '--entrypoint', '/bin/bash', $playwrightBrowserImage, '-lc', 'sleep infinity')
+    $seedRecord = Assert-OwnedDockerIdentity 'browserSeed' $script:dockerResourceNames.browserSeed $browserSeedName $browserSeedName
+    $seedMounts = @($seedRecord.Mounts)
+    if ($seedMounts.Count -ne 1 -or $seedMounts[0].Type -cne 'volume' -or
+        $seedMounts[0].Destination -cne '/ms-playwright/chromium_headless_shell-1243' -or
+        $seedMounts[0].Name -cnotmatch '^[a-f0-9]{64}$') {
+      throw 'Disposable browser image failed anonymous volume mount ownership verification.'
+    }
+    $script:browserAnonymousVolume = $seedMounts[0].Name
+    $browserVolumeMount = 'type=volume,source=' + $script:browserAnonymousVolume + ',target=/ms-playwright/chromium_headless_shell-1243'
     Invoke-PinnedDocker start $browserSeedName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the temporary Chromium cache volume.' }
     Invoke-PinnedDocker exec $browserSeedName test -x $browserExecutablePath
     if ($LASTEXITCODE -ne 0) { throw 'The pinned Playwright image does not contain the expected Chromium headless shell.' }
-    Invoke-OwnedDockerCleanup 'browserSeed'
     $script:browserImage = $playwrightBrowserImage
   }
 
@@ -526,7 +514,7 @@ try {
   if ($env:VIRKI_E2E_HUB_MODE -eq 'production') {
     $runnerCreateArguments += @('--add-host', 'access.e2e.invalid:127.0.0.1')
   }
-  if ($script:ownedResources.browserVolume) {
+  if ($script:ownedResources.browserSeed -and $script:browserAnonymousVolume) {
     $runnerCreateArguments += @('--mount', ($browserVolumeMount + ',readonly'), '--env', ('VIRKI_E2E_CHROMIUM_EXECUTABLE_PATH=' + $browserExecutablePath))
   }
   $runnerCreateArguments += @('--entrypoint', '/bin/bash', 'node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8', '-lc', 'sleep infinity')
@@ -590,7 +578,7 @@ try {
     $script:browserRevision = (Invoke-PinnedDocker exec --workdir /workspace $runnerName node -e "const b=require('./node_modules/playwright-core/browsers.json').browsers.find((x)=>x.name==='chromium-headless-shell');if(!b)process.exit(1);process.stdout.write(String(b.revision))").Trim()
     if ($LASTEXITCODE -ne 0 -or $script:browserRevision -ne '1243') { throw 'The locked Playwright browser revision does not match the preinstalled image.' }
     Invoke-LoggedStage 'chromium-dependencies' 'chromium-dependencies' 'npx playwright install-deps chromium'
-    if ($script:ownedResources.browserVolume) {
+    if ($script:ownedResources.browserSeed -and $script:browserAnonymousVolume) {
       $script:browserVersion = (Invoke-PinnedDocker exec $runnerName $browserExecutablePath --version).Trim()
       if ($LASTEXITCODE -ne 0 -or -not $script:browserVersion) { throw 'The preinstalled Chromium headless shell did not start.' }
       Write-Output "Chromium: $($script:browserVersion) from $playwrightBrowserImage"
@@ -703,7 +691,7 @@ try {
   } finally {
     Write-Output "`nRemoving only independently verified owned Docker IDs."
     $cleanupFailures = [System.Collections.Generic.List[string]]::new()
-    foreach ($resourceKind in @('runner', 'database', 'browserSeed', 'browserVolume', 'bootstrapNetwork', 'network')) {
+    foreach ($resourceKind in @('runner', 'database', 'browserSeed', 'bootstrapNetwork', 'network')) {
       try {
         Invoke-OwnedDockerCleanup $resourceKind
       } catch {

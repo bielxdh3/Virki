@@ -13,7 +13,7 @@ function runPowerShellDockerMock(caseScript) {
 $ErrorActionPreference = 'Stop'
 $scriptPath = '${path.replaceAll("'", "''")}'
 $parsed = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
-foreach ($name in @('Invoke-DockerObservation', 'Write-DockerMutationJournal', 'Assert-OwnedDockerIdentity',
+foreach ($name in @('Invoke-PinnedDocker', 'Invoke-DockerObservation', 'Write-DockerMutationJournal', 'Assert-OwnedDockerIdentity',
                     'Invoke-CreateOwnedDockerResource', 'Invoke-OwnedDockerCleanup')) {
   $functionAst = $parsed.FindAll({
     param($node)
@@ -71,6 +71,29 @@ try {
 `);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /FOREIGN_RESOURCE_BLOCKED/u);
+});
+
+test("PowerShell mock: pinned Docker CLI passes Node -e and Docker --env flags verbatim", {
+  skip: process.platform !== "win32" && "Windows PowerShell 5.1 argument binding fixture",
+}, () => {
+  const result = runPowerShellDockerMock(String.raw`
+$script:dockerHost = 'npipe:////./pipe/dockerDesktopLinuxEngine'
+$script:dockerCli = 'Mock-VerifiedNativeDocker'
+function Mock-VerifiedNativeDocker {
+  $script:forwardedDockerArgs = @($args)
+  $global:LASTEXITCODE = 0
+  'mock-pass'
+}
+$out = Invoke-PinnedDocker exec --workdir /workspace --env 'TEST=local' 'owned-runner' node -e 'process.exit(0)'
+$expected = @('--host', $script:dockerHost, 'exec', '--workdir', '/workspace', '--env', 'TEST=local',
+  'owned-runner', 'node', '-e', 'process.exit(0)')
+if (($script:forwardedDockerArgs -join '|') -cne ($expected -join '|') -or $out -cne 'mock-pass') {
+  throw 'Pinned Docker arguments or Node -e were modified by PowerShell parameter binding'
+}
+'NODE_E_PASSTHROUGH_VERIFIED'
+`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /NODE_E_PASSTHROUGH_VERIFIED/u);
 });
 
 test("PowerShell mock: lost Docker create ACK persists an unresolved intent", {
@@ -142,4 +165,57 @@ if (($states -join ',') -cne 'MUTATION_PENDING,MUTATION_ACKNOWLEDGED,REMOVE_PEND
 `);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /OWNER_ID_CLEANUP_VERIFIED/u);
+});
+
+test("PowerShell mock: browser anonymous volume can only be removed with its owner seed ID", {
+  skip: process.platform !== "win32" && "Windows PowerShell security fixture",
+}, () => {
+  const result = runPowerShellDockerMock(String.raw`
+$script:ownedResources.browserSeed = $true
+$script:ownedDockerIds.browserSeed = ('a' * 64)
+$script:dockerResourceNames.browserSeed = 'virki-e2e-browser-seed-owned'
+$script:browserAnonymousVolume = ('b' * 64)
+function Invoke-PinnedDocker {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArguments)
+  if ($DockerArguments[0] -eq 'container' -and $DockerArguments[1] -eq 'inspect') {
+    if ($script:removed) {
+      $global:LASTEXITCODE = 1
+      return ('Error: No such object: ' + ('a' * 64))
+    }
+    $global:LASTEXITCODE = 0
+    return (ConvertTo-Json -InputObject @(@{
+      Id = ('a' * 64); Name = '/virki-e2e-browser-seed-owned'
+      Config = @{ Labels = @{ 'org.virki.e2e.owner' = $runId } }
+    }) -Depth 5)
+  }
+  if ($DockerArguments[0] -eq 'container' -and $DockerArguments[1] -eq 'rm') {
+    if (($DockerArguments -join ',') -cne ('container,rm,--force,--volumes,' + ('a' * 64))) {
+      throw 'Removal did not identify only the owned immutable browser seed'
+    }
+    $script:removed = $true
+    $global:LASTEXITCODE = 0
+    return ('a' * 64)
+  }
+  if ($DockerArguments[0] -eq 'volume' -and $DockerArguments[1] -eq 'inspect') {
+    if (-not $script:removed -or $DockerArguments[2] -cne ('b' * 64)) {
+      throw 'Unexpected volume observation'
+    }
+    $global:LASTEXITCODE = 1
+    return ('Error: No such volume: ' + ('b' * 64))
+  }
+  throw ('Unexpected Docker operation (foreign mutable volume deletion?): ' + ($DockerArguments -join ' '))
+}
+Invoke-OwnedDockerCleanup 'browserSeed'
+if (-not $script:removed -or $script:ownedResources.browserSeed -or $script:dockerMutationUncertain) {
+  throw 'Browser seed cleanup was not owner-confirmed'
+}
+$states = @(Get-Content -LiteralPath $script:dockerMutationJournalPath |
+  ForEach-Object { ($_ | ConvertFrom-Json).state })
+if (($states -join ',') -cne 'REMOVE_PENDING,REMOVE_CONFIRMED') {
+  throw 'Anonymous volume cleanup journal missing'
+}
+'ANONYMOUS_VOLUME_OWNED_BY_SEED'
+`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ANONYMOUS_VOLUME_OWNED_BY_SEED/u);
 });

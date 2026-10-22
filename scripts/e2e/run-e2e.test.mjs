@@ -655,7 +655,7 @@ test("isolated Linux snapshot explicitly permits this remediation's new source a
 
 test("isolated runner journals reviewed Docker create operations and removes verified resource identities", () => {
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
-  for (const kind of ["network", "bootstrapNetwork", "database", "browserVolume", "browserSeed", "runner"]) {
+  for (const kind of ["network", "bootstrapNetwork", "database", "browserSeed", "runner"]) {
     assert.ok(script.includes(`Invoke-CreateOwnedDockerResource '${kind}'`), `${kind} creation is reviewed`);
     assert.ok(script.includes(`'${kind}'`), `${kind} has a named owner record`);
   }
@@ -664,6 +664,10 @@ test("isolated runner journals reviewed Docker create operations and removes ver
   assert.match(script, /Write-DockerMutationJournal 'RECONCILIATION_REQUIRED'/u);
   assert.match(script, /Assert-OwnedDockerIdentity \$Kind \$name \$id \$id/u);
   assert.match(script, /Invoke-PinnedDocker container rm --force --volumes \$id/u);
+  assert.match(script, /type=volume,target=\/ms-playwright\/chromium_headless_shell-1243/u);
+  assert.match(script, /Docker-managed anonymous browser volume was not removed/u);
+  assert.doesNotMatch(script, /Invoke-PinnedDocker volume rm/u,
+    "Docker volume names are mutable; cleanup must use the owned seed's immutable ID");
   assert.match(script, /if \(-not \$script:ownedResources\[\$Kind\]\) \{ return \}/u);
 });
 
@@ -673,7 +677,7 @@ test("isolated Windows Docker runner pins a signed absolute CLI and local endpoi
   assert.match(script, /Get-AuthenticodeSignature/u);
   assert.match(script, /npipe:\/\/\/\/\.\/pipe\/dockerDesktopLinuxEngine/u);
   assert.match(script, /function Invoke-PinnedDocker/u);
-  assert.match(script, /& \$script:dockerCli --host \$script:dockerHost @DockerArguments/u);
+  assert.match(script, /& \$script:dockerCli --host \$script:dockerHost @args/u);
   assert.doesNotMatch(script, /& docker(?:\s|\r|\n)/u, "no mutable PATH Docker command may remain");
 });
 
