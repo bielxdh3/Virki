@@ -96,14 +96,17 @@ function Assert-Handle {
         continue
       }
       if ($trusted -contains $ace.SecurityIdentifier.Value) { continue }
-      # Ancestors may grant create-child (e.g. C:\Users), but not delete-child,
-      # DELETE, WRITE_DAC, WRITE_OWNER or generic write/all that can replace
-      # this existing path. The private leaf grants no outsider write at all.
-      $forbidden = if ($Strict) { [uint32]0xD0156 } else { [uint32]0xD0040 }
+      # Ancestors may grant ordinary read/traverse and create-child (e.g.
+      # C:\Users), but must not allow replacement or security mutations.
+      # Private journal leaves must also deny outsider READ/LIST/READ_CONTROL:
+      # the JSONL contains an unpredictable Docker owner-label token.
+      $forbidden = if ($Strict) {
+        [uint32]0xD0156 -bor [uint32]0x80020089
+      } else { [uint32]0xD0040 }
       $forbidden = $forbidden -bor [uint32]0x50000000
       $rights = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$ace.AccessMask), 0)
       if (($rights -band $forbidden) -ne 0) {
-        throw 'journal path writable by untrusted principal'
+        throw 'journal path accessible by untrusted principal'
       }
     }
   } finally {

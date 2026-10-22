@@ -361,3 +361,29 @@ test("Windows journal checks opened file DACL before append and delete", {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("Windows journal rejects read-only outsider access to its Docker owner token", {
+  skip: process.platform !== "win32",
+}, () => {
+  for (const target of ["directory", "file"]) {
+    const directory = mkdtempSync(path.join(homedir(), ".virki-journal-test-"));
+    const owner = randomBytes(16).toString("hex");
+    const name = `virki-offline-fixture-${owner}`;
+    const file = path.join(directory, `${name}.jsonl`);
+    const request = { directory, name, owner };
+    try {
+      runProtectedWindowsJournalOperation("create", { ...request, line: JSON.stringify({ owner, name }) });
+      const granted = spawnSync("C:\\Windows\\System32\\icacls.exe",
+        [target === "directory" ? directory : file, "/grant", "*S-1-1-0:(R)"],
+        { encoding: "utf8", windowsHide: true });
+      assert.equal(granted.status, 0);
+      assert.throws(() => runProtectedWindowsJournalOperation("append",
+        { ...request, line: '{"event":"forged"}' }), /ACL binding unavailable/u);
+      assert.throws(() => runProtectedWindowsJournalOperation("remove", request),
+        /ACL binding unavailable/u);
+      assert.equal(readFileSync(file, "utf8").trim(), JSON.stringify({ owner, name }));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
