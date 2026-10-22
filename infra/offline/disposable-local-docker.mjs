@@ -7,6 +7,7 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runOwnedHostedLinuxFixture } from "./disposable-hosted-linux-docker.mjs";
 
 // Development-only guard. The Windows named pipe is an OS-local endpoint,
 // NOT an independent cryptographic proof of a production Docker daemon.
@@ -210,6 +211,12 @@ export function runOwnedLocalLinuxFixture(args, {
   platform = process.platform, env = process.env, invoke = spawnSync,
   reconciliationDirectory,
 } = {}) {
+  if (platform === "linux") {
+    assertFixtureArguments(args, cwd, timeout);
+    return runOwnedHostedLinuxFixture(args, {
+      cwd, timeout, stdio, platform, env, invoke, reconciliationDirectory,
+    });
+  }
   requireLocalFixtureEnvironment(platform, env);
   assertFixtureArguments(args, cwd, timeout);
   if (reconciliationDirectory !== undefined && invoke === spawnSync) {

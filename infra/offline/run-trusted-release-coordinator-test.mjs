@@ -25,7 +25,10 @@ const args = [
 ];
 try {
   runOwnedLocalLinuxFixture(args, { cwd: sourceRoot, timeout: 60_000 });
-} catch {
+} catch (error) {
+  if (error instanceof Error && error.message.includes("Operator reconciliation required:")) {
+    process.stderr.write(`${error.message}\n`);
+  }
   process.stderr.write("Isolated coordinator fixture refused or failed.\n");
   process.exitCode = 1;
 }

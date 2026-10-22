@@ -10,6 +10,10 @@ import {
   LOCAL_ENGINE, requireLocalFixtureEnvironment, runOwnedLocalLinuxFixture,
   runProtectedWindowsJournalOperation, verifyTrustedWindowsDockerCli,
 } from "./disposable-local-docker.mjs";
+import {
+  HOSTED_DOCKER, HOSTED_ENGINE, requireHostedLinuxFixtureEnvironment,
+  verifyTrustedHostedLinuxDockerCli,
+} from "./disposable-hosted-linux-docker.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const cli = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
@@ -25,6 +29,21 @@ const safeArgs = [
   "--mount", `type=bind,src=${root},dst=/workspace,readonly`,
   "--workdir", "/workspace", "--env", "VIRKI_DISPOSABLE_PEER_PROBE=1",
   image, "node", "--test", "infra/offline/native-peer/native-peer-probe.test.mjs",
+];
+const coordinatorArgs = [
+  "run", "--rm", "--pull=never", "--platform=linux/amd64",
+  "--network=none", "--read-only", "--cap-drop=ALL",
+  "--security-opt=no-new-privileges", "--pids-limit=128",
+  "--tmpfs", "/etc:rw,nosuid,nodev,noexec,size=16m,mode=755",
+  "--tmpfs", "/var/lib:rw,nosuid,nodev,noexec,size=256m,mode=755",
+  "--tmpfs", "/usr/local/lib/virki:rw,nosuid,nodev,noexec,size=16m,mode=700",
+  "--tmpfs", "/run:rw,exec,nosuid,nodev,size=32m,mode=755",
+  "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777",
+  "--mount", `type=bind,src=${root},dst=/workspace,readonly`,
+  "--workdir", "/workspace", "--env", "VIRKI_COORDINATOR_DISPOSABLE_CONTAINER=1",
+  "--env", "VIRKI_OWNER_INSTALL_DISPOSABLE_FIXTURE=1",
+  image, "node", "--test", "infra/offline/trusted-release-coordinator.test.mjs",
+  "infra/offline/trusted-owner-installation.test.mjs",
 ];
 const base = {
   platform: "win32",
@@ -44,10 +63,135 @@ test("unsafe platform and Docker CLI overrides reject without contacting any dae
     { env: { DOCKER_TLS_VERIFY: "1" } },
   ]) {
     assert.throws(() => runOwnedLocalLinuxFixture(safeArgs,
-      { ...base, ...entry, invoke }), /local Docker Desktop/u);
+      { ...base, ...entry, invoke }), /local Docker Desktop|GitHub-hosted Linux CI/u);
   }
   assert.equal(touched, false);
   assert.doesNotThrow(() => requireLocalFixtureEnvironment("win32", {}));
+});
+
+test("RED→GREEN: Ubuntu Validate coordinator routes to the Linux CI Docker guard", () => {
+  const workflow = readFileSync(path.join(root, ".github", "workflows", "ci.yml"), "utf8");
+  const coordinator = readFileSync(path.join(root, "infra", "offline", "run-trusted-release-coordinator-test.mjs"), "utf8");
+  const implementation = readFileSync(path.join(root, "infra", "offline", "disposable-local-docker.mjs"), "utf8");
+  assert.match(workflow, /validate:[\s\S]*?runs-on: ubuntu-latest[\s\S]*?run: npm run test:offline:coordinator:container/u);
+  assert.doesNotMatch(workflow, /actions\/upload-artifact/u,
+    "CI must never export raw Docker owner receipts as workflow artifacts");
+  assert.match(coordinator, /runOwnedLocalLinuxFixture\(args, \{ cwd: sourceRoot, timeout: 60_000 \}\)/u);
+  assert.match(implementation, /if \(platform === "linux"\)\s*\{\s*assertFixtureArguments\(args, cwd, timeout\);\s*return runOwnedHostedLinuxFixture/u);
+});
+
+test("RED→GREEN: Linux CI coordinator uses pinned Unix Docker and owned immutable-ID cleanup", {
+  skip: process.platform !== "linux",
+}, (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "virki-gh-ci-mock-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const env = { GITHUB_ACTIONS: "true", CI: "true", RUNNER_OS: "Linux",
+    RUNNER_ENVIRONMENT: "github-hosted", GITHUB_WORKSPACE: root, RUNNER_TEMP: directory };
+  const calls = [];
+  const invoke = (exe, argv, options) => {
+    assert.equal(exe, HOSTED_DOCKER);
+    assert.deepEqual(argv.slice(0, 2), ["--host", HOSTED_ENGINE]);
+    assert.equal(options.env.PATH, "/usr/bin:/bin");
+    assert.equal(Object.hasOwn(options.env, "DOCKER_HOST"), false);
+    calls.push(argv);
+    if (argv[2] === "info") return { status: 0, stdout: "linux|/var/lib/docker\n" };
+    if (argv[2] === "run") return { status: 0 };
+    if (argv[2] === "inspect") {
+      const run = calls.find((v) => v[2] === "run");
+      const name = run[run.indexOf("--name") + 1];
+      const owner = run[run.indexOf("--label") + 1].split("=")[1];
+      return { status: 0, stdout: `${"a".repeat(64)}|/${name}|${owner}` };
+    }
+    if (argv[2] === "rm") return { status: 0 };
+    throw Error("unreviewed Docker operation");
+  };
+  assert.doesNotThrow(() => runOwnedLocalLinuxFixture(safeArgs, {
+    cwd: root, platform: "linux", env, invoke, reconciliationDirectory: directory,
+  }));
+  assert.deepEqual(calls.map((v) => v[2]), ["info", "run", "inspect", "rm"]);
+  assert.deepEqual(calls[3].slice(3), ["--force", "--volumes", "a".repeat(64)]);
+  assert.deepEqual(readdirSync(directory), []);
+  // This is the exact profile called by the ubuntu-latest `validate` job;
+  // accepting only a peer fixture would leave the original P1 unresolved.
+  calls.length = 0;
+  assert.doesNotThrow(() => runOwnedLocalLinuxFixture(coordinatorArgs, {
+    cwd: root, platform: "linux", env, invoke, reconciliationDirectory: directory,
+  }));
+  assert.deepEqual(calls.map((v) => v[2]), ["info", "run", "inspect", "rm"]);
+  assert.deepEqual(readdirSync(directory), []);
+});
+
+test("RED→GREEN: hosted Linux denies foreign runner, Docker overrides and unsafe CLI", {
+  skip: process.platform !== "linux",
+}, (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "virki-gh-ci-negative-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const env = { GITHUB_ACTIONS: "true", CI: "true", RUNNER_OS: "Linux",
+    RUNNER_ENVIRONMENT: "github-hosted", GITHUB_WORKSPACE: root, RUNNER_TEMP: directory };
+  assert.doesNotThrow(() => requireHostedLinuxFixtureEnvironment("linux", env, root));
+  for (const override of [
+    { GITHUB_ACTIONS: "false" }, { RUNNER_OS: "Windows" },
+    { RUNNER_ENVIRONMENT: "self-hosted" }, { DOCKER_HOST: "tcp://foreign:2375" },
+    { DOCKER_CONTEXT: "remote" }, { BUILDX_CONFIG: "/tmp/remote" },
+    { GITHUB_WORKSPACE: directory },
+  ]) {
+    let contacted = false;
+    assert.throws(() => runOwnedLocalLinuxFixture(safeArgs, {
+      cwd: root, platform: "linux", env: { ...env, ...override },
+      invoke: () => { contacted = true; throw Error("unexpected daemon contact"); },
+    }), /GitHub-hosted Linux CI|runner paths/u);
+    assert.equal(contacted, false);
+  }
+  const trusted = {
+    stat: (p) => p === HOSTED_DOCKER
+      ? { isFile: () => true, isSymbolicLink: () => false, uid: 0, mode: 0o100755 }
+      : { isSocket: () => true, isSymbolicLink: () => false, uid: 0, mode: 0o140660 },
+    canonical: (p) => p,
+  };
+  assert.equal(verifyTrustedHostedLinuxDockerCli(trusted), HOSTED_DOCKER);
+  assert.throws(() => verifyTrustedHostedLinuxDockerCli({
+    ...trusted, stat: (p) => p === HOSTED_DOCKER
+      ? { isFile: () => true, isSymbolicLink: () => false, uid: 1000, mode: 0o100755 }
+      : trusted.stat(p),
+  }), /trusted root-owned local Docker/u);
+});
+
+test("RED→GREEN: hosted Linux retains journal and never removes a foreign or timed-out container", {
+  skip: process.platform !== "linux",
+}, (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "virki-gh-ci-failure-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const env = { GITHUB_ACTIONS: "true", CI: "true", RUNNER_OS: "Linux",
+    RUNNER_ENVIRONMENT: "github-hosted", GITHUB_WORKSPACE: root, RUNNER_TEMP: directory };
+  for (const scenario of ["foreign-label", "timeout-missing", "wrong-missing-name", "rm-failure"]) {
+    const calls = [];
+    const invoke = (_exe, argv) => {
+      calls.push(argv);
+      if (argv[2] === "info") return { status: 0, stdout: "linux|/var/lib/docker\n" };
+      const run = calls.find((v) => v[2] === "run");
+      const name = run?.[run.indexOf("--name") + 1];
+      const owner = run?.[run.indexOf("--label") + 1].split("=")[1];
+      if (argv[2] === "run") return scenario === "timeout-missing"
+        ? { status: null, error: { code: "ETIMEDOUT" } } : { status: 0 };
+      if (argv[2] === "inspect") {
+        if (scenario === "timeout-missing") {
+          return { status: 1, stderr: `Error: No such object: ${name}` };
+        }
+        if (scenario === "wrong-missing-name") {
+          return { status: 1, stderr: "Error: No such object: foreign-container" };
+        }
+        return { status: 0, stdout: `${"c".repeat(64)}|/${name}|${scenario === "foreign-label" ? "foreign" : owner}` };
+      }
+      if (argv[2] === "rm") return { status: 1, stderr: "daemon unavailable" };
+      throw Error("unreviewed Docker call");
+    };
+    assert.throws(() => runOwnedLocalLinuxFixture(coordinatorArgs, {
+      cwd: root, platform: "linux", env, invoke, reconciliationDirectory: directory,
+    }), /reconciliation required/iu);
+    assert.equal(calls.filter((v) => v[2] === "rm").length,
+      scenario === "rm-failure" ? 1 : 0);
+  }
+  assert.equal(readdirSync(directory).length, 4, "every uncertain attempt needs independent retained owner evidence");
 });
 
 function fakeEngine({
