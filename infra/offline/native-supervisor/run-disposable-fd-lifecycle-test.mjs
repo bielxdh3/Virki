@@ -66,8 +66,10 @@ function runCli(args, env, timeout = 45000, stdio = "pipe") {
   });
 }
 
-function cleanupOwnedContainer(cidfile, plan, env) {
-  if (!existsSync(cidfile)) return true;
+export function cleanupOwnedContainer(cidfile, plan, env) {
+  // A failed or timed-out `docker run` may start its container before Docker
+  // can atomically write --cidfile. Missing evidence is NOT a cleanup proof.
+  if (!existsSync(cidfile)) return false;
   let id;
   try { id = readFileSync(cidfile, "utf8").trim(); }
   catch { return false; }
@@ -86,6 +88,12 @@ function cleanupOwnedContainer(cidfile, plan, env) {
   const killed = runCli([...plan.dockerPrefix, "container", "rm", "--force", id],
     env, 4000);
   return !killed.error && killed.status === 0;
+}
+
+export function finalizeFixtureRecord(owned, { completed, cleanupConfirmed }) {
+  if (!completed && !cleanupConfirmed) return false;
+  rmSync(owned, { recursive: true, force: true });
+  return true;
 }
 
 export function runDisposableFdLifecycleFixture() {
@@ -115,11 +123,9 @@ export function runDisposableFdLifecycleFixture() {
     // A successful `docker run --rm` is allowed to have removed its own
     // container before the final inspect. Any incomplete or failed run must
     // preserve its CID record for explicitly reviewed manual reconciliation.
-    if (cleanupConfirmed || completed) {
-      rmSync(owned, { recursive: true, force: true });
-    } else {
-      process.stderr.write("Disposable cleanup unconfirmed; ownership CID preserved at " +
-        cidfile + ". No arbitrary container deletion attempted.\n");
+    if (!finalizeFixtureRecord(owned, { completed, cleanupConfirmed })) {
+      process.stderr.write("Disposable cleanup unconfirmed; fixture directory preserved at " +
+        owned + " (CID may be absent). No arbitrary container deletion attempted.\n");
       process.exitCode = 1;
     }
   }

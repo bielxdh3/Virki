@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DISPOSABLE_IMAGE, LOCAL_DESKTOP_ENGINE, planDisposableFixture,
-  validateCleanupIdentity,
+  validateCleanupIdentity, cleanupOwnedContainer, finalizeFixtureRecord,
 } from "./run-disposable-fd-lifecycle-test.mjs";
 
 const runner = fileURLToPath(new URL("./run-disposable-fd-lifecycle-test.mjs", import.meta.url));
@@ -74,4 +76,21 @@ test("runner cannot automatically execute Docker on Windows or WSL", () => {
   assert.equal(result.error, undefined);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Docker fixture blocked/u);
+});
+
+test("failed Docker spawn without CID cannot prove cleanup and must preserve its fixture path", (t) => {
+  const owned = mkdtempSync(path.join(os.tmpdir(), "virki-cid-missing-red-green-"));
+  t.after(() => rmSync(owned, { recursive: true, force: true }));
+  const cidfile = path.join(owned, "container.id");
+  const plan = planDisposableFixture({ ownerToken: token, cidfile });
+  // Simulate a timed-out/errored docker run BEFORE cidfile creation.
+  // This branch must never invoke docker inspect/rm or touch Docker itself.
+  assert.equal(existsSync(cidfile), false);
+  const cleanupConfirmed = cleanupOwnedContainer(cidfile, plan, {});
+  assert.equal(cleanupConfirmed, false, "missing CID is not proof the child never spawned");
+  assert.equal(finalizeFixtureRecord(owned, { completed: false, cleanupConfirmed }), false);
+  assert.equal(existsSync(owned), true, "unresolved fixture data must be retained");
+  // Successful --rm execution is a separate independently observed outcome.
+  assert.equal(finalizeFixtureRecord(owned, { completed: true, cleanupConfirmed }), true);
+  assert.equal(existsSync(owned), false);
 });
