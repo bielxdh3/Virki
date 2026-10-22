@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 
 // Only the explicit local Windows fixture or a GitHub-hosted disposable Linux CI runner.
 export const DOCKER_BINARY = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
@@ -12,6 +14,40 @@ export const POSTGRES_IMAGE = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e
 const OWNER_LABEL = "virki.backup-validation.owner";
 const FIXTURE_LABEL = "virki.backup-validation.fixture";
 const ID_PATTERN = /^[a-f0-9]{64}$/u;
+
+// Written BEFORE `docker run`, so a failed CLI or delayed container creation
+// cannot destroy the only independently useful name/owner lookup information.
+export async function createBackupOwnerEvidence(docker, parent = os.tmpdir()) {
+  const directory = await mkdtemp(path.join(parent, "virki-backup-owner-"));
+  const manifest = {
+    version: 1,
+    fixture: "prisma-backup-restore",
+    name: docker.name,
+    ownerLabel: `${OWNER_LABEL}=${docker.nonce}`,
+    image: POSTGRES_IMAGE,
+    daemonId: docker.daemonId,
+    endpoint: docker.host,
+  };
+  try {
+    await writeFile(path.join(directory, "owner.json"), `${JSON.stringify(manifest)}\n`, { flag: "wx", mode: 0o600 });
+    return directory;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function finalizeBackupOwnerEvidence(docker, directory) {
+  if (!directory) return { retained: false };
+  if (docker?.runAttempted && !docker.cleaned) return { retained: true, directory };
+  await rm(directory, { recursive: true, force: true });
+  return { retained: false };
+}
+
+export async function readBackupOwnerEvidence(directory) {
+  // Read-only manual reconciliation aid; this never authorizes container removal.
+  return JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
+}
 
 export function assertLocalBackupEnvironment(env = process.env, platform = process.platform) {
   const windows = platform === "win32" && env.VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER === "1" && !env.VIRKI_BACKUP_VALIDATION_LINUX_CI;
@@ -73,6 +109,8 @@ export class LocalBackupDocker {
     this.nonce = nonce;
     this.name = `virki-backup-validation-${nonce}`;
     this.id = null;
+    this.runAttempted = false;
+    this.cleaned = false;
     this.daemonId = null;
     this.expectedImageId = null;
     this.dockerEnvironment = this.mode === "linux-ci"
@@ -165,6 +203,7 @@ export class LocalBackupDocker {
     const imageId = this.command(["image", "inspect", POSTGRES_IMAGE, "--format", "{{.Id}}"]).trim();
     if (!/^sha256:[a-f0-9]{64}$/u.test(imageId)) throw new Error("Cached PostgreSQL image identity is invalid.");
     this.expectedImageId = imageId;
+    this.runAttempted = true;
     const result = this.call([
       "run", "--detach", "--pull=never", "--name", this.name,
       "--label", `${OWNER_LABEL}=${this.nonce}`, "--label", `${FIXTURE_LABEL}=prisma-backup-restore`,
@@ -216,7 +255,13 @@ export class LocalBackupDocker {
     if (!this.id) return;
     this.engine();
     this.inspect();
-    this.command(["rm", "--force", "--volumes", this.id], { timeout: 60_000 });
+    const ownedId = this.id;
+    this.command(["rm", "--force", "--volumes", ownedId], { timeout: 60_000 });
+    this.engine();
+    if (this.command(["ps", "--all", "--no-trunc", "--filter", `id=${ownedId}`, "--format", "{{.ID}}"] ) !== "") {
+      throw new Error("Backup validation container removal was not independently confirmed; owner evidence must be preserved.");
+    }
     this.id = null;
+    this.cleaned = true;
   }
 }

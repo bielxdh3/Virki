@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { PrismaClient } from "@prisma/client";
 import { describeBackupMigrationFailure } from "./lib/backup-migration-diagnostics.mjs";
-import { LocalBackupDocker, assertLocalBackupEnvironment } from "./lib/backup-validation-docker.mjs";
+import {
+  LocalBackupDocker, assertLocalBackupEnvironment, createBackupOwnerEvidence, finalizeBackupOwnerEvidence,
+} from "./lib/backup-validation-docker.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
@@ -24,6 +26,7 @@ const rolePasswords = {
 };
 let docker;
 let temporaryDirectory;
+let ownerEvidenceDirectory;
 let sourceClient;
 let restoredClient;
 let validationError;
@@ -34,6 +37,8 @@ try {
   const dockerConfigDirectory = path.join(temporaryDirectory, "docker-config");
   await mkdir(dockerConfigDirectory, { recursive: true });
   docker = new LocalBackupDocker({ configDirectory: dockerConfigDirectory });
+  docker.engine();
+  ownerEvidenceDirectory = await createBackupOwnerEvidence(docker);
   docker.start({ database: databaseName, user: databaseUser, password: databasePassword });
   await waitForDatabase();
   await runRoleInitialization(databaseName);
@@ -118,6 +123,16 @@ if (temporaryDirectory) {
     await rm(temporaryDirectory, { recursive: true, force: true });
   } catch (error) {
     cleanupErrors.push(error);
+  }
+}
+if (ownerEvidenceDirectory) {
+  try {
+    const evidence = await finalizeBackupOwnerEvidence(docker, ownerEvidenceDirectory);
+    if (evidence.retained) {
+      cleanupErrors.push(new Error(`Backup validation cannot prove container cleanup. Owner evidence preserved for manual reconciliation at ${evidence.directory}.`));
+    }
+  } catch (error) {
+    cleanupErrors.push(new Error("Backup validation could not finalize private owner evidence.", { cause: error }));
   }
 }
 if (validationError && cleanupErrors.length > 0) {

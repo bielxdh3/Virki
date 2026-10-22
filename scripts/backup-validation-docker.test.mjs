@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import {
-  assertLocalBackupEnvironment, DOCKER_BINARY, DOCKER_HOST, inspectLinuxRunnerSocket,
+  assertLocalBackupEnvironment, createBackupOwnerEvidence, finalizeBackupOwnerEvidence,
+  readBackupOwnerEvidence, DOCKER_BINARY, DOCKER_HOST, inspectLinuxRunnerSocket,
   LINUX_CI_DOCKER_BINARY, LINUX_CI_DOCKER_HOST, LocalBackupDocker, POSTGRES_IMAGE,
 } from "./lib/backup-validation-docker.mjs";
 
@@ -42,8 +46,9 @@ function fixture(overrides = {}) {
     if (subcommand === "pull") return { status: state.pullStatus ?? 0, stdout: "Digest: verified" };
     if (subcommand === "image") return { status: state.imageStatus ?? 0, stdout: `sha256:${"d".repeat(64)}` };
     if (subcommand === "run") return { status: state.runStatus ?? 0, stdout: state.returnedId, stderr: "password=secret" };
-    if (subcommand === "inspect") return { status: 0, stdout: JSON.stringify({ ...inspect(), ...state.inspectOverrides }) };
+    if (subcommand === "inspect") return { status: state.inspectStatus ?? 0, stdout: JSON.stringify({ ...inspect(), ...state.inspectOverrides }) };
     if (subcommand === "rm") return { status: state.removeStatus ?? 0, stdout: state.containerId };
+    if (subcommand === "ps") return { status: state.listStatus ?? 0, stdout: state.listOutput ?? "" };
     if (subcommand === "exec") return { status: state.execStatus ?? 0, stdout: options.encoding === null ? Buffer.from("fixture") : "fixture", stderr: "secret=leak" };
     throw new Error(`Unexpected Docker invocation: ${subcommand}`);
   };
@@ -203,6 +208,55 @@ test("adopts orphan created despite lost run response only with independently ve
   assert.equal(foreign.docker.id, null);
   foreign.docker.cleanup();
   assert.equal(foreign.calls.filter((call) => call.args[4] === "rm").length, 0);
+});
+
+test("ambiguous detached Docker run retains owner evidence even when inspect initially cannot find it", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "backup-evidence-unit-"));
+  try {
+    const { docker, state } = fixture({ returnedId: "", runStatus: 1, inspectStatus: 1 });
+    docker.engine();
+    const evidenceDirectory = await createBackupOwnerEvidence(docker, parent);
+    assert.throws(() => docker.start({ database: "d", user: "u", password: "p" }), /invalid container ID/u);
+    assert.equal(docker.id, null);
+    assert.equal(docker.runAttempted, true);
+    const retained = await finalizeBackupOwnerEvidence(docker, evidenceDirectory);
+    assert.equal(retained.retained, true);
+    const recorded = await readBackupOwnerEvidence(evidenceDirectory);
+    assert.equal(recorded.ownerLabel, `virki.backup-validation.owner=${nonce}`);
+    assert.equal(recorded.name, docker.name);
+    assert.equal(recorded.daemonId, docker.daemonId);
+    assert.ok(!JSON.stringify(recorded).includes("fixture-password"));
+    // The daemon may finish creating the same container after the CLI failed.
+    // Manual reconciliation can locate it by the retained owner name and label.
+    state.inspectStatus = 0;
+    assert.equal(docker.inspect(recorded.name).Id, id);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("owner evidence is deleted only before Docker run or after independently verified removal", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "backup-evidence-unit-"));
+  try {
+    const untouched = fixture();
+    const noRun = await createBackupOwnerEvidence(untouched.docker, parent);
+    assert.deepEqual(await finalizeBackupOwnerEvidence(untouched.docker, noRun), { retained: false });
+
+    const incomplete = fixture({ listOutput: id });
+    const evidenceDir = await createBackupOwnerEvidence(incomplete.docker, parent);
+    incomplete.docker.start({ database: "d", user: "u", password: "p" });
+    assert.throws(() => incomplete.docker.cleanup(), /not independently confirmed/u);
+    assert.deepEqual(await finalizeBackupOwnerEvidence(incomplete.docker, evidenceDir), { retained: true, directory: evidenceDir });
+    assert.equal((await readBackupOwnerEvidence(evidenceDir)).name, incomplete.docker.name);
+
+    incomplete.state.listOutput = "";
+    incomplete.docker.cleanup();
+    assert.equal(incomplete.docker.cleaned, true);
+    assert.deepEqual(await finalizeBackupOwnerEvidence(incomplete.docker, evidenceDir), { retained: false });
+    await assert.rejects(() => readBackupOwnerEvidence(evidenceDir), /ENOENT/u);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
 });
 
 test("Docker failures redact stdout, stderr, connection strings and credentials", () => {

@@ -37,7 +37,16 @@ socket or host directory is mounted. Its data directory is a disposable tmpfs;
 every created container is labelled with an unpredictable owner token and
 checked for the exact immutable Docker ID, image, network, mounts and engine
 identity before use and force-removal. Failures that prevent independent owner
-verification refuse deletion and require manual operator inspection. Docker
+verification refuse deletion and require manual operator inspection. The
+unpredictable name, owner label, engine identity, digest and endpoint are
+written to a private `virki-backup-owner-*` directory under the runner's temp
+directory **before** the detached run is attempted. An ambiguous Docker run,
+lost response, mismatched owner or unconfirmed removal preserves this owner
+receipt even if the container is created after the CLI has already failed.
+Only an independently confirmed container removal deletes the receipt; the
+binary dump is separately removed. An operator must manually inspect the
+recorded owner label and exact engine before resolving abandoned fixtures;
+the receipt alone never authorizes deletion. Docker
 CLI stdout/stderr and Prisma failure logs are redacted to avoid leaking
 synthetic credentials, URLs, dump contents and account records. The test uses
 synthetic account/admin, TOTP, recovery, audit, outbox and delivery records,
