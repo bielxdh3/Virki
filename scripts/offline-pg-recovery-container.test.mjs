@@ -27,6 +27,14 @@ function localDocker(args) {
   return spawnSync("docker", ["--host", DOCKER_ENDPOINT, ...args], options);
 }
 
+function safeRollbackDiagnostic(stderr = "") {
+  // Never echo raw Docker/PG stderr. Only enumerated journal phases and
+  // numeric child statuses can appear in failed test output.
+  const checkpoint = stderr.match(/^Unexpected protected rollback phase: (?:attempted|maintenance|backed_up|restored|restore_migrated|live_migrated|rollback_started|rollback_proven|rollback_rebuild|rollback_restored|rolled_back|completed|unknown) \(expected (?:rollback_started|rollback_proven|rollback_rebuild|rollback_restored)\)$/mu)?.[0];
+  const signal = stderr.match(/^Expected injected SIGKILL, got child status (?:0|[1-9][0-9]{0,2})$/mu)?.[0];
+  return checkpoint ?? signal ?? "no safe diagnostic";
+}
+
 function requireLocalDockerDesktop() {
   assert.equal(process.platform, "win32",
     "disposable runner requires the explicitly pinned local Windows Docker Desktop Linux engine");
@@ -91,7 +99,7 @@ for (const fixtureCase of cases) {
     const result = isolatedPostgres(fixtureCase);
     assert.equal(result.error, undefined, `isolated container launch failed: ${result.error?.code ?? "unknown"}`);
     assert.equal(result.status, 0,
-      `isolated PostgreSQL fixture case=${fixtureCase} failed (status=${result.status}, signal=${result.signal ?? "none"}); inspect local isolated run; private stderr redacted`);
+      `isolated PostgreSQL fixture case=${fixtureCase} failed (status=${result.status}, signal=${result.signal ?? "none"}; ${safeRollbackDiagnostic(result.stderr)}); private stderr redacted`);
     assert.equal(result.stdout.trim(), `PASS real PostgreSQL disposable ${fixtureCase} (NON_AUTHORIZING)`);
   });
 }
@@ -104,4 +112,10 @@ test("rejects an externally provided PostgreSQL URL before starting the disposab
 test("disposable launcher accepts no external PG connection or host socket", () => {
   assert.equal(DOCKER_ENDPOINT, "npipe:////./pipe/dockerDesktopLinuxEngine");
   assert.equal(IMAGE.includes("@sha256:"), true);
+  assert.equal(safeRollbackDiagnostic("Unexpected protected rollback phase: rollback_rebuild (expected rollback_restored)"),
+    "Unexpected protected rollback phase: rollback_rebuild (expected rollback_restored)");
+  assert.equal(safeRollbackDiagnostic("Expected injected SIGKILL, got child status 70"),
+    "Expected injected SIGKILL, got child status 70");
+  assert.equal(safeRollbackDiagnostic("postgresql://sensitive.invalid/opaque data"),
+    "no safe diagnostic");
 });

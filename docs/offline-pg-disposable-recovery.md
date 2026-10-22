@@ -91,6 +91,14 @@ original User, MFA, recovery, audit, outbox and security-policy data after
 manual reconciliation. If a crash leaves a **partially created rollback clone**,
 reconciliation refuses it and preserves the attempt latch for explicit manual
 inspection. The fixture never silently deletes an unverified rollback clone.
+Each injected failure is accepted only if the child terminates with actual
+SIGKILL status 137 **and** the durable journal equals the case's exact
+checkpoint. The `rollback_restored` interruption happens directly in the
+journal-recording function immediately after readback of its committed row,
+before a `rolled_back` transition is possible. If validation fails, only an
+enumerated journal phase or numeric child exit status may be printed; all raw
+PostgreSQL/SQL/dump output remains redacted. A mismatch is a test failure,
+never an accepted alternative outcome or silently retried test.
 
 Admission first creates and synchronizes the exclusive `.attempted` marker,
 then requires its *own* unique PostgreSQL journal INSERT to return an inserted

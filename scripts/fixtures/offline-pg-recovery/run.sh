@@ -89,10 +89,33 @@ case "${1:-}" in
       crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored)
         ( sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" ) &
         pid=$!
-        wait "$pid" && exit 141
+        child_status=0
+        wait "$pid" || child_status=$?
+        # Do not accept arbitrary non-zero exits: an SQL failure before the
+        # injected SIGKILL must never masquerade as successful crash coverage.
+        test "$child_status" = 137 ||
+          { printf 'Expected injected SIGKILL, got child status %s\n' "$child_status" >&2; exit 141; }
         test -f "$fixture/.attempted" && test -s "$fixture/virki.dump" || exit 142
         phase="$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')"
-        case "$phase" in rollback_started|rollback_proven|rollback_rebuild|rollback_restored) ;; *) exit 143;; esac
+        # Every crash fixture MUST have reached exactly the intended
+        # committed checkpoint. An earlier SQL failure, missing injection, or
+        # accidental completion is NOT a valid crash/rollback proof.
+        case "$1" in
+          crash_rollback_clone) expected_phase=rollback_started ;;
+          crash_rollback_proven) expected_phase=rollback_proven ;;
+          crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded) expected_phase=rollback_rebuild ;;
+          crash_rollback_restored) expected_phase=rollback_restored ;;
+        esac
+        if test "$phase" != "$expected_phase"; then
+          # Journal phase is a fixed internal vocabulary, not protected
+          # database content; still avoid leaking arbitrary SQL output.
+          case "$phase" in
+            attempted|maintenance|backed_up|restored|restore_migrated|live_migrated|rollback_started|rollback_proven|rollback_rebuild|rollback_restored|rolled_back|completed) ;;
+            *) phase=unknown ;;
+          esac
+          printf 'Unexpected protected rollback phase: %s (expected %s)\n' "$phase" "$expected_phase" >&2
+          exit 143
+        fi
         VIRKI_OFFLINE_PG_CASE=happy
         export VIRKI_OFFLINE_PG_CASE
         if test "$1" = crash_rollback_clone; then

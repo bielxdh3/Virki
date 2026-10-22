@@ -59,6 +59,13 @@ record() {
   control "UPDATE recovery_attempt SET phase='$1', updated_at=clock_timestamp() WHERE id=1 AND phase='$2'" > /dev/null ||
     refuse 'unexpected journal state'
   require_equal "$(last_phase)" "$1" 'journal transition failed'
+  # The terminal rollback crash proof must stop inside the journal transition,
+  # immediately after the committed checkpoint is independently read back.
+  # This avoids an untested execution interval after recording restoration
+  # and before injecting SIGKILL in the caller.
+  if test "$1" = rollback_restored; then
+    crash_point rollback_restored
+  fi
 }
 require_ledger() {
   require_equal "$(control "SELECT count(*) FROM recovery_attempt")" 1 'missing unique attempted journal'
@@ -162,7 +169,6 @@ rollback() {
   assert_fingerprint "$source_db" "$baseline_fingerprint"
   assert_schema "$source_db"
   record rollback_restored rollback_rebuild
-  crash_point rollback_restored
   record rolled_back rollback_restored
   # Attempt latch intentionally retained. Operator must reconcile.
 }
