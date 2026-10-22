@@ -18,6 +18,18 @@ export const DISPOSABLE_IMAGE =
   "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const CONTAINER_LABEL = "dev.virki.disposable-fd-lifecycle";
+// This state deliberately changes BEFORE a CLI attempt, not on success:
+// timeout or spawn failure may still mean that Docker was contacted.
+let runnerStage = "preflight";
+export function runnerFailureDiagnostic(stage) {
+  if (stage === "preflight")
+    return "Docker fixture blocked before Docker CLI invocation.";
+  if (stage === "cli-invoked")
+    return "Docker fixture failed after Docker CLI invocation; daemon contact cannot be ruled out.";
+  if (stage === "cleanup-attempted")
+    return "Docker fixture failed during cleanup after Docker CLI invocation; daemon contact cannot be ruled out.";
+  return "Docker fixture failed at unknown stage; Docker CLI/daemon contact cannot be ruled out.";
+}
 // Resource ownership is established only by mkdtemp within this process.
 // A caller must not be able to use the exported test helper to delete a
 // different filesystem tree by supplying its path.
@@ -158,6 +170,7 @@ export function finalizeFixtureRecord(owned, { completed, cleanupConfirmed }) {
 }
 
 export function runDisposableFdLifecycleFixture() {
+  runnerStage = "preflight";
   if (process.platform !== "win32" ||
     process.env.VIRKI_DISPOSABLE_SUPERVISOR_RUN_DOCKER !== "1" ||
     !existsSync(DOCKER_BINARY) || process.argv.length !== 2) {
@@ -170,6 +183,7 @@ export function runDisposableFdLifecycleFixture() {
   const env = sanitizedCliEnvironment(configDir);
   let completed = false;
   try {
+    runnerStage = "cli-invoked";
     const result = runCli(plan.args, env, 45000, "inherit");
     completed = !result.error && result.status === 0;
     if (result.error || result.status !== 0) {
@@ -177,6 +191,7 @@ export function runDisposableFdLifecycleFixture() {
       process.exitCode = 1;
     }
   } finally {
+    runnerStage = "cleanup-attempted";
     const cleanupConfirmed = cleanupOwnedContainer(cidfile, plan, env);
     // A successful `docker run --rm` is allowed to have removed its own
     // container before the final inspect. Any incomplete or failed run must
@@ -191,6 +206,6 @@ export function runDisposableFdLifecycleFixture() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { runDisposableFdLifecycleFixture(); }
-  catch { process.stderr.write("Docker fixture blocked; no daemon was contacted.\n");
+  catch { process.stderr.write(runnerFailureDiagnostic(runnerStage) + "\n");
     process.exitCode = 1; }
 }

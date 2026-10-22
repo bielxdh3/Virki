@@ -306,6 +306,9 @@ against a privileged or same-user concurrent file replacement, nor do they
 prove Windows ACL ownership. Such environments are **not** production trust
 boundaries. The launcher does not mount a host Docker socket.
 No real Docker-in-Docker daemon is started or authorized.
+Startup errors before Docker CLI invocation are reported distinctly from errors
+after the CLI was invoked; once invoked, daemon contact **cannot be ruled out**
+even if the CLI reports failure or times out. Diagnostics never claim otherwise.
 
 For local development **without contacting Docker at all**, native C fixtures
 also run with root inside a separately opted-in Ubuntu WSL2 test VM:
@@ -342,8 +345,12 @@ The socket directory is removed only after successful child cleanup and
 verification that it is the originally created root-owned directory inode,
 not a renamed/replaced path. If those proofs fail, the test refuses positive
 status and preserves the private socket path for manual reconciliation.
-The child must also exit successfully; a nonzero fake-daemon exit is not
-evidence of a successful supervised lifecycle.
+The child must also exit successfully; nonzero exits or signal termination
+preserve the original root/socket evidence rather than deleting it, even if
+`waitpid` confirmed the child was reaped. A swapped fixture root is reported
+alongside its separately renamed original path only when that former location
+still has the exact root-owned original device/inode. No arbitrary symlink
+target is resolved or disclosed by this diagnostic.
 These C pathname/inode checks are not a kernel-atomic same-directory-handle
 cleanup primitive against an independently privileged concurrent attacker;
 they demonstrate fail-closed swaps in the disposable fixture only.

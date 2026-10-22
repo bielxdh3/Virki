@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   DISPOSABLE_IMAGE, LOCAL_DESKTOP_ENGINE, planDisposableFixture,
   validateCleanupIdentity, cleanupOwnedContainer, finalizeFixtureRecord,
-  prepareOwnedFixtureDirectory,
+  prepareOwnedFixtureDirectory, runnerFailureDiagnostic,
 } from "./run-disposable-fd-lifecycle-test.mjs";
 
 const runner = fileURLToPath(new URL("./run-disposable-fd-lifecycle-test.mjs", import.meta.url));
@@ -80,6 +80,21 @@ test("runner cannot automatically execute Docker on Windows or WSL", () => {
   assert.equal(result.error, undefined);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Docker fixture blocked/u);
+  assert.match(result.stderr, /before Docker CLI invocation/u);
+  assert.doesNotMatch(result.stderr, /no daemon was contacted/u);
+});
+
+test("CLI-invoked error never falsely claims the daemon was not contacted", () => {
+  const diagnostic = runnerFailureDiagnostic("cli-invoked");
+  assert.match(diagnostic, /after Docker CLI invocation/u);
+  assert.match(diagnostic, /contact cannot be ruled out/u);
+  assert.doesNotMatch(diagnostic, /no daemon was contacted/u);
+  const cleanup = runnerFailureDiagnostic("cleanup-attempted");
+  assert.match(cleanup, /Docker CLI/u);
+  assert.match(cleanup, /contact cannot be ruled out/u);
+  assert.doesNotMatch(cleanup, /no daemon was contacted/u);
+  assert.match(runnerFailureDiagnostic("unknown"), /contact cannot be ruled out/u);
+  assert.match(runnerFailureDiagnostic("preflight"), /before Docker CLI invocation/u);
 });
 
 test("failed Docker spawn without CID cannot prove cleanup and must preserve its fixture path", (t) => {

@@ -325,6 +325,8 @@ static bool teardown(void) {
       fprintf(stderr, "DISPOSABLE_FIXTURE_CHILD_REAPED %ld\n", (long)child_pid);
     else
       fputs("fixture child reap was not confirmed\n", stderr);
+    if (confirmed_reap && !child_exited_cleanly)
+      fputs("DISPOSABLE_FIXTURE_CHILD_NONCLEAN_EXIT\n", stderr);
     child_pid = -1;
   }
   if (child_pidfd >= 0) {
@@ -337,7 +339,8 @@ static bool teardown(void) {
   bool root_clean = true;
   if (owns_rootdir) {
     struct stat current;
-    root_clean = confirmed_reap && lstat(rootdir, &current) == 0 &&
+    root_clean = confirmed_reap && child_exited_cleanly &&
+      lstat(rootdir, &current) == 0 &&
       S_ISDIR(current.st_mode) && current.st_uid == 0 &&
       current.st_gid == 0 && (current.st_mode & 07777) == 0700 &&
       current.st_dev == owned_root_dev && current.st_ino == owned_root_ino;
@@ -350,8 +353,23 @@ static bool teardown(void) {
       } else if (errno != ENOENT) root_clean = false;
     }
     if (root_clean) root_clean = rmdir(rootdir) == 0;
-    if (!root_clean)
+    if (!root_clean) {
       fprintf(stderr, "DISPOSABLE_FIXTURE_ROOT_PRESERVED %s\n", rootdir);
+      /* The fixture's synthetic rename attack relocates only the exact
+       * private directory to "<root>-original". Emit this generated path
+       * solely if it still has the original root-owned inode. Do not resolve
+       * or print arbitrary symlink targets or external paths. */
+      char prior[sizeof(rootdir) + 20];
+      struct stat previous;
+      if (snprintf(prior, sizeof(prior), "%s-original", rootdir) <
+          (int)sizeof(prior) &&
+          lstat(prior, &previous) == 0 &&
+          S_ISDIR(previous.st_mode) && previous.st_uid == 0 &&
+          previous.st_gid == 0 && (previous.st_mode & 07777) == 0700 &&
+          previous.st_dev == owned_root_dev &&
+          previous.st_ino == owned_root_ino)
+        fprintf(stderr, "DISPOSABLE_FIXTURE_ORIGINAL_RENAMED %s\n", prior);
+    }
   }
   return confirmed_reap && child_exited_cleanly && root_clean;
 }
@@ -420,6 +438,7 @@ static int serve_fake(const char *mode, int readyfd) {
         rename(rootdir, prior) != 0 || mkdir(rootdir, 0700) != 0) return 44;
   }
   close(conn);
+  if (strcmp(mode, "nonzero-after-ack") == 0) return 45;
   return 0;
 }
 static bool fixture_directory(void) {
@@ -464,7 +483,8 @@ int main(int argc, char **argv) {
       strcmp(mode, "fake-rootdir") && strcmp(mode, "stall-on-inspect") &&
       strcmp(mode, "response-smuggling") && strcmp(mode, "pipeline-valid") &&
       strcmp(mode, "slow-trickle") && strcmp(mode, "ignore-term") &&
-      strcmp(mode, "late-final-junk") && strcmp(mode, "swap-owned-root"))
+      strcmp(mode, "late-final-junk") && strcmp(mode, "swap-owned-root") &&
+      strcmp(mode, "nonzero-after-ack"))
     return blocked();
   if (!fixture_directory()) {
     teardown();

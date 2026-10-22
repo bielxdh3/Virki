@@ -138,10 +138,28 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     assert.equal(lstatSync(original).isDirectory(), true);
     const originalSocket = path.join(original, "engine.sock");
     assert.ok(lstatSync(originalSocket).isSocket());
+    assert.match(result.stderr, /DISPOSABLE_FIXTURE_ORIGINAL_RENAMED \/tmp\/virki-supervisor-[A-Za-z0-9]{8}-original/u);
     t.after(() => {
       if (existsSync(originalSocket)) unlinkSync(originalSocket);
       if (existsSync(original)) rmdirSync(original);
       if (existsSync(replacement)) rmdirSync(replacement);
+    });
+  });
+  await t.test("child nonzero exit after final authentic ACK preserves owned socket and root", (t) => {
+    const { result, output } = invoke("nonzero-after-ack");
+    assert.equal(result.status, 2, result.stderr);
+    assert.equal(output.status, "BLOCKED");
+    assert.match(result.stderr, /DISPOSABLE_FIXTURE_CHILD_NONCLEAN_EXIT/u);
+    const match = /DISPOSABLE_FIXTURE_ROOT_PRESERVED (\/tmp\/virki-supervisor-[A-Za-z0-9]{8})/u.exec(
+      result.stderr);
+    assert.ok(match, "nonclean child exit must preserve forensic directory");
+    const owned = match[1];
+    const socket = path.join(owned, "engine.sock");
+    assert.ok(lstatSync(owned).isDirectory());
+    assert.ok(lstatSync(socket).isSocket());
+    t.after(() => {
+      if (existsSync(socket)) unlinkSync(socket);
+      if (existsSync(owned)) rmdirSync(owned);
     });
   });
   await t.test("nonresponsive daemon is terminated and reaped after socket poll deadline", () => {
