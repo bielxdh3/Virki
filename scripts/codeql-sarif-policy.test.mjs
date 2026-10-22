@@ -78,10 +78,16 @@ test("CodeQL documented driver/version and consistent ruleIndex are accepted", (
   assert.throws(() => evaluateCodeqlSarif([document]), /Invalid SARIF/u);
 });
 
-test("RED→GREEN: CodeQL documented canonical artifact/index and invocation structure fails closed", () => {
+test("RED→GREEN: SARIF 2.1 artifactLocation index, rule and invocation consistency fail closed", () => {
+  const valid = sarif([accepted]);
+  assert.equal(evaluateCodeqlSarif([valid]).ok, true,
+    "canonical SARIF artifact has a location, not a required top-level index");
+  valid.runs[0].artifacts[0].location.index = 0;
+  assert.equal(evaluateCodeqlSarif([valid]).ok, true,
+    "an artifactLocation index is allowed when it matches its array position");
   for (const mutation of [
-    (run) => { delete run.artifacts[0].index; },
-    (run) => { run.artifacts[0].index = 999; },
+    (run) => { run.artifacts[0].location.index = 999; },
+    (run) => { run.artifacts[0].location.index = "0"; },
     (run) => { delete run.results[0].ruleIndex; },
     (run) => { run.results[0].ruleIndex = "1"; },
     (run) => { run.invocations = [{ executionSuccessful: "false" }]; },

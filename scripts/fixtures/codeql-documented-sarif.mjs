@@ -4,7 +4,7 @@ export function codeqlDocument(findings = []) {
   const ruleIds = [...new Set(["js/path-injection", ...findings.map((item) => item.ruleId)])];
   const rules = ruleIds.map((id) => ({ id, name: id }));
   const sourcePaths = [...new Set(findings.map((item) => item.path.replace(/^file:\/\/\/github\/workspace\//u, "")))];
-  const artifacts = sourcePaths.map((uri, index) => ({ index, location: { uri, uriBaseId: "%SRCROOT%" } }));
+  const artifacts = sourcePaths.map((uri) => ({ location: { uri, uriBaseId: "%SRCROOT%" } }));
   return {
     $schema: "https://json.schemastore.org/sarif-2.1.0.json",
     version: "2.1.0",

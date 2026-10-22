@@ -57,9 +57,10 @@ function validateCodeqlRun(run) {
   if (!Array.isArray(run.artifacts)) invalidSarif("CodeQL artifact table is missing.");
   const artifactPaths = new Map();
   run.artifacts.forEach((artifact, index) => {
-    if (!isObject(artifact) || !isObject(artifact.location) || artifact.index !== index) {
-      invalidSarif("invalid or misindexed artifact entry.");
-    }
+    // SARIF 2.1 defines index on artifactLocation, not on artifact itself.
+    // The CodeQL CLI documentation has an inconsistent table entry naming
+    // artifact.index; do not make that non-schema property a release gate.
+    if (!isObject(artifact) || !isObject(artifact.location)) invalidSarif("invalid artifact entry.");
     const location = artifact.location;
     if (location.index !== undefined && location.index !== index) invalidSarif("inconsistent artifact index.");
     const normalized = normalizeArtifactPath(location.uri);
