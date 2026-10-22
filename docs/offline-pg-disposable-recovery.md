@@ -40,7 +40,12 @@ identity before use and force-removal using Docker metadata. Inconsistent
 ownership metadata prevents deletion and requires manual operator inspection. The
 unpredictable name, owner label, engine identity, digest and endpoint are
 written to a private `virki-backup-owner-*` directory under the runner's temp
-directory **before** the detached run is attempted. An ambiguous Docker run,
+directory **before** the detached run is attempted. The `owner.json` write is
+flushed to disk; Linux also syncs the receipt directory and its parent before
+attempting `docker run`. The receipt is outside the separately deleted dump
+and Docker-config directory, and the runner's finalization preserves it even
+when Docker returned an invalid CID and immediate inspection found no container.
+An ambiguous Docker run,
 lost response, mismatched owner or unconfirmed removal preserves this owner
 receipt even if the container is created after the CLI has already failed.
 Only a removal followed by a Docker status query showing the container absent
@@ -52,6 +57,12 @@ CLI stdout/stderr and Prisma failure logs are redacted to avoid leaking
 synthetic credentials, URLs, dump contents and account records. The test uses
 synthetic account/admin, TOTP, recovery, audit, outbox and delivery records,
 and proves no real production backup's restore capability.
+
+This is durable **against the script's normal cleanup and process errors**;
+it is not durable across deletion of the host's temp storage or teardown of
+an ephemeral GitHub runner. A lost receipt or a daemon with false metadata
+does not authorize speculative deletion of a container. Recover an uncertain
+fixture only by operator review of the retained manifest and exact daemon.
 
 The **intended GitHub-hosted Ubuntu CI runner** also runs the same Prisma test.
 The checked-in `validate` job sets `VIRKI_BACKUP_VALIDATION_LINUX_CI=1`

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, mkdir, readFile, rm, readdir, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { PrismaClient } from "@prisma/client";
 import { describeBackupMigrationFailure } from "./lib/backup-migration-diagnostics.mjs";
 import {
-  LocalBackupDocker, assertLocalBackupEnvironment, createBackupOwnerEvidence, finalizeBackupOwnerEvidence,
+  LocalBackupDocker, assertLocalBackupEnvironment, createBackupOwnerEvidence, finalizeBackupValidationArtifacts,
 } from "./lib/backup-validation-docker.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -111,30 +111,7 @@ try {
 } catch (error) {
   cleanupErrors.push(error);
 }
-if (docker?.id) {
-  try {
-    docker.cleanup();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-}
-if (temporaryDirectory) {
-  try {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-}
-if (ownerEvidenceDirectory) {
-  try {
-    const evidence = await finalizeBackupOwnerEvidence(docker, ownerEvidenceDirectory);
-    if (evidence.retained) {
-      cleanupErrors.push(new Error(`Backup validation cannot prove container cleanup. Owner evidence preserved for manual reconciliation at ${evidence.directory}.`));
-    }
-  } catch (error) {
-    cleanupErrors.push(new Error("Backup validation could not finalize private owner evidence.", { cause: error }));
-  }
-}
+cleanupErrors.push(...await finalizeBackupValidationArtifacts({ docker, temporaryDirectory, ownerEvidenceDirectory }));
 if (validationError && cleanupErrors.length > 0) {
   throw new AggregateError([validationError, ...cleanupErrors], "Backup validation failed and cleanup also failed; both errors are preserved.");
 }

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -31,7 +31,16 @@ export async function createBackupOwnerEvidence(docker, parent = os.tmpdir()) {
     endpoint: docker.host,
   };
   try {
-    await writeFile(path.join(directory, "owner.json"), `${JSON.stringify(manifest)}\n`, { flag: "wx", mode: 0o600 });
+    // Node 22 flush:true fsyncs the receipt before returning. Linux also
+    // syncs its new directory entry so an uncertain docker run can be
+    // reconciled after process failure (subject to runner/disk survival).
+    await writeFile(path.join(directory, "owner.json"), `${JSON.stringify(manifest)}\n`, { flag: "wx", mode: 0o600, flush: true });
+    if (process.platform === "linux") {
+      const handle = await open(directory, "r");
+      try { await handle.sync(); } finally { await handle.close(); }
+      const parentHandle = await open(parent, "r");
+      try { await parentHandle.sync(); } finally { await parentHandle.close(); }
+    }
     return directory;
   } catch (error) {
     await rm(directory, { recursive: true, force: true });
@@ -44,6 +53,31 @@ export async function finalizeBackupOwnerEvidence(docker, directory) {
   if (docker?.runAttempted && !docker.cleaned) return { retained: true, directory };
   await rm(directory, { recursive: true, force: true });
   return { retained: false };
+}
+
+// The caller's dump/config directory and the receipt have different lifetimes.
+// Crucially, an invalid/lost CID is not evidence of no container: only a
+// confirmed cleanup removes the receipt. A late create remains discoverable.
+export async function finalizeBackupValidationArtifacts({ docker, temporaryDirectory, ownerEvidenceDirectory, removeTemporary = rm }) {
+  const errors = [];
+  if (docker?.id) {
+    try { docker.cleanup(); } catch (error) { errors.push(error); }
+  }
+  if (temporaryDirectory) {
+    try { await removeTemporary(temporaryDirectory, { recursive: true, force: true }); }
+    catch (error) { errors.push(error); }
+  }
+  if (ownerEvidenceDirectory) {
+    try {
+      const evidence = await finalizeBackupOwnerEvidence(docker, ownerEvidenceDirectory);
+      if (evidence.retained) {
+        errors.push(new Error(`Backup validation cannot prove container cleanup. Owner evidence preserved for manual reconciliation at ${evidence.directory}.`));
+      }
+    } catch (error) {
+      errors.push(new Error("Backup validation could not finalize private owner evidence.", { cause: error }));
+    }
+  }
+  return errors;
 }
 
 export async function readBackupOwnerEvidence(directory) {

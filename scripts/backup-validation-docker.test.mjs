@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
   assertLocalBackupEnvironment, createBackupOwnerEvidence, finalizeBackupOwnerEvidence,
+  finalizeBackupValidationArtifacts,
   readBackupOwnerEvidence, DOCKER_BINARY, DOCKER_HOST, inspectLinuxRunnerSocket,
   LINUX_CI_DOCKER_BINARY, LINUX_CI_DOCKER_HOST, LocalBackupDocker, POSTGRES_IMAGE,
 } from "./lib/backup-validation-docker.mjs";
@@ -285,6 +286,62 @@ test("owner evidence is deleted only before Docker run or after a Docker query c
     assert.equal(incomplete.docker.cleaned, true);
     assert.deepEqual(await finalizeBackupOwnerEvidence(incomplete.docker, evidenceDir), { retained: false });
     await assert.rejects(() => readBackupOwnerEvidence(evidenceDir), /ENOENT/u);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("end-to-end cleanup leaves durable receipt after lost CID and invisible late Docker create", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "backup-wrapper-unit-"));
+  const disposable = path.join(parent, "disposable-data");
+  const evidenceParent = path.join(parent, "reconciliation");
+  await mkdir(disposable, { recursive: true });
+  await mkdir(evidenceParent, { recursive: true });
+  try {
+    const { docker, state, calls } = fixture({ returnedId: "not-an-id", runStatus: 1, inspectStatus: 1 });
+    docker.engine();
+    const ownerEvidenceDirectory = await createBackupOwnerEvidence(docker, evidenceParent);
+    const beforeRun = await readBackupOwnerEvidence(ownerEvidenceDirectory);
+    assert.equal(beforeRun.name, docker.name);
+    assert.equal(beforeRun.ownerLabel, `virki.backup-validation.owner=${nonce}`);
+    assert.throws(() => docker.start({ database: "d", user: "u", password: "secret-not-in-receipt" }), /invalid container ID/u);
+    assert.equal(docker.id, null);
+    const errors = await finalizeBackupValidationArtifacts({ docker, temporaryDirectory: disposable, ownerEvidenceDirectory });
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /preserved for manual reconciliation/u);
+    await assert.rejects(stat(disposable), /ENOENT/u);
+    assert.equal((await readBackupOwnerEvidence(ownerEvidenceDirectory)).ownerLabel, beforeRun.ownerLabel);
+    assert.ok(!JSON.stringify(beforeRun).includes("secret-not-in-receipt"));
+    assert.ok(!calls.some((call) => call.args[4] === "rm"));
+
+    // Simulates a daemon that creates the container after the CLI timeout.
+    // No speculative delete occurs; the durable receipt still identifies it.
+    state.inspectStatus = 0;
+    assert.equal(docker.inspect(beforeRun.name).Id, id);
+    assert.equal((await readBackupOwnerEvidence(ownerEvidenceDirectory)).daemonId, docker.daemonId);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("end-to-end cleanup removes receipt only after Docker reports owned ID absent", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "backup-wrapper-unit-"));
+  const disposable = path.join(parent, "disposable-data");
+  await mkdir(disposable, { recursive: true });
+  try {
+    const { docker, state } = fixture();
+    docker.engine();
+    const ownerEvidenceDirectory = await createBackupOwnerEvidence(docker, parent);
+    docker.start({ database: "d", user: "u", password: "p" });
+    state.listOutput = id;
+    const errors = await finalizeBackupValidationArtifacts({ docker, temporaryDirectory: disposable, ownerEvidenceDirectory });
+    assert.equal(errors.length, 2);
+    assert.match(errors[0].message, /not confirmed by Docker status/u);
+    assert.equal((await readBackupOwnerEvidence(ownerEvidenceDirectory)).name, docker.name);
+    state.listOutput = "";
+    const retry = await finalizeBackupValidationArtifacts({ docker, ownerEvidenceDirectory });
+    assert.deepEqual(retry, []);
+    await assert.rejects(() => readBackupOwnerEvidence(ownerEvidenceDirectory), /ENOENT/u);
   } finally {
     await rm(parent, { recursive: true, force: true });
   }
