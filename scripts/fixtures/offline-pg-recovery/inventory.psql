@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
--- Exact per-table digest of every user row in public (including password
--- hashes, security factors, recovery factors, audit and email delivery).
+-- Exact per-table digest of user and security-policy rows in both public and
+-- virki_security (including password hashes, recovery, audit and delivery).
 -- "offlineFixtureAdditive" is the ONLY tolerated fixture-only new column.
 -- Only an ephemeral pg_temp table is written. No business table is changed.
 BEGIN;
@@ -14,18 +14,18 @@ DECLARE
   h text;
 BEGIN
   FOR item IN
-    SELECT cls.relname AS name
+    SELECT ns.nspname AS schema_name, cls.relname AS name
     FROM pg_class cls JOIN pg_namespace ns ON ns.oid=cls.relnamespace
-    WHERE ns.nspname='public' AND cls.relkind='r'
-    ORDER BY cls.relname
+    WHERE ns.nspname IN ('public', 'virki_security') AND cls.relkind='r'
+    ORDER BY ns.nspname, cls.relname
   LOOP
     EXECUTE format(
       'SELECT count(*), encode(digest(coalesce(string_agg(
         (to_jsonb(t) - %L)::text, E''\n'' ORDER BY (to_jsonb(t) - %L)::text),
-        ''''), ''sha256''), ''hex'') FROM public.%I AS t',
-      'offlineFixtureAdditive', 'offlineFixtureAdditive', item.name
+        ''''), ''sha256''), ''hex'') FROM %I.%I AS t',
+      'offlineFixtureAdditive', 'offlineFixtureAdditive', item.schema_name, item.name
     ) INTO n, h;
-    INSERT INTO fixture_inventory VALUES (item.name, n, h);
+    INSERT INTO fixture_inventory VALUES (item.schema_name || '.' || item.name, n, h);
   END LOOP;
 END
 $proof$;

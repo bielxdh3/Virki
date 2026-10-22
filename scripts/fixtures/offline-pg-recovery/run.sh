@@ -37,9 +37,25 @@ for migration in /workspace/packages/database/prisma/migrations/*/migration.sql;
 done
 psql -X -q -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/seed.psql > /dev/null 2>"$fixture/pg-error" ||
   { echo 'Synthetic private-data seed failed' >&2; exit 109; }
+protected_count="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -c '
+SELECT
+  (SELECT count(*) FROM "User")=2
+  AND (SELECT count(*) FROM "Session")=1
+  AND (SELECT count(*) FROM "TotpFactor")=1
+  AND (SELECT count(*) FROM "RecoveryCode")=1
+  AND (SELECT count(*) FROM "AdministrativeCredential")=1
+  AND (SELECT count(*) FROM "AdministrativeRecoveryCode")=1
+  AND (SELECT count(*) FROM "AccountRecoveryRequest")=1
+  AND (SELECT count(*) FROM "AuditLog")=1
+  AND (SELECT count(*) FROM "EmailOutboxMessage")=1
+  AND (SELECT count(*) FROM "EmailDeliveryAttempt")=1
+  AND (SELECT count(*) FROM "OidcArtifact")=1
+' 2>"$fixture/pg-error")"
+test "$protected_count" = t ||
+  { echo 'Representative security data is incomplete' >&2; exit 133; }
 
 case "${1:-}" in
-  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup)
+  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race)
     export VIRKI_OFFLINE_PG_CASE="$1"
     case "$1" in
       happy)
@@ -64,6 +80,24 @@ case "${1:-}" in
         test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 119
         test -f "$fixture/.attempted" || exit 120
         ;;
+      race)
+        ( sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/race-a.err" ) &
+        first=$!
+        ( sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/race-b.err" ) &
+        second=$!
+        first_status=0
+        second_status=0
+        wait "$first" || first_status=$?
+        wait "$second" || second_status=$?
+        if test "$first_status" -eq 0; then
+          test "$second_status" -ne 0 || exit 128
+        else
+          test "$second_status" -eq 0 || exit 129
+        fi
+        test "$(psql -X -qAt -d virki_control -c 'SELECT count(*) FROM recovery_attempt')" = 1 || exit 130
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = completed || exit 131
+        test -f "$fixture/.attempted" || exit 132
+        ;;
       corrupt_backup)
         if sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err"; then exit 121; fi
         test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = live_migrated || exit 122
@@ -73,6 +107,9 @@ case "${1:-}" in
         if sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err"; then exit 124; fi
         test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = restored || exit 125
         test -f "$fixture/.attempted" || exit 126
+        current_inventory="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/inventory.psql 2>"$fixture/pg-error")"
+        test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 134
+        test "$(psql -X -qAt -d virki_source -c 'SELECT count(*) FROM information_schema.columns WHERE table_name = '\''User'\'' AND column_name = '\''offlineFixtureAdditive'\''')" = 0 || exit 135
         ;;
     esac
     printf 'PASS real PostgreSQL disposable %s (NON_AUTHORIZING)\n' "$1"

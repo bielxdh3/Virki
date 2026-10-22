@@ -102,6 +102,7 @@ assert_schema() {
   require_equal "$(sql "$1" "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='TotpFactor' AND column_name='secretCiphertext'")" 1 'TOTP ciphertext column missing'
   require_equal "$(sql "$1" "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='AccountRecoveryRequest' AND column_name='requestKeyHash'")" 1 'recovery hash schema incompatible'
   require_equal "$(sql "$1" "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='EmailOutboxMessage' AND column_name='payload'")" 1 'outbox schema incompatible'
+  require_equal "$(sql "$1" "SELECT count(*) FROM information_schema.tables WHERE table_schema='virki_security' AND table_name='audit_retention_policy'")" 1 'audit policy schema incompatible'
 }
 rollback() {
   verify_backup

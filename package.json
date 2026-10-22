@@ -21,6 +21,7 @@
     "test:migration": "node scripts/migration-validation.mjs",
     "test:database:roles": "node scripts/database-role-isolation.test.mjs",
     "test:backup:restore": "node scripts/backup-restore-validation.mjs",
+    "test:offline:pg:container": "cross-env VIRKI_OFFLINE_PG_CONTAINER_TEST=1 node --test scripts/offline-pg-recovery-container.test.mjs",
     "test:offline:rollback": "node --test scripts/offline-release-rollback-rehearsal.test.mjs",
     "test:backup:inventory": "node --test scripts/backup-retention-inventory.test.mjs",
     "test:offline:rehearsal": "node --test scripts/offline-release-rehearsal.test.mjs",
