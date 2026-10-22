@@ -4,8 +4,66 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createDisposableDockerSession } from "./lib/disposable-docker-session.mjs";
+import { requireOwnedDisposableDockerMutation } from "./lib/disposable-docker-mutation-policy.mjs";
 
 const OWNER = "a".repeat(32);
+
+test("reviewed runtime and migrator profiles accept exact owned operations only", () => {
+  const runtime = { kind: "runtime", owner: OWNER, containers: ["public-run", "issuer-run", "hub-run"],
+    network: "validation-network" };
+  const label = `org.virki.validation=${OWNER}`;
+  const revision = "a".repeat(40);
+  const img = `virki-production-ci:${revision}`;
+  const base = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m"];
+  const check = (context, stage, args) => assert.doesNotThrow(() =>
+    requireOwnedDisposableDockerMutation({ ...context, stage, args }), stage);
+  check(runtime, "create-network", ["network", "create", "--label", label, runtime.network]);
+  const publicArgs = ["run", ...base, "--tmpfs",
+    "/app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m",
+    "--detach", "--name", "public-run", "--network", runtime.network, "--label", label,
+    "--publish", "127.0.0.1::3000", "--env", "NODE_ENV=production", img,
+    "npm", "run", "start", "--workspace", "@virki/public-site"];
+  check(runtime, "create-public", publicArgs);
+  const imageIndex = publicArgs.indexOf(img);
+  for (const injection of [
+    ["--env", "NODE_OPTIONS=--require=/tmp/rogue.js"],
+    ["--env", "DATABASE_URL=postgresql://untrusted-host/other"],
+    ["--privileged"],
+    ["--host", "tcp://remote.example.invalid:2376"],
+  ]) assert.throws(() => requireOwnedDisposableDockerMutation({ ...runtime,
+    stage: "create-public", args: [...publicArgs.slice(0, imageIndex), ...injection,
+      ...publicArgs.slice(imageIndex)] }), /refused/u);
+  check(runtime, "create-issuer", ["run", ...base, "--detach", "--name", "issuer-run",
+    "--network", runtime.network, "--label", label, "--network-alias", "oidc-issuer",
+    "--env", "NODE_ENV=production", img, "npm", "run", "start", "--workspace", "@virki/issuer"]);
+  check(runtime, "create-hub", ["run", ...base, "--detach", "--name", "hub-run",
+    "--network", runtime.network, "--label", label, "--publish", "127.0.0.1::3001",
+    "--env", "NODE_ENV=production", img]);
+  check(runtime, "run-assertion", ["run", "--rm", "--name", "public-run", "--label", label,
+    "--network", "none", ...base, "--entrypoint", "node", img, "-e", "process.exit(0)"]);
+
+  const id = "b".repeat(8) + "-cccc-dddd-eeee-" + "f".repeat(12);
+  const migrator = { kind: "migrator", owner: OWNER,
+    containers: ["db-run", "deploy-run", "status-run"], network: "isolated-net" };
+  check(migrator, "create-network", ["network", "create", "--internal", "--label", label, migrator.network]);
+  const databaseArgs = ["run", "--detach", "--name", "db-run",
+    "--network", migrator.network, "--network-alias", `database-${id}`,
+    "--label", label, "--env", "POSTGRES_USER", "--env", "POSTGRES_PASSWORD",
+    "--volume", `${path.resolve("infra/postgres-init/10-virki-database-roles.sh")}:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro`,
+    "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24"];
+  check(migrator, "create-database", databaseArgs);
+  assert.throws(() => requireOwnedDisposableDockerMutation({ ...migrator,
+    stage: "create-database", args: databaseArgs.map((v) => v.includes("postgres-init/") ||
+      v.includes("postgres-init\\") ? v.replace(/^[^:]+/u, "C:/foreign/infra/postgres-init/10-virki-database-roles.sh") : v),
+  }), /refused/u);
+  for (const [stage, name, command] of [
+    ["run-deploy", "deploy-run", "prisma:migrate:deploy"],
+    ["run-status", "status-run", "prisma:migrate:status"],
+  ]) check(migrator, stage, ["run", ...base, "--rm", "--name", name,
+    "--network", migrator.network, "--label", label, "--env", "MIGRATION_DATABASE_URL",
+    `virki-migrator-ci:${revision}`, "npm", "run", command]);
+});
 
 function receipt(pathname) {
   return JSON.parse(readFileSync(pathname, "utf8").trim().split(/\r?\n/u).at(-1));
@@ -20,6 +78,7 @@ function fixture({ failCreate = false, failStart = false, missingAfterFailure = 
     calls.push({ cli, args, env: options.env });
     const action = args.slice(2);
     if (action[0] === "version") return { status: 0, stdout: `linux|${serverArch}\n`, stderr: "" };
+    if (action[0] === "port") return { status: 0, stdout: "127.0.0.1:30000\n", stderr: "" };
     if (action[0] === "network" && action[1] === "create") {
       exists = !missingAfterFailure;
       return { status: failCreate ? 1 : 0, stdout: "", stderr: failCreate ? "ambiguous Docker CLI timeout" : "" };
@@ -85,14 +144,62 @@ test("ambiguous Docker rm keeps ownership receipt for manual reconciliation", (t
   assert.equal(record.status, "RECONCILIATION_REQUIRED");
 });
 
+test("a Docker mutation after verified cleanup cannot reuse stale cleanup evidence", (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  f.session.cleanup();
+  const priorCalls = f.calls.length;
+  assert.throws(() => f.session.mutate("create-network", ["network", "create",
+    "--label", `org.virki.validation=${OWNER}`, "validation-network"]), /after cleanup/u);
+  assert.equal(f.calls.length, priorCalls, "post-cleanup creation must not reach Docker");
+  f.session.finish(true);
+  assert.equal(receipt(f.session.receiptPath).status, "PASS");
+});
+
+test("public Docker reads never expose raw mutation or foreign resource access", (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const before = f.calls.length;
+  for (const dangerous of [
+    ["network", "create", "--label", `org.virki.validation=${OWNER}`, "validation-network"],
+    ["container", "rm", "--force", "foreign-container"],
+    ["exec", "foreign-container", "sh", "-c", "touch /tmp/foreign"],
+    ["port", "foreign-container", "3000/tcp"],
+  ]) assert.throws(() => f.session.invoke(dangerous), /refused/u);
+  assert.equal(f.calls.length, before, "unreviewed Docker calls cannot reach CLI");
+  assert.equal(f.session.invoke(["port", "validation-container", "3000/tcp"]).status, 0);
+  f.session.cleanup();
+  const afterCleanup = f.calls.length;
+  assert.throws(() => f.session.invoke(["network", "create", "validation-network"]), /refused/u);
+  assert.equal(f.calls.length, afterCleanup);
+  f.session.finish(true);
+  assert.equal(receipt(f.session.receiptPath).status, "PASS");
+});
+
+test("public Docker mutations cannot target foreign resources or enable host privileges", (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const earlierCalls = f.calls.length;
+  for (const bad of [
+    ["container", "rm", "--force", "foreign-container"],
+    ["network", "rm", "foreign-network"],
+    ["network", "create", "--label", "org.virki.validation=foreign", "validation-network"],
+    ["run", "--privileged", "--name", "validation-container", "--label",
+      `org.virki.validation=${OWNER}`, "scratch-local-image"],
+    ["run", "--name", "foreign-container", "--label", `org.virki.validation=${OWNER}`,
+      "scratch-local-image"],
+  ]) assert.throws(() => f.session.mutate("create-network", bad), /refused/u);
+  assert.equal(f.calls.length, earlierCalls, "invalid Docker mutations must not contact daemon");
+  f.session.cleanup(); f.session.finish(true);
+});
+
 test("lost container CID after Docker start cannot be cleared by an absent immediate inspect", (t) => {
   const f = fixture({ failStart: true, missingAfterFailure: true }); t.after(f.cleanup);
-  assert.throws(() => f.session.mutate("create-container", ["run", "--detach", "--name", "validation-container",
-    "--label", `org.virki.validation=${OWNER}`, "scratch-local-image"]), /uncertain/u);
+  assert.throws(() => f.session.mutate("run-assertion", ["run", "--rm", "--name", "validation-container",
+    "--label", `org.virki.validation=${OWNER}`, "--network", "none", "--read-only", "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
+    "--entrypoint", "node", `virki-production-ci:${"a".repeat(40)}`, "-e", "process.exit(0)"]), /uncertain/u);
   f.session.cleanup();
   assert.throws(() => f.session.finish(false), /reconciliation/u);
   const record = receipt(f.session.receiptPath);
-  assert.deepEqual(record.uncertainOperations, ["create-container"]);
+  assert.deepEqual(record.uncertainOperations, ["run-assertion"]);
   assert.equal(record.resources.containers[0], "validation-container");
   assert.equal(f.calls.some((call) => call.args.includes("--force")), false);
 });
@@ -168,7 +275,8 @@ test("live path swap after receipt open cannot redirect the pinned journal", (t)
   renameSync(f.session.receiptPath, previous);
   symlinkSync(unrelated, f.session.receiptPath);
   const previousCalls = f.calls.length;
-  assert.throws(() => f.session.mutate("create-network", ["network", "create", "validation-network"]),
+  assert.throws(() => f.session.mutate("create-network", ["network", "create", "--label",
+    `org.virki.validation=${OWNER}`, "validation-network"]),
     /receipt directory or pinned file identity changed/u);
   assert.equal(f.calls.length, previousCalls);
   assert.equal(readFileSync(unrelated, "utf8"), "external-bytes\n");
@@ -188,7 +296,8 @@ test("renamed and symlinked parent directory refuses mutation on the original re
     rmSync(foreign, { recursive: true, force: true }); });
   renameSync(f.root, original);
   symlinkSync(foreign, f.root);
-  assert.throws(() => f.session.mutate("create-network", ["network", "create", "validation-network"]),
+  assert.throws(() => f.session.mutate("create-network", ["network", "create", "--label",
+    `org.virki.validation=${OWNER}`, "validation-network"]),
     /unsafe path alias/u);
   unlinkSync(f.root);
   renameSync(original, f.root);

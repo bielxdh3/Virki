@@ -4,6 +4,7 @@ import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, op
 import os from "node:os";
 import path from "node:path";
 import { cleanupOwnedDockerResources } from "./disposable-docker-cleanup.mjs";
+import { requireOwnedDisposableDockerMutation } from "./disposable-docker-mutation-policy.mjs";
 
 // Test-only engine selection. Windows must use the local Docker Desktop Linux
 // named pipe directly. Linux requires the trusted GitHub-hosted CI runner
@@ -163,7 +164,7 @@ export function createDisposableDockerSession({
     appendReceipt();
   }
 
-  function invoke(args, options = {}) {
+  function invokeRaw(args, options = {}) {
     const output = spawn(cli, ["--host", host, ...args], {
       encoding: "utf8", windowsHide: true,
       timeout: options.timeout ?? 120_000,
@@ -173,19 +174,37 @@ export function createDisposableDockerSession({
     return output;
   }
 
-  const check = invoke(["version", "--format", "{{.Server.Os}}|{{.Server.Arch}}"], { timeout: 15_000 });
+  const check = invokeRaw(["version", "--format", "{{.Server.Os}}|{{.Server.Arch}}"], { timeout: 15_000 });
   if (check?.error || check?.status !== 0 || check?.stdout?.trim() !== `linux|${arch}`) {
     persist("PREFLIGHT_FAILED", "Docker Desktop Linux / trusted hosted architecture check");
     refuse(`explicit Linux/${arch} Docker endpoint was not verified`);
   }
   persist("READY", "preflight-verified");
 
-  function mutate(stage, args, options) {
+  let cleanupStarted = false;
+  let cleanupComplete = false;
+  // A public generic Docker CLI bypasses the mutation journal. Only expose
+  // the exact, owner-scoped read observations used by smoke fixtures.
+  function invoke(args, options = {}) {
+    if (cleanupStarted || !Array.isArray(args)) refuse("unreviewed public Docker read after cleanup or invalid arguments");
+    const portRead = kind === "runtime" && args.length === 3 && args[0] === "port" &&
+      containers.includes(args[1]) && ["3000/tcp", "3001/tcp"].includes(args[2]);
+    const readyArgs = ["exec", containers[0], "pg_isready", "-h", "127.0.0.1",
+      "-U", "virki_bootstrap", "-d", "virki_validation"];
+    const readyRead = kind === "migrator" && args.length === readyArgs.length &&
+      args.every((value, index) => value === readyArgs[index]);
+    if (!portRead && !readyRead) refuse("unreviewed public Docker read operation");
+    return invokeRaw(args, options);
+  }
+
+  function performMutation(stage, args, options, cleanupOperation = false) {
+    if (cleanupStarted && !cleanupOperation) refuse("Docker mutation after cleanup was requested");
     if (!SAFE_NAME.test(stage)) refuse("invalid Docker mutation stage");
+    if (!cleanupOperation) requireOwnedDisposableDockerMutation({ kind, owner, containers, network, stage, args });
     // Persist intent before invoking Docker; a lost ACK must never become PASS.
     persist("MUTATION_PENDING", stage);
     let result;
-    try { result = invoke(args, options); } catch { /* unknown Docker effect */ }
+    try { result = invokeRaw(args, options); } catch { /* unknown Docker effect */ }
     if (result?.error || result?.status !== 0) {
       receipt.uncertainOperations.push(stage);
       persist("RECONCILIATION_REQUIRED", stage);
@@ -195,13 +214,18 @@ export function createDisposableDockerSession({
     return result;
   }
 
-  let cleanupComplete = false;
+  function mutate(stage, args, options) {
+    return performMutation(stage, args, options);
+  }
+
   function cleanup() {
+    if (cleanupStarted) refuse("Docker cleanup already started; reconcile prior attempt");
+    cleanupStarted = true;
     try {
       cleanupOwnedDockerResources({
         invoke: (args) => args[1] === "rm"
-          ? mutate(`remove-${args[0]}`, args)
-          : invoke(args, { timeout: 60_000 }),
+          ? performMutation(`remove-${args[0]}`, args, undefined, true)
+          : invokeRaw(args, { timeout: 60_000 }),
         owner, containers, network,
       });
       cleanupComplete = true;
