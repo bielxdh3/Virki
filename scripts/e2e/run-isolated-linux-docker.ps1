@@ -33,6 +33,25 @@ if ($playwrightArgumentsJson) {
   $PlaywrightArguments = [string[]]$decodedPlaywrightArguments
 }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+# This launcher CREATES and later removes disposable Docker resources. A Docker
+# context can point at an arbitrary remote daemon even when its name looks
+# local. Restrict this development runner to the known Windows Desktop Linux
+# pipe, and reject environment overrides before the first Docker mutation.
+# This is a test-runner safety fence, NOT an attestation of a production daemon.
+if ($env:DOCKER_HOST -or $env:DOCKER_CONTEXT -or $env:DOCKER_CONFIG) {
+  throw 'Isolated E2E requires an unoverridden local Docker Desktop Linux context.'
+}
+if (-not [System.Environment]::OSVersion.Platform.Equals([System.PlatformID]::Win32NT)) {
+  throw 'Isolated E2E is restricted to the Windows Docker Desktop local runner.'
+}
+$dockerContext = (& docker context show 2>$null)
+if ($LASTEXITCODE -ne 0 -or ($dockerContext | Out-String).Trim() -cne 'desktop-linux') {
+  throw 'Isolated E2E refuses a non-Desktop or unverified Docker context.'
+}
+$dockerEndpoint = (& docker context inspect desktop-linux --format '{{.Endpoints.docker.Host}}' 2>$null)
+if ($LASTEXITCODE -ne 0 -or ($dockerEndpoint | Out-String).Trim() -cne 'npipe:////./pipe/dockerDesktopLinuxEngine') {
+  throw 'Isolated E2E refuses any remote or unexpected Docker engine endpoint.'
+}
 $repositoryBranch = (& git -C $repoRoot branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $repositoryBranch -notmatch '^[A-Za-z0-9._/-]{1,240}$') {
   throw 'The isolated Docker snapshot requires a named local branch with a supported ref name.'

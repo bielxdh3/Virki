@@ -29,6 +29,33 @@ test("Windows runs browser E2E in isolated Linux Docker and carries filters as J
   assert.deepEqual(JSON.parse(command.environment.VIRKI_E2E_PLAYWRIGHT_ARGUMENTS_JSON), playwrightArguments);
 });
 
+test("isolated Windows launcher rejects remote Docker context overrides before creating any fixture", {
+  skip: process.platform !== "win32" && "Windows-only PowerShell launch guard",
+}, () => {
+  const script = resolve(scriptDirectory, "run-isolated-linux-docker.ps1");
+  for (const override of [
+    { DOCKER_CONTEXT: "remote-untrusted" },
+    { DOCKER_HOST: "tcp://198.51.100.22:2375" },
+    { DOCKER_CONFIG: "C:\\remote-docker-config" },
+  ]) {
+    const child = spawnSync("powershell.exe", [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, "-UnitOnly",
+    ], {
+      cwd: repositoryRoot, encoding: "utf8", timeout: 15_000,
+      env: {
+        ...process.env,
+        DOCKER_CONTEXT: "", DOCKER_HOST: "", DOCKER_CONFIG: "",
+        ...override,
+      },
+    });
+    assert.equal(child.error, undefined);
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /unoverridden local Docker Desktop Linux context/u);
+    assert.doesNotMatch(child.stdout, /ISOLATED_RUN_ID|SOURCE_HEAD|\[RESULT\]/u,
+      "unsafe context must be rejected before recording or running a fixture");
+  }
+});
+
 test("direct Playwright runs on Windows are rejected except for side-effect-free discovery", async () => {
   const policy = await import("./run-e2e.mjs");
   assert.equal(typeof policy.assertDirectPlaywrightPlatform, "function");
