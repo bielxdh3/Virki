@@ -56,8 +56,11 @@ The sequence is:
    Only then migrate the live fixture and check application/schema health.
 6. Re-verify both images, backup, migrated live data and clone; record the
    candidate active while maintenance is enabled, then finalize the one
-   attempted ledger using the existing persistence primitive. Reopen the
-   application route only after durable completion.
+   attempted ledger using the existing persistence primitive. Persist the
+   completed journal and a terminal transaction record **before** reopening
+   the application route. The rollback path likewise checkpoints recovery
+   before reopening the predecessor route. The attempted ledger latch still
+   requires manual reconciliation following a failed attempt.
 
 On ordinary errors **before ledger finalization starts**, a verified backup
 restores the exact original database bytes and healthy predecessor release.
@@ -70,6 +73,14 @@ Once ledger finalization begins, the state may have advanced even if the
 caller throws or dies. An exception after that boundary therefore **never
 automatically rolls back the database or rewinds the ledger head**. Review
 both ledger and application state before any operator recovery.
+
+The read-only fixture inspector distinguishes a genuinely untouched starting
+state from a coherent completed transaction. It requires the terminal
+transaction marker, journal, active and routed revision, ledger head and
+maintenance flag to agree. Missing or interrupted markers, even with a
+completed ledger and no pending lock, report manual reconciliation. An
+injected SIGKILL immediately after ledger completion but before route
+publication must leave maintenance enabled.
 
 ## Run
 

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync,
-  openSync, readFileSync, readSync, realpathSync, renameSync, statfsSync,
+  openSync, readFileSync, readdirSync, readSync, realpathSync, renameSync, statfsSync,
   unlinkSync, writeSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
@@ -27,6 +27,11 @@ const MAX_JSON = 1024 * 1024;
 const MAX_IMAGE = 256 * 1024 * 1024; // Fixture cap; real image loader has a separate bound.
 const SHA_SOURCE = "https://github.com/bielxdh3/Virki";
 const ROLES = Object.freeze(["runtime", "migrator"]);
+const FINISHED_PHASES = Object.freeze([
+  "attempted", "loaded-runtime", "loaded-migrator", "maintenance",
+  "backup-verified", "restore-verified", "restore-migrated", "live-migrated",
+  "candidate-healthy", "activated-under-maintenance", "finalizing-ledger", "completed",
+]);
 
 function refuse(message) { throw new Error("Native recovery fixture refused: " + message); }
 function requireIt(value, message) { if (!value) refuse(message); }
@@ -331,8 +336,10 @@ function rollback(root, plan, originalDigest, backupRelative) {
   requireIt(old.health === "ok" && readJson(root, "database/live.json").schemaVersion === old.schemaVersion,
     "predecessor health or schema invalid after restore");
   putJson(root, "state/active.json", { revision: plan.previousSha });
-  putJson(root, "state/routing.json", { maintenance: false, runningSha: plan.previousSha });
+  // Keep maintenance active until the durable rollback checkpoint is stored.
+  // The attempted ledger latch still requires operator reconciliation.
   checkpoint(root, plan, "rolled-back");
+  putJson(root, "state/routing.json", { maintenance: false, runningSha: plan.previousSha });
 }
 
 /**
@@ -446,8 +453,15 @@ export async function rehearseProtectedNativeOfflineRecovery(request = {}, optio
     });
     requireIt(final.status === "completed" && final.headSha === plan.nextSha,
       "fixture ledger completion refused");
-    putJson(root, "state/routing.json", { maintenance: false, runningSha: plan.nextSha });
+    // Publish the durable completed journal and terminal transaction marker
+    // BEFORE reopening the route. A SIGKILL at either checkpoint therefore
+    // leaves maintenance engaged and requires manual reconciliation.
     step("completed");
+    putJson(root, "state/transaction.json", {
+      status: "completed", predecessor: plan.previousSha,
+      candidate: plan.nextSha, manifestSha256: plan.manifestSha256,
+    });
+    putJson(root, "state/routing.json", { maintenance: false, runningSha: plan.nextSha });
     return Object.freeze({
       status: "NATIVE_DISPOSABLE_RECOVERY_REHEARSAL_ONLY", deployAuthorized: false,
       twoPinnedImagesVerified: true, attemptSequence: accepted.sequence,
@@ -481,22 +495,73 @@ export async function rehearseProtectedNativeOfflineRecovery(request = {}, optio
 export function inspectProtectedNativeOfflineRecoveryFixture(request = {}) {
   strictKeys(request, ["fixtureRoot"], "fixture request");
   const root = rootGate(request.fixtureRoot);
+  const plan = operatorPlan(root);
   const active = readJson(root, "state/active.json");
   const route = readJson(root, "state/routing.json");
   const journal = readJson(root, "state/journal.json");
   const ledger = readJson(root, "operator/ledger/ledger.json");
   const pending = existsSync(pathname(root, "operator/ledger/.offline-release.lock"));
   const finalizing = existsSync(pathname(root, "operator/ledger/.offline-release.finalizing"));
-  const checkpoint = journal.steps.at(-1) ?? null;
+  const hasTransaction = existsSync(pathname(root, "state/transaction.json"));
+  const transaction = hasTransaction ? readJson(root, "state/transaction.json") : null;
+  const checkpoint = Array.isArray(journal.steps) ? journal.steps.at(-1) ?? null : null;
   // A crash AFTER ledger commitment but BEFORE reopening the route can leave
   // no pending lock. Maintenance and an incomplete journal still require
   // manual reconciliation; absence of .lock alone is never a success proof.
-  const complete = checkpoint === "completed" && !route.maintenance &&
-    ledger.entries.at(-1)?.nextSha === active.revision;
-  const status = pending || finalizing || route.maintenance ||
-    (checkpoint !== null && !complete)
-    ? "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION"
-    : "DISPOSABLE_REHEARSAL_INSPECTION_ONLY";
+  const structurallyValid = journal.version === 1 && Array.isArray(journal.steps) &&
+    Array.isArray(ledger.entries) && ledger.version === 1 &&
+    ledger.anchorSha === plan.previousSha &&
+    Object.keys(ledger).length === 3 && typeof route.maintenance === "boolean";
+  const expectedEntry = {
+    sequence: plan.sequence, priorSha: plan.previousSha,
+    nextSha: plan.nextSha, manifestSha256: plan.manifestSha256,
+    nonce: plan.nonce, approvalDigest: plan.approvalDigest,
+  };
+  const pristine = structurallyValid && !hasTransaction && checkpoint === null &&
+    active.revision === plan.previousSha && route.runningSha === plan.previousSha &&
+    !route.maintenance && ledger.entries.length === 0;
+  const completed = structurallyValid && transaction !== null &&
+    transaction.status === "completed" && transaction.predecessor === plan.previousSha &&
+    transaction.candidate === plan.nextSha && transaction.manifestSha256 === plan.manifestSha256 &&
+    Object.keys(transaction).length === 4 &&
+    JSON.stringify(journal.steps) === JSON.stringify(FINISHED_PHASES) &&
+    !route.maintenance && route.runningSha === plan.nextSha &&
+    active.revision === plan.nextSha && ledger.entries.length === 1 &&
+    JSON.stringify(ledger.entries[0]) === JSON.stringify(expectedEntry);
+  // The status is evidence, not an admission token. Still refuse to describe
+  // a corrupted database, daemon image inventory or rollback snapshot as a
+  // coherent idle/complete rehearsal merely because a journal says so.
+  let coherentFixture = false;
+  try {
+    const liveData = readJson(root, "database/live.json");
+    if (pristine) {
+      const predecessor = readJson(root, `releases/${plan.previousSha}.json`);
+      const docker = readJson(root, "fake-docker/images.json");
+      coherentFixture = liveData.schemaVersion === predecessor.schemaVersion &&
+        Array.isArray(liveData.accounts) && liveData.accounts.length > 0 &&
+        liveData.secrets && Array.isArray(liveData.audit) &&
+        Array.isArray(liveData.outbox) && Array.isArray(docker.images) &&
+        docker.images.length === 0 &&
+        readdirSync(pathname(root, "sealed")).length === 0 &&
+        readdirSync(pathname(root, "backups")).length === 0 &&
+        readdirSync(pathname(root, "restores")).length === 0;
+    } else if (completed) {
+      verifyDaemon(root, plan, true);
+      const candidate = readJson(root, `releases/${plan.nextSha}.json`);
+      const backup = readPrivate(root, `backups/${plan.sequence}.dump`);
+      const original = JSON.parse(backup.toString("utf8"));
+      restoredIdentity(original, liveData, candidate.schemaVersion);
+      const clone = readJson(root, `restores/${plan.sequence}.json`);
+      coherentFixture = candidate.health === "ok" &&
+        JSON.stringify(clone) === JSON.stringify(liveData) &&
+        readdirSync(pathname(root, "sealed")).length === 0;
+    }
+  } catch {
+    coherentFixture = false;
+  }
+  const status = !pending && !finalizing && coherentFixture && (pristine || completed)
+    ? "DISPOSABLE_REHEARSAL_INSPECTION_ONLY"
+    : "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION";
   return Object.freeze({
     status, deployAuthorized: false,
     activeSha: active.revision,

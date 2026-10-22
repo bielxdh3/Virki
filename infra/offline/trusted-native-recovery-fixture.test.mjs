@@ -155,6 +155,8 @@ function childScript() {
         if (process.argv[2] === "crash" && phase === "live-migrated") process.kill(process.pid, "SIGKILL");
         if (process.argv[2] === "finalize-crash" && phase === "finalizing-ledger")
           process.kill(process.pid, "SIGKILL");
+        if (process.argv[2] === "committed-crash" && phase === "completed")
+          process.kill(process.pid, "SIGKILL");
         if (process.argv[2] === "hold" && phase === "attempted") {
           const end = Date.now() + 300;
           while (Date.now() < end) {}
@@ -197,6 +199,10 @@ test("native recovery rehearsal reserves one ledger attempt for two distinct pin
   assert.deepEqual(f.status().entries.map((entry) => entry.nextSha), [NEW]);
   assert.deepEqual(f.read("state/active.json"), { revision: NEW });
   assert.deepEqual(f.read("state/routing.json"), { maintenance: false, runningSha: NEW });
+  assert.deepEqual(f.read("state/transaction.json"), {
+    status: "completed", predecessor: OLD, candidate: NEW,
+    manifestSha256: "c".repeat(64),
+  });
   const migrated = f.read("database/live.json");
   assert.deepEqual(migrated, { ...f.oldData, schemaVersion: 2 });
   assert.deepEqual(f.read("restores/1.json"), migrated);
@@ -273,17 +279,109 @@ test("error after durable ledger commit never rewrites accepted head back to pre
   assert.equal(f.read("database/live.json").schemaVersion, 2);
   assert.equal(f.status().active.revision, NEW);
   assert.equal(f.status().route.runningSha, NEW);
+  assert.equal(f.status().route.maintenance, true,
+    "a failure after commit must not reopen the route before journal durability");
   assert.equal(f.status().locked, false);
   assert.equal(f.status().entries.length, 1);
+  assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+    "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+});
+
+test("SIGKILL after ledger commit but before route publication keeps maintenance on", nativeOnly, (t) => {
+  const f = fixture(t);
+  const child = runChild(f.root, "committed-crash");
+  assert.equal(child.signal, "SIGKILL", child.stderr);
+  assert.equal(f.status().locked, false, "ledger completed before fatal signal");
+  assert.equal(f.status().entries.length, 1);
+  assert.equal(f.status().active.revision, NEW);
+  assert.deepEqual(f.read("state/routing.json"), { maintenance: true, runningSha: NEW });
+  assert.equal(f.read("state/journal.json").steps.at(-1), "completed");
+  assert.equal(f.read("state/transaction.json").status, "attempted");
+  assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+    "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+});
+
+test("inspector fails closed on forged idle, missing terminal marker and inconsistent accepted state", nativeOnly, async (t) => {
+  await t.test("pristine fixture with inconsistent routing", (subtest) => {
+    const f = fixture(subtest);
+    f.put("state/routing.json", { maintenance: false, runningSha: NEW });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("pristine revision cannot mask a migrated live database", (subtest) => {
+    const f = fixture(subtest);
+    f.put("database/live.json", { ...f.oldData, schemaVersion: 2 });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("pristine journal cannot hide an imported image", (subtest) => {
+    const f = fixture(subtest);
+    f.put("fake-docker/images.json", { images: [{ role: "runtime" }] });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("unexpected transaction without journal", (subtest) => {
+    const f = fixture(subtest);
+    f.put("state/transaction.json", {
+      status: "attempted", predecessor: OLD, candidate: NEW, manifestSha256: "c".repeat(64),
+    });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("completed journal without terminal transaction marker", async (subtest) => {
+    const f = fixture(subtest);
+    await f.run();
+    f.put("state/transaction.json", {
+      status: "attempted", predecessor: OLD, candidate: NEW, manifestSha256: "c".repeat(64),
+    });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("completed journal with altered active revision", async (subtest) => {
+    const f = fixture(subtest);
+    await f.run();
+    f.put("state/active.json", { revision: OLD });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("a forged ledger entry retaining only matching release SHAs is rejected", async (subtest) => {
+    const f = fixture(subtest);
+    await f.run();
+    const ledger = f.read("operator/ledger/ledger.json");
+    ledger.entries[0].nonce = "f".repeat(32);
+    f.put("operator/ledger/ledger.json", ledger);
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("a changed ledger trust anchor is rejected despite matching entry", async (subtest) => {
+    const f = fixture(subtest);
+    await f.run();
+    const ledger = f.read("operator/ledger/ledger.json");
+    ledger.anchorSha = "f".repeat(40);
+    f.put("operator/ledger/ledger.json", ledger);
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("a forged completed journal with missing phases is rejected", async (subtest) => {
+    const f = fixture(subtest);
+    await f.run();
+    f.put("state/journal.json", { version: 1, steps: ["completed"] });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
+  await t.test("a corrupted retained backup invalidates completed inspection", async (subtest) => {
+    const f = fixture(subtest);
+    await f.run();
+    f.put("backups/1.dump", { schemaVersion: 1, accounts: [] });
+    assert.equal(inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root }).status,
+      "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  });
 });
 
 test("read-only inspector detects maintenance after ledger completion even without a pending lock", nativeOnly, async (t) => {
   const f = fixture(t);
-  await f.run((phase) => {
-    if (phase === "completed") {
-      f.put("state/routing.json", { maintenance: true, runningSha: NEW });
-    }
-  });
+  await f.run();
+  f.put("state/routing.json", { maintenance: true, runningSha: NEW });
   assert.equal(f.status().locked, false);
   assert.equal(f.status().entries.length, 1);
   const status = inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root });
