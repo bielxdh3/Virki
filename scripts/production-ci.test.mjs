@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { codeqlEvidenceRunDisplayTitle, selectCodeqlEvidenceRun } from "./lib/codeql-evidence-selection.mjs";
 import { classifyExactShaWorkflow, evaluateExactShaCi, evaluateExactShaRelease, verifyExactShaCi } from "./lib/production-ci.mjs";
+import { codeqlDocument } from "./fixtures/codeql-documented-sarif.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -62,19 +63,10 @@ function publicationNeedsAreSafe(source) {
   }
   return !publisher.some((line) => /^ {4}continue-on-error:/u.test(line));
 }
-const reviewedSarif = {
-  version: "2.1.0",
-  runs: [{
-    results: [{
-      ruleId: "js/file-access-to-http",
-      locations: [{ physicalLocation: { artifactLocation: { uri: "scripts/e2e/access-token.mts" } } }],
-      partialFingerprints: {
-        primaryLocationLineHash: "90e07734df8b1ab3:1",
-        primaryLocationStartColumnFingerprint: "6"
-      }
-    }]
-  }]
-};
+const reviewedSarif = codeqlDocument([{
+  ruleId: "js/file-access-to-http", path: "scripts/e2e/access-token.mts",
+  lineFingerprint: "90e07734df8b1ab3:1", columnFingerprint: "6"
+}]);
 const fakeEvidence = (document = reviewedSarif) => () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "virki-test-ghcr-evidence-"));
   const contents = path.join(directory, "contents");
@@ -278,15 +270,9 @@ test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF 
     lines: ["Exact-SHA private GHCR CodeQL SARIF evidence is missing, inaccessible, or invalid."]
   });
 
-  const unreviewed = {
-    version: "2.1.0",
-    runs: [{
-      results: [{
-        ruleId: "js/redos",
-        locations: [{ physicalLocation: { artifactLocation: { uri: "scripts/deploy-production.mjs" } } }]
-      }]
-    }]
-  };
+  const unreviewed = codeqlDocument([{
+    ruleId: "js/redos", path: "scripts/deploy-production.mjs"
+  }]);
   const rejected = verifyExactShaCi({
     revision,
     repositoryRoot: "/repo",
