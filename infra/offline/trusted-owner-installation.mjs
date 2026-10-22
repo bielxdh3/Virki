@@ -221,8 +221,10 @@ function checkOfflineHostPolicy(policyBytes, ledgerBytes, host, bootstrapSignerP
     manifests.add(entry.manifestSha256);
     approvals.add(entry.approvalDigest);
   });
+  return Object.freeze({ policy, ledger, head: prior, sequence: ledger.entries.length });
 }
-function parseApproval(bytes, trust, state, pins, policyBytes, ledgerBytes, host, destinations, now) {
+function parseApproval(bytes, trust, state, pins, policyBytes, ledgerBytes, host, destinations, now,
+  installed = false) {
   const wrapper = json(bytes, ["approval", "signature"], "owner approval");
   const approval = wrapper.approval;
   exact(approval, ["version", "mode", "approvalId", "sequence", "signerKeyId",
@@ -235,9 +237,10 @@ function parseApproval(bytes, trust, state, pins, policyBytes, ledgerBytes, host
     !trust.revokedKeyIds.includes(approval.signerKeyId) &&
     !trust.revokedApprovalIds.includes(approval.approvalId),
   "approval signer revoked, malformed or unknown");
-  demand(Number.isSafeInteger(approval.sequence) && approval.sequence === state.lastSequence + 1 &&
+  demand(Number.isSafeInteger(approval.sequence) &&
+    approval.sequence === (installed ? state.lastSequence : state.lastSequence + 1) &&
     Number.isSafeInteger(approval.issuedAt) && Number.isSafeInteger(approval.expiresAt) &&
-    approval.issuedAt <= now + 60 && now < approval.expiresAt &&
+    (installed || (approval.issuedAt <= now + 60 && now < approval.expiresAt)) &&
     approval.expiresAt > approval.issuedAt &&
     approval.expiresAt - approval.issuedAt <= trust.maxValiditySeconds,
   "approval expired, not yet valid or replayed");
@@ -441,6 +444,99 @@ function publish(parent, basename, payload, fixture) {
   renameSync(temp, target);
   fsyncDir(parent);
   privateDir(target, fixture);
+}
+
+/**
+ * Re-measures an independently installed verifier from the pinned bootstrap
+ * authority on every invocation. Caller-provided image IDs, release bundles,
+ * ledger head claims and source checkouts cannot act as trust anchors.
+ *
+ * This is deliberately only a read-only integrity measurement, NOT permission
+ * to load Docker images, authorize a release, or import these paths later.
+ * The dynamic ledger requires its own protected CAS/witness before admission.
+ */
+export function measureInstalledTrustedVerifierAtUseTime(request = {}) {
+  const { fixture, bootstrap, operator, destinations, host } = nativeMode(request);
+  const bootstrapEntry = fileURLToPath(import.meta.url);
+  if (!fixture) {
+    demand(bootstrapEntry === BOOTSTRAP_ENTRY &&
+      isPrivate(lstatSync(bootstrapEntry, { bigint: true }), false),
+    "use-time authority must execute from independently installed root bootstrap");
+    privateDir(path.dirname(bootstrapEntry));
+  }
+  directoryEntries(bootstrap, [...EXPECTED_BOOTSTRAP, ".installation-lock"], fixture);
+  const lock = path.join(bootstrap, ".installation-lock");
+  privateDir(lock, fixture);
+  demand(readdirSync(lock).length === 0, "installation lock contains unexpected entries");
+  directoryEntries(operator, EXPECTED_OPERATOR, fixture);
+  const bootstrapPolicyBytes = readPrivate(bootstrap, "bootstrap-policy.json", 16384, fixture);
+  const ownerKeyBytes = readPrivate(bootstrap, "owner-key.pem", 4096, fixture);
+  const trust = strictBootstrap(bootstrapPolicyBytes, ownerKeyBytes);
+  demand(trust.hostIdentitySha256 === host, "use-time host differs from installed bootstrap");
+  verifyNativeInterpreter(trust);
+  const bootstrapCode = fixture ? readFileSync(bootstrapEntry) :
+    readPrivate(path.dirname(bootstrapEntry), path.basename(bootstrapEntry), MAX_CODE);
+  demand(hash(bootstrapCode) === trust.installerSha256,
+    "use-time bootstrap executable differs from independently pinned installer");
+  const state = json(readPrivate(bootstrap, "installation-state.json", 4096, fixture),
+    ["version", "lastSequence", "status", "approvalDigest"], "installed bootstrap state", 4096);
+  demand(state.version === 1 && state.status === "installed" &&
+    Number.isSafeInteger(state.lastSequence) && state.lastSequence > 0 &&
+    typeof state.approvalDigest === "string" && SHA.test(state.approvalDigest),
+  "incomplete, replayed or unaccepted bootstrap installation state");
+
+  const pinsBytes = readPrivate(operator, "verifier-pins.json", 16384, fixture);
+  const policyBytes = readPrivate(operator, "trust-policy.json", 16384, fixture);
+  const initialLedgerBytes = readPrivate(operator, "ledger.json", 1024 * 1024, fixture);
+  const pins = json(pinsBytes, ["version", "mode", "files", "trustPolicySha256", "ledgerSha256"],
+    "independent verifier inventory");
+  checkPins(pins, policyBytes, initialLedgerBytes);
+  demand(pins.files.length === 11, "the complete eleven-file reviewed closure is mandatory");
+  const baseline = checkOfflineHostPolicy(policyBytes, initialLedgerBytes,
+    host, trust.ownerPublicKeySha256);
+  const approvalBytes = readPrivate(bootstrap, "installation-approval.json", 16384, fixture);
+  const { approval, digest } = parseApproval(approvalBytes, trust, state, pinsBytes,
+    policyBytes, initialLedgerBytes, host, destinations, Math.floor(Date.now() / 1000), true);
+  demand(state.approvalDigest === digest && approval.sequence === state.lastSequence,
+    "accepted installation state and signed approval digest or sequence mismatch");
+
+  directoryEntries(destinations.policy, ["trust-policy.json"], fixture);
+  demand(hash(readPrivate(destinations.policy, "trust-policy.json", 16384, fixture)) ===
+    pins.trustPolicySha256, "installed release trust policy changed since owner approval");
+  exactModuleTree(destinations.code, fixture);
+  for (const file of pins.files) {
+    demand(hash(readonlySource(destinations.code, file.path, fixture)) === file.sha256,
+      "use-time verifier executable altered: " + file.path);
+  }
+  // A release legitimately appends to the installed ledger. The installation
+  // signature pins the *initial* state, not a permanently frozen mutable head.
+  // Only the initial prefix and structural validity are checked here. A signed
+  // release decision and atomic monotonic witness remain separate obligations.
+  const liveLedgerBytes = readPrivate(destinations.ledger, "ledger.json", 1024 * 1024, fixture);
+  const live = checkOfflineHostPolicy(policyBytes, liveLedgerBytes,
+    host, trust.ownerPublicKeySha256);
+  demand(live.sequence >= baseline.sequence && baseline.ledger.entries.every((entry, i) =>
+    JSON.stringify(entry) === JSON.stringify(live.ledger.entries[i])),
+  "installed ledger lost or changed approved initial history");
+  // Catch late replacement of protected approval/pins without ever trusting the
+  // live ledger as authority over the verifier pin inventory.
+  demand(hash(readPrivate(bootstrap, "installation-approval.json", 16384, fixture)) === digest &&
+    hash(readPrivate(operator, "verifier-pins.json", 16384, fixture)) === hash(pinsBytes) &&
+    hash(readPrivate(bootstrap, "installation-state.json", 4096, fixture)) ===
+      hash(Buffer.from(JSON.stringify(state))),
+  "protected trust material changed during use-time measurement");
+  return Object.freeze({
+    status: "INSTALLED_VERIFIER_BYTES_MEASURED_ONLY",
+    installedModules: pins.files.length,
+    pinsetSha256: hash(pinsBytes),
+    ownerInstallationApprovalDigest: digest,
+    ownerInstallationSequence: state.lastSequence,
+    liveLedgerSha256: hash(liveLedgerBytes),
+    liveLedgerSequence: live.sequence,
+    liveLedgerStatus: liveLedgerBytes.equals(initialLedgerBytes) ?
+      "INITIAL_LEDGER_INSPECTED_NOT_AUTHORIZED" : "DYNAMIC_LEDGER_INSPECTED_NOT_AUTHORIZED",
+    restriction: "No release, ledger CAS, Docker image, execution or deployment authority is granted.",
+  });
 }
 
 /**

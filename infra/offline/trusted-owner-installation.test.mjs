@@ -10,7 +10,9 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { AUDITED_VERIFIER_FILES } from "./trusted-host-installer.mjs";
-import { installOwnerApprovedVerifier } from "./trusted-owner-installation.mjs";
+import {
+  installOwnerApprovedVerifier, measureInstalledTrustedVerifierAtUseTime,
+} from "./trusted-owner-installation.mjs";
 
 const enabled = process.platform === "linux" && process.arch === "x64" &&
   process.getuid?.() === 0 && process.env.VIRKI_OWNER_INSTALL_DISPOSABLE_FIXTURE === "1" &&
@@ -34,7 +36,7 @@ function ownerKey(keyId) {
 function file(directory, name, data) {
   writeFileSync(path.join(directory, name), data, { mode: 0o600 });
 }
-function setup(t) {
+function setup(t, { realSource = false } = {}) {
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "virki-owner-install-fixture-"));
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
   const source = path.join(fixtureRoot, "source");
@@ -48,7 +50,9 @@ function setup(t) {
   const sourceBytes = AUDITED_VERIFIER_FILES.map((relative, i) => {
     const target = path.join(source, ...relative.split("/"));
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-    const bytes = Buffer.from(`// independent reviewer pinned mock executable ${i}\n`);
+    const bytes = realSource ?
+      readFileSync(fileURLToPath(new URL(`../../${relative}`, import.meta.url))) :
+      Buffer.from(`// independent reviewer pinned mock executable ${i}\n`);
     writeFileSync(target, bytes, { mode: 0o600 });
     return bytes;
   });
@@ -290,4 +294,95 @@ test("production invocation cannot come from a source checkout, even with arbitr
   });
   assert.notEqual(child.status, 0);
   assert.match(child.stderr, /independently installed/u);
+});
+
+test("use-time trust remeasures eleven genuine ESM modules after independently signed installation", fixtureOnly, (t) => {
+  const f = setup(t, { realSource: true });
+  for (const item of f.files) {
+    const disk = readFileSync(path.join(f.locations.source, ...item.path.split("/")));
+    assert.ok(disk.includes(Buffer.from("import ")), `${item.path} must contain real reviewed code`);
+    assert.equal(sha(disk), item.sha256);
+  }
+  assert.equal(installOwnerApprovedVerifier(f.request).verifierFiles, 11);
+  const measurement = measureInstalledTrustedVerifierAtUseTime(f.request);
+  assert.equal(measurement.status, "INSTALLED_VERIFIER_BYTES_MEASURED_ONLY");
+  assert.equal(measurement.installedModules, 11);
+  assert.equal(measurement.liveLedgerSequence, 0);
+  assert.equal(measurement.liveLedgerStatus, "INITIAL_LEDGER_INSPECTED_NOT_AUTHORIZED");
+  assert.equal(Object.hasOwn(measurement, "releaseAuthorized"), false);
+  assert.equal(Object.hasOwn(measurement, "deployAuthorized"), false);
+  assert.equal(Object.hasOwn(measurement, "verifiedImageId"), false);
+  assert.ok(Object.isFrozen(measurement));
+});
+
+test("use-time trust fails closed on tamper, swaps, symlinks and replayed owner state with real signed modules", fixtureOnly, (t) => {
+  const attacks = [
+    ...AUDITED_VERIFIER_FILES.map((relative) => (f) =>
+      writeFileSync(path.join(f.locations.code, ...relative.split("/")), "injected")),
+    (f) => { const src = path.join(f.locations.code, ...f.files[4].path.split("/"));
+      renameSync(src, src + ".original"); symlinkSync(src + ".original", src); },
+    (f) => { const dir = path.join(f.locations.code, "scripts", "lib");
+      renameSync(dir, dir + "-old"); symlinkSync(dir + "-old", dir); },
+    (f) => { const src = path.join(f.locations.code, ...f.files[2].path.split("/"));
+      linkSync(src, src + ".hardlink"); },
+    (f) => writeFileSync(path.join(f.locations.code, "infra", "offline", "extra.mjs"), "unexpected"),
+    (f) => chmodSync(path.join(f.locations.code, "scripts"), 0o777),
+    (f) => { const name = path.join(f.locations.bootstrap, "installation-state.json");
+      const state = JSON.parse(readFileSync(name)); state.status = "pending";
+      file(f.locations.bootstrap, "installation-state.json", canonical(state)); },
+    (f) => { const name = path.join(f.locations.bootstrap, "installation-state.json");
+      const state = JSON.parse(readFileSync(name)); state.lastSequence = 2;
+      file(f.locations.bootstrap, "installation-state.json", canonical(state)); },
+    (f) => { const name = path.join(f.locations.bootstrap, "installation-state.json");
+      const state = JSON.parse(readFileSync(name)); state.approvalDigest = SHA("e");
+      file(f.locations.bootstrap, "installation-state.json", canonical(state)); },
+    (f) => { const name = path.join(f.locations.bootstrap, "installation-approval.json");
+      const envelope = JSON.parse(readFileSync(name));
+      envelope.approval.approvalId = SHA("d"); file(f.locations.bootstrap, "installation-approval.json", canonical(envelope)); },
+    (f) => { const name = path.join(f.locations.operator, "verifier-pins.json");
+      const pins = JSON.parse(readFileSync(name)); pins.files[1].sha256 = SHA("e");
+      file(f.locations.operator, "verifier-pins.json", canonical(pins)); },
+    (f) => file(f.locations.policy, "trust-policy.json", "{}"),
+    (f) => { const name = path.join(f.locations.ledger, "ledger.json");
+      renameSync(name, name + ".before"); symlinkSync(name + ".before", name); },
+    (f) => { const lock = path.join(f.locations.bootstrap, ".installation-lock");
+      renameSync(lock, lock + "-old"); symlinkSync(lock + "-old", lock); },
+  ];
+  for (const attack of attacks) {
+    const f = setup(t, { realSource: true });
+    installOwnerApprovedVerifier(f.request);
+    attack(f);
+    assert.throws(() => measureInstalledTrustedVerifierAtUseTime(f.request),
+      /refused|unsafe|changed|malformed/u);
+  }
+});
+
+test("use-time distinguishes an independently pinned initial ledger from a valid changing release ledger", fixtureOnly, (t) => {
+  const f = setup(t, { realSource: true });
+  installOwnerApprovedVerifier(f.request);
+  const ledgerFile = path.join(f.locations.ledger, "ledger.json");
+  const append = (entries) => file(f.locations.ledger, "ledger.json", canonical({
+    version: 1, anchorSha: "1".repeat(40), entries,
+  }));
+  const first = {
+    sequence: 1, priorSha: "1".repeat(40), nextSha: "2".repeat(40),
+    manifestSha256: SHA("a"), nonce: "a".repeat(32), approvalDigest: SHA("b"),
+  };
+  const second = {
+    sequence: 2, priorSha: "2".repeat(40), nextSha: "3".repeat(40),
+    manifestSha256: SHA("c"), nonce: "c".repeat(32), approvalDigest: SHA("d"),
+  };
+  append([first, second]);
+  const measured = measureInstalledTrustedVerifierAtUseTime(f.request);
+  assert.equal(measured.liveLedgerSequence, 2);
+  assert.equal(measured.liveLedgerStatus, "DYNAMIC_LEDGER_INSPECTED_NOT_AUTHORIZED");
+  assert.equal(Object.hasOwn(measured, "releaseAuthorized"), false);
+  second.nonce = first.nonce;
+  append([first, second]);
+  assert.throws(() => measureInstalledTrustedVerifierAtUseTime(f.request), /replay|ledger/u);
+  second.nonce = "c".repeat(32);
+  second.priorSha = "f".repeat(40);
+  append([first, second]);
+  assert.throws(() => measureInstalledTrustedVerifierAtUseTime(f.request), /predecessor|ledger/u);
+  assert.ok(existsSync(ledgerFile));
 });
