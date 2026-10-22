@@ -153,6 +153,63 @@ production host until its 11-file byte inventory, separate executable pin,
 trusted isolated daemon lifecycle and broader release policy are independently
 reviewed and approved.
 
+## Dedicated Docker daemon identity: read-only evidence, NOT admission
+
+`infra/offline/isolated-docker-daemon-identity.mjs` is a separate, **read-only**
+identity inspector, not an image-loader dependency, daemon launcher or deploy
+entrypoint. Run `npm run test:offline:daemon-identity` for portable, in-memory
+adversarial /proc and Docker-info simulations. No test opens, mounts or contacts
+the host Docker socket. The native inspector refuses Windows, WSL, non-root,
+unavailable /procfs, caller-supplied pins, arbitrary process paths or extra
+input. It makes no Docker API request and does not start a daemon.
+
+The independent operator must provision canonical, root:root 0600 JSON at
+`/etc/virki/offline-import-daemon/daemon-policy.json` inside a root:root 0700
+directory. Version 1 / `virki-isolated-daemon-owner-pin-v1` records exactly:
+`version`, `mode`, `cliSha256`, `daemonSha256`, `daemonPid`,
+`daemonStartTicks`, `socketKernelInode`, `daemonCgroup`,
+`mountNamespace`, `netNamespace`, `pidNamespace`. It must be approved
+from **separately trusted native-host observations**, not generated, signed or
+overwritten by uploaded release bytes. The independently maintained
+`/etc/virki/offline-import-cli.sha256` digest must agree with the new owner
+policy. Pin updates require manual review after every intentional daemon
+restart; stale PID/start ticks or listener inodes fail closed.
+
+The inspector checks the root-owned private Unix socket at
+`/run/virki-offline-import/docker.sock`; obtains the **listening** Unix
+stream kernel socket inode from the pinned PID's `/proc/PID/net/unix`;
+verifies that the same process holds an FD to that inode; validates the
+running `/proc/PID/exe` content against the independently pinned dockerd
+SHA-256; and checks the CLI SHA, exact dockerd command line, root IDs, cgroup
+v2 path, namespaces, start ticks and procfs PID stability before and after
+observation. Both the daemon's `--data-root`
+(`/var/lib/virki/offline-import-daemon-data`) and `--exec-root`
+(`/run/virki-offline-import/exec`) are required to be independent, root-only
+directories. The process's mount, network and PID namespaces must differ from
+the inspector's. The strict, ordered daemon command line also disables
+iptables, ip6tables, bridge and userland proxy and uses `/dev/null` for
+the daemon configuration file. A Docker `info` response can be compared
+separately, but its `DockerRootDir` is **self-reported** and cannot establish
+socket peer identity, root separation or lifecycle provenance.
+
+**Fundamental P1 boundary:** a process holding a listening Unix socket does
+not prove which peer accepted this importer's particular connection. Node's
+built-in APIs do not expose a kernel-verified `SO_PEERCRED` binding across
+the current Docker CLI calls, and process polling does not provide an
+independent supervisor's continuous lifecycle/fencing proof. A proxy could
+forward a private-looking socket to the real host daemon. Therefore **even
+matching root-owned pins and kernel observations return
+`dockerLoadAuthorized:false` and `deployAuthorized:false`**. This module
+is deliberately not wired to `trusted-image-import.mjs` and is not added
+to the installed 11-module executable verifier pin set. A later integration
+must first independently audit and pin its new source bytes and prove a
+kernel-bound peer credential + daemon lifecycle/namespace/cgroup isolation
+at the **use point of every Docker command**, preferably via an independently
+installed, separately owner-pinned native supervisor and disposable
+Docker-in-Docker tests. Merely creating a `docker.sock` path, trusting
+`docker info`, overriding the WSL kernel check or presenting a synthetic
+fixture result must never enable a production Docker import or deploy.
+
 ## Evidence and disposition
 
 Before approval, retain the exact final SHA, `run-manifest.json` with all
