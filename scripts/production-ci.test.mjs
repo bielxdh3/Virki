@@ -18,6 +18,14 @@ const codeqlWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workfl
 const codeqlEvidenceWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql-evidence.yml"), "utf8");
 const approvalWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "approve-production.yml"), "utf8");
 
+test("Ubuntu Validate re-executes root-protected offline transport assertions, not just non-root skips", () => {
+  assert.match(workflow,
+    /validate:[\s\S]*?runs-on: ubuntu-latest[\s\S]*?run: npm run test:production-revision[\s\S]*?run: sudo "\$\(command -v node\)" --test scripts\/offline-production-transport\.test\.mjs/u);
+  const source = readFileSync(path.join(repositoryRoot, "scripts", "offline-production-transport.test.mjs"), "utf8");
+  assert.match(source, /rootProtectedLinuxOnly = \{ skip: !nativeLinux \|\| process\.getuid\?\.\(\) !== 0 \}/u);
+  assert.match(source, /test\("even newly re-signed local CI with failed stage is refused before Git or SSH", rootProtectedLinuxOnly/u);
+});
+
 function publicationNeedsAreSafe(source) {
   // Parse the job-level portion of this workflow instead of matching a
   // "needs:" substring that might belong to another job or a comment.

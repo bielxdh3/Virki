@@ -8,6 +8,10 @@ import { runProductionPreflight } from "./production-preflight.mjs";
 
 const prior = "a".repeat(40);
 const candidate = "b".repeat(40);
+// This is an exact Bash/POSIX release-link rehearsal, not a Windows host
+// simulation. Linux CI and WSL run the complete scenarios; Windows may not
+// create the relative symlink without privileged Developer Mode.
+const linuxRehearsalOnly = { skip: process.platform !== "linux" };
 
 function initialState(f) {
   assert.equal(readlinkSync(path.join(f.root, "current")), `releases/${prior}`);
@@ -22,7 +26,7 @@ function assertNoExternalMutation(result) {
   assert.ok(result.operations.split("\n").every((entry) => entry.length === 0 || /^(?:compose|docker) /u.test(entry)));
 }
 
-test("production backup/restore workflow accepts a simulated successful clone and hashes the preserved backup", (t) => {
+test("production backup/restore workflow accepts a simulated successful clone and hashes the preserved backup", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const result = runProductionShellRehearsal(f, ["cleanup_failed_backup_verification", "create_verified_backup"],
     "create_verified_backup", { revisions: candidate });
@@ -40,7 +44,7 @@ test("production backup/restore workflow accepts a simulated successful clone an
   assert.match(result.operations, /docker exec .*pg_restore/u);
 });
 
-test("failed clone migration removes only unverified backup and clone artifacts; predecessor persists", (t) => {
+test("failed clone migration removes only unverified backup and clone artifacts; predecessor persists", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const result = runProductionShellRehearsal(f, ["cleanup_failed_backup_verification", "create_verified_backup"],
     "create_verified_backup", { revisions: candidate, failure: "clone-migration" });
@@ -54,7 +58,7 @@ test("failed clone migration removes only unverified backup and clone artifacts;
   assertNoExternalMutation(result);
 });
 
-test("failed real production migration remains in maintenance with intact predecessor release and backup", (t) => {
+test("failed real production migration remains in maintenance with intact predecessor release and backup", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const result = runProductionShellRehearsal(f,
     ["maintenance_on", "stop_routed_services", "cleanup_failed_backup_verification", "create_verified_backup", "apply_production_migrations"],
@@ -68,7 +72,7 @@ test("failed real production migration remains in maintenance with intact predec
   assert.doesNotMatch(result.operations, /compose up .*cloudflared/u);
 });
 
-test("failed final health retains maintenance, stops routed services and keeps previous release recoverable", (t) => {
+test("failed final health retains maintenance, stops routed services and keeps previous release recoverable", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const marker = path.join(f.root, ".virki-migration-verification");
   writeFileSync(marker, "verified disposable backup\n");
@@ -91,7 +95,7 @@ test("failed final health retains maintenance, stops routed services and keeps p
   assertNoExternalMutation(result);
 });
 
-test("transient disk deficit rejects before backup or maintenance, retry only after measured capacity recovers", (t) => {
+test("transient disk deficit rejects before backup or maintenance, retry only after measured capacity recovers", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const input = {
     freeBytes: 6 * 1024 ** 3,
@@ -107,7 +111,7 @@ test("transient disk deficit rejects before backup or maintenance, retry only af
   initialState(f);
 });
 
-test("existing offline preflight rejects transient disk shortage then permits only a read-only verified retry", async (t) => {
+test("existing offline preflight rejects transient disk shortage then permits only a read-only verified retry", linuxRehearsalOnly, async (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const operatorConfig = { sshAlias: "disposable-fake", host: "rehearsal.invalid", port: "2222", root: "/srv/virki" };
   const sizes = {
@@ -144,7 +148,7 @@ test("existing offline preflight rejects transient disk shortage then permits on
   initialState(f);
 });
 
-test("interrupted partial transfer cleans only target staging and leaves unrelated transfer and predecessor untouched", (t) => {
+test("interrupted partial transfer cleans only target staging and leaves unrelated transfer and predecessor untouched", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const id = "c".repeat(24);
   const other = "d".repeat(24);
@@ -160,7 +164,7 @@ test("interrupted partial transfer cleans only target staging and leaves unrelat
   assertNoExternalMutation(result);
 });
 
-test("maintenance cannot be silently cleared by a failed migration status or health gate", (t) => {
+test("maintenance cannot be silently cleared by a failed migration status or health gate", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const marker = path.join(f.root, ".virki-maintenance");
   writeFileSync(marker, "revision=" + candidate + "\n");

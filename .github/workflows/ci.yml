@@ -114,6 +114,12 @@ jobs:
       - name: Production control tests
         run: npm run test:production-revision
 
+      - name: Root-protected offline transport test fixtures
+        # The normal runner cannot open the fixture's 0700 root-only trust
+        # directory. Keep the positive-path tamper tests mandatory under a
+        # bounded sudo Node process; no SSH, Docker or deploy commands run.
+        run: sudo "$(command -v node)" --test scripts/offline-production-transport.test.mjs
+
       - name: Disposable Docker safety tests
         run: npm run test:production:docker-safety
 

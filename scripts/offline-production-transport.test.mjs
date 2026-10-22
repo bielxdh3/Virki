@@ -5,6 +5,7 @@ import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, syml
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { encodeCanonicalOfflineReleaseManifest } from "./lib/offline-release-attestation.mjs";
 import { prepareVerifiedOfflineTransportPlan, validateOfflineSshConfiguration } from "./offline-production-transport.mjs";
 
@@ -16,6 +17,11 @@ const predecessor = sha("b");
 const hostIdentity = digest("9");
 const now = Math.floor(Date.now() / 1000);
 const nativeLinux = process.platform === "linux";
+// CI's normal Node process is unprivileged. These three positive-path tests
+// must reach independently protected 0700 root-owned trust files, so execute
+// them only through the explicit sudo Node 22 step in ci.yml, not as false
+// negatives rejected by a missing root capability.
+const rootProtectedLinuxOnly = { skip: !nativeLinux || process.getuid?.() !== 0 };
 const STAGES = [
   "tooling-policy-dependencies", "tooling-policy-tests", "chromium-dependencies",
   "production-hub-build", "runtime", "secrets-scan", "production-revision-tests",
@@ -154,8 +160,7 @@ test("SSH policy rejects unsafe settings and host mismatches before remote actio
   ]) assert.throws(() => validateOfflineSshConfiguration(bad, config));
 });
 
-test("complete owner-signed candidate with 19 claimed stages reaches strict Git gate, never SSH on a non-repository", async (t) => {
-  if (!nativeLinux) return t.skip("Linux protected test fixtures required");
+test("complete owner-signed candidate with 19 claimed stages reaches strict Git gate, never SSH on a non-repository", rootProtectedLinuxOnly, async (t) => {
   const f = fixture(t);
   await assert.rejects(prepareVerifiedOfflineTransportPlan({
     candidateDirectory: f.candidateDirectory,
@@ -164,8 +169,7 @@ test("complete owner-signed candidate with 19 claimed stages reaches strict Git 
   }), /Production command failed/iu);
 });
 
-test("even newly re-signed local CI with failed stage is refused before Git or SSH", async (t) => {
-  if (!nativeLinux) return t.skip("Linux protected test fixtures required");
+test("even newly re-signed local CI with failed stage is refused before Git or SSH", rootProtectedLinuxOnly, async (t) => {
   const f = fixture(t);
   const fakeCi = claimedCi();
   fakeCi.stages[12].exitCode = 1;
@@ -190,8 +194,7 @@ test("fails closed for missing independently protected inputs (no SSH and no dep
   }
 });
 
-test("fails closed on altered owner pin or revoked owner key before contacting a host", async (t) => {
-  if (!nativeLinux) return t.skip("POSIX root-protected fixture requires Linux");
+test("fails closed on altered owner pin or revoked owner key before contacting a host", rootProtectedLinuxOnly, async (t) => {
   const f = fixture(t);
   const p = path.join(f.trustedDirectory, "trust-policy.json");
   const original = readFileSync(p);
@@ -285,9 +288,12 @@ test("absent owner signature and omitted candidate file fail before Git or SSH",
 });
 
 test("no one-step transfer, Docker load, untrusted source execution or GHCR command is exposed", () => {
-  const local = spawnSync(process.execPath, [new URL("./offline-production-transport.mjs", import.meta.url).pathname], {
+  const local = spawnSync(process.execPath, [fileURLToPath(new URL("./offline-production-transport.mjs", import.meta.url))], {
     encoding: "utf8", timeout: 4000,
   });
-  assert.notEqual(local.status, 0);
+  assert.equal(local.error, undefined, String(local.error));
+  assert.equal(local.status, 2, local.stderr);
+  assert.match(local.stderr, /Offline transport is a read-only library; no transfer or deploy entrypoint/u);
+  assert.doesNotMatch(local.stderr, /MODULE_NOT_FOUND|Cannot find module|ERR_MODULE_NOT_FOUND/iu);
   assert.doesNotMatch(local.stdout, /deployAuthorized.*true|transferAuthorized.*true|deployed/iu);
 });

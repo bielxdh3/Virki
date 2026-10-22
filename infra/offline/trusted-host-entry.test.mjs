@@ -5,6 +5,7 @@ import { chmodSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, sy
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   inspectUntrustedOfflineCandidate,
   verifyTrustedHostOfflineCandidate,
@@ -32,6 +33,9 @@ const base = {
 const REPORTS = ["ci-report.json", "scanner-report.json", "finding-review.json", "runtime-smoke.json", "migrator-smoke.json", "backup-restore.json"];
 const TARS = ["source.tar", "runtime.tar", "migrator.tar"];
 const DIR_FILES = ["manifest.json", "signatures.json", ...TARS, ...REPORTS];
+// The native envelope reader relies on POSIX open flags, inode/uid ownership,
+// and permission bits. Windows must not turn platform refusal into a test pass.
+const linuxCandidateOnly = { skip: process.platform !== "linux" };
 
 function fixture(t) {
   const candidateDirectory = mkdtempSync(path.join(os.tmpdir(), "virki-entry-native-"));
@@ -65,7 +69,7 @@ function fixture(t) {
   return { candidateDirectory, manifest, manifestBytes, tarBytes, reportBytes };
 }
 
-test("reads a candidate envelope as UNTRUSTED bytes with independent file hashes, never authorizes a release", async (t) => {
+test("reads a candidate envelope as UNTRUSTED bytes with independent file hashes, never authorizes a release", linuxCandidateOnly, async (t) => {
   const f = fixture(t);
   const value = await inspectUntrustedOfflineCandidate({ candidateDirectory: f.candidateDirectory });
   assert.equal(value.status, "UNTRUSTED_ENVELOPE_ONLY");
@@ -80,7 +84,7 @@ test("reads a candidate envelope as UNTRUSTED bytes with independent file hashes
   assert.equal(Object.hasOwn(value, "deploymentAuthorized"), false);
 });
 
-test("rejects bundle-supplied policy and keys, even when JSON looks credible", async (t) => {
+test("rejects bundle-supplied policy and keys, even when JSON looks credible", linuxCandidateOnly, async (t) => {
   const f = fixture(t);
   for (const file of ["trust-policy.json", "ledger.json", "host-identity.sha256", "owner-private-key.pem"]) {
     writeFileSync(path.join(f.candidateDirectory, file), "{}");
@@ -89,7 +93,7 @@ test("rejects bundle-supplied policy and keys, even when JSON looks credible", a
   }
 });
 
-test("strict shape validation rejects oversized, noncanonical and duplicate signature envelopes", async (t) => {
+test("strict shape validation rejects oversized, noncanonical and duplicate signature envelopes", linuxCandidateOnly, async (t) => {
   const f = fixture(t);
   const target = path.join(f.candidateDirectory, "signatures.json");
   for (const payload of [
@@ -105,7 +109,7 @@ test("strict shape validation rejects oversized, noncanonical and duplicate sign
   }
 });
 
-test("rejects malformed, reserialized, duplicate-key and archive-hash-mismatched manifests", async (t) => {
+test("rejects malformed, reserialized, duplicate-key and archive-hash-mismatched manifests", linuxCandidateOnly, async (t) => {
   const f = fixture(t);
   const file = path.join(f.candidateDirectory, "manifest.json");
   const original = readFileSync(file);
@@ -123,7 +127,7 @@ test("rejects malformed, reserialized, duplicate-key and archive-hash-mismatched
   writeFileSync(file, original);
 });
 
-test("rejects caller-supplied keys, host, ledger or untrusted expected-identity objects", async (t) => {
+test("rejects caller-supplied keys, host, ledger or untrusted expected-identity objects", linuxCandidateOnly, async (t) => {
   const f = fixture(t);
   for (const key of ["trustedKeys", "expected", "ledger", "measuredHostIdentitySha256", "hostState"]) {
     await assert.rejects(inspectUntrustedOfflineCandidate({
@@ -133,7 +137,7 @@ test("rejects caller-supplied keys, host, ledger or untrusted expected-identity 
   }
 });
 
-test("rejects missing, changed or swapped raw evidence and signed archives", async (t) => {
+test("rejects missing, changed or swapped raw evidence and signed archives", linuxCandidateOnly, async (t) => {
   const f = fixture(t);
   for (const file of ["ci-report.json", "source.tar", "runtime.tar", "migrator.tar"]) {
     const target = path.join(f.candidateDirectory, file);
@@ -146,7 +150,7 @@ test("rejects missing, changed or swapped raw evidence and signed archives", asy
   await assert.rejects(inspectUntrustedOfflineCandidate({ candidateDirectory: f.candidateDirectory }));
 });
 
-test("rejects mode, symlink and hardlink attacks before reading untrusted bytes", async (t) => {
+test("rejects mode, symlink and hardlink attacks before reading untrusted bytes", linuxCandidateOnly, async (t) => {
   const f = fixture(t);
   const badDirectory = path.join(os.tmpdir(), "virki-bad-alias-" + path.basename(f.candidateDirectory));
   symlinkSync(f.candidateDirectory, badDirectory, "dir");
@@ -161,7 +165,7 @@ test("rejects mode, symlink and hardlink attacks before reading untrusted bytes"
   await assert.rejects(inspectUntrustedOfflineCandidate({ candidateDirectory: f.candidateDirectory }));
 });
 
-test("rejects relative, traversal, missing and root candidate paths", async () => {
+test("rejects relative, traversal, missing and root candidate paths", linuxCandidateOnly, async () => {
   for (const candidateDirectory of ["./bundle", ".", "../bundle", "/", null, ""]) {
     await assert.rejects(inspectUntrustedOfflineCandidate({ candidateDirectory }));
   }
@@ -189,9 +193,11 @@ test("native trust-root and non-classic OCI Docker save are not silently accepte
 test("direct installed entrypoint CLI never returns success or starts Docker", (t) => {
   const f = fixture(t);
   const result = spawnSync(process.execPath,
-    [new URL("./trusted-host-entry.mjs", import.meta.url).pathname, f.candidateDirectory],
+    [fileURLToPath(new URL("./trusted-host-entry.mjs", import.meta.url)), f.candidateDirectory],
     { encoding: "utf8", timeout: 5000 });
-  assert.notEqual(result.status, 0);
+  assert.equal(result.error, undefined, String(result.error));
+  assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /preflight refused|deploy remains BLOCKED/iu);
+  assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND|Cannot find module|ERR_MODULE_NOT_FOUND/iu);
   assert.doesNotMatch(result.stdout, /authorized|deployed|success/iu);
 });
