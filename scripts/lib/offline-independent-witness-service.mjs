@@ -150,7 +150,7 @@ export class IndependentOfflineWitness {
     this.audit();
   }
 
-  audit() {
+  audit(candidateHeadSha) {
     const info = this.db.prepare("PRAGMA integrity_check").get();
     requireWitness(info.integrity_check === "ok", "SQLite integrity verification failed");
     const meta = this.db.prepare("SELECT * FROM scope").all();
@@ -182,6 +182,8 @@ export class IndependentOfflineWitness {
       head = message.headSha;
       receiptSha256 = receiptHash(message, record.signature);
     }
+    requireWitness(candidateHeadSha === undefined || !seenHeads.has(candidateHeadSha),
+      "replayed transition head");
     this.verifyAnchors(records);
     return { sequence, headSha: head, receiptSha256 };
   }
@@ -221,7 +223,12 @@ export class IndependentOfflineWitness {
     let fd;
     try {
       fd = openSync(file, "wx", 0o600);
-      writeSync(fd, encoded);
+      let offset = 0;
+      while (offset < encoded.length) {
+        const count = writeSync(fd, encoded, offset, encoded.length - offset);
+        requireWitness(count > 0, "unable to persist durable anchor");
+        offset += count;
+      }
       fsyncSync(fd);
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
@@ -246,7 +253,7 @@ export class IndependentOfflineWitness {
     let committed = false;
     let receipt;
     try {
-      const head = this.audit();
+      const head = this.audit(request.nextHeadSha);
       requireWitness(request.expectedSequence === head.sequence &&
         request.expectedHeadSha === head.headSha &&
         request.expectedReceiptSha256 === head.receiptSha256 &&

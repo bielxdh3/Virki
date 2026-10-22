@@ -205,6 +205,8 @@ test("native Linux disposable independent Ed25519 witness CAS and rollback resis
         assert.equal((await send(server.socket, "/v1/cas", { ...winningRequest, extra: true })).code, 400);
         const next = nextRequest(f, verified);
         current = await cas(other, f, next);
+        assert.equal((await send(server.socket, "/v1/cas",
+          nextRequest(f, current, verified.headSha))).code, 409);
         assert.deepEqual(await head(server, f, current), {
           sequence: 2, headSha: next.nextHeadSha, receiptSha256: current.receiptSha256,
         });
