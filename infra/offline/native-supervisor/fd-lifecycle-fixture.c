@@ -6,8 +6,10 @@
  * It never invokes dockerd, sends real image data, reaches the Docker host
  * socket, starts containers, or grants production admission.
  *
- * Linux SO_PEERCRED is bound to the accepted connection. That says NOTHING
- * about a forwarding proxy's upstream target or mount/cgroup separation.
+ * Linux SO_PEERCRED is bound to the accepted connection. SO_PASSCRED and
+ * recvmsg additionally inspect sender credentials on each synthetic reply.
+ * This does NOT prevent a privileged sender from forging SCM_CREDENTIALS,
+ * or attest a forwarding proxy's upstream target or mount/cgroup separation.
  * Namespace isolation must be independently proved before ANY authorizer.
  */
 #define _GNU_SOURCE
@@ -80,15 +82,39 @@ static bool poll_ready_until(int fd, short event, long long deadline) {
   return ready == 1 && (p.revents & event) != 0 &&
     (p.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
 }
-static bool read_exact_until(int fd, const char *expected, long long deadline) {
+static bool read_exact_until(int fd, const char *expected, long long deadline,
+                             pid_t expected_writer) {
   size_t total = strlen(expected);
   for (size_t offset = 0; offset < total;) {
     if (!poll_ready_until(fd, POLLIN, deadline)) return false;
     char buffer[128];
-    ssize_t got = recv(fd, buffer, total - offset < sizeof(buffer) ?
-      total - offset : sizeof(buffer), MSG_DONTWAIT);
+    /* SO_PEERCRED is frozen at connect-time; a forked process may inherit the
+     * socket and send correct nonce responses while the pinned peer stays
+     * alive. Linux SO_PASSCRED supplies the sender of each received chunk.
+     * Reject missing/malformed ancillary data, extra control messages and
+     * truncated credentials rather than trusting only the original peer PID. */
+    union {
+      struct cmsghdr align;
+      char bytes[CMSG_SPACE(sizeof(struct ucred))];
+    } control = {0};
+    struct iovec payload = {.iov_base = buffer,
+      .iov_len = total - offset < sizeof(buffer) ?
+        total - offset : sizeof(buffer)};
+    struct msghdr message = {.msg_iov = &payload, .msg_iovlen = 1,
+      .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
+    ssize_t got = recvmsg(fd, &message, MSG_DONTWAIT);
     if (got < 0 && (errno == EAGAIN || errno == EINTR)) continue;
-    if (got <= 0 || memcmp(buffer, expected + offset, (size_t)got) != 0)
+    if (got <= 0 || (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) != 0)
+      return false;
+    struct cmsghdr *cred_message = CMSG_FIRSTHDR(&message);
+    if (!cred_message || cred_message->cmsg_level != SOL_SOCKET ||
+        cred_message->cmsg_type != SCM_CREDENTIALS ||
+        cred_message->cmsg_len != CMSG_LEN(sizeof(struct ucred)) ||
+        CMSG_NXTHDR(&message, cred_message) != NULL) return false;
+    struct ucred sender;
+    memcpy(&sender, CMSG_DATA(cred_message), sizeof(sender));
+    if (sender.pid != expected_writer || sender.uid != 0 || sender.gid != 0 ||
+        memcmp(buffer, expected + offset, (size_t)got) != 0)
       return false;
     offset += (size_t)got;
   }
@@ -373,6 +399,43 @@ static bool teardown(void) {
   }
   return confirmed_reap && child_exited_cleanly && root_clean;
 }
+static bool pass_socket_fd(int transport, int passed) {
+  char marker = 'F';
+  struct iovec payload = {.iov_base = &marker, .iov_len = 1};
+  union {
+    struct cmsghdr align;
+    char bytes[CMSG_SPACE(sizeof(int))];
+  } control = {0};
+  struct msghdr message = {.msg_iov = &payload, .msg_iovlen = 1,
+    .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
+  struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+  if (!header) return false;
+  header->cmsg_level = SOL_SOCKET;
+  header->cmsg_type = SCM_RIGHTS;
+  header->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(header), &passed, sizeof(passed));
+  return sendmsg(transport, &message, MSG_NOSIGNAL) == 1;
+}
+static int receive_socket_fd(int transport) {
+  char marker = 0;
+  struct iovec payload = {.iov_base = &marker, .iov_len = 1};
+  union {
+    struct cmsghdr align;
+    char bytes[CMSG_SPACE(sizeof(int))];
+  } control = {0};
+  struct msghdr message = {.msg_iov = &payload, .msg_iovlen = 1,
+    .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
+  if (recvmsg(transport, &message, MSG_CMSG_CLOEXEC) != 1 || marker != 'F' ||
+      (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) != 0) return -1;
+  struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+  if (!header || header->cmsg_level != SOL_SOCKET ||
+      header->cmsg_type != SCM_RIGHTS ||
+      header->cmsg_len != CMSG_LEN(sizeof(int)) ||
+      CMSG_NXTHDR(&message, header)) return -1;
+  int received = -1;
+  memcpy(&received, CMSG_DATA(header), sizeof(received));
+  return received;
+}
 static int serve_fake(const char *mode, int readyfd) {
   int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (listener < 0) return 30;
@@ -393,6 +456,41 @@ static int serve_fake(const char *mode, int readyfd) {
   if (strcmp(mode, "dead-before-load") == 0) {
     close(conn);
     return 0;
+  }
+  if (strcmp(mode, "forked-writer") == 0 ||
+      strcmp(mode, "scm-rights-writer") == 0) {
+    /* The child accepted the connection, but an inherited socket FD lets a
+     * DIFFERENT PID answer every request while the original child stays alive.
+     * SCM_RIGHTS can also transfer the connected FD after acceptance. */
+    const bool transfer = strcmp(mode, "scm-rights-writer") == 0;
+    int handoff[2] = {-1, -1};
+    if (transfer && socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC,
+                               0, handoff) != 0) return 46;
+    pid_t writer = fork();
+    if (writer < 0) { close(conn); return 46; }
+    if (writer > 0) {
+      bool passed = true;
+      if (transfer) {
+        close(handoff[1]);
+        passed = pass_socket_fd(handoff[0], conn);
+        close(handoff[0]);
+      }
+      close(conn);
+      int status = 0;
+      pid_t reaped;
+      do { reaped = waitpid(writer, &status, 0); }
+      while (reaped < 0 && errno == EINTR);
+      return passed && reaped == writer && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0 ? 0 : 47;
+    }
+    if (transfer) {
+      close(handoff[0]);
+      close(conn); /* The helper MUST use only the received SCM_RIGHTS FD. */
+      conn = receive_socket_fd(handoff[1]);
+      close(handoff[1]);
+      if (conn < 0) return 48;
+    }
+    fprintf(stderr, "DISPOSABLE_FIXTURE_DELEGATED_WRITER %ld\n", (long)getpid());
   }
   const long long deadline = monotonic_ms() + TRANSACTION_BUDGET_MS;
   char nonce[NONCE_HEX + 1], response[80];
@@ -484,7 +582,8 @@ int main(int argc, char **argv) {
       strcmp(mode, "response-smuggling") && strcmp(mode, "pipeline-valid") &&
       strcmp(mode, "slow-trickle") && strcmp(mode, "ignore-term") &&
       strcmp(mode, "late-final-junk") && strcmp(mode, "swap-owned-root") &&
-      strcmp(mode, "nonzero-after-ack"))
+      strcmp(mode, "nonzero-after-ack") && strcmp(mode, "forked-writer") &&
+      strcmp(mode, "scm-rights-writer"))
     return blocked();
   if (!fixture_directory()) {
     teardown();
@@ -527,6 +626,11 @@ int main(int argc, char **argv) {
   }
   int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (sock < 0) { teardown(); return blocked(); }
+  const int passcred = 1;
+  if (setsockopt(sock, SOL_SOCKET, SO_PASSCRED, &passcred,
+                 sizeof(passcred)) != 0) {
+    close(sock); teardown(); return blocked();
+  }
   struct sockaddr_un address = {.sun_family = AF_UNIX};
   strcpy(address.sun_path, endpoint);
   bool good = connect(sock, (struct sockaddr *)&address,
@@ -540,7 +644,7 @@ int main(int argc, char **argv) {
       frame(request, sizeof(request), "REQ", phases[i], nonce, NULL) &&
       frame(expected, sizeof(expected), "ACK", phases[i], nonce, "OK") &&
       write_all_until(sock, request, transaction_deadline) &&
-      read_exact_until(sock, expected, transaction_deadline) &&
+      read_exact_until(sock, expected, transaction_deadline, child_pid) &&
       no_surplus(sock) &&
       peer_on_same_fd(sock, child_pid, ticks) &&
       same_provenance(child_pid, &observed);
@@ -559,6 +663,7 @@ int main(int argc, char **argv) {
   printf("{\"status\":\"SAME_FD_KERNEL_PEER_AND_LIFECYCLE_TEST_ONLY\","
     "\"sameFdAcrossSyntheticLoadAndInspect\":true,"
     "\"supervisedPidfdAcrossExchange\":true,"
+    "\"kernelSenderCredentialsMatchedAcrossSyntheticPhases\":true,"
     "\"isolatedNamespacesApproved\":%s,"
     "\"dockerLoadAuthorized\":false,\"deployAuthorized\":false}\n",
     isolation ? "true" : "false");

@@ -47,6 +47,7 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     assert.equal(result.result.status, 0, result.result.stderr);
     assert.equal(result.output.sameFdAcrossSyntheticLoadAndInspect, true);
     assert.equal(result.output.supervisedPidfdAcrossExchange, true);
+    assert.equal(result.output.kernelSenderCredentialsMatchedAcrossSyntheticPhases, true);
     assert.equal(result.output.isolatedNamespacesApproved, false);
     assert.equal(result.output.status, "SAME_FD_KERNEL_PEER_AND_LIFECYCLE_TEST_ONLY");
   });
@@ -70,6 +71,18 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     const result = invoke("pipeline-valid");
     assert.equal(result.result.status, 2);
     assert.equal(result.output.status, "BLOCKED");
+  });
+  await t.test("inherited same FD cannot spoof replies from the pinned living peer", () => {
+    const { result, output } = invoke("forked-writer");
+    assert.match(result.stderr, /DISPOSABLE_FIXTURE_DELEGATED_WRITER [1-9][0-9]*/u);
+    assert.equal(result.status, 2, "a forked writer must not impersonate the connected peer");
+    assert.equal(output.status, "BLOCKED");
+  });
+  await t.test("SCM_RIGHTS receiver cannot forge original SO_PEERCRED writer", () => {
+    const { result, output } = invoke("scm-rights-writer");
+    assert.match(result.stderr, /DISPOSABLE_FIXTURE_DELEGATED_WRITER [1-9][0-9]*/u);
+    assert.equal(result.status, 2, "passing the connected FD must not transfer writer authority");
+    assert.equal(output.status, "BLOCKED");
   });
   await t.test("late trailing payload after final authenticated response must fail before clean EOF", () => {
     const result = invoke("late-final-junk");
@@ -179,6 +192,9 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     const source = readFileSync(path.join(directory, "fd-lifecycle-fixture.c"), "utf8");
     assert.doesNotMatch(source, /(?:execvp|system|popen|docker\s+load|\/var\/run\/docker\.sock)\s*\(/u);
     assert.match(source, /SO_PEERCRED/u);
+    assert.match(source, /SO_PASSCRED/u);
+    assert.match(source, /SCM_CREDENTIALS/u);
+    assert.match(source, /recvmsg\(/u);
     assert.match(source, /pidfd_open/u);
     assert.match(source, /dockerLoadAuthorized\\":false/u);
     assert.doesNotMatch(source, /\b(?:system|popen|execvp|execve|execl|dlopen)\s*\(/u);

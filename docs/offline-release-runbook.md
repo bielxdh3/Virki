@@ -327,6 +327,11 @@ Before and after each synthetic framed exchange it reads `SO_PEERCRED`
 from that **same connected socket FD**, checks the child's Linux start
 ticks and pidfd liveness, and compares its mount, network and PID namespace
 identifiers and cgroup-v2 path against the initial `/proc` snapshot.
+The client also enables Linux `SO_PASSCRED` and uses `recvmsg` to verify
+`SCM_CREDENTIALS` on **every received synthetic response chunk**. It refuses
+absent, truncated, unexpected or differently attributed credentials. This
+adds a sender check to the existing connect-time peer check; it is not a
+capability-restricted daemon attestation.
 Only fixed synthetic `LOAD`, `INSPECT` and `INFO` phase requests with fresh
 kernel-generated 128-bit transaction challenges are allowed. Every fake
 `ACK` must echo the same phase and nonce; replayed or prequeued acknowledgments
@@ -359,7 +364,9 @@ The adversarial tests demonstrate continuity of the kernel peer identity
 across the entire *synthetic* operation; they also cover daemon death before
 or during the exchange, response tampering, three prequeued syntactically
 valid responses, late trailing bytes, slow-trickle deadlines, TERM-ignoring
-children, changed private socket-root inodes, fake negative root-directory
+children, inherited-FD and real `SCM_RIGHTS` transfers to a second process
+that sends otherwise valid replies while the pinned daemon remains alive,
+changed private socket-root inodes, fake negative root-directory
 responses and mode/path escape. The
 `fake-rootdir` case remains a **synthetic negative acknowledgment**, not
 proof against a syntactically valid malicious real Docker `/info` response.
@@ -374,9 +381,15 @@ not installed, and is not added to the existing 11-module verifier graph.
 In a WSL2 test, the child likewise shares the WSL test VM's namespaces;
 there is no dedicated independently owner-approved isolation boundary.
 `SO_PEERCRED` identifies the socket's connect-time peer, not necessarily the
-writer of every subsequent response if the FD is transferred using
-`SCM_RIGHTS` or inherited by another process. A pidfd bound to the original
-child alone does not close that handoff gap. **Production NO-GO.**
+writer of every subsequent response. The new per-chunk `SCM_CREDENTIALS`
+check rejects the demonstrated inherited-FD and `SCM_RIGHTS` handoffs when
+the sender has no capability to impersonate another PID. Linux permits
+privileged senders (notably those with `CAP_SYS_ADMIN`) to supply alternate
+PID credentials, and this disposable fixture does not prove those privileges
+are absent throughout a real daemon lifecycle. It also cannot establish
+the provenance of upstream traffic forwarded by a proxy. A pidfd and
+per-message credentials alone do not prove independent control or isolation.
+**Production NO-GO.**
 
 To move beyond the experiment, commission an independent security review
 of an owner-signed native service installer and constrained supervisor:
