@@ -277,6 +277,22 @@ test("error after durable ledger commit never rewrites accepted head back to pre
   assert.equal(f.status().entries.length, 1);
 });
 
+test("read-only inspector detects maintenance after ledger completion even without a pending lock", nativeOnly, async (t) => {
+  const f = fixture(t);
+  await f.run((phase) => {
+    if (phase === "completed") {
+      f.put("state/routing.json", { maintenance: true, runningSha: NEW });
+    }
+  });
+  assert.equal(f.status().locked, false);
+  assert.equal(f.status().entries.length, 1);
+  const status = inspectProtectedNativeOfflineRecoveryFixture({ fixtureRoot: f.root });
+  assert.equal(status.status, "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION");
+  assert.equal(status.deployAuthorized, false);
+  assert.equal(status.maintenance, true);
+  assert.equal(status.pendingAttempt, false);
+});
+
 test("foreign or interrupted finalization latch blocks ledger completion and keeps maintenance for manual review", nativeOnly, async (t) => {
   const f = fixture(t);
   await assert.rejects(f.run((phase) => {

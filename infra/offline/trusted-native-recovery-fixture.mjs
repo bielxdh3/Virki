@@ -487,14 +487,21 @@ export function inspectProtectedNativeOfflineRecoveryFixture(request = {}) {
   const ledger = readJson(root, "operator/ledger/ledger.json");
   const pending = existsSync(pathname(root, "operator/ledger/.offline-release.lock"));
   const finalizing = existsSync(pathname(root, "operator/ledger/.offline-release.finalizing"));
-  const status = pending || finalizing
+  const checkpoint = journal.steps.at(-1) ?? null;
+  // A crash AFTER ledger commitment but BEFORE reopening the route can leave
+  // no pending lock. Maintenance and an incomplete journal still require
+  // manual reconciliation; absence of .lock alone is never a success proof.
+  const complete = checkpoint === "completed" && !route.maintenance &&
+    ledger.entries.at(-1)?.nextSha === active.revision;
+  const status = pending || finalizing || route.maintenance ||
+    (checkpoint !== null && !complete)
     ? "DISPOSABLE_ATTEMPT_REQUIRES_MANUAL_RECONCILIATION"
     : "DISPOSABLE_REHEARSAL_INSPECTION_ONLY";
   return Object.freeze({
     status, deployAuthorized: false,
     activeSha: active.revision,
     maintenance: route.maintenance,
-    lastCheckpoint: journal.steps.at(-1) ?? null,
+    lastCheckpoint: checkpoint,
     pendingAttempt: pending, finalizing,
     acceptedEntries: ledger.entries.length,
   });
