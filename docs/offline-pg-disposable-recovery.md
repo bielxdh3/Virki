@@ -18,6 +18,43 @@ misrepresent its own SQL invocations as a Prisma engine migration deployment.
 
 ## Running
 
+The full Prisma migration transition proof (`npm run test:migration`) now uses
+the same local-only Docker safety boundary as backup/restore, but with a separate
+`prisma-migration` fixture identity, a cryptographically random name/owner label
+and disposable database password. On Windows with Docker Desktop's local Linux
+engine and the PostgreSQL digest already cached, run:
+
+```powershell
+$env:VIRKI_MIGRATION_VALIDATION_LOCAL_DOCKER = '1'
+npm run test:migration
+Remove-Item Env:VIRKI_MIGRATION_VALIDATION_LOCAL_DOCKER
+```
+
+The checked-in GitHub-hosted Ubuntu `validate` job supplies a separate
+`VIRKI_MIGRATION_VALIDATION_LINUX_CI` opt-in only for that migration step,
+conditional on workflow runner/repository contexts. The Linux path requires
+the canonical root-owned `/run/docker.sock` socket and `/usr/bin/docker` CLI,
+explicit `--host unix:///var/run/docker.sock` and a private empty CLI config.
+The Windows path pins Docker Desktop's Linux named pipe and executable. Neither
+accepts an inherited Docker context or arbitrary target; the pinned digest is
+the only image allowed and pulls are disabled on Windows. GitHub/runner variables
+and Docker metadata are *not* cryptographic attestation: an uncompromised
+GitHub-hosted runner is a documented CI trust assumption.
+
+Before `docker run` the migration script flushes a private owner manifest
+**outside** its scratch directory. Every database health check, SQL execution
+and cleanup rechecks the exact immutable container ID, owner/fixture labels,
+image and loopback binding. If an invalid/lost CID or late creation leaves
+container ownership uncertain, the owner manifest survives normal cleanup for
+manual reconciliation; the script never guesses a target or cleans by PID/name.
+The manifest cannot guarantee survival of a host power loss (its shared temp
+parent is deliberately not opened for `fsync`) or destruction of the entire
+ephemeral runner's temp storage. It is retained across ordinary script errors
+and cleanup. This fixture cannot prove a production migration or authorize deploy.
+The receipt parent is checked as a local, canonical directory without a
+symbolic-link redirection before creation; the caller never opens the shared
+parent for synchronization or recursively removes that parent.
+
 For the full Prisma migration and backup/restore validation, in Windows
 PowerShell with Docker Desktop's Linux engine running:
 

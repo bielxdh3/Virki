@@ -173,7 +173,13 @@ jobs:
       - name: Public surface tests
         run: npm run test:public-site
 
+      - name: Validate disposable migration Docker ownership and CI admission
+        run: node --test scripts/migration-validation-docker.test.mjs scripts/backup-validation-docker.test.mjs
+
       - name: Validate clean migration baseline or transition plan
+        env:
+          # Hosted runner is trusted by CI policy, not attested by Docker info.
+          VIRKI_MIGRATION_VALIDATION_LINUX_CI: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' && '1' || '0' }}
         run: npm run test:migration
 
       - name: Test isolated PostgreSQL role separation

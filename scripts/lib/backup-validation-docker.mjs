@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { realpathSync, statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,30 +16,61 @@ export const POSTGRES_IMAGE = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e
 const OWNER_LABEL = "virki.backup-validation.owner";
 const FIXTURE_LABEL = "virki.backup-validation.fixture";
 const ID_PATTERN = /^[a-f0-9]{64}$/u;
+const MIGRATION_KIND = "prisma-migration";
+
+export function assertSafeOwnerReceiptParent(parent, { lstat = lstatSync, realpath = realpathSync, platform = process.platform } = {}) {
+  if (typeof parent !== "string" || !path.isAbsolute(parent) || /^(?:\\\\|\/\/)/u.test(parent)) {
+    throw new Error("Owner receipt requires a local absolute temporary directory.");
+  }
+  let observed;
+  let resolved;
+  try {
+    observed = lstat(parent);
+    resolved = realpath(parent);
+  } catch {
+    throw new Error("Owner receipt temporary parent could not be checked.");
+  }
+  const expected = path.resolve(parent);
+  const equal = platform === "win32" ? resolved.toLowerCase() === expected.toLowerCase() : resolved === expected;
+  if (!observed.isDirectory() || observed.isSymbolicLink() || !equal) {
+    throw new Error("Owner receipt refuses symlinked, redirected or non-directory temporary parent.");
+  }
+}
+
+export function assertLocalMigrationEnvironment(env = process.env, platform = process.platform) {
+  const mapped = { ...env };
+  if (Object.hasOwn(env, "VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER") || Object.hasOwn(env, "VIRKI_BACKUP_VALIDATION_LINUX_CI")) {
+    throw new Error("Migration fixture refuses mixed backup Docker opt-in variables.");
+  }
+  mapped.VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER = env.VIRKI_MIGRATION_VALIDATION_LOCAL_DOCKER;
+  mapped.VIRKI_BACKUP_VALIDATION_LINUX_CI = env.VIRKI_MIGRATION_VALIDATION_LINUX_CI;
+  delete mapped.VIRKI_MIGRATION_VALIDATION_LOCAL_DOCKER;
+  delete mapped.VIRKI_MIGRATION_VALIDATION_LINUX_CI;
+  return assertLocalBackupEnvironment(mapped, platform);
+}
 
 // Written BEFORE `docker run`, so a failed CLI or delayed container creation
 // cannot destroy the only independently useful name/owner lookup information.
 export async function createBackupOwnerEvidence(docker, parent = os.tmpdir()) {
+  assertSafeOwnerReceiptParent(parent);
   const directory = await mkdtemp(path.join(parent, "virki-backup-owner-"));
   const manifest = {
     version: 1,
-    fixture: "prisma-backup-restore",
+    fixture: docker.fixture,
     name: docker.name,
-    ownerLabel: `${OWNER_LABEL}=${docker.nonce}`,
+    ownerLabel: `${docker.ownerLabel}=${docker.nonce}`,
     image: POSTGRES_IMAGE,
     daemonId: docker.daemonId,
     endpoint: docker.host,
   };
   try {
-    // Node 22 flush:true fsyncs the receipt before returning. Linux also
-    // syncs its new directory entry so an uncertain docker run can be
-    // reconciled after process failure (subject to runner/disk survival).
+    // Node 22 flush:true fsyncs the receipt before returning. Sync only the
+    // newly created private directory; never open/fsync the shared OS temp
+    // parent (which may be an attacker-controlled mount or symlink).
     await writeFile(path.join(directory, "owner.json"), `${JSON.stringify(manifest)}\n`, { flag: "wx", mode: 0o600, flush: true });
     if (process.platform === "linux") {
       const handle = await open(directory, "r");
       try { await handle.sync(); } finally { await handle.close(); }
-      const parentHandle = await open(parent, "r");
-      try { await parentHandle.sync(); } finally { await parentHandle.close(); }
     }
     return directory;
   } catch (error) {
@@ -135,8 +166,9 @@ function assertDockerSuccess(result, operation) {
 
 export class LocalBackupDocker {
   constructor({ configDirectory, env = process.env, platform = process.platform, spawn = spawnSync,
-    linuxProbe = inspectLinuxRunnerSocket, nonce = randomBytes(24).toString("hex") }) {
-    this.mode = assertLocalBackupEnvironment(env, platform);
+    linuxProbe = inspectLinuxRunnerSocket, nonce = randomBytes(24).toString("hex"), fixture = "prisma-backup-restore" }) {
+    if (fixture !== "prisma-backup-restore" && fixture !== MIGRATION_KIND) throw new Error("Unknown isolated Docker fixture.");
+    this.mode = fixture === MIGRATION_KIND ? assertLocalMigrationEnvironment(env, platform) : assertLocalBackupEnvironment(env, platform);
     if (!configDirectory || !/^[a-f0-9]{48}$/u.test(nonce)) throw new Error("Invalid backup validation isolation configuration.");
     this.spawn = spawn;
     this.linuxProbe = linuxProbe;
@@ -145,7 +177,10 @@ export class LocalBackupDocker {
     this.host = this.mode === "linux-ci" ? LINUX_CI_DOCKER_HOST : DOCKER_HOST;
     this.configDirectory = configDirectory;
     this.nonce = nonce;
-    this.name = `virki-backup-validation-${nonce}`;
+    this.fixture = fixture;
+    this.ownerLabel = fixture === MIGRATION_KIND ? "virki.migration-validation.owner" : OWNER_LABEL;
+    this.fixtureLabel = fixture === MIGRATION_KIND ? "virki.migration-validation.fixture" : FIXTURE_LABEL;
+    this.name = `${fixture === MIGRATION_KIND ? "virki-migration-validation" : "virki-backup-validation"}-${nonce}`;
     this.id = null;
     this.runAttempted = false;
     this.cleaned = false;
@@ -207,8 +242,8 @@ export class LocalBackupDocker {
     try { container = JSON.parse(this.command(["inspect", "--type", "container", "--format", "{{json .}}", target])); }
     catch { throw new Error("Owned backup validation container could not be inspected."); }
     if (!ID_PATTERN.test(container?.Id ?? "") || container?.Name !== `/${this.name}` ||
-        container?.Config?.Labels?.[OWNER_LABEL] !== this.nonce ||
-        container?.Config?.Labels?.[FIXTURE_LABEL] !== "prisma-backup-restore" ||
+        container?.Config?.Labels?.[this.ownerLabel] !== this.nonce ||
+        container?.Config?.Labels?.[this.fixtureLabel] !== this.fixture ||
         container?.Config?.Image !== POSTGRES_IMAGE ||
         container?.Image !== this.expectedImageId ||
         container?.HostConfig?.Privileged !== false ||
@@ -247,7 +282,7 @@ export class LocalBackupDocker {
     this.runAttempted = true;
     const result = this.call([
       "run", "--detach", "--pull=never", "--name", this.name,
-      "--label", `${OWNER_LABEL}=${this.nonce}`, "--label", `${FIXTURE_LABEL}=prisma-backup-restore`,
+      "--label", `${this.ownerLabel}=${this.nonce}`, "--label", `${this.fixtureLabel}=${this.fixture}`,
       "--publish", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m",
       "--env", `POSTGRES_DB=${database}`, "--env", `POSTGRES_USER=${user}`,
       "--env", `POSTGRES_PASSWORD=${password}`,
@@ -284,13 +319,17 @@ export class LocalBackupDocker {
   }
 
   exec(command, { environment = {}, input, binary = false, timeout = 120_000, maxBuffer } = {}) {
+    const result = this.execResult(command, { environment, input, binary, timeout, maxBuffer });
+    if (result.error || result.status !== 0) throw new Error("Local backup Docker exec failed (details redacted).");
+    return result.stdout;
+  }
+
+  execResult(command, { environment = {}, input, binary = false, timeout = 120_000, maxBuffer } = {}) {
     this.engine();
     this.inspect();
     const envArgs = Object.entries(environment).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
     const args = ["exec", "--interactive", ...envArgs, this.id, ...command];
-    const result = this.call(args, { input, binary, timeout, maxBuffer: maxBuffer ?? (binary ? 100 * 1024 * 1024 : 10 * 1024 * 1024) });
-    if (result.error || result.status !== 0) throw new Error("Local backup Docker exec failed (details redacted).");
-    return result.stdout;
+    return this.call(args, { input, binary, timeout, maxBuffer: maxBuffer ?? (binary ? 100 * 1024 * 1024 : 10 * 1024 * 1024) });
   }
 
   cleanup() {
