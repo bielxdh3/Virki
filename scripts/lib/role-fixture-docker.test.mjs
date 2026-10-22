@@ -416,6 +416,62 @@ test("RED→GREEN: config injection between Buildx preflight and build fails clo
   assert.equal(guard.uncertain, true);
 });
 
+test("RED→GREEN: real signed Buildx default inspect tolerates device names and empty internal state", () => {
+  const calls = [];
+  const guard = new OwnedRoleDocker({
+    runId, cwd: "E:\\Virki\\.worktrees\\safe-test", platform: "win32", env: {}, journal: () => {},
+    invoke: (exe, argv, options) => {
+      calls.push(argv);
+      if (argv[2] === "info") return { status: 0, stdout: JSON.stringify({
+        OSType: "linux", OperatingSystem: "Docker Desktop", ID: "LOCALENGINE1234",
+      }) };
+      if (argv[2] === "inspect") {
+        mkdirSync(options.env.BUILDX_CONFIG);
+        for (const directory of ["activity", "defaults", "instances"]) {
+          mkdirSync(path.join(options.env.BUILDX_CONFIG, directory));
+        }
+        writeFileSync(path.join(options.env.BUILDX_CONFIG, ".lock"), "");
+        return { status: 0, stdout: [
+          "Name:   default", "Driver: docker", "", "Nodes:",
+          "Name:             default", "Endpoint:         default", "Status:           running",
+          "BuildKit version: v0.31.2", "Platforms:        linux/amd64, linux/arm64",
+          "Devices:", " Name:                  docker.com/gpu=webgpu",
+          " Automatically allowed: false", "GC Policy rule#0:",
+        ].join("\n") };
+      }
+      if (argv[2] === "build") return { status: 0, stdout: "safe local build" };
+      throw Error("Unexpected Docker/Buildx operation");
+    },
+  });
+  assert.equal(guard.call(roleImageBuild).status, 0);
+  assert.equal(calls.filter((argv) => argv[2] === "build").length, 1);
+});
+
+test("RED→GREEN: even inside Buildx internal state, injected remote builder blocks image build", () => {
+  const calls = [];
+  const guard = new OwnedRoleDocker({
+    runId, cwd: "E:\\Virki\\.worktrees\\safe-test", platform: "win32", env: {}, journal: () => {},
+    invoke: (exe, argv, options) => {
+      calls.push(argv);
+      if (argv[2] === "info") return { status: 0, stdout: JSON.stringify({
+        OSType: "linux", OperatingSystem: "Docker Desktop", ID: "LOCALENGINE1234",
+      }) };
+      if (argv[2] === "inspect") {
+        mkdirSync(options.env.BUILDX_CONFIG);
+        for (const directory of ["activity", "defaults", "instances"]) {
+          mkdirSync(path.join(options.env.BUILDX_CONFIG, directory));
+        }
+        writeFileSync(path.join(options.env.BUILDX_CONFIG, ".lock"), "");
+        writeFileSync(path.join(options.env.BUILDX_CONFIG, "instances", "remote"), "malicious builder");
+        return { status: 0, stdout: "Name: default\nDriver: docker\nNodes:\nName: default\nEndpoint: default\nStatus: running\n" };
+      }
+      throw Error("Build executed with injected remote builder state");
+    },
+  });
+  assert.throws(() => guard.call(roleImageBuild), /private configuration identity\/contents changed/u);
+  assert.equal(calls.some((argv) => argv[2] === "build"), false);
+});
+
 test("pins allowed migrator command to the verified image digest rather than mutable tag", () => {
   const fake = mockGuard();
   fake.guard.call(networkCreate());

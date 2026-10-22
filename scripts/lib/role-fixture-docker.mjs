@@ -354,14 +354,21 @@ export function verifyOfficialBuildx({ stat = lstatSync, canonicalize = realpath
 function requireLocalDefaultBuildxBuilder(stdout) {
   // The signed plugin must resolve its own default builder through the fresh
   // Docker configuration, rather than a remembered remote/container builder.
+  // Recent Docker Desktop adds a "Devices" section containing more "Name:"
+  // fields; these describe BuildKit devices, not additional builder nodes.
   const lines = typeof stdout === "string" ? stdout.split(/\r?\n/u).map((line) => line.trim()) : [];
-  const values = (key) => lines.filter((line) => line.startsWith(`${key}:`))
+  const nodesAt = lines.indexOf("Nodes:");
+  const tailAt = lines.findIndex((line, at) => at > nodesAt &&
+    /^(?:Labels:|Devices:|GC Policy rule#[0-9]+:)$/u.test(line));
+  const builder = nodesAt > 0 ? lines.slice(0, nodesAt) : [];
+  const node = nodesAt > 0 ? lines.slice(nodesAt + 1, tailAt < 0 ? undefined : tailAt) : [];
+  const values = (section, key) => section.filter((line) => line.startsWith(`${key}:`))
     .map((line) => line.slice(key.length + 1).trim());
-  if (values("Name").some((v) => v !== "default") ||
-      !identicalArgs(values("Driver"), ["docker"]) ||
-      !identicalArgs(values("Endpoint"), ["default"]) ||
-      !identicalArgs(values("Status"), ["running"]) ||
-      values("Name").length !== 2) {
+  if (!identicalArgs(values(builder, "Name"), ["default"]) ||
+      !identicalArgs(values(builder, "Driver"), ["docker"]) ||
+      !identicalArgs(values(node, "Name"), ["default"]) ||
+      !identicalArgs(values(node, "Endpoint"), ["default"]) ||
+      !identicalArgs(values(node, "Status"), ["running"])) {
     throw Error("Role fixture Buildx default builder identity/driver/endpoint untrusted.");
   }
 }
@@ -370,8 +377,32 @@ function assertUntouchedBuildxConfig(directory, original) {
   const current = lstatSync(directory);
   if (!current.isDirectory() || current.isSymbolicLink() ||
     current.dev !== original.dev || current.ino !== original.ino ||
-    realpathSync.native(directory).toLowerCase() !== directory.toLowerCase() ||
-    readdirSync(directory).length !== 0) {
+    realpathSync.native(directory).toLowerCase() !== directory.toLowerCase()) {
+    throw Error("Role fixture Buildx private configuration identity/contents changed.");
+  }
+  const rootNames = readdirSync(directory);
+  // The signed Docker Desktop Buildx inspect creates precisely its private
+  // empty bookkeeping folders and zero-byte lock. A remote instance, saved
+  // default, config.json, extra plugin path, or unfamiliar file is rejected.
+  if (rootNames.length === 0) return;
+  if (!identicalArgs(rootNames, ["buildx"])) {
+    throw Error("Role fixture Buildx private configuration identity/contents changed.");
+  }
+  const statePath = path.join(directory, "buildx");
+  const state = lstatSync(statePath);
+  if (!state.isDirectory() || state.isSymbolicLink() ||
+      !identicalArgs(readdirSync(statePath).sort(), [".lock", "activity", "defaults", "instances"])) {
+    throw Error("Role fixture Buildx private configuration identity/contents changed.");
+  }
+  for (const name of ["activity", "defaults", "instances"]) {
+    const entryPath = path.join(statePath, name);
+    const entry = lstatSync(entryPath);
+    if (!entry.isDirectory() || entry.isSymbolicLink() || readdirSync(entryPath).length !== 0) {
+      throw Error("Role fixture Buildx private configuration identity/contents changed.");
+    }
+  }
+  const lock = lstatSync(path.join(statePath, ".lock"));
+  if (!lock.isFile() || lock.isSymbolicLink() || lock.size !== 0 || lock.nlink !== 1) {
     throw Error("Role fixture Buildx private configuration identity/contents changed.");
   }
 }
