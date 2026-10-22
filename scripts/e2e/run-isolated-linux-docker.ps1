@@ -539,9 +539,9 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Could not start the isolated Playwright runner.' }
   Assert-RunnerFileSha256 '/tmp/staged.patch' $script:stagedPatchSha256 'staged patch'
   Assert-RunnerFileSha256 '/tmp/working-tree.patch' $script:workingTreePatchSha256 'unstaged patch'
-  Invoke-PinnedDocker network connect $networkName $runnerName | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not connect the runner to the private database network.' }
-
+  # Bootstrap dependencies only on the dedicated egress network. Do not
+  # attach the private database network until all external package installs
+  # finish, or untrusted postinstall scripts could reach both networks.
   Invoke-PinnedDocker exec $runnerName bash -lc 'apt-get update -qq && apt-get install -y --no-install-recommends git libnss3-tools'
   if ($LASTEXITCODE -ne 0) { throw 'Could not install Linux Git and Chromium NSS tooling.' }
   $nodeVersion = (Invoke-PinnedDocker exec $runnerName node --version).Trim()
@@ -596,6 +596,11 @@ try {
 
   Invoke-PinnedDocker network disconnect $bootstrapNetworkName $runnerName | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not disconnect the runner bootstrap egress network.' }
+  # Docker Desktop retains the original network mode in HostConfig after
+  # disconnect; preserve this empty network until its replacement attaches.
+  # The container never has simultaneous bootstrap/private endpoints.
+  Invoke-PinnedDocker network connect $networkName $runnerName | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not connect the runner to the private database network.' }
   Invoke-OwnedDockerCleanup 'bootstrapNetwork'
   Invoke-PinnedDocker exec --workdir /workspace --env ("DATABASE_URL=" + $urls.runtime) --env ("MIGRATION_DATABASE_URL=" + $urls.migrator) $runnerName npm run prisma:migrate:deploy
   if ($LASTEXITCODE -ne 0) { throw 'Committed migrations did not apply to the disposable database.' }

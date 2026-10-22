@@ -13,6 +13,21 @@ import { redactBrowserE2ELog } from "./redact-browser-e2e-log.mjs";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "../..");
 
+test("RED→GREEN: Docker dependency bootstrap disconnects before private DB attachment", () => {
+  const launcher = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  const install = launcher.indexOf("Invoke-PinnedDocker exec --workdir /workspace $runnerName npm ci");
+  const browserDeps = launcher.indexOf("Invoke-LoggedStage 'chromium-dependencies'");
+  const disconnect = launcher.indexOf("Invoke-PinnedDocker network disconnect $bootstrapNetworkName $runnerName");
+  const connectPrivate = launcher.indexOf("Invoke-PinnedDocker network connect $networkName $runnerName");
+  const deleteBootstrap = launcher.indexOf("Invoke-OwnedDockerCleanup 'bootstrapNetwork'", disconnect);
+  const migrate = launcher.indexOf("npm run prisma:migrate:deploy", connectPrivate);
+  assert.ok(install > 0 && browserDeps > install && disconnect > browserDeps,
+    "package installers must run only on the bootstrap network");
+  assert.ok(connectPrivate > disconnect && deleteBootstrap > connectPrivate && migrate > deleteBootstrap,
+    "the bootstrap endpoint must be disconnected before the DB attach while preserving Docker HostConfig mode");
+  assert.equal(launcher.indexOf("Invoke-PinnedDocker network connect $networkName $runnerName", connectPrivate + 1), -1);
+});
+
 test("Windows runs browser E2E in isolated Linux Docker and carries filters as JSON data", () => {
   const playwrightArguments = ["--grep", "OIDC flow with spaces", "value; do-not-run-shell"];
   const command = buildE2ECommand("win32", playwrightArguments, "C:\\Virki");
