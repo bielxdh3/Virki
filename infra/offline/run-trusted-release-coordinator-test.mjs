@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runOwnedLocalLinuxFixture } from "./disposable-local-docker.mjs";
 
 // Explicit opt-in for the destructive fixed-path test fixture. Never run the
 // test with host privileges or mounted host /etc or /var/lib directories.
@@ -23,12 +23,9 @@ const args = [
   IMAGE, "node", "--test", "infra/offline/trusted-release-coordinator.test.mjs",
   "infra/offline/trusted-owner-installation.test.mjs",
 ];
-const result = spawnSync("docker", args, {
-  cwd: sourceRoot, stdio: "inherit", shell: false, timeout: 60_000,
-});
-if (result.error) {
-  process.stderr.write("Isolated coordinator test launcher failed: " + result.error.message + "\n");
+try {
+  runOwnedLocalLinuxFixture(args, { cwd: sourceRoot, timeout: 60_000 });
+} catch {
+  process.stderr.write("Isolated coordinator fixture refused or failed.\n");
   process.exitCode = 1;
-} else {
-  process.exitCode = result.status === 0 ? 0 : 1;
 }

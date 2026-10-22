@@ -26,6 +26,7 @@
     "test:backup:inventory": "node --test scripts/backup-retention-inventory.test.mjs",
     "test:offline:rehearsal": "node --test scripts/offline-release-rehearsal.test.mjs",
     "test:offline:daemon-identity": "node --test infra/offline/isolated-docker-daemon-identity.test.mjs",
+    "test:offline:local-docker-fixture": "node --test infra/offline/disposable-local-docker.test.mjs",
     "test:offline:witness-read": "node --test scripts/offline-ledger-witness-proof.test.mjs",
     "test:offline:peer:container": "node infra/offline/native-peer/run-disposable-native-peer-test.mjs",
     "test:offline:supervisor:container": "node infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs",
