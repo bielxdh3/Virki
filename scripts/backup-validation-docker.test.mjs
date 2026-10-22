@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  assertLocalBackupEnvironment, DOCKER_BINARY, DOCKER_HOST, LocalBackupDocker, POSTGRES_IMAGE,
+  assertLocalBackupEnvironment, DOCKER_BINARY, DOCKER_HOST, inspectLinuxRunnerSocket,
+  LINUX_CI_DOCKER_BINARY, LINUX_CI_DOCKER_HOST, LocalBackupDocker, POSTGRES_IMAGE,
 } from "./lib/backup-validation-docker.mjs";
 
 const id = "a".repeat(64);
 const alternateId = "c".repeat(64);
 const nonce = "b".repeat(48);
 const env = { VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER: "1" };
+const ciEnv = {
+  VIRKI_BACKUP_VALIDATION_LINUX_CI: "1", GITHUB_ACTIONS: "true", CI: "true",
+  RUNNER_OS: "Linux", RUNNER_ENVIRONMENT: "github-hosted", GITHUB_REPOSITORY: "bielxdh3/Virki",
+  GITHUB_RUN_ID: "1234567", GITHUB_RUN_ATTEMPT: "1",
+};
 
 function fixture(overrides = {}) {
   const calls = [];
   const state = { infoId: "desktop-engine-id", owner: nonce, containerId: id, returnedId: id, ...overrides };
+  const identity = { socketDevice: 7, socketInode: 1234, hostname: "gha-runner-01" };
   const inspect = () => ({
     Id: state.containerId,
     Image: state.imageId ?? `sha256:${"d".repeat(64)}`,
@@ -31,7 +38,8 @@ function fixture(overrides = {}) {
   const spawn = (binary, args, options) => {
     calls.push({ binary, args, options });
     const subcommand = args[4];
-    if (subcommand === "info") return { status: 0, stdout: JSON.stringify({ OSType: "linux", OperatingSystem: state.os ?? "Docker Desktop", ID: state.infoId }) };
+    if (subcommand === "info") return { status: 0, stdout: JSON.stringify({ OSType: "linux", OperatingSystem: state.os ?? (state.linux ? "Ubuntu 24.04" : "Docker Desktop"), ID: state.infoId, Name: state.daemonName ?? identity.hostname }) };
+    if (subcommand === "pull") return { status: state.pullStatus ?? 0, stdout: "Digest: verified" };
     if (subcommand === "image") return { status: state.imageStatus ?? 0, stdout: `sha256:${"d".repeat(64)}` };
     if (subcommand === "run") return { status: state.runStatus ?? 0, stdout: state.returnedId, stderr: "password=secret" };
     if (subcommand === "inspect") return { status: 0, stdout: JSON.stringify({ ...inspect(), ...state.inspectOverrides }) };
@@ -39,8 +47,10 @@ function fixture(overrides = {}) {
     if (subcommand === "exec") return { status: state.execStatus ?? 0, stdout: options.encoding === null ? Buffer.from("fixture") : "fixture", stderr: "secret=leak" };
     throw new Error(`Unexpected Docker invocation: ${subcommand}`);
   };
-  const docker = new LocalBackupDocker({ configDirectory: "C:\\private\\test-docker-config", env, platform: "win32", spawn, nonce });
-  return { docker, calls, state };
+  const docker = new LocalBackupDocker({ configDirectory: state.linux ? "/tmp/backup-docker-config" : "C:\\private\\test-docker-config",
+    env: state.linux ? ciEnv : env, platform: state.linux ? "linux" : "win32", spawn,
+    linuxProbe: () => ({ ...identity, ...state.linuxProbeOverrides }), nonce });
+  return { docker, calls, state, identity };
 }
 
 test("refuses all ambient remote/context, database and Node overrides before invoking Docker", () => {
@@ -49,6 +59,61 @@ test("refuses all ambient remote/context, database and Node overrides before inv
   }
   assert.throws(() => assertLocalBackupEnvironment({}, "win32"), /opt-in/u);
   assert.throws(() => assertLocalBackupEnvironment(env, "linux"), /opt-in/u);
+});
+
+test("Linux CI rejects self-hosted, spoofed and incomplete workflow admission even with opt-in", () => {
+  for (const overrides of [
+    { RUNNER_ENVIRONMENT: "self-hosted" }, { GITHUB_ACTIONS: "false" }, { RUNNER_OS: "Windows" },
+    { CI: "false" }, { GITHUB_REPOSITORY: "attacker/fork" }, { GITHUB_RUN_ID: "0" },
+    { GITHUB_RUN_ATTEMPT: "${bad}" }, { VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER: "1" },
+  ]) {
+    assert.throws(() => assertLocalBackupEnvironment({ ...ciEnv, ...overrides }, "linux"), /opt-in/u);
+  }
+  assert.equal(assertLocalBackupEnvironment(ciEnv, "linux"), "linux-ci");
+  for (const key of ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "COMPOSE_FILE", "PGHOST", "PGPASSWORD", "MIGRATION_DATABASE_URL", "NODE_OPTIONS"]) {
+    assert.throws(() => assertLocalBackupEnvironment({ ...ciEnv, [key]: "evil" }, "linux"), /ambient/u);
+  }
+});
+
+test("Linux CI validates root-owned canonical local Unix socket and root-owned CLI", () => {
+  const stat = (target) => target.endsWith(".sock")
+    ? { isSocket: () => true, uid: 0, mode: 0o140660, dev: 4, ino: 55 }
+    : { isFile: () => true, uid: 0, mode: 0o100755 };
+  const realpath = (target) => target.endsWith(".sock") ? "/run/docker.sock" : LINUX_CI_DOCKER_BINARY;
+  const valid = { stat, realpath, hostname: () => "gha-linux-runner" };
+  assert.deepEqual(inspectLinuxRunnerSocket(valid), { socketDevice: 4, socketInode: 55, hostname: "gha-linux-runner" });
+  for (const probe of [
+    { realpath: (target) => target.endsWith(".sock") ? "/tmp/ssh-forwarded.sock" : LINUX_CI_DOCKER_BINARY },
+    { stat: (target) => ({ ...stat(target), uid: 1000 }) },
+    { stat: (target) => ({ ...stat(target), mode: 0o140666 }) },
+    { stat: () => ({ isSocket: () => false, isFile: () => false, uid: 0, mode: 0o100755, dev: 4, ino: 55 }) },
+    { hostname: () => "host\nspoofed" },
+  ]) {
+    assert.throws(() => inspectLinuxRunnerSocket({ ...valid, ...probe }), /trustworthy/u);
+  }
+  assert.throws(() => inspectLinuxRunnerSocket({ ...valid, stat: () => { throw new Error("ENOENT"); } }), /could not be verified/u);
+});
+
+test("Linux CI pins argv, own socket and engine, pulls only cached digest before run", () => {
+  const { docker, calls, state } = fixture({ linux: true });
+  docker.start({ database: "d", user: "u", password: "p" });
+  assert.deepEqual(calls.filter((call) => call.args[4] === "pull").map((call) => call.args.slice(4)), [["pull", POSTGRES_IMAGE]]);
+  assert.ok(calls.every((call) => call.binary === LINUX_CI_DOCKER_BINARY && call.args[1] === LINUX_CI_DOCKER_HOST));
+  assert.ok(calls.every((call) => Object.keys(call.options.env).sort().join() === "DOCKER_CONFIG,HOME,LANG"));
+  docker.cleanup();
+  state.linuxProbeOverrides = { socketInode: 9999 };
+  assert.throws(() => docker.engine(), /socket or runner identity changed/u);
+});
+
+test("Linux CI refuses cross-host daemon and changed socket before run/cleanup", () => {
+  const mismatched = fixture({ linux: true, daemonName: "another-remote-host" });
+  assert.throws(() => mismatched.docker.start({ database: "d", user: "u", password: "p" }), /Docker Desktop Linux engine/u);
+  assert.ok(!mismatched.calls.some((call) => ["run", "pull"].includes(call.args[4])));
+  const tampered = fixture({ linux: true });
+  tampered.docker.start({ database: "d", user: "u", password: "p" });
+  tampered.state.linuxProbeOverrides = { socketDevice: 900 };
+  assert.throws(() => tampered.docker.cleanup(), /socket or runner identity changed/u);
+  assert.ok(!tampered.calls.some((call) => call.args[4] === "rm"));
 });
 
 test("pins executable, npipe, local engine, owner and exact ID for real disposable fixture", () => {

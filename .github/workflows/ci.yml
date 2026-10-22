@@ -180,6 +180,8 @@ jobs:
         run: npm run test:database:roles
 
       - name: Validate database backup and restore
+        env:
+          VIRKI_BACKUP_VALIDATION_LINUX_CI: "1"
         run: npm run test:backup:restore
 
       - name: Build applications

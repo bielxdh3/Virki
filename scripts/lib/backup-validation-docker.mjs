@@ -1,23 +1,55 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { realpathSync, statSync } from "node:fs";
+import os from "node:os";
 
-// This is an explicitly local Windows development fixture, never a generic Docker launcher.
+// Only the explicit local Windows fixture or a GitHub-hosted disposable Linux CI runner.
 export const DOCKER_BINARY = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
 export const DOCKER_HOST = "npipe:////./pipe/dockerDesktopLinuxEngine";
+export const LINUX_CI_DOCKER_BINARY = "/usr/bin/docker";
+export const LINUX_CI_DOCKER_HOST = "unix:///var/run/docker.sock";
 export const POSTGRES_IMAGE = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
 const OWNER_LABEL = "virki.backup-validation.owner";
 const FIXTURE_LABEL = "virki.backup-validation.fixture";
 const ID_PATTERN = /^[a-f0-9]{64}$/u;
 
 export function assertLocalBackupEnvironment(env = process.env, platform = process.platform) {
-  if (env.VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER !== "1" || platform !== "win32") {
-    throw new Error("Backup validation requires explicit Windows local Docker Desktop opt-in (VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER=1).");
+  const windows = platform === "win32" && env.VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER === "1" && !env.VIRKI_BACKUP_VALIDATION_LINUX_CI;
+  const linuxCI = platform === "linux" && env.VIRKI_BACKUP_VALIDATION_LINUX_CI === "1" && !env.VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER &&
+    env.GITHUB_ACTIONS === "true" && env.CI === "true" && env.RUNNER_OS === "Linux" &&
+    env.RUNNER_ENVIRONMENT === "github-hosted" && env.GITHUB_REPOSITORY === "bielxdh3/Virki" &&
+    /^[1-9][0-9]{0,19}$/u.test(env.GITHUB_RUN_ID ?? "") && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? "");
+  if (!windows && !linuxCI) {
+    throw new Error("Backup validation requires explicit Windows Docker Desktop or verified GitHub-hosted Linux CI opt-in.");
   }
   const forbidden = Object.keys(env).filter((key) =>
     /^(?:DOCKER_|COMPOSE_|PG(?:HOST|PORT|SERVICE|SERVICEFILE|PASSFILE|PASSWORD|OPTIONS|USER|DATABASE)$|DATABASE_URL$|MIGRATION_DATABASE_URL$|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$)/iu.test(key));
   if (forbidden.length) {
     throw new Error("Backup validation refuses ambient Docker, database and Node overrides; unset them before local testing.");
   }
+  return linuxCI ? "linux-ci" : "windows-local";
+}
+
+export function inspectLinuxRunnerSocket({
+  stat = statSync, realpath = realpathSync, hostname = os.hostname,
+} = {}) {
+  let socket, binary, resolvedSocket, resolvedBinary;
+  try {
+    socket = stat("/var/run/docker.sock");
+    binary = stat(LINUX_CI_DOCKER_BINARY);
+    resolvedSocket = realpath("/var/run/docker.sock");
+    resolvedBinary = realpath(LINUX_CI_DOCKER_BINARY);
+  } catch {
+    throw new Error("GitHub-hosted Linux Docker socket or CLI could not be verified.");
+  }
+  if (resolvedSocket !== "/run/docker.sock" || resolvedBinary !== LINUX_CI_DOCKER_BINARY ||
+    !socket.isSocket() || socket.uid !== 0 || (socket.mode & 0o002) !== 0 ||
+    !binary.isFile() || binary.uid !== 0 || (binary.mode & 0o002) !== 0 ||
+    !Number.isSafeInteger(socket.dev) || !Number.isSafeInteger(socket.ino) ||
+    !/^[A-Za-z0-9][A-Za-z0-9.-]{0,253}$/u.test(hostname())) {
+    throw new Error("GitHub-hosted Linux Docker socket, CLI or hostname is not trustworthy.");
+  }
+  return { socketDevice: socket.dev, socketInode: socket.ino, hostname: hostname() };
 }
 
 function assertDockerSuccess(result, operation) {
@@ -28,27 +60,40 @@ function assertDockerSuccess(result, operation) {
 }
 
 export class LocalBackupDocker {
-  constructor({ configDirectory, env = process.env, platform = process.platform, spawn = spawnSync, nonce = randomBytes(24).toString("hex") }) {
-    assertLocalBackupEnvironment(env, platform);
+  constructor({ configDirectory, env = process.env, platform = process.platform, spawn = spawnSync,
+    linuxProbe = inspectLinuxRunnerSocket, nonce = randomBytes(24).toString("hex") }) {
+    this.mode = assertLocalBackupEnvironment(env, platform);
     if (!configDirectory || !/^[a-f0-9]{48}$/u.test(nonce)) throw new Error("Invalid backup validation isolation configuration.");
     this.spawn = spawn;
+    this.linuxProbe = linuxProbe;
+    this.linuxIdentity = this.mode === "linux-ci" ? this.linuxProbe() : null;
+    this.binary = this.mode === "linux-ci" ? LINUX_CI_DOCKER_BINARY : DOCKER_BINARY;
+    this.host = this.mode === "linux-ci" ? LINUX_CI_DOCKER_HOST : DOCKER_HOST;
     this.configDirectory = configDirectory;
     this.nonce = nonce;
     this.name = `virki-backup-validation-${nonce}`;
     this.id = null;
     this.daemonId = null;
     this.expectedImageId = null;
-    this.dockerEnvironment = {
-      SystemRoot: env.SystemRoot ?? "C:\\Windows",
-      WINDIR: env.WINDIR ?? "C:\\Windows",
-      TEMP: env.TEMP ?? "C:\\Windows\\Temp",
-      TMP: env.TMP ?? "C:\\Windows\\Temp",
-      DOCKER_CONFIG: configDirectory,
-    };
+    this.dockerEnvironment = this.mode === "linux-ci"
+      ? { HOME: configDirectory, LANG: "C", DOCKER_CONFIG: configDirectory }
+      : { SystemRoot: env.SystemRoot ?? "C:\\Windows", WINDIR: env.WINDIR ?? "C:\\Windows",
+          TEMP: env.TEMP ?? "C:\\Windows\\Temp", TMP: env.TMP ?? "C:\\Windows\\Temp", DOCKER_CONFIG: configDirectory };
+  }
+
+  assertEndpoint() {
+    if (this.linuxIdentity) {
+      const current = this.linuxProbe();
+      if (current.socketDevice !== this.linuxIdentity.socketDevice || current.socketInode !== this.linuxIdentity.socketInode ||
+          current.hostname !== this.linuxIdentity.hostname) {
+        throw new Error("Linux CI Docker socket or runner identity changed; manual reconciliation required.");
+      }
+    }
   }
 
   call(args, { input, binary = false, timeout = 120_000, maxBuffer = 10 * 1024 * 1024 } = {}) {
-    return this.spawn(DOCKER_BINARY, ["--host", DOCKER_HOST, "--config", this.configDirectory, ...args], {
+    this.assertEndpoint();
+    return this.spawn(this.binary, ["--host", this.host, "--config", this.configDirectory, ...args], {
       input, encoding: binary ? null : "utf8", windowsHide: true, timeout, maxBuffer,
       env: this.dockerEnvironment,
     });
@@ -60,9 +105,12 @@ export class LocalBackupDocker {
 
   engine() {
     let info;
+    this.assertEndpoint();
     try { info = JSON.parse(this.command(["info", "--format", "{{json .}}"])); }
     catch { throw new Error("Local Docker Desktop Linux engine identity cannot be verified."); }
-    if (info?.OSType !== "linux" || !/^Docker Desktop(?:\b|$)/u.test(info.OperatingSystem ?? "") ||
+    const trustedOS = this.mode === "linux-ci" ? info?.Name === this.linuxIdentity.hostname && !info?.OperatingSystem?.includes("Docker Desktop")
+      : /^Docker Desktop(?:\b|$)/u.test(info?.OperatingSystem ?? "");
+    if (info?.OSType !== "linux" || !trustedOS ||
         typeof info.ID !== "string" || info.ID.length < 8) {
       throw new Error("Backup validation requires the local Docker Desktop Linux engine.");
     }
@@ -107,6 +155,12 @@ export class LocalBackupDocker {
 
   start({ database, user, password }) {
     this.engine();
+    if (this.mode === "linux-ci") {
+      // The ephemeral hosted CI job may start with an empty image cache. The
+      // sole allowed network fetch is this exact immutable PostgreSQL digest.
+      this.command(["pull", POSTGRES_IMAGE], { timeout: 180_000 });
+      this.engine();
+    }
     // Never trigger a registry fetch or silently substitute a locally tagged image.
     const imageId = this.command(["image", "inspect", POSTGRES_IMAGE, "--format", "{{.Id}}"]).trim();
     if (!/^sha256:[a-f0-9]{64}$/u.test(imageId)) throw new Error("Cached PostgreSQL image identity is invalid.");

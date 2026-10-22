@@ -27,8 +27,9 @@ npm run test:backup:restore
 Remove-Item Env:VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER
 ```
 
-This validation refuses other platforms, contexts, remote Docker hosts,
-inherited database credentials and an uncached pinned image. It uses the
+This validation refuses other platforms, contexts, remote Docker hosts and
+inherited database credentials. The local Windows mode requires a cached pinned
+image. It uses the
 installed Docker Desktop executable at
 `C:\Program Files\Docker\Docker\resources\bin\docker.exe` and its explicit
 Linux `npipe:////./pipe/dockerDesktopLinuxEngine` endpoint. No host Docker
@@ -41,6 +42,27 @@ CLI stdout/stderr and Prisma failure logs are redacted to avoid leaking
 synthetic credentials, URLs, dump contents and account records. The test uses
 synthetic account/admin, TOTP, recovery, audit, outbox and delivery records,
 and proves no real production backup's restore capability.
+
+The **GitHub-hosted Ubuntu CI runner only** also runs the same Prisma test.
+The checked-in `validate` job sets `VIRKI_BACKUP_VALIDATION_LINUX_CI=1`
+exclusively on its backup/restore step. This mode additionally requires the
+GitHub-hosted runner identity, expected Virki repository, nonempty run/attempt
+identifiers, and an independently inspected canonical root-owned
+`/run/docker.sock` Unix socket and root-owned `/usr/bin/docker` CLI. The CLI
+always receives `--host unix:///var/run/docker.sock --config` with a private
+empty config; it never reads the runner's Docker context or service URL.
+The daemon must report the runner's kernel hostname and a stable Linux daemon
+ID. The socket's kernel device/inode and hostname are checked before each
+Docker operation, including cleanup. Only this mode may pull the exact pinned
+PostgreSQL image digest, and it still verifies the resulting image ID and the
+created disposable container before Prisma migrations or deletion.
+
+The trust boundary is a GitHub-hosted ephemeral Linux runner and its root-owned
+local daemon. Environment variables alone cannot attest the runner identity;
+the local Unix socket, daemon hostname and runner host must also match. This
+mode is not available on arbitrary Linux hosts, self-hosted runners, WSL,
+Docker-in-Docker proxies or production Docker contexts. Root compromise of the
+ephemeral CI runner itself remains outside this local fixture's threat model.
 
 For the separate offline SQL crash/recovery fixture:
 
