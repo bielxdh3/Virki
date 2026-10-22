@@ -187,6 +187,42 @@ preload or Node startup argument. Neither binary is executed by this check.
 Those dependencies, witness semantics and end-to-end native
 host rehearsal remain blockers. **PRODUCTION NO-GO.**
 
+### Exact source bytes delivered to Node's ESM compiler (disposable only)
+
+`rehearseInstalledVerifierPinnedEsmImport(request)` is a diagnostic experiment
+restricted to the independently signed **disposable native Linux root tmpfs**
+fixture. It invokes `measureInstalledTrustedVerifierAtUseTime` and then copies
+the eleven installed, root-protected, digest-checked modules to a private
+in-process byte snapshot. Node 22's synchronous `node:module.registerHooks`
+then resolves only modules inside the approved graph and supplies each module's
+exact snapshot bytes to the ESM loader. All builtin imports are checked
+against the reviewed builtin allowlist; package imports, extra filesystem
+modules, data URLs, query variants and other graph escapes fail closed.
+Returned `loadedPaths` represent hashes of the buffers that Node's real ESM
+loader consumed, not merely prior disk inspection. The read-only host entry
+is imported, but none of its release methods is called.
+
+Adversarial Linux tests use **all eleven real project ESM files** and an actual
+Ed25519 installation approval. Post-snapshot replacement of an entry or a
+transitive dependency cannot change the compiler's source: the tests compare
+actual loader bytes against the signed hashes. Removal or symlink replacement
+of the entry's path is refused when Node cannot resolve it to the exact pinned
+URL. A compromised source before the snapshot, an altered owner state, or an
+unreviewed `NODE_OPTIONS`, `LD_PRELOAD` or Node command-line flag is refused.
+
+The experiment explicitly **does not launch a production verifier**.
+A flag/environment check inside JavaScript runs after Node and its native
+startup code have already executed. It therefore cannot attest absence of
+earlier `--import`, `--require`, `LD_PRELOAD`, loader hooks, startup snapshots,
+interpreter helpers or dynamic-library injection. A separately installed,
+audited **native launcher** must validate those inputs before Node executes,
+start a fresh process under a restrictive execution environment, and bind its
+runtime loader to the approved snapshot without any module cache predating
+the hooks. That native design, kernel policy, live host test and the externally
+monotonic ledger witness remain unproven. Both exported diagnostic measurements
+explicitly set `independentLedgerWitnessVerified: false` and cannot authorize
+a release. **PRODUCTION NO-GO.**
+
 ## Disposable native validation
 
 The root fixture writes only beneath `/tmp/virki-owner-install-fixture-XXXXXX`
