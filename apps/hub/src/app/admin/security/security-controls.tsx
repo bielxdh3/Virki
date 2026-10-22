@@ -33,21 +33,23 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
       {showRecoveryCodes && complete.recoveryCodes ? (
         <>
           <RecoveryCodes codes={complete.recoveryCodes} />
-          <a
+          <button
             className="button-secondary"
-            href="/admin/security?status=credential#admin-content"
+            type="button"
             onClick={(event) => {
               event.preventDefault();
               if (acknowledgingRecoveryCodes.current) return;
               acknowledgingRecoveryCodes.current = true;
-              const destination = event.currentTarget.href;
-              // Commit dismissal before the outgoing document can enter the browser's back/forward cache.
+              // An unhydrated <a href> navigates with PUSH, bypassing this
+              // scrub-and-REPLACE handler. A native button without an action
+              // cannot navigate before React attaches its listener.
+              // Commit dismissal before the outgoing document can enter BFCache.
               flushSync(() => setRecoveryCodesAcknowledged(true));
-              window.location.replace(destination);
+              window.location.replace("/admin/security?status=credential#admin-content");
             }}
           >
             Continuar para elevação
-          </a>
+          </button>
         </>
       ) : activeCredential ? (
         <>
@@ -127,20 +129,19 @@ function OneTimeRecoveryCodes({ codes, destination, label }: { codes: string[]; 
   return (
     <>
       <RecoveryCodes codes={codes} />
-      <a
+      <button
         className="button-secondary"
-        href={destination}
+        type="button"
         onClick={(event) => {
           event.preventDefault();
           if (acknowledging.current) return;
           acknowledging.current = true;
-          const target = event.currentTarget.href;
           flushSync(() => setAcknowledged(true));
-          window.location.replace(target);
+          window.location.replace(destination);
         }}
       >
         {label}
-      </a>
+      </button>
     </>
   );
 }

@@ -366,17 +366,42 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await page.evaluate(() => { window.location.hash = "recovery-code-acknowledgment"; });
     await expect(page).toHaveURL(`${hubUrl}/admin/security#recovery-code-acknowledgment`);
     await expect(credentialSection.locator("ul li code")).toHaveCount(10);
-    const acknowledgeRecoveryCodes = credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true });
+    // There must be no native href navigation when a sensitive one-time
+    // control is visible before React hydrates. Otherwise the default anchor
+    // follows its href with a PUSH (rather than our scrub-and-REPLACE click),
+    // leaving an extra fragment entry behind and possibly a secret-bearing
+    // document in browser history.
+    const acknowledgeRecoveryCodes = credentialSection.getByRole("button", { name: "Continuar para elevação", exact: true });
+    await expect(acknowledgeRecoveryCodes).toHaveAttribute("type", "button");
+    await expect(credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true })).toHaveCount(0);
     const recoveryCodeInput = credentialSection.getByLabel("Código de recuperação administrativa", { exact: true });
     const recoveryForm = recoveryCodeInput.locator("xpath=ancestor::form");
+    const historyEntriesBeforeDismissal = await page.evaluate(() => window.history.length);
     await acknowledgeRecoveryCodes.click();
     await expect(page).toHaveURL(acknowledgementUrl);
+    // Native window.location.replace must not add a history entry. If the
+    // pre-hydration fallback follows an anchor href instead, Chrome PUSHes
+    // and one Back stops at the old one-time-code acknowledgment fragment.
+    expect(await page.evaluate(() => window.history.length)).toBe(historyEntriesBeforeDismissal);
     await expect(page.getByRole("status")).toContainText("Credencial administrativa configurada");
     await expect(credentialSection.locator("ul li code")).toHaveCount(0);
     await expect(acknowledgeRecoveryCodes).toHaveCount(0);
     await expect(recoveryCodeInput).toBeVisible();
     await page.goBack();
-    await expect(page).toHaveURL(predecessorUrl);
+    try {
+      await expect(page).toHaveURL(predecessorUrl);
+    } catch {
+      // The general E2E log scrubber masks both query and hash, making
+      // distinct protected URLs look identical. Report ONLY a fixed
+      // allowlisted route/query/fragment classification (never raw URLs).
+      const observed = new URL(page.url());
+      const pathname = observed.origin === hubUrl && observed.pathname === "/admin/security" ? "security" : "other";
+      const query = observed.search === "" ? "none" : observed.search === "?status=credential" ? "credential" : "other";
+      const fragment = observed.hash === "#recovery-code-predecessor" ? "predecessor"
+        : observed.hash === "#recovery-code-acknowledgment" ? "acknowledgment"
+          : observed.hash === "#admin-content" ? "admin-content" : observed.hash === "" ? "none" : "other";
+      throw new Error(`E2E ADMIN browser Back history mismatch (route=${pathname}; query=${query}; fragment=${fragment}).`);
+    }
     await expect(credentialSection.locator("ul li code")).toHaveCount(0);
     await expect(acknowledgeRecoveryCodes).toHaveCount(0);
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
