@@ -1,6 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import {
+  closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync,
+  realpathSync, unlinkSync, writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +16,7 @@ const DOCKER_CLI = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.ex
 const POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 const FIXTURE_IMAGE = "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8";
 const SOURCE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const RECONCILIATION_DIRECTORY = path.join(homedir(), ".virki", "offline-docker-reconciliation");
 
 // This runner is intentionally limited to the three checked-in, read-only
 // test profiles. Docker run exposes dozens of host escape surfaces; accepting
@@ -125,6 +130,57 @@ function assertExit(result, message) {
   if (result.error || result.status !== 0) throw new Error(message);
 }
 
+// File is created exclusively and flushed BEFORE invoking docker run; a
+// timeout, killed CLI or daemon stall cannot erase its random owner/name.
+function createReconciliationEvidence({ directory, name, owner, root }) {
+  const file = path.join(directory, `${name}.jsonl`);
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const entry = lstatSync(directory);
+    if (!entry.isDirectory() || entry.isSymbolicLink() ||
+        realpathSync.native(directory).toLowerCase() !== path.resolve(directory).toLowerCase()) {
+      throw new Error("untrusted evidence directory");
+    }
+    const fd = openSync(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify({
+        version: 1, name, owner, engine: LOCAL_ENGINE, image: FIXTURE_IMAGE,
+        sourceRoot: root, createdAt: new Date().toISOString(),
+        state: "run_may_still_start", reconciliation: "operator_required_if_retained",
+      }) + "\n");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    throw new Error("Disposable Docker reconciliation evidence could not be persisted; fixture refused.");
+  }
+  return file;
+}
+
+function retainEvidence(file, reason, invoke) {
+  const message = `${reason} Operator reconciliation required; owner evidence: ${file}`;
+  // Callers intentionally redact caught errors; emit the local evidence path
+  // here so the operator can reconcile a delayed container.
+  if (invoke === spawnSync) process.stderr.write(`${message}\n`);
+  throw new Error(message);
+}
+
+function recordInspection(file, { id, actualName, actualOwner }) {
+  let fd;
+  try {
+    fd = openSync(file, constants.O_APPEND | constants.O_WRONLY);
+    writeFileSync(fd, JSON.stringify({
+      event: "inspection_observation", observedId: id?.slice(0, 128) ?? null,
+      observedName: actualName?.slice(0, 128) ?? null,
+      observedOwner: actualOwner?.slice(0, 128) ?? null,
+    }) + "\n");
+    fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 /**
  * Run an owned ephemeral Linux fixture only through the local Docker Desktop
  * named pipe. A cancelled docker CLI does not imply the container has exited,
@@ -133,9 +189,13 @@ function assertExit(result, message) {
 export function runOwnedLocalLinuxFixture(args, {
   cwd, timeout = 90_000, stdio = "inherit",
   platform = process.platform, env = process.env, invoke = spawnSync,
+  reconciliationDirectory,
 } = {}) {
   requireLocalFixtureEnvironment(platform, env);
   assertFixtureArguments(args, cwd, timeout);
+  if (reconciliationDirectory !== undefined && invoke === spawnSync) {
+    throw new Error("Disposable Docker reconciliation location is fixed for real fixtures.");
+  }
   // Only a mocked process runner may skip the real on-disk signature check.
   // The executable passed to either runner is always the fixed absolute path.
   const executable = invoke === spawnSync ? verifyTrustedWindowsDockerCli() : DOCKER_CLI;
@@ -154,28 +214,50 @@ export function runOwnedLocalLinuxFixture(args, {
 
   const owner = randomBytes(16).toString("hex");
   const name = `virki-offline-fixture-${owner}`;
+  const evidence = createReconciliationEvidence({
+    directory: reconciliationDirectory ?? RECONCILIATION_DIRECTORY,
+    name, owner, root: realpathSync.native(SOURCE_ROOT),
+  });
   const runArgs = ["run", "--rm", "--name", name,
     "--label", `${OWNER_LABEL}=${owner}`, ...args.slice(2)];
   let result;
   let cleanupFailure;
   try {
     result = docker(runArgs, { stdio, timeout });
+  } catch {
+    result = { status: null, error: true };
   } finally {
     // Do not use 'docker rm' by mutable name: inspection and removal may race.
     // A foreign container with the same name cannot pass the owner label proof.
-    const inspect = docker(["inspect", "--format",
-      `{{.Id}}|{{.Name}}|{{index .Config.Labels "${OWNER_LABEL}"}}`, name],
-    { encoding: "utf8", timeout: 10000, maxBuffer: 4096 });
+    let inspect;
+    try {
+      inspect = docker(["inspect", "--format",
+        `{{.Id}}|{{.Name}}|{{index .Config.Labels "${OWNER_LABEL}"}}`, name],
+      { encoding: "utf8", timeout: 10000, maxBuffer: 4096 });
+    } catch {
+      inspect = { error: true };
+    }
     if (inspect.error) {
       cleanupFailure = "Disposable Docker engine unavailable during ownership check.";
     } else if (inspect.status === 0) {
-      const [id, actualName, actualOwner] = inspect.stdout.trim().split("|");
-      if (!/^[a-f0-9]{64}$/u.test(id) || actualName !== `/${name}` || actualOwner !== owner) {
+      const [id, actualName, actualOwner] =
+        typeof inspect.stdout === "string" ? inspect.stdout.trim().split("|") : [];
+      try {
+        recordInspection(evidence, { id, actualName, actualOwner });
+      } catch {
+        cleanupFailure = "Disposable Docker ownership observation could not be persisted.";
+      }
+      if (!cleanupFailure && (!/^[a-f0-9]{64}$/u.test(id) ||
+          actualName !== `/${name}` || actualOwner !== owner)) {
         cleanupFailure = "Disposable Docker ownership proof rejected; no cleanup attempted.";
-      } else {
-        const removed = docker(["rm", "--force", "--volumes", id],
-          { encoding: "utf8", timeout: 10000, maxBuffer: 4096 });
-        if (removed.error || removed.status !== 0) {
+      } else if (!cleanupFailure) {
+        try {
+          const removed = docker(["rm", "--force", "--volumes", id],
+            { encoding: "utf8", timeout: 10000, maxBuffer: 4096 });
+          if (removed.error || removed.status !== 0) {
+            cleanupFailure = "Disposable Docker cleanup by verified ID failed.";
+          }
+        } catch {
           cleanupFailure = "Disposable Docker cleanup by verified ID failed.";
         }
       }
@@ -183,6 +265,15 @@ export function runOwnedLocalLinuxFixture(args, {
       cleanupFailure = "Disposable Docker cleanup state could not be verified.";
     }
   }
-  if (cleanupFailure) throw new Error(cleanupFailure);
-  assertExit(result, "Disposable Linux fixture failed or exceeded bounded runtime.");
+  // A failed/timed-out docker run is never proof that the daemon aborted the
+  // create request. An immediate 'No such object' can precede a late create.
+  if (result.error || result.status !== 0) {
+    cleanupFailure ??= "Disposable Linux fixture failed or exceeded bounded runtime.";
+  }
+  if (cleanupFailure) retainEvidence(evidence, cleanupFailure, invoke);
+  try {
+    unlinkSync(evidence);
+  } catch {
+    retainEvidence(evidence, "Disposable Docker cleanup evidence could not be cleared.", invoke);
+  }
 }

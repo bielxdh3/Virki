@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import test, { after } from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -10,6 +12,8 @@ import {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const cli = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
 const image = "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8";
+const evidenceDirectory = mkdtempSync(path.join(tmpdir(), "virki-owned-docker-test-"));
+after(() => rmSync(evidenceDirectory, { recursive: true, force: true }));
 const safeArgs = [
   "run", "--rm", "--pull=never", "--platform=linux/amd64",
   "--network=none", "--read-only", "--cap-drop=ALL",
@@ -24,6 +28,7 @@ const base = {
   platform: "win32",
   env: { PATH: "C:\\evil-cli", SystemRoot: "C:\\bogus" },
   cwd: root,
+  reconciliationDirectory: evidenceDirectory,
 };
 
 test("unsafe platform and Docker CLI overrides reject without contacting any daemon", () => {
@@ -43,8 +48,13 @@ test("unsafe platform and Docker CLI overrides reject without contacting any dae
   assert.doesNotThrow(() => requireLocalFixtureEnvironment("win32", {}));
 });
 
-function fakeEngine({ runStatus = 0, inspectOwner = "correct", inspectExists = true, info = "Docker Desktop|linux" } = {}) {
+function fakeEngine({
+  runStatus = 0, inspectOwner = "correct", inspectExists = true,
+  delayedInspection = false, inspectId = "e".repeat(64), info = "Docker Desktop|linux",
+  runThrows = false, inspectThrows = false, rmThrows = false,
+} = {}) {
   const calls = [];
+  let inspections = 0;
   const invoke = (exe, argv, options) => {
     assert.equal(exe, cli);
     assert.deepEqual(argv.slice(0, 2), ["--host", LOCAL_ENGINE]);
@@ -54,16 +64,26 @@ function fakeEngine({ runStatus = 0, inspectOwner = "correct", inspectExists = t
     const command = argv[2];
     calls.push({ command, args: argv.slice(3) });
     if (command === "info") return { status: 0, stdout: info };
-    if (command === "run") return { status: runStatus, error: runStatus ? { code: "ETIMEDOUT" } : undefined };
+    if (command === "run") {
+      if (runThrows) throw Error("mock process transport failed");
+      return { status: runStatus, error: runStatus ? { code: "ETIMEDOUT" } : undefined };
+    }
     if (command === "inspect") {
-      if (!inspectExists) return { status: 1, stderr: "Error: No such object" };
+      if (inspectThrows) throw Error("mock inspect transport failed");
+      inspections += 1;
+      if (!inspectExists || (delayedInspection && inspections === 1)) {
+        return { status: 1, stderr: "Error: No such object" };
+      }
       const run = calls.find((call) => call.command === "run").args;
       const name = run[run.indexOf("--name") + 1];
       const ownerLabel = run[run.indexOf("--label") + 1];
       const owner = ownerLabel.split("=")[1];
-      return { status: 0, stdout: `${"e".repeat(64)}|/${name}|${inspectOwner === "correct" ? owner : "forged"}` };
+      return { status: 0, stdout: `${inspectId}|/${name}|${inspectOwner === "correct" ? owner : "forged"}` };
     }
-    if (command === "rm") return { status: 0, stdout: "removed" };
+    if (command === "rm") {
+      if (rmThrows) throw Error("mock removal transport failed");
+      return { status: 0, stdout: "removed" };
+    }
     throw new Error("unexpected command");
   };
   return { calls, invoke };
@@ -159,4 +179,109 @@ test("rejects missing, redirected, unsigned, and unexpected-publisher Docker CLI
   assert.throws(() => verifyTrustedWindowsDockerCli({
     ...good, authenticate: () => ({ status: 0, stdout: "not Docker" }),
   }), /trusted Docker Desktop CLI/u);
+});
+
+function evidenceForRun(fake) {
+  const run = fake.calls.find(({ command }) => command === "run").args;
+  const name = run[run.indexOf("--name") + 1];
+  const owner = run[run.indexOf("--label") + 1].split("=")[1];
+  const file = path.join(evidenceDirectory, `${name}.jsonl`);
+  return { name, owner, file };
+}
+
+function readEvidence(file) {
+  return readFileSync(file, "utf8").trim().split("\n").map((entry) => JSON.parse(entry));
+}
+
+test("timeout plus immediate not-found inspect can hide a delayed orphan, retains owner evidence", () => {
+  const fake = fakeEngine({ runStatus: 1, delayedInspection: true });
+  let error;
+  try {
+    runOwnedLocalLinuxFixture(safeArgs, { ...base, invoke: fake.invoke });
+  } catch (caught) {
+    error = caught;
+  }
+  const evidence = evidenceForRun(fake);
+  assert.match(error?.message ?? "", /reconciliation required/iu);
+  assert.ok(error.message.includes(evidence.file));
+  const [stored] = readEvidence(evidence.file);
+  assert.equal(stored.name, evidence.name);
+  assert.equal(stored.owner, evidence.owner);
+  assert.equal(stored.engine, LOCAL_ENGINE);
+  assert.equal(stored.image, image);
+  assert.equal(fake.calls.filter(({ command }) => command === "rm").length, 0);
+  // The daemon reveals the previously invisible container after the failed run.
+  const appeared = fake.invoke(cli, ["--host", LOCAL_ENGINE, "inspect", "--format", "unused", evidence.name],
+    { env: { PATH: "C:\\Windows", SystemRoot: "C:\\Windows" } });
+  assert.equal(appeared.status, 0);
+  assert.ok(appeared.stdout.includes(`/${evidence.name}|${evidence.owner}`));
+  assert.equal(readdirSync(evidenceDirectory).includes(path.basename(evidence.file)), true);
+});
+
+test("malformed immutable CID cannot authorize cleanup and retains reconciliation evidence", () => {
+  const fake = fakeEngine({ inspectId: "not-a-verified-cid" });
+  let error;
+  try {
+    runOwnedLocalLinuxFixture(safeArgs, { ...base, invoke: fake.invoke });
+  } catch (caught) {
+    error = caught;
+  }
+  const evidence = evidenceForRun(fake);
+  assert.match(error?.message ?? "", /ownership proof rejected/iu);
+  assert.ok(error.message.includes(evidence.file));
+  const [initial, observation] = readEvidence(evidence.file);
+  assert.equal(initial.owner, evidence.owner);
+  assert.equal(observation.observedId, "not-a-verified-cid");
+  assert.equal(fake.calls.some(({ command }) => command === "rm"), false);
+});
+
+test("journal write failure denies launch without any docker run", () => {
+  const invalidDirectory = path.join(evidenceDirectory, "not-a-directory");
+  writeFileSync(invalidDirectory, "occupied");
+  const fake = fakeEngine();
+  assert.throws(() => runOwnedLocalLinuxFixture(safeArgs, {
+    ...base, reconciliationDirectory: invalidDirectory, invoke: fake.invoke,
+  }), /reconciliation evidence/iu);
+  assert.deepEqual(fake.calls.map(({ command }) => command), ["info"]);
+});
+
+test("successful --rm and missing container clears its evidence only after a completed run", () => {
+  const fake = fakeEngine({ inspectExists: false });
+  runOwnedLocalLinuxFixture(safeArgs, { ...base, invoke: fake.invoke });
+  const evidence = evidenceForRun(fake);
+  assert.equal(existsSync(evidence.file), false);
+  assert.equal(fake.calls.some(({ command }) => command === "rm"), false);
+});
+
+test("timed-out run retains evidence even after successful verified-ID removal", () => {
+  const fake = fakeEngine({ runStatus: 1 });
+  assert.throws(() => runOwnedLocalLinuxFixture(safeArgs, {
+    ...base, invoke: fake.invoke,
+  }), /reconciliation required/iu);
+  const evidence = evidenceForRun(fake);
+  assert.equal(existsSync(evidence.file), true);
+  assert.deepEqual(fake.calls.map(({ command }) => command), ["info", "run", "inspect", "rm"]);
+  assert.equal(readEvidence(evidence.file)[1].observedId, "e".repeat(64));
+});
+
+test("run exception and inspection transport failure both retain owner evidence", () => {
+  for (const config of [{ runThrows: true, inspectExists: false }, { inspectThrows: true }]) {
+    const fake = fakeEngine(config);
+    assert.throws(() => runOwnedLocalLinuxFixture(safeArgs, {
+      ...base, invoke: fake.invoke,
+    }), /reconciliation required/iu);
+    const evidence = evidenceForRun(fake);
+    assert.equal(readEvidence(evidence.file)[0].owner, evidence.owner);
+    assert.equal(fake.calls.some(({ command }) => command === "rm"), false);
+  }
+});
+
+test("removal transport failure preserves inspected CID for manual reconciliation", () => {
+  const fake = fakeEngine({ rmThrows: true });
+  assert.throws(() => runOwnedLocalLinuxFixture(safeArgs, {
+    ...base, invoke: fake.invoke,
+  }), /reconciliation required/iu);
+  const evidence = evidenceForRun(fake);
+  assert.equal(readEvidence(evidence.file)[1].observedId, "e".repeat(64));
+  assert.deepEqual(fake.calls.map(({ command }) => command), ["info", "run", "inspect", "rm"]);
 });
