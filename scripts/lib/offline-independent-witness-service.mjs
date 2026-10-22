@@ -1,7 +1,7 @@
 import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
 import {
-  closeSync, fsyncSync, linkSync, lstatSync, openSync,
-  readFileSync, readdirSync, realpathSync, unlinkSync, writeSync,
+  closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, openSync,
+  readSync, readdirSync, realpathSync, unlinkSync, writeSync,
 } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -18,6 +18,11 @@ const B64 = /^[A-Za-z0-9+/]{86}==$/u;
 const MAX_EVENTS = 4096;
 const ANCHOR_FILE = /^[0-9]{8}\.receipt$/u;
 const ANCHOR_TEMP = /^\.[0-9]{8}\.receipt\.[0-9a-f]{32}\.tmp$/u;
+const MAX_KEY_BYTES = 16 * 1024;
+const MAX_ANCHOR_BYTES = 512;
+// Node's fs.constants does not expose O_CLOEXEC on all Linux builds.
+// Linux asm-generic uses 02000000; libuv also opens descriptors CLOEXEC.
+const LINUX_O_CLOEXEC = 0o2000000;
 const CAS_OWNER_FIELDS = [
   "version", "domain", "challenge", "requestId", "hostIdentitySha256", "ledgerIdSha256",
   "expectedSequence", "expectedHeadSha", "expectedReceiptSha256", "nextHeadSha", "transitionSha256",
@@ -55,12 +60,59 @@ export function independentWitnessOwnerCasSigningBytes(request) {
   return Buffer.from(`${WITNESS_OWNER_CAS_DOMAIN}\0${JSON.stringify(body)}`);
 }
 
+function sameFileVersion(left, right) {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.uid === right.uid && left.gid === right.gid && left.mode === right.mode &&
+    left.size === right.size && left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+}
+
+function readPinnedPrivateFile(file, maxBytes, label, maxLinks = 1n) {
+  requireWitness(isAbsolute(file), `${label} path must be absolute`);
+  // O_NONBLOCK prevents a substituted FIFO/device from stalling the daemon;
+  // O_NOFOLLOW prevents redirecting the final component to another file.
+  requireWitness(process.platform === "linux" && constants.O_NOFOLLOW,
+    "native Linux pinned file reads are required");
+  const expected = lstatSync(file, { bigint: true });
+  const safe = (stats) => stats.isFile() && !stats.isSymbolicLink() &&
+    stats.uid === BigInt(process.getuid()) && (stats.mode & 0o077n) === 0n &&
+    stats.nlink >= 1n && stats.nlink <= maxLinks &&
+    stats.size >= 0n && stats.size <= BigInt(maxBytes);
+  requireWitness(safe(expected), `invalid ${label} owner, size, mode or links`);
+  const fd = openSync(file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | LINUX_O_CLOEXEC | constants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd, { bigint: true });
+    requireWitness(safe(before) && sameFileVersion(expected, before),
+      `${label} changed before opening pinned descriptor`);
+    const data = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < data.length) {
+      const count = readSync(fd, data, length, data.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    requireWitness(length <= maxBytes && BigInt(length) === before.size,
+      `${label} exceeds size limit or changed during read`);
+    const after = fstatSync(fd, { bigint: true });
+    const current = lstatSync(file, { bigint: true });
+    requireWitness(safe(after) && safe(current) &&
+      sameFileVersion(before, after) && sameFileVersion(after, current),
+    `${label} changed during pinned read`);
+    // Publication uses a hardlink while the staging name is removed, so an
+    // anchor may legitimately go from two links to one without changing data.
+    if (maxLinks === 1n) {
+      requireWitness(expected.nlink === before.nlink && before.nlink === after.nlink &&
+        after.nlink === current.nlink, `${label} links changed during read`);
+    }
+    return data.subarray(0, length);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function verifyPrivateFile(file) {
-  requireWitness(isAbsolute(file), "key path must be absolute");
-  const stats = lstatSync(file);
-  requireWitness(stats.isFile() && !stats.isSymbolicLink() && stats.uid === process.getuid() &&
-    (stats.mode & 0o077) === 0, "signer key must be owner-controlled regular file (0600)");
-  return readFileSync(file);
+  return readPinnedPrivateFile(file, MAX_KEY_BYTES, "signer or owner key");
 }
 
 function verifyPrivateDirectory(path) {
@@ -277,10 +329,8 @@ export class IndependentOfflineWitness {
       const name = this.anchorName(index + 1);
       requireWitness(names[index] === name, "missing or unexpected durable anchor");
       const file = resolve(this.anchorDirectory, name);
-      const stats = lstatSync(file);
-      requireWitness(stats.isFile() && !stats.isSymbolicLink(), "invalid anchor file");
       const record = records[index];
-      const source = readFileSync(file, "utf8");
+      const source = readPinnedPrivateFile(file, MAX_ANCHOR_BYTES, "durable anchor", 2n).toString("utf8");
       const expected = JSON.stringify({
         sequence: index + 1,
         receiptSha256: receiptHash(JSON.parse(record.message), record.signature),
@@ -325,7 +375,8 @@ export class IndependentOfflineWitness {
         linkSync(temp, file);
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
-        requireWitness(readFileSync(file, "utf8") === encoded.toString("utf8"),
+        requireWitness(readPinnedPrivateFile(file, MAX_ANCHOR_BYTES, "durable anchor", 2n)
+          .equals(encoded),
           "conflicting durable anchor");
       }
       this.fsyncAnchorDirectory();

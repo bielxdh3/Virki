@@ -591,3 +591,129 @@ test("CAS owner expires while waiting for a real competing SQLite BEGIN IMMEDIAT
     await stop(server); f.cleanup();
   }
 });
+
+test("lstat-to-read signer and owner key symlink swap fails closed on Linux", { skip: !isLinux }, async (t) => {
+  for (const role of ["signer", "owner"]) {
+    await t.test(role, async () => {
+      const f = fixture();
+      try {
+        const target = role === "signer" ? f.env.VIRKI_WITNESS_SIGNER_KEY : f.env.VIRKI_WITNESS_OWNER_PUBLIC_KEY;
+        const saved = join(f.root, `${role}-original-outside-private-key`);
+        const injected = faultPreload(f, `swap-${role}`, `
+          const fs = require("node:fs");
+          const original = fs.lstatSync;
+          let swapped = false;
+          fs.lstatSync = function(path, ...args) {
+            const stats = original.call(fs, path, ...args);
+            if (!swapped && path === ${JSON.stringify(target)}) {
+              swapped = true;
+              fs.renameSync(path, ${JSON.stringify(saved)});
+              fs.symlinkSync(${JSON.stringify(saved)}, path);
+            }
+            return stats;
+          };
+          require("node:module").syncBuiltinESMExports();
+        `);
+        await assert.rejects(start(f, `reject-${role}`, injected), /symlink|private|changed|ELOOP|refused/u);
+        assert.equal(readFileSync(saved).length > 0, true);
+      } finally { f.cleanup(); }
+    });
+  }
+});
+
+test("lstat-to-read committed anchor symlink swap fails closed despite identical signed bytes", { skip: !isLinux }, async () => {
+  const f = fixture();
+  let server;
+  try {
+    server = await start(f, "anchor-base");
+    await cas(server, f, nextRequest(f, await head(server, f)));
+    await stop(server);
+    server = undefined;
+    const anchor = join(f.anchors, "00000001.receipt");
+    const saved = join(f.root, "valid-signed-anchor-outside-anchor-directory");
+    const injected = faultPreload(f, "swap-anchor", `
+      const fs = require("node:fs");
+      const original = fs.lstatSync;
+      let swapped = false;
+      fs.lstatSync = function(path, ...args) {
+        const stats = original.call(fs, path, ...args);
+        if (!swapped && path === ${JSON.stringify(anchor)}) {
+          swapped = true;
+          fs.renameSync(path, ${JSON.stringify(saved)});
+          fs.symlinkSync(${JSON.stringify(saved)}, path);
+        }
+        return stats;
+      };
+      require("node:module").syncBuiltinESMExports();
+    `);
+    await assert.rejects(start(f, "reject-anchor", injected), /symlink|anchor|changed|ELOOP|refused/u);
+    assert.match(readFileSync(saved, "utf8"), /receiptSha256/u);
+  } finally { await stop(server); f.cleanup(); }
+});
+
+test("same-content regular inode replacement after lstat is rejected for key and anchor", { skip: !isLinux }, async (t) => {
+  for (const targetKind of ["key", "anchor"]) {
+    await t.test(targetKind, async () => {
+      const f = fixture();
+      let server;
+      try {
+        if (targetKind === "anchor") {
+          server = await start(f, "create-anchor");
+          await cas(server, f, nextRequest(f, await head(server, f)));
+          await stop(server);
+          server = undefined;
+        }
+        const target = targetKind === "key" ? f.env.VIRKI_WITNESS_SIGNER_KEY :
+          join(f.anchors, "00000001.receipt");
+        const replacement = join(f.root, `${targetKind}-replacement-same-content`);
+        const injected = faultPreload(f, `inode-${targetKind}`, `
+          const fs = require("node:fs");
+          const original = fs.lstatSync;
+          let replaced = false;
+          fs.lstatSync = function(path, ...args) {
+            const stats = original.call(fs, path, ...args);
+            if (!replaced && path === ${JSON.stringify(target)}) {
+              replaced = true;
+              fs.copyFileSync(path, ${JSON.stringify(replacement)});
+              fs.renameSync(${JSON.stringify(replacement)}, path);
+            }
+            return stats;
+          };
+          require("node:module").syncBuiltinESMExports();
+        `);
+        await assert.rejects(start(f, `reject-inode-${targetKind}`, injected),
+          /changed before opening pinned descriptor|refused/u);
+      } finally { await stop(server); f.cleanup(); }
+    });
+  }
+});
+
+test("anchor pathname swapped after FD read is rejected by final inode recheck", { skip: !isLinux }, async () => {
+  const f = fixture();
+  let server;
+  try {
+    server = await start(f, "anchor-for-read-swap");
+    await cas(server, f, nextRequest(f, await head(server, f)));
+    await stop(server);
+    server = undefined;
+    const anchor = join(f.anchors, "00000001.receipt");
+    const backup = join(f.root, "valid-anchor-after-read-swap");
+    const injected = faultPreload(f, "swap-after-fd-read", `
+      const fs = require("node:fs");
+      const original = fs.readSync;
+      let swapped = false;
+      fs.readSync = function(fd, ...args) {
+        const count = original.call(fs, fd, ...args);
+        if (!swapped && count > 0 && fs.readlinkSync("/proc/self/fd/" + fd) === ${JSON.stringify(anchor)}) {
+          swapped = true;
+          fs.renameSync(${JSON.stringify(anchor)}, ${JSON.stringify(backup)});
+          fs.symlinkSync(${JSON.stringify(backup)}, ${JSON.stringify(anchor)});
+        }
+        return count;
+      };
+      require("node:module").syncBuiltinESMExports();
+    `);
+    await assert.rejects(start(f, "reject-after-fd-read", injected), /durable anchor changed during pinned read/u);
+    assert.match(readFileSync(backup, "utf8"), /receiptSha256/u);
+  } finally { await stop(server); f.cleanup(); }
+});
