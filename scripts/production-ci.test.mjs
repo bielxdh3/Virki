@@ -26,6 +26,20 @@ test("Ubuntu Validate re-executes root-protected offline transport assertions, n
   assert.match(source, /test\("even newly re-signed local CI with failed stage is refused before Git or SSH", rootProtectedLinuxOnly/u);
 });
 
+test("A02 hosted CI must execute the first-ADMIN bootstrap against a separately cloned virgin PostgreSQL", () => {
+  assert.match(workflow, /CREATE DATABASE virki_bootstrap_virgin WITH TEMPLATE virki_e2e_test/u);
+  assert.match(workflow, /REVOKE ALL ON DATABASE virki_bootstrap_virgin FROM PUBLIC/u);
+  assert.match(workflow, /GRANT CONNECT ON DATABASE virki_bootstrap_virgin TO virki_runtime_test/u);
+  assert.match(workflow, /VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin[\s\S]{0,40}npm run test:integration -- packages\/auth\/src\/bootstrap-first-admin\.integration\.test\.ts/u);
+  const migrated = workflow.indexOf("- name: Apply committed Prisma migrations to disposable PostgreSQL");
+  const cloned = workflow.indexOf("CREATE DATABASE virki_bootstrap_virgin WITH TEMPLATE virki_e2e_test");
+  const tested = workflow.indexOf("VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin");
+  const shared = workflow.indexOf("- name: Database integration tests");
+  assert.ok(migrated !== -1 && cloned > migrated && tested > cloned && shared > tested,
+    "CI must make the virgin bootstrap proof mandatory after migration and before any ordinary DB tests");
+  assert.doesNotMatch(workflow.slice(cloned, shared), /continue-on-error:\s*true/u);
+});
+
 function publicationNeedsAreSafe(source) {
   // Parse the job-level portion of this workflow instead of matching a
   // "needs:" substring that might belong to another job or a comment.

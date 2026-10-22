@@ -477,6 +477,22 @@ jobs:
       - name: Apply committed Prisma migrations to disposable PostgreSQL
         run: npm run prisma:migrate:deploy
 
+      - name: Test first ADMIN against isolated virgin PostgreSQL clone (A02)
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_name="virki-e2e-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # The source has only just been migrated, before any integration/E2E
+          # mutations. Never reset a shared database to simulate first install.
+          docker exec "$container_name" psql -U virki_bootstrap -d postgres -v ON_ERROR_STOP=1 \
+            --command='CREATE DATABASE virki_bootstrap_virgin WITH TEMPLATE virki_e2e_test'
+          docker exec "$container_name" psql -U virki_bootstrap -d postgres -v ON_ERROR_STOP=1 \
+            --command='REVOKE ALL ON DATABASE virki_bootstrap_virgin FROM PUBLIC; GRANT CONNECT ON DATABASE virki_bootstrap_virgin TO virki_runtime_test;'
+          bootstrap_url="${VIRKI_E2E_DATABASE_URL/virki_e2e_test/virki_bootstrap_virgin}"
+          test "$bootstrap_url" != "$VIRKI_E2E_DATABASE_URL"
+          VIRKI_INTEGRATION_DATABASE_URL="$bootstrap_url" VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin \
+            npm run test:integration -- packages/auth/src/bootstrap-first-admin.integration.test.ts
+
       - name: Database integration tests
         run: |
           VIRKI_INTEGRATION_DATABASE_URL="$VIRKI_E2E_DATABASE_URL" npm run test:integration

@@ -89,6 +89,7 @@ New-Item -ItemType Directory -Path $runEvidenceDirectory -ErrorAction Stop | Out
 $productionOperationsEvidencePath = Join-Path $runEvidenceDirectory 'production-operations-tests.tap.log'
 $unitTestsEvidencePath = Join-Path $runEvidenceDirectory 'unit-tests.tap.log'
 $integrationTestsEvidencePath = Join-Path $runEvidenceDirectory 'integration-tests.tap.log'
+$bootstrapVirginTestsEvidencePath = Join-Path $runEvidenceDirectory 'bootstrap-virgin-tests.tap.log'
 $browserE2EEvidencePath = Join-Path $runEvidenceDirectory 'browser-e2e-output.log'
 $runManifestPath = Join-Path $runEvidenceDirectory 'run-manifest.json'
 $dockerMutationJournalPath = Join-Path $runEvidenceDirectory 'docker-mutations.jsonl'
@@ -604,6 +605,14 @@ try {
   Invoke-OwnedDockerCleanup 'bootstrapNetwork'
   Invoke-PinnedDocker exec --workdir /workspace --env ("DATABASE_URL=" + $urls.runtime) --env ("MIGRATION_DATABASE_URL=" + $urls.migrator) $runnerName npm run prisma:migrate:deploy
   if ($LASTEXITCODE -ne 0) { throw 'Committed migrations did not apply to the disposable database.' }
+  if (-not $E2EOnly -and -not $UnitOnly) {
+    # Clone the freshly migrated, untouched schema into a separate database
+    # inside this run-owned tmpfs PostgreSQL. Never reset shared test data.
+    Invoke-PinnedDocker exec $databaseName psql -U virki_bootstrap -d postgres -v ON_ERROR_STOP=1 --command 'CREATE DATABASE virki_bootstrap_virgin WITH TEMPLATE virki_e2e_test'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the owned virgin bootstrap database.' }
+    Invoke-PinnedDocker exec $databaseName psql -U virki_bootstrap -d postgres -v ON_ERROR_STOP=1 --command 'REVOKE ALL ON DATABASE virki_bootstrap_virgin FROM PUBLIC; GRANT CONNECT ON DATABASE virki_bootstrap_virgin TO virki_runtime_test;'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not restrict virgin bootstrap database CONNECT privileges.' }
+  }
   Invoke-PinnedDocker exec --detach $runnerName node -e "const net=require('node:net');net.createServer(s=>{const d=net.connect(5432,'postgres');s.pipe(d);d.pipe(s)}).listen(5432,'127.0.0.1')"
   if ($LASTEXITCODE -ne 0) { throw 'Could not start the loopback-only integration database proxy.' }
 
@@ -634,6 +643,12 @@ try {
     $script:unitTestFailures = @(Get-TapFailureManifest -Path $unitTestsEvidencePath)
   }
   if (-not $E2EOnly -and -not $UnitOnly) {
+    $virginBootstrapUrl = $urls.integration.Replace('/virki_e2e_test?', '/virki_bootstrap_virgin?')
+    if ($virginBootstrapUrl -eq $urls.integration -or $virginBootstrapUrl -cnotmatch '/virki_bootstrap_virgin\?') {
+      throw 'The virgin bootstrap fixture must use its isolated database target.'
+    }
+    $virginBootstrapEnvironment = @('--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $virginBootstrapUrl), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable', '--env', 'VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin')
+    Invoke-LoggedStage -Name 'bootstrap-virgin-tests' -LogName 'bootstrap-virgin-tests' -CommandText 'npm run test:integration -- packages/auth/src/bootstrap-first-admin.integration.test.ts' -Environment $virginBootstrapEnvironment -EvidenceLogPath $bootstrapVirginTestsEvidencePath -CaptureFullOutput
     $integrationEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $urls.integration), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
     $integrationCommand = 'npm run test:integration' + $(if ($IntegrationTestFile) { ' -- ' + $IntegrationTestFile } else { '' })
     Invoke-LoggedStage -Name 'integration-tests' -LogName 'integration-tests' -CommandText $integrationCommand -Environment $integrationEnvironment -EvidenceLogPath $integrationTestsEvidencePath -CaptureFullOutput

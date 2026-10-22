@@ -746,6 +746,25 @@ test("isolated runner retains complete TAP output for integration and production
   assert.match(script, /WriteAllText\(\$runManifestPath[\s\S]*?\} finally \{\s*Write-Output "[^\r\n]*Removing only independently verified owned Docker IDs\."/u, "owned-resource cleanup has its own finally block around evidence persistence");
 });
 
+test("A02 must exercise first ADMIN bootstrap with a real cloned virgin PostgreSQL database", () => {
+  const runner = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  const testSource = readFileSync(new URL("../../packages/auth/src/bootstrap-first-admin.integration.test.ts", import.meta.url), "utf8");
+  assert.match(runner, /CREATE DATABASE virki_bootstrap_virgin WITH TEMPLATE virki_e2e_test/u);
+  assert.match(runner, /REVOKE ALL ON DATABASE virki_bootstrap_virgin FROM PUBLIC/u);
+  assert.match(runner, /GRANT CONNECT ON DATABASE virki_bootstrap_virgin TO virki_runtime_test/u);
+  assert.match(runner, /VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin/u);
+  assert.match(runner, /npm run test:integration -- packages\/auth\/src\/bootstrap-first-admin\.integration\.test\.ts/u);
+  assert.match(testSource, /current_database\(\) AS database/u);
+  assert.match(testSource, /virki_bootstrap_virgin/u);
+  const migrated = runner.indexOf("Committed migrations did not apply to the disposable database.");
+  const cloned = runner.indexOf("CREATE DATABASE virki_bootstrap_virgin WITH TEMPLATE virki_e2e_test");
+  const executed = runner.indexOf("-Name 'bootstrap-virgin-tests'");
+  const shared = runner.indexOf("-Name 'integration-tests'");
+  assert.ok(migrated !== -1 && cloned > migrated && executed > cloned && shared > executed,
+    "real bootstrap must use the freshly migrated schema before the shared integration suite");
+  assert.match(runner, /Invoke-OwnedDockerCleanup/u, "the independent database must remain confined to owned Docker cleanup");
+});
+
 test("browser E2E output redacts URL queries, fragments and credential-bearing headers", () => {
   const input = [
     'Error: page.goto failed at https://hub.localhost/recover/open?request=SAFE_TEST_VALUE&next=%2Fadmin#one-time-proof',
