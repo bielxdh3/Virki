@@ -242,7 +242,8 @@ jobs:
   production-images:
     name: Build tested production images (${{ matrix.arch }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [validate, authenticated-e2e]
+    # GHCR publication requires every independent audit to succeed.
+    needs: [validate, authenticated-e2e, tooling-policy, production-audit]
     permissions:
       contents: read
       packages: write

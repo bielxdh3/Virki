@@ -55,6 +55,9 @@ export function interpretProductionNpmResult(kind, result) {
     return { status: "reported", names };
   }
 
+  // JSON cannot override a contradictory npm stderr diagnostic.
+  if (typeof result.stderr === "string" && result.stderr.trim()) return unavailable("command-stderr");
+
   const counts = report?.metadata?.vulnerabilities;
   if (report.auditReportVersion !== 2 || !record(counts) || !record(report.vulnerabilities) ||
       [...severityKeys, "total"].some((key) => !Number.isSafeInteger(counts[key]) || counts[key] < 0)) {

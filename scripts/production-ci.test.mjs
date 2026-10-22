@@ -16,6 +16,52 @@ const isolatedRunner = readFileSync(path.join(repositoryRoot, "scripts", "e2e", 
 const codeqlWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql.yml"), "utf8");
 const codeqlEvidenceWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "codeql-evidence.yml"), "utf8");
 const approvalWorkflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "approve-production.yml"), "utf8");
+
+function publicationNeedsAreSafe(source) {
+  // Parse the job-level portion of this workflow instead of matching a
+  // "needs:" substring that might belong to another job or a comment.
+  const lines = source.split(/\r?\n/u);
+  const jobsStart = lines.findIndex((line) => line === "jobs:");
+  if (jobsStart < 0 || lines.filter((line) => line === "jobs:").length !== 1) return false;
+  const jobs = new Map();
+  let current = null;
+  for (const line of lines.slice(jobsStart + 1)) {
+    if (line.length > 0 && !line.startsWith(" ") && !line.startsWith("#")) break;
+    const match = /^ {2}([a-z][a-z0-9-]*):\s*$/u.exec(line);
+    if (match) {
+      if (jobs.has(match[1])) return false;
+      current = match[1];
+      jobs.set(current, []);
+    } else if (current !== null) {
+      jobs.get(current).push(line);
+    }
+  }
+  const publisher = jobs.get("production-images");
+  if (!publisher) return false;
+  const needsLines = publisher.filter((line) => /^ {4}needs:/u.test(line));
+  const ifLines = publisher.filter((line) => /^ {4}if:/u.test(line));
+  if (needsLines.length !== 1 || ifLines.length !== 1) return false;
+  if (ifLines[0].trim() !== "if: github.event_name == 'push' && github.ref == 'refs/heads/main'") return false;
+  // A custom always() or success() expression here would override the
+  // GitHub Actions default success() gating on every needs dependency.
+  const needs = /^ {4}needs: \[([a-z0-9, -]+)\]\s*$/u.exec(needsLines[0]);
+  if (!needs) return false;
+  const members = needs[1].split(",").map((name) => name.trim());
+  if (members.some((name) => !name) || new Set(members).size !== members.length) return false;
+  for (const dependency of ["validate", "authenticated-e2e", "production-audit", "tooling-policy"]) {
+    if (!members.includes(dependency) || !jobs.has(dependency)) return false;
+  }
+  for (const [jobName, auditScript] of [
+    ["production-audit", "node scripts/production-dependency-audit.mjs"],
+    ["tooling-policy", "node scripts/tooling-audit-policy.mjs"]
+  ]) {
+    const job = jobs.get(jobName);
+    if (job.some((line) => /^ {4}(if:|continue-on-error:)/u.test(line)) ||
+        job.some((line) => /^\s+continue-on-error:\s*true\s*$/u.test(line)) ||
+        !job.some((line) => line.trim() === "run: " + auditScript)) return false;
+  }
+  return !publisher.some((line) => /^ {4}continue-on-error:/u.test(line));
+}
 const reviewedSarif = {
   version: "2.1.0",
   runs: [{
@@ -295,7 +341,7 @@ test("a publisher log naming another CodeQL run cannot satisfy the exact-SHA evi
 
 test("private GHCR images publish only after exact main-push builds pass on both architectures", () => {
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
-  assert.match(workflow, /needs: \[validate, authenticated-e2e\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
+  assert.match(workflow, /needs: \[validate, authenticated-e2e, tooling-policy, production-audit\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
   assert.match(workflow, /--target production[\s\S]*?--target migrator/u);
   assert.match(workflow, /VIRKI_BUILD_REVISION=\$\{\{ github\.sha \}\}[\s\S]*?docker image inspect[\s\S]*?node scripts\/production-runtime-smoke\.mjs/u);
   const migratorSmoke = workflow.indexOf("name: Production migrator image smoke");
@@ -317,6 +363,40 @@ test("private GHCR images publish only after exact main-push builds pass on both
   assert.ok(workflow.includes("Store exact-run image digests in private GHCR evidence"));
   assert.ok(!workflow.includes("actions/upload-artifact"));
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
+});
+
+test("GHCR publication requires successful audit jobs in GitHub Actions needs closure", () => {
+  assert.equal(publicationNeedsAreSafe(workflow), true, "both audit jobs must complete successfully before GHCR publication");
+
+  for (const removed of ["tooling-policy", "production-audit", "validate", "authenticated-e2e"]) {
+    const mutated = workflow.replace(
+      /^ {4}needs: \[[^\]\n]+\]$/mu,
+      (line) => line.replace(new RegExp(removed + "(?:, )?|, " + removed, "u"), "")
+    );
+    assert.notEqual(mutated, workflow);
+    assert.equal(publicationNeedsAreSafe(mutated), false, "removing " + removed + " must block publication");
+  }
+  assert.equal(publicationNeedsAreSafe(workflow.replace("  production-audit:", "  renamed-production-audit:")), false);
+  assert.equal(publicationNeedsAreSafe(workflow.replace("  tooling-policy:", "  renamed-tooling-policy:")), false);
+  assert.equal(publicationNeedsAreSafe(workflow.replace(
+    "    needs: [validate, authenticated-e2e, tooling-policy, production-audit]",
+    "    needs: [validate, authenticated-e2e, tooling-policy, production-audit]\n    if: always()"
+  )), false, "duplicate or bypassing job conditions must block publication");
+  assert.equal(publicationNeedsAreSafe(workflow.replace(
+    "        run: node scripts/production-dependency-audit.mjs",
+    "        run: echo audit disabled"
+  )), false, "removing the production audit step must block publication");
+  assert.equal(publicationNeedsAreSafe(workflow.replace(
+    "        run: node scripts/tooling-audit-policy.mjs",
+    "        run: echo audit disabled"
+  )), false, "removing the tooling audit step must block publication");
+  assert.equal(publicationNeedsAreSafe(workflow.replace(
+    "  tooling-policy:", "  tooling-policy:\n    if: always()"
+  )), false, "an audit job with a custom condition must not authorize publishing");
+  assert.equal(publicationNeedsAreSafe(workflow.replace(
+    "        run: node scripts/production-dependency-audit.mjs",
+    "        run: node scripts/production-dependency-audit.mjs\n        continue-on-error: true"
+  )), false, "a soft-failed production audit must not authorize publishing");
 });
 
 test("privileged source Git tests stay mandatory in isolated root Linux CI and the local production stage", () => {

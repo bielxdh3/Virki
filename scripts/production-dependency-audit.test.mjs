@@ -83,6 +83,17 @@ test("npm audit clean exit 1 or process timeout never permits PASS", () => {
   assert.equal(JSON.stringify(evaluate({ audit: timedOut })).includes("SENSITIVE_TEST_MARKER"), false);
 });
 
+test("npm audit clean status 0 accompanied by stderr fails closed without echoing diagnostics", () => {
+  const execution = interpretProductionNpmResult("audit", npmResult(0, cleanAudit,
+    "SENSITIVE_TEST_MARKER audit endpoint unreachable"));
+  assert.equal(execution.status, "unavailable");
+  assert.equal(execution.reason, "command-stderr");
+  const evaluated = evaluate({ audit: execution });
+  assert.equal(evaluated.status, "failed");
+  assert.equal(JSON.stringify(evaluated).includes("SENSITIVE_TEST_MARKER"), false);
+  assert.doesNotMatch(evaluated.errors.join(" "), /reported one or more vulnerabilities/u);
+});
+
 test("npm ls exit 1 with plausible JSON and stderr still fails closed", () => {
   const tree = interpretProductionNpmResult("ls", npmResult(1, healthyTree, "private registry URL"));
   assert.equal(tree.status, "unavailable");
