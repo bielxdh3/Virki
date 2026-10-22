@@ -20,17 +20,75 @@ function hasLow05NoStoreDirectives(value: string): boolean {
   return ["no-store", "max-age=0", "must-revalidate"].every((directive) => directives.has(directive)) && !directives.has("public");
 }
 
-async function goBackToProtectedPage(page: import("@playwright/test").Page): Promise<{ status: number; cacheControl: string }> {
-  const protectedDocumentResponse = page.waitForResponse((response) => {
+async function goBackToProtectedPage(page: import("@playwright/test").Page, priorSecurityOrigin: number): Promise<{ status: number; cacheControl: string }> {
+  const responses: import("@playwright/test").Response[] = [];
+  const observeProtectedDocument = (response: import("@playwright/test").Response) => {
     const request = response.request();
     const url = new URL(response.url());
-    return request.frame() === page.mainFrame() && request.isNavigationRequest() && request.resourceType() === "document" && request.method() === "GET" &&
-      url.origin === new URL(portalUrl).origin && url.pathname === "/account/security";
-  }, { timeout: 15_000 });
-  await page.goBack({ waitUntil: "domcontentloaded" });
-  await expect(page).toHaveURL(`${portalUrl}/account/security`);
-  const response = await protectedDocumentResponse;
-  return { status: response.status(), cacheControl: await response.headerValue("cache-control") ?? "" };
+    if (request.frame() === page.mainFrame() && request.isNavigationRequest() &&
+        request.resourceType() === "document" && request.method() === "GET" &&
+        url.origin === new URL(portalUrl).origin && url.pathname === "/account/security") {
+      responses.push(response);
+    }
+  };
+  page.on("response", observeProtectedDocument);
+  try {
+    try {
+      await page.goBack({ waitUntil: "domcontentloaded" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // The protected history entry intentionally scrubs and reloads itself;
+      // an aborted first navigation is tolerated only if the expected secured
+      // document response, exact URL, and completed reload still follow.
+      if (!/page\.goBack: net::ERR_ABORTED/u.test(message)) throw error;
+    }
+    await expect(page).toHaveURL(`${portalUrl}/account/security`);
+    await waitForHistoryRevalidation(page, priorSecurityOrigin);
+    await expect(page).toHaveURL(`${portalUrl}/account/security`);
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    // Assert the last security GET observed through the guard reload, not an
+    // earlier, possibly weaker response to the history traversal itself.
+    const finalResponse = responses.at(-1);
+    expect(finalResponse, "fresh history reload must have a main-frame security GET").toBeDefined();
+    return { status: finalResponse!.status(), cacheControl: await finalResponse!.headerValue("cache-control") ?? "" };
+  } finally {
+    page.off("response", observeProtectedDocument);
+  }
+}
+
+async function waitForHistoryRevalidation(page: import("@playwright/test").Page, priorOrigin: number): Promise<void> {
+  // Both protected routes deliberately scrub and reload a history-restored
+  // document. A preexisting navigation entry with type "reload" is not
+  // evidence of a NEW document. Require a later performance time origin.
+  await expect.poll(async () => {
+    try {
+      return await page.evaluate((previous) => {
+        const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+        return navigation?.type === "reload" && performance.timeOrigin > previous;
+      }, priorOrigin);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/(?:execution context was destroyed|page is navigating|frame was detached)/iu.test(message)) throw error;
+      return false;
+    }
+  }, { timeout: 15_000, message: "History restoration must finish a newly loaded protected document" }).toBe(true);
+}
+
+async function goForwardToPortalPage(page: import("@playwright/test").Page, priorPortalOrigin: number): Promise<void> {
+  try {
+    await page.goForward({ waitUntil: "domcontentloaded" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // The protected page deliberately forces a second full navigation on
+    // history restoration. Chromium can abort the first document navigation
+    // while the browser still completes the forward traversal. Do not treat
+    // other errors as transient, and require the intended URL and UI below.
+    if (!/page\.goForward: net::ERR_ABORTED/u.test(message)) throw error;
+  }
+  await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
+  await waitForHistoryRevalidation(page, priorPortalOrigin);
+  await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
+  await expect(page.getByRole("heading", { level: 1, name: "Projetos", exact: true })).toBeVisible();
 }
 
 test.skip(!e2eDatabaseUrl, "Recovery/invitation E2E requires an explicit disposable PostgreSQL fixture.");
@@ -423,9 +481,11 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     expect(visibleState.storage).toBe(false);
     expect(await database.recoveryCode.count({ where: { userId: fixture.user.id, usedAt: null } })).toBe(10);
 
+    const firstSecurityOrigin = await page.evaluate(() => performance.timeOrigin);
     await page.goto(`${portalUrl}/?history-probe=low05`);
     await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
-    const historyBackResponse = await goBackToProtectedPage(page);
+    const firstPortalOrigin = await page.evaluate(() => performance.timeOrigin);
+    const historyBackResponse = await goBackToProtectedPage(page, firstSecurityOrigin);
     expect(historyBackResponse.status).toBe(200);
     // Next dev overwrites the protected Proxy header when rendering documents.
     // Production browser history always requires the full no-store policy.
@@ -462,12 +522,9 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     expect(backState.history).toBe(false);
     expect(backState.storage).toBe(false);
     expect(backState.forms).toBe(false);
-    await page.goForward({ waitUntil: "domcontentloaded" });
-    await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
-    // A URL match can precede hydration; avoid racing the next history traversal
-    // against the returning portal document's initial navigation lifecycle.
-    await expect(page.getByRole("heading", { level: 1, name: "Projetos", exact: true })).toBeVisible();
-    const repeatHistoryBackResponse = await goBackToProtectedPage(page);
+    const firstSecurityReloadOrigin = await page.evaluate(() => performance.timeOrigin);
+    await goForwardToPortalPage(page, firstPortalOrigin);
+    const repeatHistoryBackResponse = await goBackToProtectedPage(page, firstSecurityReloadOrigin);
     expect(repeatHistoryBackResponse.status).toBe(200);
     expect(isLow05ProtectedDocumentCacheControl(repeatHistoryBackResponse.cacheControl, hubMode)).toBe(true);
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
