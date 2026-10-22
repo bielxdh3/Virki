@@ -276,6 +276,28 @@ prerequisites. This design is **not implemented** by the read-only probe.
 
 ## Evidence and disposition
 
+### Independent ledger witness read (non-authorizing prototype)
+
+`npm run test:offline:witness-read` runs a local Ed25519 verification contract
+in `scripts/lib/offline-ledger-witness-proof.mjs`. The fixture-only probe
+generates a fresh unpredictable 256-bit challenge and validates an exact,
+canonical signed response bound to the independently pinned witness public
+key, host identity, whole local ledger SHA-256, sequence, accepted revision and
+a maximum 30-second validity window. It rejects response replay, foreign keys,
+rewound snapshots, unknown/duplicate fields and forged signatures. No private
+witness signing key belongs on the release host or in the repository.
+
+This is **only a signed remote-read protocol contract**: its transport callback
+is enabled solely with `VIRKI_DISPOSABLE_WITNESS_PROBE=1` for tests. There is
+no deployed independent witness, owner-provisioned public-key pin, mutually
+authenticated transport, atomic distributed compare-and-swap, durable external
+state, host-controlled timing, or native release integration. No response grants
+`witnessCasAuthorized`, `dockerLoadAuthorized` or `deployAuthorized`. In
+particular, a signed fresh read does **not** guarantee that a later local
+append was accepted by an independently durable monotonic authority. Real
+release admission and completion must remain blocked until independent CAS
+and reconciliation are implemented and reviewed.
+
 Before approval, retain the exact final SHA, `run-manifest.json` with all
 19/19 stages, complete scanner/finding-review report, runtime and migrator
 image IDs and hashes, real disposable restoration report, host-preflight and
