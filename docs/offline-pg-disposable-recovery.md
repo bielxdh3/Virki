@@ -99,6 +99,13 @@ before a `rolled_back` transition is possible. If validation fails, only an
 enumerated journal phase or numeric child exit status may be printed; all raw
 PostgreSQL/SQL/dump output remains redacted. A mismatch is a test failure,
 never an accepted alternative outcome or silently retried test.
+The separate `rollback_precheckpoint_error` adversarial case simulates a
+non-signal exit (70) after a fully restored source but before
+`rollback_restored` is persisted. It requires the journal to remain
+`rollback_rebuild`, proves exact data preservation, keeps the attempt latch,
+and succeeds only after explicit manual reconciliation. This reproduces the
+**class** of early failure that the old permissive `wait` accepted as a
+crash, without claiming the precise cause of a past intermittent early exit.
 
 Admission first creates and synchronizes the exclusive `.attempted` marker,
 then requires its *own* unique PostgreSQL journal INSERT to return an inserted

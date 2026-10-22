@@ -168,6 +168,14 @@ rollback() {
   crash_point rollback_loaded
   assert_fingerprint "$source_db" "$baseline_fingerprint"
   assert_schema "$source_db"
+  # Adversarial proof of the pre-checkpoint failure window. Before 063b44b the
+  # runner accepted ANY child non-zero status as a simulated SIGKILL and then
+  # misreported the lingering rollback_rebuild journal as exit 143. This case
+  # deliberately fails after a complete pg_restore but BEFORE the durable
+  # checkpoint. It must remain uncommitted and explicitly reconcilable.
+  if test "${VIRKI_OFFLINE_PG_CASE:-}" = rollback_precheckpoint_error; then
+    refuse 'injected failure before rollback_restored checkpoint'
+  fi
   record rollback_restored rollback_rebuild
   record rolled_back rollback_restored
   # Attempt latch intentionally retained. Operator must reconcile.
@@ -180,7 +188,7 @@ crash_point() {
 }
 attempt() {
   case "${VIRKI_OFFLINE_PG_CASE:-}" in
-    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored) ;;
+    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error) ;;
     *) refuse 'unsupported fixture case';;
   esac
   baseline_fingerprint="$(fingerprint "$source_db")"
@@ -221,7 +229,7 @@ attempt() {
     printf '%s' 'broken' > "$backup"
   fi
   case "${VIRKI_OFFLINE_PG_CASE}" in
-    fail_live|corrupt_backup|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored)
+    fail_live|corrupt_backup|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error)
       rollback
       return
       ;;

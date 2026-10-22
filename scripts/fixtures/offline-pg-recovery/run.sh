@@ -55,7 +55,7 @@ test "$protected_count" = t ||
   { echo 'Representative security data is incomplete' >&2; exit 133; }
 
 case "${1:-}" in
-  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored)
+  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error)
     export VIRKI_OFFLINE_PG_CASE="$1"
     case "$1" in
       happy)
@@ -131,6 +131,27 @@ case "${1:-}" in
           test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 149
         fi
         test -f "$fixture/.attempted" || exit 150
+        ;;
+      rollback_precheckpoint_error)
+        # A restore may succeed while the controller exits BEFORE persisting
+        # the final checkpoint. This is NOT an injected kill, nor a completed
+        # rollback. It used to appear as a misleading exit 143 in the loose
+        # crash fixture. Assert the exact error and preserve the attempt latch.
+        child_status=0
+        sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" || child_status=$?
+        test "$child_status" = 70 || exit 151
+        phase="$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')"
+        test "$phase" = rollback_rebuild || exit 152
+        test -f "$fixture/.attempted" && test -s "$fixture/virki.dump" || exit 153
+        # Keep the immutable proof exact even when the prior process died
+        # between successful pg_restore and its terminal journal transition.
+        current_inventory="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/inventory.psql 2>"$fixture/pg-error")"
+        test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 154
+        VIRKI_OFFLINE_PG_CASE=happy
+        export VIRKI_OFFLINE_PG_CASE
+        sh /workspace/scripts/lib/offline-pg-disposable-controller.sh reconcile > /dev/null 2>"$fixture/reconcile.err" || exit 155
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 156
+        test -f "$fixture/.attempted" || exit 157
         ;;
       fail_live)
         sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" || exit 118
