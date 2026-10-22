@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { generateKeyPairSync, randomBytes, createHash } from "node:crypto";
+import { generateKeyPairSync, randomBytes, createHash, sign } from "node:crypto";
 import {
   chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync,
   readdirSync, rmSync, writeFileSync,
@@ -14,10 +14,12 @@ import { fileURLToPath } from "node:url";
 import {
   WITNESS_CAS_DOMAIN, WITNESS_READ_DOMAIN, GENESIS_HEAD, GENESIS_RECEIPT,
   verifyIndependentWitnessCasReceipt, verifyIndependentWitnessHead,
+  ownerWitnessCasSigningBytes,
 } from "./lib/offline-independent-witness-service.mjs";
 
 const isLinux = process.platform === "linux";
 const nonce = () => randomBytes(32).toString("hex");
+const anchoredCount = (directory) => readdirSync(directory).filter((name) => name.endsWith(".receipt")).length;
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const script = fileURLToPath(new URL("./offline-independent-witness-server.mjs", import.meta.url));
 
@@ -28,11 +30,16 @@ function fixture() {
   const sockets = join(root, "sockets");
   for (const path of [db, anchors, sockets]) mkdirSync(path, { mode: 0o700 });
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const ownerKeys = generateKeyPairSync("ed25519");
   const signerKey = join(root, "witness-private.pem");
   writeFileSync(signerKey, privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
   chmodSync(signerKey, 0o600);
   const publicKeyPem = publicKey.export({ format: "pem", type: "spki" });
   const pinSha256 = digest(publicKey.export({ format: "der", type: "spki" }));
+  const ownerPublicFile = join(root, "owner-public.pem");
+  writeFileSync(ownerPublicFile, ownerKeys.publicKey.export({ format: "pem", type: "spki" }), { mode: 0o600 });
+  chmodSync(ownerPublicFile, 0o600);
+  const ownerPinSha256 = digest(ownerKeys.publicKey.export({ format: "der", type: "spki" }));
   const hostIdentitySha256 = nonce();
   const ledgerIdSha256 = nonce();
   const children = [];
@@ -43,10 +50,13 @@ function fixture() {
     VIRKI_WITNESS_ANCHOR_DIRECTORY: anchors,
     VIRKI_WITNESS_SIGNER_KEY: signerKey,
     VIRKI_WITNESS_SIGNER_PIN: pinSha256,
+    VIRKI_WITNESS_OWNER_PUBLIC_KEY: ownerPublicFile,
+    VIRKI_WITNESS_OWNER_PUBLIC_PIN: ownerPinSha256,
     VIRKI_WITNESS_HOST_SHA256: hostIdentitySha256,
     VIRKI_WITNESS_LEDGER_SHA256: ledgerIdSha256,
   };
   return { root, db, anchors, sockets, children, publicKeyPem, pinSha256,
+    ownerPrivateKey: ownerKeys.privateKey, ownerPublicFile, ownerPinSha256,
     hostIdentitySha256, ledgerIdSha256, env,
     cleanup: () => {
       for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -107,12 +117,16 @@ async function send(socket, endpoint, payload) {
 }
 
 function nextRequest(f, state, headSha = nonce().slice(0, 40)) {
-  return {
+  const request = {
     version: 1, domain: WITNESS_CAS_DOMAIN, challenge: nonce(), requestId: nonce(),
     hostIdentitySha256: f.hostIdentitySha256, ledgerIdSha256: f.ledgerIdSha256,
     expectedSequence: state.sequence, expectedHeadSha: state.headSha,
     expectedReceiptSha256: state.receiptSha256, nextHeadSha: headSha,
     transitionSha256: nonce(),
+    ownerExpiresAt: Math.floor(Date.now() / 1000) + 25,
+  };
+  return { ...request,
+    ownerSignature: sign(null, ownerWitnessCasSigningBytes(request), f.ownerPrivateKey).toString("base64"),
   };
 }
 
@@ -170,6 +184,27 @@ test("native Linux disposable independent Ed25519 witness CAS and rollback resis
       assert.throws(() => verifyIndependentWitnessHead({ ...verifyOptions, nowSeconds: 1 }), /refused/u);
     });
 
+    await t.test("same-UID socket client cannot change witnessed head without separate fresh owner signature", async () => {
+      const original = await head(server, f);
+      const authentic = nextRequest(f, original);
+      for (const forged of [
+        { ...authentic, ownerSignature: "A".repeat(86) + "==" },
+        { ...authentic, ownerSignature: undefined },
+        { ...authentic, ownerExpiresAt: 1 },
+        { ...authentic, nextHeadSha: nonce().slice(0, 40) },
+        { ...authentic, transitionSha256: nonce() },
+        { ...authentic, requestId: nonce() },
+        { ...authentic, expectedSequence: 200 },
+      ]) {
+        const rejected = await send(server.socket, "/v1/cas", forged);
+        assert.equal(rejected.code, 400, "unauthorized same-UID client must not advance CAS");
+      }
+      assert.deepEqual(await head(server, f), original);
+      await assert.rejects(start(f, "wrong-owner", {
+        VIRKI_WITNESS_OWNER_PUBLIC_PIN: nonce(),
+      }), /distinct independently pinned owner authorization key required/u);
+    });
+
     let current;
     await t.test("concurrent CAS across two OS processes yields one winner, signed proof and 409 fencing", async () => {
       const other = await start(f, "second");
@@ -200,7 +235,7 @@ test("native Linux disposable independent Ed25519 witness CAS and rollback resis
           nowSeconds: accepted.message.expiresAt,
         }), /refused/u);
         assert.equal((await send(server.socket, "/v1/cas", winningRequest)).code, 409);
-        assert.equal((await send(other.socket, "/v1/cas", { ...winningRequest, requestId: nonce() })).code, 409);
+        assert.equal((await send(other.socket, "/v1/cas", { ...winningRequest, requestId: nonce() })).code, 400);
         assert.equal((await send(server.socket, "/v1/cas", { ...winningRequest, ledgerIdSha256: nonce() })).code, 400);
         assert.equal((await send(server.socket, "/v1/cas", { ...winningRequest, extra: true })).code, 400);
         const next = nextRequest(f, verified);
@@ -235,14 +270,30 @@ test("native Linux disposable independent Ed25519 witness CAS and rollback resis
       await assert.rejects(send(faulty.socket, "/v1/cas", request), /ECONNRESET|socket hang up/u);
       await once(faulty.child, "exit");
       assert.equal(faulty.child.exitCode, 73);
-      assert.equal(readdirSync(f.anchors).length, 2);
+      assert.equal(anchoredCount(f.anchors), 2);
       server = await start(f, "after-middle");
       const recovered = await head(server, f);
       assert.equal(recovered.sequence, 3);
       assert.equal(recovered.headSha, request.nextHeadSha);
-      assert.equal(readdirSync(f.anchors).length, 3);
+      assert.equal(anchoredCount(f.anchors), 3);
       assert.equal((await send(server.socket, "/v1/cas", request)).code, 409);
       current = recovered;
+    });
+
+    await t.test("mid-write anchor crash cannot publish partial receipt and is recovered from signed SQL", async () => {
+      await stop(server);
+      const faulty = await start(f, "partial", { VIRKI_DISPOSABLE_WITNESS_FAULT: "partialAnchor" });
+      const request = nextRequest(f, current);
+      await assert.rejects(send(faulty.socket, "/v1/cas", request), /ECONNRESET|socket hang up/u);
+      await once(faulty.child, "exit");
+      assert.equal(faulty.child.exitCode, 76);
+      assert.equal(anchoredCount(f.anchors), 3);
+      assert.ok(readdirSync(join(f.anchors, ".staging")).length > 0);
+      server = await start(f, "after-partial");
+      current = await head(server, f);
+      assert.equal(current.sequence, 4);
+      assert.equal(current.headSha, request.nextHeadSha);
+      assert.equal(anchoredCount(f.anchors), 4);
     });
 
     await t.test("crash after anchor remains committed across restart", async () => {
@@ -254,9 +305,9 @@ test("native Linux disposable independent Ed25519 witness CAS and rollback resis
       assert.equal(faulty.child.exitCode, 75);
       server = await start(f, "after-anchor");
       current = await head(server, f);
-      assert.equal(current.sequence, 4);
+      assert.equal(current.sequence, 5);
       assert.equal(current.headSha, request.nextHeadSha);
-      assert.equal(readdirSync(f.anchors).length, 4);
+      assert.equal(anchoredCount(f.anchors), 5);
     });
 
     await t.test("restoring an older committed SQLite image is refused due to independent anchors", async () => {
@@ -268,7 +319,7 @@ test("native Linux disposable independent Ed25519 witness CAS and rollback resis
       server = await start(f, "ahead");
       const successor = nextRequest(f, current);
       current = await cas(server, f, successor);
-      assert.equal(current.sequence, 5);
+      assert.equal(current.sequence, 6);
       await stop(server);
       copyFileSync(oldDb, dbFile);
       await assert.rejects(start(f, "rollback"), /rollback: durable anchor ahead of database/u);
@@ -303,6 +354,48 @@ test("tampered signed SQL history and corrupted durable anchor refuse boot", { s
     });
   } finally {
     await stop(server);
+    f.cleanup();
+  }
+});
+
+test("concurrent signed head reads and owner-approved CAS cannot report a forged rollback", {
+  skip: !isLinux,
+}, async () => {
+  const f = fixture();
+  let writer;
+  let reader;
+  try {
+    writer = await start(f, "cas-writer");
+    reader = await start(f, "head-reader");
+    let expected = await head(writer, f);
+    for (let i = 0; i < 8; i += 1) {
+      const mutation = nextRequest(f, expected);
+      const readChallenges = Array.from({ length: 5 }, () => readRequest(f));
+      const [casResponse, ...reads] = await Promise.all([
+        send(writer.socket, "/v1/cas", mutation),
+        ...readChallenges.map((req) => send(reader.socket, "/v1/head", req)),
+      ]);
+      assert.equal(casResponse.code, 201, "single owner-authorized transition must commit");
+      const committed = verifyIndependentWitnessCasReceipt({
+        receipt: casResponse.body.receipt, request: mutation,
+        publicKeyPem: f.publicKeyPem, pinSha256: f.pinSha256,
+      });
+      for (let j = 0; j < reads.length; j += 1) {
+        assert.equal(reads[j].code, 200, "a valid racing read must not report anchor rollback/503");
+        const proof = verifyIndependentWitnessHead({
+          receipt: reads[j].body.receipt, request: readChallenges[j],
+          publicKeyPem: f.publicKeyPem, pinSha256: f.pinSha256,
+          minimumSequence: expected.sequence,
+        });
+        assert.ok(proof.sequence === expected.sequence || proof.sequence === committed.sequence,
+          "racing read may see only previous or newly signed committed head");
+      }
+      expected = committed;
+      assert.equal((await head(reader, f, expected)).sequence, i + 1);
+    }
+  } finally {
+    await stop(reader);
+    await stop(writer);
     f.cleanup();
   }
 });

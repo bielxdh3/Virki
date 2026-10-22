@@ -1,7 +1,7 @@
-import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
 import {
-  closeSync, fsyncSync, lstatSync, openSync,
-  readFileSync, readdirSync, realpathSync, writeSync,
+  closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync,
+  readFileSync, readdirSync, realpathSync, unlinkSync, writeSync,
 } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -19,6 +19,8 @@ const CAS_FIELDS = [
   "version", "domain", "challenge", "requestId", "hostIdentitySha256", "ledgerIdSha256",
   "expectedSequence", "expectedHeadSha", "expectedReceiptSha256", "nextHeadSha", "transitionSha256",
 ];
+const AUTHORIZED_CAS_FIELDS = [...CAS_FIELDS, "ownerExpiresAt", "ownerSignature"];
+const OWNER_CAS_PREFIX = Buffer.from("Virki/offline-independent-witness/owner-cas-v1\0");
 const HEAD_FIELDS = ["version", "domain", "challenge", "hostIdentitySha256", "ledgerIdSha256"];
 const RECEIPT_FIELDS = [
   "version", "domain", "challenge", "requestId", "hostIdentitySha256", "ledgerIdSha256",
@@ -85,7 +87,7 @@ export function verifyIndependentWitnessCasReceipt({ receipt, publicKeyPem, pinS
     digest(key.export({ format: "der", type: "spki" })) === pinSha256, "invalid verifier pin");
   exactFields(receipt, ["message", "signature", "receiptSha256"]);
   auditReceipt(receipt.message, receipt.signature, key);
-  exactFields(request, CAS_FIELDS);
+  exactFields(request, AUTHORIZED_CAS_FIELDS);
   const m = receipt.message;
   requireWitness(m.challenge === request.challenge && m.requestId === request.requestId &&
     m.hostIdentitySha256 === request.hostIdentitySha256 && m.ledgerIdSha256 === request.ledgerIdSha256 &&
@@ -113,8 +115,16 @@ function canonicalRequest(value, allowed, domain, host, ledger) {
   "scope, challenge or protocol mismatch");
 }
 
+export function ownerWitnessCasSigningBytes(request) {
+  const body = {};
+  for (const field of CAS_FIELDS) body[field] = request[field];
+  body.ownerExpiresAt = request.ownerExpiresAt;
+  return Buffer.concat([OWNER_CAS_PREFIX, Buffer.from(JSON.stringify(body))]);
+}
+
 export class IndependentOfflineWitness {
   constructor({ directory, anchorDirectory, keyFile, expectedKeyPinSha256,
+    ownerPublicKeyFile, expectedOwnerKeyPinSha256,
     hostIdentitySha256, ledgerIdSha256, repositoryDirectory } = {}) {
     requireWitness(process.platform === "linux" && process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE === "1",
       "Linux disposable fixture is required");
@@ -124,30 +134,59 @@ export class IndependentOfflineWitness {
     const store = realpathSync(directory);
     const anchors = realpathSync(anchorDirectory);
     const signer = realpathSync(keyFile);
+    const ownerKeyFile = realpathSync(ownerPublicKeyFile);
     requireWitness(store !== anchors && !isWithin(store, anchors) && !isWithin(anchors, store),
       "anchor and database directories must be distinct");
     if (repositoryDirectory) {
       const repository = realpathSync(repositoryDirectory);
       requireWitness(!isWithin(store, repository) && !isWithin(anchors, repository) &&
-        !isWithin(signer, repository), "witness authority must live outside repository");
+        !isWithin(signer, repository) && !isWithin(ownerKeyFile, repository),
+      "witness authority must live outside repository");
     }
     const privateKey = createPrivateKey(verifyPrivateFile(keyFile));
     requireWitness(privateKey.asymmetricKeyType === "ed25519", "Ed25519 signing key required");
     const publicKey = createPublicKey(privateKey);
     const actualPin = digest(publicKey.export({ format: "der", type: "spki" }));
     requireWitness(actualPin === expectedKeyPinSha256, "witness signer does not match operator pin");
+    requireWitness(HEX64.test(expectedOwnerKeyPinSha256), "independent owner signer pin missing");
+    const ownerPublicKey = createPublicKey(verifyPrivateFile(ownerPublicKeyFile));
+    requireWitness(ownerPublicKey.asymmetricKeyType === "ed25519" &&
+      digest(ownerPublicKey.export({ format: "der", type: "spki" })) === expectedOwnerKeyPinSha256 &&
+      expectedOwnerKeyPinSha256 !== actualPin && ownerKeyFile !== signer,
+    "distinct independently pinned owner authorization key required");
     this.privateKey = privateKey;
     this.publicKey = publicKey;
+    this.ownerPublicKey = ownerPublicKey;
+    this.ownerKeyPin = expectedOwnerKeyPinSha256;
     this.anchorDirectory = anchors;
+    // Never publish partially written receipt bytes under a final anchor name.
+    // Scratch files can be abandoned on crash and have no authority.
+    this.anchorStagingDirectory = resolve(anchors, ".staging");
+    try { mkdirSync(this.anchorStagingDirectory, { mode: 0o700 }); }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+    verifyPrivateDirectory(this.anchorStagingDirectory);
     this.hostIdentitySha256 = hostIdentitySha256;
     this.ledgerIdSha256 = ledgerIdSha256;
     this.db = new DatabaseSync(resolve(store, "witness.sqlite"), { timeout: 5000 });
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
-    this.db.exec("CREATE TABLE IF NOT EXISTS scope (id INTEGER PRIMARY KEY CHECK(id=1), host TEXT NOT NULL, ledger TEXT NOT NULL, signer TEXT NOT NULL)");
+    this.db.exec("CREATE TABLE IF NOT EXISTS scope (id INTEGER PRIMARY KEY CHECK(id=1), host TEXT NOT NULL, ledger TEXT NOT NULL, signer TEXT NOT NULL, owner TEXT NOT NULL)");
     this.db.exec("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, request_id TEXT UNIQUE NOT NULL, challenge TEXT UNIQUE NOT NULL, message TEXT NOT NULL, signature TEXT NOT NULL)");
-    this.db.prepare("INSERT OR IGNORE INTO scope(id,host,ledger,signer) VALUES(1,?,?,?)")
-      .run(hostIdentitySha256, ledgerIdSha256, actualPin);
-    this.audit();
+    this.db.prepare("INSERT OR IGNORE INTO scope(id,host,ledger,signer,owner) VALUES(1,?,?,?,?)")
+      .run(hostIdentitySha256, ledgerIdSha256, actualPin, expectedOwnerKeyPinSha256);
+    this.withExclusiveSnapshot(() => this.audit());
+  }
+
+  withExclusiveSnapshot(action) {
+    this.db.exec("BEGIN IMMEDIATE");
+    let success = false;
+    try {
+      const result = action();
+      this.db.exec("COMMIT");
+      success = true;
+      return result;
+    } finally {
+      if (!success) this.db.exec("ROLLBACK");
+    }
   }
 
   audit(candidateHeadSha) {
@@ -156,7 +195,8 @@ export class IndependentOfflineWitness {
     const meta = this.db.prepare("SELECT * FROM scope").all();
     requireWitness(meta.length === 1 && meta[0].host === this.hostIdentitySha256 &&
       meta[0].ledger === this.ledgerIdSha256 &&
-      meta[0].signer === digest(this.publicKey.export({ type: "spki", format: "der" })),
+      meta[0].signer === digest(this.publicKey.export({ type: "spki", format: "der" })) &&
+      meta[0].owner === this.ownerKeyPin,
     "store signer/scope mismatch");
     let head = GENESIS_HEAD;
     let receiptSha256 = GENESIS_RECEIPT;
@@ -189,7 +229,7 @@ export class IndependentOfflineWitness {
   }
 
   verifyAnchors(records) {
-    const names = readdirSync(this.anchorDirectory).sort();
+    const names = readdirSync(this.anchorDirectory).filter((name) => name !== ".staging").sort();
     requireWitness(names.length <= records.length, "rollback: durable anchor ahead of database");
     for (let index = 0; index < names.length; index += 1) {
       const name = this.anchorName(index + 1);
@@ -220,35 +260,55 @@ export class IndependentOfflineWitness {
   writeAnchor(sequence, hash) {
     const file = resolve(this.anchorDirectory, this.anchorName(sequence));
     const encoded = Buffer.from(JSON.stringify({ sequence, receiptSha256: hash }));
+    const staging = resolve(this.anchorStagingDirectory,
+      `${this.anchorName(sequence)}.${randomBytes(16).toString("hex")}.tmp`);
     let fd;
     try {
-      fd = openSync(file, "wx", 0o600);
+      fd = openSync(staging, "wx", 0o600);
       let offset = 0;
       while (offset < encoded.length) {
-        const count = writeSync(fd, encoded, offset, encoded.length - offset);
+        const sliceLength = process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "partialAnchor" ? 4 : encoded.length - offset;
+        const count = writeSync(fd, encoded, offset, sliceLength);
         requireWitness(count > 0, "unable to persist durable anchor");
         offset += count;
+        if (process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "partialAnchor") process.exit(76);
       }
       fsyncSync(fd);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      requireWitness(readFileSync(file, "utf8") === encoded.toString("utf8"),
-        "conflicting durable anchor");
+      closeSync(fd);
+      fd = undefined;
+      try {
+        linkSync(staging, file); // no-replace atomic publication on Linux
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        requireWitness(readFileSync(file, "utf8") === encoded.toString("utf8"),
+          "conflicting durable anchor");
+      }
     } finally {
       if (fd !== undefined) closeSync(fd);
+      try { unlinkSync(staging); } catch { /* crash debris is non-authorizing */ }
     }
     const dirFd = openSync(this.anchorDirectory, "r");
     try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+    const scratchFd = openSync(this.anchorStagingDirectory, "r");
+    try { fsyncSync(scratchFd); } finally { closeSync(scratchFd); }
   }
 
   cas(request) {
-    canonicalRequest(request, CAS_FIELDS, WITNESS_CAS_DOMAIN,
+    canonicalRequest(request, AUTHORIZED_CAS_FIELDS, WITNESS_CAS_DOMAIN,
       this.hostIdentitySha256, this.ledgerIdSha256);
     requireWitness(HEX64.test(request.requestId) && HEX40.test(request.expectedHeadSha) &&
       HEX40.test(request.nextHeadSha) && HEX64.test(request.expectedReceiptSha256) &&
       HEX64.test(request.transitionSha256) &&
       Number.isSafeInteger(request.expectedSequence) && request.expectedSequence >= 0 &&
       request.expectedSequence < MAX_EVENTS, "invalid CAS predecessor or proposal");
+    const now = Math.floor(Date.now() / 1000);
+    requireWitness(Number.isSafeInteger(request.ownerExpiresAt) &&
+      request.ownerExpiresAt > now && request.ownerExpiresAt <= now + 30 &&
+      typeof request.ownerSignature === "string" && B64.test(request.ownerSignature) &&
+      Buffer.from(request.ownerSignature, "base64").toString("base64") === request.ownerSignature &&
+      verify(null, ownerWitnessCasSigningBytes(request), this.ownerPublicKey,
+        Buffer.from(request.ownerSignature, "base64")),
+    "independent owner-approved CAS signature missing, expired or invalid");
     this.db.exec("BEGIN IMMEDIATE");
     let committed = false;
     let receipt;
@@ -287,7 +347,9 @@ export class IndependentOfflineWitness {
   read(request) {
     canonicalRequest(request, HEAD_FIELDS, WITNESS_READ_DOMAIN,
       this.hostIdentitySha256, this.ledgerIdSha256);
-    const head = this.audit();
+    // A stable SQLite writer snapshot prevents seeing a new anchor against an
+    // old event list during concurrent CAS across separate witness processes.
+    const head = this.withExclusiveSnapshot(() => this.audit());
     const issuedAt = Math.floor(Date.now() / 1000);
     return buildReceipt({
       version: 1, domain: WITNESS_READ_DOMAIN, challenge: request.challenge,
