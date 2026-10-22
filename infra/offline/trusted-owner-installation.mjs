@@ -23,6 +23,7 @@ const LEDGER_ROOT = "/var/lib/virki/offline-release";
 const AUDITED_FILES = Object.freeze([
   "infra/offline/trusted-host-entry.mjs",
   "infra/offline/trusted-host-installer.mjs",
+  "infra/offline/trusted-image-import.mjs",
   "infra/offline/trusted-image-loader.mjs",
   "infra/offline/trusted-release-coordinator.mjs",
   "infra/offline/trusted-source-git.mjs",

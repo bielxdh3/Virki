@@ -147,7 +147,7 @@ test("root bootstrap requires an actual independent Ed25519 approval and publish
   const f = setup(t);
   const result = installOwnerApprovedVerifier(f.request);
   assert.equal(result.status, "DISPOSABLE_OWNER_APPROVED_INSTALL_REHEARSAL");
-  assert.equal(result.verifierFiles, 10);
+  assert.equal(result.verifierFiles, 11);
   const state = JSON.parse(readFileSync(path.join(f.locations.bootstrap, "installation-state.json")));
   assert.equal(state.status, "installed");
   assert.equal(state.lastSequence, 1);

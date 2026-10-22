@@ -19,7 +19,9 @@ const args = [
   "--mount", `type=bind,src=${sourceRoot},dst=/workspace,readonly`,
   "--workdir", "/workspace",
   "--env", "VIRKI_COORDINATOR_DISPOSABLE_CONTAINER=1",
+  "--env", "VIRKI_OWNER_INSTALL_DISPOSABLE_FIXTURE=1",
   IMAGE, "node", "--test", "infra/offline/trusted-release-coordinator.test.mjs",
+  "infra/offline/trusted-owner-installation.test.mjs",
 ];
 const result = spawnSync("docker", args, {
   cwd: sourceRoot, stdio: "inherit", shell: false, timeout: 60_000,

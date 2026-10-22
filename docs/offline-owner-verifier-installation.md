@@ -26,7 +26,7 @@ provisioning ceremony, with root-owned 0700 directories and 0600 regular files:
 | --- | --- |
 | `/etc/virki/offline-bootstrap` | `bootstrap-policy.json`, `owner-key.pem`, `installation-state.json`, and, only after review, `installation-approval.json` |
 | `/etc/virki/offline-verifier-operator` | `verifier-pins.json`, `trust-policy.json`, `ledger.json` |
-| `/var/lib/virki/owner-reviewed-verifier` | Exactly the ten separately audited ESM source modules, all pinned in the verifier inventory |
+| `/var/lib/virki/owner-reviewed-verifier` | Exactly the eleven separately audited ESM source modules, all pinned in the verifier inventory |
 
 The independent bootstrap policy uses canonical minified JSON and *exactly*
 the following keys, in order: `version` (1), `mode`
@@ -80,7 +80,7 @@ only a root-owned, stable, single-link regular file.
 
 The independently approved verifier pin inventory is canonical JSON with the
 exact keys `version`, `mode`, `files`, `trustPolicySha256`, `ledgerSha256`.
-`mode` is `independent-native-verifier-pins-v1`; `files` has exactly ten
+`mode` is `independent-native-verifier-pins-v1`; `files` has exactly eleven
 lexicographically ordered `{"path":"...","sha256":"..."}` entries from
 `AUDITED_VERIFIER_FILES` in `trusted-host-installer.mjs`. The project has a
 separate TypeScript-parser-based closure test in
@@ -118,7 +118,7 @@ and the consumed signed approval sequence. Each target is first written into
 its own parent filesystem as a private `.verifier-install-pending` directory,
 using no-follow exclusive file creation, `fsync` for files/directories, and a
 same-parent atomic rename to the final destination. Policy and ledger are
-published first; the complete ten-module verifier directory is published last.
+published first; the complete eleven-module verifier directory is published last.
 The installed files and policies are remeasured before the bootstrap state
 becomes `status: "installed"`.
 
