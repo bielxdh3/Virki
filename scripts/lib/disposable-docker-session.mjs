@@ -61,20 +61,26 @@ function directoryIdentity(root, requireOwnerPrivate = true) {
   return stat;
 }
 
-function sameIdentity(left, right) {
-  return ["dev", "ino", "mode", "nlink"].every((field) => left[field] === right[field]);
+function sameIdentity(left, right, requireLinkCount = true) {
+  // The public shared /tmp parent legitimately changes nlink when another
+  // process creates/removes an unrelated child directory. Its dev/ino/mode,
+  // path components and sticky-bit protection remain mandatory. Keep nlink
+  // strict for our private receipt root and the receipt file itself.
+  const fields = requireLinkCount ? ["dev", "ino", "mode", "nlink"] : ["dev", "ino", "mode"];
+  return fields.every((field) => left[field] === right[field]);
 }
 
 function syncPinnedDirectory(directory, expectedIdentity, fsyncDirectory, label) {
   const fd = openSync(directory, "r");
+  const matches = (actual) => sameIdentity(expectedIdentity, actual, label !== "parent");
   try {
-    if (!sameIdentity(expectedIdentity, fstatSync(fd, { bigint: true })) ||
-        !sameIdentity(expectedIdentity, directoryIdentity(directory, label !== "parent"))) {
+    if (!matches(fstatSync(fd, { bigint: true })) ||
+        !matches(directoryIdentity(directory, label !== "parent"))) {
       refuse("receipt directory identity changed before durability barrier");
     }
     fsyncDirectory(fd, label);
-    if (!sameIdentity(expectedIdentity, fstatSync(fd, { bigint: true })) ||
-        !sameIdentity(expectedIdentity, directoryIdentity(directory, label !== "parent"))) {
+    if (!matches(fstatSync(fd, { bigint: true })) ||
+        !matches(directoryIdentity(directory, label !== "parent"))) {
       refuse("receipt directory identity changed after durability barrier");
     }
   } finally {

@@ -450,6 +450,34 @@ test("POSIX fsync failure for receipt directory or parent blocks Docker before f
   }
 });
 
+test("RED→GREEN: unrelated shared /tmp subdirectory changes do not invalidate durable receipt parent", (t) => {
+  if (process.platform !== "linux") { t.skip("Linux shared temp parent inode test"); return; }
+  const root = mkdtempSync(path.join(os.tmpdir(), "virki-parent-nlink-"));
+  let unrelated = null;
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    if (unrelated) rmSync(unrelated, { recursive: true, force: true });
+  });
+  let probes = 0;
+  const session = createDisposableDockerSession({
+    kind: "runtime", owner: OWNER, containers: [], network: "validation-network",
+    platform: "linux", nativeArch: "x64", receiptDirectory: root,
+    env: { GITHUB_ACTIONS: "true", CI: "true", RUNNER_OS: "Linux",
+      RUNNER_ENVIRONMENT: "github-hosted", RUNNER_ARCH: "X64",
+      VIRKI_BUILD_ARCH: "amd64", VIRKI_BUILD_REVISION: "a".repeat(40) },
+    fsyncDirectory: (fd, label) => {
+      fsyncSync(fd);
+      if (label === "root") unrelated = mkdtempSync(path.join(os.tmpdir(), "virki-unrelated-nlink-"));
+    },
+    spawn: (_cli, args) => {
+      if (args[2] === "version") { probes++; return { status: 0, stdout: "linux|amd64\n", stderr: "" }; }
+      return { status: 1, stdout: "", stderr: `Error response from daemon: network ${args[4]} not found` };
+    },
+  });
+  assert.equal(probes, 1, "unrelated tmp changes must not prevent the pinned local Docker probe");
+  session.cleanup(); session.finish(true);
+});
+
 test("POSIX persists receipt-root and mkdtemp-parent entries before the first Docker probe", (t) => {
   if (process.platform !== "linux") { t.skip("Linux fsync ordering test"); return; }
   const root = mkdtempSync(path.join(os.tmpdir(), "virki-powerloss-order-"));
