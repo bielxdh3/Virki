@@ -22,12 +22,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef SO_PEERCRED
@@ -38,27 +40,17 @@
 #endif
 
 #define ROOT "/tmp/virki-supervisor-"
-#define MAX_REQUEST 400
 #define TIMEOUT_MS 1200
-static const char load_request[] =
-  "POST /images/load HTTP/1.1\r\n"
-  "Host: isolated-disposable\r\n"
-  "Content-Length: 25\r\n"
-  "Connection: keep-alive\r\n\r\n"
-  "VIRKI_DISPOSABLE_IMAGE_V1";
-static const char inspect_request[] =
-  "GET /images/sha256:fixture/json HTTP/1.1\r\n"
-  "Host: isolated-disposable\r\n"
-  "Connection: keep-alive\r\n\r\n";
-static const char info_request[] =
-  "GET /info HTTP/1.1\r\nHost: isolated-disposable\r\n"
-  "Connection: keep-alive\r\n\r\n";
-static const char success_response[] =
-  "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
-  "Connection: keep-alive\r\n\r\nOK";
-static const char bad_response[] =
-  "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
-  "Connection: keep-alive\r\n\r\nNO";
+#define TRANSACTION_BUDGET_MS 1800
+#define TERM_GRACE_MS 180
+#define KILL_REAP_MS 700
+#define NONCE_HEX 32
+/*
+ * This is NOT Docker HTTP. An unpredictable transaction nonce must be echoed
+ * with its expected phase, and no surplus response bytes may be buffered.
+ * A fake daemon cannot turn uncorrelated success prefixes into approval.
+ */
+static const char *phases[] = {"LOAD", "INSPECT", "INFO"};
 static int child_pidfd = -1;
 static pid_t child_pid = -1;
 static char rootdir[80];
@@ -69,33 +61,114 @@ static int blocked(void) {
        "\"deployAuthorized\":false}");
   return 2;
 }
-static bool poll_ready(int fd, short event) {
+static long long monotonic_ms(void) {
+  struct timespec value;
+  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) return -1;
+  return (long long)value.tv_sec * 1000 + value.tv_nsec / 1000000;
+}
+static bool poll_ready_until(int fd, short event, long long deadline) {
+  long long now = monotonic_ms();
+  if (now < 0 || now >= deadline) return false;
+  int left = (deadline - now > INT_MAX) ? INT_MAX : (int)(deadline - now);
   struct pollfd p = {.fd = fd, .events = event};
-  int ready = poll(&p, 1, TIMEOUT_MS);
+  int ready;
+  do { ready = poll(&p, 1, left); } while (ready < 0 && errno == EINTR &&
+    (left = (int)(deadline - monotonic_ms())) > 0);
   return ready == 1 && (p.revents & event) != 0 &&
     (p.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
 }
-static bool read_exact(int fd, const char *expected) {
-  size_t left = strlen(expected), offset = 0;
-  char buffer[MAX_REQUEST];
-  if (left >= sizeof(buffer)) return false;
-  while (offset < left) {
-    if (!poll_ready(fd, POLLIN)) return false;
-    ssize_t got = recv(fd, buffer + offset, left - offset, 0);
-    if (got <= 0) return false;
+static bool read_exact_until(int fd, const char *expected, long long deadline) {
+  size_t total = strlen(expected);
+  for (size_t offset = 0; offset < total;) {
+    if (!poll_ready_until(fd, POLLIN, deadline)) return false;
+    char buffer[128];
+    ssize_t got = recv(fd, buffer, total - offset < sizeof(buffer) ?
+      total - offset : sizeof(buffer), MSG_DONTWAIT);
+    if (got < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+    if (got <= 0 || memcmp(buffer, expected + offset, (size_t)got) != 0)
+      return false;
     offset += (size_t)got;
   }
-  return memcmp(buffer, expected, left) == 0;
+  return true;
 }
-static bool write_all(int fd, const char *data) {
+static bool no_surplus(int fd) {
+  char extra;
+  ssize_t n = recv(fd, &extra, 1, MSG_PEEK | MSG_DONTWAIT);
+  return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+}
+static bool clean_end_of_stream(int fd, long long deadline) {
+  /* Unlike no_surplus(), EOF closes the final transaction; no delayed suffix
+   * can be silently accepted after the third receipt. */
+  while (monotonic_ms() < deadline) {
+    struct pollfd p = {.fd = fd, .events = POLLIN | POLLHUP};
+    int left = (int)(deadline - monotonic_ms());
+    if (left <= 0) return false;
+    int ready = poll(&p, 1, left);
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready != 1 || (p.revents & (POLLERR | POLLNVAL))) return false;
+    char byte = 0;
+    ssize_t got = recv(fd, &byte, 1, MSG_DONTWAIT);
+    if (got == 0) return true;
+    if (got > 0) return false;
+    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return false;
+  }
+  return false;
+}
+static bool write_all_until(int fd, const char *data, long long deadline) {
   size_t offset = 0, total = strlen(data);
   while (offset < total) {
-    if (!poll_ready(fd, POLLOUT)) return false;
-    ssize_t wrote = send(fd, data + offset, total - offset, MSG_NOSIGNAL);
+    if (!poll_ready_until(fd, POLLOUT, deadline)) return false;
+    ssize_t wrote = send(fd, data + offset, total - offset,
+      MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (wrote < 0 && (errno == EAGAIN || errno == EINTR)) continue;
     if (wrote <= 0) return false;
     offset += (size_t)wrote;
   }
   return true;
+}
+static bool nonce_hex(char out[NONCE_HEX + 1]) {
+  unsigned char raw[NONCE_HEX / 2];
+  if (getrandom(raw, sizeof(raw), 0) != (ssize_t)sizeof(raw)) return false;
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < sizeof(raw); i++) {
+    out[i * 2] = hex[raw[i] >> 4];
+    out[i * 2 + 1] = hex[raw[i] & 15];
+  }
+  out[NONCE_HEX] = '\0';
+  return true;
+}
+static bool frame(char *out, size_t capacity, const char *kind,
+                  const char *phase, const char *nonce, const char *status) {
+  int length = snprintf(out, capacity, "%s %s %s%s%s\n",
+    kind, phase, nonce, status ? " " : "", status ? status : "");
+  return length > 0 && (size_t)length < capacity;
+}
+static bool request_frame(int fd, const char *phase, char nonce[NONCE_HEX + 1],
+                          long long deadline) {
+  char incoming[64], expected[64];
+  /* Read one fixed-length request; the nonce is conveyed by this very socket.
+   * The fake daemon is never allowed to choose the client's challenge. */
+  if (!frame(expected, sizeof(expected), "REQ", phase,
+    "00000000000000000000000000000000", NULL)) return false;
+  const size_t length = strlen(expected);
+  if (length >= sizeof(incoming)) return false;
+  for (size_t offset = 0; offset < length;) {
+    if (!poll_ready_until(fd, POLLIN, deadline)) return false;
+    ssize_t got = recv(fd, incoming + offset, length - offset, MSG_DONTWAIT);
+    if (got < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+    if (got <= 0) return false;
+    offset += (size_t)got;
+  }
+  const size_t prefix = 4 + strlen(phase) + 1;
+  if (memcmp(incoming, expected, prefix) ||
+      incoming[length - 1] != '\n') return false;
+  for (size_t i = 0; i < NONCE_HEX; i++) {
+    const char c = incoming[prefix + i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  memcpy(nonce, incoming + prefix, NONCE_HEX);
+  nonce[NONCE_HEX] = '\0';
+  return no_surplus(fd);
 }
 static bool pidfd_alive(int pidfd) {
   struct pollfd p = {.fd = pidfd, .events = POLLIN};
@@ -198,9 +271,34 @@ static bool isolation_approved(const struct provenance *child) {
 }
 static void teardown(void) {
   if (child_pid > 1) {
-    kill(child_pid, SIGTERM);
     int status = 0;
-    waitpid(child_pid, &status, 0);
+    pid_t done = waitpid(child_pid, &status, WNOHANG);
+    if (done == 0) {
+      /* Only our unreaped fork child may be signaled; no PID reuse until reap.
+       * TERM-ignore cannot hang the test or leave its fake daemon alive. */
+      kill(child_pid, SIGTERM);
+      const long long grace = monotonic_ms() + TERM_GRACE_MS;
+      while (done == 0 && monotonic_ms() < grace) {
+        usleep(10000);
+        done = waitpid(child_pid, &status, WNOHANG);
+        if (done < 0 && errno == EINTR) done = 0;
+      }
+      if (done == 0) {
+        kill(child_pid, SIGKILL);
+        const long long kill_deadline = monotonic_ms() + KILL_REAP_MS;
+        while (done == 0 && monotonic_ms() < kill_deadline) {
+          usleep(10000);
+          done = waitpid(child_pid, &status, WNOHANG);
+          if (done < 0 && errno == EINTR) done = 0;
+        }
+      }
+    }
+    /* The fake child is NOT authorizing. Never block beyond the kill budget;
+     * a failed reap must result in BLOCKED and an operator-visible error. */
+    if (done == child_pid)
+      fprintf(stderr, "DISPOSABLE_FIXTURE_CHILD_REAPED %ld\n", (long)child_pid);
+    else
+      fputs("fixture child reap was not confirmed\n", stderr);
     child_pid = -1;
   }
   if (child_pidfd >= 0) {
@@ -223,7 +321,7 @@ static int serve_fake(const char *mode, int readyfd) {
   }
   if (write(readyfd, "R", 1) != 1) return 32;
   close(readyfd);
-  if (!poll_ready(listener, POLLIN)) return 33;
+  if (!poll_ready_until(listener, POLLIN, monotonic_ms() + TIMEOUT_MS)) return 33;
   int conn = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
   close(listener);
   if (conn < 0) return 34;
@@ -231,30 +329,44 @@ static int serve_fake(const char *mode, int readyfd) {
     close(conn);
     return 0;
   }
-  if (!read_exact(conn, load_request)) return 35;
-  if (!write_all(conn, success_response)) return 36;
-  if (strcmp(mode, "response-smuggling") == 0 &&
-      !write_all(conn, "JUNK")) return 41;
-  if (strcmp(mode, "dead-after-load") == 0) {
-    close(conn);
-    return 0;
+  const long long deadline = monotonic_ms() + TRANSACTION_BUDGET_MS;
+  char nonce[NONCE_HEX + 1], response[80];
+  for (int i = 0; i < 3; i++) {
+    if (!request_frame(conn, phases[i], nonce, deadline)) return 35 + i;
+    if (i == 1 && (strcmp(mode, "stall-on-inspect") == 0 ||
+                   strcmp(mode, "ignore-term") == 0)) {
+      if (strcmp(mode, "ignore-term") == 0) signal(SIGTERM, SIG_IGN);
+      for (;;) pause();
+    }
+    const bool wrong = (i == 1 && strcmp(mode, "bad-inspect") == 0) ||
+                       (i == 2 && strcmp(mode, "fake-rootdir") == 0);
+    if (!frame(response, sizeof(response), "ACK", phases[i], nonce,
+      wrong ? "NO" : "OK")) return 38;
+    if (i == 1 && strcmp(mode, "slow-trickle") == 0) {
+      /* 120ms/byte: a per-byte timeout would reset forever. */
+      for (size_t b = 0; b < strlen(response); b++) {
+        if (send(conn, response + b, 1, MSG_NOSIGNAL) != 1) return 42;
+        usleep(120000);
+      }
+    } else if (!write_all_until(conn, response, deadline)) return 36;
+    if (i == 0 && strcmp(mode, "response-smuggling") == 0 &&
+        !write_all_until(conn, "JUNK", deadline)) return 41;
+    if (i == 0 && strcmp(mode, "pipeline-valid") == 0) {
+      /* Three syntactically valid replies issued for only one request. */
+      if (!write_all_until(conn, response, deadline) ||
+          !write_all_until(conn, response, deadline)) return 43;
+    }
+    if (i == 0 && strcmp(mode, "dead-after-load") == 0) {
+      close(conn);
+      return 0;
+    }
   }
-  if (!read_exact(conn, inspect_request)) return 37;
-  if (strcmp(mode, "stall-on-inspect") == 0) {
-    /* Parent enforces a finite kernel poll timeout and then SIGTERM/reaps
-     * the child, even when its peer is alive but unresponsive. */
-    pause();
-    return 42;
-  }
-  if (!write_all(conn, strcmp(mode, "bad-inspect") == 0 ?
-      bad_response : success_response)) return 38;
-  if (!read_exact(conn, info_request)) return 39;
-  if (!write_all(conn, strcmp(mode, "fake-rootdir") == 0 ?
-      bad_response : success_response)) return 40;
   /* Preserve the peer PID until the supervisor closes the SAME socket FD
    * after verifying the final response and pidfd state. */
   char final_byte = 0;
   (void)recv(conn, &final_byte, 1, 0);
+  if (strcmp(mode, "late-final-junk") == 0)
+    (void)write_all_until(conn, "JUNK", monotonic_ms() + TIMEOUT_MS);
   close(conn);
   return 0;
 }
@@ -270,16 +382,34 @@ static bool fixture_directory(void) {
       (int)sizeof(endpoint)) return false;
   return true;
 }
-int main(int argc, char **argv) {
-  if (argc != 2 || getuid() != 0 || geteuid() != 0 ||
+static bool approved_disposable_test_environment(void) {
+  if (getuid() != 0 || geteuid() != 0 ||
       !getenv("VIRKI_DISPOSABLE_SUPERVISOR_TEST") ||
-      strcmp(getenv("VIRKI_DISPOSABLE_SUPERVISOR_TEST"), "1") != 0 ||
-      access("/.dockerenv", F_OK) != 0) return blocked();
+      strcmp(getenv("VIRKI_DISPOSABLE_SUPERVISOR_TEST"), "1") != 0)
+    return false;
+  if (access("/.dockerenv", F_OK) == 0) return true;
+  /* Independent ephemeral C fixture may run inside the local WSL2 VM without
+   * invoking any Docker endpoint. It has no production code path. */
+  if (!getenv("VIRKI_DISPOSABLE_SUPERVISOR_WSL_TEST") ||
+      strcmp(getenv("VIRKI_DISPOSABLE_SUPERVISOR_WSL_TEST"), "1") != 0)
+    return false;
+  int fd = open("/proc/sys/kernel/osrelease", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return false;
+  char kernel[256] = {0};
+  ssize_t n = read(fd, kernel, sizeof(kernel) - 1);
+  close(fd);
+  if (n <= 0 || n >= (ssize_t)sizeof(kernel) - 1) return false;
+  return strstr(kernel, "microsoft-standard-WSL2") != NULL;
+}
+int main(int argc, char **argv) {
+  if (argc != 2 || !approved_disposable_test_environment()) return blocked();
   const char *mode = argv[1];
   if (strcmp(mode, "normal") && strcmp(mode, "bad-inspect") &&
       strcmp(mode, "dead-before-load") && strcmp(mode, "dead-after-load") &&
       strcmp(mode, "fake-rootdir") && strcmp(mode, "stall-on-inspect") &&
-      strcmp(mode, "response-smuggling"))
+      strcmp(mode, "response-smuggling") && strcmp(mode, "pipeline-valid") &&
+      strcmp(mode, "slow-trickle") && strcmp(mode, "ignore-term") &&
+      strcmp(mode, "late-final-junk"))
     return blocked();
   if (!fixture_directory()) {
     teardown();
@@ -328,18 +458,22 @@ int main(int argc, char **argv) {
     offsetof(struct sockaddr_un, sun_path) + strlen(endpoint) + 1) == 0;
   good = good && peer_on_same_fd(sock, child_pid, ticks) &&
     same_provenance(child_pid, &observed);
-  good = good && write_all(sock, load_request);
-  good = good && read_exact(sock, success_response);
-  good = good && peer_on_same_fd(sock, child_pid, ticks) &&
-    same_provenance(child_pid, &observed);
-  good = good && write_all(sock, inspect_request);
-  good = good && read_exact(sock, success_response);
-  good = good && peer_on_same_fd(sock, child_pid, ticks) &&
-    same_provenance(child_pid, &observed);
-  good = good && write_all(sock, info_request);
-  good = good && read_exact(sock, success_response);
-  good = good && peer_on_same_fd(sock, child_pid, ticks) &&
-    same_provenance(child_pid, &observed);
+  const long long transaction_deadline = monotonic_ms() + TRANSACTION_BUDGET_MS;
+  for (int i = 0; good && i < 3; i++) {
+    char nonce[NONCE_HEX + 1], request[80], expected[80];
+    good = nonce_hex(nonce) &&
+      frame(request, sizeof(request), "REQ", phases[i], nonce, NULL) &&
+      frame(expected, sizeof(expected), "ACK", phases[i], nonce, "OK") &&
+      write_all_until(sock, request, transaction_deadline) &&
+      read_exact_until(sock, expected, transaction_deadline) &&
+      no_surplus(sock) &&
+      peer_on_same_fd(sock, child_pid, ticks) &&
+      same_provenance(child_pid, &observed);
+  }
+  /* End-of-stream, not an instantaneous EAGAIN peek, proves the final reply
+   * had no delayed suffix on the one connected kernel socket. */
+  good = good && shutdown(sock, SHUT_WR) == 0 &&
+    clean_end_of_stream(sock, transaction_deadline);
   bool isolation = isolation_approved(&observed);
   close(sock);
   teardown();
