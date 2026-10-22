@@ -1,0 +1,35 @@
+-- Synthetic fixture statements only; no actual user hashes, MFA seeds, recovery factors,
+-- tokens, message payloads or production connection strings.
+INSERT INTO "User" ("id","email","emailNormalized","displayName","passwordHash",
+  "role","accountStatus","secondFactorMethod","updatedAt")
+VALUES ('proof-admin','admin@fixture.invalid','admin@fixture.invalid','Fixture admin',
+  'fixture-admin-hash','ADMIN','ACTIVE','TOTP',now()),
+  ('proof-user','user@fixture.invalid','user@fixture.invalid','Fixture user',
+  'fixture-user-hash','USER','ACTIVE','TOTP',now());
+INSERT INTO "Session" ("id","sessionKey","userId","tokenHash","authenticationMethods","expiresAt","updatedAt")
+VALUES ('proof-session','proof-session-key','proof-user','fixture-token-hash',
+  ARRAY['pwd','totp'],now()+interval '1 day',now());
+INSERT INTO "TotpFactor" ("id","userId","secretCiphertext","keyVersion","status","confirmedAt","updatedAt")
+VALUES ('proof-totp','proof-user','fixture-encrypted-seed',3,'ACTIVE',now(),now());
+INSERT INTO "RecoveryCode" ("id","userId","codeHash")
+VALUES ('proof-code','proof-user','fixture-recovery-hash');
+INSERT INTO "AdministrativeCredential" ("id","userId","passwordHash","status","keyVersion","updatedAt")
+VALUES ('proof-admin-credential','proof-admin','fixture-admin-credential-hash','ACTIVE',2,now());
+INSERT INTO "AdministrativeRecoveryCode" ("id","userId","codeHash")
+VALUES ('proof-admin-code','proof-admin','fixture-admin-recovery-hash');
+INSERT INTO "AccountRecoveryRequest" ("id","requestKeyHash","userId",
+  "emailAddressHash","emailChallengeHash","status","expiresAt","updatedAt")
+VALUES ('proof-account-recovery','fixture-request-key-hash','proof-user',
+  'fixture-email-hash','fixture-challenge-hash','APPROVED',now()+interval '1 day',now());
+INSERT INTO "AuditLog" ("id","eventType","actorUserId","result","resource","metadata")
+VALUES ('proof-audit','AUTH_LOGIN_SUCCESS','proof-user','SUCCESS','auth.session',
+  '{"fixture":true,"sensitive":{"tag":"synthetic"}}'::jsonb);
+INSERT INTO "EmailOutboxMessage" ("id","idempotencyKey","kind","recipientEmail",
+  "locale","payload","status","attemptCount","updatedAt")
+VALUES ('proof-outbox','fixture-idempotency-key','ACCOUNT_RECOVERY','user@fixture.invalid',
+  'en','{"version":1,"protectedValues":{"ciphertext":"fixture-encrypted-message"}}'::jsonb,
+  'RETRYABLE_FAILURE',3,now());
+INSERT INTO "EmailDeliveryAttempt" ("id","messageId","attempt","status","errorCode")
+VALUES ('proof-delivery','proof-outbox',1,'FAILED','fixture-error');
+INSERT INTO "OidcArtifact" ("id","model","idHash","payloadCiphertext","updatedAt")
+VALUES ('proof-oidc','AuthorizationCode','fixture-artifact-hash','fixture-encrypted-payload',now());
