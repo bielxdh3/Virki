@@ -390,7 +390,7 @@ test("Docker safety inventory and native-image smoke checks are mandatory withou
   const validate = normalized.match(/\n {2}validate:\n([\s\S]*?)(?=\n {2}[a-z][a-z-]*:\n|$)/u)?.[1] ?? "";
   const publisher = normalized.match(/\n {2}production-images:\n([\s\S]*?)(?=\n {2}[a-z][a-z-]*:\n|$)/u)?.[1] ?? "";
   assert.equal(packageScripts["test:production:docker-safety"],
-    "node --test scripts/disposable-docker-cleanup.test.mjs scripts/disposable-docker-session.test.mjs");
+    "node --test scripts/disposable-docker-cleanup.test.mjs scripts/disposable-docker-session.test.mjs scripts/e2e/isolated-docker-owner.mock.test.mjs");
   assert.match(validate, /- name: Disposable Docker safety tests\n\s+run: npm run test:production:docker-safety/u);
   assert.equal(publicationNeedsAreSafe(normalized), true);
   for (const name of [
