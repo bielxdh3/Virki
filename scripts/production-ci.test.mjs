@@ -399,6 +399,33 @@ test("GHCR publication requires successful audit jobs in GitHub Actions needs cl
   )), false, "a soft-failed production audit must not authorize publishing");
 });
 
+test("Docker safety inventory and native-image smoke checks are mandatory without weakening GHCR audit gates", () => {
+  const normalized = workflow.replace(/\r\n/gu, "\n");
+  const validate = normalized.match(/\n {2}validate:\n([\s\S]*?)(?=\n {2}[a-z][a-z-]*:\n|$)/u)?.[1] ?? "";
+  const publisher = normalized.match(/\n {2}production-images:\n([\s\S]*?)(?=\n {2}[a-z][a-z-]*:\n|$)/u)?.[1] ?? "";
+  assert.equal(packageScripts["test:production:docker-safety"],
+    "node --test scripts/disposable-docker-cleanup.test.mjs scripts/disposable-docker-session.test.mjs");
+  assert.match(validate, /- name: Disposable Docker safety tests\n\s+run: npm run test:production:docker-safety/u);
+  assert.equal(publicationNeedsAreSafe(normalized), true);
+  for (const name of [
+    "Verify image revisions and runtime dependency boundary",
+    "Production runtime smoke", "Production migrator image smoke",
+  ]) {
+    const start = publisher.indexOf(`- name: ${name}`);
+    assert.ok(start >= 0, `missing hosted image smoke: ${name}`);
+    const env = publisher.slice(start).match(/\n\s+env:\n([\s\S]*?)\n\s+run:/u)?.[1] ?? "";
+    assert.match(env, /VIRKI_BUILD_ARCH: \$\{\{ matrix\.arch \}\}/u);
+    assert.match(env, /VIRKI_BUILD_REVISION: \$\{\{ github\.sha \}\}/u);
+  }
+  for (const removed of ["production-audit", "tooling-policy"]) {
+    const bad = normalized.replace(
+      "needs: [validate, authenticated-e2e, tooling-policy, production-audit]",
+      `needs: [validate, authenticated-e2e, ${removed === "production-audit" ? "tooling-policy" : "production-audit"}]`
+    );
+    assert.equal(publicationNeedsAreSafe(bad), false, `GHCR publication must block without ${removed}`);
+  }
+});
+
 test("hosted Linux CI explicitly executes native machine-id race regression with root privileges", () => {
   const normalized = workflow.replace(/\r\n/gu, "\n");
   const command = 'sudo "$(command -v node)" --test infra/offline/trusted-owner-machine-id-race.test.mjs';

@@ -114,6 +114,9 @@ jobs:
       - name: Production control tests
         run: npm run test:production-revision
 
+      - name: Disposable Docker safety tests
+        run: npm run test:production:docker-safety
+
       - name: Native root trusted source Git tests
         run: |
           docker run --rm \
@@ -220,12 +223,16 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           VIRKI_RUNTIME_IMAGE: virki-production-ci:${{ github.sha }}
+          VIRKI_BUILD_ARCH: amd64
+          VIRKI_BUILD_REVISION: ${{ github.sha }}
         run: node scripts/production-image-assertion.mjs
 
       - name: Production runtime smoke
         if: github.event_name == 'pull_request'
         env:
           VIRKI_RUNTIME_IMAGE: virki-production-ci:${{ github.sha }}
+          VIRKI_BUILD_ARCH: amd64
+          VIRKI_BUILD_REVISION: ${{ github.sha }}
         run: npm run test:production:runtime
 
       - name: Validate production Compose config
@@ -286,6 +293,8 @@ jobs:
       - name: Verify image revisions and runtime dependency boundary
         env:
           VIRKI_RUNTIME_IMAGE: virki-production-ci:${{ github.sha }}
+          VIRKI_BUILD_ARCH: ${{ matrix.arch }}
+          VIRKI_BUILD_REVISION: ${{ github.sha }}
         run: |
           runtime_revision="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$VIRKI_RUNTIME_IMAGE")"
           migrator_revision="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' "virki-migrator-ci:${{ github.sha }}")"
@@ -296,11 +305,15 @@ jobs:
       - name: Production runtime smoke
         env:
           VIRKI_RUNTIME_IMAGE: virki-production-ci:${{ github.sha }}
+          VIRKI_BUILD_ARCH: ${{ matrix.arch }}
+          VIRKI_BUILD_REVISION: ${{ github.sha }}
         run: node scripts/production-runtime-smoke.mjs
 
       - name: Production migrator image smoke
         env:
           VIRKI_MIGRATOR_IMAGE: virki-migrator-ci:${{ github.sha }}
+          VIRKI_BUILD_ARCH: ${{ matrix.arch }}
+          VIRKI_BUILD_REVISION: ${{ github.sha }}
         run: node scripts/production-migrator-smoke.mjs
 
       - name: Publish tested private GHCR images and record exact manifest digests
