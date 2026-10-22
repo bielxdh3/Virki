@@ -29,7 +29,7 @@ const witness = new IndependentOfflineWitness({
   keyFile: config.VIRKI_WITNESS_SIGNER_KEY,
   expectedKeyPinSha256: config.VIRKI_WITNESS_SIGNER_PIN,
   ownerPublicKeyFile: config.VIRKI_WITNESS_OWNER_PUBLIC_KEY,
-  expectedOwnerKeyPinSha256: config.VIRKI_WITNESS_OWNER_PUBLIC_PIN,
+  expectedOwnerPinSha256: config.VIRKI_WITNESS_OWNER_PIN,
   hostIdentitySha256: config.VIRKI_WITNESS_HOST_SHA256,
   ledgerIdSha256: config.VIRKI_WITNESS_LEDGER_SHA256,
   repositoryDirectory: root,
