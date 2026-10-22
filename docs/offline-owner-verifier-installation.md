@@ -130,6 +130,60 @@ The three different target filesystems do not support one atomic transaction;
 `pending` and the permanent lock are therefore necessary. No production
 runtime activation is provided by this installer; deployment remains NO-GO.
 
+## Re-measure installed trust at use time
+
+`measureInstalledTrustedVerifierAtUseTime({})` is a read-only exported function
+of the **independently pinned bootstrap executable**, not an entrypoint loaded
+from the candidate or the release archive. It is usable only when the bootstrap
+module is already installed at the fixed native root path. The function accepts
+no caller-selected production trust roots, pins, public keys, interpreter,
+ledger head, image IDs or expected source hashes.
+
+Every call independently rechecks the immutable root/owner-protected bootstrap
+policy, its Ed25519 public-key pin, the exact SHA-256 of the bootstrap module,
+the Node 22 executable's canonical path and SHA-256, and the measured host
+identity. It then requires the protected `.installation-lock` and a canonical
+`installation-state.json` with `status: "installed"`, positive exact sequence,
+and the SHA-256 digest of the signed owner approval. The approval's signature,
+host, policy version, verifier pin inventory, destinations, state sequence,
+revocations and maximum originally signed duration are verified again. Owner
+approval expiration bounds the *installation act* and is not a time-to-live for
+already installed executable code: an otherwise accepted installation does not
+become untrusted just because the original installation authorization expires.
+Subsequent revocation still refuses fresh measurement.
+
+The module checks the **eleven** exact installed ESM file paths and their
+complete private directory tree. Each file is opened with `O_NOFOLLOW` from an
+anchored directory descriptor, with regular-file, root:root 0600, single-link,
+size, inode metadata and SHA-256 requirements. Missing, reordered, injected,
+modified, linked or publicly writable paths fail closed. The installed release
+trust policy must exactly match the independently approved immutable digest.
+This measurement cannot be replaced by a statement in Git, an image label or a
+result supplied by a release candidate.
+
+The installed `ledger.json` is deliberately **mutable** after legitimate
+release transitions. The approval binds its independently held *initial*
+ledger; a current ledger may contain additional entries. The function checks
+that the original ledger history remains an exact prefix, that all current
+entries have strictly increasing sequences, valid predecessor links and unique
+release hashes, nonces and approval digests. The returned status is always
+`INSTALLED_VERIFIER_BYTES_MEASURED_ONLY`, and the ledger is classified either
+`INITIAL_LEDGER_INSPECTED_NOT_AUTHORIZED` or
+`DYNAMIC_LEDGER_INSPECTED_NOT_AUTHORIZED`. No returned field permits a release,
+Docker load, migration or service activation.
+
+**Remaining security boundary:** a read-only inspection cannot establish that
+a newly appended ledger entry was produced by a trusted atomic admission CAS,
+or detect a rollback of previously observed history to an earlier *valid*
+prefix without an independent monotonic checkpoint. It also does not prove
+that the modules later loaded by another process are the exact bytes just
+measured: an installed-verifier invocation must protect its execution and
+loader boundary, with remeasurement within that boundary and prevention of
+post-check replacement, before it can be a production authority. An audited
+Node binary hash alone does not attest every dynamic library, preload or Node
+startup argument. Those dependencies, witness semantics and end-to-end native
+host rehearsal remain blockers. **PRODUCTION NO-GO.**
+
 ## Disposable native validation
 
 The root fixture writes only beneath `/tmp/virki-owner-install-fixture-XXXXXX`
