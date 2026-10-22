@@ -269,33 +269,53 @@ static bool isolation_approved(const struct provenance *child) {
   const bool independent_owner_service_pin = false;
   return namespaces_separate && cgroup_separate && independent_owner_service_pin;
 }
-static void teardown(void) {
+/* Injection hooks exercise EINTR and unverifiable reap reporting only inside
+ * this disposable fixture; neither path can grant production authority. */
+static pid_t fixture_waitpid(pid_t pid, int *status) {
+  static bool injected_eintr = false;
+  const char *eintr = getenv("VIRKI_DISPOSABLE_SUPERVISOR_INJECT_WAITPID_EINTR");
+  if (!injected_eintr && eintr && strcmp(eintr, "1") == 0) {
+    injected_eintr = true;
+    errno = EINTR;
+    fputs("DISPOSABLE_FIXTURE_WAITPID_EINTR_INJECTED\n", stderr);
+    return -1;
+  }
+  pid_t result = waitpid(pid, status, WNOHANG);
+  const char *masked = getenv("VIRKI_DISPOSABLE_SUPERVISOR_MASK_REAP_PROOF");
+  if (result == pid && masked && strcmp(masked, "1") == 0) {
+    /* The kernel reaped the process, but the caller has lost its proof. */
+    errno = ECHILD;
+    return -1;
+  }
+  return result;
+}
+static pid_t wait_reap_until(pid_t pid, int *status, long long deadline) {
+  while (monotonic_ms() >= 0 && monotonic_ms() < deadline) {
+    pid_t done = fixture_waitpid(pid, status);
+    if (done == pid || (done < 0 && errno != EINTR)) return done;
+    if (done == 0) usleep(10000);
+  }
+  return 0;
+}
+static bool teardown(void) {
+  bool confirmed_reap = true;
   if (child_pid > 1) {
     int status = 0;
-    pid_t done = waitpid(child_pid, &status, WNOHANG);
+    pid_t done = wait_reap_until(child_pid, &status, monotonic_ms() + 30);
     if (done == 0) {
       /* Only our unreaped fork child may be signaled; no PID reuse until reap.
        * TERM-ignore cannot hang the test or leave its fake daemon alive. */
       kill(child_pid, SIGTERM);
-      const long long grace = monotonic_ms() + TERM_GRACE_MS;
-      while (done == 0 && monotonic_ms() < grace) {
-        usleep(10000);
-        done = waitpid(child_pid, &status, WNOHANG);
-        if (done < 0 && errno == EINTR) done = 0;
-      }
+      done = wait_reap_until(child_pid, &status, monotonic_ms() + TERM_GRACE_MS);
       if (done == 0) {
         kill(child_pid, SIGKILL);
-        const long long kill_deadline = monotonic_ms() + KILL_REAP_MS;
-        while (done == 0 && monotonic_ms() < kill_deadline) {
-          usleep(10000);
-          done = waitpid(child_pid, &status, WNOHANG);
-          if (done < 0 && errno == EINTR) done = 0;
-        }
+        done = wait_reap_until(child_pid, &status, monotonic_ms() + KILL_REAP_MS);
       }
     }
     /* The fake child is NOT authorizing. Never block beyond the kill budget;
      * a failed reap must result in BLOCKED and an operator-visible error. */
-    if (done == child_pid)
+    confirmed_reap = done == child_pid;
+    if (confirmed_reap)
       fprintf(stderr, "DISPOSABLE_FIXTURE_CHILD_REAPED %ld\n", (long)child_pid);
     else
       fputs("fixture child reap was not confirmed\n", stderr);
@@ -307,6 +327,7 @@ static void teardown(void) {
   }
   if (endpoint[0]) unlink(endpoint);
   if (rootdir[0]) rmdir(rootdir);
+  return confirmed_reap;
 }
 static int serve_fake(const char *mode, int readyfd) {
   int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -476,8 +497,8 @@ int main(int argc, char **argv) {
     clean_end_of_stream(sock, transaction_deadline);
   bool isolation = isolation_approved(&observed);
   close(sock);
-  teardown();
-  if (!good) return blocked();
+  bool child_reaped = teardown();
+  if (!good || !child_reaped) return blocked();
   /* Real kernel-bound mechanics are proven, but not daemon root isolation.
    * Even if isolation were confirmed, this is NOT an owner-installed binary
    * and no release-pinned Docker image was verified. NEVER authorize here. */

@@ -290,9 +290,11 @@ read-only filesystem/repository, `no-new-privileges`, and one executable
 tmpfs at `/tmp`. The container receives a randomized ownership label and
 immutable container-ID file; any cleanup is limited to a full 64-hex ID whose
 inspected label matches this run. Failure to verify ownership must never lead
-to wildcard/name cleanup. If an unsuccessful invocation cannot confirm its
-cleanup, the local full-ID record is preserved for separate operator review
-instead of silently forgetting a potentially live container. The launcher
+to wildcard/name cleanup. A missing CID file does **not** prove cleanup: a
+failed or timed-out run might have started the container before writing its ID.
+If an unsuccessful invocation cannot confirm cleanup, the local fixture
+directory is preserved for separate operator review even when the CID is
+missing, instead of silently forgetting a potentially live container. The launcher
 does not mount a host Docker socket.
 No real Docker-in-Docker daemon is started or authorized.
 
@@ -323,7 +325,10 @@ deadline covers the complete three-phase exchange, including individual
 reads, writes and delays. The parser checks for surplus bytes after each
 response, then half-closes the client socket after `INFO` and requires clean
 peer EOF to reject even a late trailing payload. Cleanup first attempts
-`SIGTERM`, then bounded `SIGKILL` and nonblocking `waitpid` reaping.
+`SIGTERM`, then bounded `SIGKILL` and nonblocking `waitpid` reaping. EINTR is
+retried within the deadline, and a positive lifecycle result is forbidden
+unless `waitpid` positively confirms the exact child was reaped. Disposable
+fault injection tests cover interrupted waits and lost reap confirmation.
 
 The adversarial tests demonstrate continuity of the kernel peer identity
 across the entire *synthetic* operation; they also cover daemon death before

@@ -89,6 +89,24 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     assert.ok(match, "the parent must confirm waitpid for its exact child");
     assert.equal(existsSync("/proc/" + match[1]), false, "reaped test PID must be gone");
   });
+  await t.test("interrupted first waitpid retries EINTR and confirms the exact child was reaped", () => {
+    const { result, output } = invoke("normal", {
+      VIRKI_DISPOSABLE_SUPERVISOR_INJECT_WAITPID_EINTR: "1",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /DISPOSABLE_FIXTURE_WAITPID_EINTR_INJECTED/u);
+    assert.match(result.stderr, /DISPOSABLE_FIXTURE_CHILD_REAPED [1-9][0-9]*/u);
+    assert.equal(output.status, "SAME_FD_KERNEL_PEER_AND_LIFECYCLE_TEST_ONLY");
+  });
+  await t.test("lost reap confirmation cannot yield a positive same-FD lifecycle claim", () => {
+    const { result, output } = invoke("normal", {
+      VIRKI_DISPOSABLE_SUPERVISOR_MASK_REAP_PROOF: "1",
+    });
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /fixture child reap was not confirmed/u);
+    assert.doesNotMatch(result.stderr, /DISPOSABLE_FIXTURE_CHILD_REAPED/u);
+    assert.equal(output.status, "BLOCKED");
+  });
   await t.test("nonresponsive daemon is terminated and reaped after socket poll deadline", () => {
     const result = invoke("stall-on-inspect");
     assert.equal(result.result.status, 2);
