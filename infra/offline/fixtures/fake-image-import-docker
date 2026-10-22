@@ -1,6 +1,6 @@
 #!/usr/local/bin/node
-// Disposable Docker CLI sink. ONLY mounted over /usr/bin/docker within the
-// purpose-built --network none, read-only root regression container.
+// Disposable Docker CLI sink. Copied only into the dedicated /run tmpfs
+// inside a --network none, read-only root regression container.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 const root = "/run/virki-offline-import/";
@@ -33,6 +33,8 @@ if (existsSync(root + "mutate-source")) {
 const archive = readFileSync(0);
 writeFileSync(root + "consumed.sha256",
   createHash("sha256").update(archive).digest("hex"));
+// A failed or interrupted daemon load must leave the release attempt locked.
+if (existsSync(root + "fail-load")) process.exit(23);
 // The fixture TAR places the image config before its other members.
 const name = archive.subarray(0, 100).toString("ascii").replace(/\0.*$/u, "");
 if (!/^[a-f0-9]{64}\.json$/u.test(name)) process.exit(22);
