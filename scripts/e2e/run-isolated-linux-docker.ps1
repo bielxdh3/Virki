@@ -264,7 +264,16 @@ function Invoke-OwnedDockerCleanup {
     if ($LASTEXITCODE -ne 0) { throw "Docker $Kind removal ACK is uncertain." }
     $dockerKind = if ($Kind -in @('network', 'bootstrapNetwork')) { 'network' } else { 'container' }
     $postRemoval = Invoke-DockerObservation $dockerKind inspect $id
-    if ($postRemoval.Status -eq 0 -or $postRemoval.Output -notmatch '(?i)(No such (?:object|container|network|volume):|\bno such volume\b)') {
+    # Docker Desktop returns [] plus "network <immutable ID> not found" for
+    # a removed network, rather than "No such network". Require a precise
+    # diagnostic for THIS ID so an arbitrary inspection failure cannot become
+    # a fabricated absence or a successful cleanup receipt.
+    $quotedId = [regex]::Escape($id)
+    $expectedMissingNetwork = $dockerKind -eq 'network' -and $postRemoval.Output -match (
+      '(?is)^\s*\[\]\s*Error response from daemon: network ' + $quotedId + ' not found\s*$')
+    $expectedMissingObject = $postRemoval.Output -match (
+      '(?is)^\s*(?:\[\]\s*)?(?:Error response from daemon:\s*)?(?:Error:\s*)?No such (?:object|container|network): ' + $quotedId + '\s*$')
+    if ($postRemoval.Status -eq 0 -or -not ($expectedMissingNetwork -or $expectedMissingObject)) {
       throw "Docker $Kind absence could not be confirmed."
     }
     if ($Kind -eq 'browserSeed' -and $script:browserAnonymousVolume) {

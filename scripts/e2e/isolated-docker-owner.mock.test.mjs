@@ -219,3 +219,41 @@ if (($states -join ',') -cne 'REMOVE_PENDING,REMOVE_CONFIRMED') {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /ANONYMOUS_VOLUME_OWNED_BY_SEED/u);
 });
+
+test("PowerShell mock: Docker Desktop network removal accepts only exact-ID missing diagnostics", {
+  skip: process.platform !== "win32" && "Windows PowerShell 5.1 Docker network fixture",
+}, () => {
+  const result = runPowerShellDockerMock(String.raw`
+$script:ownedResources.network = $true
+$script:ownedDockerIds.network = ('b' * 64)
+$script:dockerResourceNames.network = 'virki-e2e-own-network'
+function Invoke-PinnedDocker {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArguments)
+  if ($DockerArguments[0] -eq 'network' -and $DockerArguments[1] -eq 'inspect') {
+    if (-not $script:removed) {
+      $global:LASTEXITCODE = 0
+      return (ConvertTo-Json -InputObject @(@{
+        Id = ('b' * 64); Name = 'virki-e2e-own-network'
+        Labels = @{ 'org.virki.e2e.owner' = $runId }
+      }) -Depth 5)
+    }
+    $global:LASTEXITCODE = 1
+    return @('[]', ('Error response from daemon: network ' + ('b' * 64) + ' not found'))
+  }
+  if ($DockerArguments[0] -eq 'network' -and $DockerArguments[1] -eq 'rm') {
+    if ($DockerArguments[2] -cne ('b' * 64)) { throw 'Not the immutable network ID' }
+    $script:removed = $true
+    $global:LASTEXITCODE = 0
+    return ('b' * 64)
+  }
+  throw 'Unexpected mutation or observation'
+}
+Invoke-OwnedDockerCleanup 'network'
+if ($script:ownedResources.network -or $script:dockerMutationUncertain -or -not $script:removed) {
+  throw 'Exact-ID network removal was not confirmed'
+}
+'NETWORK_IMMUTABLE_ID_ABSENCE_VERIFIED'
+`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /NETWORK_IMMUTABLE_ID_ABSENCE_VERIFIED/u);
+});
