@@ -22,6 +22,8 @@ const sha = (data) => createHash("sha256").update(data).digest("hex");
 const SHA = (char) => char.repeat(64);
 const domain = Buffer.from("Virki/offline-verifier/owner-install/v1\0");
 const moduleFile = fileURLToPath(new URL("./trusted-owner-installation.mjs", import.meta.url));
+const pinnedImportFixture = fileURLToPath(
+  new URL("./trusted-owner-esm-usepoint-fixture.mjs", import.meta.url));
 const canonical = (data) => Buffer.from(JSON.stringify(data));
 const interpreterPin = enabled ? sha(readFileSync(process.execPath)) : null;
 const nativeGitPin = enabled ? sha(readFileSync("/usr/bin/git")) : null;
@@ -390,4 +392,94 @@ test("use-time distinguishes an independently pinned initial ledger from a valid
   append([first, second]);
   assert.throws(() => measureInstalledTrustedVerifierAtUseTime(f.request), /predecessor|ledger/u);
   assert.ok(existsSync(ledgerFile));
+});
+
+function runPinnedImportFixture(f, { mutation = "none", envOverride = {}, nodeFlags = [] } = {}) {
+  const environment = {
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    HOME: "/tmp",
+    TMPDIR: "/tmp",
+    VIRKI_OWNER_INSTALL_DISPOSABLE_FIXTURE: "1",
+    VIRKI_USEPOINT_REQUEST: JSON.stringify(f.request),
+    VIRKI_USEPOINT_MUTATION: mutation,
+    ...envOverride,
+  };
+  return spawnSync(process.execPath, [...nodeFlags, pinnedImportFixture], {
+    encoding: "utf8", timeout: 12000, env: environment,
+  });
+}
+
+test("native Node22 actually imports real owner-signed eleven-file ESM graph from measured in-memory snapshots", fixtureOnly, (t) => {
+  for (const mutation of ["none", "swap-entry", "swap-dependency"]) {
+    const f = setup(t, { realSource: true });
+    installOwnerApprovedVerifier(f.request);
+    const result = runPinnedImportFixture(f, { mutation });
+    assert.equal(result.status, 0, `mutation=${mutation}: ${result.stderr}`);
+    const loaded = JSON.parse(result.stdout.trim());
+    assert.equal(loaded.status, "DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY");
+    assert.equal(loaded.pinnedInventoryCount, 11);
+    assert.ok(loaded.actualNodeEsmLoads >= 2 && loaded.actualNodeEsmLoads <= 11);
+    assert.ok(loaded.loadedPaths.some((entry) =>
+      entry.path === "infra/offline/trusted-host-entry.mjs"));
+    assert.ok(loaded.loadedPaths.every((entry) =>
+      f.files.some((pin) => pin.path === entry.path && pin.sha256 === entry.sha256)),
+    "every byte string actually delivered to Node's loader must match the independently signed pins");
+    assert.equal(Object.hasOwn(loaded, "deployAuthorized"), false);
+  }
+});
+
+test("native fixture refuses preload, changed pin, revocation and before-launch ESM tampering", fixtureOnly, (t) => {
+  for (const attack of [
+    { nodeFlags: ["--trace-warnings"] },
+    { envOverride: { NODE_OPTIONS: "--no-warnings" } },
+    { envOverride: { LD_PRELOAD: "/tmp/not-a-library.so" } },
+    { before(f) { writeFileSync(path.join(f.locations.code,
+      "infra", "offline", "trusted-host-entry.mjs"), "// forged ESM\n"); } },
+    { before(f) { const name = path.join(f.locations.bootstrap, "installation-state.json");
+      const state = JSON.parse(readFileSync(name)); state.status = "pending";
+      file(f.locations.bootstrap, "installation-state.json", canonical(state)); } },
+    { before(f) { const name = path.join(f.locations.operator, "verifier-pins.json");
+      const pins = JSON.parse(readFileSync(name)); pins.files[0].sha256 = SHA("f");
+      file(f.locations.operator, "verifier-pins.json", canonical(pins)); } },
+  ]) {
+    const f = setup(t, { realSource: true });
+    installOwnerApprovedVerifier(f.request);
+    attack.before?.(f);
+    const child = runPinnedImportFixture(f, attack);
+    assert.notEqual(child.status, 0, `expected fail closed for ${JSON.stringify(Object.keys(attack))}`);
+    assert.doesNotMatch(child.stdout, /DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY/u);
+  }
+});
+
+test("Node loader fails closed when ESM pathname disappears or becomes a symlink after the signed snapshot", fixtureOnly, (t) => {
+  for (const mutation of ["remove-entry", "symlink-entry"]) {
+    const f = setup(t, { realSource: true });
+    installOwnerApprovedVerifier(f.request);
+    const result = runPinnedImportFixture(f, { mutation });
+    assert.notEqual(result.status, 0, `expected fail closed after ${mutation}`);
+    assert.doesNotMatch(result.stdout, /DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY/u);
+  }
+});
+
+test("valid prior-ledger rollback stays explicitly unwitnessed and cannot become release authorization", fixtureOnly, (t) => {
+  const f = setup(t, { realSource: true });
+  installOwnerApprovedVerifier(f.request);
+  const ledger = path.join(f.locations.ledger, "ledger.json");
+  const initiallyApproved = readFileSync(ledger);
+  file(f.locations.ledger, "ledger.json", canonical({
+    version: 1, anchorSha: "1".repeat(40),
+    entries: [{
+      sequence: 1, priorSha: "1".repeat(40), nextSha: "2".repeat(40),
+      manifestSha256: SHA("a"), nonce: "b".repeat(32),
+      approvalDigest: SHA("c"),
+    }],
+  }));
+  const appended = measureInstalledTrustedVerifierAtUseTime(f.request);
+  assert.equal(appended.liveLedgerSequence, 1);
+  assert.equal(appended.independentLedgerWitnessVerified, false);
+  file(f.locations.ledger, "ledger.json", initiallyApproved);
+  const rolledBack = measureInstalledTrustedVerifierAtUseTime(f.request);
+  assert.equal(rolledBack.liveLedgerSequence, 0);
+  assert.equal(rolledBack.independentLedgerWitnessVerified, false);
+  assert.equal(Object.hasOwn(rolledBack, "releaseAuthorized"), false);
 });

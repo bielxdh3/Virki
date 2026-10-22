@@ -6,6 +6,8 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { registerHooks } from "node:module";
+import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 
 // This module is a standalone BOOTSTRAP executable, provisioned by the owner
@@ -549,7 +551,118 @@ export function measureInstalledTrustedVerifierAtUseTime(request = {}) {
     liveLedgerSequence: live.sequence,
     liveLedgerStatus: liveLedgerBytes.equals(initialLedgerBytes) ?
       "INITIAL_LEDGER_INSPECTED_NOT_AUTHORIZED" : "DYNAMIC_LEDGER_INSPECTED_NOT_AUTHORIZED",
+    independentLedgerWitnessVerified: false,
     restriction: "No release, ledger CAS, Docker image, execution or deployment authority is granted.",
+  });
+}
+
+const REVIEWED_BUILTINS = new Set([
+  "node:child_process", "node:crypto", "node:fs", "node:fs/promises",
+  "node:os", "node:path", "node:url",
+]);
+const ENTRYPOINT = "infra/offline/trusted-host-entry.mjs";
+
+function assertFreshNativeNodeLaunch() {
+  demand(process.execArgv.length === 0,
+    "unreviewed Node startup flags, --import/--require/--loader or preload");
+  // Node preloads, V8 snapshot/coverage injectors and ELF loader injection
+  // cannot be admitted from the environment into a measured verifier run.
+  const forbidden = Object.keys(process.env).filter((key) =>
+    /^(?:NODE_|LD_|DYLD_|V8_|UV_|ELECTRON_)/u.test(key));
+  demand(forbidden.length === 0,
+    "unreviewed native loader, Node startup or preload environment");
+  demand(process.argv.length === 2 &&
+    typeof process.argv[1] === "string" && path.isAbsolute(process.argv[1]),
+  "a single fixed native launcher script is required");
+}
+
+/**
+ * Diagnostic ONLY: exercise Node 22's synchronous ESM resolve/load hooks
+ * against an already owner-approved, exact pinned in-memory byte snapshot.
+ * The actual production process launcher and its environment have NOT been
+ * independently attested, so non-fixture calls fail before registering hooks.
+ *
+ * Returns hashes of bytes passed to Node's loader, not execution permission.
+ * The callback is available only inside disposable root tests for adversarial
+ * disk swaps after snapshot capture; it is never part of a native host API.
+ */
+export async function rehearseInstalledVerifierPinnedEsmImport(request = {},
+  { afterSnapshot } = {}) {
+  const mode = nativeMode(request);
+  demand(Boolean(mode.fixture), "native production ESM launch requires an audited external launcher");
+  assertFreshNativeNodeLaunch();
+  demand(afterSnapshot === undefined || typeof afterSnapshot === "function",
+    "fixture phase callback invalid");
+  const attestation = measureInstalledTrustedVerifierAtUseTime(request);
+  const pinsBytes = readPrivate(mode.operator, "verifier-pins.json", 16384, mode.fixture);
+  demand(hash(pinsBytes) === attestation.pinsetSha256,
+    "pin inventory changed after owner measurement");
+  const pins = json(pinsBytes, ["version", "mode", "files", "trustPolicySha256", "ledgerSha256"],
+    "verified ESM snapshot inventory");
+  checkPins(pins, readPrivate(mode.operator, "trust-policy.json", 16384, mode.fixture),
+    readPrivate(mode.operator, "ledger.json", 1024 * 1024, mode.fixture));
+  const snapshots = new Map();
+  const digests = new Map();
+  for (const file of pins.files) {
+    const data = readonlySource(mode.destinations.code, file.path, mode.fixture);
+    demand(hash(data) === file.sha256, "installed ESM changed during snapshot");
+    const url = pathToFileURL(path.join(mode.destinations.code, ...file.path.split("/"))).href;
+    demand(!snapshots.has(url), "duplicate ESM URL");
+    snapshots.set(url, Buffer.from(data));
+    digests.set(url, file.sha256);
+  }
+  exactModuleTree(mode.destinations.code, mode.fixture);
+  const entry = pathToFileURL(path.join(mode.destinations.code, ...ENTRYPOINT.split("/"))).href;
+  demand(snapshots.has(entry) && snapshots.size === 11, "incomplete ESM snapshot");
+  afterSnapshot?.();
+  // Only real Node import() execution through this hook is counted. A disk
+  // inode replaced after capture cannot alter the immutable source supplied
+  // to the Node compiler for the pinned entry and its transitive imports.
+  const consumed = new Map();
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier.startsWith("node:")) {
+        demand(REVIEWED_BUILTINS.has(specifier), "unreviewed native builtin import");
+        return nextResolve(specifier, context);
+      }
+      demand(specifier === entry || specifier.startsWith("./") || specifier.startsWith("../"),
+        "non-static/absolute/package ESM import forbidden");
+      const resolved = nextResolve(specifier, context);
+      demand(snapshots.has(resolved.url) && resolved.url.startsWith("file:") &&
+        !resolved.url.includes("?") && !resolved.url.includes("#"),
+      "ESM resolve escaped independently pinned snapshot");
+      return resolved;
+    },
+    load(url, context, nextLoad) {
+      if (url.startsWith("node:")) {
+        demand(REVIEWED_BUILTINS.has(url), "unreviewed native builtin load");
+        return nextLoad(url, context);
+      }
+      demand(snapshots.has(url) && context.format === "module",
+        "unexpected native Node ESM load");
+      const bytes = snapshots.get(url);
+      demand(hash(bytes) === digests.get(url), "ESM snapshot changed in memory");
+      consumed.set(url, hash(bytes));
+      return { format: "module", shortCircuit: true, source: Buffer.from(bytes) };
+    },
+  });
+  const namespace = await import(entry);
+  demand(typeof namespace.verifyTrustedHostOfflineCandidate === "function" &&
+    consumed.has(entry), "native ESM entry was cached or failed to load via pinned hook");
+  for (const [url, digest] of consumed) {
+    demand(digests.get(url) === digest, "actual Node load differs from approved ESM bytes");
+  }
+  demand(consumed.size > 1 && consumed.size <= 11, "unexpected ESM module load graph");
+  return Object.freeze({
+    status: "DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY",
+    pinnedInventoryCount: snapshots.size,
+    actualNodeEsmLoads: consumed.size,
+    loadedPaths: Object.freeze([...consumed.keys()].map((url) =>
+      Object.freeze({ path: path.relative(mode.destinations.code, fileURLToPath(url))
+        .split(path.sep).join("/"), sha256: consumed.get(url) }))),
+    liveLedgerStatus: attestation.liveLedgerStatus,
+    independentLedgerWitnessVerified: false,
+    restriction: "No production launcher, mutable ledger witness, Docker or release authority.",
   });
 }
 
