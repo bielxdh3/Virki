@@ -84,6 +84,9 @@ jobs:
       - name: Install production dependencies only
         run: npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit
 
+      - name: Test production dependency audit policy
+        run: node --test scripts/production-dependency-audit.test.mjs
+
       - name: Audit production dependency tree
         run: node scripts/production-dependency-audit.mjs
 
