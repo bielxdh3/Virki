@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
-  chmodSync, linkSync, lstatSync, mkdirSync, readFileSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync,
   rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -17,7 +17,7 @@ const pin = path.join(fixture, "peer.pin");
 const executable = path.join(fixture, "probe");
 const isDisposable = process.platform === "linux" && process.arch === "x64" &&
   process.getuid?.() === 0 && process.env.VIRKI_DISPOSABLE_PEER_PROBE === "1" &&
-  readFileSync("/.dockerenv", "utf8") !== null &&
+  existsSync("/.dockerenv") &&
   fixture.startsWith("/tmp/virki-peer-fixture-");
 
 function readTicks(pid) {
@@ -45,9 +45,10 @@ function run(endpoint = socket, env = {}) {
   assert.equal(result.deployAuthorized, false);
   return { status: r.status, result };
 }
-async function launch(t) {
+async function launch(t, endpoint = socket, upstream = undefined) {
   const child = spawn(process.execPath, [
-    path.join(here, "fake-peer-server.mjs"), socket,
+    path.join(here, "fake-peer-server.mjs"), endpoint,
+    ...(upstream ? [upstream] : []),
   ], {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     env: { ...process.env, VIRKI_DISPOSABLE_PEER_PROBE: "1" },
@@ -127,16 +128,20 @@ test("native kernel AF_UNIX probe is fail-closed against proxies and changes", {
     assert.equal(run().status, 2);
     chmodSync(socket, 0o600);
   });
-  await t.test("another root process behind the same socket cannot impersonate the pinned daemon", async (t2) => {
+  await t.test("forwarding proxy changes SO_PEERCRED even if it relays to the pinned backend", async (t2) => {
     const oldTicks = readTicks(daemon.pid);
     daemon.kill("SIGTERM");
     await new Promise((resolve) => daemon.once("exit", resolve));
     rmSync(socket, { force: true });
-    const proxy = await launch(t2);
-    assert.notEqual(proxy.pid, daemon.pid);
+    const upstream = path.join(fixture, "upstream.sock");
+    const backend = await launch(t2, upstream);
+    const proxy = await launch(t2, socket, upstream);
+    assert.notEqual(proxy.pid, backend.pid);
     ownerPin(daemon.pid, oldTicks);
     assert.equal(run().status, 2);
+    ownerPin(backend.pid);
+    assert.equal(run().status, 2, "a forwarding proxy cannot impersonate the independently pinned backend");
     ownerPin(proxy.pid);
-    assert.equal(run().status, 0);
+    assert.equal(run().status, 0, "SO_PEERCRED identifies the proxy, not its forwarded destination");
   });
 });
