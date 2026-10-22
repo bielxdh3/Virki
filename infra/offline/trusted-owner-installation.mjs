@@ -38,6 +38,9 @@ const AUDITED_FILES = Object.freeze([
 ]);
 const DOMAIN = Buffer.from("Virki/offline-verifier/owner-install/v1\0", "utf8");
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+// Node's fs.constants omits O_CLOEXEC on Linux. Use the kernel's fixed
+// O_CLOEXEC flag explicitly for this native Linux-only host identity read.
+const LINUX_O_CLOEXEC = 0o2000000;
 const DIR_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const NEW_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 const SHA = /^[0-9a-f]{64}$/u;
@@ -341,12 +344,34 @@ function verifyNativeGit(trust) {
     trust.gitExecutableSha256, "native Git");
 }
 function identityDigest() {
+  // /etc is an externally provisioned root-owned host boundary. An actor
+  // capable of swapping machine-id normally already controls that boundary;
+  // this FD binding prevents path/metadata confusion, not root compromise.
   const filename = "/etc/machine-id";
   const st = lstatSync(filename, { bigint: true });
-  demand(st.isFile() && st.uid === 0n && st.nlink === 1n &&
+  demand(st.isFile() && !st.isSymbolicLink() && st.uid === 0n &&
+    st.gid === 0n && st.nlink === 1n && st.size >= 32n && st.size <= 128n &&
     (st.mode & 0o022n) === 0n && realpathSync.native(filename) === filename,
   "native host machine-id is untrusted");
-  const id = readFileSync(filename, "utf8").trim();
+  const fd = openSync(filename, READ_FLAGS | LINUX_O_CLOEXEC);
+  let bytes;
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    demand(same(st, opened), "native host machine-id changed at open");
+    // Exact bounded read of the pinned regular inode. Never perform a second
+    // pathname read, follow a late symlink or trust an expanding file size.
+    bytes = Buffer.alloc(Number(opened.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      demand(count > 0, "native host machine-id truncated during read");
+      offset += count;
+    }
+    demand(same(opened, fstatSync(fd, { bigint: true })) &&
+      same(opened, lstatSync(filename, { bigint: true })),
+    "native host machine-id changed during read");
+  } finally { closeSync(fd); }
+  const id = bytes.toString("utf8").trim();
   demand(/^[0-9a-f]{32}$/u.test(id) && !/^0+$/u.test(id), "machine-id malformed");
   return hash("VIRKI_OFFLINE_HOST_MACHINE_ID_V1\0" + id);
 }
