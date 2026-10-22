@@ -234,21 +234,37 @@ test("rejects symlink output parent and unsafe source tree links, invalid CI and
 test("rejects a valid but substituted source tar even if its paths are individually safe", async (t) => {
   const f = setup(t);
   const base = f.options.runner;
-  const substitutePath = path.join(f.root, "substitute");
-  mkdirSync(substitutePath);
-  writeFileSync(path.join(substitutePath, "harmless.txt"), "wrong content");
   const runner = async (program, args, options) => {
+    const result = await base(program, args, options);
     if (program === "git" && args[0] === "archive") {
       const output = args.find((arg) => arg.startsWith("--output=")).slice("--output=".length);
-      // The substituted archive must retain canonical Git owner and commit
-      // metadata. Otherwise the verifier rejects an earlier independent
-      // invariant and this test never exercises the missing-Git-member gate.
-      const commitTime = git(f.repositoryRoot, "show", "-s", "--format=%ct", f.revision);
-      execFileSync("tar", ["--format=ustar", "--owner=root:0", "--group=root:0",
-        `--mtime=@${commitTime}`, "-cf", output, "-C", substitutePath, "harmless.txt"]);
-      return "";
+      // Mutate only a member name in Git's canonical tar. GNU tar and BSD
+      // tar encode optional numeric fields differently; generating a fresh
+      // archive with the host tar can fail an earlier strict numeric gate.
+      // This keeps every other header and Git's owner/time fields identical,
+      // so a safe but untracked pathname must reach the missing-member gate.
+      const archive = readFileSync(output);
+      for (let offset = 0; offset + 512 <= archive.length;) {
+        const header = archive.subarray(offset, offset + 512);
+        if (header.every((byte) => byte === 0)) break;
+        const kind = String.fromCharCode(header[156]);
+        if (kind === "0" || kind === "\0") {
+          assert.equal(header.toString("utf8", 0, 9), "README.md");
+          header.fill(0, 0, 100);
+          header.write("harmless.txt", 0, "utf8");
+          header.fill(32, 148, 156);
+          const checksum = header.reduce((total, byte) => total + byte, 0);
+          header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+          writeFileSync(output, archive);
+          return result;
+        }
+        const size = parseInt(header.toString("ascii", 124, 136).replace(/\0.*/u, "").trim(), 8);
+        assert.ok(Number.isSafeInteger(size));
+        offset += 512 + Math.ceil(size / 512) * 512;
+      }
+      assert.fail("canonical Git archive had no regular source member");
     }
-    return base(program, args, options);
+    return result;
   };
   await assert.rejects(prepareOfflineReleaseBundle({ ...f.options, runner }), /source tar contains a member missing from Git/);
   assert.deepEqual(readdirSync(f.stagingParent), []);
