@@ -471,6 +471,9 @@ export class OwnedRoleDocker {
       // itself; never ask docker.exe to search for a buildx plugin.
       return this.#signedBuildx(args, { env, input, timeout, maxBuffer });
     }
+    if (this.mode === "linux-ci" && args[0] === "buildx" && args[1] === "build") {
+      return this.#isolatedLinuxBuildx(args, { env, input, timeout, maxBuffer });
+    }
     let result;
     try {
       result = this.invoke(this.binary, ["--host", this.engine, ...args], {
@@ -532,6 +535,59 @@ export class OwnedRoleDocker {
       catch {
         this.uncertain = true;
         failure = Error("Role fixture Buildx temporary configuration cleanup uncertain.");
+      }
+    }
+    if (failure) throw failure;
+    return response;
+  }
+
+  #isolatedLinuxBuildx(args, { env, input, timeout, maxBuffer }) {
+    // A hosted runner must not resolve Buildx state against HOME=/nonexistent,
+    // and must never inherit a user-selected remote builder or Docker config.
+    // Docker's own system plugin is selected by the verified /usr/bin/docker
+    // executable with a fresh explicit config and pinned local Unix socket.
+    const configDir = mkdtempSync(path.join(os.tmpdir(), "virki-role-ci-buildx-"), { mode: 0o700 });
+    let configInfo, response, failure;
+    try {
+      configInfo = lstatSync(configDir);
+      if (!configInfo.isDirectory() || configInfo.isSymbolicLink() ||
+          realpathSync.native(configDir) !== configDir ||
+          (process.platform === "linux" &&
+            (configInfo.uid !== process.getuid() || (configInfo.mode & 0o077) !== 0))) {
+        throw Error("Role fixture Linux Buildx private configuration directory untrusted.");
+      }
+      const environment = {
+        ...safeEnvironment(env, this.mode),
+        DOCKER_HOST: this.engine,
+        DOCKER_CONFIG: configDir,
+        BUILDX_CONFIG: path.join(configDir, "buildx"),
+      };
+      const run = (argv, options) => this.invoke(this.binary,
+        ["--host", this.engine, "buildx", "--builder", "default", ...argv], {
+          cwd: this.cwd, shell: false, windowsHide: true, encoding: "utf8",
+          env: environment, ...options,
+        });
+      const inspect = run(["inspect", "default"], { timeout: 20_000, maxBuffer: 64 * 1024 });
+      if (inspect.error || inspect.status !== 0) {
+        throw Error("Role fixture Linux Buildx default builder preflight unavailable.");
+      }
+      requireLocalDefaultBuildxBuilder(inspect.stdout);
+      assertUntouchedBuildxConfig(configDir, configInfo);
+      let result;
+      try {
+        result = run(args.slice(1), { input, timeout, maxBuffer });
+      } catch {
+        result = { status: null, error: { code: "TRANSPORT" }, stdout: "", stderr: "" };
+      }
+      response = { ...result, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+    } catch (cause) {
+      this.uncertain = true;
+      failure = cause;
+    } finally {
+      try { removeVerifiedBuildxConfig(configDir, configInfo); }
+      catch {
+        this.uncertain = true;
+        failure = Error("Role fixture Linux Buildx temporary configuration cleanup uncertain.");
       }
     }
     if (failure) throw failure;

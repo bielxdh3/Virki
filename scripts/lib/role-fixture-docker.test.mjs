@@ -472,6 +472,69 @@ test("RED→GREEN: even inside Buildx internal state, injected remote builder bl
   assert.equal(calls.some((argv) => argv[2] === "build"), false);
 });
 
+test("RED→GREEN: hosted Linux Buildx uses a writable isolated configuration and pinned local builder", () => {
+  const commands = [];
+  const guard = new OwnedRoleDocker({
+    runId, cwd: "/tmp/virki-roles-safe-test", platform: "linux", env: linuxCI,
+    linuxProbe: () => ({ dev: 1, ino: 2, hostname: "ci-host" }), journal: () => {},
+    invoke: (exe, argv, options) => {
+      commands.push({ exe, argv, env: options.env });
+      assert.equal(exe, LINUX_CI_DOCKER);
+      assert.deepEqual(argv.slice(0, 2), ["--host", LINUX_CI_ENGINE]);
+      if (argv[2] === "info") return { status: 0, stdout: JSON.stringify({
+        OSType: "linux", OperatingSystem: "Ubuntu", Name: "ci-host", ID: "LOCALENGINE1234",
+      }) };
+      assert.equal(argv[2], "buildx");
+      assert.equal(options.env.HOME, "/nonexistent");
+      assert.ok(options.env.DOCKER_CONFIG?.startsWith(os.tmpdir()));
+      assert.equal(options.env.BUILDX_CONFIG, path.join(options.env.DOCKER_CONFIG, "buildx"));
+      assert.equal(options.env.DOCKER_HOST, LINUX_CI_ENGINE);
+      if (process.platform === "linux") assert.equal(statSync(options.env.DOCKER_CONFIG).mode & 0o077, 0);
+      assert.deepEqual(argv.slice(3, 5), ["--builder", "default"]);
+      if (argv[5] === "inspect") return { status: 0, stdout:
+        "Name: default\nDriver: docker\nNodes:\nName: default\nEndpoint: default\nStatus: running\n" };
+      if (argv[5] === "build") return { status: 0, stdout: "safe local image" };
+      throw Error("Unexpected Linux Buildx invocation");
+    },
+  });
+  assert.equal(guard.call(roleImageBuild).status, 0);
+  assert.equal(commands.filter(({ argv }) => argv[5] === "build").length, 1);
+  assert.ok(commands.filter(({ argv }) => argv[2] === "buildx")
+    .every(({ env }) => !existsSync(env.DOCKER_CONFIG)));
+});
+
+test("RED→GREEN: hostile Linux Buildx state or remote driver blocks image creation", () => {
+  for (const variant of ["saved-remote", "remote-driver"]) {
+    const commands = [];
+    const guard = new OwnedRoleDocker({
+      runId, cwd: "/tmp/virki-roles-safe-test", platform: "linux", env: linuxCI,
+      linuxProbe: () => ({ dev: 1, ino: 2, hostname: "ci-host" }), journal: () => {},
+      invoke: (exe, argv, options) => {
+        commands.push(argv);
+        if (argv[2] === "info") return { status: 0, stdout: JSON.stringify({
+          OSType: "linux", OperatingSystem: "Ubuntu", Name: "ci-host", ID: "LOCALENGINE1234",
+        }) };
+        if (argv[5] === "inspect") {
+          if (variant === "saved-remote") {
+            mkdirSync(options.env.BUILDX_CONFIG);
+            for (const directory of ["activity", "defaults", "instances"]) {
+              mkdirSync(path.join(options.env.BUILDX_CONFIG, directory));
+            }
+            writeFileSync(path.join(options.env.BUILDX_CONFIG, ".lock"), "");
+            writeFileSync(path.join(options.env.BUILDX_CONFIG, "instances", "remote"), "remote builder");
+          }
+          return { status: 0, stdout: variant === "remote-driver"
+            ? "Name: default\nDriver: docker-container\nNodes:\nName: default\nEndpoint: tcp://foreign:2375\nStatus: running\n"
+            : "Name: default\nDriver: docker\nNodes:\nName: default\nEndpoint: default\nStatus: running\n" };
+        }
+        throw Error("Unreviewed Linux Buildx call");
+      },
+    });
+    assert.throws(() => guard.call(roleImageBuild), /Buildx.*(?:config|builder)|builder.*Buildx/u);
+    assert.equal(commands.some((argv) => argv[5] === "build"), false);
+  }
+});
+
 test("pins allowed migrator command to the verified image digest rather than mutable tag", () => {
   const fake = mockGuard();
   fake.guard.call(networkCreate());
