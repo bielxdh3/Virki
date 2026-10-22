@@ -55,6 +55,9 @@ static int child_pidfd = -1;
 static pid_t child_pid = -1;
 static char rootdir[80];
 static char endpoint[108];
+static bool owns_rootdir = false;
+static dev_t owned_root_dev = 0;
+static ino_t owned_root_ino = 0;
 
 static int blocked(void) {
   puts("{\"status\":\"BLOCKED\",\"dockerLoadAuthorized\":false,"
@@ -299,6 +302,7 @@ static pid_t wait_reap_until(pid_t pid, int *status, long long deadline) {
 }
 static bool teardown(void) {
   bool confirmed_reap = true;
+  bool child_exited_cleanly = true;
   if (child_pid > 1) {
     int status = 0;
     pid_t done = wait_reap_until(child_pid, &status, monotonic_ms() + 30);
@@ -315,6 +319,8 @@ static bool teardown(void) {
     /* The fake child is NOT authorizing. Never block beyond the kill budget;
      * a failed reap must result in BLOCKED and an operator-visible error. */
     confirmed_reap = done == child_pid;
+    child_exited_cleanly = confirmed_reap &&
+      WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (confirmed_reap)
       fprintf(stderr, "DISPOSABLE_FIXTURE_CHILD_REAPED %ld\n", (long)child_pid);
     else
@@ -325,9 +331,29 @@ static bool teardown(void) {
     close(child_pidfd);
     child_pidfd = -1;
   }
-  if (endpoint[0]) unlink(endpoint);
-  if (rootdir[0]) rmdir(rootdir);
-  return confirmed_reap;
+  /* Neither an unsuccessful mkdtemp nor a changed inode can authorize
+   * unlink/rmdir. The fake child has root privileges in its disposable VM
+   * and can race a pathname replacement after the protocol completes. */
+  bool root_clean = true;
+  if (owns_rootdir) {
+    struct stat current;
+    root_clean = confirmed_reap && lstat(rootdir, &current) == 0 &&
+      S_ISDIR(current.st_mode) && current.st_uid == 0 &&
+      current.st_gid == 0 && (current.st_mode & 07777) == 0700 &&
+      current.st_dev == owned_root_dev && current.st_ino == owned_root_ino;
+    if (root_clean && endpoint[0]) {
+      struct stat socket_state;
+      if (lstat(endpoint, &socket_state) == 0) {
+        root_clean = S_ISSOCK(socket_state.st_mode) &&
+          socket_state.st_uid == 0 && socket_state.st_gid == 0 &&
+          unlink(endpoint) == 0;
+      } else if (errno != ENOENT) root_clean = false;
+    }
+    if (root_clean) root_clean = rmdir(rootdir) == 0;
+    if (!root_clean)
+      fprintf(stderr, "DISPOSABLE_FIXTURE_ROOT_PRESERVED %s\n", rootdir);
+  }
+  return confirmed_reap && child_exited_cleanly && root_clean;
 }
 static int serve_fake(const char *mode, int readyfd) {
   int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -388,6 +414,11 @@ static int serve_fake(const char *mode, int readyfd) {
   (void)recv(conn, &final_byte, 1, 0);
   if (strcmp(mode, "late-final-junk") == 0)
     (void)write_all_until(conn, "JUNK", monotonic_ms() + TIMEOUT_MS);
+  if (strcmp(mode, "swap-owned-root") == 0) {
+    char prior[sizeof(rootdir) + 20];
+    if (snprintf(prior, sizeof(prior), "%s-original", rootdir) >= (int)sizeof(prior) ||
+        rename(rootdir, prior) != 0 || mkdir(rootdir, 0700) != 0) return 44;
+  }
   close(conn);
   return 0;
 }
@@ -399,6 +430,9 @@ static bool fixture_directory(void) {
       !S_ISDIR(statbuf.st_mode) || statbuf.st_uid != 0 ||
       statbuf.st_gid != 0 || (statbuf.st_mode & 07777) != 0700)
     return false;
+  owns_rootdir = true;
+  owned_root_dev = statbuf.st_dev;
+  owned_root_ino = statbuf.st_ino;
   if (snprintf(endpoint, sizeof(endpoint), "%s/engine.sock", rootdir) >=
       (int)sizeof(endpoint)) return false;
   return true;
@@ -430,7 +464,7 @@ int main(int argc, char **argv) {
       strcmp(mode, "fake-rootdir") && strcmp(mode, "stall-on-inspect") &&
       strcmp(mode, "response-smuggling") && strcmp(mode, "pipeline-valid") &&
       strcmp(mode, "slow-trickle") && strcmp(mode, "ignore-term") &&
-      strcmp(mode, "late-final-junk"))
+      strcmp(mode, "late-final-junk") && strcmp(mode, "swap-owned-root"))
     return blocked();
   if (!fixture_directory()) {
     teardown();

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, chmodSync } from "node:fs";
+import {
+  existsSync, mkdtempSync, readFileSync, rmSync, chmodSync, lstatSync,
+  unlinkSync, rmdirSync,
+} from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -98,7 +101,7 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     assert.match(result.stderr, /DISPOSABLE_FIXTURE_CHILD_REAPED [1-9][0-9]*/u);
     assert.equal(output.status, "SAME_FD_KERNEL_PEER_AND_LIFECYCLE_TEST_ONLY");
   });
-  await t.test("lost reap confirmation cannot yield a positive same-FD lifecycle claim", () => {
+  await t.test("lost reap confirmation refuses positive claim and preserves owned socket evidence", (t) => {
     const { result, output } = invoke("normal", {
       VIRKI_DISPOSABLE_SUPERVISOR_MASK_REAP_PROOF: "1",
     });
@@ -106,6 +109,40 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     assert.match(result.stderr, /fixture child reap was not confirmed/u);
     assert.doesNotMatch(result.stderr, /DISPOSABLE_FIXTURE_CHILD_REAPED/u);
     assert.equal(output.status, "BLOCKED");
+    const match = /DISPOSABLE_FIXTURE_ROOT_PRESERVED (\/tmp\/virki-supervisor-[A-Za-z0-9]{8})/u.exec(
+      result.stderr);
+    assert.ok(match, "unconfirmed child teardown must retain the socket path");
+    const owned = match[1];
+    assert.match(owned, /^\/tmp\/virki-supervisor-[A-Za-z0-9]{8}$/u);
+    const stat = lstatSync(owned);
+    assert.ok(stat.isDirectory());
+    assert.equal(stat.uid, 0);
+    assert.equal(stat.mode & 0o7777, 0o700);
+    const socket = path.join(owned, "engine.sock");
+    assert.ok(lstatSync(socket).isSocket());
+    t.after(() => {
+      if (existsSync(socket)) unlinkSync(socket);
+      if (existsSync(owned)) rmdirSync(owned);
+    });
+  });
+  await t.test("child swapping private socket root after ACK cannot make teardown erase replacement", (t) => {
+    const { result, output } = invoke("swap-owned-root");
+    assert.equal(result.status, 2, result.stderr);
+    assert.equal(output.status, "BLOCKED");
+    const match = /DISPOSABLE_FIXTURE_ROOT_PRESERVED (\/tmp\/virki-supervisor-[A-Za-z0-9]{8})/u.exec(
+      result.stderr);
+    assert.ok(match, "swapped root cannot be treated as owned");
+    const replacement = match[1];
+    const original = replacement + "-original";
+    assert.equal(lstatSync(replacement).isDirectory(), true);
+    assert.equal(lstatSync(original).isDirectory(), true);
+    const originalSocket = path.join(original, "engine.sock");
+    assert.ok(lstatSync(originalSocket).isSocket());
+    t.after(() => {
+      if (existsSync(originalSocket)) unlinkSync(originalSocket);
+      if (existsSync(original)) rmdirSync(original);
+      if (existsSync(replacement)) rmdirSync(replacement);
+    });
   });
   await t.test("nonresponsive daemon is terminated and reaped after socket poll deadline", () => {
     const result = invoke("stall-on-inspect");

@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  readdirSync, rmdirSync, unlinkSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,10 @@ export const DISPOSABLE_IMAGE =
   "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const CONTAINER_LABEL = "dev.virki.disposable-fd-lifecycle";
+// Resource ownership is established only by mkdtemp within this process.
+// A caller must not be able to use the exported test helper to delete a
+// different filesystem tree by supplying its path.
+const ownedFixtureDirectories = new Map();
 
 export function planDisposableFixture({ ownerToken, cidfile } = {}) {
   if (!/^[a-f0-9]{32}$/u.test(ownerToken ?? "") ||
@@ -66,17 +71,30 @@ function runCli(args, env, timeout = 45000, stdio = "pipe") {
   });
 }
 
-export function cleanupOwnedContainer(cidfile, plan, env) {
+export function cleanupOwnedContainer(cidfile, plan, env, { run = runCli } = {}) {
   // A failed or timed-out `docker run` may start its container before Docker
   // can atomically write --cidfile. Missing evidence is NOT a cleanup proof.
   if (!existsSync(cidfile)) return false;
+  // A CID pathname is not evidence if its parent was swapped or it points to
+  // an unrelated hardlinked/reparse file. Refuse BEFORE any Docker CLI call.
+  const ownerRoot = path.dirname(cidfile);
+  const original = ownedFixtureDirectories.get(ownerRoot);
+  if (!original) return false;
+  try {
+    const owner = lstatSync(ownerRoot, { bigint: true });
+    const cid = lstatSync(cidfile);
+    if (!owner.isDirectory() || owner.isSymbolicLink() ||
+        owner.dev !== original.dev || owner.ino !== original.ino ||
+        !cid.isFile() || cid.isSymbolicLink() || cid.nlink !== 1)
+      return false;
+  } catch { return false; }
   let id;
   try { id = readFileSync(cidfile, "utf8").trim(); }
   catch { return false; }
   if (!/^[a-f0-9]{64}$/u.test(id)) return false;
   // NEVER remove by mutable name, wildcard, label selection or ambient context.
   // The inspect must prove the exact owned label on the immutable full ID.
-  const metadata = runCli([...plan.dockerPrefix, "inspect",
+  const metadata = run([...plan.dockerPrefix, "inspect",
     "--format", "{{.Id}} {{index .Config.Labels \"dev.virki.disposable-fd-lifecycle\"}}",
     id], env, 4000);
   if (metadata.error || metadata.status !== 0) return false;
@@ -85,15 +103,58 @@ export function cleanupOwnedContainer(cidfile, plan, env) {
   if (extra.length || inspectedId !== id ||
     !validateCleanupIdentity(id, labelToken, ownerToken))
     return false;
-  const killed = runCli([...plan.dockerPrefix, "container", "rm", "--force", id],
+  const killed = run([...plan.dockerPrefix, "container", "rm", "--force", id],
     env, 4000);
   return !killed.error && killed.status === 0;
 }
 
+export function prepareOwnedFixtureDirectory() {
+  const owned = mkdtempSync(path.join(os.tmpdir(), "virki-owned-fd-lifecycle-"));
+  const state = lstatSync(owned, { bigint: true });
+  if (!state.isDirectory() || state.isSymbolicLink()) {
+    throw new Error("Disposable owner directory is not an actual directory");
+  }
+  const configDir = path.join(owned, "empty-docker-config");
+  mkdirSync(configDir);
+  ownedFixtureDirectories.set(owned, Object.freeze({
+    dev: state.dev, ino: state.ino,
+  }));
+  return Object.freeze({ owned, cidfile: path.join(owned, "container.id"),
+    configDir });
+}
+
 export function finalizeFixtureRecord(owned, { completed, cleanupConfirmed }) {
   if (!completed && !cleanupConfirmed) return false;
-  rmSync(owned, { recursive: true, force: true });
-  return true;
+  const original = ownedFixtureDirectories.get(owned);
+  if (!original) return false;
+  try {
+    // No arbitrary recursive deletion: verify our original private root,
+    // require an exact two-entry allowlist, and delete only known leaf files.
+    const state = lstatSync(owned, { bigint: true });
+    if (!state.isDirectory() || state.isSymbolicLink() ||
+        state.dev !== original.dev || state.ino !== original.ino) return false;
+    const entries = readdirSync(owned);
+    if (entries.length < 1 || entries.length > 2 ||
+        entries.some((name) => name !== "empty-docker-config" &&
+          name !== "container.id") ||
+        !entries.includes("empty-docker-config")) return false;
+    const configDir = path.join(owned, "empty-docker-config");
+    const config = lstatSync(configDir);
+    if (!config.isDirectory() || config.isSymbolicLink() ||
+        readdirSync(configDir).length !== 0) return false;
+    if (entries.includes("container.id")) {
+      const cidfile = path.join(owned, "container.id");
+      const cid = lstatSync(cidfile);
+      if (!cid.isFile() || cid.isSymbolicLink() || cid.nlink !== 1) return false;
+      unlinkSync(cidfile);
+    }
+    rmdirSync(configDir);
+    rmdirSync(owned);
+    ownedFixtureDirectories.delete(owned);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function runDisposableFdLifecycleFixture() {
@@ -102,10 +163,7 @@ export function runDisposableFdLifecycleFixture() {
     !existsSync(DOCKER_BINARY) || process.argv.length !== 2) {
     throw new Error("Docker fixture refused: explicit Windows Desktop Linux npipe opt-in required");
   }
-  const owned = mkdtempSync(path.join(os.tmpdir(), "virki-owned-fd-lifecycle-"));
-  const cidfile = path.join(owned, "container.id");
-  const configDir = path.join(owned, "empty-docker-config");
-  mkdirSync(configDir);
+  const { owned, cidfile, configDir } = prepareOwnedFixtureDirectory();
   const plan = planDisposableFixture({
     ownerToken: randomBytes(16).toString("hex"), cidfile,
   });

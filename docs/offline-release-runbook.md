@@ -294,8 +294,17 @@ to wildcard/name cleanup. A missing CID file does **not** prove cleanup: a
 failed or timed-out run might have started the container before writing its ID.
 If an unsuccessful invocation cannot confirm cleanup, the local fixture
 directory is preserved for separate operator review even when the CID is
-missing, instead of silently forgetting a potentially live container. The launcher
-does not mount a host Docker socket.
+missing, instead of silently forgetting a potentially live container. Local
+test-fixture deletion is restricted to the temporary directory created in the
+same Node process, checked against its original device/inode and an exact
+known-file inventory. No general recursive-delete path is accepted: foreign
+directories, replaced roots, hardlinked CID records, symlinks, and unexpected
+children preserve the evidence and fail the test. A valid CID's full container
+ID and exact owner label must be verified before Docker cleanup. These
+path/metadata checks do not create a kernel-atomic same-handle guarantee
+against a privileged or same-user concurrent file replacement, nor do they
+prove Windows ACL ownership. Such environments are **not** production trust
+boundaries. The launcher does not mount a host Docker socket.
 No real Docker-in-Docker daemon is started or authorized.
 
 For local development **without contacting Docker at all**, native C fixtures
@@ -329,12 +338,22 @@ peer EOF to reject even a late trailing payload. Cleanup first attempts
 retried within the deadline, and a positive lifecycle result is forbidden
 unless `waitpid` positively confirms the exact child was reaped. Disposable
 fault injection tests cover interrupted waits and lost reap confirmation.
+The socket directory is removed only after successful child cleanup and
+verification that it is the originally created root-owned directory inode,
+not a renamed/replaced path. If those proofs fail, the test refuses positive
+status and preserves the private socket path for manual reconciliation.
+The child must also exit successfully; a nonzero fake-daemon exit is not
+evidence of a successful supervised lifecycle.
+These C pathname/inode checks are not a kernel-atomic same-directory-handle
+cleanup primitive against an independently privileged concurrent attacker;
+they demonstrate fail-closed swaps in the disposable fixture only.
 
 The adversarial tests demonstrate continuity of the kernel peer identity
 across the entire *synthetic* operation; they also cover daemon death before
 or during the exchange, response tampering, three prequeued syntactically
 valid responses, late trailing bytes, slow-trickle deadlines, TERM-ignoring
-children, fake negative root-directory responses and mode/path escape. The
+children, changed private socket-root inodes, fake negative root-directory
+responses and mode/path escape. The
 `fake-rootdir` case remains a **synthetic negative acknowledgment**, not
 proof against a syntactically valid malicious real Docker `/info` response.
 Even
