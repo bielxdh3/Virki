@@ -19,7 +19,7 @@
     "test:e2e": "node scripts/e2e/run-e2e.mjs",
     "test:e2e:production-hub": "cross-env VIRKI_E2E_HUB_MODE=production npm run test:e2e -- --grep=USER.TOTP.confirmation",
     "test:migration": "node scripts/migration-validation.mjs",
-    "test:database:roles": "node scripts/database-role-isolation.test.mjs",
+    "test:database:roles": "node --test scripts/lib/role-fixture-docker.test.mjs && node scripts/database-role-isolation.test.mjs",
     "test:backup:restore": "node scripts/backup-restore-validation.mjs",
     "test:backup:docker-guard": "node --test scripts/backup-validation-docker.test.mjs",
     "test:offline:pg:container": "cross-env VIRKI_OFFLINE_PG_CONTAINER_TEST=1 node --test scripts/offline-pg-recovery-container.test.mjs",

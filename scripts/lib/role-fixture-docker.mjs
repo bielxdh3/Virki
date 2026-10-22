@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdtempSync, openSync, realpathSync, rmSync, statSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runProtectedWindowsJournalOperation, verifyTrustedWindowsDockerCli, LOCAL_ENGINE } from "../../infra/offline/disposable-local-docker.mjs";
@@ -16,17 +16,28 @@ const POSTGRES = "postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab34
 // resources/cli-plugins (which Docker's plugin search does not select here).
 const BUILDX = "C:\\Program Files\\Docker\\cli-plugins\\docker-buildx.exe";
 const POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+export const LINUX_CI_DOCKER = "/usr/bin/docker";
+export const LINUX_CI_ENGINE = "unix:///var/run/docker.sock";
 const SECRET_ENV = /^(?:POSTGRES_(?:PASSWORD|DB|USER|HOST_AUTH_METHOD|INITDB_ARGS)|VIRKI_(?:RUNTIME_DB_PASSWORD|MIGRATOR_DB_PASSWORD|AUDIT_MAINTENANCE_DB_PASSWORD|E2E_DATABASE_PASSWORD|TEST_MIGRATOR_PASSWORD)|(?:MIGRATION_)?DATABASE_URL|PGPASSWORD|AUDIT_LOG_RETENTION_DAYS)$/u;
 
 export function requireRoleFixtureLocalEnvironment(env = process.env, platform = process.platform) {
-  if (platform !== "win32" || Object.keys(env).some((key) =>
+  const linuxCI = platform === "linux" && env.VIRKI_ROLE_FIXTURE_LINUX_CI === "1" &&
+    env.GITHUB_ACTIONS === "true" && env.CI === "true" &&
+    env.RUNNER_OS === "Linux" && env.RUNNER_ENVIRONMENT === "github-hosted" &&
+    env.GITHUB_REPOSITORY === "bielxdh3/Virki" &&
+    /^[1-9][0-9]{0,19}$/u.test(env.GITHUB_RUN_ID ?? "") &&
+    /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? "");
+  const windows = platform === "win32" && !env.VIRKI_ROLE_FIXTURE_LINUX_CI;
+  if ((!windows && !linuxCI) || Object.keys(env).some((key) =>
     /^(?:DOCKER_|COMPOSE_|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|DATABASE_URL$|MIGRATION_DATABASE_URL$|PG(?:PASSWORD|HOST|PORT|SERVICE|PASSFILE|OPTIONS)$)/iu.test(key))) {
-    throw new Error("Role fixture requires local Windows Docker Desktop and no Docker/Node/database overrides.");
+    throw new Error("Role fixture requires local Windows Docker Desktop or explicitly opted-in hosted Linux CI, with no Docker/Node/database overrides.");
   }
+  return linuxCI ? "linux-ci" : "windows-local";
 }
 
-function safeEnvironment(extra) {
+function safeEnvironment(extra, mode = "windows-local") {
   if (Object.keys(extra).some((key) => !SECRET_ENV.test(key))) throw Error("Role fixture rejected an unexpected subprocess variable.");
+  if (mode === "linux-ci") return { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", ...extra };
   return {
     SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows",
     PATH: "C:\\Windows\\System32;C:\\Windows",
@@ -47,6 +58,97 @@ function argument(args, key) {
 
 function identicalArgs(actual, expected) {
   return actual.length === expected.length && expected.every((item, at) => actual[at] === item);
+}
+
+// A hosted runner and root-owned local socket are CI trust assumptions: neither
+// environment hints nor daemon responses attest an independent host identity.
+export function inspectRoleLinuxSocket({
+  stat = statSync, canonicalize = realpathSync, hostname = os.hostname,
+} = {}) {
+  let socket, binary;
+  try {
+    socket = stat("/var/run/docker.sock");
+    binary = stat(LINUX_CI_DOCKER);
+    if (canonicalize("/var/run/docker.sock") !== "/run/docker.sock" ||
+      canonicalize(LINUX_CI_DOCKER) !== LINUX_CI_DOCKER) throw Error("redirected");
+  } catch { throw Error("Role fixture Linux CI Docker socket or executable untrusted."); }
+  if (!socket.isSocket() || socket.uid !== 0 || (socket.mode & 0o002) ||
+    !binary.isFile() || binary.uid !== 0 || (binary.mode & 0o002) ||
+    !Number.isSafeInteger(socket.dev) || !Number.isSafeInteger(socket.ino) ||
+    !/^[A-Za-z0-9][A-Za-z0-9.-]{0,253}$/u.test(hostname())) {
+    throw Error("Role fixture Linux CI Docker socket or executable untrusted.");
+  }
+  return { dev: socket.dev, ino: socket.ino, hostname: hostname() };
+}
+
+// Dedicated, exclusive 0700 directory. Every line is flushed before daemon
+// contact; keep evidence on any uncertain result for manual reconciliation.
+export function runProtectedLinuxRoleJournal(operation, request) {
+  const { directory, name, owner, line } = request;
+  if (!/^virki-offline-fixture-[a-f0-9]{32}$/u.test(name) ||
+    !/^[a-f0-9]{32}$/u.test(owner) || name !== `virki-offline-fixture-${owner}` ||
+    !directory.startsWith(path.join(os.tmpdir(), "virki-role-owner-"))) {
+    throw Error("Invalid private Linux role fixture journal identity.");
+  }
+  const entry = lstatSync(directory);
+  if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== process.getuid() ||
+    (entry.mode & 0o077) !== 0 || realpathSync(directory) !== directory) {
+    throw Error("Linux role fixture journal directory is not private.");
+  }
+  const filename = path.join(directory, `${name}.jsonl`);
+  if (operation === "remove") {
+    // Only a finished, already reconciled owner may request deletion.
+    const file = lstatSync(filename);
+    if (!file.isFile() || file.isSymbolicLink() || file.uid !== process.getuid() ||
+      (file.mode & 0o077) !== 0 || file.nlink !== 1) throw Error("Unsafe Linux role fixture journal removal.");
+    rmSync(filename);
+    fsyncDirectory(directory);
+    rmSync(directory);
+    fsyncDirectory(path.dirname(directory));
+    return;
+  }
+  if (!["create", "append"].includes(operation) || typeof line !== "string" ||
+    !line || line.length > 16_384 || /[\r\n]/u.test(line)) throw Error("Invalid role fixture journal entry.");
+  const flags = (operation === "create" ? constants.O_CREAT | constants.O_EXCL : constants.O_APPEND) |
+    constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_CLOEXEC;
+  let fd;
+  try {
+    fd = openSync(filename, flags, 0o600);
+    const file = lstatSync(filename);
+    if (!file.isFile() || file.isSymbolicLink() || file.uid !== process.getuid() ||
+      (file.mode & 0o077) !== 0 || file.nlink !== 1) throw Error("Unsafe role fixture journal inode.");
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.ino !== file.ino || opened.dev !== file.dev) {
+      throw Error("Role fixture journal pathname changed.");
+    }
+    writeSync(fd, `${line}\n`);
+    fsyncSync(fd);
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(filename);
+    if (opened.ino !== after.ino || opened.dev !== after.dev ||
+      after.ino !== pathAfter.ino || after.dev !== pathAfter.dev) {
+      throw Error("Role fixture journal inode changed during append.");
+    }
+  } finally { if (fd !== undefined) closeSync(fd); }
+  fsyncDirectory(directory);
+}
+
+function fsyncDirectory(directory) {
+  const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function createDurableLinuxOwnerDirectory() {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-role-owner-"));
+  try {
+    // fsync the parent too: a flushed journal inode is insufficient if the
+    // newly created 0700 directory entry disappears after a host crash.
+    fsyncDirectory(path.dirname(directory));
+    return directory;
+  } catch {
+    rmSync(directory);
+    throw Error("Linux role fixture could not durably reserve its private journal directory.");
+  }
 }
 
 function expectedPostgresCreate(name, runId) {
@@ -95,6 +197,146 @@ const MIGRATOR_COMMANDS = [
     "--schema", "/app/packages/database/prisma/schema.prisma"],
 ];
 
+const CONTAINER_FORMATS = new Set([
+  `--format={{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}`,
+  `--format={{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}published{{end}}{{end}}|{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}published{{end}}{{end}}|{{.HostConfig.NetworkMode}}|{{index .Config.Labels "virki.role-test.run"}}|{{index .Config.Labels "virki.role-test.fixture"}}|{{index .Config.Labels "virki.role-test.kind"}}`,
+  `--format={{index .HostConfig.Tmpfs "/var/lib/postgresql/data"}}`,
+  `--format={{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}}|{{.Name}}|{{.Destination}}{{end}}{{end}}`,
+  `--format={{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}}{{end}}{{end}}`,
+  "--format={{len .HostConfig.Binds}}",
+  `--format={{.Name}}|{{index .Config.Labels "virki.role-test.run"}}|{{index .Config.Labels "virki.role-test.fixture"}}|{{index .Config.Labels "virki.role-test.kind"}}`,
+]);
+const NETWORK_FORMATS = new Set([
+  `--format={{.Name}}|{{.Driver}}|{{.Internal}}|{{index .Labels "virki.role-test.run"}}|{{index .Labels "virki.role-test.fixture"}}`,
+  `--format={{.Name}}|{{.Internal}}|{{index .Labels "virki.role-test.run"}}|{{index .Labels "virki.role-test.fixture"}}|{{len .Containers}}`,
+]);
+const VOLUME_FORMAT = `--format={{.Name}}|{{.Driver}}|{{index .Labels "virki.role-test.run"}}|{{index .Labels "virki.role-test.fixture"}}`;
+const IMAGE_FORMATS = new Set([
+  `--format={{.Id}}|{{index .Config.Labels "virki.role-test.run"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}`,
+  `--format={{.Id}}|{{index .Config.Labels "virki.role-test.run"}}`,
+  "--format={{.Id}}",
+]);
+const FIXTURE_NAME = /^virki-role-(?:fresh|interrupted|populated)-[a-f0-9]{12}$/u;
+const MIGRATOR_NAME = /^virki-role-(?:fresh|interrupted|populated)-[a-f0-9]{12}-migrate-[a-f0-9]{12}$/u;
+const ROLE_PATHS = new Set([
+  "/docker-entrypoint-initdb.d/10-virki-database-roles.sh",
+  "/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh",
+  "/test/10-virki-database-roles.sh",
+  "/test/20-virki-e2e-runtime-test-role.sh",
+]);
+const PSQL_PREFIX = ["psql", "--no-psqlrc", "--host", "127.0.0.1", "--username"];
+const DB_SUFFIX = ["--dbname", "virki_roles_test", "--set", "ON_ERROR_STOP=1"];
+
+// Validate the COMPLETE argv before even observing the engine. Docker accepts
+// multiple targets and mixed positional/options after flags: checking only an
+// owned last operand lets a foreign first operand be modified or removed.
+function requireReviewedRoleArguments(args, state) {
+  if (!Array.isArray(args) || args.some((v) => typeof v !== "string")) throw Error("Unreviewed role fixture Docker arguments.");
+  const [op, sub] = args;
+  const fixture = (v) => FIXTURE_NAME.test(v ?? "");
+  const network = (v) => fixture(v?.slice(0, -4)) && v.endsWith("-net");
+  const volume = (v) => /^virki-role-interrupted-[a-f0-9]{12}-data$/u.test(v ?? "");
+  const container = (v) => fixture(v) || MIGRATOR_NAME.test(v ?? "") || ID.test(v ?? "");
+  const image = (v) => v === state.imageTag || v === state.image?.id;
+  let allowed = false;
+  if (op === "network") {
+    if (sub === "create") {
+      const n = args.at(-1);
+      allowed = network(n) && identicalArgs(args, ["network", "create", "--internal",
+        "--label", `${RUN_LABEL}=${state.runId}`, "--label", `${FIXTURE_LABEL}=${n.slice(0, -4)}`, n]);
+    } else if (sub === "rm") allowed = args.length === 3 && (network(args[2]) || ID.test(args[2]));
+    else if (sub === "ls") allowed = args.length === 5 && identicalArgs(args, ["network", "ls", "--quiet", "--filter", `name=^${args[4]?.slice(6, -1)}$`]) && network(args[4]?.slice(6, -1));
+    else if (sub === "inspect") allowed = args.length === 4 && NETWORK_FORMATS.has(args[2]) &&
+      [...state.networks].some(([name, id]) => name === args[3] || id === args[3] ||
+        (/^[a-f0-9]{12,64}$/u.test(args[3] ?? "") && id.startsWith(args[3])));
+  } else if (op === "volume") {
+    if (sub === "create") {
+      const v = args.at(-1);
+      allowed = volume(v) && identicalArgs(args, ["volume", "create",
+        "--label", `${RUN_LABEL}=${state.runId}`, "--label", `${FIXTURE_LABEL}=${v.slice(0, -5)}`, v]);
+    } else if (sub === "rm") allowed = args.length === 3 && volume(args[2]);
+    else if (sub === "ls") allowed = args.length === 5 && volume(args[4]?.slice(6, -1)) &&
+      identicalArgs(args, ["volume", "ls", "--quiet", "--filter", `name=^${args[4].slice(6, -1)}$`]);
+    else if (sub === "inspect") allowed = args.length === 4 && args[2] === VOLUME_FORMAT && state.volumes.has(args[3]);
+  } else if (op === "buildx" && sub === "build") {
+    const tag = args[16];
+    allowed = /^virki-role-test-migrator:[a-f0-9]{24}$/u.test(tag ?? "") &&
+      identicalArgs(args, ["buildx", "build", "--load", "--platform", "linux/amd64",
+        "--progress", "plain", "--file", "infra/Dockerfile.prod", "--target", "migrator",
+        "--build-arg", args[12], "--label", `${RUN_LABEL}=${state.runId}`,
+        "--tag", tag, "."]) &&
+      /^VIRKI_BUILD_REVISION=[a-f0-9]{40}$/u.test(args[12]);
+  } else if (op === "create") {
+    allowed = fixture(args[2]) && identicalArgs(args, expectedPostgresCreate(args[2], state.runId));
+  } else if (op === "run") {
+    const n = args[2];
+    // The fixture ID is the fixed prefix before the trailing migration suffix.
+    const parent = n?.replace(/-migrate-[a-f0-9]{12}$/u, "");
+    allowed = MIGRATOR_NAME.test(n ?? "") && !!state.image && !!state.imageTag &&
+      MIGRATOR_COMMANDS.some((cmd) => ["DATABASE_URL", "MIGRATION_DATABASE_URL"].some((key) =>
+        [false, true].some((retention) =>
+          identicalArgs(args, expectedMigrationRun(n, parent, state.runId, state.imageTag, cmd, key, retention)))));
+  } else if (["start", "stop", "rm"].includes(op)) {
+    allowed = container(args.at(-1)) &&
+      (op === "rm" ? (args.length === 2 || identicalArgs(args, ["rm", "--force", args[2]])) : args.length === 2);
+  } else if (op === "cp") {
+    const dest = args[2]?.split(":/");
+    const basename = dest?.[1]?.split("/").at(-1);
+    const expectedSource = basename === "10-virki-database-roles.sh"
+      ? path.join(state.cwd, "infra", "postgres-init", basename)
+      : basename === "20-virki-e2e-runtime-test-role.sh"
+        ? path.join(state.cwd, "scripts", "e2e", basename) : null;
+    allowed = args.length === 3 && container(dest?.[0]) && dest?.length === 2 &&
+      ROLE_PATHS.has(`/${dest[1]}`) && args[1] === expectedSource;
+  } else if (op === "logs") {
+    allowed = args.length === 4 && identicalArgs(args, ["logs", "--tail", "40", args[3]]) && container(args[3]);
+  } else if (op === "inspect") {
+    allowed = args.length === 3 && CONTAINER_FORMATS.has(args[1]) && container(args[2]);
+  } else if (op === "image") {
+    if (sub === "rm") allowed = args.length === 3 && image(args[2]);
+    else if (sub === "inspect") allowed = args.length === 4 && IMAGE_FORMATS.has(args[2]) && image(args[3]);
+  } else if (op === "ps") {
+    const filters = args.slice(4);
+    allowed = args.length >= 5 && args.length <= 8 &&
+      identicalArgs(args.slice(0, 4), ["ps", "--all", "--quiet", "--filter"]) &&
+      (args.length === 5 && (
+        /^name=\^\/virki-role-(?:fresh|interrupted|populated)-[a-f0-9]{12}\$$/u.test(filters[0]) ||
+        /^volume=virki-role-interrupted-[a-f0-9]{12}-data$/u.test(filters[0]) ||
+        /^ancestor=sha256:[a-f0-9]{64}$/u.test(filters[0])) ||
+        args.length === 7 && filters[0] === `label=${RUN_LABEL}=${state.runId}` &&
+        filters[1] === "--filter" && /^label=virki\.role-test\.fixture=virki-role-(?:fresh|interrupted|populated)-[a-f0-9]{12}$/u.test(filters[2]));
+  } else if (op === "exec") {
+    let index = 1;
+    const interactive = args[index] === "--interactive";
+    if (interactive) index += 1;
+    const vars = [];
+    while (args[index]?.startsWith("--env=")) vars.push(args[index++]);
+    const target = args[index++];
+    const command = args.slice(index);
+    const scripts = ["--env=VIRKI_RUNTIME_DB_PASSWORD", "--env=VIRKI_MIGRATOR_DB_PASSWORD", "--env=VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD"];
+    allowed = container(target) && (
+      (!interactive && vars.length === 0 && identicalArgs(command, ["mkdir", "-m", "0700", "/test"]) && index === 2) ||
+      (!interactive && vars.length === 0 && command.length === 2 && command[0] === "sha256sum" && ROLE_PATHS.has(command[1])) ||
+      (!interactive && vars.length === 0 && command.length === 3 && identicalArgs(command.slice(0, 2), ["test", "-e"]) && ROLE_PATHS.has(command[2])) ||
+      (!interactive && identicalArgs(vars, scripts) && command.length === 2 && command[0] === "sh" && ROLE_PATHS.has(command[1]) && command[1].endsWith("/10-virki-database-roles.sh")) ||
+      (!interactive && identicalArgs(vars, ["--env=VIRKI_E2E_DATABASE_PASSWORD"]) && command.length === 2 && command[0] === "sh" && command[1].endsWith("/20-virki-e2e-runtime-test-role.sh") && ROLE_PATHS.has(command[1])) ||
+      (!interactive && identicalArgs(vars, ["--env=PGPASSWORD"]) && command.length === 14 &&
+        identicalArgs(command.slice(0, 5), PSQL_PREFIX) &&
+        ["virki_bootstrap", "virki_runtime", "virki_runtime_test", "virki_migrator", "virki_audit_maintenance", "virki_connect_probe"].includes(command[5]) &&
+        identicalArgs(command.slice(6, 10), DB_SUFFIX) &&
+        identicalArgs(command.slice(10, 14), ["--tuples-only", "--no-align", "--command", command[13]]) &&
+        typeof command[13] === "string" && command[13].length > 0 && command[13].length < 32_768) ||
+      (!interactive && identicalArgs(vars, ["--env=PGPASSWORD"]) &&
+        identicalArgs(command, [...PSQL_PREFIX, "virki_runtime", ...DB_SUFFIX, "--command",
+          "CREATE TABLE public.__virki_forbidden_probe (id integer);"])) ||
+      (interactive && identicalArgs(vars, ["--env=VIRKI_TEST_MIGRATOR_PASSWORD"]) &&
+        identicalArgs(command, ["psql", "--no-psqlrc", "--username", "virki_bootstrap",
+          "--dbname", "virki_roles_test", "--set", "ON_ERROR_STOP=1"]))
+    );
+  }
+  if (!allowed) throw Error("Role fixture denied unreviewed Docker arguments before daemon contact.");
+}
+
 export function verifyOfficialBuildx({ stat = lstatSync, canonicalize = realpathSync.native, authenticate = spawnSync } = {}) {
   try {
     const info = stat(BUILDX);
@@ -114,18 +356,26 @@ export function verifyOfficialBuildx({ stat = lstatSync, canonicalize = realpath
 export class OwnedRoleDocker {
   constructor({ runId, cwd, invoke = spawnSync, journal = runProtectedWindowsJournalOperation,
     verify = verifyTrustedWindowsDockerCli, verifyBuildx = verifyOfficialBuildx,
-    env = process.env, platform = process.platform }) {
-    requireRoleFixtureLocalEnvironment(env, platform);
+    linuxProbe = inspectRoleLinuxSocket, env = process.env, platform = process.platform }) {
+    this.mode = requireRoleFixtureLocalEnvironment(env, platform);
     if (!/^[a-f0-9]{24}$/u.test(runId)) throw Error("Invalid role fixture run ID.");
     this.invoke = invoke;
-    this.binary = invoke === spawnSync ? verify() : DOCKER_EXE;
-    if (invoke === spawnSync) verifyBuildx();
+    this.linuxProbe = linuxProbe;
+    this.linuxIdentity = this.mode === "linux-ci" ? linuxProbe() : null;
+    this.binary = this.mode === "linux-ci" ? LINUX_CI_DOCKER : invoke === spawnSync ? verify() : DOCKER_EXE;
+    if (invoke === spawnSync && this.mode === "windows-local") verifyBuildx();
+    this.engine = this.mode === "linux-ci" ? LINUX_CI_ENGINE : LOCAL_ENGINE;
     this.cwd = cwd;
     this.runId = runId;
-    this.journal = journal;
+    this.journal = this.mode === "linux-ci" && journal === runProtectedWindowsJournalOperation
+      ? runProtectedLinuxRoleJournal : journal;
     this.owner = randomBytes(16).toString("hex");
     this.journalName = `virki-offline-fixture-${this.owner}`;
-    this.directory = path.join(os.homedir(), ".virki", "offline-docker-reconciliation");
+    this.directory = this.mode === "linux-ci"
+      ? platform === process.platform && journal === runProtectedWindowsJournalOperation
+        ? createDurableLinuxOwnerDirectory()
+        : path.join(os.tmpdir(), `virki-role-owner-${this.owner}`)
+      : path.join(os.homedir(), ".virki", "offline-docker-reconciliation");
     this.evidence = path.join(this.directory, `${this.journalName}.jsonl`);
     this.records = new Map();
     this.networks = new Map();
@@ -136,7 +386,7 @@ export class OwnedRoleDocker {
     this.created = false;
     this.engineId = null;
     this.verifyEngine();
-    this.writeJournal("create", { event: "run_reservation", runId, owner: this.owner, endpoint: LOCAL_ENGINE, cwd });
+    this.writeJournal("create", { event: "run_reservation", runId, owner: this.owner, endpoint: this.engine, cwd });
     this.created = true;
   }
 
@@ -145,29 +395,42 @@ export class OwnedRoleDocker {
       owner: this.owner, line: JSON.stringify(data) });
   }
 
-  raw(args, { env = {}, input, timeout = 120_000, maxBuffer = 10 * 1024 * 1024 } = {}) {
+  #raw(args, { env = {}, input, timeout = 120_000, maxBuffer = 10 * 1024 * 1024 } = {}) {
+    this.assertEndpoint();
     let result;
     try {
-      result = this.invoke(this.binary, ["--host", LOCAL_ENGINE, ...args], {
+      result = this.invoke(this.binary, ["--host", this.engine, ...args], {
         cwd: this.cwd, shell: false, windowsHide: true,
-        env: safeEnvironment(env), input, timeout, maxBuffer, encoding: "utf8",
+        env: safeEnvironment(env, this.mode), input, timeout, maxBuffer, encoding: "utf8",
       });
     } catch { return { status: null, error: { code: "TRANSPORT" }, stdout: "", stderr: "" }; }
     return { ...result, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   }
 
-  checked(args) {
-    const result = this.raw(args, { timeout: 20_000, maxBuffer: 2 * 1024 * 1024 });
+  assertEndpoint() {
+    if (this.linuxIdentity) {
+      const current = this.linuxProbe();
+      if (current.dev !== this.linuxIdentity.dev || current.ino !== this.linuxIdentity.ino ||
+        current.hostname !== this.linuxIdentity.hostname) {
+        throw Error("Role fixture Linux CI Docker socket identity changed.");
+      }
+    }
+  }
+
+  #checked(args) {
+    const result = this.#raw(args, { timeout: 20_000, maxBuffer: 2 * 1024 * 1024 });
     if (result.error || result.status !== 0) throw Error("Role fixture Docker ownership/endpoint observation unavailable.");
     return result.stdout.trim();
   }
 
   verifyEngine() {
-    const result = this.raw(["info", "--format", "{{json .}}"], { timeout: 20_000 });
+    const result = this.#raw(["info", "--format", "{{json .}}"], { timeout: 20_000 });
     let info;
     try { info = JSON.parse(result.stdout); } catch { /* fail closed */ }
     if (result.error || result.status !== 0 || info?.OSType !== "linux" ||
-      !/^Docker Desktop(?:\b|$)/u.test(info?.OperatingSystem ?? "") ||
+      (this.mode === "linux-ci"
+        ? info?.Name !== this.linuxIdentity.hostname || /Docker Desktop/u.test(info?.OperatingSystem ?? "")
+        : !/^Docker Desktop(?:\b|$)/u.test(info?.OperatingSystem ?? "")) ||
       typeof info?.ID !== "string" || info.ID.length < 8 ||
       (this.engineId !== null && info.ID !== this.engineId)) {
       throw Error("Role fixture refused unverified or changed local Docker Desktop engine.");
@@ -177,12 +440,12 @@ export class OwnedRoleDocker {
 
   ensurePostgresImage() {
     this.verifyEngine();
-    const inspect = () => this.raw(["image", "inspect", "--format", "{{json .}}", POSTGRES],
+    const inspect = () => this.#raw(["image", "inspect", "--format", "{{json .}}", POSTGRES],
       { timeout: 20_000 });
     let result = inspect();
     if (result.error || result.status !== 0) {
       this.reserve("postgres_image_pull_intent", { image: POSTGRES, platform: "linux/amd64" });
-      const pulled = this.raw(["pull", "--platform", "linux/amd64", POSTGRES],
+      const pulled = this.#raw(["pull", "--platform", "linux/amd64", POSTGRES],
         { timeout: 15 * 60_000, maxBuffer: 8 * 1024 * 1024 });
       if (pulled.error || pulled.status !== 0) {
         this.uncertain = true;
@@ -206,7 +469,11 @@ export class OwnedRoleDocker {
   }
 
   observeContainer(name, fixture, kind, { expectNew = false } = {}) {
-    const raw = this.checked(["inspect", "--type", "container", "--format", "{{json .}}", name]);
+    if (!(FIXTURE_NAME.test(name) || MIGRATOR_NAME.test(name)) ||
+      !FIXTURE_NAME.test(fixture) || !["postgres", "migration-runner"].includes(kind)) {
+      throw Error("Role fixture refused an unreviewed container observation.");
+    }
+    const raw = this.#checked(["inspect", "--type", "container", "--format", "{{json .}}", name]);
     let info;
     try { info = JSON.parse(raw); } catch { throw Error("Role fixture container ownership JSON unavailable."); }
     const existing = this.records.get(name);
@@ -245,7 +512,10 @@ export class OwnedRoleDocker {
   }
 
   observeNetwork(name, fixture) {
-    const raw = this.checked(["network", "inspect", "--format", "{{json .}}", name]);
+    if (name !== `${fixture}-net` || !FIXTURE_NAME.test(fixture)) {
+      throw Error("Role fixture refused an unreviewed network observation.");
+    }
+    const raw = this.#checked(["network", "inspect", "--format", "{{json .}}", name]);
     let info;
     try { info = JSON.parse(raw); } catch { throw Error("Role fixture network ownership JSON unavailable."); }
     if (!ID.test(info?.Id ?? "") || info.Name !== name || info.Driver !== "bridge" ||
@@ -262,7 +532,10 @@ export class OwnedRoleDocker {
   }
 
   observeVolume(name, fixture) {
-    const raw = this.checked(["volume", "inspect", "--format", "{{json .}}", name]);
+    if (name !== `${fixture}-data` || !/^virki-role-interrupted-[a-f0-9]{12}$/u.test(fixture)) {
+      throw Error("Role fixture refused an unreviewed volume observation.");
+    }
+    const raw = this.#checked(["volume", "inspect", "--format", "{{json .}}", name]);
     let info;
     try { info = JSON.parse(raw); } catch { throw Error("Role fixture volume JSON unavailable."); }
     if (info?.Name !== name || info.Driver !== "local" ||
@@ -278,6 +551,7 @@ export class OwnedRoleDocker {
   }
 
   call(args, options = {}) {
+    requireReviewedRoleArguments(args, this);
     this.verifyEngine();
     const [op, sub] = args;
     let transformed = args;
@@ -374,7 +648,7 @@ export class OwnedRoleDocker {
       if (!this.image || (args[2] !== this.imageTag && args[2] !== this.image.id)) {
         throw Error("Role fixture refused deleting an unowned image.");
       }
-      const metadata = this.checked(["image", "inspect", "--format", "{{json .}}", this.imageTag]);
+      const metadata = this.#checked(["image", "inspect", "--format", "{{json .}}", this.imageTag]);
       const info = JSON.parse(metadata);
       if (info.Id !== this.image.id || info.Config?.Labels?.[RUN_LABEL] !== this.runId ||
         !info.RepoTags?.includes(this.imageTag) || info.RepoTags.length !== 1) {
@@ -393,7 +667,7 @@ export class OwnedRoleDocker {
 
     // Docker timeouts are not proof of cancellation. Record the attempt before
     // invoking the daemon; never interpret a missing immediate CID as clean.
-    const result = this.raw(transformed, options);
+    const result = this.#raw(transformed, options);
     if (creation) {
       try {
         if (creation.type === "container") {

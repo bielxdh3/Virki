@@ -194,6 +194,10 @@ jobs:
         run: npm run test:migration
 
       - name: Test isolated PostgreSQL role separation
+        env:
+          # Hosted runner policy opts in to local disposable Docker only; the
+          # runner environment and daemon identity are not cryptographic proof.
+          VIRKI_ROLE_FIXTURE_LINUX_CI: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' && '1' || '0' }}
         run: npm run test:database:roles
 
       - name: Validate database backup and restore
