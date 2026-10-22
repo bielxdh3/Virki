@@ -66,7 +66,7 @@ for (const relative of [
   chmodSync(pathname, 0o600);
 }
 const { coordinateTrustedOfflineRelease } = await import(pathToFileURL(TRUSTED_ENTRY));
-const { importApprovedOfflineImage } = await import(pathToFileURL(
+const { importApprovedOfflineImage, importApprovedOfflineImages } = await import(pathToFileURL(
   path.join(INSTALL, "infra/offline/trusted-image-import.mjs")));
 
 const FIXED = "/var/lib/virki";
@@ -104,8 +104,8 @@ function tar(entries) {
   result.push(Buffer.alloc(1024));
   return Buffer.concat(result);
 }
-function dockerSave(revision) {
-  const layer = tar([{ name: "app.txt", bytes: "ok" }]);
+function dockerSave(revision, role) {
+  const layer = tar([{ name: "app.txt", bytes: role }]);
   const config = Buffer.from(JSON.stringify({
     os: "linux", architecture: "amd64",
     config: { User: "node:node", Labels: {
@@ -168,8 +168,8 @@ function buildFixture() {
   git(`--git-dir=${GIT}`, "archive", "--format=tar", `--output=${path.join(directory, "source.tar")}`, sourceSha);
   chmodSync(path.join(directory, "source.tar"), 0o600);
   const source = readFileSync(path.join(directory, "source.tar"));
-  const runtime = dockerSave(sourceSha);
-  const migrator = dockerSave(sourceSha);
+  const runtime = dockerSave(sourceSha, "runtime");
+  const migrator = dockerSave(sourceSha, "migrator");
   const reports = [
     ["ci-report.json", "ci_report_sha256"], ["scanner-report.json", "scanner_report_sha256"],
     ["finding-review.json", "finding_review_sha256"], ["runtime-smoke.json", "runtime_smoke_sha256"],
@@ -211,7 +211,7 @@ function buildFixture() {
     });
   }
   resign();
-  return { directory, work, sourceSha, manifest, resign, policy, ledger };
+  return { directory, work, sourceSha, manifest, resign, policy, ledger, runtime, migrator };
 }
 function reset() {
   rmSync(POLICY, { recursive: true, force: true });
@@ -413,78 +413,109 @@ test("disposable Linux root transaction coordinator denies, reserves once and pe
       assert.equal(locked(), false);
     } finally { os.release = prior; }
   });
-  await t.test("an independently approved image imports through one detached FD; source in-place rewrite cannot affect Docker bytes", async () => {
+  await t.test("one signed attempt imports BOTH images from detached FDs despite an in-place rewrite", async () => {
     reset();
     const f = buildFixture();
     const endpoint = await setupIsolatedImportSink(t);
     const original = readFileSync(path.join(f.directory, "runtime.tar"));
+    const originalMigrator = readFileSync(path.join(f.directory, "migrator.tar"));
     writeFileSync(path.join(endpoint, "mutate-source"), path.join(f.directory, "runtime.tar"));
-    const result = await importApprovedOfflineImage({ candidateDirectory: f.directory, role: "runtime" });
-    assert.equal(result.status, "IMPORTED_UNTAGGED_ATTEMPT_LOCKED");
+    const result = await importApprovedOfflineImages({ candidateDirectory: f.directory });
+    assert.equal(result.status, "IMPORTED_BOTH_UNTAGGED_ATTEMPT_LOCKED");
+    assert.deepEqual(result.imageIds, [f.runtime.image_id, f.migrator.image_id]);
     assert.equal(result.dockerTagAuthorized, false);
     assert.equal(result.deployAuthorized, false);
     assert.equal(locked(), true);
     assert.equal(state().entries.length, 0);
-    assert.equal(readFileSync(path.join(endpoint, "consumed.sha256"), "utf8"), hash(original));
+    assert.deepEqual(readFileSync(path.join(endpoint, "consumed.sha256"), "utf8").trim().split("\n"),
+      [hash(original), hash(originalMigrator)]);
     assert.notEqual(hash(readFileSync(path.join(f.directory, "runtime.tar"))), hash(original),
       "attacker actually overwrote the original TAR before Docker read its inherited FD");
     assert.deepEqual(readdirSync(path.join(FIXED, "offline-import-quarantine")), []);
     const calls = readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n");
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 7);
     assert.equal(calls.every((line) => !/\bimage (?:tag|run|start|push)\b/u.test(line)), true);
-    assert.equal((await importApprovedOfflineImage({ candidateDirectory: f.directory, role: "runtime" })).status,
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status,
       "blocked", "same reserved attempt cannot re-import after mutation or partial work");
+    assert.equal((await importApprovedOfflineImage({ candidateDirectory: f.directory, role: "runtime" })).status,
+      "blocked", "legacy single-role callers are always forbidden");
   });
-  await t.test("invalid owner signature blocks import before any Docker invocation or ledger mutation", async () => {
+  await t.test("invalid owner signature blocks all Docker image operations and ledger mutation", async () => {
     reset();
     const f = buildFixture();
     const endpoint = await setupIsolatedImportSink(t);
     const signaturePath = path.join(f.directory, "signatures.json");
     const envelope = JSON.parse(readFileSync(signaturePath, "utf8"));
     writeJson(signaturePath, { ...envelope, owner: envelope.builder });
-    assert.equal((await importApprovedOfflineImage({ candidateDirectory: f.directory, role: "runtime" })).status, "blocked");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
     assert.equal(locked(), false);
-    assert.equal(existsSync(path.join(endpoint, "calls")), false);
+    assert.deepEqual(readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n")
+      .map((call) => call.includes(" version --format")), [true]);
+  });
+  await t.test("unreachable dedicated daemon refuses before consuming owner approval or attempted lock", async (t2) => {
+    reset();
+    const f = buildFixture();
+    const endpoint = await setupIsolatedImportSink(t2);
+    writeFileSync(path.join(endpoint, "daemon-unavailable"), "1");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
+    assert.equal(locked(), false);
+    assert.deepEqual(readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n")
+      .map((call) => call.includes(" version --format")), [true]);
+  });
+  await t.test("daemon transport failure is not mistaken for a missing image", async (t2) => {
+    reset();
+    const f = buildFixture();
+    const endpoint = await setupIsolatedImportSink(t2);
+    writeFileSync(path.join(endpoint, "inspect-error"), "1");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
+    assert.equal(locked(), true, "authenticated attempt remains latched after failed daemon precondition");
+    assert.equal(existsSync(path.join(endpoint, "consumed.sha256")), false);
   });
   await t.test("post-load Docker identity mismatch denies acceptance, leaves exclusive attempt lock and no tag", async (t2) => {
     reset();
     const f = buildFixture();
     const endpoint = await setupIsolatedImportSink(t2);
     writeFileSync(path.join(endpoint, "wrong-inspect"), "1");
-    assert.equal((await importApprovedOfflineImage({
-      candidateDirectory: f.directory, role: "runtime",
-    })).status, "blocked");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
     assert.equal(locked(), true);
     assert.equal(state().entries.length, 0);
     assert.equal(existsSync(path.join(endpoint, "consumed.sha256")), true);
     const calls = readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n");
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 6);
     assert.equal(calls.every((line) => !/\bimage (?:tag|run|start|push)\b/u.test(line)), true);
-    assert.equal((await importApprovedOfflineImage({
-      candidateDirectory: f.directory, role: "runtime",
-    })).status, "blocked");
-    assert.equal(readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n").length, 3);
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
+    assert.equal(readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n").length, 7);
   });
   await t.test("failed Docker load leaves attempted lock, no image acceptance and no second import", async (t2) => {
     reset();
     const f = buildFixture();
     const endpoint = await setupIsolatedImportSink(t2);
     writeFileSync(path.join(endpoint, "fail-load"), "1");
-    assert.equal((await importApprovedOfflineImage({
-      candidateDirectory: f.directory, role: "runtime",
-    })).status, "blocked");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
     assert.equal(locked(), true);
     assert.equal(state().entries.length, 0);
     assert.equal(existsSync(path.join(endpoint, "consumed.sha256")), true);
     assert.equal(existsSync(path.join(endpoint, "loaded.json")), false);
     assert.deepEqual(readdirSync(path.join(FIXED, "offline-import-quarantine")), []);
     const before = readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n");
-    assert.equal(before.length, 2, "exactly preflight inspect and failed load are allowed");
+    assert.equal(before.length, 4, "one health probe, two negative inspect proofs and failed load");
     assert.equal(before.every((line) => !/\bimage (?:tag|run|start|push)\b/u.test(line)), true);
-    assert.equal((await importApprovedOfflineImage({
-      candidateDirectory: f.directory, role: "runtime",
-    })).status, "blocked");
-    assert.deepEqual(readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n"), before);
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
+    assert.equal(readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n").length,
+      before.length + 1, "retry only probes daemon health before existing ledger lock denies");
+  });
+  await t.test("second-image Docker load failure retains attempt lock and first image isolated", async (t2) => {
+    reset();
+    const f = buildFixture();
+    const endpoint = await setupIsolatedImportSink(t2);
+    writeFileSync(path.join(endpoint, "fail-second-load"), "1");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
+    assert.equal(locked(), true);
+    assert.deepEqual(readFileSync(path.join(endpoint, "consumed.sha256"), "utf8").trim().split("\n"),
+      [f.runtime.archive_sha256, f.migrator.archive_sha256]);
+    assert.equal(JSON.parse(readFileSync(path.join(endpoint, "loaded.json"), "utf8")).length, 1);
+    assert.deepEqual(readdirSync(path.join(FIXED, "offline-import-quarantine")), []);
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
   });
   await t.test("an in-place modified signed TAR cannot reach Docker or reserve admission", async (t2) => {
     reset();
@@ -494,20 +525,17 @@ test("disposable Linux root transaction coordinator denies, reserves once and pe
     const changed = readFileSync(archive);
     changed[changed.length - 1] ^= 1;
     writeFileSync(archive, changed);
-    assert.equal((await importApprovedOfflineImage({
-      candidateDirectory: f.directory, role: "runtime",
-    })).status, "blocked");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
     assert.equal(locked(), false);
-    assert.equal(existsSync(path.join(endpoint, "calls")), false);
+    assert.deepEqual(readFileSync(path.join(endpoint, "calls"), "utf8").trim().split("\n")
+      .map((call) => call.includes(" version --format")), [true]);
   });
   await t.test("a mutated or unpinned Docker executable cannot reserve an attempt or execute", async (t2) => {
     reset();
     const f = buildFixture();
     const endpoint = await setupIsolatedImportSink(t2);
     writeFileSync("/etc/virki/offline-import-cli.sha256", "f".repeat(64) + "\n");
-    assert.equal((await importApprovedOfflineImage({
-      candidateDirectory: f.directory, role: "runtime",
-    })).status, "blocked");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
     assert.equal(locked(), false);
     assert.equal(existsSync(path.join(endpoint, "calls")), false);
     writeFileSync("/etc/virki/offline-import-cli.sha256",
@@ -515,9 +543,7 @@ test("disposable Linux root transaction coordinator denies, reserves once and pe
     writeFileSync(path.join(endpoint, "docker"), Buffer.concat([
       readFileSync(path.join(endpoint, "docker")), Buffer.from("\n// attacker mutation\n"),
     ]));
-    assert.equal((await importApprovedOfflineImage({
-      candidateDirectory: f.directory, role: "runtime",
-    })).status, "blocked");
+    assert.equal((await importApprovedOfflineImages({ candidateDirectory: f.directory })).status, "blocked");
     assert.equal(locked(), false);
     assert.equal(existsSync(path.join(endpoint, "calls")), false);
   });
@@ -528,7 +554,7 @@ test("disposable Linux root transaction coordinator denies, reserves once and pe
       { candidateDirectory: "/tmp/untrusted", role: "runtime", expectedArchiveSha256: "f".repeat(64) },
       { candidateDirectory: "/tmp/untrusted", role: "runtime", dockerHost: "unix:///var/run/docker.sock" },
     ]) {
-      assert.equal((await importApprovedOfflineImage(payload)).status, "blocked");
+      assert.equal((await importApprovedOfflineImages(payload)).status, "blocked");
     }
   });
 });

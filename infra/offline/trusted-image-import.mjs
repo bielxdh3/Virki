@@ -67,6 +67,9 @@ function isolatedDockerOnly() {
   rootDirectory(path.dirname(DOCKER_SOCKET), 0o700);
   const socket = lstatSync(DOCKER_SOCKET, { bigint: true });
   ensure(socket.isSocket() && socket.uid === 0n && (socket.mode & 0o7777n) === 0o600n);
+  // The CLI digest file must be independently controlled, never writable by
+  // an uploader via a swapped directory or an untrusted ancestor.
+  rootDirectory(path.dirname(DOCKER_EXE_PIN), 0o755);
   ensure(realpathSync.native(DOCKER_EXE_PIN) === DOCKER_EXE_PIN);
   const pinStat = lstatSync(DOCKER_EXE_PIN, { bigint: true });
   ensure(pinStat.isFile() && !pinStat.isSymbolicLink() && pinStat.uid === 0n &&
@@ -196,24 +199,27 @@ async function detachedAuthenticatedCopy(filename, expected) {
 }
 
 /**
- * Performs one audited, untagged import, never deployment. The caller selects
- * only a private candidate directory and image role. The coordinator obtains
+ * Performs one audited, atomic-admission two-image import, never deployment.
+ * The caller selects only a private candidate directory. The coordinator obtains
  * all trusted signature, Git and ledger identities from protected host state.
  * Every failed/partial import leaves the coordinator's attempted latch intact.
  */
-export async function importApprovedOfflineImage(request = {}) {
+export async function importApprovedOfflineImages(request = {}) {
   try {
     nativeInstalledOnly();
     ensure(request && typeof request === "object" && !Array.isArray(request) &&
-      Object.keys(request).length === 2 &&
-      Object.hasOwn(request, "candidateDirectory") && Object.hasOwn(request, "role"));
-    ensure(["runtime", "migrator"].includes(request.role) &&
-      typeof request.candidateDirectory === "string" &&
+      Object.keys(request).length === 1 && Object.hasOwn(request, "candidateDirectory"));
+    ensure(typeof request.candidateDirectory === "string" &&
       path.isAbsolute(request.candidateDirectory) &&
       path.normalize(request.candidateDirectory) === request.candidateDirectory &&
       request.candidateDirectory.startsWith("/var/lib/virki/offline-staging/"));
     isolatedDockerOnly();
     rootDirectory(QUARANTINE, 0o700);
+    // A failed or disconnected daemon must not burn the one-shot owner
+    // approval. Check the root-pinned dedicated endpoint before reserving
+    // the durable attempt; repeat checks remain mandatory after admission.
+    const daemon = docker(["version", "--format", "{{.Server.Version}}"]);
+    ensure(daemon.status === 0 && /^\d+\.\d+\.\d+\n?$/u.test(daemon.stdout));
     const accepted = await coordinateTrustedOfflineRelease({
       candidateDirectory: request.candidateDirectory,
     });
@@ -223,42 +229,64 @@ export async function importApprovedOfflineImage(request = {}) {
     });
     ensure(candidate.manifestDigest === accepted.verifiedManifestSha256 &&
       candidate.expected.sourceSha === accepted.sourceSha);
-    const identity = request.role === "runtime"
-      ? candidate.expected.runtimeImage : candidate.expected.migratorImage;
-    ensure(identity.archiveSizeBytes <= MAX_IMAGE_BYTES);
-    const expected = {
-      role: request.role,
-      expectedImageId: identity.imageId,
-      expectedRevision: accepted.sourceSha,
-      expectedArchiveSha256: identity.archiveSha256,
-      expectedArchiveSizeBytes: identity.archiveSizeBytes,
-    };
-    // Never import if an existing daemon image already has this content ID.
-    const prior = docker(["image", "inspect", "--type", "image", identity.imageId]);
-    ensure(prior.status !== 0);
-    const pinned = await detachedAuthenticatedCopy(candidate.archivePaths[request.role], expected);
-    try {
-      const loaded = docker(["image", "load", "--quiet"], pinned.fd);
-      ensure(loaded.status === 0);
-    } finally {
-      await pinned.close();
-    }
-    const after = docker(["image", "inspect", "--type", "image", identity.imageId]);
-    ensure(after.status === 0 && after.stdout.length <= 65536);
-    const checked = compareUntrustedLoadedImageForPreview({
-      imageInspect: JSON.parse(after.stdout),
-      verifiedImage: {
-        imageId: identity.imageId, revision: accepted.sourceSha,
-        source: SOURCE, platform: "linux/amd64", user: "node:node",
-      },
+    const imagePlan = ["runtime", "migrator"].map((role) => {
+      const identity = role === "runtime" ? candidate.expected.runtimeImage : candidate.expected.migratorImage;
+      ensure(identity.archiveSizeBytes <= MAX_IMAGE_BYTES);
+      return {
+        role, identity, expected: {
+          role, expectedImageId: identity.imageId,
+          expectedRevision: accepted.sourceSha,
+          expectedArchiveSha256: identity.archiveSha256,
+          expectedArchiveSizeBytes: identity.archiveSizeBytes,
+        },
+      };
     });
-    ensure(checked.dockerTagAuthorized === false && checked.deployAuthorized === false);
+    ensure(imagePlan[0].identity.imageId !== imagePlan[1].identity.imageId);
+    // Check both preconditions BEFORE mutating the isolated daemon. The two
+    // archives may happen to encode one identical image ID in a test fixture;
+    // an existing object is still never reused as implicit authorization.
+    for (const { identity } of imagePlan) {
+      const prior = docker(["image", "inspect", "--type", "image", identity.imageId]);
+      ensure(prior.status === 1 && prior.stdout.length === 0 &&
+        prior.stderr.trim() === `Error: No such image: ${identity.imageId}`);
+    }
+    const pinned = [];
+    try {
+      // Authenticate BOTH complete archives before the FIRST image load.
+      // Neither upload pathname is accessed once import begins.
+      for (const { role, expected } of imagePlan) {
+        pinned.push(await detachedAuthenticatedCopy(candidate.archivePaths[role], expected));
+      }
+      for (const handle of pinned) {
+        ensure(docker(["image", "load", "--quiet"], handle.fd).status === 0);
+      }
+    } finally {
+      for (const handle of pinned) await handle.close();
+    }
+    for (const { identity } of imagePlan) {
+      const after = docker(["image", "inspect", "--type", "image", identity.imageId]);
+      ensure(after.status === 0 && after.stdout.length <= 65536);
+      const checked = compareUntrustedLoadedImageForPreview({
+        imageInspect: JSON.parse(after.stdout),
+        verifiedImage: {
+          imageId: identity.imageId, revision: accepted.sourceSha,
+          source: SOURCE, platform: "linux/amd64", user: "node:node",
+        },
+      });
+      ensure(checked.dockerTagAuthorized === false && checked.deployAuthorized === false);
+    }
     return Object.freeze({
-      status: "IMPORTED_UNTAGGED_ATTEMPT_LOCKED",
-      imageId: identity.imageId, role: request.role,
+      status: "IMPORTED_BOTH_UNTAGGED_ATTEMPT_LOCKED",
+      imageIds: Object.freeze(imagePlan.map(({ identity }) => identity.imageId)),
       dockerTagAuthorized: false, deployAuthorized: false,
     });
   } catch {
     return BLOCKED;
   }
+}
+
+// Refuse legacy callers trying to admit one role at a time: the attempted
+// release latch is one-shot and must cover BOTH signed images in one process.
+export async function importApprovedOfflineImage() {
+  return BLOCKED;
 }

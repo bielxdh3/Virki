@@ -1,1 +1,2 @@
 *.sh text eol=lf
+infra/offline/fixtures/fake-image-import-docker text eol=lf

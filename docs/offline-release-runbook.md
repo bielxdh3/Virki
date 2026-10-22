@@ -108,18 +108,23 @@ This destructive-path fixture is deliberately excluded from ordinary
 ## Isolated, untagged native image import (development boundary)
 
 `infra/offline/trusted-image-import.mjs` is an independent, installed-host-only
-import boundary. Its sole public request contains the root-owned private candidate
-directory and the exact `runtime` or `migrator` role; uploaded code cannot
+import boundary. `importApprovedOfflineImages({candidateDirectory})` accepts
+only a root-owned private candidate directory, and always processes both the
+`runtime` and `migrator` images under one signed admission. Legacy single-role
+calls are rejected; uploaded code cannot
 inject an image digest, signer, trust token, subprocess or Docker host.
 It invokes the independently installed coordinator, which validates the signed
 owner/builder manifest, Git source, host identity and exclusive ledger attempt
-before any Docker execution. All failures retain the durable attempted lock.
+before image inspection or loading. A read-only dedicated daemon health check
+occurs before reserving admission; all failures after admission retain the
+durable attempted lock.
 
-After admission, it validates the signed digest of a private, root-owned copy
-and parses the full Docker TAR through the same file descriptor. It then unlinks
-that copy and fsyncs its parent directory **before** passing its read-only FD
-directly as Docker stdin. Replacing or modifying the uploaded TAR while Docker
-reads cannot mutate the detached inode. It calls only the separately owner-pinned
+After admission, it validates both signed digests of private, root-owned copies
+and parses each complete Docker TAR through the same respective file descriptor.
+Both copies are unlinked and their parent fsynced **before the first load**;
+each inherited read-only descriptor becomes Docker stdin in order. Replacing
+or modifying either uploaded TAR while Docker reads cannot mutate its detached
+inode. It calls only the separately owner-pinned
 `/run/virki-offline-import/docker` CLI with the dedicated
 `unix:///run/virki-offline-import/docker.sock` endpoint; its binary SHA-256
 must match the independently provisioned root:root 0600
@@ -127,14 +132,15 @@ must match the independently provisioned root:root 0600
 daemon socket directory must be root-owned and inaccessible to non-root users.
 The caller never chooses the Docker executable or socket.
 
-The importer refuses a preexisting image ID and validates the newly loaded
+The importer refuses both preexisting image IDs and validates each newly loaded
 image's exact content ID, revision/source labels, Linux/amd64 architecture,
 non-root user and empty tag/digest aliases. Its only successful result is
-`IMPORTED_UNTAGGED_ATTEMPT_LOCKED`. It **never tags or starts containers,
+`IMPORTED_BOTH_UNTAGGED_ATTEMPT_LOCKED`. It **never tags or starts containers,
 deploys, finalizes the ledger, or modifies production services**. A failed
 post-load comparison is a fail-closed refusal, not an atomic rollback of bytes
-already imported into the isolated daemon; the administrator must reconcile
-that daemon and the durable attempted state manually.
+already imported into the isolated daemon; a second-image failure deliberately
+retains the first image and the admission latch for manual reconciliation.
+This is not an atomic two-image Docker transaction.
 
 The explicit coordinator fixture exercises a simulated Docker executable
 inside an ephemeral pinned-Node container with root-only temporary mounts
