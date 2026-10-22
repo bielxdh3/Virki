@@ -5,7 +5,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-// Only the explicit local Windows fixture or a GitHub-hosted disposable Linux CI runner.
+// Intended for the local Windows fixture or a GitHub-hosted disposable Linux CI
+// runner. CI identity variables and Docker metadata are spoofable: the hosted
+// runner itself is a required trust assumption, not independently attested.
 export const DOCKER_BINARY = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
 export const DOCKER_HOST = "npipe:////./pipe/dockerDesktopLinuxEngine";
 export const LINUX_CI_DOCKER_BINARY = "/usr/bin/docker";
@@ -50,13 +52,15 @@ export async function readBackupOwnerEvidence(directory) {
 }
 
 export function assertLocalBackupEnvironment(env = process.env, platform = process.platform) {
+  // Admission restricts accidental invocation. GITHUB_*/RUNNER_* are process
+  // environment variables, not verified proof of a GitHub-hosted runner.
   const windows = platform === "win32" && env.VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER === "1" && !env.VIRKI_BACKUP_VALIDATION_LINUX_CI;
   const linuxCI = platform === "linux" && env.VIRKI_BACKUP_VALIDATION_LINUX_CI === "1" && !env.VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER &&
     env.GITHUB_ACTIONS === "true" && env.CI === "true" && env.RUNNER_OS === "Linux" &&
     env.RUNNER_ENVIRONMENT === "github-hosted" && env.GITHUB_REPOSITORY === "bielxdh3/Virki" &&
     /^[1-9][0-9]{0,19}$/u.test(env.GITHUB_RUN_ID ?? "") && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? "");
   if (!windows && !linuxCI) {
-    throw new Error("Backup validation requires explicit Windows Docker Desktop or verified GitHub-hosted Linux CI opt-in.");
+    throw new Error("Backup validation requires explicit Windows Docker Desktop or GitHub-hosted Linux CI opt-in.");
   }
   const forbidden = Object.keys(env).filter((key) =>
     /^(?:DOCKER_|COMPOSE_|PG(?:HOST|PORT|SERVICE|SERVICEFILE|PASSFILE|PASSWORD|OPTIONS|USER|DATABASE)$|DATABASE_URL$|MIGRATION_DATABASE_URL$|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$)/iu.test(key));
@@ -76,14 +80,14 @@ export function inspectLinuxRunnerSocket({
     resolvedSocket = realpath("/var/run/docker.sock");
     resolvedBinary = realpath(LINUX_CI_DOCKER_BINARY);
   } catch {
-    throw new Error("GitHub-hosted Linux Docker socket or CLI could not be verified.");
+    throw new Error("Linux CI local Docker socket or CLI metadata could not be checked.");
   }
   if (resolvedSocket !== "/run/docker.sock" || resolvedBinary !== LINUX_CI_DOCKER_BINARY ||
     !socket.isSocket() || socket.uid !== 0 || (socket.mode & 0o002) !== 0 ||
     !binary.isFile() || binary.uid !== 0 || (binary.mode & 0o002) !== 0 ||
     !Number.isSafeInteger(socket.dev) || !Number.isSafeInteger(socket.ino) ||
     !/^[A-Za-z0-9][A-Za-z0-9.-]{0,253}$/u.test(hostname())) {
-    throw new Error("GitHub-hosted Linux Docker socket, CLI or hostname is not trustworthy.");
+    throw new Error("Linux CI local Docker socket, CLI or hostname failed safety checks.");
   }
   return { socketDevice: socket.dev, socketInode: socket.ino, hostname: hostname() };
 }
@@ -124,7 +128,7 @@ export class LocalBackupDocker {
       const current = this.linuxProbe();
       if (current.socketDevice !== this.linuxIdentity.socketDevice || current.socketInode !== this.linuxIdentity.socketInode ||
           current.hostname !== this.linuxIdentity.hostname) {
-        throw new Error("Linux CI Docker socket or runner identity changed; manual reconciliation required.");
+        throw new Error("Linux CI socket metadata or hostname changed; manual reconciliation required.");
       }
     }
   }
@@ -145,12 +149,15 @@ export class LocalBackupDocker {
     let info;
     this.assertEndpoint();
     try { info = JSON.parse(this.command(["info", "--format", "{{json .}}"])); }
-    catch { throw new Error("Local Docker Desktop Linux engine identity cannot be verified."); }
+    catch { throw new Error("Backup validation could not check Docker engine metadata."); }
+    // This is a consistency check on an untrusted daemon response. A local
+    // root-owned proxy may report the expected Name and ID; it is not proof of
+    // local execution or independently verified daemon identity.
     const trustedOS = this.mode === "linux-ci" ? info?.Name === this.linuxIdentity.hostname && !info?.OperatingSystem?.includes("Docker Desktop")
       : /^Docker Desktop(?:\b|$)/u.test(info?.OperatingSystem ?? "");
     if (info?.OSType !== "linux" || !trustedOS ||
         typeof info.ID !== "string" || info.ID.length < 8) {
-      throw new Error("Backup validation requires the local Docker Desktop Linux engine.");
+      throw new Error("Backup validation Docker engine metadata did not match the expected test environment.");
     }
     if (this.daemonId !== null && info.ID !== this.daemonId) {
       throw new Error("Docker engine changed during backup validation; owned cleanup requires manual inspection.");
@@ -183,7 +190,7 @@ export class LocalBackupDocker {
           container.NetworkSettings.Ports["5432/tcp"].length !== 1 ||
           container.NetworkSettings.Ports["5432/tcp"][0].HostIp !== "127.0.0.1"
         ))) {
-      throw new Error("Backup validation container failed independent ownership/isolation inspection.");
+      throw new Error("Backup validation container metadata failed ownership/isolation checks.");
     }
     if (this.id !== null && container.Id !== this.id) {
       throw new Error("Backup validation container immutable ID changed.");
@@ -217,8 +224,9 @@ export class LocalBackupDocker {
     const returnedId = result.status === 0 && !result.error && typeof result.stdout === "string" ? result.stdout.trim() : "";
     if (ID_PATTERN.test(returnedId)) this.id = returnedId;
     else {
-      // A Docker CLI can fail after creating a container. Adopt only our independently
-      // verified, unpredictable name+owner label; cleanup remains ID-scoped.
+      // A Docker CLI can fail after creating a container. Adopt only when the
+      // returned metadata matches our unpredictable name and owner label;
+      // this is a daemon consistency check, not independent provenance.
       try { this.engine(); this.id = this.inspect(this.name).Id; } catch { /* no verified ownership */ }
       throw new Error("Local backup Docker run failed or returned an invalid container ID (details redacted).");
     }
@@ -259,7 +267,7 @@ export class LocalBackupDocker {
     this.command(["rm", "--force", "--volumes", ownedId], { timeout: 60_000 });
     this.engine();
     if (this.command(["ps", "--all", "--no-trunc", "--filter", `id=${ownedId}`, "--format", "{{.ID}}"] ) !== "") {
-      throw new Error("Backup validation container removal was not independently confirmed; owner evidence must be preserved.");
+      throw new Error("Backup validation container removal was not confirmed by Docker status; owner evidence must be preserved.");
     }
     this.id = null;
     this.cleaned = true;

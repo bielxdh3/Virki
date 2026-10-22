@@ -181,7 +181,9 @@ jobs:
 
       - name: Validate database backup and restore
         env:
-          VIRKI_BACKUP_VALIDATION_LINUX_CI: "1"
+          # Workflow-scoped opt-in. These runner contexts restrict intended
+          # execution; they are not cryptographic runner/daemon attestation.
+          VIRKI_BACKUP_VALIDATION_LINUX_CI: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' && '1' || '0' }}
         run: npm run test:backup:restore
 
       - name: Build applications

@@ -27,8 +27,8 @@ npm run test:backup:restore
 Remove-Item Env:VIRKI_BACKUP_VALIDATION_LOCAL_DOCKER
 ```
 
-This validation refuses other platforms, contexts, remote Docker hosts and
-inherited database credentials. The local Windows mode requires a cached pinned
+This validation refuses unapproved modes and inherited Docker context and
+database credential overrides. The local Windows mode requires a cached pinned
 image. It uses the
 installed Docker Desktop executable at
 `C:\Program Files\Docker\Docker\resources\bin\docker.exe` and its explicit
@@ -36,14 +36,15 @@ Linux `npipe:////./pipe/dockerDesktopLinuxEngine` endpoint. No host Docker
 socket or host directory is mounted. Its data directory is a disposable tmpfs;
 every created container is labelled with an unpredictable owner token and
 checked for the exact immutable Docker ID, image, network, mounts and engine
-identity before use and force-removal. Failures that prevent independent owner
-verification refuse deletion and require manual operator inspection. The
+identity before use and force-removal using Docker metadata. Inconsistent
+ownership metadata prevents deletion and requires manual operator inspection. The
 unpredictable name, owner label, engine identity, digest and endpoint are
 written to a private `virki-backup-owner-*` directory under the runner's temp
 directory **before** the detached run is attempted. An ambiguous Docker run,
 lost response, mismatched owner or unconfirmed removal preserves this owner
 receipt even if the container is created after the CLI has already failed.
-Only an independently confirmed container removal deletes the receipt; the
+Only a removal followed by a Docker status query showing the container absent
+deletes the receipt. That query depends on the same daemon trust assumption; the
 binary dump is separately removed. An operator must manually inspect the
 recorded owner label and exact engine before resolving abandoned fixtures;
 the receipt alone never authorizes deletion. Docker
@@ -52,11 +53,12 @@ synthetic credentials, URLs, dump contents and account records. The test uses
 synthetic account/admin, TOTP, recovery, audit, outbox and delivery records,
 and proves no real production backup's restore capability.
 
-The **GitHub-hosted Ubuntu CI runner only** also runs the same Prisma test.
+The **intended GitHub-hosted Ubuntu CI runner** also runs the same Prisma test.
 The checked-in `validate` job sets `VIRKI_BACKUP_VALIDATION_LINUX_CI=1`
-exclusively on its backup/restore step. This mode additionally requires the
-GitHub-hosted runner identity, expected Virki repository, nonempty run/attempt
-identifiers, and an independently inspected canonical root-owned
+only on its backup/restore step and only when GitHub workflow contexts report
+`runner.environment=github-hosted`, `runner.os=Linux`, and the expected
+repository. The script also checks corresponding environment variables, run/
+attempt identifiers, and filesystem metadata for the canonical root-owned
 `/run/docker.sock` Unix socket and root-owned `/usr/bin/docker` CLI. The CLI
 always receives `--host unix:///var/run/docker.sock --config` with a private
 empty config; it never reads the runner's Docker context or service URL.
@@ -66,12 +68,20 @@ Docker operation, including cleanup. Only this mode may pull the exact pinned
 PostgreSQL image digest, and it still verifies the resulting image ID and the
 created disposable container before Prisma migrations or deletion.
 
-The trust boundary is a GitHub-hosted ephemeral Linux runner and its root-owned
-local daemon. Environment variables alone cannot attest the runner identity;
-the local Unix socket, daemon hostname and runner host must also match. This
-mode is not available on arbitrary Linux hosts, self-hosted runners, WSL,
-Docker-in-Docker proxies or production Docker contexts. Root compromise of the
-ephemeral CI runner itself remains outside this local fixture's threat model.
+**Trusted runner assumption:** the CI job actually executes on an uncompromised
+GitHub-hosted ephemeral Linux runner with a local Docker daemon. GitHub and
+runner environment variables are spoofable outside that trusted workflow.
+Root ownership, canonical Unix socket paths, socket device/inode stability,
+Docker `info` hostname and engine ID are **consistency checks only**; they do
+not cryptographically attest the runner or daemon and cannot distinguish a
+root-owned local forwarding proxy from a genuine local daemon. An arbitrary
+Linux host or Docker-in-Docker proxy with forged matching metadata could pass
+these checks. No authorization to use an arbitrary daemon follows from a
+passing check; operators and CI policy must supply the trusted runner boundary.
+The code fails closed if the expected local socket or metadata is missing or
+changes, and it never accepts inherited Docker contexts. Compromise of root
+on the trusted runner lies outside the fixture's threat model. None of this is
+production-host identity, production recovery or release authorization.
 
 For the separate offline SQL crash/recovery fixture:
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -66,7 +67,7 @@ test("refuses all ambient remote/context, database and Node overrides before inv
   assert.throws(() => assertLocalBackupEnvironment(env, "linux"), /opt-in/u);
 });
 
-test("Linux CI rejects self-hosted, spoofed and incomplete workflow admission even with opt-in", () => {
+test("Linux CI rejects missing or mismatched environment hints, which are not attestation", () => {
   for (const overrides of [
     { RUNNER_ENVIRONMENT: "self-hosted" }, { GITHUB_ACTIONS: "false" }, { RUNNER_OS: "Windows" },
     { CI: "false" }, { GITHUB_REPOSITORY: "attacker/fork" }, { GITHUB_RUN_ID: "0" },
@@ -80,7 +81,16 @@ test("Linux CI rejects self-hosted, spoofed and incomplete workflow admission ev
   }
 });
 
-test("Linux CI validates root-owned canonical local Unix socket and root-owned CLI", () => {
+test("workflow opts in only when hosted Linux runner contexts and repository match", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const step = workflow.match(/ {6}- name: Validate database backup and restore\r?\n([\s\S]*?)(?=\r?\n {6}- name:|$)/u)?.[1];
+  assert.ok(step, "CI must retain the real Prisma backup/restore step.");
+  assert.match(step, /VIRKI_BACKUP_VALIDATION_LINUX_CI: \$\{\{ runner\.environment == 'github-hosted' && runner\.os == 'Linux' && github\.repository == 'bielxdh3\/Virki' && '1' \|\| '0' \}\}/u);
+  assert.match(step, /run: npm run test:backup:restore/u);
+  assert.doesNotMatch(step, /if:\s*\$\{\{/u, "Untrusted runner context must fail the test, not silently skip it.");
+});
+
+test("Linux CI checks root-owned canonical local socket and CLI metadata", () => {
   const stat = (target) => target.endsWith(".sock")
     ? { isSocket: () => true, uid: 0, mode: 0o140660, dev: 4, ino: 55 }
     : { isFile: () => true, uid: 0, mode: 0o100755 };
@@ -94,12 +104,33 @@ test("Linux CI validates root-owned canonical local Unix socket and root-owned C
     { stat: () => ({ isSocket: () => false, isFile: () => false, uid: 0, mode: 0o100755, dev: 4, ino: 55 }) },
     { hostname: () => "host\nspoofed" },
   ]) {
-    assert.throws(() => inspectLinuxRunnerSocket({ ...valid, ...probe }), /trustworthy/u);
+    assert.throws(() => inspectLinuxRunnerSocket({ ...valid, ...probe }), /safety checks/u);
   }
-  assert.throws(() => inspectLinuxRunnerSocket({ ...valid, stat: () => { throw new Error("ENOENT"); } }), /could not be verified/u);
+  assert.throws(() => inspectLinuxRunnerSocket({ ...valid, stat: () => { throw new Error("ENOENT"); } }), /could not be checked/u);
 });
 
-test("Linux CI pins argv, own socket and engine, pulls only cached digest before run", () => {
+test("Linux refuses a missing local socket before any Docker CLI call", () => {
+  let executed = false;
+  assert.throws(() => new LocalBackupDocker({
+    configDirectory: "/tmp/backup-docker-config", env: ciEnv, platform: "linux", nonce,
+    linuxProbe: () => inspectLinuxRunnerSocket({ stat: () => { throw new Error("ENOENT"); } }),
+    spawn: () => { executed = true; throw new Error("unexpected exec"); },
+  }), /could not be checked/u);
+  assert.equal(executed, false);
+});
+
+test("matching spoofable CI variables and daemon metadata cannot prove local origin", () => {
+  // Models a local root-owned forwarding proxy reporting the expected metadata.
+  // It intentionally passes consistency checks. This is a TRUST ASSUMPTION,
+  // not evidence of a cryptographically verified GitHub runner/daemon.
+  assert.equal(assertLocalBackupEnvironment({ ...ciEnv }, "linux"), "linux-ci");
+  const simulatedProxy = fixture({ linux: true, daemonName: "gha-runner-01", infoId: "forged-id" });
+  assert.doesNotThrow(() => simulatedProxy.docker.start({ database: "d", user: "u", password: "p" }));
+  assert.equal(simulatedProxy.docker.daemonId, "forged-id");
+  simulatedProxy.docker.cleanup();
+});
+
+test("Linux CI pins argv and socket metadata on an assumed trusted runner, and pulls one digest", () => {
   const { docker, calls, state } = fixture({ linux: true });
   docker.start({ database: "d", user: "u", password: "p" });
   assert.deepEqual(calls.filter((call) => call.args[4] === "pull").map((call) => call.args.slice(4)), [["pull", POSTGRES_IMAGE]]);
@@ -107,17 +138,17 @@ test("Linux CI pins argv, own socket and engine, pulls only cached digest before
   assert.ok(calls.every((call) => Object.keys(call.options.env).sort().join() === "DOCKER_CONFIG,HOME,LANG"));
   docker.cleanup();
   state.linuxProbeOverrides = { socketInode: 9999 };
-  assert.throws(() => docker.engine(), /socket or runner identity changed/u);
+  assert.throws(() => docker.engine(), /socket metadata or hostname changed/u);
 });
 
-test("Linux CI refuses cross-host daemon and changed socket before run/cleanup", () => {
+test("Linux CI refuses mismatching reported daemon hostname and changed socket metadata", () => {
   const mismatched = fixture({ linux: true, daemonName: "another-remote-host" });
-  assert.throws(() => mismatched.docker.start({ database: "d", user: "u", password: "p" }), /Docker Desktop Linux engine/u);
+  assert.throws(() => mismatched.docker.start({ database: "d", user: "u", password: "p" }), /engine metadata did not match/u);
   assert.ok(!mismatched.calls.some((call) => ["run", "pull"].includes(call.args[4])));
   const tampered = fixture({ linux: true });
   tampered.docker.start({ database: "d", user: "u", password: "p" });
   tampered.state.linuxProbeOverrides = { socketDevice: 900 };
-  assert.throws(() => tampered.docker.cleanup(), /socket or runner identity changed/u);
+  assert.throws(() => tampered.docker.cleanup(), /socket metadata or hostname changed/u);
   assert.ok(!tampered.calls.some((call) => call.args[4] === "rm"));
 });
 
@@ -151,7 +182,7 @@ test("pins executable, npipe, local engine, owner and exact ID for real disposab
 test("refuses non-Desktop Linux identities and never starts a container", () => {
   for (const os of ["Ubuntu 24.04", "Docker Engine - Community"]) {
     const { docker, calls } = fixture({ os });
-    assert.throws(() => docker.start({ database: "d", user: "u", password: "p" }), /Docker Desktop/u);
+    assert.throws(() => docker.start({ database: "d", user: "u", password: "p" }), /engine metadata did not match/u);
     assert.ok(!calls.some((call) => call.args[4] === "run"));
   }
 });
@@ -196,7 +227,7 @@ test("stopped owned container remains cleanable with immutable ID after port is 
   assert.equal(calls.filter((call) => call.args[4] === "rm").length, 1);
 });
 
-test("adopts orphan created despite lost run response only with independently verified owner", () => {
+test("adopts orphan created despite lost run response only with matching owner metadata", () => {
   const owned = fixture({ returnedId: "corrupted", runStatus: 1 });
   assert.throws(() => owned.docker.start({ database: "d", user: "u", password: "p" }), /invalid container ID/u);
   assert.equal(owned.docker.id, id);
@@ -235,7 +266,7 @@ test("ambiguous detached Docker run retains owner evidence even when inspect ini
   }
 });
 
-test("owner evidence is deleted only before Docker run or after independently verified removal", async () => {
+test("owner evidence is deleted only before Docker run or after a Docker query confirms removal", async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), "backup-evidence-unit-"));
   try {
     const untouched = fixture();
@@ -245,7 +276,7 @@ test("owner evidence is deleted only before Docker run or after independently ve
     const incomplete = fixture({ listOutput: id });
     const evidenceDir = await createBackupOwnerEvidence(incomplete.docker, parent);
     incomplete.docker.start({ database: "d", user: "u", password: "p" });
-    assert.throws(() => incomplete.docker.cleanup(), /not independently confirmed/u);
+    assert.throws(() => incomplete.docker.cleanup(), /not confirmed by Docker status/u);
     assert.deepEqual(await finalizeBackupOwnerEvidence(incomplete.docker, evidenceDir), { retained: true, directory: evidenceDir });
     assert.equal((await readBackupOwnerEvidence(evidenceDir)).name, incomplete.docker.name);
 
