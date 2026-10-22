@@ -29,8 +29,8 @@ function validateCodeqlRun(run) {
     || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(driver.version)) {
     invalidSarif("expected a versioned CodeQL CLI driver.");
   }
-  if (!isObject(run.properties) || typeof run.properties["semmle.formatSpecifier"] !== "string"
-    || !run.properties["semmle.formatSpecifier"].trim()) {
+  if (!isObject(run.properties) || !["sarif-latest", "sarifv2.1.0"].includes(
+    run.properties["semmle.formatSpecifier"])) {
     invalidSarif("CodeQL exporter format is missing.");
   }
   if (run.automationDetails !== undefined && (!isObject(run.automationDetails)
@@ -57,7 +57,9 @@ function validateCodeqlRun(run) {
   if (!Array.isArray(run.artifacts)) invalidSarif("CodeQL artifact table is missing.");
   const artifactPaths = new Map();
   run.artifacts.forEach((artifact, index) => {
-    if (!isObject(artifact) || !isObject(artifact.location)) invalidSarif("invalid artifact entry.");
+    if (!isObject(artifact) || !isObject(artifact.location) || artifact.index !== index) {
+      invalidSarif("invalid or misindexed artifact entry.");
+    }
     const location = artifact.location;
     if (location.index !== undefined && location.index !== index) invalidSarif("inconsistent artifact index.");
     const normalized = normalizeArtifactPath(location.uri);
@@ -69,7 +71,8 @@ function validateCodeqlRun(run) {
   });
   if (run.invocations !== undefined) {
     if (!Array.isArray(run.invocations) || run.invocations.some((invocation) =>
-      !isObject(invocation) || invocation.executionSuccessful === false
+      !isObject(invocation) || (invocation.executionSuccessful !== undefined
+        && invocation.executionSuccessful !== true)
       || (invocation.toolExecutionNotifications !== undefined
         && (!Array.isArray(invocation.toolExecutionNotifications)
           || invocation.toolExecutionNotifications.some((notice) =>
@@ -95,7 +98,7 @@ function validateCodeqlRun(run) {
     }
     const registeredIndex = ruleTables[componentIndex].get(result.ruleId);
     if (registeredIndex === undefined) invalidSarif("result rule is absent from referenced component.");
-    if (result.ruleIndex !== undefined && result.ruleIndex !== registeredIndex) {
+    if (!Number.isSafeInteger(result.ruleIndex) || result.ruleIndex !== registeredIndex) {
       invalidSarif("result ruleIndex does not match ruleId.");
     }
     if (result.rule !== undefined && (!isObject(result.rule)

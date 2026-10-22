@@ -64,7 +64,7 @@ const accepted = {
   lineFingerprint: "90e07734df8b1ab3:1", columnFingerprint: "6"
 };
 
-test("CodeQL documented driver/version and optional ruleIndex are accepted", () => {
+test("CodeQL documented driver/version and consistent ruleIndex are accepted", () => {
   const document = sarif([accepted]);
   const run = document.runs[0];
   const result = run.results[0];
@@ -75,7 +75,27 @@ test("CodeQL documented driver/version and optional ruleIndex are accepted", () 
   delete result.ruleIndex;
   delete result.rule;
   delete result.locations[0].physicalLocation.artifactLocation.uri;
-  assert.equal(evaluateCodeqlSarif([document]).ok, true);
+  assert.throws(() => evaluateCodeqlSarif([document]), /Invalid SARIF/u);
+});
+
+test("RED→GREEN: CodeQL documented canonical artifact/index and invocation structure fails closed", () => {
+  for (const mutation of [
+    (run) => { delete run.artifacts[0].index; },
+    (run) => { run.artifacts[0].index = 999; },
+    (run) => { delete run.results[0].ruleIndex; },
+    (run) => { run.results[0].ruleIndex = "1"; },
+    (run) => { run.invocations = [{ executionSuccessful: "false" }]; },
+    (run) => { run.properties["semmle.formatSpecifier"] = "not-a-codeql-format"; },
+  ]) {
+    const document = sarif([accepted]);
+    mutation(document.runs[0]);
+    assert.throws(() => evaluateCodeqlSarif([document]), /Invalid SARIF/u);
+  }
+  for (const format of ["sarifv2.1.0", "sarif-latest"]) {
+    const document = sarif([]);
+    document.runs[0].properties["semmle.formatSpecifier"] = format;
+    assert.equal(evaluateCodeqlSarif([document]).ok, true);
+  }
 });
 
 test("CodeQL documented zero findings with zero artifacts is structurally valid", () => {
