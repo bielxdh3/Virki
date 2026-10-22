@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
+import { getSessionCookieName } from "@virki/auth/constants";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 const publicUrl = "http://127.0.0.1:3000";
-const portalUrl = "https://portal.localhost:3001";
-const hubUrl = "https://hub.localhost:3001";
+const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
+const portalUrl = productionHubMode ? "https://portal.localhost" : "https://portal.localhost:3001";
+const hubUrl = productionHubMode ? "https://hub.localhost" : "https://hub.localhost:3001";
+const sessionCookieName = getSessionCookieName({ NODE_ENV: productionHubMode ? "production" : process.env.NODE_ENV });
 
 for (const viewport of [
   { name: "desktop", width: 1365, height: 900 },
@@ -64,7 +66,7 @@ for (const viewport of [
       await expect.soft(page).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
       await expect.soft(page.getByRole("heading", { name: "Contas", exact: true })).toHaveCount(0);
       await expect.soft(page.getByRole("link", { name: "Acessos", exact: true })).toHaveCount(0);
-      expect((await context.cookies(hubUrl)).some((cookie) => cookie.name === SESSION_COOKIE_NAME)).toBe(false);
+      expect((await context.cookies(hubUrl)).some((cookie) => cookie.name === sessionCookieName)).toBe(false);
       await expect(page.getByRole("heading", { level: 1, name: "Entrar", exact: true })).toBeVisible();
       await expect(page.getByLabel("E-mail", { exact: true })).toBeVisible();
       await expect(page.getByLabel("Senha", { exact: true })).toBeVisible();

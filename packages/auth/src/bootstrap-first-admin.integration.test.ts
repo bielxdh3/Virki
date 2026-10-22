@@ -11,7 +11,13 @@ after(() => prisma.$disconnect());
 
 test("legitimate bootstrap survives real pre-account authentication, audit and limiter activity in an otherwise virgin DB", { skip: integrationOptions.skip || (process.env.VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM !== "virgin" ? "dedicated virgin bootstrap fixture not configured" : false) }, async () => {
   // A separate freshly migrated fixture is mandatory; this test never erases pre-existing data.
+  assert.equal(new URL(process.env.VIRKI_INTEGRATION_DATABASE_URL ?? "postgresql://invalid.invalid/").pathname,
+    "/virki_bootstrap_virgin", "Refuse to run the destructive first-install test against a shared integration database.");
+  const [database] = await prisma.$queryRaw<Array<{ database: string }>>`SELECT current_database() AS database`;
+  assert.equal(database?.database, "virki_bootstrap_virgin", "The real PostgreSQL connection must target the dedicated cloned database.");
   assert.equal(await prisma.user.count(), 0, "Use a dedicated fresh bootstrap test database.");
+  assert.equal(await prisma.auditLog.count(), 0, "Bootstrap fixture must start without audit history.");
+  assert.equal(await prisma.loginRateLimit.count(), 0, "Bootstrap fixture must start without accumulated rate limits.");
   const email = `unknown-${randomUUID()}@integration.invalid`;
   const password = randomBytes(24).toString("base64url");
   for (let attempt = 0; attempt < 35; attempt += 1) {

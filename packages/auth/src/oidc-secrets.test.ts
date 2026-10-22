@@ -16,6 +16,17 @@ test("OIDC client secrets and artifact payloads are authenticated encrypted valu
   assert.throws(() => decryptOidcPayload(encrypted, { VIRKI_OIDC_ADAPTER_KEY: "34".repeat(32) }));
 });
 
+test("OIDC encrypted values reject shortened authentic GCM tags", () => {
+  const env = { VIRKI_OIDC_ADAPTER_KEY: key };
+  for (const encrypted of [encryptOidcClientSecret("client", env), encryptOidcPayload("payload", env)]) {
+    const parts = encrypted.split(".");
+    parts[2] = Buffer.from(parts[2], "base64url").subarray(0, 4).toString("base64url");
+    const shortened = parts.join(".");
+    assert.throws(() => decryptOidcClientSecret(shortened, env));
+    assert.throws(() => decryptOidcPayload(shortened, env));
+  }
+});
+
 test("OIDC identifiers are irreversibly indexed with SHA-256", () => {
   assert.match(hashOidcIdentifier("client-secret"), /^[a-f0-9]{64}$/u);
   assert.notEqual(hashOidcIdentifier("client-secret"), "client-secret");

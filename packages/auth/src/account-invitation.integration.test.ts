@@ -8,6 +8,22 @@ import { consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAcc
 
 after(() => prisma.$disconnect());
 
+test("invitation helper rejects control characters and overlong display names before any write", integrationOptions, async () => {
+  const admin = await createTestUser({ role: "ADMIN", label: "invite-invalid-name-admin" });
+  const now = new Date();
+  const { sessionId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", now);
+  const inputs = [
+    { email: uniqueEmail("invite-control-name"), displayName: "First line\nSecond line" },
+    { email: uniqueEmail("invite-long-name"), displayName: "x".repeat(81) }
+  ];
+
+  for (const input of inputs) {
+    await assert.rejects(provisionInvitedUserAccount({ id: admin.id }, sessionId, input, now));
+    assert.equal(await prisma.user.findUnique({ where: { emailNormalized: input.email }, select: { id: true } }), null);
+    assert.equal(await prisma.emailOutboxMessage.count({ where: { recipientEmail: input.email } }), 0);
+  }
+});
+
 async function invite(label: string) {
   const admin = await createTestUser({ role: "ADMIN", label: `${label}-admin` });
   const email = uniqueEmail(label);

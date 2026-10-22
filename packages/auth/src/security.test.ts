@@ -45,6 +45,13 @@ test("TOTP secrets are encrypted and never returned from ciphertext", () => {
   assert.match(hashDeviceToken("opaque-device-token"), /^[a-f0-9]{64}$/);
 });
 
+test("TOTP ciphertexts reject shortened authentic GCM tags", () => {
+  const env = { NODE_ENV: "test" };
+  const parts = encryptTotpSecret(createTotpSecret(), env).split(":");
+  parts[2] = Buffer.from(parts[2], "base64url").subarray(0, 4).toString("base64url");
+  assert.throws(() => decryptTotpSecret(parts.join(":"), env));
+});
+
 test("login replaces an unknown caller-selected device token before it can be trusted", () => {
   const attackerToken = "A".repeat(48);
   const resolved = resolveLoginDeviceToken(attackerToken, null);

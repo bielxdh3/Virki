@@ -89,7 +89,7 @@ export async function setAccountStateAction(formData: FormData): Promise<void> {
         await revokeUserAuthenticationProofsInTransaction(transaction, userId, now);
         await transaction.oidcArtifact.deleteMany({ where: { accountIdHash: hashOidcIdentifier(userId) } });
       }
-      await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_STATE_CHANGED", result: "SUCCESS", actorUserId: actor.user.id, resource: "account", message: enabled ? "User account enabled." : "User account disabled and sessions revoked.", actorRole: "ADMIN", after: { enabled, accountStatus: enabled ? "ACTIVE" : "INACTIVE" }, metadata: { targetRef: hashOidcIdentifier(userId), enabled } });
+      await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_STATE_CHANGED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "account", message: enabled ? "User account enabled." : "User account disabled and sessions revoked.", after: { enabled, accountStatus: enabled ? "ACTIVE" : "INACTIVE" }, metadata: { targetRef: hashOidcIdentifier(userId), enabled } });
     }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/accounts");
     redirect("/admin/accounts?status=updated");

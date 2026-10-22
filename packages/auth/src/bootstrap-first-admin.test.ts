@@ -27,10 +27,13 @@ const dataModels = [
 type AuditFixture = {
   eventType: string;
   result: string;
+  reason: string | null;
   resource: string | null;
   message: string | null;
   actorUserId: string | null;
   actorEmailHash: string | null;
+  actorRole: "ADMIN" | "USER" | null;
+  sessionRef: string | null;
   metadata: unknown;
 };
 
@@ -41,6 +44,9 @@ const noopAudit = {
   message: "Inactive sessions cleaned up.",
   actorUserId: null,
   actorEmailHash: null,
+  actorRole: null,
+  sessionRef: null,
+  reason: null,
   metadata: { source: "sessions-cleanup", deletedCount: 0, deletedRateLimitCount: 0 }
 };
 
@@ -77,7 +83,13 @@ function createDatabase(
       if (args?.take === undefined || args.take > 128 || args.take < 1 || args.orderBy?.id !== "asc") {
         throw new Error("Audit bootstrap must use bounded, deterministic pages.");
       }
-      const records = auditRows.map((record, index) => ({ ...record, id: `audit-${String(index).padStart(6, "0")}` }));
+      const records = auditRows.map((record, index) => ({
+        ...record,
+        actorRole: record.actorRole ?? null,
+        sessionRef: record.sessionRef ?? null,
+        reason: record.reason ?? null,
+        id: `audit-${String(index).padStart(6, "0")}`
+      }));
       const position = args.cursor ? records.findIndex((record) => record.id === args.cursor?.id) : -1;
       if (args.cursor && position < 0) throw new Error("Unknown audit cursor.");
       return records.slice(position + (args.cursor ? (args.skip ?? 0) : 1), position + (args.cursor ? (args.skip ?? 0) : 1) + args.take);
@@ -161,6 +173,157 @@ test("first ADMIN bootstrap accepts the actual sanitized cleanup audit with rate
     writeAudit: async (_transaction, input) => fixture.setAudit(input as unknown as Record<string, unknown>)
   });
   assert.equal(result.id, "created-admin");
+});
+
+test("first ADMIN bootstrap accepts only anonymous Cloudflare ingress denials with exact metadata", async () => {
+  const requestId = "c2245041-0904-4fa1-a6a8-053df5241d90";
+  const audits: AuditFixture[] = [
+    {
+      ...noopAudit,
+      eventType: "ACCESS_JWT_MISSING",
+      result: "DENIED",
+      reason: "cloudflare",
+      resource: "hub",
+      message: null,
+      metadata: { requestId, source: "hub-ingress", accessJwtStatus: "missing" }
+    },
+    {
+      ...noopAudit,
+      eventType: "ACCESS_JWT_INVALID",
+      result: "DENIED",
+      reason: "cloudflare",
+      resource: "hub",
+      message: null,
+      metadata: { requestId, source: "hub-ingress", accessJwtStatus: "invalid" }
+    }
+  ];
+  const fixture = createDatabase({ auditLog: audits.length }, audits);
+  const result = await bootstrapFirstAdmin(validInput, {
+    database: fixture.database as never,
+    hashPassword: async () => "argon2:hashed",
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async (_transaction, input) => fixture.setAudit(input as unknown as Record<string, unknown>)
+  });
+  assert.equal(result.id, "created-admin");
+});
+
+test("first ADMIN bootstrap rejects identity-bearing or malformed Cloudflare denial history", async () => {
+  const requestId = "c2245041-0904-4fa1-a6a8-053df5241d90";
+  const valid: AuditFixture = {
+    ...noopAudit,
+    eventType: "ACCESS_JWT_MISSING",
+    result: "DENIED",
+    reason: "cloudflare",
+    resource: "hub",
+    message: null,
+    metadata: { requestId, source: "hub-ingress", accessJwtStatus: "missing" }
+  };
+  const suspicious: AuditFixture[] = [
+    { ...valid, actorUserId: "existing-user" },
+    { ...valid, actorEmailHash: "a".repeat(64) },
+    { ...valid, actorRole: "USER" },
+    { ...valid, sessionRef: "b".repeat(64) },
+    { ...valid, result: "FAILURE" },
+    { ...valid, reason: "rejected" },
+    { ...valid, resource: "identity.security" },
+    { ...valid, message: "Cloudflare Access JWT missing." },
+    { ...valid, metadata: { requestId, source: "hub-ingress", accessJwtStatus: "missing", extra: true } },
+    { ...valid, metadata: { requestId, source: "other", accessJwtStatus: "missing" } },
+    { ...valid, metadata: { requestId, source: "hub-ingress", accessJwtStatus: "misconfigured" } },
+    { ...valid, metadata: { requestId: "not-a-request-id", source: "hub-ingress", accessJwtStatus: "missing" } },
+    { ...valid, eventType: "ACCESS_JWT_VALID", result: "SUCCESS" }
+  ];
+  for (const record of suspicious) {
+    const fixture = createDatabase({ auditLog: 1 }, [record]);
+    await assert.rejects(
+      bootstrapFirstAdmin(validInput, {
+        database: fixture.database as never,
+        hashPassword: async () => "argon2:hashed",
+        writeAudit: async () => assert.fail("Audit must not be written for a rejected bootstrap.")
+      }),
+      (error) => error instanceof FirstAdminBootstrapError && error.code === "DATABASE_NOT_VIRGIN"
+    );
+    assert.equal(fixture.createdUser, undefined);
+  }
+});
+
+test("first ADMIN bootstrap preserves only known anonymous login rate-limit and CSRF audit records", async () => {
+  const requestId = "c2245041-0904-4fa1-a6a8-053df5241d90";
+  const audits: AuditFixture[] = [
+    {
+      ...noopAudit,
+      eventType: "RATE_LIMIT_REACHED",
+      result: "DENIED",
+      reason: "rate-limited",
+      resource: "hub",
+      message: null,
+      actorEmailHash: "a".repeat(64),
+      metadata: {
+        source: "hub-login",
+        cloudflareAccessPresent: true,
+        userAgentHash: null,
+        requestId,
+        route: "/api/login",
+        method: "POST"
+      }
+    },
+    {
+      ...noopAudit,
+      eventType: "CSRF_DENIED",
+      result: "DENIED",
+      reason: "csrf",
+      resource: "identity.security",
+      message: null,
+      metadata: {
+        source: "login-csrf",
+        cloudflareAccessPresent: false,
+        userAgentHash: null,
+        requestId,
+        route: "/api/login",
+        method: "POST"
+      }
+    },
+    {
+      ...noopAudit,
+      eventType: "RATE_LIMIT_REACHED",
+      result: "DENIED",
+      reason: "unavailable",
+      resource: "sso.rate-limit",
+      message: null,
+      metadata: null
+    }
+  ];
+  const fixture = createDatabase({ auditLog: audits.length }, audits);
+  const result = await bootstrapFirstAdmin(validInput, {
+    database: fixture.database as never,
+    hashPassword: async () => "argon2:hashed",
+    hashAdminEmail: () => "pseudonym:admin",
+    writeAudit: async (_transaction, input) => fixture.setAudit(input as unknown as Record<string, unknown>)
+  });
+  assert.equal(result.id, "created-admin");
+
+  const suspicious: AuditFixture[] = [
+    { ...audits[0]!, actorRole: "ADMIN" },
+    { ...audits[0]!, sessionRef: "b".repeat(64) },
+    { ...audits[0]!, metadata: { ...audits[0]!.metadata as object, source: "other" } },
+    { ...audits[0]!, metadata: { ...audits[0]!.metadata as object, unexpected: true } },
+    { ...audits[1]!, actorEmailHash: "a".repeat(64) },
+    { ...audits[1]!, metadata: { ...audits[1]!.metadata as object, source: "admin-mutation" } },
+    { ...audits[2]!, actorEmailHash: "a".repeat(64) },
+    { ...audits[2]!, metadata: { source: "sso-rate-limit" } }
+  ];
+  for (const record of suspicious) {
+    const invalid = createDatabase({ auditLog: 1 }, [record]);
+    await assert.rejects(
+      bootstrapFirstAdmin(validInput, {
+        database: invalid.database as never,
+        hashPassword: async () => "argon2:hashed",
+        writeAudit: async () => assert.fail("Audit must not be written for a rejected bootstrap.")
+      }),
+      (error) => error instanceof FirstAdminBootstrapError && error.code === "DATABASE_NOT_VIRGIN"
+    );
+    assert.equal(invalid.createdUser, undefined);
+  }
 });
 
 test("bootstrap refuses suspicious audit rows", async () => {

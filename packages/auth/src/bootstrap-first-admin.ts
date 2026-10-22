@@ -30,20 +30,106 @@ const BOOTSTRAP_LOCK_ID = 4_852_716_032_158_417_203n;
 const AUDIT_LOG_COUNT_INDEX = 6;
 const RATE_LIMIT_COUNT_INDEX = 2;
 const BOOTSTRAP_AUDIT_PAGE_SIZE = 128;
+const AUDIT_EMAIL_HASH_PATTERN = /^(?:[a-f0-9]{64}|hmac-v1:[a-f0-9]{16}:[a-f0-9]{64})$/u;
+const AUDIT_REQUEST_ID_PATTERN = /^[a-f0-9-]{36}$/u;
+const SAFE_LOGIN_AUDIT_METADATA_KEYS = new Set(["source", "cloudflareAccessPresent", "userAgentHash", "requestId", "route", "method"]);
+const PREBOOTSTRAP_LOGIN_CSRF_SOURCES = new Set([
+  "login-origin", "login-csrf", "login-verification-origin", "login-verification-csrf"
+]);
+
+function isSafeAnonymousEmailHash(value: string | null): boolean {
+  return value === null || AUDIT_EMAIL_HASH_PATTERN.test(value);
+}
+
+function isSafePrebootstrapLoginMetadata(metadata: PrismaTypes.JsonValue, allowedSources: ReadonlySet<string>): boolean {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const fields = Object.keys(metadata);
+  if (fields.some((field) => !SAFE_LOGIN_AUDIT_METADATA_KEYS.has(field))) return false;
+  if (typeof metadata.source !== "string" || !allowedSources.has(metadata.source) ||
+      typeof metadata.cloudflareAccessPresent !== "boolean" ||
+      !(metadata.userAgentHash === null || (typeof metadata.userAgentHash === "string" && /^[a-f0-9]{64}$/u.test(metadata.userAgentHash)))) return false;
+
+  const hasRoute = Object.hasOwn(metadata, "route");
+  const hasMethod = Object.hasOwn(metadata, "method");
+  if (hasRoute !== hasMethod) return false;
+  if (Object.hasOwn(metadata, "requestId") && (typeof metadata.requestId !== "string" || !AUDIT_REQUEST_ID_PATTERN.test(metadata.requestId))) return false;
+  if (hasRoute) {
+    const expectsVerification = metadata.source.includes("verification");
+    if (metadata.route !== (expectsVerification ? "/api/login/verify" : "/api/login") || metadata.method !== "POST") return false;
+  }
+  return true;
+}
+
+function isHarmlessPrebootstrapAccessDenial(record: {
+  eventType: string;
+  result: string;
+  reason: string | null;
+  resource: string | null;
+  message: string | null;
+  actorEmailHash: string | null;
+  metadata: PrismaTypes.JsonValue;
+}): boolean {
+  if ((record.eventType !== "ACCESS_JWT_MISSING" && record.eventType !== "ACCESS_JWT_INVALID") ||
+      record.result !== "DENIED" || record.reason !== "cloudflare" || record.resource !== "hub" ||
+      record.message !== null || record.actorEmailHash !== null) return false;
+  if (record.metadata === null || typeof record.metadata !== "object" || Array.isArray(record.metadata)) return false;
+  const metadata = record.metadata;
+  const fields = Object.keys(metadata).sort();
+  const expectedStatus = record.eventType === "ACCESS_JWT_MISSING" ? "missing" : "invalid";
+  return fields.length === 3 && fields[0] === "accessJwtStatus" && fields[1] === "requestId" && fields[2] === "source" &&
+    metadata.source === "hub-ingress" && metadata.accessJwtStatus === expectedStatus &&
+    typeof metadata.requestId === "string" && AUDIT_REQUEST_ID_PATTERN.test(metadata.requestId);
+}
+
+function isHarmlessPrebootstrapRateLimit(record: {
+  result: string;
+  reason: string | null;
+  resource: string | null;
+  message: string | null;
+  actorEmailHash: string | null;
+  metadata: PrismaTypes.JsonValue;
+}): boolean {
+  if (record.result !== "DENIED" || (record.reason !== "rate-limited" && record.reason !== "unavailable") || record.message !== null) return false;
+  if (record.resource === "sso.rate-limit") return record.actorEmailHash === null && record.metadata === null;
+  if ((record.resource !== "hub" && record.resource !== "portal") || !isSafeAnonymousEmailHash(record.actorEmailHash)) return false;
+  return isSafePrebootstrapLoginMetadata(record.metadata, new Set([`${record.resource}-login`]));
+}
+
+function isHarmlessPrebootstrapLoginCsrf(record: {
+  result: string;
+  reason: string | null;
+  resource: string | null;
+  message: string | null;
+  actorEmailHash: string | null;
+  metadata: PrismaTypes.JsonValue;
+}): boolean {
+  return record.result === "DENIED" && record.reason === "csrf" && record.resource === "identity.security" &&
+    record.message === null && record.actorEmailHash === null &&
+    isSafePrebootstrapLoginMetadata(record.metadata, PREBOOTSTRAP_LOGIN_CSRF_SOURCES);
+}
 
 function isHarmlessPrebootstrapCleanupAudit(record: {
   eventType: string;
   result: string;
+  reason: string | null;
   resource: string | null;
   message: string | null;
   actorUserId: string | null;
   actorEmailHash: string | null;
+  actorRole: string | null;
+  sessionRef: string | null;
   metadata: PrismaTypes.JsonValue;
 }): boolean {
-  if (record.actorUserId !== null) return false;
+  if (record.actorUserId !== null || record.actorRole !== null || record.sessionRef !== null) return false;
+  if (record.eventType === "ACCESS_JWT_MISSING" || record.eventType === "ACCESS_JWT_INVALID") {
+    return isHarmlessPrebootstrapAccessDenial(record);
+  }
+  if (record.eventType === "RATE_LIMIT_REACHED") return isHarmlessPrebootstrapRateLimit(record);
+  if (record.eventType === "CSRF_DENIED") return isHarmlessPrebootstrapLoginCsrf(record);
   // Anonymous failures and request counters establish no account ownership. Keep their immutable history.
   if (record.eventType === "AUTH_LOGIN_FAILURE" && record.result === "FAILURE" &&
       ["hub", "portal"].includes(record.resource ?? "") &&
+      isSafeAnonymousEmailHash(record.actorEmailHash) &&
       ["Login failed.", "Login rate limit reached.", "Login rate limit unavailable.", "Security verification failed."].includes(record.message ?? "")) return true;
   if (record.actorEmailHash === null && record.result === "FAILURE" && (
     (record.eventType === "SSO_AUTHORIZATION_DENIED" && record.resource === "sso.authorization" && record.message === "OIDC authorization request rejected.") ||
@@ -79,7 +165,7 @@ async function verifyBootstrapDatabaseIsVirgin(transaction: PrismaTypes.Transact
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       select: {
         id: true, eventType: true, result: true, resource: true, message: true,
-        actorUserId: true, actorEmailHash: true, metadata: true
+        reason: true, actorUserId: true, actorEmailHash: true, actorRole: true, sessionRef: true, metadata: true
       }
     });
     if (audits.length === 0 || audits.some((audit) => !isHarmlessPrebootstrapCleanupAudit(audit))) {

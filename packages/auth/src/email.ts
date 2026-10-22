@@ -340,7 +340,8 @@ export function decryptEmailPayload(
   const decipher = createDecipheriv(
     "aes-256-gcm",
     key,
-    Buffer.from(value.protectedValues.iv, "base64url")
+    Buffer.from(value.protectedValues.iv, "base64url"),
+    { authTagLength: 16 }
   );
   decipher.setAuthTag(Buffer.from(value.protectedValues.tag, "base64url"));
   const plaintext = Buffer.concat([

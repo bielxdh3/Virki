@@ -2,6 +2,13 @@
 
 Virki has five responsibilities: identity, authentication and SSO, security, project entry access, and audit. It authenticates people and decides whether a person may enter an external project. Project behavior and permissions stay with that project.
 
+## Local-first engineering and delegated missions
+
+- **Immediately after every delegated agent's mission, include this as the primary operating context:** "Execute everything technically possible locally. Do not stop at unavailable hosted CI, third-party services, billing restrictions, or external reviews. Independently run the applicable local builds, tests, security scans, adversarial cases, and disposable native/Docker experiments without asking the owner to repeat this instruction."
+- Apply the same local-first rule to the primary agent, not just workers. Complete locally actionable implementation, review, corrections, and proof before declaring an external blocker.
+- Local evidence must identify the exact source SHA, commands, PASS/FAIL/SKIP and limitations. A local run or alternative scanner is **not** an attestation from hosted CI, CodeQL, GHCR, an independent security principal, or a production native Linux host.
+- Never override fail-closed security controls, connect local experiments to production Docker, mutate deManage, or claim deployment authorization merely to make a check green. When an external gate cannot be satisfied locally, finish all safe local work and state precisely what still needs that external authority.
+
 ## Surfaces
 
 - `biel.dev.br` is a minimal public page with a portal entry.

@@ -4,14 +4,14 @@ import { runWithAuditContext, writeAuditLog } from "@virki/auth/audit";
 import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAttemptInTransaction, getSessionByToken, hashAuditIdentifier, hashAuditSessionReference, isTrustedClientAddress, writeAuditLogRequired } from "@virki/auth";
 import { prisma } from "@virki/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
-import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
+import { installAuditResponseGate, requireAuditBeforeResponse, useNativeOidcResponse } from "./audit-gate";
 import { readInteractionDetailsOrRespond } from "./interaction-error";
 import { createProviderEventAudit } from "./provider-audit";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { readIssuer } from "./issuer-config";
-import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, isInteractionPath, isTokenEndpoint, selectAuthRateLimits, selectInteractionRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
+import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_PROVIDER_CLAIMS, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const issuer = readIssuer(process.env);
 const signingJwks = readSigningJwks(process.env.VIRKI_OIDC_SIGNING_JWKS);
@@ -96,11 +96,7 @@ const provider = new Provider(issuer, {
     id_token_signed_response_alg: "ES256"
   },
   scopes: ["openid", "profile", "email"],
-  claims: {
-    openid: ["sub"],
-    profile: ["name"],
-    email: ["email", "email_verified"]
-  },
+  claims: OIDC_PROVIDER_CLAIMS,
   features: {
     devInteractions: { enabled: false },
     clientCredentials: { enabled: false },
@@ -137,8 +133,8 @@ const provider = new Provider(issuer, {
     }
   },
   findAccount: async (_context, id): Promise<Account | undefined> => {
-    const user = await prisma.user.findUnique({ where: { id }, select: { id: true, email: true, displayName: true, emailVerifiedAt: true, isActive: true, accountStatus: true } });
-    if (!user?.isActive || user.accountStatus !== "ACTIVE") return undefined;
+    const user = await prisma.user.findUnique({ where: { id }, select: { id: true, email: true, displayName: true, emailVerifiedAt: true, role: true, isActive: true, accountStatus: true } });
+    if (!user || !isOidcAccountEligible(user)) return undefined;
     return {
       accountId: user.id,
       async claims() {
@@ -173,9 +169,15 @@ securityDataCleanupTimer.unref();
 
 provider.proxy = true;
 const authorizationRequestStartedAt = new WeakMap<object, number>();
+let lastRateLimitStorageOutageLogMs = 0;
 provider.use(async (rawContext, next) => {
   const context = rawContext as KoaContextWithOIDC;
   setIssuerSensitiveResponseCachePolicy(context.res, context.path);
+  if (isNonCanonicalOidcEndpointPath(context.path)) {
+    context.status = 404;
+    context.body = { error: "invalid_request" };
+    return;
+  }
   if (context.path === "/auth") {
     if (context.method !== "GET") {
       context.status = 405;
@@ -194,6 +196,13 @@ provider.use(async (rawContext, next) => {
   } else if (isTokenEndpoint(context.method, context.path)) {
     const authorization = getString(context.req.headers.authorization) ?? undefined;
     if (await rateLimitRequest(context, (address) => selectTokenRateLimits(address, authorization))) return;
+  } else {
+    const endpoint = getPublicOidcRateLimitEndpoint(context.method, context.path);
+    if (endpoint) {
+      const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
+      const bearerAuthorization = getString(context.req.headers.authorization) ?? undefined;
+      if (await rateLimitRequest(context, (address) => selectPublicOidcRateLimits(address, sessionCookie, endpoint, bearerAuthorization))) return;
+    }
   }
 
   const match = isInteractionPath(context.path) ? context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u) : null;
@@ -275,7 +284,16 @@ const server = createServer((request, response) => {
   installAuditResponseGate(response);
   const requestId = randomUUID();
   response.setHeader("x-virki-request-id", requestId);
-  const path = new URL(request.url ?? "/", issuer).pathname;
+  let path: string;
+  try {
+    path = new URL(request.url ?? "/", issuer).pathname;
+  } catch {
+    response.statusCode = 400;
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Content-Type", "text/plain; charset=utf-8");
+    response.end("Bad Request");
+    return;
+  }
   const route = /^\/(?:token(?:\/revocation)?|auth|jwks|me|session\/end)$/u.test(path) ? path : /^\/(?:interaction|auth)\/[A-Za-z0-9_-]{8,80}$/u.test(path) ? `/${path.split("/")[1]}/:id` : undefined;
   runWithAuditContext({ requestId, service: "issuer", route, method: request.method }, () => providerCallback(request, response));
 });
@@ -348,6 +366,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
   if (["login", "virki_session", "virki_assurance"].includes(interaction.prompt.name) || interaction.session?.accountId !== session.user.id) {
     const authentication = getOidcAuthenticationContext(session.authenticationMethods, essentialAcr.values);
     requireAuditBeforeResponse(context.res, writeAuditLogRequired({ eventType: "SSO_INTERACTION_COMPLETED", result: "SUCCESS", actorUserId: session.user.id, actorRole: session.user.role === "USER" ? "USER" : undefined, sessionRef: hashAuditSessionReference(session.id), resource: "sso.interaction", metadata: { requestRef: hashAuditIdentifier(uid) } }));
+    useNativeOidcResponse(context);
     await provider.interactionFinished(context.req, context.res, {
       login: { accountId: session.user.id, ts: Math.floor(session.createdAt.getTime() / 1_000), ...authentication }
     }, { mergeWithLastSubmission: false });
@@ -385,6 +404,7 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
   if (Array.isArray(missingClaims) && missingClaims.every((claim) => typeof claim === "string")) grant.addOIDCClaims(missingClaims);
   const grantId = await grant.save();
   requireAuditBeforeResponse(context.res, writeAuditLogRequired({ eventType: "SSO_INTERACTION_COMPLETED", result: "SUCCESS", actorUserId: session.user.id, actorRole: "USER", sessionRef: hashAuditSessionReference(session.id), resource: "sso.interaction", metadata: { requestRef: hashAuditIdentifier(uid) } }));
+  useNativeOidcResponse(context);
   await provider.interactionFinished(context.req, context.res, { consent: { grantId } }, { mergeWithLastSubmission: true });
 }
 
@@ -398,6 +418,7 @@ function auditProviderEvent(eventName: string, rawContext: unknown, error?: unkn
 
 async function denyInteraction(context: KoaContextWithOIDC): Promise<void> {
   await writeAuditLog({ eventType: "SSO_INTERACTION_DENIED", result: "DENIED", resource: "sso.interaction" });
+  useNativeOidcResponse(context);
   await provider.interactionFinished(context.req, context.res, {
     error: "access_denied",
     error_description: "Access denied."
@@ -427,13 +448,29 @@ async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: s
   }
   if (!isTrustedClientAddress(clientAddress)) return false;
   const now = new Date();
-  const allowed = await prisma.$transaction(async (transaction) => {
-    for (const check of select(clientAddress)) {
-      const attempt = await consumeRateLimitAttemptInTransaction(transaction, check.identifier, now, check.maxAttempts);
-      if (!attempt.allowed) return false;
+  let allowed: boolean;
+  try {
+    allowed = await prisma.$transaction(async (transaction) => {
+      for (const check of select(clientAddress)) {
+        const attempt = await consumeRateLimitAttemptInTransaction(transaction, check.identifier, now, check.maxAttempts);
+        if (!attempt.allowed) return false;
+      }
+      return true;
+    });
+  } catch {
+    // Rate-limit storage failure must be observable, but never expose a DB
+    // exception, Authorization header, CF address or a session identifier.
+    // Throttle diagnostics while the database is down to avoid log flooding.
+    const timestamp = Date.now();
+    if (timestamp - lastRateLimitStorageOutageLogMs >= 60_000) {
+      lastRateLimitStorageOutageLogMs = timestamp;
+      console.error("OIDC rate limiter storage unavailable; refusing request with 503.");
     }
+    context.status = 503;
+    context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
+    context.body = { error: "temporarily_unavailable" };
     return true;
-  });
+  }
   if (allowed) return false;
   await writeRateLimitAuditOnce(clientAddress, now, "rate-limited");
   context.status = 429;

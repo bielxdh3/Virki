@@ -3,8 +3,9 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createServer as createHttpsServer } from "node:https";
+import http from "node:http";
 import { request as httpRequest } from "node:http";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyLow05Url, summarizeLow05ProxyBoundary } from "./low05-diagnostics.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -14,14 +15,107 @@ const requireFromRepository = createRequire(join(repositoryRoot, "package.json")
 const hubHost = "127.0.0.1";
 const hubPort = 443;
 const nextPort = 3002;
+const accessJwksPort = 3010;
+const syntheticAccessHost = "access.e2e.invalid";
 const startTimeoutMs = 120_000;
 
-export function createProductionHubProxyRequestHandler(targetPort = nextPort) {
+// This file is also preloaded, *only* in the disposable production-mode Next E2E
+// child. Next's compiled httpxy package calls require('node:http').request, so
+// observing this one core method captures the otherwise invisible Next->issuer
+// TCP hop. Never inspect/serialize the URL, query, headers, body or error message.
+export function installNextIssuerTransportDiagnostics({
+  httpModule = http,
+  issuerPort = 3003,
+  emit = reportNextIssuerTransport
+} = {}) {
+  const originalRequest = httpModule.request;
+  const socketIds = new WeakMap();
+  let requestNumber = 0;
+  let socketNumber = 0;
+  const report = (entry) => {
+    // Observability must never affect HTTP semantics, including if a test
+    // supplied a throwing reporter.
+    try { emit(entry); } catch { /* diagnostic-only */ }
+  };
+
+  function diagnosticHttpRequest(...args) {
+    const options = args[0];
+    const isIssuer = options && typeof options === "object" &&
+      (options.hostname === "127.0.0.1" || options.host === "127.0.0.1") &&
+      Number(options.port) === issuerPort;
+    const outbound = Reflect.apply(originalRequest, this, args);
+    if (!isIssuer) return outbound;
+
+    const request = ++requestNumber;
+    const pathname = typeof options.path === "string" ? options.path : "";
+    const route = /^\/interaction\/[A-Za-z0-9_-]{8,80}(?:\?|$)/u.test(pathname) ? "interaction" : "other";
+    const method = ["GET", "POST", "HEAD"].includes(options.method) ? options.method : "other";
+    report({ event: "request", request, route, method });
+    let responseSeen = false;
+    outbound.on("socket", (socket) => {
+      let socketId = socketIds.get(socket);
+      if (socketId === undefined) {
+        socketId = ++socketNumber;
+        socketIds.set(socket, socketId);
+        const fixedId = socketId;
+        socket.once("end", () => report({ event: "socket-end", socket: fixedId }));
+        socket.once("error", (error) => report({ event: "socket-error", socket: fixedId, code: safeTransportCode(error) }));
+        socket.once("close", (hadError) => report({ event: "socket-close", socket: fixedId, hadError: hadError === true }));
+      }
+      report({ event: "socket", request, socket: socketId, reused: outbound.reusedSocket === true, connecting: socket.connecting === true });
+      if (socket.connecting) {
+        socket.once("connect", () => report({ event: "connect", request, socket: socketId }));
+      }
+    });
+    outbound.once("finish", () => report({ event: "request-finish", request }));
+    outbound.once("error", (error) => report({ event: "request-error", request, code: safeTransportCode(error) }));
+    outbound.once("response", (response) => {
+      responseSeen = true;
+      const status = response.statusCode;
+      report({ event: "response", request, status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0 });
+      response.once("end", () => report({ event: "response-end", request, complete: response.complete === true }));
+      response.once("aborted", () => report({ event: "response-aborted", request }));
+      response.once("close", () => report({ event: "response-close", request, complete: response.complete === true }));
+    });
+    outbound.once("close", () => report({ event: "request-close", request, complete: responseSeen }));
+    return outbound;
+  }
+  httpModule.request = diagnosticHttpRequest;
+  return () => {
+    if (httpModule.request === diagnosticHttpRequest) httpModule.request = originalRequest;
+  };
+}
+
+function safeTransportCode(error) {
+  const code = error && typeof error === "object" ? error.code : undefined;
+  return typeof code === "string" && /^[A-Z0-9_]{1,32}$/u.test(code) ? code : "UNKNOWN";
+}
+
+function reportNextIssuerTransport(event) {
+  process.stderr.write(`E2E_NEXT_ISSUER ${JSON.stringify(event)}\n`);
+}
+
+if (process.env.VIRKI_E2E_NEXT_ISSUER_DIAGNOSTICS === "1" &&
+    process.env.NODE_ENV === "production" && process.env.VIRKI_E2E_HUB_MODE === "production") {
+  installNextIssuerTransportDiagnostics();
+  reportNextIssuerTransport({ event: "instrumented" });
+}
+
+export function createProductionHubProxyRequestHandler(targetPort = nextPort, jwksPort = accessJwksPort, onUpstreamFailure = reportProxyFailure) {
   return (incomingRequest, outgoingResponse) => {
     const requestHost = incomingRequest.headers.host;
     if (!requestHost) {
       outgoingResponse.writeHead(400, { "cache-control": "no-store" });
       outgoingResponse.end();
+      return;
+    }
+
+    const isSyntheticAccessJwksRequest = requestHost.toLowerCase() === syntheticAccessHost && (
+      (incomingRequest.method === "GET" && incomingRequest.url === "/cdn-cgi/access/certs") ||
+      (incomingRequest.method === "POST" && incomingRequest.url === "/__test__/keys")
+    );
+    if (isSyntheticAccessJwksRequest) {
+      proxyToLocalPort(incomingRequest, outgoingResponse, jwksPort, { ...incomingRequest.headers, host: `127.0.0.1:${jwksPort}` }, undefined, onUpstreamFailure);
       return;
     }
 
@@ -32,13 +126,14 @@ export function createProductionHubProxyRequestHandler(targetPort = nextPort) {
     forwardedHeaders["x-forwarded-for"] = incomingRequest.socket.remoteAddress ?? "127.0.0.1";
     forwardedHeaders["cf-connecting-ip"] = incomingRequest.socket.remoteAddress ?? "127.0.0.1";
 
-    const upstreamRequest = httpRequest({
-      hostname: hubHost,
-      port: targetPort,
-      method: incomingRequest.method,
-      path: incomingRequest.url,
-      headers: forwardedHeaders
-    }, (upstreamResponse) => {
+    // Next's internal httpxy forwards this hop-by-hop header to the issuer.
+    // Closing after each OIDC interaction GET avoids reusing an issuer socket
+    // that can end after sending redirect headers but before completing them.
+    if (incomingRequest.method === "GET" && /^\/interaction\/[A-Za-z0-9_-]{8,80}(?:\?|$)/u.test(incomingRequest.url ?? "")) {
+      forwardedHeaders.connection = "close";
+    }
+
+    proxyToLocalPort(incomingRequest, outgoingResponse, targetPort, forwardedHeaders, (upstreamResponse) => {
       const low05Route = classifyLow05Url(incomingRequest.url ?? "/", process.env.VIRKI_PORTAL_URL ?? "https://portal.localhost").route;
       if (process.env.VIRKI_E2E_LOW05_DIAGNOSTICS === "true" && ["account-security", "login"].includes(low05Route)) {
         process.stdout.write(`LOW05_PROXY_BOUNDARY ${JSON.stringify(summarizeLow05ProxyBoundary({
@@ -51,15 +146,59 @@ export function createProductionHubProxyRequestHandler(targetPort = nextPort) {
       }
       outgoingResponse.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
       upstreamResponse.pipe(outgoingResponse);
-    });
-
-    upstreamRequest.on("error", () => {
-      if (!outgoingResponse.headersSent) outgoingResponse.writeHead(502, { "cache-control": "no-store" });
-      outgoingResponse.end("Hub unavailable");
-    });
-    incomingRequest.on("aborted", () => upstreamRequest.destroy());
-    incomingRequest.pipe(upstreamRequest);
+    }, onUpstreamFailure);
   };
+}
+
+function proxyToLocalPort(incomingRequest, outgoingResponse, port, headers, onResponse = (upstreamResponse) => {
+  outgoingResponse.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+  upstreamResponse.pipe(outgoingResponse);
+}, onUpstreamFailure = reportProxyFailure) {
+  let socketAssigned = false;
+  let tcpConnected = false;
+  let responseStarted = false;
+  let clientAborted = false;
+  const upstreamRequest = httpRequest({
+    hostname: hubHost,
+    port,
+    method: incomingRequest.method,
+    path: incomingRequest.url,
+    headers,
+    // This disposable E2E proxy must not reuse an idle upstream socket that Next.js may have closed.
+    // A stale pooled socket can reset during OIDC redirects and turn a valid callback into a spurious 502.
+    agent: false
+  }, onResponse);
+  upstreamRequest.on("socket", (socket) => {
+    socketAssigned = true;
+    tcpConnected = !socket.connecting;
+    socket.once("connect", () => { tcpConnected = true; });
+  });
+  upstreamRequest.on("response", () => { responseStarted = true; });
+  upstreamRequest.on("error", (error) => {
+    const candidateCode = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    const errorCode = typeof candidateCode === "string" && /^[A-Z0-9_]{1,32}$/u.test(candidateCode) ? candidateCode : "UNKNOWN";
+    onUpstreamFailure({
+      code: errorCode,
+      method: ["GET", "HEAD", "POST"].includes(incomingRequest.method) ? incomingRequest.method : "other",
+      route: /^\/interaction\/[A-Za-z0-9_-]{8,80}(?:\?|$)/u.test(incomingRequest.url ?? "") ? "oidc-interaction" : "other",
+      phase: responseStarted ? "response-started" : !socketAssigned ? "socket-unassigned" : !tcpConnected ? "tcp-connect-pending" : "connected-before-headers",
+      clientAborted
+    });
+    if (!outgoingResponse.headersSent) outgoingResponse.writeHead(502, { "cache-control": "no-store" });
+    outgoingResponse.end("Hub unavailable");
+  });
+  incomingRequest.on("aborted", () => {
+    clientAborted = true;
+    upstreamRequest.destroy();
+  });
+  incomingRequest.pipe(upstreamRequest);
+  return upstreamRequest;
+}
+
+function reportProxyFailure(details) {
+  // Error messages, URLs, cookies, OAuth IDs, socket addresses and request
+  // bodies are intentionally excluded from this fixture-only diagnostic.
+  process.stderr.write(`Production Hub E2E proxy upstream failed ${JSON.stringify(details)}.\n`);
 }
 
 async function startProductionHub() {
@@ -77,9 +216,9 @@ async function startProductionHub() {
   }
 
   const nextCliPath = requireFromRepository.resolve("next/dist/bin/next", { paths: [hubDirectory] });
-  const nextProcess = spawn(process.execPath, [nextCliPath, "start", "--hostname", hubHost, "--port", String(nextPort)], {
+  const nextProcess = spawn(process.execPath, ["--import", pathToFileURL(fileURLToPath(import.meta.url)).href, nextCliPath, "start", "--hostname", hubHost, "--port", String(nextPort)], {
     cwd: hubDirectory,
-    env: process.env,
+    env: { ...process.env, VIRKI_E2E_NEXT_ISSUER_DIAGNOSTICS: "1" },
     stdio: "inherit",
     windowsHide: true
   });
@@ -94,12 +233,19 @@ async function startProductionHub() {
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  nextProcess.once("error", () => {
+  nextProcess.once("error", (error) => {
+    reportNextIssuerTransport({ event: "next-child-error", code: safeTransportCode(error) });
     process.stderr.write("Production Hub E2E server could not start.\n");
     stop();
     process.exitCode = 1;
   });
-  nextProcess.once("exit", (code) => {
+  nextProcess.once("exit", (code, signal) => {
+    reportNextIssuerTransport({
+      event: "next-child-exit",
+      code: Number.isInteger(code) ? code : -1,
+      signal: ["SIGINT", "SIGTERM", "SIGKILL"].includes(signal) ? signal : "none",
+      planned: stopped
+    });
     if (!stopped) {
       process.exitCode = code ?? 1;
       proxyServer?.close();

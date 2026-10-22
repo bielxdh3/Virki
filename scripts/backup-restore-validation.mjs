@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, mkdir, readFile, rm, readdir, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -7,42 +8,49 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { PrismaClient } from "@prisma/client";
 import { describeBackupMigrationFailure } from "./lib/backup-migration-diagnostics.mjs";
+import {
+  LocalBackupDocker, assertLocalBackupEnvironment, createBackupOwnerEvidence, finalizeBackupValidationArtifacts,
+} from "./lib/backup-validation-docker.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
 const transitionName = "20260922090000_total_identity_security_rebaseline";
-const containerName = `virki-backup-validation-${process.pid}`;
 const databaseName = "virki_backup_test";
 const restoreDatabaseName = "virki_restore_test";
 const databaseUser = "virki_backup_test";
-const databasePassword = "backup-validation-only";
-let containerStarted = false;
+const databasePassword = randomBytes(32).toString("hex");
+const rolePasswords = {
+  runtime: randomBytes(32).toString("hex"),
+  migrator: randomBytes(32).toString("hex"),
+  auditMaintenance: randomBytes(32).toString("hex"),
+};
+let docker;
 let temporaryDirectory;
+let ownerEvidenceDirectory;
 let sourceClient;
 let restoredClient;
 let validationError;
 
 try {
-  runDocker([
-    "run", "--detach", "--name", containerName, "--publish", "127.0.0.1::5432",
-    "--env", `POSTGRES_DB=${databaseName}`, "--env", `POSTGRES_USER=${databaseUser}`,
-    "--env", `POSTGRES_PASSWORD=${databasePassword}`,
-    "--health-cmd", `pg_isready -h 127.0.0.1 -U ${databaseUser} -d ${databaseName}`,
-    "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "60",
-    "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
-  ]);
-  containerStarted = true;
+  assertLocalBackupEnvironment();
+  temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "virki-backup-validation-"));
+  const dockerConfigDirectory = path.join(temporaryDirectory, "docker-config");
+  await mkdir(dockerConfigDirectory, { recursive: true });
+  docker = new LocalBackupDocker({ configDirectory: dockerConfigDirectory });
+  docker.engine();
+  ownerEvidenceDirectory = await createBackupOwnerEvidence(docker);
+  docker.start({ database: databaseName, user: databaseUser, password: databasePassword });
   await waitForDatabase();
-  runSql("CREATE ROLE virki_audit_maintenance NOLOGIN");
+  await runRoleInitialization(databaseName);
 
-  const port = readPublishedPort();
+  const port = docker.port();
   const sourceUrl = buildDatabaseUrl(port, databaseName);
+  const sourceMigrationUrl = buildDatabaseUrl(port, databaseName, "virki_migrator", rolePasswords.migrator);
   const migrations = await readdir(migrationsRoot, { withFileTypes: true });
   const transitionPresent = migrations.some((entry) => entry.isDirectory() && entry.name === transitionName);
   const baselinePresent = migrations.some((entry) => entry.isDirectory() && entry.name === "0_init");
 
   if (transitionPresent) {
-    temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "virki-backup-validation-"));
     const temporaryPrismaDirectory = path.join(temporaryDirectory, "prisma");
     const temporaryMigrationsDirectory = path.join(temporaryPrismaDirectory, "migrations");
     await mkdir(temporaryMigrationsDirectory, { recursive: true });
@@ -51,36 +59,42 @@ try {
     for (const entry of migrations.filter((item) => item.isDirectory() && item.name !== transitionName)) {
       await cp(path.join(migrationsRoot, entry.name), path.join(temporaryMigrationsDirectory, entry.name), { recursive: true });
     }
-    await migrate(temporaryPrismaDirectory, sourceUrl, "source-legacy");
+    await migrate(temporaryPrismaDirectory, sourceMigrationUrl, "source-legacy");
     runSql("INSERT INTO \"User\" (\"id\",\"email\",\"emailNormalized\",\"displayName\",\"passwordHash\",\"role\",\"accountStatus\",\"emailVerifiedAt\",\"secondFactorMethod\",\"createdAt\",\"updatedAt\") VALUES ('backup-admin','admin@backup.invalid','admin@backup.invalid','Backup administrator','legacy-password-hash','OWNER'::\"UserRole\",'ACTIVE'::\"AccountStatus\",CURRENT_TIMESTAMP,'EMAIL'::\"SecondFactorMethod\",CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)");
     await cp(path.join(migrationsRoot, transitionName), path.join(temporaryMigrationsDirectory, transitionName), { recursive: true });
-    await migrate(temporaryPrismaDirectory, sourceUrl, "source-transition");
+    await migrate(temporaryPrismaDirectory, sourceMigrationUrl, "source-transition");
   } else if (baselinePresent) {
-    await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), sourceUrl, "source-baseline");
+    await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), sourceMigrationUrl, "source-baseline");
   } else {
     throw new Error("Backup validation migration plan is missing.");
   }
 
   sourceClient = new PrismaClient({ datasources: { db: { url: sourceUrl } } });
   await sourceClient.$connect();
+  await verifyAuditRoleBoundaries(sourceClient);
   await seedRepresentativeData();
   const expectedMigrations = await readMigrations(sourceClient);
   assert.ok(expectedMigrations.length > 0);
 
-  temporaryDirectory ??= await mkdtemp(path.join(os.tmpdir(), "virki-backup-validation-"));
   const dumpPath = path.join(temporaryDirectory, "virki-validation.dump");
-  const dump = runDockerBinary(["exec", "-i", containerName, "pg_dump", "-U", databaseUser, "-d", databaseName, "--format=custom", "--no-owner", "--no-privileges"]);
+  const dump = docker.exec(["pg_dump", "-U", databaseUser, "-d", databaseName, "--format=custom", "--no-owner", "--no-privileges"], { binary: true });
   assert.ok(dump.length > 0);
   await writeFile(dumpPath, dump, { mode: 0o600 });
 
-  runDocker(["exec", containerName, "createdb", "-U", databaseUser, restoreDatabaseName]);
-  runDockerBinary(["exec", "-i", containerName, "pg_restore", "--exit-on-error", "--clean", "--if-exists", "--no-owner", "--no-privileges", "-U", databaseUser, "-d", restoreDatabaseName], dump);
+  docker.exec(["createdb", "-U", databaseUser, restoreDatabaseName]);
+  docker.exec(["pg_restore", "--exit-on-error", "--clean", "--if-exists", "--no-owner", "--no-privileges", "-U", databaseUser, "-d", restoreDatabaseName], { input: dump, binary: true });
 
+  await runRoleInitialization(restoreDatabaseName);
   const restoredUrl = buildDatabaseUrl(port, restoreDatabaseName);
+  const restoredMigrationUrl = buildDatabaseUrl(port, restoreDatabaseName, "virki_migrator", rolePasswords.migrator);
   restoredClient = new PrismaClient({ datasources: { db: { url: restoredUrl } } });
   await restoredClient.$connect();
   assert.deepEqual(await readMigrations(restoredClient), expectedMigrations);
-  await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), restoredUrl, "restored");
+  for (const requiredMigration of ["20261019120000_runtime_audit_write_boundary", "20261020120000_elevation_credential_key_version"]) {
+    assert.ok(expectedMigrations.includes(requiredMigration), `Backup must retain applied migration ${requiredMigration}.`);
+  }
+  await migrate(path.join(repositoryRoot, "packages", "database", "prisma"), restoredMigrationUrl, "restored");
+  await verifyAuditRoleBoundaries(restoredClient);
   await verifyRestoredData();
 } catch (error) {
   validationError = error;
@@ -97,25 +111,7 @@ try {
 } catch (error) {
   cleanupErrors.push(error);
 }
-if (containerStarted) {
-  let result;
-  try {
-    result = spawnSync("docker", ["rm", "--force", "--volumes", containerName], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
-  } catch (error) {
-    cleanupErrors.push(new Error("Disposable backup validation container cleanup could not be started.", { cause: error }));
-  }
-  if (result && (result.error || result.status !== 0)) {
-    const detail = result.error?.message ?? `exit status ${result.status ?? "unknown"}`;
-    cleanupErrors.push(new Error(`Disposable backup validation container cleanup failed (${detail}).`, result.error ? { cause: result.error } : undefined));
-  }
-}
-if (temporaryDirectory) {
-  try {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-}
+cleanupErrors.push(...await finalizeBackupValidationArtifacts({ docker, temporaryDirectory, ownerEvidenceDirectory }));
 if (validationError && cleanupErrors.length > 0) {
   throw new AggregateError([validationError, ...cleanupErrors], "Backup validation failed and cleanup also failed; both errors are preserved.");
 }
@@ -330,7 +326,7 @@ async function migrate(prismaDirectory, databaseUrl, stage) {
   const prismaCli = path.join(repositoryRoot, "node_modules", "prisma", "build", "index.js");
   const result = spawnSync(process.execPath, [prismaCli, "migrate", "deploy", "--schema", path.join(prismaDirectory, "schema.prisma")], {
     cwd: repositoryRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl },
+    env: { ...process.env, DATABASE_URL: databaseUrl, MIGRATION_DATABASE_URL: databaseUrl },
     encoding: "utf8",
     windowsHide: true,
     timeout: 120_000,
@@ -339,54 +335,74 @@ async function migrate(prismaDirectory, databaseUrl, stage) {
   if (result.error || result.status !== 0) throw new Error(describeBackupMigrationFailure(result, stage));
 }
 
+async function runRoleInitialization(database) {
+  const scriptPath = path.join(repositoryRoot, "infra", "postgres-init", "10-virki-database-roles.sh");
+  docker.exec(["sh", "-s"], {
+    environment: {
+      POSTGRES_DB: database,
+      POSTGRES_USER: databaseUser,
+      POSTGRES_PASSWORD: databasePassword,
+      VIRKI_RUNTIME_DB_PASSWORD: rolePasswords.runtime,
+      VIRKI_MIGRATOR_DB_PASSWORD: rolePasswords.migrator,
+      VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD: rolePasswords.auditMaintenance,
+      AUDIT_LOG_RETENTION_DAYS: "180",
+    },
+    input: await readFile(scriptPath),
+    timeout: 120_000,
+  });
+}
+
 async function readMigrations(databaseClient) {
   const rows = await databaseClient.$queryRaw`SELECT "migration_name" FROM "_prisma_migrations" ORDER BY "started_at" ASC`;
   return rows.map((row) => row.migration_name);
 }
 
+async function verifyAuditRoleBoundaries(databaseClient) {
+  const [privileges] = await databaseClient.$queryRaw`
+    SELECT
+      has_table_privilege('virki_runtime', 'public."AuditLog"', 'INSERT') AS runtime_table_insert,
+      has_column_privilege('virki_runtime', 'public."AuditLog"', 'eventType', 'INSERT') AS runtime_event_insert,
+      has_column_privilege('virki_runtime', 'public."AuditLog"', 'createdAt', 'INSERT') AS runtime_timestamp_insert,
+      has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'SELECT') AS maintenance_select,
+      has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'INSERT') AS maintenance_insert,
+      has_table_privilege('virki_audit_maintenance', 'public."AuditLog"', 'DELETE') AS maintenance_delete,
+      has_function_privilege('virki_audit_maintenance', 'virki_security.delete_expired_audit_logs()', 'EXECUTE') AS maintenance_cleanup_execute,
+      has_function_privilege('virki_runtime', 'virki_security.delete_expired_audit_logs()', 'EXECUTE') AS runtime_cleanup_execute,
+      (SELECT pg_get_userbyid(namespace.nspowner) FROM pg_namespace AS namespace WHERE namespace.nspname = 'virki_security') AS security_schema_owner
+  `;
+  assert.deepEqual(privileges, {
+    runtime_table_insert: false,
+    runtime_event_insert: true,
+    runtime_timestamp_insert: true,
+    maintenance_select: false,
+    maintenance_insert: false,
+    maintenance_delete: false,
+    maintenance_cleanup_execute: true,
+    runtime_cleanup_execute: false,
+    security_schema_owner: "virki_migrator",
+  });
+}
+
 async function waitForDatabase() {
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    const result = spawnSync("docker", ["inspect", "--format", "{{.State.Health.Status}}", containerName], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-    if (result.status === 0 && result.stdout.trim() === "healthy") return;
+    if (docker.state() === "healthy") return;
     await delay(1_000);
   }
   throw new Error("Disposable PostgreSQL did not become healthy.");
 }
 
-function readPublishedPort() {
-  const result = spawnSync("docker", ["port", containerName, "5432/tcp"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-  const match = result.status === 0 ? result.stdout.match(/127\.0\.0\.1:(\d+)/u) : null;
-  if (!match) throw new Error("Disposable PostgreSQL port was not loopback-bound.");
-  return match[1];
-}
-
-function buildDatabaseUrl(port, database) {
+function buildDatabaseUrl(port, database, username = databaseUser, password = databasePassword) {
   const url = new URL("postgresql://127.0.0.1");
-  url.username = databaseUser;
-  url.password = databasePassword;
+  url.username = username;
+  url.password = password;
   url.port = port;
   url.pathname = `/${database}`;
   return url.toString();
 }
 
 function runSql(sql) {
-  const result = spawnSync("docker", ["exec", "-i", containerName, "psql", "-U", databaseUser, "-d", databaseName, "-v", "ON_ERROR_STOP=1"], {
+  docker.exec(["psql", "-U", databaseUser, "-d", databaseName, "-v", "ON_ERROR_STOP=1"], {
     input: sql,
-    encoding: "utf8",
-    windowsHide: true,
     timeout: 120_000,
-    maxBuffer: 10 * 1024 * 1024,
   });
-  if (result.error || result.status !== 0) throw new Error("Disposable backup validation SQL failed.");
-}
-
-function runDocker(args) {
-  const result = spawnSync("docker", args, { encoding: "utf8", windowsHide: true, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
-  if (result.error || result.status !== 0) throw new Error("Disposable backup validation Docker command failed.");
-}
-
-function runDockerBinary(args, input) {
-  const result = spawnSync("docker", args, { input, encoding: null, windowsHide: true, timeout: 120_000, maxBuffer: 100 * 1024 * 1024 });
-  if (result.error || result.status !== 0) throw new Error("Disposable PostgreSQL backup command failed.");
-  return result.stdout;
 }

@@ -9,28 +9,147 @@ const acceptedFindings = new Map([
   ["js/user-controlled-bypass|scripts/e2e/jwks-server.mjs|ebcb3e6db1dd4911:1|33", 1],
 ]);
 
+function invalidSarif(message) {
+  throw new Error(`Invalid SARIF: ${message}`);
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// CodeQL's documented SARIF contains rules for queries in the analysis and
+// artifacts for files referenced by results. Neither is a coverage inventory.
+// Keep this validator structural; only the exact-SHA hosted workflow provides
+// evidence that the scanner really ran on the intended checkout.
+function validateCodeqlRun(run) {
+  if (!isObject(run) || !Array.isArray(run.results)) invalidSarif("each run needs a results array.");
+  const driver = run.tool?.driver;
+  if (!isObject(driver) || driver.name !== "CodeQL command-line toolchain"
+    || driver.organization !== "GitHub" || typeof driver.version !== "string"
+    || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(driver.version)) {
+    invalidSarif("expected a versioned CodeQL CLI driver.");
+  }
+  if (!isObject(run.properties) || !["sarif-latest", "sarifv2.1.0"].includes(
+    run.properties["semmle.formatSpecifier"])) {
+    invalidSarif("CodeQL exporter format is missing.");
+  }
+  if (run.automationDetails !== undefined && (!isObject(run.automationDetails)
+    || !["/language:javascript-typescript", "/language:javascript-typescript/"].includes(run.automationDetails.id))) {
+    invalidSarif("unexpected CodeQL analysis category.");
+  }
+  // CodeQL can group query descriptors by pack with --sarif-group-rules-by-pack.
+  // A result referring to an extension must identify that component explicitly.
+  const extensions = run.tool.extensions ?? [];
+  if (!Array.isArray(driver.rules) || !Array.isArray(extensions)) invalidSarif("invalid rule component inventory.");
+  const ruleTables = [driver, ...extensions].map((component) => {
+    if (!isObject(component) || (component.rules !== undefined && !Array.isArray(component.rules))) {
+      invalidSarif("invalid CodeQL rule component.");
+    }
+    const rules = new Map();
+    for (const [index, descriptor] of (component.rules ?? []).entries()) {
+      if (!isObject(descriptor) || typeof descriptor.id !== "string" || !descriptor.id.trim()
+        || rules.has(descriptor.id)) invalidSarif("invalid or duplicate CodeQL rule descriptor.");
+      rules.set(descriptor.id, index);
+    }
+    return rules;
+  });
+  if (ruleTables.every((rules) => rules.size === 0)) invalidSarif("CodeQL rule descriptors are missing.");
+  if (!Array.isArray(run.artifacts)) invalidSarif("CodeQL artifact table is missing.");
+  const artifactPaths = new Map();
+  run.artifacts.forEach((artifact, index) => {
+    // SARIF 2.1 defines index on artifactLocation, not on artifact itself.
+    // The CodeQL CLI documentation has an inconsistent table entry naming
+    // artifact.index; do not make that non-schema property a release gate.
+    if (!isObject(artifact) || !isObject(artifact.location)) invalidSarif("invalid artifact entry.");
+    const location = artifact.location;
+    if (location.index !== undefined && location.index !== index) invalidSarif("inconsistent artifact index.");
+    const normalized = normalizeArtifactPath(location.uri);
+    if (!normalized || (location.uriBaseId !== undefined && location.uriBaseId !== "%SRCROOT%")) {
+      invalidSarif("invalid artifact source location.");
+    }
+    if (artifactPaths.has(normalized)) invalidSarif("duplicate artifact source location.");
+    artifactPaths.set(normalized, index);
+  });
+  if (run.invocations !== undefined) {
+    if (!Array.isArray(run.invocations) || run.invocations.some((invocation) =>
+      !isObject(invocation) || (invocation.executionSuccessful !== undefined
+        && invocation.executionSuccessful !== true)
+      || (invocation.toolExecutionNotifications !== undefined
+        && (!Array.isArray(invocation.toolExecutionNotifications)
+          || invocation.toolExecutionNotifications.some((notice) =>
+            !isObject(notice) || notice.level === "error"
+            || notice.descriptor?.id === "js/diagnostics/extraction-errors"))))) {
+      invalidSarif("CodeQL invocation reports failure or invalid diagnostics.");
+    }
+  }
+  for (const result of run.results) {
+    if (!isObject(result) || typeof result.ruleId !== "string"
+      || !isObject(result.message) || ![result.message.text, result.message.markdown]
+        .some((value) => typeof value === "string" && value.trim())) {
+      invalidSarif("result has no rule identifier or message.");
+    }
+    const toolComponent = result.rule?.toolComponent;
+    let componentIndex = 0;
+    if (toolComponent !== undefined) {
+      if (!isObject(toolComponent) || !Number.isSafeInteger(toolComponent.index)
+        || toolComponent.index < -1 || toolComponent.index >= extensions.length) {
+        invalidSarif("invalid CodeQL tool extension reference.");
+      }
+      componentIndex = toolComponent.index + 1;
+    }
+    const registeredIndex = ruleTables[componentIndex].get(result.ruleId);
+    if (registeredIndex === undefined) invalidSarif("result rule is absent from referenced component.");
+    if (!Number.isSafeInteger(result.ruleIndex) || result.ruleIndex !== registeredIndex) {
+      invalidSarif("result ruleIndex does not match ruleId.");
+    }
+    if (result.rule !== undefined && (!isObject(result.rule)
+      || (result.rule.id !== undefined && result.rule.id !== result.ruleId)
+      || (result.rule.index !== undefined && result.rule.index !== registeredIndex))) {
+      invalidSarif("result rule reference does not match its component.");
+    }
+    const locations = result.locations;
+    if (!Array.isArray(locations) || locations.length !== 1
+      || !isObject(locations[0]?.physicalLocation?.artifactLocation)) {
+      invalidSarif("result needs one source location.");
+    }
+    const location = locations[0].physicalLocation.artifactLocation;
+    if (location.uriBaseId !== undefined && location.uriBaseId !== "%SRCROOT%") {
+      invalidSarif("unexpected result source root.");
+    }
+    const normalized = location.uri === undefined ? undefined : normalizeArtifactPath(location.uri);
+    if (location.uri !== undefined && !normalized) invalidSarif("invalid result source location.");
+    if (location.index !== undefined && (!Number.isSafeInteger(location.index)
+      || location.index < 0 || location.index >= run.artifacts.length)) {
+      invalidSarif("result references an unknown artifact index.");
+    }
+    const artifactPath = location.index === undefined
+      ? normalized : normalizeArtifactPath(run.artifacts[location.index].location.uri);
+    if (!artifactPath || (normalized !== undefined && normalized !== artifactPath)
+      || artifactPaths.get(artifactPath) === undefined) {
+      invalidSarif("result source location is inconsistent with its artifact.");
+    }
+  }
+}
+
 export function evaluateCodeqlSarif(documents) {
-  if (!Array.isArray(documents) || documents.length === 0) {
-    throw new Error("Invalid SARIF: expected at least one SARIF document.");
+  if (!Array.isArray(documents) || documents.length !== 1) {
+    throw new Error("Invalid SARIF: expected one JavaScript/TypeScript SARIF document.");
   }
   const acceptedCounts = new Map();
   const violations = [];
   let totalResults = 0;
 
   for (const document of documents) {
-    if (!document || typeof document !== "object" || Array.isArray(document)
-      || document.version !== "2.1.0" || !Array.isArray(document.runs) || document.runs.length === 0) {
-      throw new Error("Invalid SARIF: expected version 2.1.0 and a non-empty runs array.");
+    if (!isObject(document) || document.version !== "2.1.0" || !Array.isArray(document.runs) || document.runs.length !== 1) {
+      throw new Error("Invalid SARIF: expected version 2.1.0 and exactly one run.");
     }
     for (const run of document.runs) {
-      if (!run || typeof run !== "object" || Array.isArray(run) || !Array.isArray(run.results)) {
-        throw new Error("Invalid SARIF: each run must contain a results array.");
-      }
+      validateCodeqlRun(run);
       for (const result of run.results) {
         totalResults += 1;
-        const ruleId = typeof result?.ruleId === "string" ? result.ruleId : "unknown-rule";
-        const uri = result?.locations?.[0]?.physicalLocation?.artifactLocation?.uri;
-        const artifactPath = normalizeArtifactPath(uri);
+        const ruleId = result.ruleId;
+        const location = result.locations[0].physicalLocation.artifactLocation;
+        const artifactPath = normalizeArtifactPath(location.uri ?? run.artifacts[location.index].location.uri);
         const lineFingerprint = result?.partialFingerprints?.primaryLocationLineHash;
         const columnFingerprint = result?.partialFingerprints?.primaryLocationStartColumnFingerprint;
         const hasFingerprint = typeof lineFingerprint === "string" && lineFingerprint.trim()
@@ -61,19 +180,25 @@ export function evaluateCodeqlSarif(documents) {
 }
 
 function normalizeArtifactPath(uri) {
-  if (typeof uri !== "string" || !uri.trim()) return "unknown-path";
-  let value = uri.trim().replaceAll("\\", "/");
+  if (typeof uri !== "string" || !uri || uri.trim() !== uri || /[\\?#]/u.test(uri)) return null;
+  let value = uri;
   try {
-    if (value.startsWith("file://")) value = new URL(value).pathname;
+    if (value.startsWith("file://")) {
+      const location = new URL(value);
+      if (location.protocol !== "file:" || location.host) return null;
+      value = location.pathname;
+    }
     value = decodeURIComponent(value);
   } catch {
-    return "invalid-path";
+    return null;
   }
   const workspaceMarker = "/github/workspace/";
-  const workspaceIndex = value.indexOf(workspaceMarker);
-  if (workspaceIndex >= 0) value = value.slice(workspaceIndex + workspaceMarker.length);
-  value = value.replace(/^\/+/, "").replace(/^\.\//u, "");
-  return value || "unknown-path";
+  if (value.startsWith(workspaceMarker)) value = value.slice(workspaceMarker.length);
+  else if (value.startsWith("/")) return null;
+  value = value.replace(/^\.\//u, "");
+  if (!value || /[:\\]/u.test(value) || [...value].some((char) => char.charCodeAt(0) < 32)
+    || value.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  return value;
 }
 
 export function readSarifDirectory(directory) {

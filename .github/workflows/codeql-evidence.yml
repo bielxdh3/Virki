@@ -1,4 +1,5 @@
 name: CodeQL evidence publication
+run-name: CodeQL evidence for ${{ github.event.workflow_run.head_sha }} (analysis run ${{ github.event.workflow_run.id }})
 
 on:
   workflow_run:

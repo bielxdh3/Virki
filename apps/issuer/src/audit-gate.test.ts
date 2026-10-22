@@ -3,7 +3,8 @@ import test from "node:test";
 import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
-import { installAuditResponseGate, requireAuditBeforeResponse } from "./audit-gate";
+import Koa from "koa";
+import { installAuditResponseGate, requireAuditBeforeResponse, useNativeOidcResponse } from "./audit-gate";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 
 test("each queued audit rejection is observed immediately while earlier writes remain pending", async (context) => {
@@ -271,6 +272,51 @@ test("queued duplicate response.end calls cannot crash the issuer or append data
   assert.equal(server.listening, true);
 });
 
+test("invalid response.end chunks fail closed before they enter the bounded audit buffer", async (context) => {
+  let finishAudit!: () => void;
+  let reachGate!: () => void;
+  const allowAudit = new Promise<void>((resolve) => { finishAudit = resolve; });
+  const requestReachedGate = new Promise<void>((resolve) => { reachGate = resolve; });
+  const callbackErrors: string[] = [];
+  let responseErrors = 0;
+  const server = createServer((request, response) => {
+    response.on("error", (error) => { responseErrors++; callbackErrors.push(error.message); });
+    installAuditResponseGate(response);
+    if (request.url === "/invalid-end") {
+      requireAuditBeforeResponse(response, allowAudit);
+      response.statusCode = 200;
+      const onEnd = (error?: Error): void => {
+        if (error) callbackErrors.push(error.message);
+      };
+      response.end({ invalid: true } as never, onEnd);
+      reachGate();
+      return;
+    }
+    response.statusCode = 204;
+    response.end();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const address = server.address() as AddressInfo;
+  const responsePromise = fetch(`http://127.0.0.1:${address.port}/invalid-end`, { redirect: "manual" });
+  await requestReachedGate;
+  finishAudit();
+  const response = await responsePromise;
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "temporarily_unavailable" });
+  assert.equal(callbackErrors.length, 1);
+  assert.match(callbackErrors[0] ?? "", /bounded audit buffer/u);
+  assert.equal(responseErrors, 0);
+  assert.equal(server.listening, true);
+});
+
 test("a required audit registered while the response waits is included before release", async (context) => {
   let finishFirstAudit!: () => void;
   let finishSecondAudit!: () => void;
@@ -319,4 +365,103 @@ test("a required audit registered while the response waits is included before re
   assert.equal(response.headers.get("location"), "https://client.invalid/callback?code=synthetic-code");
   assert.equal(await response.text(), "audited response");
   assert.equal(responseFinished, true);
+});
+
+test("a delayed native OIDC interactionFinished 303 stays complete when Koa automatic responses are disabled", async (context) => {
+  let persistAudit!: () => void;
+  let interactionFinished!: () => void;
+  const audit = new Promise<void>((resolve) => { persistAudit = resolve; });
+  const interactionEnded = new Promise<void>((resolve) => { interactionFinished = resolve; });
+  const serverErrors: string[] = [];
+
+  const app = new Koa();
+  app.use(async (koaContext) => {
+    // oidc-provider.interactionFinished() sets these headers and ends the native response.
+    requireAuditBeforeResponse(koaContext.res, audit);
+    useNativeOidcResponse(koaContext);
+    koaContext.res.statusCode = 303;
+    koaContext.res.setHeader("location", "/auth/resume");
+    koaContext.res.setHeader("content-length", "0");
+    koaContext.res.end();
+    interactionFinished();
+    // The native end is buffered until the audit succeeds; Koa must not emit a second response.
+  });
+  const koaCallback = app.callback();
+  const server = createServer((request, response) => {
+    response.on("error", (error) => { serverErrors.push(error.message); });
+    installAuditResponseGate(response);
+    koaCallback(request, response);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const address = server.address() as AddressInfo;
+  const result = new Promise<{ complete: boolean; aborted: boolean; status: number; headers: import("node:http").IncomingHttpHeaders; body: string }>((resolve, reject) => {
+    const request = httpRequest({ hostname: "127.0.0.1", port: address.port, path: "/interaction", headers: { connection: "close" } }, (response) => {
+      const chunks: Buffer[] = [];
+      let aborted = false;
+      response.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+      response.on("aborted", () => { aborted = true; });
+      response.on("error", () => undefined);
+      response.on("close", () => resolve({ complete: response.complete, aborted, status: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+
+  await interactionEnded;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  persistAudit();
+  const received = await result;
+  assert.equal(received.status, 303);
+  assert.equal(received.headers.location, "/auth/resume");
+  assert.equal(received.headers["content-length"], "0");
+  assert.equal(received.body, "");
+  assert.equal(received.aborted, false);
+  assert.equal(received.complete, true);
+  assert.deepEqual(serverErrors, []);
+});
+
+test("native interaction failure after respond=false is a bounded generic error, not a hanging connection", async (context) => {
+  const observedErrors: string[] = [];
+  const app = new Koa();
+  app.on("error", (error: Error) => { observedErrors.push(error.message); });
+  app.use(async (koaContext) => {
+    useNativeOidcResponse(koaContext);
+    // Models oidc-provider.interactionFinished() rejecting before it writes
+    // headers. The Koa native-response opt-out must not produce a timeout.
+    await Promise.reject(new Error("private interaction provider failure"));
+  });
+  const koaCallback = app.callback();
+  const server = createServer((request, response) => {
+    setIssuerSecurityHeaders(response);
+    installAuditResponseGate(response);
+    koaCallback(request, response);
+  });
+  server.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    if (server.listening) resolve();
+    else server.once("listening", resolve);
+  });
+  context.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const response = await fetch(`http://127.0.0.1:${address.port}/interaction/abcdefgh`, {
+    signal: AbortSignal.timeout(3_000),
+  });
+  assert.equal(response.status, 500);
+  assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/u);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.doesNotMatch(await response.text(), /private interaction provider failure/u);
+  assert.equal(observedErrors.length, 1);
 });

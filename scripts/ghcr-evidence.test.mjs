@@ -72,6 +72,19 @@ test("private OCI evidence requires exact SHA, run, kind and architecture", () =
   ]) assert.throws(() => evidenceTag(...values));
 });
 
+test("CodeQL digest logs come from the publisher run while the evidence tag stays bound to the analysis run", () => {
+  const { calls, execute } = fixture("valid", "codeql");
+  const proof = downloadGhcrEvidence({ revision, runId: 67890, logRunId: 98765, kind: "codeql", execute, repositoryRoot: "/repo" });
+  try {
+    const logCall = calls.find((call) => call.command === "gh" && call.args[0] === "run" && call.args[1] === "view");
+    assert.ok(logCall);
+    assert.equal(logCall.args[2], "98765");
+    assert.equal(proof.tag, `${revision}-67890-codeql`);
+  } finally {
+    rmSync(proof.directory, { recursive: true, force: true });
+  }
+});
+
 for (const kind of ["codeql", "images"]) {
   test(`pulls ${kind} from private GHCR by run-scoped tag without executing image`, () => {
     const { calls, execute } = fixture("valid", kind);

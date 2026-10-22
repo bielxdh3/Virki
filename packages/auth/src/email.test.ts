@@ -15,6 +15,18 @@ import {
   renderEmailMessage
 } from "./email";
 
+test("invitation display names are rendered only in a plain-text body", () => {
+  const displayName = "<img src=x onerror=alert(1)>";
+  const message = renderEmailMessage("ACCOUNT_INVITATION", "pt-BR", {
+    displayName,
+    recipientEmail: "recipient@example.invalid",
+    actionUrl: "https://portal.example.invalid/recover/open?request=synthetic"
+  });
+
+  assert.equal(message.text.startsWith(`${displayName},\n`), true);
+  assert.equal(Object.hasOwn(message, "html"), false);
+});
+
 test("production email is unavailable without a real transport or outbox key", () => {
   assert.deepEqual(getEmailTransportStatus({ NODE_ENV: "production" }), {
     state: "unavailable",
@@ -114,6 +126,20 @@ test("protected email values are encrypted at rest and reconstruct only in memor
     code: "123456",
     actionUrl: "https://biel.dev.br/activate?token=raw"
   });
+});
+
+test("protected email values reject shortened authentic GCM tags", () => {
+  const env = { NODE_ENV: "test" };
+  const payload = protectEmailPayload({ publicValues: {}, protectedValues: { code: "123456" } }, env);
+  assert.ok(payload.protectedValues);
+  const shortened = {
+    ...payload,
+    protectedValues: {
+      ...payload.protectedValues,
+      tag: Buffer.from(payload.protectedValues.tag, "base64url").subarray(0, 4).toString("base64url")
+    }
+  };
+  assert.throws(() => decryptEmailPayload(shortened, env));
 });
 
 test("deterministic transport and localized templates stay provider-neutral", async () => {

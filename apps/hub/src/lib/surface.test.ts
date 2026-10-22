@@ -18,6 +18,9 @@ test("return targets remain relative and reject protocol-relative or auth-loop d
 
 test("return targets are scoped to the selected surface and role", () => {
   assert.equal(safeReturnTo("/admin/accounts", "hub", "ADMIN"), "/admin/accounts");
+  assert.equal(safeReturnTo("/account/security", "hub"), "/account/security");
+  assert.equal(safeReturnTo("/account/security?returnTo=%2Fadmin%2Fsecurity", "hub", "ADMIN"), "/account/security?returnTo=%2Fadmin%2Fsecurity");
+  assert.equal(safeReturnTo("/account/security", "hub", "USER"), null);
   assert.equal(safeReturnTo("/admin/accounts", "portal", "USER"), null);
   assert.equal(safeReturnTo("/interaction/abcdefgh", "hub", "ADMIN"), null);
   assert.equal(safeReturnTo("/interaction/abcdefgh", "portal", "USER"), "/interaction/abcdefgh");

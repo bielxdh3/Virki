@@ -263,10 +263,62 @@ $$;
 GRANT EXECUTE ON FUNCTION public.digest(text, text) TO virki_migrator;
 
 DO $$
+DECLARE
+  migrator_oid oid;
+  security_owner_oid oid;
+  bootstrap_oid oid;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_migrator') THEN
+    SELECT oid INTO migrator_oid FROM pg_roles WHERE rolname = 'virki_migrator';
     IF to_regnamespace('virki_security') IS NULL THEN
       EXECUTE 'CREATE SCHEMA virki_security AUTHORIZATION virki_migrator';
+    ELSE
+      SELECT namespace.nspowner INTO security_owner_oid
+      FROM pg_namespace AS namespace
+      WHERE namespace.nspname = 'virki_security';
+
+      IF security_owner_oid <> migrator_oid THEN
+        SELECT oid INTO bootstrap_oid FROM pg_roles WHERE rolname = current_user;
+
+        IF security_owner_oid = bootstrap_oid
+          AND to_regclass('virki_security.audit_retention_policy') IS NOT NULL
+          AND to_regprocedure('virki_security.enforce_audit_log_timestamp()') IS NOT NULL
+          AND to_regprocedure('virki_security.delete_expired_audit_logs()') IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pg_class AS relation
+            JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'virki_security'
+              AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+              AND relation.relname <> 'audit_retention_policy'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pg_proc AS routine
+            JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+            WHERE namespace.nspname = 'virki_security'
+              AND NOT (
+                (routine.proname = 'enforce_audit_log_timestamp' AND routine.pronargs = 0)
+                OR (routine.proname = 'delete_expired_audit_logs' AND routine.pronargs = 0)
+                OR (
+                  routine.proname = 'delete_expired_audit_logs'
+                  AND routine.pronargs = 1
+                  AND routine.proargtypes[0] = 'integer'::regtype
+                )
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pg_type AS type
+            JOIN pg_namespace AS namespace ON namespace.oid = type.typnamespace
+            WHERE namespace.nspname = 'virki_security'
+              AND type.typtype IN ('d', 'e', 'm', 'r')
+          ) THEN
+          EXECUTE 'ALTER SCHEMA virki_security OWNER TO virki_migrator';
+        ELSE
+          RAISE EXCEPTION 'virki_security must be owned by virki_migrator';
+        END IF;
+      END IF;
     END IF;
     IF NOT EXISTS (
       SELECT 1

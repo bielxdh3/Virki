@@ -129,6 +129,15 @@ test("development Hub keeps its explicit local Access opt-out", async () => {
   assert.equal(response.status, 307);
 });
 
+test("unauthenticated Hub account-security requests keep a safe ADMIN login return path", async () => {
+  const response = await evaluateProxyRequest(
+    new NextRequest("https://hub.biel.dev.br/account/security?tab=mfa", { headers: { host: "hub.biel.dev.br" } }),
+    { ...env, NODE_ENV: "development", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false" }
+  );
+  assert.equal(response.status, 307);
+  assert.equal(response.headers.get("location"), "https://hub.biel.dev.br/login?returnTo=%2Faccount%2Fsecurity%3Ftab%3Dmfa");
+});
+
 const nonceOf = (csp: string) => /'nonce-([A-Za-z0-9+/=]+)'/u.exec(csp)?.[1];
 
 test("every proxy response path carries one nonce CSP with the hardened directives", async () => {

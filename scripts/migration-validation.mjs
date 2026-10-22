@@ -1,26 +1,31 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { cp, mkdtemp, mkdir, readFile, rm, readdir, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { cp, mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
+import {
+  LocalBackupDocker, assertLocalMigrationEnvironment, createBackupOwnerEvidence, finalizeBackupValidationArtifacts,
+} from "./lib/backup-validation-docker.mjs";
 
-const repositoryRoot = process.cwd();
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsRoot = path.join(repositoryRoot, "packages", "database", "prisma", "migrations");
 const baselineName = "0_init";
 const transitionName = "20260922090000_total_identity_security_rebaseline";
-const containerName = `virki-migration-validation-${process.pid}`;
 const databaseName = "virki_migration_validation";
 const databaseUser = "virki_validation";
-const databasePassword = "migration-validation-only";
-let containerStarted = false;
+const databasePassword = randomBytes(32).toString("hex");
+let docker;
 let temporaryDirectory;
+let ownerEvidenceDirectory;
 let client;
 let validationError;
 
 try {
+  assertLocalMigrationEnvironment();
   const migrationDirectories = (await readdir(migrationsRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
@@ -32,22 +37,19 @@ try {
   if (transitionPlan) assert.equal(legacyDirectories.length, 14, "Expected the production's fourteen applied migrations before transition.");
   const additiveDirectories = baselinePlan ? migrationDirectories.filter((name) => name !== baselineName) : [];
 
-  runDocker([
-    "run", "--detach", "--name", containerName, "--publish", "127.0.0.1::5432",
-    "--env", `POSTGRES_DB=${databaseName}`, "--env", `POSTGRES_USER=${databaseUser}`,
-    "--env", `POSTGRES_PASSWORD=${databasePassword}`,
-    "--health-cmd", `pg_isready -h 127.0.0.1 -U ${databaseUser} -d ${databaseName}`,
-    "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "60",
-    "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
-  ]);
-  containerStarted = true;
+  temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "virki-migration-validation-"));
+  const dockerConfigDirectory = path.join(temporaryDirectory, "docker-config");
+  await mkdir(dockerConfigDirectory, { recursive: true });
+  docker = new LocalBackupDocker({ configDirectory: dockerConfigDirectory, fixture: "prisma-migration" });
+  docker.engine();
+  ownerEvidenceDirectory = await createBackupOwnerEvidence(docker);
+  docker.start({ database: databaseName, user: databaseUser, password: databasePassword });
   await waitForDatabase();
-  const port = readPublishedPort();
+  const port = docker.port();
   const databaseUrl = buildDatabaseUrl(port);
 
   runSql("CREATE ROLE virki_audit_maintenance NOLOGIN");
 
-  temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "virki-migration-validation-"));
   const temporaryPrismaDirectory = path.join(temporaryDirectory, "prisma");
   const temporaryMigrationsDirectory = path.join(temporaryPrismaDirectory, "migrations");
   await mkdir(temporaryMigrationsDirectory, { recursive: true });
@@ -118,25 +120,7 @@ try {
 } catch (error) {
   cleanupErrors.push(error);
 }
-if (containerStarted) {
-  let result;
-  try {
-    result = spawnSync("docker", ["rm", "--force", "--volumes", containerName], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
-  } catch (error) {
-    cleanupErrors.push(new Error("Disposable migration validation container cleanup could not be started.", { cause: error }));
-  }
-  if (result && (result.error || result.status !== 0)) {
-    const detail = result.error?.message ?? `exit status ${result.status ?? "unknown"}`;
-    cleanupErrors.push(new Error(`Disposable migration validation container cleanup failed (${detail}).`, result.error ? { cause: result.error } : undefined));
-  }
-}
-if (temporaryDirectory) {
-  try {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-}
+cleanupErrors.push(...await finalizeBackupValidationArtifacts({ docker, temporaryDirectory, ownerEvidenceDirectory }));
 if (validationError && cleanupErrors.length > 0) {
   throw new AggregateError([validationError, ...cleanupErrors], "Migration validation failed and cleanup also failed; both errors are preserved.");
 }
@@ -396,13 +380,7 @@ function describeDependencyFailure(output) {
 }
 
 function runSql(sql) {
-  const result = spawnSync("docker", ["exec", "-i", containerName, "psql", "-U", databaseUser, "-d", databaseName, "-At", "-v", "VERBOSITY=sqlstate", "-v", "ON_ERROR_STOP=1"], {
-    input: sql,
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 120_000,
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  const result = docker.execResult(["psql", "-U", databaseUser, "-d", databaseName, "-At", "-v", "VERBOSITY=sqlstate", "-v", "ON_ERROR_STOP=1"], { input: sql });
   if (result.error || result.status !== 0) {
     const diagnostic = `${result.stdout?.toString() ?? ""}\n${result.stderr?.toString() ?? ""}`;
     const sqlState = diagnostic.match(/ERROR:\s*([0-9A-Z]{5}):/u)?.[1];
@@ -491,18 +469,10 @@ COMMIT;
 
 async function waitForDatabase() {
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    const result = spawnSync("docker", ["inspect", "--format", "{{.State.Health.Status}}", containerName], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-    if (result.status === 0 && result.stdout.trim() === "healthy") return;
+    if (docker.state() === "healthy") return;
     await delay(1_000);
   }
   throw new Error("Disposable PostgreSQL did not become healthy.");
-}
-
-function readPublishedPort() {
-  const result = spawnSync("docker", ["port", containerName, "5432/tcp"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-  const match = result.status === 0 ? result.stdout.match(/127\.0\.0\.1:(\d+)/u) : null;
-  if (!match) throw new Error("Disposable PostgreSQL port is not loopback-bound.");
-  return match[1];
 }
 
 function buildDatabaseUrl(port) {
@@ -512,9 +482,4 @@ function buildDatabaseUrl(port) {
   url.port = port;
   url.pathname = `/${databaseName}`;
   return url.toString();
-}
-
-function runDocker(args) {
-  const result = spawnSync("docker", args, { encoding: "utf8", windowsHide: true, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
-  if (result.error || result.status !== 0) throw new Error("Disposable migration validation Docker command failed.");
 }

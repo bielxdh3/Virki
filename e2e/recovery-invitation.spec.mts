@@ -4,13 +4,14 @@ import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
-import { hashRecoveryRequestKey, requestAccountRecovery } from "@virki/auth/security";
+import { hashEmailAddress, hashRecoveryRequestKey, requestAccountRecovery } from "@virki/auth/security";
 // @ts-expect-error The disposable-database guard is a JavaScript safety helper without a declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 // @ts-expect-error The LOW-05 diagnostics helper is a JavaScript test-only redaction boundary.
-import { classifyLow05NavigationError, classifyLow05Url, describeLow05Response } from "../scripts/e2e/low05-diagnostics.mjs";
+import { classifyLow05NavigationError, classifyLow05RequestBoundary, classifyLow05Url, describeLow05Response, isLow05ProtectedDocumentCacheControl } from "../scripts/e2e/low05-diagnostics.mjs";
 
 const portalUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://portal.localhost" : "https://portal.localhost:3001";
+const hubMode = process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
 const sessionCookieName = getSessionCookieName({ NODE_ENV: process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development" });
 const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
 
@@ -19,9 +20,134 @@ function hasLow05NoStoreDirectives(value: string): boolean {
   return ["no-store", "max-age=0", "must-revalidate"].every((directive) => directives.has(directive)) && !directives.has("public");
 }
 
+async function goBackToProtectedPage(page: import("@playwright/test").Page, priorSecurityOrigin: number): Promise<{ status: number; cacheControl: string }> {
+  const responses: import("@playwright/test").Response[] = [];
+  const observeProtectedDocument = (response: import("@playwright/test").Response) => {
+    const request = response.request();
+    const url = new URL(response.url());
+    if (request.frame() === page.mainFrame() && request.isNavigationRequest() &&
+        request.resourceType() === "document" && request.method() === "GET" &&
+        url.origin === new URL(portalUrl).origin && url.pathname === "/account/security") {
+      responses.push(response);
+    }
+  };
+  page.on("response", observeProtectedDocument);
+  try {
+    try {
+      await page.goBack({ waitUntil: "domcontentloaded" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // The protected history entry intentionally scrubs and reloads itself;
+      // an aborted first navigation is tolerated only if the expected secured
+      // document response, exact URL, and completed reload still follow.
+      if (!/page\.goBack: net::ERR_ABORTED/u.test(message)) throw error;
+    }
+    await expect(page).toHaveURL(`${portalUrl}/account/security`);
+    await waitForHistoryRevalidation(page, priorSecurityOrigin);
+    await expect(page).toHaveURL(`${portalUrl}/account/security`);
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    // Assert the last security GET observed through the guard reload, not an
+    // earlier, possibly weaker response to the history traversal itself.
+    const finalResponse = responses.at(-1);
+    expect(finalResponse, "fresh history reload must have a main-frame security GET").toBeDefined();
+    return { status: finalResponse!.status(), cacheControl: await finalResponse!.headerValue("cache-control") ?? "" };
+  } finally {
+    page.off("response", observeProtectedDocument);
+  }
+}
+
+async function waitForHistoryRevalidation(page: import("@playwright/test").Page, priorOrigin: number): Promise<void> {
+  // Both protected routes deliberately scrub and reload a history-restored
+  // document. A preexisting navigation entry with type "reload" is not
+  // evidence of a NEW document. Require a later performance time origin.
+  await expect.poll(async () => {
+    try {
+      return await page.evaluate((previous) => {
+        const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+        return navigation?.type === "reload" && performance.timeOrigin > previous;
+      }, priorOrigin);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/(?:execution context was destroyed|page is navigating|frame was detached)/iu.test(message)) throw error;
+      return false;
+    }
+  }, { timeout: 15_000, message: "History restoration must finish a newly loaded protected document" }).toBe(true);
+}
+
+async function goForwardToPortalPage(page: import("@playwright/test").Page, priorPortalOrigin: number): Promise<void> {
+  try {
+    await page.goForward({ waitUntil: "domcontentloaded" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // The protected page deliberately forces a second full navigation on
+    // history restoration. Chromium can abort the first document navigation
+    // while the browser still completes the forward traversal. Do not treat
+    // other errors as transient, and require the intended URL and UI below.
+    if (!/page\.goForward: net::ERR_ABORTED/u.test(message)) throw error;
+  }
+  await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
+  await waitForHistoryRevalidation(page, priorPortalOrigin);
+  await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
+  await expect(page.getByRole("heading", { level: 1, name: "Projetos", exact: true })).toBeVisible();
+}
+
 test.skip(!e2eDatabaseUrl, "Recovery/invitation E2E requires an explicit disposable PostgreSQL fixture.");
 
 type AuthFixture = { admin: { id: string }; user: { id: string; email: string; password: string } };
+
+test("public recovery form gives known and unknown addresses the same browser response", async ({ browser }) => {
+  test.setTimeout(45_000);
+  if (!e2eDatabaseUrl) throw new Error("Recovery/invitation E2E database is unavailable.");
+  assertDisposableCoreTestDatabase(e2eDatabaseUrl, process.env);
+  process.env.DATABASE_URL = e2eDatabaseUrl;
+  process.env.VIRKI_PORTAL_URL = portalUrl;
+  process.env.VIRKI_PORTAL_HOSTNAME = "portal.localhost";
+  const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
+  if (!fixturePath) throw new Error("Recovery/invitation E2E fixture path is unavailable.");
+  const fixture = JSON.parse(await (await import("node:fs/promises")).readFile(fixturePath, "utf8")) as AuthFixture;
+  const database = new PrismaClient({ datasources: { db: { url: e2eDatabaseUrl } } });
+  const unknownEmail = `${randomUUID()}@unknown.e2e.invalid`;
+  const responses: Array<{ url: string; httpStatus: number; body: string; status: string; heading: string }> = [];
+  try {
+    const knownRequestCountBefore = await database.accountRecoveryRequest.count({ where: { userId: fixture.user.id } });
+    const knownMessageCountBefore = await database.emailOutboxMessage.count({ where: { recipientEmail: fixture.user.email, kind: "ACCOUNT_RECOVERY" } });
+    for (const email of [fixture.user.email, unknownEmail]) {
+      const context = await browser.newContext();
+      try {
+        const page = await context.newPage();
+        await page.goto(`${portalUrl}/recover`);
+        await page.getByLabel("E-mail", { exact: true }).fill(email);
+        const actionResponsePromise = page.waitForResponse((response) => {
+          const responseUrl = new URL(response.url());
+          return response.request().method() === "POST" && responseUrl.origin === new URL(portalUrl).origin && responseUrl.pathname === "/recover";
+        });
+        await page.getByRole("button", { name: "Enviar instruções", exact: true }).click();
+        const actionResponse = await actionResponsePromise;
+        await expect(page).toHaveURL(`${portalUrl}/recover?sent=1`);
+        const status = page.getByRole("status");
+        await expect(status).toHaveText("Se a conta puder ser recuperada, você receberá instruções no e-mail cadastrado.");
+        responses.push({
+          url: new URL(page.url()).pathname + new URL(page.url()).search,
+          httpStatus: actionResponse.status(),
+          body: await page.locator("main").innerText(),
+          status: await status.innerText(),
+          heading: await page.getByRole("heading", { level: 1 }).innerText()
+        });
+      } finally {
+        await context.close();
+      }
+    }
+    expect(responses[0]).toEqual(responses[1]);
+    const knownRequestCountAfter = await database.accountRecoveryRequest.count({ where: { userId: fixture.user.id } });
+    const knownMessageCountAfter = await database.emailOutboxMessage.count({ where: { recipientEmail: fixture.user.email, kind: "ACCOUNT_RECOVERY" } });
+    expect(knownRequestCountAfter).toBe(knownRequestCountBefore + 1);
+    expect(knownMessageCountAfter).toBe(knownMessageCountBefore + 1);
+    expect(await database.accountRecoveryRequest.count({ where: { emailAddressHash: hashEmailAddress(unknownEmail) } })).toBe(0);
+    expect(await database.emailOutboxMessage.count({ where: { recipientEmail: unknownEmail, kind: "ACCOUNT_RECOVERY" } })).toBe(0);
+  } finally {
+    await database.$disconnect();
+  }
+});
 
 test("invitation purpose survives URL spoofing and activates a USER once with onboarding copy", async ({ browser }) => {
   test.setTimeout(45_000);
@@ -84,7 +210,7 @@ test("invitation purpose survives URL spoofing and activates a USER once with on
     expect(await database.accountRecoveryRequest.count({ where: { userId: account.id, purpose: "INVITATION", status: "CONSUMED" } })).toBe(1);
 
     await page.goto(actionUrl);
-    await expect(page.getByRole("alert")).toContainText("Não foi possível abrir este link.");
+    await expect(page.locator('p.form-error[role="alert"]')).toContainText("Não foi possível abrir este link.");
     await expect(page.getByLabel("Criar senha", { exact: true })).toHaveCount(0);
     expect(await database.user.findUnique({ where: { id: account.id }, select: { passwordHash: true } })).toEqual({ passwordHash: activated?.passwordHash });
   } finally {
@@ -226,9 +352,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
       initialUrl,
       finalUrl: classifyLow05Url(page.url(), portalUrl),
       requestBoundary: {
-        origin: portalUrl.startsWith("https://portal.localhost") ? "portal" : "other",
-        scheme: portalUrl.startsWith("https://") ? "https" : "other",
-        originHasExplicitPort: Boolean(new URL(portalUrl).port),
+        ...classifyLow05RequestBoundary(portalUrl, hubMode),
         productionHubMode: process.env.VIRKI_E2E_HUB_MODE === "production"
       },
       gotoResponse: unauthenticatedResponse ? { method: "GET", ...describeLow05Response(unauthenticatedResponse, unauthenticatedResponse.url(), portalUrl) } : null,
@@ -303,7 +427,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     sessionId = activeSession.id;
 
     const securityResponse = await page.reload();
-    const securityCacheControl = securityResponse?.headers()["cache-control"] ?? "";
+    const securityCacheControl = await securityResponse?.headerValue("cache-control") ?? "";
     const securityResponseIsNoStore = /(?:^|,)\s*no-store(?:,|$)/iu.test(securityCacheControl);
     if (process.env.VIRKI_E2E_HUB_MODE === "production") {
       expect(securityCacheControl).toBe("private, no-store, max-age=0, must-revalidate");
@@ -314,10 +438,10 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
       console.log("LOW-05 production BFCache proof unavailable: isolated E2E uses Next development mode.");
     }
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
-    const actionResponses: Array<{ status: number; cacheControl: string }> = [];
+    const actionResponses: Array<Promise<{ status: number; cacheControl: string }>> = [];
     page.on("response", (response) => {
       if (response.request().method() === "POST" && new URL(response.url()).origin === new URL(portalUrl).origin) {
-        actionResponses.push({ status: response.status(), cacheControl: response.headers()["cache-control"] ?? "" });
+        actionResponses.push(response.headerValue("cache-control").then((cacheControl) => ({ status: response.status(), cacheControl: cacheControl ?? "" })));
       }
     });
     const factorSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Autenticação multifator", exact: true }) });
@@ -328,7 +452,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     await expect(secretElement).toHaveCount(1);
     const secret = (await secretElement.textContent())?.trim() ?? "";
     if (!/^[A-Z2-7]+=*$/u.test(secret)) throw new Error("E2E TOTP enrollment secret was invalid.");
-    const beginAction = actionResponses[beginActionIndex];
+    const beginAction = (await Promise.all(actionResponses))[beginActionIndex];
     if (!beginAction) throw new Error("E2E TOTP enrollment action response was not observed.");
     if (process.env.VIRKI_E2E_HUB_MODE === "production") {
       expect(hasLow05NoStoreDirectives(beginAction.cacheControl)).toBe(true);
@@ -342,7 +466,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     if (codes.length !== 10 || codes.some((recoveryCode) => !/^[A-Z0-9-]{8,32}$/u.test(recoveryCode))) {
       throw new Error("E2E TOTP recovery codes were invalid.");
     }
-    const activateAction = actionResponses[activateActionIndex];
+    const activateAction = (await Promise.all(actionResponses))[activateActionIndex];
     if (!activateAction) throw new Error("E2E TOTP activation action response was not observed.");
     if (process.env.VIRKI_E2E_HUB_MODE === "production") {
       expect(hasLow05NoStoreDirectives(activateAction.cacheControl)).toBe(true);
@@ -355,25 +479,36 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     expect(visibleState.storage).toBe(false);
     expect(await database.recoveryCode.count({ where: { userId: fixture.user.id, usedAt: null } })).toBe(10);
 
+    const firstSecurityOrigin = await page.evaluate(() => performance.timeOrigin);
     await page.goto(`${portalUrl}/?history-probe=low05`);
     await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
-    await page.goBack({ waitUntil: "domcontentloaded" });
-    await expect(page).toHaveURL(`${portalUrl}/account/security`);
-    const browserCacheEvidence = await page.evaluate(() => {
-      type NotRestoredReasonTree = { reasons?: Array<{ reason: string }>; children?: NotRestoredReasonTree[] };
-      type NavigationWithNotRestoredReasons = PerformanceNavigationTiming & { notRestoredReasons?: NotRestoredReasonTree | null };
-      const navigation = performance.getEntriesByType("navigation")[0] as NavigationWithNotRestoredReasons | undefined;
-      const collectReasons = (tree: NotRestoredReasonTree | null | undefined): string[] => tree
-        ? [...(tree.reasons ?? []).map(({ reason }) => reason), ...(tree.children ?? []).flatMap(collectReasons)]
-        : [];
-      return {
-        pagehidePersisted: window.sessionStorage.getItem("virki-low05-security-pagehide-persisted"),
-        pageshowPersisted: window.sessionStorage.getItem("virki-low05-security-pageshow-persisted"),
-        lifecycleEvents: JSON.parse(window.sessionStorage.getItem("virki-low05-security-lifecycle-events") ?? "[]") as Array<{ type: string; persisted: boolean }>,
-        notRestoredReasons: collectReasons(navigation?.notRestoredReasons)
-      };
+    const firstPortalOrigin = await page.evaluate(() => performance.timeOrigin);
+    const historyBackResponse = await goBackToProtectedPage(page, firstSecurityOrigin);
+    expect(historyBackResponse.status).toBe(200);
+    // Next dev overwrites the protected Proxy header when rendering documents.
+    // Production browser history always requires the full no-store policy.
+    expect(isLow05ProtectedDocumentCacheControl(historyBackResponse.cacheControl, hubMode),
+      `LOW-05 secure history reload header in ${hubMode}: ${historyBackResponse.cacheControl || "absent"}`).toBe(true);
+    // Protected history traversal deliberately reloads the document during hydration.
+    // Retry only reads interrupted by a real navigation, never failed security assertions.
+    const browserCacheEvidence = await readDuringStableNavigation(page, async () => {
+      await expect(page).toHaveURL(`${portalUrl}/account/security`);
+      return page.evaluate(() => {
+        type NotRestoredReasonTree = { reasons?: Array<{ reason: string }>; children?: NotRestoredReasonTree[] };
+        type NavigationWithNotRestoredReasons = PerformanceNavigationTiming & { notRestoredReasons?: NotRestoredReasonTree | null };
+        const navigation = performance.getEntriesByType("navigation")[0] as NavigationWithNotRestoredReasons | undefined;
+        const collectReasons = (tree: NotRestoredReasonTree | null | undefined): string[] => tree
+          ? [...(tree.reasons ?? []).map(({ reason }) => reason), ...(tree.children ?? []).flatMap(collectReasons)]
+          : [];
+        return {
+          pagehidePersisted: window.sessionStorage.getItem("virki-low05-security-pagehide-persisted"),
+          pageshowPersisted: window.sessionStorage.getItem("virki-low05-security-pageshow-persisted"),
+          lifecycleEvents: JSON.parse(window.sessionStorage.getItem("virki-low05-security-lifecycle-events") ?? "[]") as Array<{ type: string; persisted: boolean }>,
+          notRestoredReasons: collectReasons(navigation?.notRestoredReasons)
+        };
+      });
     });
-    console.log(`LOW-05 browser history probe: cache-control=${securityResponse?.headers()["cache-control"] ?? "unobserved"}; pagehide.persisted=${browserCacheEvidence.pagehidePersisted ?? "unobserved"}; pageshow.persisted=${browserCacheEvidence.pageshowPersisted ?? "unobserved"}; lifecycle=${JSON.stringify(browserCacheEvidence.lifecycleEvents)}; notRestoredReasons=${browserCacheEvidence.notRestoredReasons.join(",") || "none"}`);
+    console.log(`LOW-05 browser history probe: cache-control=${securityCacheControl || "unobserved"}; pagehide.persisted=${browserCacheEvidence.pagehidePersisted ?? "unobserved"}; pageshow.persisted=${browserCacheEvidence.pageshowPersisted ?? "unobserved"}; lifecycle=${JSON.stringify(browserCacheEvidence.lifecycleEvents)}; notRestoredReasons=${browserCacheEvidence.notRestoredReasons.join(",") || "none"}`);
     console.log(`LOW-05 production browser: chromium=${browser.version()}; document-cache-control=${securityCacheControl}; begin-action-cache-control=${beginAction.cacheControl}; recovery-action-cache-control=${activateAction.cacheControl}`);
     expect(browserCacheEvidence.pagehidePersisted).not.toBeNull();
     expect(browserCacheEvidence.pageshowPersisted).not.toBeNull();
@@ -386,10 +521,13 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     expect(backState.history).toBe(false);
     expect(backState.storage).toBe(false);
     expect(backState.forms).toBe(false);
-    await page.goForward({ waitUntil: "domcontentloaded" });
-    await expect(page).toHaveURL(`${portalUrl}/?history-probe=low05`);
-    await page.goBack({ waitUntil: "domcontentloaded" });
-    await expect(page).toHaveURL(`${portalUrl}/account/security`);
+    const firstSecurityReloadOrigin = await page.evaluate(() => performance.timeOrigin);
+    await goForwardToPortalPage(page, firstPortalOrigin);
+    const repeatHistoryBackResponse = await goBackToProtectedPage(page, firstSecurityReloadOrigin);
+    expect(repeatHistoryBackResponse.status).toBe(200);
+    expect(isLow05ProtectedDocumentCacheControl(repeatHistoryBackResponse.cacheControl, hubMode),
+      `LOW-05 repeat secure history reload header in ${hubMode}: ${repeatHistoryBackResponse.cacheControl || "absent"}`).toBe(true);
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
     const repeatBackState = await inspectSensitiveBrowserState(page, sensitiveValues);
     expect(repeatBackState.dom).toBe(false);
     expect(repeatBackState.accessibility).toBe(false);
@@ -452,23 +590,40 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
   }
 });
 
+async function readDuringStableNavigation<T>(page: import("@playwright/test").Page, read: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await page.waitForLoadState("load", { timeout: 10_000 });
+      return await read();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === 3 || !/(?:execution context was destroyed|page is navigating|frame was detached)/iu.test(message)) {
+        throw error;
+      }
+    }
+  }
+  throw new Error("The browser document did not stabilize after navigation.");
+}
+
 async function inspectSensitiveBrowserState(page: import("@playwright/test").Page, sensitiveValues: string[]) {
-  const html = await page.content();
-  const accessibleSnapshot = await page.locator("body").ariaSnapshot();
-  const pageState = await page.evaluate(() => ({
-    history: JSON.stringify(window.history.state ?? null),
-    storage: [window.localStorage, window.sessionStorage].flatMap((storage) => Object.keys(storage).map((key) => storage.getItem(key) ?? "")).join("\n"),
-    forms: Array.from(document.forms).flatMap((form) => Array.from(form.elements).map((element) => "value" in element ? String(element.value ?? "") : "")).join("\n"),
-    dom: document.documentElement.outerHTML
-  }));
-  const containsValue = (text: string) => sensitiveValues.some((value) => value.length > 0 && text.includes(value));
-  return {
-    dom: containsValue(html) || containsValue(pageState.dom),
-    accessibility: containsValue(accessibleSnapshot),
-    history: containsValue(pageState.history),
-    storage: containsValue(pageState.storage),
-    forms: containsValue(pageState.forms)
-  };
+  return readDuringStableNavigation(page, async () => {
+    const html = await page.content();
+    const accessibleSnapshot = await page.locator("body").ariaSnapshot();
+    const pageState = await page.evaluate(() => ({
+      history: JSON.stringify(window.history.state ?? null),
+      storage: [window.localStorage, window.sessionStorage].flatMap((storage) => Object.keys(storage).map((key) => storage.getItem(key) ?? "")).join("\n"),
+      forms: Array.from(document.forms).flatMap((form) => Array.from(form.elements).map((element) => "value" in element ? String(element.value ?? "") : "")).join("\n"),
+      dom: document.documentElement.outerHTML
+    }));
+    const containsValue = (text: string) => sensitiveValues.some((value) => value.length > 0 && text.includes(value));
+    return {
+      dom: containsValue(html) || containsValue(pageState.dom),
+      accessibility: containsValue(accessibleSnapshot),
+      history: containsValue(pageState.history),
+      storage: containsValue(pageState.storage),
+      forms: containsValue(pageState.forms)
+    };
+  });
 }
 
 function currentTotpCode(secret: string, now = Date.now()): string {

@@ -66,12 +66,17 @@ export class PrismaOidcAdapter implements Adapter {
         throw new Error("OIDC redirect URI is no longer registered.");
       }
       if (grantBoundModels.has(this.model)) {
-        // An account-level purge deletes the provider Grant while holding the User row lock taken above, so this check serializes with it.
-        const providerGrant = await transaction.oidcArtifact.findUnique({
-          where: { model_idHash: { model: "Grant", idHash: hashOidcIdentifier(payload.grantId as string) } },
-          select: { expiresAt: true }
-        });
-        if (!providerGrant || (providerGrant.expiresAt && providerGrant.expiresAt <= new Date())) throw new errors.InvalidGrant("OIDC provider grant is no longer active.");
+        // Lock the provider Grant itself so replay revocation cannot delete the Grant
+        // between this check and the grant-bound artifact upsert.
+        const providerGrants = await transaction.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "OidcArtifact"
+          WHERE "model" = 'Grant'
+            AND "idHash" = ${hashOidcIdentifier(payload.grantId as string)}
+            AND ("expiresAt" IS NULL OR "expiresAt" > ${new Date()})
+          FOR UPDATE
+        `;
+        if (providerGrants.length !== 1) throw new errors.InvalidGrant("OIDC provider grant is no longer active.");
       }
       await transaction.oidcArtifact.upsert(artifact);
     });
@@ -117,7 +122,12 @@ export class PrismaOidcAdapter implements Adapter {
 
   async revokeByGrantId(grantId: string): Promise<void> {
     const hash = hashOidcIdentifier(grantId);
-    await this.database.oidcArtifact.deleteMany({ where: { OR: [{ grantHash: hash }, { model: "Grant", idHash: hash }] } });
+    await this.database.$transaction(async (transaction) => {
+      // Take the same row lock as grant-bound upserts before deleting anything. A
+      // separate delete statement then sees tokens committed by an earlier upsert.
+      await transaction.$queryRaw`SELECT "id" FROM "OidcArtifact" WHERE "model" = 'Grant' AND "idHash" = ${hash} FOR UPDATE`;
+      await transaction.oidcArtifact.deleteMany({ where: { OR: [{ grantHash: hash }, { model: "Grant", idHash: hash }] } });
+    });
   }
 
   private async findClient(clientId: string): Promise<AdapterPayload | undefined> {

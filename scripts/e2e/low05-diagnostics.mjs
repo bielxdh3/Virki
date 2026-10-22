@@ -1,5 +1,15 @@
 const SESSION_COOKIE_NAMES = ["__Host-virki_session", "virki_session"];
 
+// Next dev overwrites the Proxy Cache-Control for rendered documents. Since
+// Next 16.4.2, its local development navigation may emit exactly `no-store`
+// instead of the older `no-cache, must-revalidate`. A development-only exact
+// no-store is strictly non-storable; production must still enforce the full
+// private, no-store, max-age=0, must-revalidate protected-document policy.
+export function isLow05ProtectedDocumentCacheControl(value, hubMode) {
+  if (value === "private, no-store, max-age=0, must-revalidate") return true;
+  return hubMode === "development" && (value === "no-cache, must-revalidate" || value === "no-store");
+}
+
 export function classifyLow05Url(value, portalUrl) {
   let expectedOrigin;
   let url;
@@ -27,6 +37,22 @@ export function classifyLow05Url(value, portalUrl) {
       : "absent";
 
   return { origin: "portal", route, returnTo };
+}
+
+export function classifyLow05RequestBoundary(portalUrl, hubMode) {
+  let parsed;
+  try { parsed = new URL(portalUrl); }
+  catch { return { origin: "other", scheme: "other", originHasExplicitPort: false }; }
+  const expectedOrigin = new URL(hubMode === "production"
+    ? "https://portal.localhost"
+    : "https://portal.localhost:3001").origin;
+  return {
+    // Require the exact scheme, hostname and effective port. Prefix matching
+    // could otherwise mislabel an attacker-controlled hostname as portal proof.
+    origin: parsed.origin === expectedOrigin ? "portal" : "other",
+    scheme: parsed.protocol === "https:" ? "https" : "other",
+    originHasExplicitPort: Boolean(parsed.port),
+  };
 }
 
 export function describeLow05Response(response, url, portalUrl) {

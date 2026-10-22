@@ -8,6 +8,16 @@ import { requireSecurityElevationInTransaction } from "./elevation-authorization
 
 export const ACCOUNT_INVITATION_TTL_MS = 72 * 60 * 60 * 1000;
 
+function containsControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) || codePoint === 0x2028 || codePoint === 0x2029)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Creates a USER with no password and a one-time invitation. The invitation is an APPROVED recovery
 // request, so the person sets their own password through the existing /recover link and the admin
 // never knows the credential. The account and its invitation e-mail are created atomically.
@@ -18,6 +28,10 @@ export async function provisionInvitedUserAccount(
   now = new Date()
 ): Promise<{ userId: string }> {
   const email = input.email.trim().toLowerCase();
+  const displayName = input.displayName ?? "";
+  if (displayName.length > 80 || containsControlCharacters(displayName)) {
+    throw new Error("Invalid account invitation input.");
+  }
   const actionBase = getRecoveryActionBaseUrl("USER");
   if (!actionBase) throw new Error("Account invitation link is unavailable.");
   const requestKey = randomBytes(24).toString("base64url");

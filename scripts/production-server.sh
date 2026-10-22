@@ -1226,7 +1226,10 @@ verify_clone_cleanup() {
 }
 
 cleanup_failed_backup_verification() {
-  local original_status=$1 isolation_id=$2 override=$3 backup_path=$4 partial_backup_path=$5 verification_tmp=$6 backup_verified=$7 verification_path=$8 cleanup_failed=0
+  # verification_path is a readonly global. Shadowing it with local aborts the
+  # EXIT handler before partial backup and restore-clone cleanup can run.
+  local original_status=$1 isolation_id=$2 override=$3 backup_path=$4 partial_backup_path=$5 verification_tmp=$6 backup_verified=$7 cleanup_failed=0
+  [[ "${8:-}" == "$verification_path" ]] || cleanup_failed=1
   trap - EXIT
   set +e
   cleanup_clone "$isolation_id" "$override" || cleanup_failed=1

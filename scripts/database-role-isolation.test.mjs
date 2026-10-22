@@ -1,20 +1,22 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { OwnedRoleDocker } from "./lib/role-fixture-docker.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const roleSetupPath = path.join(repositoryRoot, "infra", "postgres-init", "10-virki-database-roles.sh");
 const e2eRoleSetupPath = path.join(repositoryRoot, "scripts", "e2e", "20-virki-e2e-runtime-test-role.sh");
 const postgresImage = "postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3";
 const testRunId = randomBytes(12).toString("hex");
+const guardedDocker = new OwnedRoleDocker({ runId: testRunId, cwd: repositoryRoot });
 
 let migrationRunner;
 let failure;
 try {
+  guardedDocker.ensurePostgresImage();
   migrationRunner = buildMigrationRunner(testRunId);
   await verifyDatabaseRoles("fresh", migrationRunner, testRunId);
   await verifyDatabaseRoles("interrupted", migrationRunner, testRunId);
@@ -31,6 +33,12 @@ if (migrationRunner) {
       ? new AggregateError([failure, cleanupError], "PostgreSQL role validation and migration-runner cleanup both failed.")
       : cleanupError;
   }
+}
+try {
+  guardedDocker.finish(!failure);
+} catch (cleanupError) {
+  failure = failure ? new AggregateError([failure, cleanupError],
+    "Role fixture failure; immutable owner reconciliation evidence retained.") : cleanupError;
 }
 if (failure) throw failure;
 console.log("PASS: fresh, interrupted-init, and populated disposable PostgreSQL role separation");
@@ -560,7 +568,8 @@ function buildMigrationRunner(testRunId) {
     : randomBytes(20).toString("hex");
   const image = `virki-role-test-migrator:${testRunId}`;
   docker([
-    "build", "--file", "infra/Dockerfile.prod", "--target", "migrator",
+    "buildx", "build", "--load", "--platform", "linux/amd64", "--progress", "plain",
+    "--file", "infra/Dockerfile.prod", "--target", "migrator",
     "--build-arg", `VIRKI_BUILD_REVISION=${revision}`,
     "--label", `virki.role-test.run=${testRunId}`,
     "--tag", image, "."
@@ -679,21 +688,11 @@ function assertFixtureVolume(volume, testRunId, fixtureName) {
 }
 
 function cleanupFixture(name, network, testRunId, dataVolume = null) {
-  const containers = docker([
-    "ps", "--all", "--quiet", "--filter", `label=virki.role-test.run=${testRunId}`,
-    "--filter", `label=virki.role-test.fixture=${name}`
-  ], "list exact PostgreSQL fixture containers").stdout.trim().split(/\r?\n/u).filter(Boolean);
-  for (const container of containers) {
-    const identity = docker([
-      "inspect", `--format={{.Name}}|{{index .Config.Labels "virki.role-test.run"}}|{{index .Config.Labels "virki.role-test.fixture"}}|{{index .Config.Labels "virki.role-test.kind"}}`, container
-    ], "verify exact PostgreSQL fixture container before removal").stdout.trim();
-    const [rawName, observedRunId, observedFixture, kind] = identity.split("|");
-    const containerName = rawName.replace(/^\//u, "");
-    assert.ok(containerName === name || containerName.startsWith(`${name}-migrate-`), "Refusing to remove a container outside this exact fixture.");
-    assert.equal(observedRunId, testRunId, "Refusing to remove a container with an unexpected run label.");
-    assert.equal(observedFixture, name, "Refusing to remove a container with an unexpected fixture label.");
-    assert.equal(kind, containerName === name ? "postgres" : "migration-runner", "Refusing to remove a container with an unexpected type label.");
-    docker(["rm", "--force", container], "remove exact PostgreSQL fixture container");
+  // The local journal—not a daemon label search—is the authority. A foreign
+  // container with matching labels is never eligible for deletion.
+  for (const container of guardedDocker.ownedContainersForFixture(name)) {
+    assert.ok(container.name === name || container.name.startsWith(`${name}-migrate-`));
+    docker(["rm", "--force", container.id], "remove verified immutable PostgreSQL fixture container");
   }
   const remainingContainers = docker([
     "ps", "--all", "--quiet", "--filter", `label=virki.role-test.run=${testRunId}`,
@@ -717,7 +716,7 @@ function cleanupFixture(name, network, testRunId, dataVolume = null) {
       "network", "inspect", `--format={{.Name}}|{{.Internal}}|{{index .Labels "virki.role-test.run"}}|{{index .Labels "virki.role-test.fixture"}}|{{len .Containers}}`, existingNetwork
     ], "verify exact PostgreSQL fixture network before removal").stdout.trim();
     assert.equal(metadata, `${network}|true|${testRunId}|${name}|0`, "Refusing to remove a network with unexpected identity, labels, or consumers.");
-    docker(["network", "rm", existingNetwork], "remove exact PostgreSQL fixture network");
+    docker(["network", "rm", network], "remove exact PostgreSQL fixture network");
   }
   const remainingNetwork = docker(["network", "ls", "--quiet", "--filter", `name=^${network}$`], "verify PostgreSQL fixture network cleanup").stdout.trim();
   assert.equal(remainingNetwork, "", "The PostgreSQL fixture network remains after cleanup.");
@@ -741,15 +740,7 @@ function docker(args, label, { allowFailure = false, env = {}, input, timeout = 
       throw new Error(`${label} would expose ${key} in Docker process arguments.`);
     }
   }
-  const result = spawnSync("docker", args, {
-    cwd: repositoryRoot,
-    env: { ...process.env, ...env },
-    input,
-    encoding: "utf8",
-    windowsHide: true,
-    timeout,
-    maxBuffer
-  });
+  const result = guardedDocker.call(args, { env, input, timeout, maxBuffer });
   if (result.error) throw new Error(`${label} could not run Docker (${result.error.code ?? "unknown error"}).`);
   const sanitizedResult = {
     ...result,

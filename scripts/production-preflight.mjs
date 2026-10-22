@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readProductionConfig, isValidProductionConfig } from "./lib/production-config.mjs";
 import { inspectProductionSource, ProductionRevisionError, runCommand } from "./lib/production-revision.mjs";
 import { verifyExactShaCi } from "./lib/production-ci.mjs";
+import { requireOfflineReleaseCapacity } from "./lib/offline-release-capacity.mjs";
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 export const SSH_OPTIONS = [
@@ -46,6 +47,13 @@ printf 'VIRKI_PROBE_WD=%s\\n' "$root"
 printf 'VIRKI_PROBE_PLATFORM=linux-native\\n'
 printf 'VIRKI_PROBE_MARKER=valid\\n'
 `;
+
+// Explicitly opted-in offline validation must not depend on a GHCR credential.
+// Keep the hosted probe unchanged: it still requires its dedicated read token.
+const OFFLINE_PROBE_SCRIPT = PROBE_SCRIPT.replace(
+  "for name in .env .env.oidc .env.oidc-data .ghcr-read-token; do",
+  "for name in .env .env.oidc .env.oidc-data; do",
+);
 
 export const DOCKER_SCRIPT = `
 set -eu
@@ -179,7 +187,12 @@ export async function runProductionPreflight({
   execute = run,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   config: operatorConfig = readProductionConfig(),
+  mode = "hosted",
+  offlineArtifacts,
 } = {}) {
+  if (mode !== "hosted" && mode !== "offline") {
+    return { status: 1, lines: ["Unknown production preflight release mode."] };
+  }
   if (!isValidProductionConfig(operatorConfig)) {
     return { status: 1, lines: ["Private production operator configuration is missing or invalid."] };
   }
@@ -200,7 +213,8 @@ export async function runProductionPreflight({
   let identity = "";
   const lines = [];
   for (let attempt = 1; attempt <= PROBE_COUNT; attempt += 1) {
-    const result = runRemoteScript(PROBE_SCRIPT, "probe", execute, operatorConfig);
+    const result = runRemoteScript(mode === "offline" ? OFFLINE_PROBE_SCRIPT : PROBE_SCRIPT,
+      "probe", execute, operatorConfig);
     if (!probeIsValid(result)) {
       return { status: 1, lines: [`SSH preflight failed on probe ${attempt}; ${describeProbeFailure(result)}`] };
     }
@@ -228,11 +242,33 @@ export async function runProductionPreflight({
     return { status: 1, lines: [...lines, "Remote Docker, Compose, locking, or disk preflight failed."] };
   }
 
+  let capacity;
+  if (mode === "offline") {
+    if (lineValue(docker.stdout, "VIRKI_PLATFORM=") !== "linux/amd64") {
+      return { status: 1, lines: [...lines, "Offline release requires native linux/amd64."] };
+    }
+    // df reports GiB rounded to 0.1; subtract the full rounding unit so no
+    // capacity is inadvertently conjured by display precision. Inputs must be
+    // measured independently and repeated by the trusted host before use.
+    const freeGiB = Number(lineValue(docker.stdout, "VIRKI_DISK_FREE_GB="));
+    const safeFreeBytes = Math.floor((freeGiB - 0.1) * 1024 ** 3);
+    try {
+      capacity = requireOfflineReleaseCapacity({ ...offlineArtifacts, freeBytes: safeFreeBytes });
+    } catch {
+      return { status: 1, lines: [...lines, "Offline release disk budget is unproven or insufficient; no transfer authorized."] };
+    }
+  }
+
   lines.push("SSH preflight passed with a stable native Linux identity.");
   lines.push(`Remote Docker ${lineValue(docker.stdout, "VIRKI_DOCKER_VERSION=")} / Compose ${lineValue(docker.stdout, "VIRKI_COMPOSE_VERSION=")}.`);
   lines.push(`Remote Docker platform ${lineValue(docker.stdout, "VIRKI_PLATFORM=")}.`);
   lines.push(`Remote free disk ${lineValue(docker.stdout, "VIRKI_DISK_FREE_GB=")} GB; deManage container names observed ${lineValue(docker.stdout, "VIRKI_DEMANAGE_COUNT=")}.`);
-  return { status: 0, lines, platform: lineValue(docker.stdout, "VIRKI_PLATFORM=") };
+  return { status: 0, lines, platform: lineValue(docker.stdout, "VIRKI_PLATFORM="),
+    ...(mode === "offline" ? {
+      capacity,
+      deployAuthorized: false,
+      limitation: "Operator-provided disk/image/DB sizes are not independently measured by the trusted host. This is a read-only connectivity and preliminary budget probe, never a release authorization.",
+    } : {}) };
 }
 
 export async function runAcceptedProductionPreflight({

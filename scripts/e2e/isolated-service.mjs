@@ -37,7 +37,7 @@ const serviceEnvironment = {
     "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_E2E_LOW05_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_RATE_LIMIT_HASH_SECRET", "VIRKI_AUDIT_HASH_SECRET", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
     "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_E2E_HUB_MODE", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY"
   ],
-  issuer: ["DATABASE_URL", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"]
+  issuer: ["DATABASE_URL", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT", "VIRKI_RATE_LIMIT_HASH_SECRET"]
 };
 
 export function buildServiceEnvironment(service, source = process.env, platform = process.platform) {
@@ -51,8 +51,10 @@ export function buildServiceEnvironment(service, source = process.env, platform 
     if (typeof value === "string") result[key] = value;
   }
 
+  if (service === "hub") loadHubOidcAdapterKey(result, source.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE);
+
   if (service !== "jwks") {
-    result.NODE_ENV = service === "hub" && source.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
+    result.NODE_ENV = ["hub", "issuer"].includes(service) && source.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
     result.NEXT_TELEMETRY_DISABLED = "1";
   }
   if (service === "hub" && (!result.DATABASE_URL || !result.VIRKI_OIDC_PROXY_URL || !result.VIRKI_E2E_TLS_KEY_PATH || !result.VIRKI_E2E_TLS_CERTIFICATE_PATH || !/^[a-f0-9]{64}$/iu.test(result.VIRKI_CSRF_SIGNING_KEY ?? "") || !result.NODE_EXTRA_CA_CERTS || !isAbsolute(result.NODE_EXTRA_CA_CERTS))) {
@@ -61,10 +63,13 @@ export function buildServiceEnvironment(service, source = process.env, platform 
   if (service === "issuer" && (!result.DATABASE_URL || !result.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE || !result.VIRKI_OIDC_ISSUER || result.VIRKI_OIDC_BIND_ADDRESS !== "127.0.0.1" || !result.OIDC_ISSUER_PORT)) {
     throw new Error("OIDC issuer E2E configuration is incomplete.");
   }
+  if (service === "issuer" && source.VIRKI_E2E_HUB_MODE === "production" && !/^[a-f0-9]{64}$/iu.test(result.VIRKI_RATE_LIMIT_HASH_SECRET ?? "")) {
+    throw new Error("OIDC issuer E2E configuration is incomplete.");
+  }
   if (service === "hub" || service === "issuer") {
     const databaseUrl = result.DATABASE_URL?.trim();
     if (!databaseUrl) throw new Error("E2E database configuration is incomplete.");
-    const databaseValidationEnvironment = service === "hub" && source.VIRKI_E2E_HUB_MODE === "production"
+    const databaseValidationEnvironment = ["hub", "issuer"].includes(service) && source.VIRKI_E2E_HUB_MODE === "production"
       ? { ...source, NODE_ENV: "development" }
       : source;
     assertDisposableCoreTestDatabase(databaseUrl, databaseValidationEnvironment);
@@ -174,6 +179,16 @@ function loadIssuerPrivateConfiguration(environment) {
   environment.VIRKI_OIDC_COOKIE_KEY = config.cookieKey;
   environment.VIRKI_OIDC_SIGNING_JWKS = JSON.stringify(config.signingJwks);
   delete environment.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE;
+}
+
+function loadHubOidcAdapterKey(environment, file) {
+  if (!file || !isAbsolute(file) || !existsSync(file)) throw new Error("Hub OIDC private E2E configuration is unavailable.");
+  const config = JSON.parse(readFileSync(file, "utf8"));
+  if (!config || typeof config !== "object" || Array.isArray(config) ||
+    typeof config.adapterKey !== "string" || !/^[a-f0-9]{64}$/iu.test(config.adapterKey)) {
+    throw new Error("Hub OIDC private E2E configuration is invalid.");
+  }
+  environment.VIRKI_OIDC_ADAPTER_KEY = config.adapterKey;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -1,14 +1,41 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildChromiumEnvironment, buildServiceEnvironment, getServiceCommand, platformEnvironmentVariableNames } from "./isolated-service.mjs";
+import { createE2eOidcPrivateConfiguration, readE2eOidcPrivateConfiguration } from "./oidc-private-config.mjs";
 import { runCleanupSteps, validateAuditCleanupDatabase } from "./global-setup.mts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+
+test("private OIDC configuration exists before Playwright webServer starts the Hub", () => {
+  const playwrightSource = readFileSync(resolve(repositoryRoot, "playwright.config.mts"), "utf8");
+  const globalSetupSource = readFileSync(resolve(repositoryRoot, "scripts/e2e/global-setup.mts"), "utf8");
+  const creation = playwrightSource.indexOf("createE2eOidcPrivateConfiguration(oidcPrivateConfigPath)");
+  const webServers = playwrightSource.indexOf("webServer: [");
+  assert.ok(creation >= 0 && creation < webServers, "the private configuration must be generated before webServer startup");
+  assert.doesNotMatch(globalSetupSource, /writeFile\(oidcPrivateConfigFile,/u, "globalSetup must reuse rather than create a late private configuration");
+});
+
+test("private OIDC fixture is generated once with isolated signing and cookie keys", (t) => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "virki-e2e-private-oidc-"));
+  t.after(() => rmSync(temporaryDirectory, { recursive: true, force: true }));
+  const file = join(temporaryDirectory, "issuer-config.json");
+  createE2eOidcPrivateConfiguration(file);
+  const config = readE2eOidcPrivateConfiguration(file);
+  assert.match(config.adapterKey, /^[0-9a-f]{64}$/u);
+  assert.match(config.cookieKey, /^[A-Za-z0-9_-]{43}$/u);
+  assert.match(config.signingKeyId, /^[0-9a-f-]{36}$/u);
+  assert.equal(config.signingJwks.keys[0].alg, "ES256");
+  assert.equal(config.signingJwks.keys[0].crv, "P-256");
+  if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.throws(() => createE2eOidcPrivateConfiguration(file), { code: "EEXIST" }, "existing signing material must not be overwritten");
+  writeFileSync(file, "{}", { encoding: "utf8" });
+  assert.throws(() => readE2eOidcPrivateConfiguration(file), /configuration is invalid/u, "malformed private material fails closed");
+});
 
 test("audit fixture cleanup uses the exact validated disposable target and migration role", () => {
   const previousNodeEnv = process.env.NODE_ENV;
@@ -149,7 +176,13 @@ test("Hub Next dev receives the private E2E CA for its server worker", () => {
   }
 });
 
-test("service children receive only their E2E allowlist and required OS paths", () => {
+test("service children receive only their E2E allowlist and required OS paths", (t) => {
+  const privateConfigDirectory = mkdtempSync(join(tmpdir(), "virki-isolated-service-"));
+  const privateConfigPath = join(privateConfigDirectory, "issuer-config.json");
+  const privateAdapterKey = "b".repeat(64);
+  writeFileSync(privateConfigPath, JSON.stringify({ adapterKey: privateAdapterKey, cookieKey: "c".repeat(43), signingJwks: { keys: [{}] } }), { encoding: "utf8", mode: 0o600 });
+  t.after(() => rmSync(privateConfigDirectory, { recursive: true, force: true }));
+
   const source = {
     PATH: process.env.PATH ?? process.env.Path ?? "",
     HOME: "e2e-home-sentinel",
@@ -190,8 +223,8 @@ test("service children receive only their E2E allowlist and required OS paths", 
     VIRKI_OIDC_ISSUER: "https://portal.localhost:3001",
     VIRKI_OIDC_BIND_ADDRESS: "127.0.0.1",
     OIDC_ISSUER_PORT: "3003",
-    VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: "C:\\Temp\\issuer-config.json",
-    VIRKI_OIDC_ADAPTER_KEY: "must-stay-in-private-config",
+    VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: privateConfigPath,
+    VIRKI_OIDC_ADAPTER_KEY: "parent-environment-key-must-not-be-used",
     VIRKI_OIDC_COOKIE_KEY: "must-stay-in-private-config",
     VIRKI_OIDC_SIGNING_JWKS: "must-stay-in-private-config",
     CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",
@@ -220,7 +253,7 @@ test("service children receive only their E2E allowlist and required OS paths", 
         "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY"
       ]
     },
-    { name: "issuer", allowed: ["DATABASE_URL", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT"] }
+    { name: "issuer", allowed: ["DATABASE_URL", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_OIDC_ISSUER", "VIRKI_OIDC_BIND_ADDRESS", "OIDC_ISSUER_PORT", "VIRKI_RATE_LIMIT_HASH_SECRET"] }
   ];
 
   for (const service of services) {
@@ -247,6 +280,7 @@ test("service children receive only their E2E allowlist and required OS paths", 
       allowedKeys.add("NODE_ENV");
       allowedKeys.add("NEXT_TELEMETRY_DISABLED");
     }
+    if (service.name === "hub") allowedKeys.add("VIRKI_OIDC_ADAPTER_KEY");
     assert.deepEqual(result.keys, [...allowedKeys].sort(), `${service.name} receives no unlisted caller variables`);
     assert.equal(result.keys.includes("NODE_OPTIONS"), false);
     assert.equal(result.keys.includes("NODE_PATH"), false);
@@ -268,9 +302,16 @@ test("service children receive only their E2E allowlist and required OS paths", 
     if (service.name === "hub") {
       assert.equal(environment.VIRKI_CSRF_SIGNING_KEY, source.VIRKI_CSRF_SIGNING_KEY, "all Hub dev workers receive the same E2E-only CSRF key");
       assert.equal(environment.NODE_EXTRA_CA_CERTS, source.NODE_EXTRA_CA_CERTS, "the Hub trusts only the E2E runtime CA bundle");
+      assert.equal(environment.VIRKI_OIDC_ADAPTER_KEY, privateAdapterKey, "the Hub receives only the adapter key extracted from private OIDC configuration");
+      assert.equal(Object.hasOwn(environment, "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE"), false, "the Hub does not receive the private config path");
+      assert.equal(Object.hasOwn(environment, "VIRKI_OIDC_COOKIE_KEY"), false, "the Hub does not receive the issuer cookie key");
+      assert.equal(Object.hasOwn(environment, "VIRKI_OIDC_SIGNING_JWKS"), false, "the Hub does not receive issuer signing keys");
+    } else if (service.name === "issuer") {
+      assert.equal(environment.VIRKI_RATE_LIMIT_HASH_SECRET, source.VIRKI_RATE_LIMIT_HASH_SECRET, "the issuer receives only the isolated rate-limit HMAC key it requires");
     } else {
       assert.equal(result.keys.includes("VIRKI_CSRF_SIGNING_KEY"), false, `${service.name} does not receive the Hub CSRF key`);
       assert.equal(result.keys.includes("NODE_EXTRA_CA_CERTS"), false, `${service.name} does not receive the Hub CA bundle`);
+      assert.equal(result.keys.includes("VIRKI_OIDC_ADAPTER_KEY"), false, `${service.name} does not inherit the adapter key from the parent environment`);
     }
   }
 
@@ -354,6 +395,8 @@ test("Chromium receives only required platform variables and never Virki secrets
     VIRKI_CSRF_SIGNING_KEY: "must-not-reach-browser",
     VIRKI_TOTP_ENCRYPTION_KEY: "must-not-reach-browser",
     VIRKI_EMAIL_OUTBOX_KEY: "must-not-reach-browser",
+    VIRKI_OIDC_ADAPTER_KEY: "d".repeat(64),
+    VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: "private-oidc-config.json",
     VIRKI_E2E_ACCESS_SIGNING_KEY_FILE: "private-signing-key.json",
     VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "maintenance-must-not-reach-browser"
   };
@@ -369,7 +412,7 @@ test("Chromium receives only required platform variables and never Virki secrets
   assert.equal(windows.USERPROFILE, source.USERPROFILE);
 
   for (const environment of [linux, windows]) {
-    for (const name of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "DATABASE_URL", "VIRKI_CSRF_SIGNING_KEY", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_E2E_ACCESS_SIGNING_KEY_FILE", "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL"]) {
+    for (const name of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "DATABASE_URL", "VIRKI_CSRF_SIGNING_KEY", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY", "VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE", "VIRKI_E2E_ACCESS_SIGNING_KEY_FILE", "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL"]) {
       assert.equal(Object.hasOwn(environment, name), false, `${name} is excluded from Chromium`);
     }
   }

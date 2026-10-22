@@ -160,7 +160,7 @@ function isAuthenticationPath(pathname: string): boolean {
 function isReturnPathAllowed(pathname: string, surface: Surface, role?: string): boolean {
   const isHub = surface === "hub" || (surface === "local" && role === "ADMIN");
   const isPortal = surface === "portal" || (surface === "local" && role === "USER");
-  if (isHub) return pathname === "/admin" || pathname.startsWith("/admin/");
+  if (isHub) return (pathname === "/account/security" && (role === undefined || role === "ADMIN")) || pathname === "/admin" || pathname.startsWith("/admin/");
   if (isPortal) {
     return pathname === "/" || pathname === "/account/security" || /^\/(?:interaction|resume)\/[A-Za-z0-9_-]{8,160}$/u.test(pathname);
   }

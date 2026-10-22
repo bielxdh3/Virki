@@ -184,7 +184,7 @@ export function encryptTotpSecret(secret: string, env: NodeJS.ProcessEnv = proce
 export function decryptTotpSecret(value: string, env: NodeJS.ProcessEnv = process.env): string {
   const [version, ivValue, tagValue, ciphertextValue] = value.split(":");
   if (version !== `v${TOTP_KEY_VERSION}` || !ivValue || !tagValue || !ciphertextValue) throw new SecurityMutationError();
-  const decipher = createDecipheriv("aes-256-gcm", getTotpKey(env), Buffer.from(ivValue, "base64url"));
+  const decipher = createDecipheriv("aes-256-gcm", getTotpKey(env), Buffer.from(ivValue, "base64url"), { authTagLength: 16 });
   decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
   return Buffer.concat([decipher.update(Buffer.from(ciphertextValue, "base64url")), decipher.final()]).toString("utf8");
 }
@@ -274,6 +274,7 @@ export async function regenerateRecoveryCodes(userId: string, code: string, now 
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
   await prisma.$transaction(async (transaction) => {
+    if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "ACTIVE") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -292,6 +293,7 @@ export async function verifyRecoveryCode(userId: string, code: string): Promise<
   if (code.length > 64) throw new SecurityMutationError();
   const normalizedHash = hashRecoveryCode(code);
   return prisma.$transaction(async (transaction) => {
+    if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
     const row = await transaction.recoveryCode.findFirst({ where: { userId, codeHash: normalizedHash, usedAt: null }, select: { id: true } });
     if (!row) return false;
     const consumed = await transaction.recoveryCode.updateMany({ where: { id: row.id, usedAt: null }, data: { usedAt: new Date() } });

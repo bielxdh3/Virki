@@ -11,6 +11,7 @@ export default [
       "**/dist/**",
       "**/node_modules/**",
       "**/out/**",
+      "**/.virki-mission-tmp/**",
       "**/*.tsbuildinfo",
       "packages/database/generated/**",
       "packages/database/prisma/generated/**",

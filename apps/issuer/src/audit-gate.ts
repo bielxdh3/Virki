@@ -1,4 +1,5 @@
 import type { ServerResponse } from "node:http";
+import { setIssuerSecurityHeaders } from "./http-security";
 
 const pendingAuditWrites = new WeakMap<ServerResponse, Promise<void>>();
 const pendingAuditWaiters = new WeakMap<ServerResponse, () => void>();
@@ -20,6 +21,11 @@ type BufferedResponseOperation = {
   replay: () => void;
   discard: (error: Error) => void;
 };
+
+/** oidc-provider ends the native response itself; Koa must not append a second response while the audit gate defers end(). */
+export function useNativeOidcResponse(context: { respond?: boolean }): void {
+  context.respond = false;
+}
 
 export function requireAuditBeforeResponse(response: ServerResponse, write: Promise<void>): void {
   const previous = pendingAuditWrites.get(response);
@@ -170,6 +176,13 @@ export function installAuditResponseGate(response: ServerResponse): void {
 
   response.writeHead = ((...args: Parameters<ServerResponse["writeHead"]>) => {
     if (state === "failed" || isResponseClosed()) return response;
+    // Koa's context.onerror clears all headers when downstream
+    // interactionFinished() throws. Restore issuer baseline policy on the
+    // actual error response, not on the already-aborted application context.
+    if (response.statusCode >= 400) {
+      setIssuerSecurityHeaders(response);
+      response.setHeader("cache-control", "no-store");
+    }
     if (!beginWaitingForAudit()) return originalWriteHead(...args);
     enqueue(0, () => { originalWriteHead(...args); });
     return response;
@@ -204,7 +217,14 @@ export function installAuditResponseGate(response: ServerResponse): void {
       return response;
     }
     if (!beginWaitingForAudit()) return originalEnd(...args);
-    enqueue(getChunkByteLength(args[0], args[1]), () => { originalEnd(...args); }, (error) => getCallback(args)?.(error));
+    const bytes = getChunkByteLength(args[0], args[1]);
+    const callback = getCallback(args);
+    if (!Number.isSafeInteger(bytes) || bufferedBytes + bytes > MAX_PENDING_RESPONSE_BYTES) {
+      failClosed();
+      callback?.(new Error("OIDC response exceeded the bounded audit buffer."));
+      return response;
+    }
+    enqueue(bytes, () => { originalEnd(...args); }, (error) => callback?.(error));
     return response;
   }) as ServerResponse["end"];
 }

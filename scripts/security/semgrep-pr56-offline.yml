@@ -1,0 +1,48 @@
+rules:
+  - id: virki.shell.dynamic-interpreter
+    languages: [bash]
+    severity: ERROR
+    message: Review dynamic shell interpretation of untrusted input.
+    pattern-regex: '(?m)^\s*(?:eval\s+|(?:ba)?sh\s+-c\s+)'
+    paths:
+      include: ["**/*.sh"]
+
+  - id: virki.shell.download-and-execute
+    languages: [bash]
+    severity: ERROR
+    message: Downloading a script directly into an interpreter can execute untrusted code.
+    pattern-regex: '(?m)\b(?:curl|wget)\b[^\n]*\|\s*(?:ba)?sh\b'
+    paths:
+      include: ["**/*.sh"]
+
+  - id: virki.powershell.dynamic-expression
+    languages: [generic]
+    severity: ERROR
+    message: Review PowerShell dynamic expression evaluation.
+    pattern-regex: '(?im)\b(?:Invoke-Expression|iex)\s+'
+    paths:
+      include: ["**/*.ps1"]
+
+  - id: virki.powershell.skip-certificate-check
+    languages: [generic]
+    severity: ERROR
+    message: PowerShell must not bypass TLS certificate verification.
+    pattern-regex: '(?i)-SkipCertificateCheck\b'
+    paths:
+      include: ["**/*.ps1"]
+
+  - id: virki.js.disable-tls-verification
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Disabling TLS verification can permit impersonation of a remote endpoint.
+    pattern-regex: '(?:rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*["\x27]?0)'
+    paths:
+      include: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.mjs"]
+
+  - id: virki.c.process-shell
+    languages: [c]
+    severity: ERROR
+    message: Review native shell execution before allowing untrusted arguments.
+    pattern-regex: '\b(?:system|popen)\s*\('
+    paths:
+      include: ["**/*.c"]

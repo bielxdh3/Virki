@@ -1,13 +1,14 @@
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
+import { createDisposableDockerSession } from "./lib/disposable-docker-session.mjs";
 
 const image = process.env.VIRKI_RUNTIME_IMAGE?.trim();
 if (!image) throw new Error("Runtime smoke requires VIRKI_RUNTIME_IMAGE.");
 
-const suffix = `${process.pid}-${Date.now()}`;
+const suffix = randomUUID();
 const network = `virki-runtime-${suffix}`;
+const ownerLabel = `org.virki.validation=${suffix}`;
 const containers = {
   publicSite: `virki-runtime-public-${suffix}`,
   hub: `virki-runtime-hub-${suffix}`,
@@ -22,20 +23,26 @@ const runtimeSafetyArgs = [
   "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
   "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
 ];
+const session = createDisposableDockerSession({
+  kind: "runtime", owner: suffix, containers: Object.values(containers), network,
+});
+let smokePassed = false;
+let cleanupFailure;
+let smokeFailure;
 
 try {
-  runDocker(["network", "create", network]);
+  session.mutate("create-network", ["network", "create", "--label", ownerLabel, network]);
 
-  runDocker([
-    "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.publicSite, "--network", network,
+  session.mutate("create-public", [
+    "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.publicSite, "--network", network, "--label", ownerLabel,
     "--publish", "127.0.0.1::3000", "--env", "NODE_ENV=production",
     "--env", `VIRKI_PORTAL_URL=https://${publicHost}`,
     image, "npm", "run", "start", "--workspace", "@virki/public-site",
   ]);
   const publicPort = readLoopbackPort(containers.publicSite, "3000/tcp");
 
-  runDocker([
-    "run", ...runtimeSafetyArgs, "--detach", "--name", containers.issuer, "--network", network,
+  session.mutate("create-issuer", [
+    "run", ...runtimeSafetyArgs, "--detach", "--name", containers.issuer, "--network", network, "--label", ownerLabel,
     "--network-alias", "oidc-issuer", "--env", "NODE_ENV=production",
     "--env", "OIDC_ISSUER_PORT=3003", "--env", `VIRKI_OIDC_ISSUER=https://${publicHost}`,
     "--env", `VIRKI_OIDC_SIGNING_JWKS=${signingJwks}`,
@@ -46,8 +53,8 @@ try {
     image, "npm", "run", "start", "--workspace", "@virki/issuer",
   ]);
 
-  runDocker([
-    "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.hub, "--network", network,
+  session.mutate("create-hub", [
+    "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.hub, "--network", network, "--label", ownerLabel,
     "--publish", "127.0.0.1::3001", "--env", "NODE_ENV=production",
     "--env", `VIRKI_HUB_URL=https://${hubHost}`,
     "--env", `VIRKI_PORTAL_URL=https://${publicHost}`,
@@ -87,12 +94,19 @@ try {
   ) {
     throw new Error("Portal OIDC discovery did not expose the required authorization-code and PKCE profile.");
   }
+  smokePassed = true;
+} catch (error) {
+  smokeFailure = error;
 } finally {
-  for (const name of Object.values(containers)) {
-    spawnSync("docker", ["rm", "--force", "--volumes", name], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
-  }
-  spawnSync("docker", ["network", "rm", network], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+  try { session.cleanup(); } catch (error) { cleanupFailure = error; }
+  try { session.finish(smokePassed && !cleanupFailure); } catch (error) { cleanupFailure = error; }
 }
+if (cleanupFailure) throw cleanupFailure;
+if (smokeFailure) throw smokeFailure;
+
+console.log(JSON.stringify({ status: "passed", runtimeImage: image, http: true,
+  securityHeaders: true, oidcDiscovery: true, unauthorizedAccessRejected: true,
+  disposableResourcesRemoved: true, disposableRunId: suffix }));
 
 function createSigningKey() {
   const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -177,14 +191,9 @@ function requestOnce(url, headers) {
 }
 
 function readLoopbackPort(container, target) {
-  const result = spawnSync("docker", ["port", container, target], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+  const result = session.invoke(["port", container, target], { timeout: 10_000 });
   if (result.status !== 0) throw new Error("Runtime smoke port could not be read.");
   const match = result.stdout.match(/^127\.0\.0\.1:(\d+)$/mu);
   if (!match) throw new Error("Runtime smoke detected a non-loopback published port.");
   return match[1];
-}
-
-function runDocker(args) {
-  const result = spawnSync("docker", args, { encoding: "utf8", windowsHide: true, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
-  if (result.error || result.status !== 0) throw new Error("Production runtime smoke Docker command failed.");
 }

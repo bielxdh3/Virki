@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const activeUserGrant = {
   revokedAt: null,
@@ -27,6 +27,14 @@ test("OIDC authorizes only current active USER grants on enabled connections", (
   assert.equal(isCurrentActiveUserProjectGrant({ ...activeUserGrant, connection: { enabled: false } }), false);
   assert.equal(isCurrentActiveUserProjectGrant({ ...activeUserGrant, revokedAt: new Date() }), false);
   assert.equal(isCurrentActiveUserProjectGrant(null), false);
+});
+
+test("OIDC account lookup excludes ADMIN and every inactive or blocked account", () => {
+  assert.equal(isOidcAccountEligible({ role: "USER", isActive: true, accountStatus: "ACTIVE" }), true);
+  assert.equal(isOidcAccountEligible({ role: "ADMIN", isActive: true, accountStatus: "ACTIVE" }), false);
+  assert.equal(isOidcAccountEligible({ role: "USER", isActive: false, accountStatus: "ACTIVE" }), false);
+  assert.equal(isOidcAccountEligible({ role: "USER", isActive: true, accountStatus: "BLOCKED" }), false);
+  assert.equal(isOidcAccountEligible(null), false);
 });
 
 test("OIDC state is required and nonce is required for OpenID requests", () => {

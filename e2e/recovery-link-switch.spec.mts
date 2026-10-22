@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
-const hubUrl = "https://hub.localhost:3001";
+const hubUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://hub.localhost" : "https://hub.localhost:3001";
+const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
+const recoveryCookieName = productionHubMode ? "__Host-virki_recovery" : "virki_recovery_v2";
+const recoveryCandidateCookieName = productionHubMode ? "__Host-virki_recovery_candidate" : "virki_recovery_candidate";
 const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
 const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
 test.skip(!e2eDatabaseUrl || !fixturePath, "Recovery switch E2E requires the explicit disposable database and global-setup fixture.");
@@ -86,22 +89,22 @@ test("approved ADMIN recovery link switch activates only the confirmed candidate
     await addCloudflareAccessHeader(page);
     await page.goto(first.actionUrl);
     await expect(page.getByLabel("Código de verificação", { exact: true })).toBeVisible();
-    const firstActive = (await context.cookies(hubUrl)).find((cookie) => cookie.name === "virki_recovery_v2");
+    const firstActive = (await context.cookies(hubUrl)).find((cookie) => cookie.name === recoveryCookieName);
     expect(firstActive?.value).toBe(first.requestKey);
 
     await page.goto(candidate.actionUrl);
     await expect(page.getByRole("status")).toContainText("Outro link está aberto nesta sessão.");
     await expect(page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
     const beforeConfirmation = await context.cookies(hubUrl);
-    expect(beforeConfirmation.find((cookie) => cookie.name === "virki_recovery_v2")?.value).toBe(first.requestKey);
-    expect(beforeConfirmation.find((cookie) => cookie.name === "virki_recovery_candidate")?.value).toBe(candidate.requestKey);
+    expect(beforeConfirmation.find((cookie) => cookie.name === recoveryCookieName)?.value).toBe(first.requestKey);
+    expect(beforeConfirmation.find((cookie) => cookie.name === recoveryCandidateCookieName)?.value).toBe(candidate.requestKey);
 
     await page.locator('input[name="requestId"]').evaluate((input, value) => { (input as HTMLInputElement).value = value; }, first.requestId);
     await page.getByRole("button", { name: "Continuar com este link", exact: true }).click();
     await expect(page.locator('p[role="alert"]')).toContainText("Não foi possível usar este link.");
     const afterRejectedSwitch = await context.cookies(hubUrl);
-    expect(afterRejectedSwitch.find((cookie) => cookie.name === "virki_recovery_v2")?.value).toBe(first.requestKey);
-    expect(afterRejectedSwitch.find((cookie) => cookie.name === "virki_recovery_candidate")?.value).toBe(candidate.requestKey);
+    expect(afterRejectedSwitch.find((cookie) => cookie.name === recoveryCookieName)?.value).toBe(first.requestKey);
+    expect(afterRejectedSwitch.find((cookie) => cookie.name === recoveryCandidateCookieName)?.value).toBe(candidate.requestKey);
 
     await page.locator('input[name="requestId"]').evaluate((input, value) => { (input as HTMLInputElement).value = value; }, candidate.requestId);
     const switchResponses: string[] = [];
@@ -125,8 +128,8 @@ test("approved ADMIN recovery link switch activates only the confirmed candidate
     } catch {
       const currentUrl = new URL(page.url());
       const afterFailure = await context.cookies(hubUrl);
-      const activeKey = afterFailure.find((cookie) => cookie.name === "virki_recovery_v2")?.value;
-      const candidateStillPresent = afterFailure.some((cookie) => cookie.name === "virki_recovery_candidate" && Boolean(cookie.value));
+      const activeKey = afterFailure.find((cookie) => cookie.name === recoveryCookieName)?.value;
+      const candidateStillPresent = afterFailure.some((cookie) => cookie.name === recoveryCandidateCookieName && Boolean(cookie.value));
       const [recoveryState, record, alertText] = await Promise.all([
         getAccountRecoveryState(candidate.requestId, candidate.requestKey, new Date(), "ADMIN"),
         prisma.accountRecoveryRequest.findUnique({
@@ -139,8 +142,8 @@ test("approved ADMIN recovery link switch activates only the confirmed candidate
     }
     await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible();
     const afterConfirmation = await context.cookies(hubUrl);
-    expect(afterConfirmation.find((cookie) => cookie.name === "virki_recovery_v2")?.value).toBe(candidate.requestKey);
-    expect(afterConfirmation.some((cookie) => cookie.name === "virki_recovery_candidate" && cookie.value.length > 0)).toBe(false);
+    expect(afterConfirmation.find((cookie) => cookie.name === recoveryCookieName)?.value).toBe(candidate.requestKey);
+    expect(afterConfirmation.some((cookie) => cookie.name === recoveryCandidateCookieName && cookie.value.length > 0)).toBe(false);
 
     const originalPasswordHash = await prisma.user.findUnique({ where: { id: candidateAccount.id }, select: { passwordHash: true } });
     const invalidPassword = page.getByLabel("Nova senha", { exact: true });
@@ -163,13 +166,13 @@ test("approved ADMIN recovery link switch activates only the confirmed candidate
         }),
         page.locator('p.form-error[role="alert"]').textContent().catch(() => null)
       ]);
-      const activeRecoveryKey = cookiesAfterRejectedPassword.find((cookie) => cookie.name === "virki_recovery_v2")?.value;
+      const activeRecoveryKey = cookiesAfterRejectedPassword.find((cookie) => cookie.name === recoveryCookieName)?.value;
       throw new Error(`Short ADMIN recovery password error did not retain the approved request (path=${new URL(page.url()).pathname}; requestIdMatches=${new URL(page.url()).searchParams.get("requestId") === candidate.requestId}; activeMatchesCandidate=${activeRecoveryKey === candidate.requestKey}; lookup=${recoveryState?.status ?? "missing"}; record=${record?.status ?? "missing"}; keyMatches=${Boolean(record?.requestKeyHash && record.requestKeyHash === hashRecoveryRequestKey(candidate.requestKey))}; emailVerified=${Boolean(record?.emailVerifiedAt)}; unexpired=${Boolean(record && record.expiresAt > new Date())}; accountEligible=${Boolean(record?.user.isActive && record.user.accountStatus === "ACTIVE" && record.user.role === "ADMIN")}; alert=${alertText ?? "none"}).`);
     }
     expect(await prisma.user.findUnique({ where: { id: candidateAccount.id }, select: { passwordHash: true } })).toEqual(originalPasswordHash);
     const afterRejectedPassword = await context.cookies(hubUrl);
-    expect(afterRejectedPassword.find((cookie) => cookie.name === "virki_recovery_v2")?.value).toBe(candidate.requestKey);
-    expect(afterRejectedPassword.some((cookie) => cookie.name === "virki_recovery_candidate" && Boolean(cookie.value))).toBe(false);
+    expect(afterRejectedPassword.find((cookie) => cookie.name === recoveryCookieName)?.value).toBe(candidate.requestKey);
+    expect(afterRejectedPassword.some((cookie) => cookie.name === recoveryCandidateCookieName && Boolean(cookie.value))).toBe(false);
   } finally {
     await context.close();
     if (createdAccountIds.length > 0) {

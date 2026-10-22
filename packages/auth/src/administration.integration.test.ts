@@ -16,7 +16,7 @@ import {
   verifySecurityElevation
 } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
-import { cleanupInactiveSessions, hashPassword } from "./index";
+import { cleanupInactiveSessions, hashAuditSessionReference, hashPassword } from "./index";
 import { hashRecoveryCode } from "./security";
 
 after(() => prisma.$disconnect());
@@ -49,6 +49,22 @@ async function latestEmailCode(email: string, kind: string): Promise<string> {
   return code;
 }
 
+async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const blocked = await prisma.$queryRaw<Array<{ waiters: number }>>`
+      SELECT count(*)::int AS waiters
+      FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
+        AND query LIKE ${`%${queryFragment}%`}
+    `;
+    if ((blocked[0]?.waiters ?? 0) >= 1) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment}.`);
+}
+
 test("a timed elevation lasts its full duration from activation, not from when the code was sent", integrationOptions, async () => {
   const admin = await setupAdmin();
   const start = new Date();
@@ -70,6 +86,13 @@ test("a timed elevation lasts its full duration from activation, not from when t
   const row = await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: started.requestKey }, select: { status: true, expiresAt: true } });
   assert.equal(row.status, "ACTIVE");
   assert.equal(row.expiresAt.getTime(), start.getTime() + 22 * MINUTE);
+  const auditEntries = await prisma.auditLog.findMany({
+    where: { actorUserId: admin.actor.id, eventType: { in: ["ADMIN_ELEVATION_STARTED", "ADMIN_ELEVATION_ACTIVATED"] } },
+    select: { eventType: true, actorRole: true, sessionRef: true }
+  });
+  assert.equal(auditEntries.length, 2);
+  assert.ok(auditEntries.every((entry) => entry.actorRole === "ADMIN" && entry.sessionRef !== null));
+  assert.ok(auditEntries.every((entry) => entry.sessionRef === hashAuditSessionReference(admin.sessionId)));
   assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", new Date(start.getTime() + 22 * MINUTE - 1000)), true);
   assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", new Date(start.getTime() + 22 * MINUTE)), false);
 });
@@ -121,12 +144,55 @@ test("an administrative password equal to the normal password is rejected when r
   await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(recoveryCode) } });
 
   await assert.rejects(
-    recoverAdministrativeCredential({ actor: admin.actor, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: NORMAL_PASSWORD }),
+    recoverAdministrativeCredential({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: NORMAL_PASSWORD }),
     AdministrativePasswordReuseError
   );
   // The rejected attempt must not consume the single-use recovery code.
-  const codes = await recoverAdministrativeCredential({ actor: admin.actor, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: "integration-recovered-admin-1" });
+  const codes = await recoverAdministrativeCredential({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: "integration-recovered-admin-1" });
   assert.equal(codes.length, 10);
+});
+
+test("administrative credential recovery rechecks its session after concurrent revocation", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  const recoveryCode = `integration-recovery-${randomBytes(6).toString("hex")}`;
+  await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(recoveryCode) } });
+  const credentialBefore = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id }, select: { passwordHash: true, keyVersion: true } });
+
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const revocation = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.session.update({ where: { id: admin.sessionId }, data: { revokedAt: now } });
+    locked();
+    await gate;
+  }, { timeout: 10000 });
+  await ready;
+
+  const recovery = recoverAdministrativeCredential({
+    actor: admin.actor,
+    sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD,
+    recoveryCode,
+    newPassword: "integration-recovered-admin-2",
+    now
+  }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE OF u, s");
+  } finally {
+    release();
+  }
+  await revocation;
+  const outcome = await recovery;
+  assert.equal(outcome.ok, false, "recovery must fail after its bound session is revoked");
+  if (!outcome.ok) assert.ok(outcome.error instanceof AdministrationMutationError);
+  const credentialAfter = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id }, select: { passwordHash: true, keyVersion: true } });
+  assert.deepEqual(credentialAfter, credentialBefore);
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id, usedAt: null } }), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_RECOVERED" } }), 0);
 });
 
 test("an administrative password equal to the normal password is rejected during credential setup", integrationOptions, async () => {
@@ -170,6 +236,71 @@ test("a legacy admin with equal passwords may only start the credential change e
     now: start
   });
   assert.ok(started.requestKey);
+});
+
+test("an elevation cannot be created from credentials rotated after password proof", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  const rotatedPasswordHash = await hashPassword("integration-rotated-admin-password-3");
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const rotation = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${admin.actor.id} FOR UPDATE`;
+    locked();
+    await gate;
+    await transaction.administrativeCredential.update({ where: { userId: admin.actor.id }, data: { passwordHash: rotatedPasswordHash, keyVersion: { increment: 1 } } });
+  }, { timeout: 10000 });
+  await ready;
+
+  const starting = startSecurityElevation({
+    actor: admin.actor,
+    sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD,
+    administrativePassword: ADMIN_PASSWORD,
+    scope: "PROJECT_ACCESS_CHANGE",
+    duration: { kind: "TIMED", minutes: 15 },
+    locale: LOCALE,
+    now
+  }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE OF u, s");
+  } finally {
+    release();
+  }
+  await rotation;
+  const outcome = await starting;
+  assert.equal(outcome.ok, false, "stale credential proof must not create an elevation ceremony");
+  if (!outcome.ok) assert.ok(outcome.error instanceof AdministrationMutationError);
+  assert.equal(await prisma.securityElevation.count({ where: { userId: admin.actor.id, status: "PENDING" } }), 0);
+  assert.equal((await queuedEmails(admin.email)).length, 0);
+});
+
+test("a pending elevation cannot activate after its administrative credential version changes", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  const started = await startSecurityElevation({
+    actor: admin.actor,
+    sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD,
+    administrativePassword: ADMIN_PASSWORD,
+    scope: "PROJECT_ACCESS_CHANGE",
+    duration: { kind: "TIMED", minutes: 15 },
+    locale: LOCALE,
+    now
+  });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  await prisma.administrativeCredential.update({ where: { userId: admin.actor.id }, data: { keyVersion: { increment: 1 } } });
+
+  await assert.rejects(
+    verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: started.requestKey, code, now }),
+    AdministrationMutationError
+  );
+  assert.equal(await prisma.securityElevation.count({ where: { userId: admin.actor.id, sessionId: admin.sessionId, status: "ACTIVE" } }), 0);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_ELEVATION_ACTIVATED" } }), 0);
 });
 
 test("an admin whose account is blocked cannot start an elevation even while the flag is active", integrationOptions, async () => {

@@ -1,9 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
+const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
 const surfaces = [
-  { name: "Portal", url: "https://portal.localhost:3001" },
-  { name: "Hub", url: "https://hub.localhost:3001" }
+  { name: "Portal", url: productionHubMode ? "https://portal.localhost" : "https://portal.localhost:3001" },
+  { name: "Hub", url: productionHubMode ? "https://hub.localhost" : "https://hub.localhost:3001" }
 ] as const;
 
 for (const surface of surfaces) {
@@ -34,7 +35,7 @@ for (const surface of surfaces) {
         if (request.url().includes("/api/login")) submits.push(request.url());
       });
 
-      await expect(page.getByRole("alert")).toHaveText("E-mail ou senha inválidos.");
+      await expect(page.locator('p.form-error[role="alert"]')).toHaveText("E-mail ou senha inválidos.");
       await password.fill("synthetic-login-password");
       await expect(password).toHaveAttribute("type", "password");
       await expect(toggle).toHaveAttribute("aria-label", "Mostrar senha");

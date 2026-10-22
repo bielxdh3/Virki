@@ -4,7 +4,7 @@ This is the same **approval-pointer plus host pull-agent** pattern used for deMa
 
 ## What the GitHub button does
 
-The **Authorize Virki production release** workflow appears under **Actions** once its PR is merged. Only the repository owner can run it on main. It requires a successful exact-commit main-push CI, CodeQL, both published CPU-architecture images, and private GHCR packages. It writes `production.json` to a separate `production` branch. This is a **request**, not a deployment.
+The **Authorize Virki production release** workflow appears under **Actions** once its PR is merged. Only the repository owner can run it on main. It requires successful exact-commit main-push CI and CodeQL runs, the separate CodeQL evidence-publication run linked to that analysis ID and SHA, both published CPU-architecture images, and private GHCR packages. It reads the digest marker from the publication run's log before writing `production.json` to a separate `production` branch. This is a **request**, not a deployment.
 
 A separate agent on the native Linux production operator host polls that pointer. It only operates if `VIRKI_AUTOMATED_DEPLOY_ENABLED=true`, a first-install marker and active Virki release exist, the pinned SSH host is reachable, and deManage containers are running. The agent fast-forwards its **clean, dedicated** `main` operator checkout to the exact approved revision, verifies the official production preflight (including GHCR evidence and reviewed SARIF), runs `npm run deploy:prod`, checks `npm run health:prod` and compares deManage container names. It records success only after these checks.
 
