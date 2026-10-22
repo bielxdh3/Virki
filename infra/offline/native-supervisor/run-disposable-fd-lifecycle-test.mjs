@@ -67,28 +67,25 @@ function runCli(args, env, timeout = 45000, stdio = "pipe") {
 }
 
 function cleanupOwnedContainer(cidfile, plan, env) {
-  if (!existsSync(cidfile)) return;
+  if (!existsSync(cidfile)) return true;
   let id;
   try { id = readFileSync(cidfile, "utf8").trim(); }
-  catch { return; }
-  if (!/^[a-f0-9]{64}$/u.test(id)) return;
+  catch { return false; }
+  if (!/^[a-f0-9]{64}$/u.test(id)) return false;
   // NEVER remove by mutable name, wildcard, label selection or ambient context.
   // The inspect must prove the exact owned label on the immutable full ID.
   const metadata = runCli([...plan.dockerPrefix, "inspect",
     "--format", "{{.Id}} {{index .Config.Labels \"dev.virki.disposable-fd-lifecycle\"}}",
     id], env, 4000);
-  if (metadata.error || metadata.status !== 0) return;
+  if (metadata.error || metadata.status !== 0) return false;
   const [inspectedId, labelToken, ...extra] = metadata.stdout.trim().split(" ");
   const ownerToken = plan.label.split("=")[1];
   if (extra.length || inspectedId !== id ||
     !validateCleanupIdentity(id, labelToken, ownerToken))
-    return;
+    return false;
   const killed = runCli([...plan.dockerPrefix, "container", "rm", "--force", id],
     env, 4000);
-  if (killed.error || killed.status !== 0) {
-    process.stderr.write("Disposable fixture cleanup was not confirmed.\n");
-    process.exitCode = 1;
-  }
+  return !killed.error && killed.status === 0;
 }
 
 export function runDisposableFdLifecycleFixture() {
@@ -105,15 +102,26 @@ export function runDisposableFdLifecycleFixture() {
     ownerToken: randomBytes(16).toString("hex"), cidfile,
   });
   const env = sanitizedCliEnvironment(configDir);
+  let completed = false;
   try {
     const result = runCli(plan.args, env, 45000, "inherit");
+    completed = !result.error && result.status === 0;
     if (result.error || result.status !== 0) {
       process.stderr.write("Disposable native supervisor fixture refused or failed.\n");
       process.exitCode = 1;
     }
   } finally {
-    cleanupOwnedContainer(cidfile, plan, env);
-    rmSync(owned, { recursive: true, force: true });
+    const cleanupConfirmed = cleanupOwnedContainer(cidfile, plan, env);
+    // A successful `docker run --rm` is allowed to have removed its own
+    // container before the final inspect. Any incomplete or failed run must
+    // preserve its CID record for explicitly reviewed manual reconciliation.
+    if (cleanupConfirmed || completed) {
+      rmSync(owned, { recursive: true, force: true });
+    } else {
+      process.stderr.write("Disposable cleanup unconfirmed; ownership CID preserved at " +
+        cidfile + ". No arbitrary container deletion attempted.\n");
+      process.exitCode = 1;
+    }
   }
 }
 
