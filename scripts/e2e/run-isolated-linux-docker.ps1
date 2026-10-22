@@ -182,7 +182,10 @@ function Invoke-Stage {
 function Invoke-LoggedStage {
   param([string]$Name, [string]$LogName, [string]$CommandText, [string[]]$Environment = @(), [string]$EvidenceLogPath, [switch]$CaptureFullOutput)
   $logOutputCommand = if ($CaptureFullOutput) { 'cat' } else { 'tail -n 80' }
-  $shellCommand = $CommandText + ' > /tmp/' + $LogName + '.log 2>&1; status=$?; ' + $logOutputCommand + ' /tmp/' + $LogName + '.log; exit $status'
+  # Group the ENTIRE stage before redirection. Without parentheses, A && B
+  # sends only B to the log, so an A failure leaves no file and tail masks
+  # the actual error. Preserve the true compound command exit status.
+  $shellCommand = '( ' + $CommandText + ' ) > /tmp/' + $LogName + '.log 2>&1; status=$?; ' + $logOutputCommand + ' /tmp/' + $LogName + '.log; exit $status'
   Invoke-Stage -Name $Name -Command @('bash', '-lc', $shellCommand) -Environment $Environment -EvidenceLogPath $EvidenceLogPath
 }
 

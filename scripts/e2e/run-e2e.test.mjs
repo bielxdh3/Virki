@@ -774,3 +774,11 @@ test("full isolated runner stores complete browser output only after redaction",
   assert.match(script, /npm run test:e2e -- "\$@" 2>&1 \| node scripts\/e2e\/redact-browser-e2e-log\.mjs > \/tmp\/browser-e2e\.log/u);
   assert.match(script, /status=\$\?; cat \/tmp\/browser-e2e\.log; exit \$status/u);
 });
+
+test("isolated tooling stage redirects the entire compound command, never loses its first failure", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  assert.match(script, /\$shellCommand = '\( ' \+ \$CommandText \+ ' \) > \/tmp\/' \+ \$LogName \+ '\.log 2>&1; status=\$\?; ' \+ \$logOutputCommand/u);
+  assert.match(script, /'tooling-policy-tests' 'tooling-policy' 'node scripts\/tooling-audit-policy\.mjs && node --test scripts\/tooling-audit-policy\.test\.mjs'/u);
+  assert.doesNotMatch(script, /\$shellCommand = \$CommandText \+ ' > \/tmp\/'/u,
+    "a failing first command must not leave the log absent");
+});
