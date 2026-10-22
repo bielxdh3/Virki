@@ -158,6 +158,11 @@ jobs:
           bash -n scripts/production-server.sh
           node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
 
+      - name: Verify native machine-id inode race defenses as root
+        # This test uses private temporary instrumented module copies; it
+        # neither changes /etc/machine-id nor authorizes production admission.
+        run: sudo "$(command -v node)" --test infra/offline/trusted-owner-machine-id-race.test.mjs
+
       - name: Read-only backup inventory tests
         run: npm run test:backup:inventory
 

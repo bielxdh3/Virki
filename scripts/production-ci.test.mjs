@@ -399,6 +399,14 @@ test("GHCR publication requires successful audit jobs in GitHub Actions needs cl
   )), false, "a soft-failed production audit must not authorize publishing");
 });
 
+test("hosted Linux CI explicitly executes native machine-id race regression with root privileges", () => {
+  const normalized = workflow.replace(/\r\n/gu, "\n");
+  const command = 'sudo "$(command -v node)" --test infra/offline/trusted-owner-machine-id-race.test.mjs';
+  assert.match(normalized, /- name: Verify native machine-id inode race defenses as root\n(?:[^\n]*\n){0,4}\s+run: sudo "\$\(command -v node\)" --test infra\/offline\/trusted-owner-machine-id-race\.test\.mjs/u);
+  assert.ok(normalized.includes(command), "root-only native race tests cannot disappear from CI unnoticed");
+  assert.ok(!normalized.includes("|| true " + command), "the native test must fail the job on failure");
+});
+
 test("privileged source Git tests stay mandatory in isolated root Linux CI and the local production stage", () => {
   assert.doesNotMatch(packageScripts["test:production-revision"], /infra\/offline\/trusted-source-git\.test\.mjs/u);
   assert.equal(packageScripts["test:offline:source-git:root"], "node --test infra/offline/trusted-source-git.test.mjs");
