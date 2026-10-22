@@ -210,12 +210,14 @@ test("production application, maintenance, and migration services run non-root w
   assert.match(dockerfile, /ENV HOME=\/tmp\/node-home[\s\S]*?USER node:node/u);
   const runtimeSmoke = readFileSync(path.join(repositoryRoot, "scripts", "production-runtime-smoke.mjs"), "utf8");
   const imageAssertion = readFileSync(path.join(repositoryRoot, "scripts", "production-image-assertion.mjs"), "utf8");
+  const boundaryAssertion = readFileSync(path.join(repositoryRoot, "scripts", "lib", "production-boundary-assertion.mjs"), "utf8");
   assert.match(runtimeSmoke, /"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"/u);
   assert.match(runtimeSmoke, /assertSecurityHeaders\(publicResponse\.headers\)/u);
   assert.match(runtimeSmoke, /assertSecurityHeaders\(hubHealth\.headers, "strict-origin"\)/u);
   assert.match(runtimeSmoke, /assertSecurityHeaders\(response\.headers\)/u);
   assert.match(runtimeSmoke, /function assertSecurityHeaders\(headers, referrerPolicy = "no-referrer"\)/u);
-  assert.match(imageAssertion, /runtimeUid !== 1000/u);
+  assert.match(imageAssertion, /import \{ assertion \} from "\.\/lib\/production-boundary-assertion\.mjs"/u);
+  assert.match(boundaryAssertion, /runtimeUid !== 1000/u);
   assert.match(imageAssertion, /"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"/u);
 });
 

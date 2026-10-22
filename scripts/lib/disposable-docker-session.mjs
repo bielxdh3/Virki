@@ -4,7 +4,7 @@ import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, op
 import os from "node:os";
 import path from "node:path";
 import { cleanupOwnedDockerResources } from "./disposable-docker-cleanup.mjs";
-import { requireOwnedDisposableDockerMutation } from "./disposable-docker-mutation-policy.mjs";
+import { requireOwnedDisposableDockerMutation, verifyTrustedRoleSetup } from "./disposable-docker-mutation-policy.mjs";
 
 // Test-only engine selection. Windows must use the local Docker Desktop Linux
 // named pipe directly. Linux requires the trusted GitHub-hosted CI runner
@@ -14,6 +14,8 @@ const WINDOWS_ENGINE = "npipe:////./pipe/dockerDesktopLinuxEngine";
 const LINUX_DOCKER = "/usr/bin/docker";
 const LINUX_ENGINE = "unix:///var/run/docker.sock";
 const SAFE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,180}$/u;
+const UUID_V4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+const RESERVED_NETWORK = /^(?:host|bridge|none|default)$/iu;
 
 function refuse(message) {
   throw new Error(`Disposable Docker session refused: ${message}`);
@@ -87,7 +89,29 @@ export function createDisposableDockerSession({
   if (!["runtime", "migrator"].includes(kind) || !SAFE_NAME.test(owner ?? "") ||
       !Array.isArray(containers) || containers.some((name) => !SAFE_NAME.test(name)) ||
       new Set(containers).size !== containers.length || !SAFE_NAME.test(network ?? "") ||
+      RESERVED_NETWORK.test(network) ||
       containers.includes(network) || typeof spawn !== "function") refuse("invalid resource ownership");
+
+  if (spawn === spawnSync) {
+    // Live calls originate only from the three reviewed disposable fixtures;
+    // a caller cannot borrow ambient Docker networks or foreign resource names.
+    const runtime = kind === "runtime" && containers.length === 3 &&
+      network === `virki-runtime-${owner}` &&
+      containers[0] === `virki-runtime-public-${owner}` &&
+      containers[1] === `virki-runtime-hub-${owner}` &&
+      containers[2] === `virki-runtime-issuer-${owner}`;
+    const assertion = kind === "runtime" && containers.length === 1 &&
+      network === `virki-image-assertion-unused-${owner}` &&
+      containers[0] === `virki-image-assertion-${owner}`;
+    const migration = kind === "migrator" && containers.length === 3 &&
+      network === `virki-migrator-smoke-${owner}` &&
+      containers[0] === `virki-migrator-db-${owner}` &&
+      containers[1] === `virki-migrator-deploy-${owner}` &&
+      containers[2] === `virki-migrator-status-${owner}`;
+    if (!UUID_V4.test(owner) || !(runtime || assertion || migration)) {
+      refuse("real Docker resource names must bind exactly to one disposable fixture owner");
+    }
+  }
 
   const { cli, host, arch } = selectEngine(platform, env, nativeArch);
   if (spawn === spawnSync && !existsSync(cli)) refuse("pinned Docker CLI is unavailable");
@@ -183,6 +207,46 @@ export function createDisposableDockerSession({
 
   let cleanupStarted = false;
   let cleanupComplete = false;
+  const acknowledgedStages = [];
+  function verifyEnvironmentOverride(stage, options = {}) {
+    if (options.env === undefined) {
+      if (["create-database", "run-deploy", "run-status"].includes(stage)) {
+        refuse("missing scoped disposable database environment");
+      }
+      return;
+    }
+    const supplied = options.env;
+    if (!supplied || typeof supplied !== "object" || Array.isArray(supplied)) {
+      refuse("invalid Docker subprocess environment override");
+    }
+    const passwordKeys = ["POSTGRES_PASSWORD", "VIRKI_RUNTIME_DB_PASSWORD",
+      "VIRKI_MIGRATOR_DB_PASSWORD", "VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD"];
+    const allowed = stage === "create-database"
+      ? new Set(["POSTGRES_USER", "POSTGRES_DB", ...passwordKeys])
+      : ["run-deploy", "run-status"].includes(stage)
+        ? new Set(["MIGRATION_DATABASE_URL"])
+        : new Set();
+    for (const key of new Set([...Object.keys(env), ...Object.keys(supplied)])) {
+      if (!allowed.has(key) && supplied[key] !== env[key]) {
+        refuse("unreviewed Docker subprocess environment override");
+      }
+    }
+    if (stage === "create-database") {
+      if (supplied.POSTGRES_USER !== "virki_bootstrap" || supplied.POSTGRES_DB !== "virki_validation" ||
+          passwordKeys.some((key) => !/^[a-f0-9]{64}$/u.test(supplied[key] ?? ""))) {
+        refuse("disposable PostgreSQL environment does not match the fixture");
+      }
+    } else if (["run-deploy", "run-status"].includes(stage)) {
+      let url;
+      try { url = new URL(supplied.MIGRATION_DATABASE_URL); } catch { /* fail closed */ }
+      if (url?.protocol !== "postgresql:" || url.username !== "virki_migrator" ||
+          !/^[a-f0-9]{64}$/u.test(url.password) || url.hostname !== `database-${owner}` ||
+          url.port !== "5432" || url.pathname !== "/virki_validation" ||
+          url.search !== "?schema=public" || url.hash) {
+        refuse("disposable migration database URL is not owner-local");
+      }
+    }
+  }
   // A public generic Docker CLI bypasses the mutation journal. Only expose
   // the exact, owner-scoped read observations used by smoke fixtures.
   function invoke(args, options = {}) {
@@ -194,23 +258,51 @@ export function createDisposableDockerSession({
     const readyRead = kind === "migrator" && args.length === readyArgs.length &&
       args.every((value, index) => value === readyArgs[index]);
     if (!portRead && !readyRead) refuse("unreviewed public Docker read operation");
+    verifyEnvironmentOverride("read", options);
     return invokeRaw(args, options);
   }
 
   function performMutation(stage, args, options, cleanupOperation = false) {
     if (cleanupStarted && !cleanupOperation) refuse("Docker mutation after cleanup was requested");
     if (!SAFE_NAME.test(stage)) refuse("invalid Docker mutation stage");
+    if (!cleanupOperation) {
+      const order = kind === "migrator"
+        ? ["create-network", "create-database", "run-deploy", "run-status"]
+        : containers.length === 3
+          ? ["create-network", "create-public", "create-issuer", "create-hub"]
+          : ["create-network", "run-assertion"];
+      // A one-container assertion fixture runs without a network; an isolated
+      // one-container mock may instead create one disposable network.
+      const allowedStage = containers.length === 1
+        ? acknowledgedStages.length === 0 && (spawn === spawnSync
+          ? stage === "run-assertion" : ["create-network", "run-assertion"].includes(stage))
+        : stage === order[acknowledgedStages.length];
+      if (!allowedStage || receipt.uncertainOperations.length > 0) {
+        refuse("out-of-order, repeated or uncertain Docker mutation");
+      }
+    }
     if (!cleanupOperation) requireOwnedDisposableDockerMutation({ kind, owner, containers, network, stage, args });
+    if (!cleanupOperation) verifyEnvironmentOverride(stage, options);
+    const initializerIdentity = !cleanupOperation && stage === "create-database"
+      ? verifyTrustedRoleSetup() : null;
     // Persist intent before invoking Docker; a lost ACK must never become PASS.
     persist("MUTATION_PENDING", stage);
     let result;
     try { result = invokeRaw(args, options); } catch { /* unknown Docker effect */ }
+    if (initializerIdentity !== null) {
+      try { verifyTrustedRoleSetup({ previous: initializerIdentity }); } catch {
+        receipt.uncertainOperations.push(stage);
+        persist("RECONCILIATION_REQUIRED", stage);
+        refuse(`disposable initializer identity changed during Docker operation; reconcile using ${receiptPath}`);
+      }
+    }
     if (result?.error || result?.status !== 0) {
       receipt.uncertainOperations.push(stage);
       persist("RECONCILIATION_REQUIRED", stage);
       refuse(`uncertain Docker mutation ${stage}; reconcile using receipt ${receiptPath}`);
     }
     persist("MUTATION_ACKNOWLEDGED", stage);
+    if (!cleanupOperation) acknowledgedStages.push(stage);
     return result;
   }
 

@@ -1,15 +1,31 @@
 import assert from "node:assert/strict";
-import { fsyncSync, readFileSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { fsyncSync, lstatSync, readFileSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createDisposableDockerSession } from "./lib/disposable-docker-session.mjs";
-import { requireOwnedDisposableDockerMutation } from "./lib/disposable-docker-mutation-policy.mjs";
+import { requireOwnedDisposableDockerMutation, verifyTrustedRoleSetup } from "./lib/disposable-docker-mutation-policy.mjs";
+import { assertion as pinnedRuntimeAssertion } from "./lib/production-boundary-assertion.mjs";
 
 const OWNER = "a".repeat(32);
 
+test("real role initializer path is regular and rejects simulated leaf, parent or inode replacement", () => {
+  const pinned = verifyTrustedRoleSetup();
+  assert.ok(pinned.length > 0);
+  for (const suffix of ["10-virki-database-roles.sh", "postgres-init"]) {
+    const observe = (pathname, options) => {
+      const actual = lstatSync(pathname, options);
+      if (path.basename(pathname) !== suffix) return actual;
+      return { ...actual, isSymbolicLink: () => true };
+    };
+    assert.throws(() => verifyTrustedRoleSetup({ observe }), /unsafe path, inode or symlink/u);
+  }
+  assert.throws(() => verifyTrustedRoleSetup({ previous: `${pinned}tampered` }),
+    /initializer inode or parent changed/u);
+});
+
 test("reviewed runtime and migrator profiles accept exact owned operations only", () => {
-  const runtime = { kind: "runtime", owner: OWNER, containers: ["public-run", "issuer-run", "hub-run"],
+  const runtime = { kind: "runtime", owner: OWNER, containers: ["public-run", "hub-run", "issuer-run"],
     network: "validation-network" };
   const label = `org.virki.validation=${OWNER}`;
   const revision = "a".repeat(40);
@@ -22,9 +38,20 @@ test("reviewed runtime and migrator profiles accept exact owned operations only"
   const publicArgs = ["run", ...base, "--tmpfs",
     "/app/apps/public-site/.next/cache:rw,noexec,nosuid,nodev,size=128m",
     "--detach", "--name", "public-run", "--network", runtime.network, "--label", label,
-    "--publish", "127.0.0.1::3000", "--env", "NODE_ENV=production", img,
+    "--publish", "127.0.0.1::3000", "--env", "NODE_ENV=production",
+    "--env", "VIRKI_PORTAL_URL=https://portal.biel.dev.br", img,
     "npm", "run", "start", "--workspace", "@virki/public-site"];
   check(runtime, "create-public", publicArgs);
+  // These mounts are part of the reviewed privilege boundary; accepting an
+  // omitted or duplicate tmpfs silently changes runtime security semantics.
+  const firstTmpfs = publicArgs.indexOf("--tmpfs");
+  for (const flags of [
+    [...publicArgs.slice(0, firstTmpfs), ...publicArgs.slice(firstTmpfs + 2)],
+    [...publicArgs.slice(0, -6), "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m", ...publicArgs.slice(-6)],
+  ]) {
+    assert.throws(() => requireOwnedDisposableDockerMutation({ ...runtime,
+      stage: "create-public", args: flags }), /refused/u);
+  }
   const imageIndex = publicArgs.indexOf(img);
   for (const injection of [
     ["--env", "NODE_OPTIONS=--require=/tmp/rogue.js"],
@@ -36,12 +63,35 @@ test("reviewed runtime and migrator profiles accept exact owned operations only"
       ...publicArgs.slice(imageIndex)] }), /refused/u);
   check(runtime, "create-issuer", ["run", ...base, "--detach", "--name", "issuer-run",
     "--network", runtime.network, "--label", label, "--network-alias", "oidc-issuer",
-    "--env", "NODE_ENV=production", img, "npm", "run", "start", "--workspace", "@virki/issuer"]);
-  check(runtime, "create-hub", ["run", ...base, "--detach", "--name", "hub-run",
+    "--env", "NODE_ENV=production", "--env", "OIDC_ISSUER_PORT=3003",
+    "--env", "VIRKI_OIDC_ISSUER=https://portal.biel.dev.br",
+    "--env", `VIRKI_OIDC_SIGNING_JWKS=${JSON.stringify({ keys: [{ kty: "EC", crv: "P-256", alg: "ES256", use: "sig", d: "secret" }] })}`,
+    "--env", `VIRKI_OIDC_COOKIE_KEY=${"A".repeat(43)}`,
+    "--env", `VIRKI_OIDC_ADAPTER_KEY=${"a".repeat(64)}`,
+    "--env", `VIRKI_TOTP_ENCRYPTION_KEY=${"a".repeat(64)}`,
+    "--env", "DATABASE_URL=postgresql://virki_app:local-validation-only@database:5432/virki",
+    img, "npm", "run", "start", "--workspace", "@virki/issuer"]);
+  check(runtime, "create-hub", ["run", ...base, "--tmpfs",
+    "/app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", "hub-run",
     "--network", runtime.network, "--label", label, "--publish", "127.0.0.1::3001",
-    "--env", "NODE_ENV=production", img]);
+    "--env", "NODE_ENV=production",
+    "--env", "VIRKI_HUB_URL=https://hub.biel.dev.br",
+    "--env", "VIRKI_PORTAL_URL=https://portal.biel.dev.br",
+    "--env", "VIRKI_HUB_HOSTNAME=hub.biel.dev.br",
+    "--env", "VIRKI_PORTAL_HOSTNAME=portal.biel.dev.br",
+    "--env", "VIRKI_OIDC_PROXY_URL=http://oidc-issuer:3003",
+    "--env", "DATABASE_URL=postgresql://virki_app:local-validation-only@database:5432/virki",
+    ...["VIRKI_RATE_LIMIT_HASH_SECRET", "VIRKI_AUDIT_HASH_SECRET", "VIRKI_CSRF_SIGNING_KEY",
+      "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY"]
+      .flatMap((key) => ["--env", `${key}=${"a".repeat(64)}`]),
+    "--env", "CLOUDFLARE_ACCESS_JWT_REQUIRED=true",
+    "--env", "CLOUDFLARE_ACCESS_AUDIENCE=runtime-smoke-audience",
+    "--env", "CLOUDFLARE_TEAM_DOMAIN=runtime.example.invalid", img]);
   check(runtime, "run-assertion", ["run", "--rm", "--name", "public-run", "--label", label,
-    "--network", "none", ...base, "--entrypoint", "node", img, "-e", "process.exit(0)"]);
+    "--network", "none", ...base, "--entrypoint", "node", img, "-e", pinnedRuntimeAssertion]);
+  assert.throws(() => requireOwnedDisposableDockerMutation({ ...runtime, stage: "run-assertion",
+    args: ["run", "--rm", "--name", "public-run", "--label", label, "--network", "none",
+      ...base, "--entrypoint", "node", img, "-e", "process.exit(0)"] }), /refused/u);
 
   const id = "b".repeat(8) + "-cccc-dddd-eeee-" + "f".repeat(12);
   const migrator = { kind: "migrator", owner: OWNER,
@@ -50,6 +100,8 @@ test("reviewed runtime and migrator profiles accept exact owned operations only"
   const databaseArgs = ["run", "--detach", "--name", "db-run",
     "--network", migrator.network, "--network-alias", `database-${id}`,
     "--label", label, "--env", "POSTGRES_USER", "--env", "POSTGRES_PASSWORD",
+    "--env", "POSTGRES_DB", "--env", "VIRKI_RUNTIME_DB_PASSWORD",
+    "--env", "VIRKI_MIGRATOR_DB_PASSWORD", "--env", "VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD",
     "--volume", `${path.resolve("infra/postgres-init/10-virki-database-roles.sh")}:/docker-entrypoint-initdb.d/10-virki-database-roles.sh:ro`,
     "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24"];
   check(migrator, "create-database", databaseArgs);
@@ -70,7 +122,8 @@ function receipt(pathname) {
 }
 
 function fixture({ failCreate = false, failStart = false, missingAfterFailure = false, failCleanup = false,
-  platform = "win32", nativeArch = "x64", serverArch = "amd64", envOverride = {} } = {}) {
+  platform = "win32", nativeArch = "x64", serverArch = "amd64", envOverride = {},
+  containers = ["validation-container"] } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "virki-docker-session-test-"));
   const calls = [];
   let exists = false;
@@ -86,6 +139,7 @@ function fixture({ failCreate = false, failStart = false, missingAfterFailure = 
     if (action[0] === "run" && failStart) {
       return { status: 1, stdout: "", stderr: "Docker CLI timed out before returning CID" };
     }
+    if (action[0] === "run") return { status: 0, stdout: "", stderr: "" };
     if (action[0] === "network" && action[1] === "inspect") {
       if (exists && action[2] === "validation-network") {
         return { status: 0, stdout: JSON.stringify([{ Id: "b".repeat(64), Name: "validation-network", Labels: { "org.virki.validation": OWNER } }]), stderr: "" };
@@ -106,10 +160,59 @@ function fixture({ failCreate = false, failStart = false, missingAfterFailure = 
     DOCKER_CONTEXT: "production", DOCKER_TLS_VERIFY: "1",
     VIRKI_VALIDATION_EVIDENCE_DIR: path.join(root, "unused-user-environment-override"), ...envOverride };
   const session = createDisposableDockerSession({ kind: "runtime", owner: OWNER,
-    containers: ["validation-container"], network: "validation-network", env,
+    containers, network: "validation-network", env,
     platform, nativeArch, receiptDirectory: root, spawn });
-  return { root, calls, session, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, calls, session, env, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("subprocess environment overrides cannot reroute Docker or disposable databases", (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const initialCalls = f.calls.length;
+  const ownedNetwork = ["network", "create", "--label", `org.virki.validation=${OWNER}`, "validation-network"];
+  for (const dangerous of [
+    { ...f.env, LD_PRELOAD: "/tmp/evil.so" },
+    { ...f.env, NODE_OPTIONS: "--require=/tmp/rogue.js" },
+    { ...f.env, PATH: "/tmp/rogue-bin" },
+    { ...f.env, MIGRATION_DATABASE_URL: "postgresql://virki_migrator@foreign.example.test/virki_validation" },
+  ]) {
+    assert.throws(() => f.session.mutate("create-network", ownedNetwork, { env: dangerous }), /refused/u);
+    assert.throws(() => f.session.invoke(["port", "validation-container", "3000/tcp"],
+      { env: dangerous }), /refused/u);
+  }
+  assert.equal(f.calls.length, initialCalls, "unsafe environment must not reach Docker");
+  f.session.cleanup(); f.session.finish(true);
+});
+
+test("RED→GREEN: reserved Docker networks and resource creation replay are rejected", (t) => {
+  for (const network of ["host", "bridge", "none", "default"]) {
+    let contacted = false;
+    assert.throws(() => createDisposableDockerSession({
+      kind: "runtime", owner: OWNER, containers: ["validation-container"], network,
+      platform: "win32", spawn: () => { contacted = true; throw Error("Unexpected Docker contact"); },
+    }), /invalid resource ownership/u);
+    assert.equal(contacted, false);
+    assert.throws(() => requireOwnedDisposableDockerMutation({ kind: "runtime", owner: OWNER,
+      containers: ["validation-container"], network, stage: "create-network",
+      args: ["network", "create", "--label", `org.virki.validation=${OWNER}`, network],
+    }), /refused/u);
+  }
+  const f = fixture(); t.after(f.cleanup);
+  const expected = ["network", "create", "--label", `org.virki.validation=${OWNER}`, "validation-network"];
+  f.session.mutate("create-network", expected);
+  const calls = f.calls.length;
+  assert.throws(() => f.session.mutate("create-network", expected), /out-of-order|repeated/u);
+  assert.equal(f.calls.length, calls, "replayed network creation must not reach Docker");
+  f.session.cleanup(); f.session.finish(true);
+});
+
+test("RED→GREEN: runtime containers cannot start before their disposable network", (t) => {
+  const f = fixture({ containers: ["public-run", "hub-run", "issuer-run"] });
+  t.after(f.cleanup);
+  const calls = f.calls.length;
+  assert.throws(() => f.session.mutate("create-hub", []), /out-of-order/u);
+  assert.equal(f.calls.length, calls);
+  f.session.cleanup(); f.session.finish(true);
+});
 
 test("explicit Windows Docker Desktop Linux pipe is used, never ambient remote DOCKER_HOST", (t) => {
   const f = fixture(); t.after(f.cleanup);
@@ -155,6 +258,22 @@ test("a Docker mutation after verified cleanup cannot reuse stale cleanup eviden
   assert.equal(receipt(f.session.receiptPath).status, "PASS");
 });
 
+test("RED→GREEN: one acknowledged image assertion can never replay before cleanup", (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const args = ["run", "--rm", "--name", "validation-container",
+    "--label", `org.virki.validation=${OWNER}`, "--network", "none",
+    "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m", "--entrypoint", "node",
+    `virki-production-ci:${"a".repeat(40)}`, "-e", pinnedRuntimeAssertion];
+  assert.equal(f.session.mutate("run-assertion", args).status, 0);
+  const originalRuns = f.calls.filter((call) => call.args[2] === "run").length;
+  assert.equal(originalRuns, 1);
+  assert.throws(() => f.session.mutate("run-assertion", args), /repeated|out-of-order/u);
+  assert.equal(f.calls.filter((call) => call.args[2] === "run").length, 1,
+    "a replayed assertion must not contact the Docker daemon");
+  f.session.cleanup(); f.session.finish(true);
+});
+
 test("public Docker reads never expose raw mutation or foreign resource access", (t) => {
   const f = fixture(); t.after(f.cleanup);
   const before = f.calls.length;
@@ -195,7 +314,7 @@ test("lost container CID after Docker start cannot be cleared by an absent immed
   assert.throws(() => f.session.mutate("run-assertion", ["run", "--rm", "--name", "validation-container",
     "--label", `org.virki.validation=${OWNER}`, "--network", "none", "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
-    "--entrypoint", "node", `virki-production-ci:${"a".repeat(40)}`, "-e", "process.exit(0)"]), /uncertain/u);
+    "--entrypoint", "node", `virki-production-ci:${"a".repeat(40)}`, "-e", pinnedRuntimeAssertion]), /uncertain/u);
   f.session.cleanup();
   assert.throws(() => f.session.finish(false), /reconciliation/u);
   const record = receipt(f.session.receiptPath);
