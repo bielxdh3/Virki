@@ -17,6 +17,7 @@ const POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.e
 const FIXTURE_IMAGE = "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8";
 const SOURCE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const RECONCILIATION_DIRECTORY = path.join(homedir(), ".virki", "offline-docker-reconciliation");
+const PRIVATE_JOURNAL_SCRIPT = fileURLToPath(new URL("./windows-private-docker-journal.ps1", import.meta.url));
 
 // This runner is intentionally limited to the three checked-in, read-only
 // test profiles. Docker run exposes dozens of host escape surfaces; accepting
@@ -130,6 +131,24 @@ function assertExit(result, message) {
   if (result.error || result.status !== 0) throw new Error(message);
 }
 
+// The Windows path is opened/ACL-verified through the same Win32 handles used
+// to create/append/delete evidence, with all ancestors held against rename.
+// This helper is mandatory for real Docker calls; unit mocks use the local
+// fixture implementation below and never launch Docker.
+export function runProtectedWindowsJournalOperation(operation, request) {
+  const cmd = spawnSync(POWERSHELL,
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", PRIVATE_JOURNAL_SCRIPT, operation],
+    {
+      shell: false, windowsHide: true, timeout: 30_000,
+      encoding: "utf8", maxBuffer: 4096, env: syntheticEnvironment(),
+      input: JSON.stringify(request),
+    });
+  if (cmd.error || cmd.status !== 0 || cmd.stdout !== "JOURNAL_OK") {
+    throw new Error("Trusted Windows reconciliation journal identity/ACL binding unavailable.");
+  }
+}
+
 // File is created exclusively and flushed BEFORE invoking docker run; a
 // timeout, killed CLI or daemon stall cannot erase its random owner/name.
 function createReconciliationEvidence({ directory, name, owner, root }) {
@@ -214,10 +233,23 @@ export function runOwnedLocalLinuxFixture(args, {
 
   const owner = randomBytes(16).toString("hex");
   const name = `virki-offline-fixture-${owner}`;
-  const evidence = createReconciliationEvidence({
-    directory: reconciliationDirectory ?? RECONCILIATION_DIRECTORY,
-    name, owner, root: realpathSync.native(SOURCE_ROOT),
-  });
+  const evidenceDirectory = reconciliationDirectory ?? RECONCILIATION_DIRECTORY;
+  const evidence = path.join(evidenceDirectory, `${name}.jsonl`);
+  const journalInput = { directory: evidenceDirectory, name, owner };
+  const protectedJournal = invoke === spawnSync;
+  const initialEvidence = {
+    version: 1, name, owner, engine: LOCAL_ENGINE, image: FIXTURE_IMAGE,
+    sourceRoot: realpathSync.native(SOURCE_ROOT), createdAt: new Date().toISOString(),
+    state: "run_may_still_start", reconciliation: "operator_required_if_retained",
+  };
+  if (protectedJournal) {
+    runProtectedWindowsJournalOperation("create",
+      { ...journalInput, line: JSON.stringify(initialEvidence) });
+  } else {
+    createReconciliationEvidence({
+      directory: evidenceDirectory, name, owner, root: initialEvidence.sourceRoot,
+    });
+  }
   const runArgs = ["run", "--rm", "--name", name,
     "--label", `${OWNER_LABEL}=${owner}`, ...args.slice(2)];
   let result;
@@ -243,7 +275,17 @@ export function runOwnedLocalLinuxFixture(args, {
       const [id, actualName, actualOwner] =
         typeof inspect.stdout === "string" ? inspect.stdout.trim().split("|") : [];
       try {
-        recordInspection(evidence, { id, actualName, actualOwner });
+        if (protectedJournal) {
+          runProtectedWindowsJournalOperation("append", {
+            ...journalInput, line: JSON.stringify({
+              event: "inspection_observation", observedId: id?.slice(0, 128) ?? null,
+              observedName: actualName?.slice(0, 128) ?? null,
+              observedOwner: actualOwner?.slice(0, 128) ?? null,
+            }),
+          });
+        } else {
+          recordInspection(evidence, { id, actualName, actualOwner });
+        }
       } catch {
         cleanupFailure = "Disposable Docker ownership observation could not be persisted.";
       }
@@ -272,7 +314,11 @@ export function runOwnedLocalLinuxFixture(args, {
   }
   if (cleanupFailure) retainEvidence(evidence, cleanupFailure, invoke);
   try {
-    unlinkSync(evidence);
+    if (protectedJournal) {
+      runProtectedWindowsJournalOperation("remove", journalInput);
+    } else {
+      unlinkSync(evidence);
+    }
   } catch {
     retainEvidence(evidence, "Disposable Docker cleanup evidence could not be cleared.", invoke);
   }

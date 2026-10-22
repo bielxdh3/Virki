@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import test, { after } from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   LOCAL_ENGINE, requireLocalFixtureEnvironment, runOwnedLocalLinuxFixture,
-  verifyTrustedWindowsDockerCli,
+  runProtectedWindowsJournalOperation, verifyTrustedWindowsDockerCli,
 } from "./disposable-local-docker.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -284,4 +286,78 @@ test("removal transport failure preserves inspected CID for manual reconciliatio
   const evidence = evidenceForRun(fake);
   assert.equal(readEvidence(evidence.file)[1].observedId, "e".repeat(64));
   assert.deepEqual(fake.calls.map(({ command }) => command), ["info", "run", "inspect", "rm"]);
+});
+
+test("Windows private journal binds creation, append, and removal to verified handles", {
+  skip: process.platform !== "win32",
+}, () => {
+  const directory = mkdtempSync(path.join(homedir(), ".virki-journal-test-"));
+  const owner = randomBytes(16).toString("hex");
+  const name = `virki-offline-fixture-${owner}`;
+  const file = path.join(directory, `${name}.jsonl`);
+  const request = { directory, name, owner };
+  try {
+    assert.doesNotThrow(() => runProtectedWindowsJournalOperation("create",
+      { ...request, line: JSON.stringify({ owner, name }) }));
+    assert.equal(readFileSync(file, "utf8").trim(), JSON.stringify({ owner, name }));
+    runProtectedWindowsJournalOperation("append", { ...request, line: '{"event":"inspect"}' });
+    assert.equal(readFileSync(file, "utf8").trim().split("\n").length, 2);
+    runProtectedWindowsJournalOperation("remove", request);
+    assert.equal(existsSync(file), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows journal rejects world-writable ACL and reparse ancestor before evidence creation", {
+  skip: process.platform !== "win32",
+}, () => {
+  const directory = mkdtempSync(path.join(homedir(), ".virki-journal-test-"));
+  const junction = path.join(directory, "redirect");
+  const owner = randomBytes(16).toString("hex");
+  const name = `virki-offline-fixture-${owner}`;
+  const request = { name, owner, line: '{"version":1}' };
+  try {
+    // A new private leaf in a verified user profile may be created.
+    runProtectedWindowsJournalOperation("create", { ...request, directory });
+    const otherOwner = randomBytes(16).toString("hex");
+    symlinkSync(directory, junction, "junction");
+    assert.throws(() => runProtectedWindowsJournalOperation("create", {
+      ...request, name: `virki-offline-fixture-${otherOwner}`,
+      owner: otherOwner, directory: junction,
+    }), /ACL binding unavailable/u);
+    const granted = spawnSync("C:\\Windows\\System32\\icacls.exe",
+      [directory, "/grant", "*S-1-1-0:(M)"], { encoding: "utf8", windowsHide: true });
+    assert.equal(granted.status, 0);
+    assert.throws(() => runProtectedWindowsJournalOperation("append",
+      { ...request, directory, line: '{"event":"forged"}' }), /ACL binding unavailable/u);
+    const before = readFileSync(path.join(directory, `${name}.jsonl`), "utf8");
+    assert.equal(before.trim(), request.line);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows journal checks opened file DACL before append and delete", {
+  skip: process.platform !== "win32",
+}, () => {
+  const directory = mkdtempSync(path.join(homedir(), ".virki-journal-test-"));
+  const owner = randomBytes(16).toString("hex");
+  const name = `virki-offline-fixture-${owner}`;
+  const file = path.join(directory, `${name}.jsonl`);
+  const request = { directory, name, owner };
+  try {
+    runProtectedWindowsJournalOperation("create", { ...request, line: '{"version":1}' });
+    const granted = spawnSync("C:\\Windows\\System32\\icacls.exe",
+      [file, "/grant", "*S-1-1-0:(M)"], { encoding: "utf8", windowsHide: true });
+    assert.equal(granted.status, 0);
+    assert.throws(() => runProtectedWindowsJournalOperation("append",
+      { ...request, line: '{"event":"unexpected"}' }), /ACL binding unavailable/u);
+    assert.throws(() => runProtectedWindowsJournalOperation("remove", request),
+      /ACL binding unavailable/u);
+    assert.equal(readFileSync(file, "utf8").trim(), '{"version":1}');
+    assert.equal(existsSync(file), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
