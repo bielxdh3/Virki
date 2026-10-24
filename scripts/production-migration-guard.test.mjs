@@ -37,6 +37,7 @@ revision='${revision}'
 backup_dir="$root/backups"
 verification_path="$root/.virki-migration-verification"
 migration_guard_path="$root/.virki-migration-integrity-guard"
+maintenance_path="$root/.virki-maintenance"
 fail() { printf '%s\\n' "$1" >&2; exit 77; }
 ${realGuardFunctions}
 identity_snapshot() { printf '%s\\n' "$VIRKI_GUARD_TEST_IDENTITY"; }
@@ -91,6 +92,54 @@ test("production checkpoint rejects symlinks, loose permissions, and malformed m
   }
 });
 
+test("a VERIFIED checkpoint renews an expired backup while preserving original custody", { skip: process.platform !== "linux" }, () => {
+  const fixture = createFixture();
+  try {
+    assert.equal(run(fixture.root, `write_migration_guard PREPARED '${identity}' '${recoveryDigest}' && write_migration_guard VERIFIED '${identity}' '${recoveryDigest}'`).status, 0);
+    const initial = readFileSync(fixture.markerPath, "utf8");
+    assert.match(initial, /origin_backup_name=virki-20261024-123456-abcdef\.dump/u);
+    const oldMarker = path.join(fixture.root, ".virki-migration-verification");
+    const oldVerification = readFileSync(oldMarker, "utf8").replace(/verified_at=.*/u, "verified_at=2026-01-01T00:00:00Z");
+    writeFileSync(oldMarker, oldVerification);
+    assert.notEqual(run(fixture.root, "assert_backup_verified").status, 0, "old backup proof is outside the 24-hour window");
+    assert.notEqual(run(fixture.root, "assert_migration_guard_renewable").status, 0, "renewal also requires the maintenance marker");
+    writeFileSync(path.join(fixture.root, ".virki-maintenance"), "revision=" + revision + "\n", { mode: 0o600 });
+    assert.equal(run(fixture.root, "assert_migration_guard_renewable").status, 0, "old original backup is still verifiable by digest");
+    // Simulate loss of the verification marker during interrupted renewal;
+    // the guarded original remains recoverable for another isolated restore.
+    rmSync(oldMarker);
+    assert.equal(run(fixture.root, "assert_migration_guard_renewable").status, 0);
+    const renewedName = "virki-20261025-123456-fedcba.dump";
+    const renewedPath = path.join(fixture.root, "backups", renewedName);
+    const bytes = "new independently restored disposable backup";
+    writeFileSync(renewedPath, bytes, { mode: 0o600 });
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    writeFileSync(oldMarker, `revision=${revision}\nbackup_name=${renewedName}\nbackup_sha256=${hash}\nverified_at=${new Date().toISOString()}\n`, { mode: 0o600 });
+    assert.equal(run(fixture.root, "rebind_verified_migration_guard").status, 0);
+    assert.equal(run(fixture.root, "assert_migration_guard_verified").status, 0);
+    const renewed = readFileSync(fixture.markerPath, "utf8");
+    assert.match(renewed, /backup_name=virki-20261025-123456-fedcba\.dump/u);
+    assert.match(renewed, /origin_backup_name=virki-20261024-123456-abcdef\.dump/u);
+    rmSync(fixture.backupPath);
+    assert.notEqual(run(fixture.root, "assert_migration_guard_verified").status, 0, "never lose custody of the original pre-migration backup");
+    assert.notEqual(run(fixture.root, "assert_migration_guard_renewable").status, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a PREPARED checkpoint never permits backup renewal after a crash", { skip: process.platform !== "linux" }, () => {
+  const fixture = createFixture();
+  try {
+    writeFileSync(path.join(fixture.root, ".virki-maintenance"), "revision=" + revision + "\n", { mode: 0o600 });
+    assert.equal(run(fixture.root, `write_migration_guard PREPARED '${identity}' '${recoveryDigest}'`).status, 0);
+    assert.notEqual(run(fixture.root, "assert_migration_guard_renewable").status, 0);
+    assert.notEqual(run(fixture.root, "rebind_verified_migration_guard").status, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("migration prepares durability checkpoint before the first live database mutation", () => {
   const block = productionSource.slice(productionSource.indexOf("apply_production_migrations() {"), productionSource.indexOf("assert_no_maintenance() {"));
   assert.ok(block.indexOf("write_migration_guard PREPARED") > 0);
@@ -98,4 +147,10 @@ test("migration prepares durability checkpoint before the first live database mu
   assert.ok(block.indexOf("write_migration_guard VERIFIED") > block.indexOf("Production migration changed encrypted recovery outbox"));
   assert.match(productionSource, /assert_no_maintenance\(\) \{[\s\S]*?assert_migration_guard_absent/u);
   assert.match(productionSource, /resume_services\(\) \{[\s\S]*?assert_migration_guard_verified/u);
+  const install = productionSource.slice(productionSource.indexOf("install_source() {"), productionSource.indexOf("cleanup_deploy_staging() {"));
+  assert.ok(install.indexOf("assert_migration_guard_absent") < install.indexOf("verify_source_archive"), "install-source and deploy must not replace the accepted revision during failed migration");
+  const resume = productionSource.slice(productionSource.indexOf("resume_services() {"), productionSource.indexOf("install_source() {"));
+  assert.ok(resume.indexOf('rm -- "$maintenance_path"') < resume.indexOf("compose up --detach cloudflared"), "the public route must never start before durable removal of maintenance markers");
+  const backupVerify = productionSource.slice(productionSource.indexOf("  backup-verify)"), productionSource.indexOf("  migration-status)"));
+  assert.match(backupVerify, /assert_migration_guard_renewable[\s\S]*?create_verified_backup[\s\S]*?rebind_verified_migration_guard/u);
 });
