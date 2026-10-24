@@ -226,3 +226,37 @@ test("Access rejects signed tokens with missing temporal claims or invalid time 
     }
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("Access tolerates at most 30 seconds of future iat and nbf, but not expired tokens", async () => {
+  const teamDomain = "https://skew-jwt-test.example.invalid";
+  const audience = "skew-test-audience";
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = await exportJWK(publicKey);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ keys: [{ ...jwk, kid: "skew-key", use: "sig", alg: "RS256" }] }))) as typeof fetch;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const env = { CLOUDFLARE_ACCESS_JWT_REQUIRED: "true", CLOUDFLARE_ACCESS_AUDIENCE: audience, CLOUDFLARE_TEAM_DOMAIN: teamDomain };
+    for (const [claims, allowed] of [
+      [{ iat: now + 15, nbf: now + 15, exp: now + 90 }, true],
+      [{ iat: now + 31, nbf: now, exp: now + 90 }, false],
+      [{ iat: now, nbf: now + 31, exp: now + 90 }, false],
+      [{ iat: now - 60, nbf: now - 60, exp: now - 1 }, false]
+    ] as const) {
+      const token = await new SignJWT(claims).setProtectedHeader({ alg: "RS256", kid: "skew-key" }).setIssuer(teamDomain).setAudience(audience).sign(privateKey);
+      const result = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), env);
+      assert.equal(result.allowed, allowed, JSON.stringify(claims));
+    }
+    const skewedClaims = { iat: now + 15, nbf: now + 15, exp: now + 90 };
+    const otherSigner = (await generateKeyPair("RS256")).privateKey;
+    for (const [issuer, tokenAudience, signer] of [
+      ["https://other.example.invalid", audience, privateKey],
+      [teamDomain, "other-audience", privateKey],
+      [teamDomain, audience, otherSigner]
+    ] as const) {
+      const token = await new SignJWT(skewedClaims).setProtectedHeader({ alg: "RS256", kid: "skew-key" }).setIssuer(issuer).setAudience(tokenAudience).sign(signer);
+      const result = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), env);
+      assert.equal(result.allowed, false, `${issuer}/${tokenAudience}`);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});

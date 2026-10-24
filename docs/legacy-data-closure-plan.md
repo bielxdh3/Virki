@@ -44,6 +44,8 @@ Before proposing an FK or uniqueness rule, the operator and security owner must 
 
 The current identity helper defines canonical email as JavaScript `trim().toLowerCase()`; it does not apply additional Unicode normalization. The admin action permits only the exact consistent ACTIVE-to-INACTIVE and INACTIVE-to-ACTIVE pairs. BLOCKED, PENDING_ACTIVATION, and inconsistent pairs cannot be changed through the toggle.
 
+Status on 2026-10-24: `BLOCKED_UNVERIFIED`. The issue #60 code review did not have an operator-approved isolated restore or aggregate inventory output. It therefore cannot establish whether case-mismatched legacy email values or canonical collisions exist. Keep lookup and recovery behavior unchanged until the read-only inventory below and the account-resolution policy are reviewed; do not backfill from this source review.
+
 Review `counts.accountEmails` (`totalUsers`, `normalizedNull`, `normalizedBlank`, `normalizationMismatch`, `collisionGroupCount`, and `collisionMemberCount`) plus all eight `counts.accountStates` status/`isActive` buckets. Collision groups are counted by the canonical helper, not by locale-sensitive database collation.
 
 Before any backfill, constraint, or recovery-lookup change, approve the canonicalization contract and a per-account resolution process for null/blank/mismatched values and collisions. A collision must be resolved against verified ownership; do not merge accounts, select an arbitrary winner, or issue recovery based on an alternate identity match. Decide explicitly how `BLOCKED` and `PENDING_ACTIVATION` accounts transition. Preserve password hashes, MFA/recovery metadata, sessions, and security audit history. Rehearse any change on the approved restore, then rerun aggregate inventory and reconciliation.

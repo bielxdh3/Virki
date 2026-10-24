@@ -8,7 +8,7 @@ import { installAuditResponseGate, requireAuditBeforeResponse, useNativeOidcResp
 import { readInteractionDetailsOrRespond } from "./interaction-error";
 import { createProviderEventAudit } from "./provider-audit";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
-import { readIssuer } from "./issuer-config";
+import { readIssuer, readSigningJwks } from "./issuer-config";
 import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_PROVIDER_CLAIMS, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
@@ -494,21 +494,6 @@ async function writeRateLimitAuditOnce(clientAddress: string, now: Date, reason:
   } catch {
     // Keep throttling effective if this optional denial audit cannot be stored.
   }
-}
-
-function readSigningJwks(value: string | undefined): { keys: Array<Record<string, string>> } {
-  if (!value) throw new Error("OIDC signing keys are unavailable.");
-  const parsed: unknown = JSON.parse(value);
-  if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { keys?: unknown }).keys)) throw new Error("OIDC signing keys are invalid.");
-  const keys = (parsed as { keys: unknown[] }).keys;
-  if (!keys.length || keys.some((item) => !isPrivateSigningKey(item))) throw new Error("OIDC requires private ES256 signing keys with key IDs.");
-  return { keys: keys as Array<Record<string, string>> };
-}
-
-function isPrivateSigningKey(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const key = value as Record<string, unknown>;
-  return key.kty === "EC" && key.crv === "P-256" && key.alg === "ES256" && key.use === "sig" && typeof key.kid === "string" && Boolean(key.kid) && typeof key.d === "string";
 }
 
 function readCookieKey(value: string | undefined): string {
