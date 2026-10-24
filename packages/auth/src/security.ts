@@ -23,7 +23,7 @@ import {
   writeAuditLogInTransaction
 } from "./index";
 import { prisma, type Prisma } from "@virki/database";
-import { requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export { DEVICE_COOKIE_NAME } from "./constants";
 export const SECURITY_CEREMONY_TTL_MS = 10 * 60 * 1000;
@@ -726,8 +726,14 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     if (administrative?.status === "ACTIVE" && await verifyPassword(administrative.passwordHash, newPassword)) throw new SecurityMutationError();
   }
   const newPasswordHash = await hashPassword(newPassword);
+  // Each post-lock read needs a fresh snapshot: a concurrent credential rotation
+  // can commit while this transaction waits for the User row.
   await prisma.$transaction(async (transaction) => {
     if (!await lockActiveRecoveryAccountInTransaction(transaction, request.userId, expectedRole)) throw new SecurityMutationError();
+    if (expectedRole === "ADMIN") {
+      const administrative = await lockAdministrativeCredentialInTransaction(transaction, request.userId);
+      if (administrative?.status === "ACTIVE" && await verifyPassword(administrative.passwordHash, newPassword)) throw new SecurityMutationError();
+    }
     await lockAndExpireSiblingAccountRecoveriesInTransaction(transaction, request.userId, request.id);
     const current = await transaction.accountRecoveryRequest.findUnique({ where: { id: request.id }, select: { userId: true, requestKeyHash: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
     if (!current || current.userId !== request.userId || !safeEqual(current.requestKeyHash, requestKeyHash) || current.emailAddressHash !== hashEmailAddress(current.user.emailNormalized ?? current.user.email) || current.status !== "APPROVED" || current.expiresAt <= now || !isAccountRecoveryEligible(current.user, expectedRole)) throw new SecurityMutationError();
@@ -741,7 +747,7 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     await revokeLoginChallenges(transaction, request.userId);
     await revokeUserOidcArtifactsInTransaction(transaction, request.userId);
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery consumed.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
-  }, { isolationLevel: "Serializable" });
+  }, { isolationLevel: "ReadCommitted" });
 }
 
 async function consumeChallengeAndCreateSession(transaction: Prisma.TransactionClient, challengeId: string, userId: string, deviceIdHash: string, now: Date, authenticationMethods: string[] = ["pwd"], rememberDevice = true): Promise<CreatedLoginSession> {

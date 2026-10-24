@@ -10,20 +10,21 @@ import {
   getAccountRecoveryRequestId,
   getAccountRecoveryState,
   requestAccountRecovery,
+  requestAdministrativeAccountRecovery,
   RECOVERY_REQUEST_COOLDOWN_MS,
   verifyAccountRecoveryEmail
 } from "./security";
-import { lockRateLimitIdentifierInTransaction, verifyPassword } from "./index";
+import { hashPassword, lockRateLimitIdentifierInTransaction, verifyPassword } from "./index";
 
 after(() => prisma.$disconnect());
 
-async function openLatestRecovery(email: string, now: Date) {
+async function openLatestRecovery(email: string, now: Date, role: "USER" | "ADMIN" = "USER") {
   const emails = (await queuedEmails(email)).filter((message) => message.kind === "ACCOUNT_RECOVERY");
   const latest = emails.at(-1);
   const requestKey = requestKeyFromActionUrl(latest?.actionUrl);
-  const opened = await getAccountRecoveryRequestId(requestKey, now);
+  const opened = await getAccountRecoveryRequestId(requestKey, now, role);
   assert.ok(opened, "the newest emailed recovery link opens");
-  assert.equal((await getAccountRecoveryState(opened.id, requestKey, now))?.purpose, "RECOVERY");
+  assert.equal((await getAccountRecoveryState(opened.id, requestKey, now, role))?.purpose, "RECOVERY");
   return { requestId: opened.id, requestKey, code: latest?.code };
 }
 
@@ -173,6 +174,49 @@ test("concurrent recovery completion changes the credential once and records one
   assert.equal(auditRows.filter((row) => (row.metadata as { requestRef?: string } | null)?.requestRef === hashAuditIdentifier(approved.requestId)).length, 1);
   assert.equal(await prisma.emailOutboxMessage.count({ where: { recipientEmail: owner.email, kind: "PASSWORD_CHANGED" } }), 1);
   await assert.rejects(consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "third-concurrent-recovery-password", now));
+});
+
+test("normal ADMIN recovery rejects a credential committed while it waits for the account lock", integrationOptions, async () => {
+  const owner = await createTestUser({ role: "ADMIN", label: "recovery-race-owner" });
+  const approver = await createTestUser({ role: "ADMIN", label: "recovery-race-approver" });
+  const now = new Date();
+  const { sessionId } = await seedAdminSessionWithElevation(approver.id, "ACCOUNT_STATE_CHANGE", now);
+  const initialHash = await hashPassword("initial-distinct-admin-password-1");
+  await prisma.administrativeCredential.create({ data: { userId: owner.id, passwordHash: initialHash, status: "ACTIVE" } });
+  await requestAdministrativeAccountRecovery(owner.email, "pt-BR", now);
+  const pending = await openLatestRecovery(owner.email, now, "ADMIN");
+  await verifyAccountRecoveryEmail(pending.requestId, pending.requestKey, pending.code ?? "", now, "ADMIN");
+  await approveAccountRecovery({ id: approver.id, role: "ADMIN" }, sessionId, pending.requestId, now);
+  const approved = await openLatestRecovery(owner.email, now, "ADMIN");
+  const candidate = "shared-after-admin-rotation-1";
+  const candidateHash = await hashPassword(candidate);
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const rotation = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${owner.id} FOR UPDATE`;
+    await transaction.administrativeCredential.update({ where: { userId: owner.id }, data: { passwordHash: candidateHash, keyVersion: { increment: 1 } } });
+    locked();
+    await gate;
+  }, { timeout: 10000 });
+  await ready;
+  const completion = consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, candidate, now, "ADMIN").then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, 'FROM "User"');
+  } finally {
+    release();
+  }
+  await rotation;
+  const outcome = await completion;
+  assert.equal(outcome.ok, false);
+  const normal = await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { passwordHash: true } });
+  const administrative = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: owner.id }, select: { passwordHash: true } });
+  assert.equal(await verifyPassword(normal.passwordHash ?? "", candidate), false);
+  assert.equal(await verifyPassword(administrative.passwordHash, candidate), true);
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: approved.requestId } })).status, "APPROVED");
 });
 
 test("portal recovery abuse does not spend the hub address or source budget", integrationOptions, async () => {
