@@ -1319,6 +1319,9 @@ create_verified_backup() {
   verify_clone_cleanup "$isolation_id" "$override" || fail 'Disposable restore cleanup could not be confirmed.'
 
   mv -- "$partial_backup_path" "$backup_path"
+  # Backup storage may be a separate mount. Persist the dump *and its directory*
+  # before publishing any checkpoint that claims it is available for recovery.
+  sync -f -- "$backup_path" && sync -f -- "$backup_dir" || fail 'Verified backup data and directory could not be made durable.'
   local backup_hash
   backup_hash=$(sha256sum -- "$backup_path" | awk '{print $1}')
   local verified_at
@@ -1331,6 +1334,7 @@ create_verified_backup() {
   } > "$verification_tmp"
   chmod 600 -- "$verification_tmp"
   mv -f -- "$verification_tmp" "$verification_path"
+  sync -f -- "$verification_path" && sync -f -- "$root" || fail 'Verified backup marker durability could not be confirmed.'
   backup_verified=true
   trap - EXIT
   printf 'Remote production backup restored and all committed migrations validated outside the source tree.\n'
@@ -1754,6 +1758,12 @@ assert_no_maintenance() {
 maintenance_on() {
   assert_migration_guard_absent
   [[ ! -L "$maintenance_path" ]] || fail 'Production maintenance marker is unsafe.'
+  # Close the external route and stop all writers FIRST. An abrupt process or
+  # host crash must never leave a new durable maintenance marker while the
+  # always-restart Tunnel can still route requests.
+  compose stop cloudflared >/dev/null || fail 'Cloudflare Tunnel could not be stopped before maintenance.'
+  assert_tunnel_stopped
+  compose stop "${application_services[@]}" >/dev/null || fail 'Application writers could not be stopped before maintenance.'
   if [[ ! -f "$maintenance_path" ]]; then
     rm -f -- "$verification_path"
     {
@@ -1765,8 +1775,6 @@ maintenance_on() {
     sync -f -- "$maintenance_path" && sync -f -- "$root" || fail 'Production maintenance checkpoint durability could not be verified.'
   fi
   trap 'stop_routed_services' EXIT
-  compose stop cloudflared >/dev/null
-  compose stop "${application_services[@]}" >/dev/null
   printf 'Virki application and Tunnel services are in maintenance; PostgreSQL and persistent data remain available.\n'
 }
 
@@ -1792,7 +1800,8 @@ resume_services() {
   [[ -f "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'Production maintenance is not active.'
   assert_backup_verified
   trap 'stop_routed_services' EXIT
-  compose stop cloudflared >/dev/null 2>&1 || true
+  compose stop cloudflared >/dev/null || fail 'Cloudflare Tunnel must stop before protected resume.'
+  assert_tunnel_stopped
   run_migration_status
   verify_migration_schema '' '' '' ''
   if [[ -e "$migration_guard_path" || -L "$migration_guard_path" ]]; then assert_migration_guard_verified; fi
@@ -1809,9 +1818,14 @@ resume_services() {
     # identity and phase may be checked here.
     read_migration_guard
     [[ "$migration_guard_phase" == VERIFIED && "$migration_guard_revision" == "$revision" ]] || fail 'Verified checkpoint changed during startup.'
+  fi
+  # On a crash between unlink operations, retaining the integrity guard is
+  # safer than leaving only maintenance with no signed backup baseline.
+  rm -- "$maintenance_path" || fail 'Production maintenance marker could not be cleared.'
+  sync -f -- "$root" || fail 'Maintenance removal could not be made durable.'
+  if [[ -e "$migration_guard_path" || -L "$migration_guard_path" ]]; then
     rm -- "$migration_guard_path" || fail 'Verified migration checkpoint could not be cleared.'
   fi
-  rm -- "$maintenance_path" || fail 'Production maintenance marker could not be cleared.'
   sync -f -- "$root" || fail 'Production resume marker transition could not be made durable.'
   compose up --detach cloudflared >/dev/null
   assert_tunnel_running
@@ -1951,6 +1965,9 @@ if [[ "$action" == install-source ]]; then
   exit 0
 fi
 if [[ "$state_changing_actions" == *" $action "* ]]; then acquire_state_lock; fi
+if [[ "$action" == deploy || "$action" == first-install || "$action" == first-install-recovery || "$action" == first-admin-rescue-prepare ]]; then
+  assert_migration_guard_absent
+fi
 if [[ "$action" == first-admin-rescue-prepare ]]; then
   verify_first_admin_rescue_state
   verify_source_archive
