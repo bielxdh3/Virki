@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { dirname, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertDisposableCoreTestDatabase } from "../core-test-database-safety.mjs";
 
 const modulePath = fileURLToPath(import.meta.url);
 const repositoryRoot = resolve(dirname(modulePath), "../..");
@@ -48,7 +49,19 @@ export function shouldBuildProductionHub(environment = process.env) {
   return environment.VIRKI_E2E_HUB_MODE === "production" && environment.VIRKI_E2E_HUB_BUILD_READY !== "true";
 }
 
+export function assertProductionE2eFixture(environment = process.env, platform = process.platform) {
+  // The Windows wrapper creates the disposable database inside its Linux runner.
+  if (platform === "win32" || environment.VIRKI_E2E_HUB_MODE !== "production") return;
+  if (!environment.VIRKI_E2E_DATABASE_URL?.trim() ||
+      !environment.VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL?.trim() ||
+      environment.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable") {
+    throw new Error("Production Hub E2E requires an explicit disposable database fixture.");
+  }
+  assertDisposableCoreTestDatabase(environment.VIRKI_E2E_DATABASE_URL, { ...environment, NODE_ENV: "test" });
+}
+
 function runE2E() {
+  assertProductionE2eFixture();
   const command = buildE2ECommand(process.platform, process.argv.slice(2));
   if (process.platform !== "win32" && shouldBuildProductionHub()) {
     const build = spawnSync("npm", ["run", "build", "--workspace", "@virki/hub"], {

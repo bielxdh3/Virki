@@ -390,7 +390,7 @@ jobs:
   authenticated-e2e:
     name: Authenticated browser E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 70
     env:
       VIRKI_CORE_TEST_DATABASE_CONFIRM: disposable
       VIRKI_E2E_ACCESS_DIAGNOSTICS: "true"
@@ -404,6 +404,12 @@ jobs:
         with:
           node-version: 22.20.0
           cache: npm
+
+      - name: Verify Node 22 and npm 10 E2E toolchain
+        shell: bash
+        run: |
+          [[ "$(node -p 'process.versions.node')" == 22.* ]]
+          [[ "$(npm --version)" == 10.* ]]
 
       - name: Install dependencies
         run: npm ci
@@ -508,6 +514,21 @@ jobs:
           cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
           trap 'unset cleanup_url; rm -f -- "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e
+
+      - name: Run production Hub core browser E2E
+        env:
+          VIRKI_E2E_HUB_MODE: production
+          VIRKI_HUB_HOSTNAME: hub.localhost
+          VIRKI_PORTAL_HOSTNAME: portal.localhost
+          VIRKI_HUB_URL: https://hub.localhost
+          VIRKI_PORTAL_URL: https://portal.localhost
+          VIRKI_OIDC_PROXY_URL: http://127.0.0.1:3003
+        run: |
+          printf '127.0.0.1 access.e2e.invalid\n' | sudo tee -a /etc/hosts >/dev/null
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0 >/dev/null
+          cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
+          trap 'unset cleanup_url; rm -f -- "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- e2e/authenticated-journeys.spec.mts e2e/oidc-authorization-code.spec.mts
 
       - name: Remove disposable PostgreSQL
         if: always()
