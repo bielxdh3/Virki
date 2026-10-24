@@ -80,6 +80,23 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
   if (!/^[A-Za-z0-9_-]{8,80}$/u.test(target) || target === session.id) redirect("/account/security?error=session");
   try {
     await prisma.$transaction(async (transaction) => {
+      // The bulk revoke and password writers lock User before Session. Keep
+      // this single-session writer in the same order to avoid a User/Session
+      // deadlock with concurrent bulk revocation or account recovery.
+      const users = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "User"
+        WHERE "id" = ${session.user.id} AND "role" = ${session.user.role}::"UserRole"
+          AND "isActive" = TRUE AND "accountStatus" = 'ACTIVE'::"AccountStatus"
+        FOR UPDATE
+      `;
+      if (users.length !== 1) throw new Error("Rejected.");
+      const liveSession = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Session"
+        WHERE "id" = ${session.id} AND "userId" = ${session.user.id}
+          AND "revokedAt" IS NULL AND "expiresAt" > ${new Date()}
+        FOR UPDATE
+      `;
+      if (liveSession.length !== 1) throw new Error("Rejected.");
       const result = await transaction.session.updateMany({ where: { id: target, userId: session.user.id, revokedAt: null }, data: { revokedAt: new Date() } });
       if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other account session revoked." });
     });

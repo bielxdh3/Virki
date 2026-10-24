@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { prisma, type Prisma } from "@virki/database";
 import * as auth from "./index";
 
 type RevokeOthers = (userId: string, currentSessionId: string) => Promise<number>;
 const revokeOthers = (auth as Record<string, unknown>).revokeOtherAccountSessions as RevokeOthers;
+
+test("single and bulk session revocation use User-first row locks before Session mutations", () => {
+  const source = readFileSync(new URL("../../../apps/hub/src/app/account/security/actions.ts", import.meta.url), "utf8");
+  const action = source.slice(source.indexOf("export async function revokeAccountSessionAction("), source.indexOf("export async function revokeOtherAccountSessionsAction("));
+  const userLock = action.indexOf('FROM "User"');
+  const sessionLock = action.indexOf('FROM "Session"');
+  const writer = action.indexOf("transaction.session.updateMany");
+  assert.ok(userLock >= 0 && sessionLock > userLock && writer > sessionLock, "User lock must always precede Session lock/mutation");
+});
 
 test("bulk revoke commits only other active rows and an audit event, then becomes idempotent", async () => {
   assert.equal(typeof revokeOthers, "function");
