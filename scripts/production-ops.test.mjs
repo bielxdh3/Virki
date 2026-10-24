@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import "./production-migration-guard.test.mjs";
 import { fileURLToPath } from "node:url";
 import { deployProduction } from "./deploy-production.mjs";
 import { isValidProductionConfig } from "./lib/production-config.mjs";

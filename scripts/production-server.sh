@@ -36,6 +36,7 @@ readonly marker_path="$root/.virki-production-host"
 readonly revision_path="$root/.virki-deploy-revision"
 readonly source_state_path="$root/.virki-source-state"
 readonly verification_path="$root/.virki-migration-verification"
+readonly migration_guard_path="$root/.virki-migration-integrity-guard"
 readonly recovery_path="$root/.virki-first-install-recovery"
 readonly maintenance_path="$root/.virki-maintenance"
 readonly first_install_path="$root/.virki-first-install"
@@ -1248,6 +1249,7 @@ cleanup_failed_backup_verification() {
 create_verified_backup() {
   # A private subshell ensures backup cleanup never overrides deploy's EXIT guard.
   (
+  assert_migration_guard_absent
   local stamp isolation_id backup_path partial_backup_path container db_network alias database_url override migration_container bootstrap_password runtime_password migrator_password audit_maintenance_password verification_tmp backup_verified=false
   stamp="$(date -u +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
   isolation_id=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
@@ -1474,6 +1476,64 @@ assert_backup_verified() {
   ((now_epoch - verified_epoch <= 86400 && verified_epoch <= now_epoch + 300)) || fail 'Verified backup is stale.'
 }
 
+# The checkpoint is durable BEFORE the migration changes DB state. Failure,
+# interruption or a changed backup leaves services unavailable until explicit
+# independent recovery; maintenance-off is never a reconciliation procedure.
+assert_migration_guard_absent() {
+  [[ ! -e "$migration_guard_path" && ! -L "$migration_guard_path" ]] || fail 'Migration integrity checkpoint exists: recovery review is required before migration or service start.'
+}
+
+read_migration_guard() {
+  [[ -f "$migration_guard_path" && ! -L "$migration_guard_path" && "$(stat -c '%a' -- "$migration_guard_path")" == 600 && "$(stat -c '%u' -- "$migration_guard_path")" == "$(id -u)" ]] || fail 'Migration checkpoint is missing or unsafe.'
+  local -a fields=()
+  mapfile -t fields < "$migration_guard_path"
+  ((${#fields[@]} == 6)) || fail 'Migration checkpoint has an invalid field count.'
+  [[ "${fields[0]}" =~ ^phase=(PREPARED|VERIFIED)$ && "${fields[1]}" =~ ^revision=[a-f0-9]{40}$ && "${fields[2]}" =~ ^backup_name=virki-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}\.dump$ && "${fields[3]}" =~ ^backup_sha256=[a-f0-9]{64}$ && "${fields[4]}" =~ ^snapshot_identity=[0-9]+\|[0-9]+\|[0-9]+$ && "${fields[5]}" =~ ^snapshot_recovery=[a-f0-9]{64}$ ]] || fail 'Migration checkpoint format is invalid.'
+  migration_guard_phase=${fields[0]#phase=}
+  migration_guard_revision=${fields[1]#revision=}
+  migration_guard_backup_name=${fields[2]#backup_name=}
+  migration_guard_backup_hash=${fields[3]#backup_sha256=}
+  migration_guard_identity=${fields[4]#snapshot_identity=}
+  migration_guard_recovery=${fields[5]#snapshot_recovery=}
+}
+
+write_migration_guard() {
+  local phase=$1 snapshot_identity=$2 snapshot_recovery=$3
+  [[ "$phase" == PREPARED || "$phase" == VERIFIED ]] || fail 'Migration checkpoint phase is invalid.'
+  [[ "$snapshot_identity" =~ ^[0-9]+\|[0-9]+\|[0-9]+$ && "$snapshot_recovery" =~ ^[a-f0-9]{64}$ ]] || fail 'Migration checkpoint snapshot is invalid.'
+  assert_backup_verified
+  local backup_name backup_hash checkpoint_tmp
+  backup_name=$(awk -F= '$1 == "backup_name" { print substr($0, index($0, "=") + 1) }' "$verification_path")
+  backup_hash=$(awk -F= '$1 == "backup_sha256" { print substr($0, index($0, "=") + 1) }' "$verification_path")
+  [[ "$backup_name" =~ ^virki-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}\.dump$ && "$backup_hash" =~ ^[a-f0-9]{64}$ ]] || fail 'Migration checkpoint backup identity is invalid.'
+  if [[ "$phase" == PREPARED ]]; then
+    assert_migration_guard_absent
+  else
+    read_migration_guard
+    [[ "$migration_guard_phase" == PREPARED && "$migration_guard_revision" == "$revision" && "$migration_guard_backup_name" == "$backup_name" && "$migration_guard_backup_hash" == "$backup_hash" && "$migration_guard_identity" == "$snapshot_identity" && "$migration_guard_recovery" == "$snapshot_recovery" ]] || fail 'Migration verification cannot replace a different checkpoint.'
+  fi
+  checkpoint_tmp=$(mktemp "$migration_guard_path.tmp.XXXXXXXX") || fail 'Migration checkpoint temp file could not be created.'
+  {
+    printf 'phase=%s\n' "$phase"
+    printf 'revision=%s\n' "$revision"
+    printf 'backup_name=%s\n' "$backup_name"
+    printf 'backup_sha256=%s\n' "$backup_hash"
+    printf 'snapshot_identity=%s\n' "$snapshot_identity"
+    printf 'snapshot_recovery=%s\n' "$snapshot_recovery"
+  } > "$checkpoint_tmp"
+  chmod 600 -- "$checkpoint_tmp"
+  mv -f -- "$checkpoint_tmp" "$migration_guard_path" || fail 'Migration checkpoint could not be committed.'
+  sync -f -- "$migration_guard_path" && sync -f -- "$root" || fail 'Migration checkpoint durability could not be verified.'
+}
+
+assert_migration_guard_verified() {
+  read_migration_guard
+  [[ "$migration_guard_phase" == VERIFIED && "$migration_guard_revision" == "$revision" ]] || fail 'Migration checkpoint unverified: service resume forbidden.'
+  assert_backup_verified
+  grep -Fxq "backup_name=$migration_guard_backup_name" "$verification_path" && grep -Fxq "backup_sha256=$migration_guard_backup_hash" "$verification_path" || fail 'Migration checkpoint backup identity has changed.'
+  [[ "$(identity_snapshot)" == "$migration_guard_identity" && "$(recovery_snapshot '' after_migrations)" == "$migration_guard_recovery" ]] || fail 'Migration integrity invariants changed after verification.'
+}
+
 # This bridge accepts only the one exact, previously recovered install that
 # was observed to have zero accounts and two actorless, zero-change worker
 # audits. Both the current revision and its first-install marker stay intact.
@@ -1617,11 +1677,12 @@ apply_production_migrations() {
   assert_backup_verified
   [[ -f "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'Production migration requires maintenance mode.'
   local before_identity before_recovery after_identity after_recovery
+  before_identity=$(identity_snapshot)
+  before_recovery=$(recovery_snapshot "" before_migrations)
+  write_migration_guard PREPARED "$before_identity" "$before_recovery"
   compose up --detach --force-recreate postgres >/dev/null || fail 'Production PostgreSQL could not be restarted with the verified maintenance-role configuration.'
   compose exec -T postgres sh -lc 'for attempt in $(seq 1 60); do pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1' || fail 'Production PostgreSQL did not become ready after its protected restart.'
   compose exec -T postgres sh -s < "$source_dir/infra/postgres-init/10-virki-database-roles.sh" >/dev/null || fail 'Production database role transition could not be applied after backup verification.'
-  before_identity=$(identity_snapshot)
-  before_recovery=$(recovery_snapshot "" before_migrations)
   normalize_migration_history '' '' '' '' ''
   compose --profile migration run --rm --no-deps migrate
   run_migration_status
@@ -1631,21 +1692,26 @@ apply_production_migrations() {
   after_recovery=$(recovery_snapshot "" after_migrations)
   [[ "$before_identity" == "$after_identity" ]] || fail 'Production migration changed ADMIN or USER counts.'
   [[ "$before_recovery" == "$after_recovery" ]] || fail 'Production migration changed encrypted recovery outbox payload or delivery-attempt metadata.'
+  write_migration_guard VERIFIED "$before_identity" "$before_recovery"
 }
 
 assert_no_maintenance() {
   [[ ! -e "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'Production maintenance is active; resume only through maintenance-off after recovery checks.'
+  assert_migration_guard_absent
 }
 
 maintenance_on() {
-  rm -f -- "$verification_path"
+  assert_migration_guard_absent
+  [[ ! -L "$maintenance_path" ]] || fail 'Production maintenance marker is unsafe.'
   if [[ ! -f "$maintenance_path" ]]; then
+    rm -f -- "$verification_path"
     {
       printf 'revision=%s\n' "$revision"
       printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } > "$maintenance_path.tmp.$$"
     chmod 600 -- "$maintenance_path.tmp.$$"
     mv -f -- "$maintenance_path.tmp.$$" "$maintenance_path"
+    sync -f -- "$maintenance_path" && sync -f -- "$root" || fail 'Production maintenance checkpoint durability could not be verified.'
   fi
   trap 'stop_routed_services' EXIT
   compose stop cloudflared >/dev/null
@@ -1678,6 +1744,7 @@ resume_services() {
   compose stop cloudflared >/dev/null 2>&1 || true
   run_migration_status
   verify_migration_schema '' '' '' ''
+  if [[ -e "$migration_guard_path" || -L "$migration_guard_path" ]]; then assert_migration_guard_verified; fi
   activate_source
   compose up --detach --force-recreate "${application_services[@]}" >/dev/null
   assert_revisions
@@ -1685,6 +1752,14 @@ resume_services() {
   assert_health
   compose up --detach cloudflared >/dev/null
   assert_tunnel_running
+  if [[ -e "$migration_guard_path" || -L "$migration_guard_path" ]]; then
+    # Application writers are online after health checks. Rechecking pre-migration
+    # account counts now would reject legitimate new signups; only the marker
+    # identity and phase may be checked here.
+    read_migration_guard
+    [[ "$migration_guard_phase" == VERIFIED && "$migration_guard_revision" == "$revision" ]] || fail 'Verified checkpoint changed during startup.'
+    rm -- "$migration_guard_path" || fail 'Verified migration checkpoint could not be cleared.'
+  fi
   rm -f -- "$maintenance_path"
   trap - EXIT
 }
