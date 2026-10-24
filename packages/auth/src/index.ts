@@ -5,6 +5,7 @@ import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from "./constants";
 import { createLoginAccountRateLimitIdentifierHash, createLoginAttemptRateLimitIdentifierHash, createLoginRateLimitIdentifierHash, createRateLimitIdentifierHash, getLoginRateLimitRefundState, isTrustedClientAddress, scopeLoginRateLimitEmail } from "./rate-limit-config";
 
 export { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS };
+export { revokeOtherAccountSessions, AccountSessionRevocationError } from "./session-revocation";
 export { isTrustedClientAddress } from "./rate-limit-config";
 export {
   createAuditRequestMetadata,

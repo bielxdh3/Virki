@@ -1,7 +1,7 @@
 "use client";
 
 import { useSensitiveFormAction } from "../../../lib/use-sensitive-form-action";
-import { confirmTotpAction, disableTotpAction, regenerateRecoveryCodesAction, startTotpAction, type AccountSecurityState } from "./actions";
+import { confirmTotpAction, disableTotpAction, regenerateRecoveryCodesAction, revokeOtherAccountSessionsAction, startTotpAction, type AccountSecurityState } from "./actions";
 
 const initial: AccountSecurityState = { status: "idle" };
 
@@ -20,4 +20,19 @@ export function TotpControls({ csrf, active, pending }: { csrf: string; active: 
 
 function RecoveryCodes({ codes }: { codes: string[] }) {
   return <section className="surface form-success" aria-live="polite" data-sensitive-one-time-value="true"><h3>Códigos de recuperação — exibidos uma vez</h3><p>Guarde-os fora deste dispositivo. Os códigos anteriores foram invalidados.</p><ul>{codes.map((code) => <li key={code}><code>{code}</code></li>)}</ul></section>;
+}
+
+export function SessionRevocationControl({ csrf, otherSessionCount, role }: { csrf: string; otherSessionCount: number; role: string }) {
+  if (role !== "USER") return null;
+  if (otherSessionCount === 0) return <p className="muted">Nenhuma outra sessão ativa.</p>;
+  return <details className="form-stack">
+    <summary>Encerrar todas as outras sessões</summary>
+    <p>Isso encerrará {otherSessionCount === 1 ? "a outra sessão ativa" : `as ${otherSessionCount} outras sessões ativas`} no Virki. Esta sessão continuará ativa.</p>
+    <form action={revokeOtherAccountSessionsAction} className="form-stack">
+      <input type="hidden" name="csrfToken" value={csrf} />
+      <label>Confirme sua senha atual<input name="password" type="password" autoComplete="current-password" required /></label>
+      <label><span><input name="confirmed" type="checkbox" value="yes" required /> Confirmo que desejo encerrar as outras sessões</span></label>
+      <button className="button-danger" type="submit">Confirmar encerramento</button>
+    </form>
+  </details>;
 }

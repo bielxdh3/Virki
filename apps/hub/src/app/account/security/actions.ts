@@ -2,7 +2,7 @@
 
 import { withHubAuditRequest } from "../../../lib/audit-request";
 
-import { verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
+import { revokeOtherAccountSessions, verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
 import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { validateSessionCsrfToken } from "../../../lib/session-csrf";
 import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt } from "@virki/auth/security";
@@ -92,6 +92,28 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
   });
 }
 
+export async function revokeOtherAccountSessionsAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
+    const session = await requireAccountMutation(formData, "account-sessions-revoke");
+    if (session.user.role !== "USER" || read(formData, "confirmed") !== "yes") {
+      await recordSecurityDenial(await headers(), "account-sessions-revoke", "rejected", session);
+      redirect("/account/security?error=sessions");
+    }
+    let revokedCount: number;
+    try {
+      await consumeSecurityProofAttempt(session.user.id);
+      const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { passwordHash: true, role: true, isActive: true, accountStatus: true } });
+      if (!user?.isActive || user.accountStatus !== "ACTIVE" || user.role !== "USER" || !user.passwordHash || !await verifyPassword(user.passwordHash, readRaw(formData, "password"))) throw new Error("Rejected.");
+      revokedCount = await revokeOtherAccountSessions(session.user.id, session.id);
+    } catch {
+      await recordSecurityDenial(await headers(), "account-sessions-revoke", "rejected", session);
+      redirect("/account/security?error=sessions");
+    }
+    revalidatePath("/account/security");
+    redirect(`/account/security?status=${revokedCount > 0 ? "sessions" : "no-sessions"}`);
+  });
+}
+
 export async function getAccountSecurityData() {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
@@ -99,12 +121,14 @@ export async function getAccountSecurityData() {
   const session = await getCurrentSession();
   if (!session || (surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) return null;
   const now = new Date();
-  const [state, devices, sessions] = await Promise.all([
+  const [state, devices, otherSessions, otherSessionCount] = await Promise.all([
     getAccountSecurityState(session.user.id),
     listTrustedDevices(session.user.id),
-    prisma.session.findMany({ where: { userId: session.user.id, revokedAt: null, expiresAt: { gt: now } }, select: { id: true, createdAt: true, expiresAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 50 })
+    prisma.session.findMany({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null, expiresAt: { gt: now } }, select: { id: true, createdAt: true, expiresAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 49 }),
+    prisma.session.count({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null, expiresAt: { gt: now } } })
   ]);
-  return { session, state, devices, sessions };
+  const sessions = [{ id: session.id, createdAt: session.createdAt, expiresAt: session.expiresAt }, ...otherSessions];
+  return { session, state, devices, sessions, otherSessionCount };
 }
 
 async function requireAccountMutation(formData: FormData, source: string) {

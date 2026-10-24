@@ -38,6 +38,8 @@ Essential `claims.id_token.acr` requests are honored only when Virki can satisfy
 
 Logout from a project ends that project's local session. OIDC token revocation is available to clients. Central session logout invalidates the Virki session and prevents later authorization interactions from completing; already-issued access tokens expire within their documented lifetime.
 
+In the portal's account security page, a USER can end other active Virki sessions while keeping the current one. This changes only central Virki sessions: previously issued OIDC tokens retain their own expiry, and each relying project's local session has its own lifecycle. A relying project must manage its own logout or token revocation when needed.
+
 ## Secret and signing-key handling
 
 Client secrets are encrypted at rest. Disabling a connection clears outstanding transient OIDC artifacts but retains its encrypted secret so the connection can be re-enabled; removing a connection deletes its stored record, and rotating replaces the secret. The issuer's asymmetric signing key and cookie key are kept in private runtime configuration. The issuer exposes public verification keys through its standard JWKS endpoint.
