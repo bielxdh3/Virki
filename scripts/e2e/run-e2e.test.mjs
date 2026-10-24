@@ -128,6 +128,9 @@ test("CI runs production build/start core browser journeys after preserving the 
   const cleanup = workflow.indexOf("- name: Remove disposable PostgreSQL");
   assert.ok(dev > 0 && production > dev && cleanup > production);
   const stage = workflow.slice(production, cleanup);
+  const devStage = workflow.slice(dev, production);
+  assert.doesNotMatch(devStage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must be able to read the disposable cleanup fixture");
+  assert.match(stage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must remove its temporary credential");
   assert.match(stage, /VIRKI_E2E_HUB_MODE: production/u);
   assert.match(stage, /VIRKI_HUB_HOSTNAME: hub\.localhost/u);
   assert.match(stage, /VIRKI_PORTAL_HOSTNAME: portal\.localhost/u);

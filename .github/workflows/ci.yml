@@ -512,7 +512,10 @@ jobs:
       - name: Run browser E2E
         run: |
           cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
-          trap 'unset cleanup_url; rm -f -- "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
+          # The next step runs production-mode E2E with this same isolated fixture.
+          # Do not delete its root-owned, mode-0600 credential here; the following
+          # step deletes it, and the always() cleanup does so on any earlier error.
+          trap 'unset cleanup_url' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e
 
       - name: Run production Hub core browser E2E
