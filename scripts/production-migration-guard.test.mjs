@@ -42,6 +42,9 @@ fail() { printf '%s\\n' "$1" >&2; exit 77; }
 ${realGuardFunctions}
 identity_snapshot() { printf '%s\\n' "$VIRKI_GUARD_TEST_IDENTITY"; }
 recovery_snapshot() { printf '%s\\n' "$VIRKI_GUARD_TEST_RECOVERY"; }
+application_services=(hub)
+compose() { [[ "$1" == stop ]] || return 1; }
+assert_tunnel_stopped() { :; }
 ${command}
 `], { encoding: "utf8", env: { ...process.env, VIRKI_GUARD_TEST_ROOT: root, VIRKI_GUARD_TEST_IDENTITY: identityOverride, VIRKI_GUARD_TEST_RECOVERY: recoveryOverride } });
 }
@@ -140,6 +143,38 @@ test("a PREPARED checkpoint never permits backup renewal after a crash", { skip:
   }
 });
 
+test("crash between maintenance and guard removal reconstructs VERIFIED maintenance safely and idempotently", { skip: process.platform !== "linux" }, () => {
+  const fixture = createFixture();
+  try {
+    assert.equal(run(fixture.root, `write_migration_guard PREPARED '${identity}' '${recoveryDigest}' && write_migration_guard VERIFIED '${identity}' '${recoveryDigest}'`).status, 0);
+    const restore = run(fixture.root, "recover_interrupted_verified_resume");
+    assert.equal(restore.status, 0, restore.stderr);
+    const restored = readFileSync(path.join(fixture.root, ".virki-maintenance"), "utf8");
+    assert.match(restored, new RegExp(`revision=${revision}`, "u"));
+    assert.equal(run(fixture.root, "recover_interrupted_verified_resume").status, 0, "repeated interrupted resume reconciliation is idempotent");
+    assert.equal(readFileSync(path.join(fixture.root, ".virki-maintenance"), "utf8"), restored);
+    assert.equal(run(fixture.root, "assert_migration_guard_verified").status, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("orphan recovery refuses PREPARED, missing-original-backup and changed account state", { skip: process.platform !== "linux" }, () => {
+  for (const scenario of ["prepared", "original-deleted", "counts-changed"]) {
+    const fixture = createFixture();
+    try {
+      assert.equal(run(fixture.root, `write_migration_guard PREPARED '${identity}' '${recoveryDigest}'`).status, 0);
+      if (scenario !== "prepared") assert.equal(run(fixture.root, `write_migration_guard VERIFIED '${identity}' '${recoveryDigest}'`).status, 0);
+      if (scenario === "original-deleted") rmSync(fixture.backupPath);
+      const options = scenario === "counts-changed" ? { identityOverride: "2|2|3" } : {};
+      assert.notEqual(run(fixture.root, "recover_interrupted_verified_resume", options).status, 0, `orphan ${scenario} must fail closed`);
+      assert.equal(run(fixture.root, `test -e "$maintenance_path"`).status, 1, "denied recovery never fabricates maintenance proof");
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("migration prepares durability checkpoint before the first live database mutation", () => {
   const block = productionSource.slice(productionSource.indexOf("apply_production_migrations() {"), productionSource.indexOf("assert_no_maintenance() {"));
   assert.ok(block.indexOf("write_migration_guard PREPARED") > 0);
@@ -153,11 +188,16 @@ test("migration prepares durability checkpoint before the first live database mu
   assert.ok(resume.indexOf('rm -- "$maintenance_path"') >= 0 && resume.indexOf('rm -- "$migration_guard_path"') > resume.indexOf('rm -- "$maintenance_path"'), "crashes during marker removal must leave the stronger integrity guard, not an unguarded maintenance flag");
   assert.ok(resume.indexOf('rm -- "$migration_guard_path"') < resume.indexOf("compose up --detach cloudflared"), "the public route must never start before durable removal of maintenance markers");
   assert.ok(resume.indexOf("assert_tunnel_stopped") >= 0 && resume.indexOf("assert_tunnel_stopped") < resume.indexOf("compose up --detach --force-recreate"), "the tunnel must be proven stopped before app recreation");
+  assert.match(resume, /recover_interrupted_verified_resume/u, "resume must recover the VERIFIED orphan-guard state after a crash between marker removals");
   const backupVerify = productionSource.slice(productionSource.indexOf("  backup-verify)"), productionSource.indexOf("  migration-status)"));
   assert.match(backupVerify, /assert_migration_guard_renewable[\s\S]*?create_verified_backup[\s\S]*?rebind_verified_migration_guard/u);
+  assert.match(backupVerify, /recover_interrupted_verified_resume/u, "a stale VERIFIED orphan checkpoint must be recoverable for safe backup renewal");
   const maintenance = productionSource.slice(productionSource.indexOf("maintenance_on() {"), productionSource.indexOf("stop_routed_services() {"));
   assert.ok(maintenance.indexOf("assert_tunnel_stopped") >= 0 && maintenance.indexOf("assert_tunnel_stopped") < maintenance.indexOf('mv -f -- "$maintenance_path.tmp.$$"'), "stop and confirm the public route before writing a persistent maintenance marker");
   assert.ok(maintenance.indexOf('compose stop "${application_services[@]}"') >= 0 && maintenance.indexOf('compose stop "${application_services[@]}"') < maintenance.indexOf('mv -f -- "$maintenance_path.tmp.$$"'), "stop application writers before maintenance marker publication");
+  assert.match(maintenance, /recover_interrupted_verified_resume/u, "maintenance-on must reconstruct the missing marker without removing a surviving guard");
+  const orphan = productionSource.slice(productionSource.indexOf("recover_interrupted_verified_resume() {"), productionSource.indexOf("rebind_verified_migration_guard() {"));
+  assert.ok(orphan.indexOf("assert_tunnel_stopped") >= 0 && orphan.indexOf("assert_tunnel_stopped") < orphan.indexOf('mv -- "$maintenance_path.tmp.$$"'), "orphan recovery stops the external route before restoring maintenance proof");
   const backup = productionSource.slice(productionSource.indexOf("create_verified_backup() {"), productionSource.indexOf("run_first_install_recovery_clone_migrations() {"));
   assert.match(backup, /sync -f -- "\$backup_path" && sync -f -- "\$backup_dir"/u, "backup mount can be a separate filesystem from the production root");
   assert.match(backup, /sync -f -- "\$verification_path" && sync -f -- "\$root"/u, "verified backup marker must be committed durably");

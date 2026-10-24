@@ -1565,6 +1565,30 @@ assert_migration_guard_renewable() {
   [[ "$(identity_snapshot)" == "$migration_guard_identity" && "$(recovery_snapshot '' after_migrations)" == "$migration_guard_recovery" ]] || fail 'Migration data invariants changed; backup renewal denied.'
 }
 
+# A power failure between the two fsynced removals at the end of resume can
+# leave the stronger VERIFIED integrity guard without a maintenance marker.
+# Re-establish maintenance only after proving the original backup and data
+# invariants, with all routed services stopped. Never promote PREPARED to
+# VERIFIED, bypass a stale backup, or automatically activate external routing.
+recover_interrupted_verified_resume() {
+  if [[ ! -e "$migration_guard_path" && ! -L "$migration_guard_path" ]]; then return 0; fi
+  if [[ -e "$maintenance_path" || -L "$maintenance_path" ]]; then return 0; fi
+  read_migration_guard
+  [[ "$migration_guard_phase" == VERIFIED && "$migration_guard_revision" == "$revision" ]] || fail 'Orphaned unverified migration guard requires independent recovery.'
+  compose stop cloudflared >/dev/null || fail 'Could not stop Tunnel during interrupted resume recovery.'
+  assert_tunnel_stopped
+  compose stop "${application_services[@]}" >/dev/null || fail 'Could not stop writers during interrupted resume recovery.'
+  assert_original_migration_backup
+  [[ "$(identity_snapshot)" == "$migration_guard_identity" && "$(recovery_snapshot '' after_migrations)" == "$migration_guard_recovery" ]] || fail 'Interrupted resume recovery cannot prove the original data invariants.'
+  {
+    printf 'revision=%s\n' "$revision"
+    printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$maintenance_path.tmp.$$"
+  chmod 600 -- "$maintenance_path.tmp.$$"
+  mv -- "$maintenance_path.tmp.$$" "$maintenance_path" || fail 'Interrupted resume maintenance could not be restored.'
+  sync -f -- "$maintenance_path" && sync -f -- "$root" || fail 'Interrupted resume recovery marker durability could not be verified.'
+}
+
 rebind_verified_migration_guard() {
   assert_migration_guard_renewable
   assert_backup_verified
@@ -1756,6 +1780,11 @@ assert_no_maintenance() {
 }
 
 maintenance_on() {
+  if [[ ( -e "$migration_guard_path" || -L "$migration_guard_path" ) && ! -e "$maintenance_path" && ! -L "$maintenance_path" ]]; then
+    recover_interrupted_verified_resume
+    printf 'Interrupted VERIFIED migration resume was returned safely to maintenance; independently verified backup is still required before resume.\n'
+    return 0
+  fi
   assert_migration_guard_absent
   [[ ! -L "$maintenance_path" ]] || fail 'Production maintenance marker is unsafe.'
   # Close the external route and stop all writers FIRST. An abrupt process or
@@ -1797,6 +1826,7 @@ assert_tunnel_running() {
 }
 
 resume_services() {
+  recover_interrupted_verified_resume
   [[ -f "$maintenance_path" && ! -L "$maintenance_path" ]] || fail 'Production maintenance is not active.'
   assert_backup_verified
   trap 'stop_routed_services' EXIT
@@ -2167,6 +2197,7 @@ case "$action" in
     printf 'Remote log lines available: %s (content withheld).\n' "$local_lines"
     ;;
   backup-verify)
+    recover_interrupted_verified_resume
     if [[ -e "$migration_guard_path" || -L "$migration_guard_path" ]]; then
       trap 'stop_routed_services' EXIT
       # Stop every writer before sampling snapshots or restoring a new backup.
