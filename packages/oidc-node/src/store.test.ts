@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
-import { MemoryTransactionStore, hashFlowState, type AuthorizationTransaction } from "./store";
-import { EncryptedPostgresTransactionStore } from "./postgres-store";
+import { MemoryTransactionStore, hashFlowState, type AuthorizationTransaction } from "./store.js";
+import { EncryptedPostgresTransactionStore } from "./postgres-store.js";
 
 function transaction(now = Date.now()): AuthorizationTransaction {
   return {
