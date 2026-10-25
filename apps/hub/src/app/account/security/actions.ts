@@ -106,6 +106,14 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
       if (!currentSession) throw new Error("Rejected.");
       const result = await transaction.session.updateMany({ where: { id: target, userId: session.user.id, revokedAt: null }, data: { revokedAt: new Date() } });
       if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other account session revoked." });
+      // A target-row or audit-table lock can delay the commit past the
+      // current session's expiry. Reject within this transaction, so both
+      // the target revocation and success audit roll back atomically.
+      const stillLive = await transaction.session.findFirst({
+        where: { id: session.id, userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } },
+        select: { id: true }
+      });
+      if (!stillLive) throw new Error("Rejected.");
     });
   } catch {
     await recordSecurityDenial(await headers(), "account-session-revoke", "rejected", session);

@@ -29,6 +29,10 @@ export async function revokeOtherAccountSessions(userId: string, currentSessionI
         metadata: { revokedCount: result.count }
       });
     }
+    // A target Session UPDATE or the audit INSERT can wait on unrelated row/
+    // table locks after the first current-session check. Revalidate with a
+    // fresh clock at the end so expiry rolls back BOTH revocations and audit.
+    await assertCurrentUserSession(transaction, userId, currentSessionId, new Date());
     return result.count;
   });
 }
