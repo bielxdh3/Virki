@@ -1,0 +1,163 @@
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { test } from 'node:test';
+import { createRpHandler } from './server.mjs';
+import { PREAUTH_COOKIE, SESSION_COOKIE, hashId, randomId } from './security.mjs';
+
+const ORIGIN = 'https://rp.example.test';
+const POST = { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-origin' };
+
+function fixture({ failInsert = false, failRevoke = false } = {}) {
+  const sessions = new Map();
+  const events = { login: [], callbacks: [], revoked: [], sql: [] };
+  const redeemed = new Set();
+  const db = {
+    async query(sql, params = []) {
+      events.sql.push(sql);
+      if (sql.startsWith('SELECT "subject"')) {
+        const entry = sessions.get(params[0]);
+        return { rows: entry ? [{ subject: entry.subject }] : [] };
+      }
+      if (sql.startsWith('DELETE FROM "VirkiRpSession"')) {
+        const removed = sessions.get(params[0]);
+        sessions.delete(params[0]);
+        return { rows: removed ? [{ ciphertext: removed.ciphertext }] : [] };
+      }
+      if (sql.startsWith('INSERT INTO "VirkiRpSession"')) {
+        if (failInsert) throw new Error('simulated DB write failure with sensitive material');
+        sessions.set(params[0], { subject: params[2], ciphertext: params[3] });
+        return { rows: [] };
+      }
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] };
+      throw new Error('Unexpected test SQL');
+    },
+    async connect() { return { query: db.query, release() {} }; }
+  };
+  const oidc = {
+    async beginLogin(binding) {
+      events.login.push(binding);
+      return { url: new URL('https://portal.example.test/auth?state=valid-state&code_challenge=stub') };
+    },
+    async completeCallback(url, binding) {
+      events.callbacks.push({ url, binding });
+      if (binding !== events.login.at(-1) || url.searchParams.get('state') !== 'valid-state' || redeemed.has('valid-state')) throw new Error('state replay');
+      redeemed.add('valid-state');
+      return { identity: { iss: 'https://portal.example.test', sub: '<script>bad()</script>' }, serverOnly: { accessToken: 'sensitive-access-token' } };
+    },
+    async revokeAccessToken(token) {
+      events.revoked.push(token);
+      if (failRevoke) throw new Error('simulated token endpoint failure with sensitive material');
+    }
+  };
+  const handler = createRpHandler({ oidc, db, origin: ORIGIN, sessionKey: randomBytes(32) });
+  const request = async (method, path, headers = {}, encrypted = true) => {
+    const result = { status: 0, headers: {}, body: '' };
+    const res = {
+      setHeader(k, v) { result.headers[k.toLowerCase()] = v; },
+      writeHead(status, hs = {}) { result.status = status; for (const [k, v] of Object.entries(hs)) this.setHeader(k, v); },
+      end(body = '') { result.body = body; }
+    };
+    await handler({ method, url: path, headers: { host: 'rp.example.test', ...headers }, socket: { encrypted, remoteAddress: '127.0.0.1' } }, res);
+    return result;
+  };
+  return { request, sessions, events };
+}
+
+function cookieValue(response, name) {
+  const header = response.headers['set-cookie'];
+  const line = header?.find(value => value.startsWith(`${name}=`));
+  return line?.split(';')[0];
+}
+
+test('CSRF, method, TLS and Host are checked before issuing any binding', async () => {
+  const { request, events } = fixture();
+  assert.equal((await request('GET', '/login')).status, 405);
+  assert.equal((await request('POST', '/login', { ...POST, origin: 'https://evil.example.test' })).status, 403);
+  assert.equal((await request('POST', '/login', { ...POST, 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.equal((await request('POST', '/login', POST, false)).status, 400);
+  assert.equal((await request('POST', '/login', { ...POST, host: 'evil.example.test' })).status, 400);
+  assert.equal(events.login.length, 0);
+});
+
+test('login -> callback -> RP session rotation -> logout remains server-only', async () => {
+  const { request, events, sessions } = fixture();
+  const previous = randomId();
+  sessions.set(hashId(previous), { subject: 'stale old account', ciphertext: '' });
+  const login = await request('POST', '/login', POST);
+  assert.equal(login.status, 303);
+  assert.ok(login.headers.location.startsWith('https://portal.example.test/auth?'));
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  assert.ok(binding);
+  assert.equal(login.headers['cache-control'], 'no-store');
+  assert.equal(login.headers['referrer-policy'], 'no-referrer');
+  assert.ok(!JSON.stringify(login).includes('sensitive-access-token'));
+
+  const callback = await request('GET', '/oidc/callback?state=valid-state&code=single-use-code', { cookie: `${binding}; ${SESSION_COOKIE}=${previous}` });
+  assert.equal(callback.status, 303);
+  const newCookie = cookieValue(callback, SESSION_COOKIE);
+  assert.ok(newCookie);
+  assert.notEqual(newCookie, `${SESSION_COOKIE}=${previous}`);
+  assert.ok(callback.headers['set-cookie'].some(v => v.startsWith(`${PREAUTH_COOKIE}=`) && v.includes('Max-Age=0')));
+  assert.equal(sessions.has(hashId(previous)), false);
+  assert.equal(sessions.size, 1);
+  assert.equal(events.callbacks.length, 1);
+  assert.ok(!JSON.stringify(callback).includes('sensitive-access-token'));
+
+  const page = await request('GET', '/', { cookie: newCookie });
+  assert.equal(page.status, 200);
+  assert.ok(page.body.includes('&lt;script&gt;bad()&lt;/script&gt;'));
+  assert.ok(!page.body.includes('sensitive-access-token'));
+  assert.equal((await request('POST', '/logout', { ...POST, origin: 'https://evil.example.test', cookie: newCookie })).status, 403);
+  const logout = await request('POST', '/logout', { ...POST, cookie: newCookie });
+  assert.equal(logout.status, 303);
+  assert.equal(sessions.size, 0);
+  assert.deepEqual(events.revoked, ['sensitive-access-token']);
+  assert.ok(!JSON.stringify(logout).includes('sensitive-access-token'));
+  assert.equal((await request('GET', '/', { cookie: newCookie })).body.includes('Not signed in.'), true);
+});
+
+test('wrong/missing/duplicate cookie and duplicate state deny callback; replay blocked', async () => {
+  const { request, events, sessions } = fixture();
+  const login = await request('POST', '/login', POST);
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  const path = '/oidc/callback?state=valid-state&code=code';
+  for (const headers of [
+    {},
+    { cookie: `${PREAUTH_COOKIE}=${randomId()}` },
+    { cookie: `${binding}; ${binding}` }
+  ]) assert.equal((await request('GET', path, headers)).status, 400);
+  assert.equal((await request('GET', `${path}&state=valid-state`, { cookie: binding })).status, 400);
+  assert.equal((await request('GET', `${path}&code=second`, { cookie: binding })).status, 400);
+  // The wrong-browser attempt reaches the SDK and is denied there. Malformed
+  // duplicate query/cookie cases are rejected before any SDK call.
+  assert.equal(events.callbacks.length, 1);
+  assert.equal((await request('GET', path, { cookie: binding })).status, 303);
+  assert.equal((await request('GET', path, { cookie: binding })).status, 400);
+  assert.equal(sessions.size, 1);
+});
+
+test('session insert failure rolls back and never issues a session cookie', async () => {
+  const { request, events, sessions } = fixture({ failInsert: true });
+  const login = await request('POST', '/login', POST);
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  const response = await request('GET', '/oidc/callback?state=valid-state&code=code', { cookie: binding });
+  assert.equal(response.status, 503);
+  assert.equal(response.headers['set-cookie'], undefined);
+  assert.equal(response.body, 'RP unavailable.');
+  assert.equal(sessions.size, 0);
+  assert.ok(events.sql.includes('ROLLBACK'));
+  assert.ok(!JSON.stringify(response).includes('sensitive material'));
+});
+
+test('upstream token revocation failure cannot restore a locally deleted RP session', async () => {
+  const { request, sessions, events } = fixture({ failRevoke: true });
+  const login = await request('POST', '/login', POST);
+  const signedIn = await request('GET', '/oidc/callback?state=valid-state&code=code', { cookie: cookieValue(login, PREAUTH_COOKIE) });
+  const session = cookieValue(signedIn, SESSION_COOKIE);
+  assert.equal(sessions.size, 1);
+  const logout = await request('POST', '/logout', { ...POST, cookie: session });
+  assert.equal(logout.status, 303);
+  assert.equal(sessions.size, 0);
+  assert.equal(events.revoked.length, 1);
+  assert.ok(!JSON.stringify(logout).includes('sensitive material'));
+});

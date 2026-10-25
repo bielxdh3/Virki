@@ -1,81 +1,52 @@
-# Virki confidential Node.js / TypeScript OIDC SDK
+# Node.js confidential RP example: `@virki/oidc-node`
 
-This is an **RP-side** library. Virki remains the identity provider. The relying project creates and revokes its **own** sessions and authorizes its own business actions. This SDK cannot grant project access, bypass Virki, or instantly revoke independently issued RP sessions.
+Virki is the OIDC identity provider; an external relying party (RP) owns its application, its own sessions and permissions. `examples/oidc-node-rp` is a minimal **Node.js 22 ESM** RP using Authorization Code with PKCE S256, a confidential client, server-side state/nonce, and an independent PostgreSQL database. It neither receives nor forwards the central Virki session cookie. This sample is for local, disposable validation until the release gates below are satisfied.
 
-## Runtime and protocol contract
+## Provision the confidential connection
 
-- Package: `@virki/oidc-node`, ESM JavaScript and `.d.ts`, Node **22.13+** (`<23`), npm 10. `npm run build -w @virki/oidc-node` emits `dist/`; the published export does **not** require `tsx`, browser bundlers or a TypeScript runtime.
-- Dependency: pinned `openid-client@6.8.8`; no custom OIDC cryptography. The client enables `enableNonRepudiationChecks` so **ES256 ID Token signatures are verified against JWKS**, including key rotation, rather than relying only on the TLS token exchange.
-- Trusted issuer `https://portal.biel.dev.br`, pinned exact discovery `issuer`, HTTPS same-origin token/authorization/JWKS URLs. Do not accept arbitrary users' issuer URLs or discovery endpoints. Client authentication is **`client_secret_basic`**, never `client_secret_post`.
-- Authorization Code + **PKCE S256**, high-entropy `state`/`nonce`, `openid profile email`, exactly registered HTTPS callback. Existing Virki provider authorization codes last 90 seconds, access tokens 300 seconds. The RP transaction can remain pending up to 10 minutes to accommodate MFA; the provider still enforces the shorter code lifetime.
-- OIDC ID Token `iss`, `aud` (with `azp` for multiple audiences), `exp`, `iat`, `nonce`, `auth_time` and claims types are checked in addition to the library's ES256/JWKS validation. `amr` and `acr` are carried through, **not inferred or upgraded**. A USER passkey alone is `amr: ["webauthn"]`, `acr: urn:virki:loa:1`; it does not authorize ADMIN or silently grant `loa:2`.
-- The SDK does not implement refresh tokens, introspection, SPA/public clients, dynamic registration, an OIDC provider, global logout or instantaneous grant revocation.
+In Virki Hub, an authorized admin must register the application's **canonical HTTPS origin** and an exact allowlisted callback URI. For this example, set `RP_ORIGIN=https://localhost:8443`, `OIDC_REDIRECT_URI=https://localhost:8443/oidc/callback`; these must match the registration byte-for-byte. The OIDC issuer must be an independently trusted, exact HTTPS origin (normally `https://portal.biel.dev.br`), provided by the operator and **never** taken from an HTTP request, callback or browser input. Store the Hub-generated confidential `client_id` and `client_secret` in server-only environment values; do not check them into Git or send them to the browser. The issuer must authorize that registered connection and an explicit active user-to-project grant. Registration of a connection alone does not grant access.
 
-## Registration and entry
+The library's `createVirkiOidcClient` uses `openid-client@6.8.8`, pins the issuer and metadata endpoint origin, uses `client_secret_basic` authentication against the token endpoint, requires an ES256 signed ID token, checks JWKS signatures, and validates issuer, audience, authorized party, nonce, token lifetime and callback before reporting an identity. Its generated `state` and one-time PKCE verifier are stored exclusively in the encrypted transaction database, with a 10-minute default TTL. The transaction store must atomically **DELETE ... RETURNING** on callback; **SELECT then DELETE is unsafe** under concurrency. JWKS key rotation requires an issuer to publish both valid keys during an overlap and a tested refresh path for previously unknown `kid`. Never replace verification with decode-only token parsing, shared symmetric signing keys, or unpinned alternate issuers.
 
-An administrator uses **Hub → Conexões** to register the RP's exact HTTPS origin and the full callback URI, enabling the confidential client and keeping the issued secret in the RP's server-side secret manager. **Hub → Acessos** then grants individual active USER accounts. Disabled clients, absent or revoked grants and inactive users are rejected by the Virki issuer at authorization; the SDK validates what the issuer returns and does not assume possession of a browser link is authorization. Never inspect or modify live client records from test code.
+## Local setup (disposable RP database only)
 
-```ts
-import { createVirkiOidcClient, randomRpSessionId } from "@virki/oidc-node";
-import { EncryptedPostgresTransactionStore } from "@virki/oidc-node/postgres-store";
-import { Pool } from "pg"; // install pg in YOUR RP, not required by the SDK
+1. Use Node **22.13+** with npm 10.9.3+. Build the actual SDK distribution: from the repository root run `npm install` and `npm run build --workspace @virki/oidc-node`. The built SDK must export `createVirkiOidcClient`, `randomRpSessionId`, and `EncryptedPostgresTransactionStore` from `@virki/oidc-node/postgres-store` as ESM, with the `dist` folder available. In `examples/oidc-node-rp`, run `npm install --ignore-scripts`; the example's private package depends on `file:../../packages/oidc-node` plus its own `pg` driver. Verify the package's local file dependency actually resolves to the built `dist` before running. These steps require the SDK build to be finalized first.
+2. Create a new, disposable PostgreSQL database owned by the **RP**, with a dedicated login role, no issuer production connection or shared credentials. Apply `examples/oidc-node-rp/schema.psql.txt` once using `psql -f examples/oidc-node-rp/schema.psql.txt` and the RP's controlled migration role. The `.psql.txt` extension keeps reference DDL distinct from prohibited database dump/backup artifacts. PostgreSQL column `"expiresAt"` **must** be `TIMESTAMPTZ`; `"stateHash"` is a SHA-256 hex identifier, and `"ciphertext"` holds the AES-256-GCM transaction. `"VirkiRpSession"` separately holds only a **hash** of the RP session cookie, trusted identity reference, expiry and encrypted server-side token. Its hash primary key makes session lookup unique and revocation a single DELETE.
+3. Copy `.env.example` into **untracked**, local `examples/oidc-node-rp/.env` and replace *every* placeholder. Generate an independent 32-byte hexadecimal `RP_ENCRYPTION_KEY_HEX` (64 hex characters) with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`; keep it in an access-controlled secret store outside Git. The flow store derives no key from passwords; the RP session token uses a separate HKDF-derived AES-GCM key and binds its ciphertext to the session hash. Protect and back up the keys under an operator-approved plan; losing a key makes existing flows/sessions undecryptable (safe invalidation).
+4. Generate a trusted local TLS certificate for `localhost` with a local developer CA, such as `mkcert -install` then `mkcert -cert-file certs/localhost.pem -key-file certs/localhost-key.pem localhost`. The example opens its **own HTTPS** listener on `127.0.0.1:8443` by default; use `https://localhost:8443` from a browser that trusts this CA. The cert/key files should be untracked, permission-restricted. Use a registered exact HTTPS callback; no HTTP fallback, wildcard redirect, automatic public deployment or `rejectUnauthorized:false` bypass. For non-loopback PostgreSQL, supply `RP_DATABASE_SSL_CA_FILE` with a trusted CA; the sample refuses remote DB connections without it. Do not put `sslmode` in the database URL.
+5. From `examples/oidc-node-rp`, run `npm test` and then `npm start`. Open `/`, click **Sign in through Virki**, complete authentication through the issuer, and verify the callback creates a *new* local RP session. **Sign out locally** performs a same-origin POST that deletes the RP session; `RP_REVOKE_ON_LOGOUT=true` additionally requests token revocation in the back end, when the issuer supports it. It does not terminate Virki's central portal session. A successful sample login never proves authorization to an application feature: the RP must authorize each sensitive operation according to its own rules.
 
-const pool = new Pool({ connectionString: process.env.RP_DATABASE_URL });
-const key = Buffer.from(process.env.RP_FLOW_ENCRYPTION_KEY_HEX!, "hex"); // exactly 32 bytes
-const store = new EncryptedPostgresTransactionStore(pool, key);
-const client = await createVirkiOidcClient({
-  issuer: "https://portal.biel.dev.br",
-  clientId: process.env.RP_CLIENT_ID!,
-  clientSecret: process.env["RP_CLIENT_SECRET"]!,
-  redirectUri: "https://project.example.invalid/callback", // registered EXACTLY
-  store
-});
+### Database privilege and cleanup boundary
 
-// GET /login: reuse one random browser-binding __Host- RP cookie across tabs
-const binding = randomRpSessionId();
-const { url } = await client.beginLogin(binding);
-// Save ONLY binding in an HttpOnly Secure SameSite=Lax Path=/ host-only cookie.
-// HTTP 303 Location: url.href; no tokens or verifier in this URL.
+The application role needs parameterized `SELECT`, `INSERT`, `DELETE` on its **own** two tables. No issuer schema or central session table access. Grant schema creation/migration rights only to a separate operator identity. Expired state and RP sessions may be cleaned by a trusted, bounded scheduled RP job using the two fixed DELETE queries at the bottom of `schema.psql.txt`; expired records are **also** rejected at use time. In clustered deployments, use one durable shared PostgreSQL store across all RP processes and hosts. Never substitute a per-process Map for authorization transactions or durable sessions. For remote PostgreSQL, verify TLS and hostname validation, restrict network access and bound connection pools. Limit ingress request rate and maximum body/query size at the trusted proxy and enforce a **shared** distributed rate limiter before release; the example's bounded per-process IP limiter is only a local defense.
 
-// GET /callback: read the exact browser-binding cookie from this RP host
-const { identity, serverOnly } = await client.completeCallback(callbackUrl, binding);
-// Write a *new* RP-local server-side session for identity.sub.
-// Set another random __Host- RP session cookie, never Virki's session cookie.
-// Keep serverOnly.accessToken server-side ONLY if you need userinfo/revocation.
-// The example intentionally does not persist serverOnly.
-```
+## Cookie, browser and token boundaries
 
-The code above is an integration sketch; use the runnable `examples/oidc-node-rp/server.mjs` for a small HTTPS server. It demonstrates `/login`, `/callback`, `/account`, `/logout`, session-ID rotation and `__Host-` cookies without sending access or ID tokens to browsers. Configure `VIRKI_RP_CLIENT_ID`, `VIRKI_RP_CLIENT_SECRET`, `VIRKI_RP_REDIRECT_URI`, `VIRKI_RP_TLS_KEY`, `VIRKI_RP_TLS_CERT`, optionally `VIRKI_RP_ISSUER` and `VIRKI_RP_PORT`, and run `node examples/oidc-node-rp/server.mjs` **after building** the workspace package. Example state is **single-process in memory and is not production-ready**. Real deployments must provide distributed atomically consumed flow storage, a separately backed RP session store, TLS-terminated canonical Host validation, CSRF controls and operational key rotation. Do not disable TLS for convenience.
+The browser submits a **POST `/login`** from the RP origin (validated `Origin`, Fetch Metadata when available, and URL-encoded content type). Before redirecting, the RP generates a cryptographic random `__Host-virki-rp-preauth` value, marks it `Secure; HttpOnly; Path=/; SameSite=Lax` with no `Domain`, and hashes it in the SDK's encrypted state record. Because the issuer's top-level GET return needs the cookie, `SameSite=Lax` is intentional. The callback validates the *one-time* stored state, exact callback and this pre-login binding. A callback without the cookie, with another browser's cookie, repeated state, expired state, malformed duplicate params or failed PKCE/nonce/signature is denied. Callback errors expose no token, query, stack or secret.
 
-## PostgreSQL transaction storage (RP-owned database)
+After the verified token exchange, the RP atomically replaces its prior RP session (if any) inside a single PostgreSQL transaction, clears the preauth cookie and issues a fresh **independent** `__Host-virki-rp-session` cookie with the same restricted attributes and eight-hour maximum age. The RP never reuses the preauth value as a session, trusts a client-supplied `sub`, puts tokens or claims in the cookie, serializes token results to HTML/JSON, or sends a token to browser storage. Sessions are stored as SHA-256 cookie hashes; the server-only access token is separately AES-256-GCM encrypted with session-hash authenticated associated data. HTTPS-only requests must match the configured `Host` and origin. All responses use no-store caching, no-referrer, a restrictive CSP and anti-framing headers. Avoid enabling request-URL logging at proxies because callbacks contain short-lived codes/state.
 
-Run the following DDL against the relying project's **own** PostgreSQL database, **not** Virki's, not production without the RP operator's approval. `TIMESTAMPTZ` is mandatory: different DB/server time zones must not change expiry semantics.
+`POST /logout` enforces the same `Origin`/Fetch Metadata checks and atomically deletes the session row. It clears both RP cookies even if the session is already absent. If configured, it decrypts and revokes the **server-only** access token after local invalidation. A token endpoint timeout or missing revocation support cannot resurrect the removed RP session. Never use a GET sign-out endpoint or propagate Virki session cookies to this app. For multiple concurrent sign-in tabs, the most recent preauth cookie wins and older outstanding flows fail securely.
 
-```sql
-CREATE TABLE IF NOT EXISTS "VirkiOidcLoginFlow" (
-  "stateHash" CHAR(64) PRIMARY KEY,
-  "ciphertext" TEXT NOT NULL,
-  "expiresAt" TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS "VirkiOidcLoginFlow_expiresAt_idx"
-  ON "VirkiOidcLoginFlow" ("expiresAt");
-```
+## Threats, tests and recovery
 
-`EncryptedPostgresTransactionStore` stores only SHA-256 of `state` plus an AES-256-GCM authenticated, randomized ciphertext containing nonce, PKCE verifier, exact issuer, client ID, redirect and hashed browser binding. A **single** parameterized `DELETE WHERE stateHash=$1 RETURNING ...` is the only consumption primitive, so two processes cannot both redeem a callback. The encryption key must come from a separate RP secret store (32 random bytes), never from a browser, source code, log or the database. If the key changes before pending flows expire, in-flight flows fail closed. Clean expired rows periodically using RP-controlled `DELETE FROM "VirkiOidcLoginFlow" WHERE "expiresAt" <= now()`; do not treat this cleanup as the consume primitive. Keep database roles restricted to the RP's table.
-
-`MemoryTransactionStore` is strictly a test/development option. Its atomicity is **per Node process only**; using it in replicated or clustered production can break callbacks and invalidate multi-host replay guarantees. The RP caller must never implement `take()` with a non-atomic `SELECT` followed by `DELETE`.
-
-## Threat model and acceptance gates
-
-| Threat | Required property / evidence |
+| Failure or attack | Required behavior |
 | --- | --- |
-| Login CSRF, stolen state, swapped browser, concurrent tabs | Random RP browser cookie bound to hashed state; independent state per tab; one atomic consume, including OAuth errors and token exchange failures |
-| Code interception / injection | S256 verifier and correct callback URI/client binding; code redeemable once for 90 seconds at issuer |
-| Redirect phishing, SSRF, issuer mix-up | Pinned trusted HTTPS issuer and discovery authority, exact registered callback, no wildcards or arbitrary metadata authority |
-| Forged ID Token, malicious algorithm, stale keys | `enableNonRepudiationChecks`, ES256 pinned, JWKS signature verification, valid `kid`, rotation test with old/new keys, unexpected `iss/aud/nonce/exp/iat` rejected |
-| Admin or unrelated user entering project | Virki independently rechecks USER role/account/connection and active explicit `UserProjectGrant`; RP checks `sub` in its OWN authorization context |
-| Secret and token leaks | No browser `client_secret`, PKCE verifier, nonce or access/ID tokens; no secrets in query URL, logs, cookies, exception text, traces or response body; `serverOnly` result must never be serialized |
-| RP session theft / fixation | Separate RP local session, random 32-byte session ID, hashed server-side storage, `__Host-` + HttpOnly + Secure + SameSite=Lax + Path=/, rotate on login and remove on logout |
-| Stale privileges/revocation | Grant/client checks happen on *new* Virki authorization, not ongoing RP requests; RP must revoke its own sessions when its policies change; already-issued tokens last until expiry or supported token revocation |
+| Login CSRF, forged `Origin`, cross-site POST, method confusion | Reject before beginning an authorization transaction; only same-origin form POST is accepted. |
+| Missing/mismatched/duplicate preauth cookie; replayed/duplicate `state` | Deny callback. The SDK atomically consumes a valid state once; wrong-browser redemption attempts can invalidate it but cannot log in. |
+| Wrong callback host, HTTP downgrade, wrong `redirect_uri`, altered issuer metadata | Fail closed before establishing a RP session. |
+| Bad PKCE, nonce, audience, ID token signature, issuer, `kid`, expiry or account grant | Deny; do not silently bypass token verification. Evaluate grants at issuer authorization and explicitly validate application permissions within RP. |
+| Transaction PostgreSQL unavailable, expired or tampered AES-GCM record | Deny callback; never silently fall back to an in-memory store. |
+| Session insert, commit, or rotation failure | Return generic 503 and issue **no** new session cookie; rollback database changes. |
+| Expired/revoked RP session or server restart | Expired rows yield no identity; durable sessions and transactions survive a process restart only while their keys and PostgreSQL remain available. |
+| Backend token theft via browser/headers/logs | Tokens only exist transiently in the RP backend and encrypted at rest; inspect reverse proxies, metrics, errors and traces for inadvertent leakage. |
+| Revocation endpoint failure at logout | RP session is already deleted; remote token may remain valid until expiry. Record an operator-safe audit signal without token details in a real deployment. |
+| Key compromise / key rollover / rollback of database | Rotate protected secrets and invalidate stored flows/sessions under a controlled operator procedure. Key rotation needs migration or coordinated invalidation; prevent restoring old session rows and old encryption keys together. |
 
-Test strategy: Node 22 ESM compile+import smoke; atomic memory and encrypted store tests (plus physical disposable PostgreSQL across connections); real openid-client protocol with ephemeral ES256 signatures/JWKS and rotated keys, OAuth wrong-state/nonce/issuer/audience/alg/expiry; runnable RP HTTP fixture tests and isolated HTTPS browser against disposable real Virki issuer when available. Synthetic protocol fixtures do **not** attest real hosted CI, Cloudflare, GHCR, external production clients or actual email delivery. Production remains NO-GO without separate human release gates.
+Run focused security tests with `node --test examples/oidc-node-rp/*.test.mjs` (PowerShell: `node --test examples/oidc-node-rp/security.test.mjs examples/oidc-node-rp/server.test.mjs`). The tests verify cookie flags, duplicate-cookie rejection, CSRF/origin, TLS/Host, callback parameter duplication, replay denial through a fake one-time SDK, independent session rotation, local logout/revocation and sensitive data not appearing in HTTP responses. These are **unit/smoke tests with a stubbed SDK and fake PostgreSQL**. They are not evidence of a real OIDC issuer flow, ES256/JWKS rotation or PostgreSQL atomicity across processes. Separately run SDK protocol tests and an isolated PostgreSQL concurrent-consume test, then repeat with TLS and a real registered test connection. Run the repository `npm run secrets:scan`, `npm run lint`, `npm run typecheck`, `npm run prisma:validate`, `npm run build` and `git diff --check` for the integrated commit.
+
+## Release / rollback gates
+
+**NO-GO** until the published SDK `dist` contract and imports work under Node 22, its real callback/JWKS/ES256 and rotation tests pass, browser callback cookies work under real HTTPS, PostgreSQL atomic state consumption and restart/multi-worker scenarios pass on a disposable instance, and an independent reviewer verifies session fixation/CSRF, revocation and secret redaction. Confirm issuer-side client registration and grant transitions, shared ingress rate limiting, independent authorization rules, DB TLS/privileges, retention, observability redaction and operator-controlled encryption key storage/rotation. Never interpret this example as a production deployment approval or as proof that issuer grants are checked continuously by the RP.
+
+To roll back the example, stop its local process, unregister/revoke the **test connection** in the intended nonproduction issuer environment after operator review, and expire local RP sessions/flows. Avoid restoring an old RP database and old key after incident-response invalidation, because that can resurrect previously accepted local session records. No central Virki login/session database migration or Cloudflare change is part of this example.
