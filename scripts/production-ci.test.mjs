@@ -514,6 +514,16 @@ test("CodeQL analysis stays read-only and preserves SARIF for later trusted publ
   assert.match(codeqlWorkflow, /contents: read/u);
 });
 
+test("CodeQL policy failure preserves SARIF diagnostics without approving publication", () => {
+  assert.match(codeqlWorkflow, /- name: Enforce reviewed CodeQL SARIF policy\r?\n\s+run: node scripts\/codeql-sarif-policy\.mjs codeql-results/u);
+  assert.match(
+    codeqlWorkflow,
+    /- name: Preserve SARIF for diagnostics and gated publication\r?\n\s+if: \$\{\{\s*!cancelled\(\)\s*\}\}\r?\n\s+uses: actions\/upload-artifact@/u,
+  );
+  assert.doesNotMatch(codeqlWorkflow, /continue-on-error:\s*true/u);
+  assert.match(codeqlEvidenceWorkflow, /github\.event\.workflow_run\.conclusion == 'success'/u);
+});
+
 test("CodeQL analysis has no package-write credential and trusted main publication is isolated", () => {
   assert.doesNotMatch(codeqlWorkflow, /packages: write|GHCR_PASSWORD:|docker login ghcr\.io|docker push/u);
   assert.match(codeqlEvidenceWorkflow, /workflow_run:[\s\S]*?workflows:\s*\["CodeQL"\][\s\S]*?types:\s*\[completed\]/u);
