@@ -7,6 +7,7 @@ import {
   consumeApprovedAccountRecovery,
   getAccountRecoveryRequestId,
   requestAdministrativeAccountRecovery,
+  SecurityMutationError,
   verifyAccountRecoveryEmail
 } from "./security";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
@@ -34,6 +35,20 @@ async function waitForWaiter(blockerPid: number, sqlFragment: string): Promise<n
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   }
   throw Error(`No observed PostgreSQL lock edge for ${sqlFragment}`);
+}
+
+type HolderOutcome = { ok: boolean; error: unknown };
+
+async function waitForHolderLock(acquired: Promise<void>, holder: Promise<HolderOutcome>): Promise<void> {
+  // The lock-acquired signal never fires if the transaction fails before
+  // calling held(). Observe transaction settlement as an independent terminal
+  // event; otherwise a failed SQL statement hangs the fixture indefinitely.
+  await Promise.race([
+    acquired,
+    holder.then((result) => {
+      throw result.error ?? new Error("Holder settled before acquiring its required lock");
+    })
+  ]);
 }
 
 async function approvedAdminRecovery() {
@@ -95,13 +110,14 @@ test("V02: ADMIN change commits first, then blocked normal recovery commits a di
     () => ({ ok: true as const, error: null }),
     (error: unknown) => ({ ok: false as const, error })
   );
-  await acquired;
-  const adminChange = changeAdministrativePassword({ id: owner.id, role: "ADMIN" }, fixture.ownerSessionId, ADMIN_NEXT, fixture.now).then(
-    () => ({ ok: true as const, error: null }),
-    (error: unknown) => ({ ok: false as const, error })
-  );
+  let adminChange: Promise<HolderOutcome> | undefined;
   let normalRecovery: Promise<{ ok: boolean; error: unknown }> | undefined;
   try {
+    await waitForHolderLock(acquired, holder);
+    adminChange = changeAdministrativePassword({ id: owner.id, role: "ADMIN" }, fixture.ownerSessionId, ADMIN_NEXT, fixture.now).then(
+      () => ({ ok: true as const, error: null }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
     const adminPid = await waitForWaiter(holderPid, 'FROM "AdministrativeCredential"');
     normalRecovery = consumeApprovedAccountRecovery(fixture.requestId, fixture.requestKey, NORMAL_NEXT, fixture.now, "ADMIN").then(
       () => ({ ok: true, error: null }),
@@ -149,13 +165,14 @@ test("V02: normal recovery wins User lock; aborted credential writer cannot bypa
     () => ({ ok: true as const, error: null }),
     (error: unknown) => ({ ok: false as const, error })
   );
-  await acquired;
-  const recovery = consumeApprovedAccountRecovery(fixture.requestId, fixture.requestKey, NORMAL_NEXT, fixture.now, "ADMIN").then(
-    () => ({ ok: true as const, error: null }),
-    (error: unknown) => ({ ok: false as const, error })
-  );
+  let recovery: Promise<HolderOutcome> | undefined;
   let adminChange: Promise<{ ok: boolean; error: unknown }> | undefined;
   try {
+    await waitForHolderLock(acquired, holder);
+    recovery = consumeApprovedAccountRecovery(fixture.requestId, fixture.requestKey, NORMAL_NEXT, fixture.now, "ADMIN").then(
+      () => ({ ok: true as const, error: null }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
     const recoveryPid = await waitForWaiter(holderPid, 'FROM "AdministrativeCredential"');
     adminChange = changeAdministrativePassword({ id: owner.id, role: "ADMIN" }, fixture.ownerSessionId, ADMIN_NEXT, fixture.now).then(
       () => ({ ok: true, error: null }),
@@ -192,5 +209,89 @@ test("V02: normal recovery wins User lock; aborted credential writer cannot bypa
   assert.equal(await verifyPassword(afterRetry.administrative.passwordHash, NORMAL_NEXT), false);
   assert.equal(afterRetry.administrative.keyVersion, 2);
   assert.equal(await recoveryAuditCount(fixture.requestId), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: owner.id, eventType: "ADMIN_CREDENTIAL_CHANGED" } }), 1);
+});
+
+test("V02: failed PostgreSQL holder statement before held() aborts the wait and cleans up", integrationOptions, async () => {
+  // Real SQL error before the holder can notify acquired. Previously await
+  // acquired remained pending forever, outside the test's finally block.
+  const acquired = new Promise<void>(() => {});
+  let unblock!: () => void;
+  const gate = new Promise<void>((resolve) => { unblock = resolve; });
+  const holder = prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "this_column_does_not_exist" FROM "User" LIMIT 1`;
+    await gate;
+  }, { timeout: 5_000 }).then(
+    () => ({ ok: true as const, error: null }),
+    (error: unknown) => ({ ok: false as const, error })
+  );
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await assert.rejects(
+      Promise.race([
+        waitForHolderLock(acquired, holder),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(Error("holder-acquisition fixture hung")), 3_000);
+        })
+      ]),
+      (error: unknown) => !String(error).includes("fixture hung") && /does_not_exist|column/iu.test(String(error))
+    );
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    unblock();
+    await Promise.allSettled([holder]);
+  }
+  assert.equal((await holder).ok, false);
+});
+
+test("V02: genuine ADMIN change committed first forbids a matching normal recovery password", integrationOptions, async () => {
+  const fixture = await approvedAdminRecovery();
+  const { owner } = fixture;
+  let held!: () => void;
+  let unblock!: () => void;
+  const acquired = new Promise<void>((resolve) => { held = resolve; });
+  const gate = new Promise<void>((resolve) => { unblock = resolve; });
+  let holderPid = 0;
+  const holder = prisma.$transaction(async (tx) => {
+    [{ pid: holderPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    await tx.$queryRaw`SELECT "userId" FROM "AdministrativeCredential" WHERE "userId" = ${owner.id} FOR UPDATE`;
+    held();
+    await gate;
+  }, { timeout: 20_000 }).then(
+    () => ({ ok: true as const, error: null }),
+    (error: unknown) => ({ ok: false as const, error })
+  );
+  let adminChange: Promise<HolderOutcome> | undefined;
+  let normalRecovery: Promise<HolderOutcome> | undefined;
+  try {
+    await waitForHolderLock(acquired, holder);
+    // Both real operations attempt the SAME candidate. Serializing the ADMIN
+    // commit first must force the normal recovery to re-read the current hash.
+    adminChange = changeAdministrativePassword({ id: owner.id, role: "ADMIN" }, fixture.ownerSessionId, NORMAL_NEXT, fixture.now).then(
+      () => ({ ok: true as const, error: null }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
+    const adminPid = await waitForWaiter(holderPid, 'FROM "AdministrativeCredential"');
+    normalRecovery = consumeApprovedAccountRecovery(fixture.requestId, fixture.requestKey, NORMAL_NEXT, fixture.now, "ADMIN").then(
+      () => ({ ok: true as const, error: null }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
+    await waitForWaiter(adminPid, 'FROM "User"');
+  } finally {
+    unblock();
+    await Promise.allSettled([holder, adminChange, normalRecovery]);
+  }
+  assert.deepEqual(await holder, { ok: true, error: null });
+  assert.deepEqual(await adminChange, { ok: true, error: null });
+  const rejected = await normalRecovery;
+  assert.equal(rejected?.ok, false);
+  assert.ok(rejected?.error instanceof SecurityMutationError, "the matching password must fail the security boundary");
+  const stored = await storedPasswords(owner.id);
+  assert.equal(await verifyPassword(stored.normal, NORMAL_INITIAL), true);
+  assert.equal(await verifyPassword(stored.normal, NORMAL_NEXT), false);
+  assert.equal(await verifyPassword(stored.administrative.passwordHash, NORMAL_NEXT), true);
+  assert.equal(stored.administrative.keyVersion, 2);
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: fixture.requestId } })).status, "APPROVED");
+  assert.equal(await recoveryAuditCount(fixture.requestId), 0);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: owner.id, eventType: "ADMIN_CREDENTIAL_CHANGED" } }), 1);
 });
