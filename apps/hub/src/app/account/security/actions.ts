@@ -93,10 +93,17 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
       const liveSession = await transaction.$queryRaw<Array<{ id: string }>>`
         SELECT "id" FROM "Session"
         WHERE "id" = ${session.id} AND "userId" = ${session.user.id}
-          AND "revokedAt" IS NULL AND "expiresAt" > ${new Date()}
+          AND "revokedAt" IS NULL
         FOR UPDATE
       `;
       if (liveSession.length !== 1) throw new Error("Rejected.");
+      // The Session lock can outlive the current session. Check expiry with a
+      // fresh timestamp after the wait using Prisma's UTC DateTime semantics.
+      const currentSession = await transaction.session.findFirst({
+        where: { id: session.id, userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } },
+        select: { id: true }
+      });
+      if (!currentSession) throw new Error("Rejected.");
       const result = await transaction.session.updateMany({ where: { id: target, userId: session.user.id, revokedAt: null }, data: { revokedAt: new Date() } });
       if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other account session revoked." });
     });

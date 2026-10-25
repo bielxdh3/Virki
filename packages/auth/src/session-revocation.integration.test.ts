@@ -143,3 +143,59 @@ test("portal action requires correct origin, session-bound CSRF, USER role, conf
   assert.equal(await auth.getSessionByToken(other.token), null);
   assert.ok(await auth.getSessionByToken(adminOther.token));
 });
+
+test("single-session revoke rejects a current session expiring while its Session lock is held", integrationOptions, async () => {
+  process.env.VIRKI_PORTAL_HOSTNAME = "portal.example.invalid";
+  const { getAccountSecurityData, revokeAccountSessionAction } = await import("../../../apps/hub/src/app/account/security/actions");
+  const user = await createTestUser({ label: "revoke-one-expired-after-lock" });
+  const current = await addSession(user.id);
+  const victim = await addSession(user.id);
+  // Warm the server action's request-context imports before starting the expiry clock.
+  assert.ok(await requestContext("portal.example.invalid", current.token, "https://portal.example.invalid", getAccountSecurityData));
+  // Stay below Prisma's five-second interactive transaction timeout, so an
+  // authorization regression cannot be hidden by a transaction timeout.
+  const expiresAt = new Date(Date.now() + 2_500);
+  await prisma.session.update({ where: { id: current.session.id }, data: { expiresAt } });
+  const form = new FormData();
+  form.set(CSRF_FORM_FIELD_NAME, createSessionCsrfTokenFor(current.token, "account-security"));
+  form.set("sessionId", victim.session.id);
+
+  let locked!: () => void;
+  let release!: () => void;
+  let blockerPid = 0;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "Session" WHERE "id" = ${current.session.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 15_000 });
+  await ready;
+  const action = requestContext("portal.example.invalid", current.token, "https://portal.example.invalid", () => revokeAccountSessionAction(form));
+  const outcome = action.then(() => "resolved", (error: unknown) => error);
+  try {
+    const deadline = Date.now() + 5_000;
+    let blocked = false;
+    while (Date.now() < deadline && !blocked) {
+      const rows = await prisma.$queryRaw<Array<{ blocked: number }>>`
+        SELECT count(*)::integer AS blocked
+        FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock'
+          AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
+          AND query LIKE ${`%FROM "Session"%`}
+      `;
+      blocked = (rows[0]?.blocked ?? 0) > 0;
+      if (!blocked) await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(blocked, true, "the action is waiting for the protected Session lock");
+    assert.ok(Date.now() < expiresAt.getTime(), "the session must still be valid while blocked");
+    await new Promise<void>((resolve) => setTimeout(resolve, expiresAt.getTime() - Date.now() + 100));
+  } finally {
+    release();
+    await holder;
+  }
+  const actionOutcome = await outcome;
+  assert.notEqual(actionOutcome, "resolved");
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: victim.session.id }, select: { revokedAt: true } })).revokedAt, null);
+});
