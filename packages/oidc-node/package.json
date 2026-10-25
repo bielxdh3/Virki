@@ -1,0 +1,16 @@
+{
+  "name": "@virki/oidc-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./src/index.ts", "default": "./src/index.ts" },
+    "./postgres-store": { "types": "./src/postgres-store.ts", "default": "./src/postgres-store.ts" }
+  },
+  "scripts": {
+    "test": "tsx --test src/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": { "node": ">=22.13.0 <23" },
+  "dependencies": { "openid-client": "6.8.8" }
+}
