@@ -76,8 +76,18 @@ export async function completeAdministrativeCredentialSetup(input: {
     if (credential?.status === "ACTIVE") throw new AdministrationMutationError();
 
     const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_SETUP_SCOPE, now);
-    if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
-    const consumed = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING" }, data: { status: "CONSUMED", consumedAt: now } });
+    // A pending challenge can be locked by a concurrent writer. Under
+    // Serializable, an unchanged locked row does not force a retry when its
+    // OTP deadline passes, so validate fresh time only AFTER acquiring it.
+    const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "SecurityElevation" WHERE "id" = ${ceremony.id} FOR UPDATE
+    `;
+    if (locked.length !== 1) throw new AdministrationMutationError();
+    const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, checkedAt);
+    const currentCeremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_SETUP_SCOPE, checkedAt);
+    if (currentCeremony.id !== ceremony.id || !verifySecurityCode(input.code, currentCeremony.challengeHash)) throw new AdministrationMutationError();
+    const consumed = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING" }, data: { status: "CONSUMED", consumedAt: checkedAt } });
     if (consumed.count !== 1) throw new AdministrationMutationError();
     await transaction.securityElevation.updateMany({
       where: { userId: input.actor.id, scope: ADMIN_CREDENTIAL_SETUP_SCOPE, status: "PENDING", id: { not: ceremony.id } },
@@ -96,6 +106,12 @@ export async function completeAdministrativeCredentialSetup(input: {
     }
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
+    // Cleanup of existing recovery codes can itself wait on their row locks.
+    // Keep the initial OTP and Session valid through the final credential
+    // mutation; any failure here rolls back the whole setup transaction.
+    const finalCheckedAt = new Date(Math.max(checkedAt.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, finalCheckedAt);
+    if (!isElevationCeremonyOpen(currentCeremony, finalCheckedAt)) throw new AdministrationMutationError();
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.admin", message: "Administrative credential configured." });
     return recoveryCodes;
   }, { isolationLevel: "Serializable" });
@@ -287,6 +303,10 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
     await transaction.securityElevation.updateMany({ where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
+    // Updating a recovery code (or deleting sibling codes) can wait after the
+    // initial User/Session locks. Recheck the live session before success;
+    // rejection rolls back the code use, credential change, and recovery data.
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, new Date(Math.max(now.getTime(), Date.now())));
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.admin", message: "Administrative credential recovered." });
     return recoveryCodes;
   });

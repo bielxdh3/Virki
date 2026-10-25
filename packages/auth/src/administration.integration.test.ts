@@ -385,6 +385,143 @@ test("administrative credential recovery rechecks its session after concurrent r
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_RECOVERED" } }), 0);
 });
 
+test("ADMIN initial credential setup rejects OTP expired while blocked on challenge row", integrationOptions, async () => {
+  const admin = await setupAdmin({ credential: false });
+  const requestKey = await startAdministrativeCredentialSetup({
+    actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE
+  });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  const expiresAt = new Date(Date.now() + 3_000);
+  await prisma.securityElevation.update({
+    where: { requestKey },
+    data: { createdAt: new Date(expiresAt.getTime() - 10 * MINUTE), expiresAt }
+  });
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (tx) => {
+    [{ pid: blockerPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await tx.$queryRaw`SELECT "id" FROM "SecurityElevation" WHERE "requestKey" = ${requestKey} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 10_000 });
+  await ready;
+  const completing = completeAdministrativeCredentialSetup({
+    actor: admin.actor, sessionId: admin.sessionId, requestKey, code, newPassword: ADMIN_PASSWORD
+  }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    // Prisma may issue a SELECT/FOR UPDATE or UPDATE as its first waiter.
+    // The blocker PID and PostgreSQL wait_event_type establish the actual lock wait.
+    await waitForBlockedPostgresQuery(blockerPid, "");
+    assert.ok(Date.now() < expiresAt.getTime(), "OTP must be valid at the start of the blocked write");
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, expiresAt.getTime() - Date.now() + 100)));
+  } finally {
+    release();
+    await blocker;
+  }
+  const outcome = await completing;
+  assert.equal(outcome.ok, false, "an expired OTP must not create an ADMIN credential");
+  if (!outcome.ok) assert.ok(outcome.error instanceof AdministrationMutationError);
+  assert.equal(await prisma.administrativeCredential.count({ where: { userId: admin.actor.id } }), 0);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey }, select: { status: true } })).status, "PENDING");
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS" } }), 0);
+});
+
+test("ADMIN initial setup rejects OTP expiring during subsequent old recovery-code cleanup", integrationOptions, async () => {
+  const admin = await setupAdmin({ credential: false });
+  const requestKey = await startAdministrativeCredentialSetup({
+    actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE
+  });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  const oldCode = await prisma.administrativeRecoveryCode.create({
+    data: { userId: admin.actor.id, codeHash: hashRecoveryCode(`old-recovery-${randomBytes(6).toString("hex")}`) },
+    select: { id: true }
+  });
+  const expiresAt = new Date(Date.now() + 3_000);
+  await prisma.securityElevation.update({
+    where: { requestKey },
+    data: { createdAt: new Date(expiresAt.getTime() - 10 * MINUTE), expiresAt }
+  });
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (tx) => {
+    [{ pid: blockerPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await tx.$queryRaw`SELECT "id" FROM "AdministrativeRecoveryCode" WHERE "id" = ${oldCode.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 10_000 });
+  await ready;
+  const completing = completeAdministrativeCredentialSetup({
+    actor: admin.actor, sessionId: admin.sessionId, requestKey, code, newPassword: ADMIN_PASSWORD
+  }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "");
+    assert.ok(Date.now() < expiresAt.getTime(), "the OTP must be valid when the old recovery-code cleanup waits");
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, expiresAt.getTime() - Date.now() + 100)));
+  } finally {
+    release();
+    await blocker;
+  }
+  const outcome = await completing;
+  assert.equal(outcome.ok, false, "a setup must not commit after the bound OTP expires in later cleanup");
+  if (!outcome.ok) assert.ok(outcome.error instanceof AdministrationMutationError);
+  assert.equal(await prisma.administrativeCredential.count({ where: { userId: admin.actor.id } }), 0);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey }, select: { status: true } })).status, "PENDING");
+  assert.ok(await prisma.administrativeRecoveryCode.findUnique({ where: { id: oldCode.id } }));
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS" } }), 0);
+});
+
+test("ADMIN credential recovery rejects session expired while blocked on recovery-code row", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const recoveryCode = `expiry-recovery-${randomBytes(6).toString("hex")}`;
+  const row = await prisma.administrativeRecoveryCode.create({
+    data: { userId: admin.actor.id, codeHash: hashRecoveryCode(recoveryCode) },
+    select: { id: true }
+  });
+  const credentialBefore = await prisma.administrativeCredential.findUniqueOrThrow({
+    where: { userId: admin.actor.id }, select: { keyVersion: true, passwordHash: true }
+  });
+  const expiresAt = new Date(Date.now() + 3_000);
+  await prisma.session.update({ where: { id: admin.sessionId }, data: { expiresAt } });
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (tx) => {
+    [{ pid: blockerPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await tx.$queryRaw`SELECT "id" FROM "AdministrativeRecoveryCode" WHERE "id" = ${row.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 10_000 });
+  await ready;
+  const recovering = recoverAdministrativeCredential({
+    actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, recoveryCode,
+    newPassword: "integration-expired-session-recovery-1"
+  }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "");
+    assert.ok(Date.now() < expiresAt.getTime(), "session must be valid before the recovery code lock wait");
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, expiresAt.getTime() - Date.now() + 100)));
+  } finally {
+    release();
+    await blocker;
+  }
+  const outcome = await recovering;
+  assert.equal(outcome.ok, false, "an expired session must not rotate administrative credentials");
+  if (!outcome.ok) assert.ok(outcome.error instanceof AdministrationMutationError);
+  assert.deepEqual(await prisma.administrativeCredential.findUniqueOrThrow({
+    where: { userId: admin.actor.id }, select: { keyVersion: true, passwordHash: true }
+  }), credentialBefore);
+  assert.equal((await prisma.administrativeRecoveryCode.findUniqueOrThrow({ where: { id: row.id }, select: { usedAt: true } })).usedAt, null);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS" } }), 0);
+});
+
 test("an administrative password equal to the normal password is rejected during credential setup", integrationOptions, async () => {
   const admin = await setupAdmin({ credential: false });
   const start = new Date();
