@@ -32,6 +32,26 @@ const evaluate = (overrides = {}) => evaluateProductionDependencies({
   physicalForbidden: [], prismaBinaryFound: false, ...overrides
 });
 
+test("production image includes workspace-local runtime dependencies from the lockfile", () => {
+  const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+  const dockerfile = readFileSync(new URL("../infra/Dockerfile.prod", import.meta.url), "utf8");
+  const copyLines = new Set(dockerfile.split(/\r?\n/u).map((line) => line.trim()));
+  const nestedRuntimePaths = Object.entries(lock.packages ?? {})
+    .filter(([name, metadata]) =>
+      /^(?:packages|apps)\/[^/]+\/node_modules\//u.test(name) &&
+      metadata.dev !== true && metadata.optional !== true && metadata.devOptional !== true)
+    .map(([name]) => name.slice(0, name.indexOf("/node_modules/") + "/node_modules".length));
+
+  assert.ok(nestedRuntimePaths.includes("packages/auth/node_modules"),
+    "the lockfile must demonstrate the Nodemailer workspace-local runtime dependency");
+  for (const nestedPath of new Set(nestedRuntimePaths)) {
+    assert.ok(copyLines.has(`COPY --from=production-dependencies /app/${nestedPath} ./${nestedPath}`),
+      `${nestedPath} would be missing from the final production image`);
+  }
+  assert.ok(copyLines.has('RUN node -e \'require.resolve("nodemailer", { paths: ["/app/packages/auth/src"] })\''),
+    "the final image must prove SMTP module resolution from the worker source path");
+});
+
 test("committed dependency lock respects global exact-version overrides", () => {
   const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));

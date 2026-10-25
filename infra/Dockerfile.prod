@@ -75,6 +75,7 @@ COPY --from=production-dependencies /app/apps/issuer/package.json ./apps/issuer/
 COPY --from=production-dependencies /app/packages/auth/package.json ./packages/auth/package.json
 COPY --from=production-dependencies /app/packages/database/package.json ./packages/database/package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --from=production-dependencies /app/packages/auth/node_modules ./packages/auth/node_modules
 
 COPY --from=build /app/apps/public-site/.next ./apps/public-site/.next
 COPY --from=build /app/apps/public-site/public ./apps/public-site/public
@@ -92,6 +93,10 @@ COPY --from=build /runtime-artifacts/node_modules/@node-rs/argon2 ./node_modules
 COPY --from=build /runtime-artifacts/node_modules/.bin/tsx ./node_modules/.bin/tsx
 COPY --from=build /runtime-artifacts/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /runtime-artifacts/apps-hub-prisma ./apps/hub/node_modules/.prisma
+
+# The auth email worker imports Nodemailer from its workspace, not root.
+# Fail the image build if a lockfile/install change breaks runtime resolution.
+RUN node -e 'require.resolve("nodemailer", { paths: ["/app/packages/auth/src"] })'
 
 RUN mkdir -p /app/node_modules/.bin \
   /app/apps/hub/.next/cache \
