@@ -10,6 +10,7 @@ const PUBLIC_ROUTES = new Set([
   "/api/login",
   "/login/verify",
   "/api/login/verify",
+  "/api/passkeys",
   "/api/logout",
   "/api/health",
   "/recover",
@@ -78,7 +79,7 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   forwardedHeaders.set("x-virki-audit-request-id", auditRequestId);
   forwardedHeaders.delete("x-virki-audit-route");
   forwardedHeaders.delete("x-virki-audit-method");
-  if (/^\/(?:login(?:\/verify)?|api\/(?:login(?:\/verify)?|logout)|admin\/(?:accounts|access|security|audit|connections)|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
+  if (/^\/(?:login(?:\/verify)?|api\/(?:passkeys|login(?:\/verify)?|logout)|admin\/(?:accounts|access|security|audit|connections)|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
   forwardedHeaders.set("x-virki-audit-method", request.method);
   forwardedHeaders.set("x-nonce", nonce);
   forwardedHeaders.set("Content-Security-Policy", csp);

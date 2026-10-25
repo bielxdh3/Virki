@@ -1,0 +1,137 @@
+import { after, test } from "node:test";
+import assert from "node:assert/strict";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { isoCBOR } from "@simplewebauthn/server/helpers";
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
+import { prisma } from "@virki/database";
+import { createTestUser, integrationOptions } from "./integration-fixtures";
+import { getOidcAuthenticationContext } from "../../../apps/issuer/src/authorization-policy";
+import {
+  createPasskeyBrowserToken,
+  finishPasskeyAuthentication,
+  finishPasskeyRegistration,
+  hashPasskeyChallenge,
+  listUserPasskeys,
+  mutatePasskey,
+  startPasskeyAuthentication,
+  startPasskeyRegistration
+} from "./passkeys";
+
+after(() => prisma.$disconnect());
+
+const rpID = "portal.biel.dev.br";
+const origin = "https://portal.biel.dev.br";
+const sha = (value: Buffer | string) => createHash("sha256").update(value).digest();
+
+function authenticator() {
+  const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const jwk = publicKey.export({ format: "jwk" });
+  const key = isoCBOR.encode(new Map<number, number | Uint8Array>([[1, 2], [3, -7], [-1, 1], [-2, Buffer.from(jwk.x!, "base64url")], [-3, Buffer.from(jwk.y!, "base64url")]]));
+  return { credentialId: randomBytes(32).toString("base64url"), key, privateKey };
+}
+
+function clientData(type: "webauthn.create" | "webauthn.get", challenge: string, targetOrigin = origin) {
+  return Buffer.from(JSON.stringify({ type, challenge, origin: targetOrigin, crossOrigin: false })).toString("base64url");
+}
+
+function registerResponse(key: ReturnType<typeof authenticator>, challenge: string): RegistrationResponseJSON {
+  const identifier = Buffer.from(key.credentialId, "base64url");
+  const data = Buffer.concat([
+    sha(rpID), Buffer.from([0x45, 0, 0, 0, 0]), Buffer.alloc(16),
+    Buffer.from([identifier.length >> 8, identifier.length & 255]), identifier, Buffer.from(key.key)
+  ]);
+  const attestation = isoCBOR.encode(new Map<string, string | Map<string, never> | Uint8Array>([["fmt", "none"], ["attStmt", new Map<string, never>()], ["authData", data]]));
+  return {
+    id: key.credentialId, rawId: key.credentialId, type: "public-key",
+    response: { clientDataJSON: clientData("webauthn.create", challenge), attestationObject: Buffer.from(attestation).toString("base64url"), transports: ["internal"] },
+    clientExtensionResults: {}, authenticatorAttachment: "platform"
+  };
+}
+
+function assertion(key: ReturnType<typeof authenticator>, userId: string, challenge: string, overrides: { targetOrigin?: string; targetRpId?: string; uv?: boolean; counter?: number; userHandle?: string } = {}): AuthenticationResponseJSON {
+  const data = Buffer.concat([sha(overrides.targetRpId ?? rpID), Buffer.from([overrides.uv === false ? 0x01 : 0x05]), Buffer.from([0, 0, 0, overrides.counter ?? 1])]);
+  const encodedClient = clientData("webauthn.get", challenge, overrides.targetOrigin);
+  const signed = Buffer.concat([data, sha(Buffer.from(encodedClient, "base64url"))]);
+  return {
+    id: key.credentialId, rawId: key.credentialId, type: "public-key",
+    response: {
+      authenticatorData: data.toString("base64url"),
+      clientDataJSON: encodedClient,
+      signature: sign("sha256", signed, key.privateKey).toString("base64url"),
+      userHandle: overrides.userHandle ?? Buffer.from(userId, "utf8").toString("base64url")
+    },
+    clientExtensionResults: {}, authenticatorAttachment: "platform"
+  };
+}
+
+test("passkey cryptography, account binding, replay, UV, RP, origin, revocation and OIDC assurance on disposable PostgreSQL", integrationOptions, async () => {
+  const user = await createTestUser({ label: "passkeys" });
+  const session = await prisma.session.create({ data: { userId: user.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60 * 60_000) } });
+  const other = await createTestUser({ label: "passkeys-other" });
+  const key = authenticator();
+  const nonce = createPasskeyBrowserToken();
+
+  const registration = await startPasskeyRegistration(user.id, session.id, user.password, nonce);
+  await assert.rejects(finishPasskeyRegistration(other.id, session.id, nonce, registerResponse(key, registration.challenge), "intrusa"));
+  assert.equal((await prisma.passkeyChallenge.findUniqueOrThrow({ where: { challengeHash: hashPasskeyChallenge(registration.challenge) } })).consumedAt !== null, true);
+  await assert.rejects(finishPasskeyRegistration(user.id, session.id, nonce, registerResponse(key, registration.challenge), "replay"));
+
+  const expiredToken = createPasskeyBrowserToken();
+  const registration2 = await startPasskeyRegistration(user.id, session.id, user.password, expiredToken);
+  const challenge2 = await prisma.passkeyChallenge.findUniqueOrThrow({ where: { challengeHash: hashPasskeyChallenge(registration2.challenge) } });
+  await prisma.passkeyChallenge.update({ where: { id: challenge2.id }, data: { expiresAt: new Date(Date.now() - 1_000) } });
+  await assert.rejects(finishPasskeyRegistration(user.id, session.id, expiredToken, registerResponse(key, registration2.challenge), "expired"));
+
+  const regToken = createPasskeyBrowserToken();
+  const options = await startPasskeyRegistration(user.id, session.id, user.password, regToken);
+  await finishPasskeyRegistration(user.id, session.id, regToken, registerResponse(key, options.challenge), "Chave A");
+  assert.equal((await listUserPasskeys(user.id))[0]?.name, "Chave A");
+  assert.equal((await listUserPasskeys(other.id)).length, 0);
+
+  const loginToken = createPasskeyBrowserToken();
+  const login = await startPasskeyAuthentication(loginToken, "203.0.113.12");
+  assert.equal(login.allowCredentials, undefined, "discoverable login does not expose stable IDs");
+  const valid = assertion(key, user.id, login.challenge);
+  const created = await finishPasskeyAuthentication(loginToken, valid);
+  const issued = await prisma.session.findUniqueOrThrow({ where: { tokenHash: hashPasskeyChallenge(created.token) } });
+  assert.deepEqual(issued.authenticationMethods, ["webauthn"]);
+  assert.deepEqual(getOidcAuthenticationContext(issued.authenticationMethods), { amr: ["webauthn"], acr: "urn:virki:loa:1" });
+  await assert.rejects(finishPasskeyAuthentication(loginToken, valid), "challenge replay blocked");
+
+  for (const malformed of [
+    { targetOrigin: "https://hub.biel.dev.br" },
+    { targetRpId: "hub.biel.dev.br" },
+    { uv: false },
+    { userHandle: Buffer.from(other.id).toString("base64url") }
+  ]) {
+    const browserToken = createPasskeyBrowserToken();
+    const options = await startPasskeyAuthentication(browserToken, "203.0.113.13");
+    await assert.rejects(finishPasskeyAuthentication(browserToken, assertion(key, user.id, options.challenge, { ...malformed, counter: 2 })));
+    await assert.rejects(finishPasskeyAuthentication(browserToken, assertion(key, user.id, options.challenge, { counter: 2 })), "invalid ceremony burns challenge");
+  }
+
+  await assert.rejects(startPasskeyAuthentication(createPasskeyBrowserToken(), "203.0.113.15", user.email, "portal.biel.dev.br", "wrong password"));
+  const nonDiscoverableToken = createPasskeyBrowserToken();
+  const namedOptions = await startPasskeyAuthentication(nonDiscoverableToken, "203.0.113.15", user.email, "portal.biel.dev.br", user.password);
+  assert.equal(namedOptions.allowCredentials?.[0]?.id, key.credentialId);
+  await finishPasskeyAuthentication(nonDiscoverableToken, assertion(key, user.id, namedOptions.challenge, { counter: 2 }));
+
+  const concurrentToken = createPasskeyBrowserToken();
+  const concurrent = await startPasskeyAuthentication(concurrentToken, "203.0.113.16");
+  const simultaneous = await Promise.allSettled([finishPasskeyAuthentication(concurrentToken, assertion(key, user.id, concurrent.challenge, { counter: 3 })), finishPasskeyAuthentication(concurrentToken, assertion(key, user.id, concurrent.challenge, { counter: 3 }))]);
+  assert.equal(simultaneous.filter(result => result.status === "fulfilled").length, 1, "only one same-challenge request succeeds");
+
+  const rows = await listUserPasskeys(user.id);
+  await assert.rejects(mutatePasskey(other.id, session.id, rows[0]!.id, other.password, "revoke"), "other account cannot revoke credential");
+  await assert.rejects(mutatePasskey(user.id, session.id, rows[0]!.id, "bad password", "revoke"), "strong proof mandatory");
+  await mutatePasskey(user.id, session.id, rows[0]!.id, user.password, "rename", "Renomeada");
+  assert.equal((await listUserPasskeys(user.id))[0]?.name, "Renomeada");
+  await assert.rejects(mutatePasskey(user.id, session.id, rows[0]!.id, user.password, "revoke"), "sixth strong-proof operation hits rate limiter");
+  // Test fixture only: advance to a new proof window without changing production limits.
+  await prisma.loginRateLimit.deleteMany({});
+  await mutatePasskey(user.id, session.id, rows[0]!.id, user.password, "revoke");
+  assert.equal((await listUserPasskeys(user.id)).length, 0);
+  const revokedToken = createPasskeyBrowserToken();
+  const revokedChallenge = await startPasskeyAuthentication(revokedToken, "203.0.113.17");
+  await assert.rejects(finishPasskeyAuthentication(revokedToken, assertion(key, user.id, revokedChallenge.challenge, { counter: 4 })));
+});
