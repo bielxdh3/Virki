@@ -166,3 +166,68 @@ test('PG18 insert failure after predecessor DELETE rolls back old session and ne
     await pool.query('DELETE FROM "VirkiRpSession" WHERE "subject" = $1', ['physical-user']);
   }
 });
+
+test('PG18 lock waiting past predecessor expiry must reject rotation after lock release', async () => {
+  const { authorize } = fixture();
+  const first = await authorize();
+  assert.equal(first.status, 303);
+  const old = cookieValue(first, SESSION_COOKIE);
+  const hash = hashId(old.split('=')[1]);
+  const lock = await pool.connect();
+  try {
+    await pool.query('UPDATE "VirkiRpSession" SET "expiresAt" = clock_timestamp() + interval \'3 seconds\' WHERE "idHash"=$1', [hash]);
+    await lock.query('BEGIN');
+    await lock.query('SELECT "idHash" FROM "VirkiRpSession" WHERE "idHash"=$1 FOR UPDATE', [hash]);
+    const contender = authorize(old);
+    let observedBlockedBeforeExpiry = false;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const state = await pool.query(`
+        SELECT
+          (SELECT COUNT(*)::int FROM pg_stat_activity
+             WHERE pid <> pg_backend_pid() AND state='active'
+               AND wait_event_type='Lock' AND query LIKE '%VirkiRpSession%') AS waiting,
+          (SELECT "expiresAt" > clock_timestamp() FROM "VirkiRpSession" WHERE "idHash"=$1) AS live
+      `, [hash]);
+      if (state.rows[0].waiting > 0 && state.rows[0].live) {
+        observedBlockedBeforeExpiry = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    assert.ok(observedBlockedBeforeExpiry, 'Callback DELETE must be physically blocked BEFORE expiry');
+    let expired = false;
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const result = await pool.query('SELECT "expiresAt" <= clock_timestamp() AS expired FROM "VirkiRpSession" WHERE "idHash"=$1', [hash]);
+      if (result.rows[0]?.expired) { expired = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    assert.ok(expired, 'Physical PG clock must cross expiry WHILE DELETE holds lock wait');
+    await lock.query('COMMIT');
+    const response = await contender;
+    assert.equal(response.status, 503, 'Expired prior session must not rotate after lock delay');
+  } finally {
+    try { await lock.query('ROLLBACK'); } catch { /* Transaction may already be closed. */ }
+    lock.release();
+    await pool.query('DELETE FROM "VirkiRpSession" WHERE "subject" = $1', ['physical-user']);
+  }
+});
+
+test('PG18 stale logout never claims success while rotated successor survives', async () => {
+  try {
+    const { request, authorize } = fixture();
+    const initial = await authorize();
+    assert.equal(initial.status, 303);
+    const old = cookieValue(initial, SESSION_COOKIE);
+    const rotated = await authorize(old);
+    assert.equal(rotated.status, 303);
+    const next = cookieValue(rotated, SESSION_COOKIE);
+    const staleLogout = await request('POST', '/logout', { ...postHeaders, cookie: old });
+    assert.equal(staleLogout.status, 409, 'A stale logout cannot claim completed revocation');
+    assert.equal(staleLogout.headers['set-cookie'], undefined, 'Must not clear newer cookie through response races');
+    assert.match((await request('GET', '/', { cookie: next })).body, /Signed in as subject/u);
+    assert.equal((await request('POST', '/logout', { ...postHeaders, cookie: next })).status, 303);
+    assert.match((await request('GET', '/', { cookie: next })).body, /Not signed in/u);
+  } finally {
+    await pool.query('DELETE FROM "VirkiRpSession" WHERE "subject" = $1', ['physical-user']);
+  }
+});
