@@ -29,7 +29,7 @@ test("bulk revoke commits only other active rows and an audit event, then become
     const pending: Array<Record<string, unknown>> = [];
     const transaction = {
       $queryRaw: async () => [{ id: current.id }],
-      session: { updateMany: async ({ where, data }: { where: { userId: string; id: { not: string }; revokedAt: null; expiresAt: { gt: Date } }; data: { revokedAt: Date } }) => {
+      session: { findFirst: async () => ({ id: current.id }), updateMany: async ({ where, data }: { where: { userId: string; id: { not: string }; revokedAt: null; expiresAt: { gt: Date } }; data: { revokedAt: Date } }) => {
         assert.equal(where.userId, "user-a");
         assert.equal(where.id.not, current.id);
         let count = 0;
@@ -66,7 +66,7 @@ test("failed audit insertion aborts the revocation transaction", async () => {
     let pending = false;
     const transaction = {
       $queryRaw: async () => [{ id: "current" }],
-      session: { updateMany: async () => { pending = true; return { count: 1 }; } },
+      session: { findFirst: async () => ({ id: "current" }), updateMany: async () => { pending = true; return { count: 1 }; } },
       auditLog: { create: async () => { throw new Error("audit unavailable"); } }
     } as unknown as Prisma.TransactionClient;
     const result = await callback(transaction);
@@ -76,5 +76,26 @@ test("failed audit insertion aborts the revocation transaction", async () => {
   try {
     await assert.rejects(revokeOthers("user-a", "current"), /audit unavailable/u);
     assert.equal(revoked, false);
+  } finally { client.$transaction = original; }
+});
+
+test("bulk revoke rejects an expired current session even after its row is locked", async () => {
+  const client = prisma as unknown as { $transaction: typeof prisma.$transaction };
+  const original = client.$transaction;
+  client.$transaction = (async (callback: (transaction: Prisma.TransactionClient) => Promise<number>) => {
+    const transaction = {
+      $queryRaw: async () => [{ id: "current" }],
+      session: {
+        findFirst: async ({ where }: { where: { expiresAt: { gt: Date } } }) => {
+          assert.ok(where.expiresAt.gt instanceof Date);
+          return null;
+        },
+        updateMany: async () => { throw new Error("expired session reached mutation"); }
+      }
+    } as unknown as Prisma.TransactionClient;
+    return callback(transaction);
+  }) as typeof prisma.$transaction;
+  try {
+    await assert.rejects(revokeOthers("user-a", "current"), /Account session revocation rejected/u);
   } finally { client.$transaction = original; }
 });

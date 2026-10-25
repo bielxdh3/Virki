@@ -1,3 +1,4 @@
+import "next/dist/server/node-environment-baseline";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -70,6 +71,8 @@ test("foreign, revoked, expired, and ADMIN current sessions cannot authorize USE
   await prisma.session.update({ where: { id: current.session.id }, data: { revokedAt: new Date() } });
   await assert.rejects(revokeOthers(user.id, current.session.id));
   await prisma.session.update({ where: { id: current.session.id }, data: { revokedAt: null, expiresAt: new Date(Date.now() - 1) } });
+  const storedExpiry = await prisma.session.findUniqueOrThrow({ where: { id: current.session.id }, select: { expiresAt: true } });
+  assert.ok(storedExpiry.expiresAt.getTime() < Date.now(), "the current session must be expired before revocation is attempted");
   await assert.rejects(revokeOthers(user.id, current.session.id));
 
   assert.ok(await auth.getSessionByToken(victim.token));

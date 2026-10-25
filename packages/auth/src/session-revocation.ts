@@ -34,23 +34,28 @@ export async function revokeOtherAccountSessions(userId: string, currentSessionI
 }
 
 async function lockCurrentUserSession(transaction: Prisma.TransactionClient, userId: string, sessionId: string): Promise<void> {
-  const now = new Date();
   const rows = await transaction.$queryRaw<Array<{ id: string }>>`
     SELECT s."id" FROM "User" u JOIN "Session" s ON s."userId" = u."id"
     WHERE u."id" = ${userId} AND u."role" = 'USER'::"UserRole"
       AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
-      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL AND s."expiresAt" > ${now}
+      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL
     FOR UPDATE OF u, s
   `;
   if (rows.length !== 1) throw new AccountSessionRevocationError();
 }
 
 async function assertCurrentUserSession(transaction: Prisma.TransactionClient, userId: string, sessionId: string, now: Date): Promise<void> {
-  const rows = await transaction.$queryRaw<Array<{ id: string }>>`
-    SELECT s."id" FROM "User" u JOIN "Session" s ON s."userId" = u."id"
-    WHERE u."id" = ${userId} AND u."role" = 'USER'::"UserRole"
-      AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
-      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL AND s."expiresAt" > ${now}
-  `;
-  if (rows.length !== 1) throw new AccountSessionRevocationError();
+  // Prisma DateTime is stored as a UTC timestamp without time zone. Comparing it
+  // to a raw Date parameter can coerce through the PostgreSQL session time zone.
+  const current = await transaction.session.findFirst({
+    where: {
+      id: sessionId,
+      userId,
+      revokedAt: null,
+      expiresAt: { gt: now },
+      user: { is: { role: "USER", isActive: true, accountStatus: "ACTIVE" } }
+    },
+    select: { id: true }
+  });
+  if (!current) throw new AccountSessionRevocationError();
 }
