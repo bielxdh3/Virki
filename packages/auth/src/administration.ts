@@ -5,7 +5,7 @@ import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashAuditSes
 import { prisma, type Prisma } from "@virki/database";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
-import { AdministrationMutationError, lockAdminSessionInTransaction, lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { AdministrationMutationError, assertAdminSessionCurrentInTransaction, lockAdminSessionInTransaction, lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export { ELEVATION_SCOPES, ELEVATION_SCOPE_ACTIONS, UI_ELEVATION_SCOPES } from "./elevation-scopes";
 export type { ElevationScope } from "./elevation-scopes";
@@ -143,6 +143,9 @@ export async function verifySecurityElevation(input: { actor: { id: string; role
     `;
     if (locked.length !== 1) throw new AdministrationMutationError();
     const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+    // The session was checked before the credential/challenge locks. A later
+    // wait may cross session expiry, so revalidate without changing lock order.
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, checkedAt);
     const currentCeremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, undefined, checkedAt);
     if (currentCeremony.id !== ceremony.id || currentCeremony.scope !== ceremony.scope ||
         currentCeremony.credentialKeyVersion !== ceremony.credentialKeyVersion) throw new AdministrationMutationError();

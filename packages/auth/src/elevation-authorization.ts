@@ -70,7 +70,7 @@ export async function requireSecurityElevationInTransaction(
   if (activeRows.length === 0) throw new AdministrationMutationError();
 }
 
-async function assertAdminSessionCurrentInTransaction(transaction: Prisma.TransactionClient, userId: string, sessionId: string, checkedAt: Date): Promise<void> {
+export async function assertAdminSessionCurrentInTransaction(transaction: Prisma.TransactionClient, userId: string, sessionId: string, checkedAt: Date): Promise<void> {
   const rows = await transaction.$queryRaw<Array<{ id: string }>>`
     SELECT s."id" FROM "User" u JOIN "Session" s ON s."userId" = u."id"
     WHERE u."id" = ${userId} AND u."role" = 'ADMIN'::"UserRole"
