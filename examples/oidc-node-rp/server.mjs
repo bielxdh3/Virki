@@ -54,7 +54,15 @@ async function insertSession(db, oldSessionId, newSessionId, issuer, identity, c
   try {
     await connection.query('BEGIN');
     if (validId(oldSessionId)) {
-      await connection.query('DELETE FROM "VirkiRpSession" WHERE "idHash" = $1', [hashId(oldSessionId)]);
+      // A presented session must still be live and exclusively consumable.
+      // With PostgreSQL READ COMMITTED, DELETE locks the matching row; a
+      // competing callback/logout receives zero RETURNING rows after it commits.
+      // Never create two successor sessions from one predecessor.
+      const consumed = await connection.query(
+        'DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 AND "expiresAt" > NOW() RETURNING "idHash"',
+        [hashId(oldSessionId)]
+      );
+      if (consumed.rows?.length !== 1) throw new Error('RP predecessor already consumed.');
     }
     await connection.query(
       'INSERT INTO "VirkiRpSession" ("idHash", "issuer", "subject", "tokenCiphertext", "expiresAt") VALUES ($1,$2,$3,$4,$5)',
