@@ -17,6 +17,9 @@ test("WebAuthn cannot expand the USER origin to the ADMIN subdomain", () => {
     assert.equal(passkeysEnabledForRequest(surface, host, env), false);
   }
   assert.equal(passkeysEnabledForRequest("portal", "portal.biel.dev.br", { ...env, VIRKI_PASSKEYS_ENABLED: "false" }), false);
+  assert.deepEqual(expectedPasskeyRP({ NODE_ENV: "test", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }, "portal.localhost"), { rpID: "portal.localhost", origin: "https://portal.localhost:3001" });
+  assert.equal(passkeysEnabledForRequest("portal", "portal.localhost", { ...env, NODE_ENV: "test", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }), true);
+  assert.equal(passkeysEnabledForRequest("portal", "portal.localhost", { ...env, NODE_ENV: "production", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }), false);
 });
 
 test("clientData only supplies an exact, bounded challenge; stored digest matches original", () => {

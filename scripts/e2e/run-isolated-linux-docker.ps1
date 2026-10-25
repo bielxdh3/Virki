@@ -660,6 +660,7 @@ try {
     $e2eEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('VIRKI_E2E_DATABASE_URL=' + $urls.e2e), '--env', ('VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL=' + $urls.migrator), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
     if ($env:VIRKI_E2E_HUB_MODE -eq 'production') { $e2eEnvironment += @('--env', 'VIRKI_E2E_HUB_MODE=production', '--env', 'VIRKI_E2E_HUB_BUILD_READY=true') }
     if ($env:VIRKI_E2E_LOW05_DIAGNOSTICS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_LOW05_DIAGNOSTICS=true') }
+    if ($env:VIRKI_E2E_PASSKEYS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_PASSKEYS=true') }
     Invoke-Stage -Name 'browser-e2e' -Command $playwrightCommand -Environment $e2eEnvironment -EvidenceLogPath $browserE2EEvidencePath
   }
   if (-not $E2EOnly -and -not $IntegrationOnly -and -not $UnitOnly) {

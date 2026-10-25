@@ -29,6 +29,10 @@ const FAILURE = new Error("Passkey ceremony rejected.");
 export const PASSKEY_BROWSER_COOKIE = "virki_passkey_browser";
 
 export function expectedPasskeyRP(env: Readonly<Record<string, string | undefined>> = process.env, host = RP_ID) {
+  // Only for the TLS Playwright portal.localhost fixture; production never accepts this RP.
+  if (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && host === "portal.localhost") {
+    return { rpID: "portal.localhost", origin: "https://portal.localhost:3001" };
+  }
   if (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && host === "localhost") {
     return { rpID: "localhost", origin: "http://localhost:3001" };
   }
@@ -38,6 +42,7 @@ export function expectedPasskeyRP(env: Readonly<Record<string, string | undefine
 export function passkeysEnabledForRequest(surface: string, host: string, env: Readonly<Record<string, string | undefined>> = process.env) {
   return env.VIRKI_PASSKEYS_ENABLED === "true" && (
     (surface === "portal" && host === RP_ID) ||
+    (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && surface === "portal" && host === "portal.localhost") ||
     (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && surface === "local" && host === "localhost")
   );
 }
