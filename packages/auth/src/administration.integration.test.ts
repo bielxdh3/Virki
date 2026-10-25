@@ -118,6 +118,67 @@ test("an elevation code cannot be verified after its ten-minute window", integra
   assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", new Date(start.getTime() + 11 * MINUTE)), false);
 });
 
+for (const lockTarget of ["User", "SecurityElevation"] as const) test(`administrative OTP expiring during ${lockTarget} lock wait must not activate elevation`, integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const started = await startSecurityElevation({
+    actor: admin.actor,
+    sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD,
+    administrativePassword: ADMIN_PASSWORD,
+    scope: "PROJECT_ACCESS_CHANGE",
+    duration: { kind: "TIMED", minutes: 15 },
+    locale: LOCALE
+  });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  // Preserve the timed elevation's later expiresAt: only the 10-minute OTP
+  // ceremony age becomes nearly expired. The database remains the time source.
+  const remainingMs = 3_000;
+  const expiredAt = new Date(Date.now() + remainingMs);
+  await prisma.securityElevation.update({
+    where: { requestKey: started.requestKey },
+    data: { createdAt: new Date(expiredAt.getTime() - 10 * MINUTE) }
+  });
+
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    if (lockTarget === "User") {
+      await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${admin.actor.id} FOR UPDATE`;
+    } else {
+      await transaction.$queryRaw`SELECT "id" FROM "SecurityElevation" WHERE "requestKey" = ${started.requestKey} FOR UPDATE`;
+    }
+    locked();
+    await gate;
+  }, { timeout: 10_000 });
+  await ready;
+
+  const verification = verifySecurityElevation({
+    actor: admin.actor,
+    sessionId: admin.sessionId,
+    requestKey: started.requestKey,
+    code
+  }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, lockTarget === "User" ? 'FROM "User" WHERE "id"' : 'FROM "SecurityElevation" WHERE "id"');
+    assert.ok(Date.now() < expiredAt.getTime(), "the OTP must still be valid when the verifier starts waiting");
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, expiredAt.getTime() - Date.now() + 100)));
+  } finally {
+    release();
+    await holder;
+  }
+
+  const outcome = await verification;
+  assert.equal(outcome.ok, false, "the OTP must not activate an elevation after its 10-minute wall-clock deadline");
+  if (!outcome.ok) assert.ok(outcome.error instanceof AdministrationMutationError);
+  const ceremony = await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: started.requestKey }, select: { status: true } });
+  assert.equal(ceremony.status, "PENDING");
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_ELEVATION_ACTIVATED" } }), 0);
+});
+
 test("an administrative password equal to the normal password is rejected when changed", integrationOptions, async () => {
   const admin = await setupAdmin();
   const start = new Date();

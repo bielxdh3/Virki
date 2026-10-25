@@ -136,10 +136,23 @@ export async function verifySecurityElevation(input: { actor: { id: string; role
     if (!isAllowedScope(ceremony.scope)) throw new AdministrationMutationError();
     if (typeof ceremony.credentialKeyVersion !== "number" || !Number.isSafeInteger(ceremony.credentialKeyVersion) || ceremony.credentialKeyVersion < 1) throw new AdministrationMutationError();
     await lockActiveAdministrativeCredentialVersion(transaction, input.actor.id, ceremony.credentialKeyVersion);
-    if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
+    // The challenge must be locked before observing its deadline: a wait on
+    // User, Session, credential, or the challenge itself must not extend an OTP.
+    const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "SecurityElevation" WHERE "id" = ${ceremony.id} FOR UPDATE
+    `;
+    if (locked.length !== 1) throw new AdministrationMutationError();
+    const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+    const currentCeremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, undefined, checkedAt);
+    if (currentCeremony.id !== ceremony.id || currentCeremony.scope !== ceremony.scope ||
+        currentCeremony.credentialKeyVersion !== ceremony.credentialKeyVersion) throw new AdministrationMutationError();
+    if (!verifySecurityCode(input.code, currentCeremony.challengeHash)) throw new AdministrationMutationError();
     // Timed elevations last their full duration from activation, not from the moment the code was emailed.
-    const activeExpiresAt = ceremony.manualUntilRevoked ? MANUAL_EXPIRY : new Date(now.getTime() + (ceremony.expiresAt.getTime() - ceremony.createdAt.getTime()));
-    const updated = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: now }, createdAt: { gt: getElevationCeremonyOpenedAfter(now) } }, data: { status: "ACTIVE", activatedAt: now, expiresAt: activeExpiresAt } });
+    const activeExpiresAt = currentCeremony.manualUntilRevoked ? MANUAL_EXPIRY : new Date(checkedAt.getTime() + (currentCeremony.expiresAt.getTime() - currentCeremony.createdAt.getTime()));
+    const updated = await transaction.securityElevation.updateMany({
+      where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: checkedAt }, createdAt: { gt: getElevationCeremonyOpenedAfter(checkedAt), lte: checkedAt } },
+      data: { status: "ACTIVE", activatedAt: checkedAt, expiresAt: activeExpiresAt }
+    });
     if (updated.count !== 1) throw new AdministrationMutationError();
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_ACTIVATED", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.elevation", message: "Administrative elevation activated.", metadata: { requestRef: hashAuditIdentifier(input.requestKey) } });
   });
