@@ -22,7 +22,7 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
       if (sql.startsWith('DELETE FROM "VirkiRpSession"')) {
         const removed = sessions.get(params[0]);
         sessions.delete(params[0]);
-        return { rows: removed ? [{ ciphertext: removed.ciphertext }] : [] };
+        return { rows: removed ? [{ ciphertext: removed.ciphertext, idHash: params[0] }] : [] };
       }
       if (sql.startsWith('INSERT INTO "VirkiRpSession"')) {
         if (failInsert) throw new Error('simulated DB write failure with sensitive material');
@@ -160,6 +160,19 @@ test('session insert failure rolls back and never issues a session cookie', asyn
   assert.equal(sessions.size, 0);
   assert.ok(events.sql.includes('ROLLBACK'));
   assert.ok(!JSON.stringify(response).includes('sensitive material'));
+});
+
+test('old session cookie with no live DB predecessor cannot create a successor', async () => {
+  const { request, sessions, events } = fixture();
+  const login = await request('POST', '/login', POST);
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  const unknownSession = `${SESSION_COOKIE}=${randomId()}`;
+  const callback = await request('GET', '/oidc/callback?state=valid-state&code=code',
+    { cookie: `${binding}; ${unknownSession}` });
+  assert.equal(callback.status, 503);
+  assert.equal(callback.headers['set-cookie'], undefined);
+  assert.equal(sessions.size, 0);
+  assert.ok(events.sql.includes('ROLLBACK'));
 });
 
 test('upstream token revocation failure cannot restore a locally deleted RP session', async () => {
