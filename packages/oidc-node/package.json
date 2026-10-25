@@ -9,7 +9,7 @@
     "./postgres-store": { "types": "./dist/postgres-store.d.ts", "import": "./dist/postgres-store.js" }
   },
   "scripts": {
-    "test": "tsx --test src/*.test.ts",
+    "test": "tsx --test src/client.test.ts src/real-protocol.test.ts src/store.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json"
   },

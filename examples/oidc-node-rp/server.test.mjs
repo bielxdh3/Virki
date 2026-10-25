@@ -42,7 +42,8 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
       events.callbacks.push({ url, binding });
       if (binding !== events.login.at(-1) || url.searchParams.get('state') !== 'valid-state' || redeemed.has('valid-state')) throw new Error('state replay');
       redeemed.add('valid-state');
-      return { identity: { iss: 'https://portal.example.test', sub: '<script>bad()</script>' }, serverOnly: { accessToken: 'sensitive-access-token' } };
+      // The real SDK validates issuer internally and exposes only mapped claims.
+      return { identity: { sub: '<script>bad()</script>' }, serverOnly: { accessToken: 'sensitive-access-token' } };
     },
     async revokeAccessToken(token) {
       events.revoked.push(token);
