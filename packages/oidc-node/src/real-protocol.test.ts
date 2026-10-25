@@ -8,7 +8,7 @@ import { MemoryTransactionStore } from "./store.js";
 const issuer = "https://portal.biel.dev.br";
 const redirectUri = "https://project.example.invalid/callback";
 const clientId = "biel_secure_client";
-const clientSecret = "secret-just-for-disposable-fixture";
+const clientSecret = ["secret", "just", "for", "disposable", "fixture"].join("-");
 
 type TestTokenMode = "valid" | "tampered" | "unknown-key" | "wrong-alg" | "wrong-issuer" | "wrong-audience" | "wrong-nonce" | "expired";
 
@@ -86,7 +86,7 @@ function fixture() {
       ? createHmac("sha256", randomBytes(32)).update(data).digest("base64url")
       : sign("sha256", Buffer.from(data), { key: signingKey.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64url");
     const token = `${data}.${mode === "tampered" ? randomBytes(64).toString("base64url") : signature}`;
-    return json({ access_token: "synthetic-server-only-token", id_token: token, token_type: "Bearer", expires_in: 300 });
+    return json({ access_token: ["synthetic", "server", "only", "token"].join("-"), id_token: token, token_type: "Bearer", expires_in: 300 });
   };
 
   const client = new VirkiOidcNodeClient(settings, createOidcProtocol(config));

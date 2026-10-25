@@ -1,5 +1,7 @@
 # External OIDC integration
 
+For confidential Node.js / TypeScript relying projects, see [the RP-side SDK and security contract](sso-node-sdk.md). It is an optional external client, not a new Virki authentication surface.
+
 ## Client registration
 
 An ADMIN registers an external project under **Hub → Conexões** with a display name, canonical HTTPS origin, exact callback URI list, and enabled state. Virki creates a confidential OIDC client. Its client secret is shown only at creation/rotation and must be stored by the relying project in its own secret store.
