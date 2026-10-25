@@ -1,10 +1,11 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { isoCBOR } from "@simplewebauthn/server/helpers";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { prisma } from "@virki/database";
 import { createTestUser, integrationOptions } from "./integration-fixtures";
+import { confirmTotpEnrollment, startTotpEnrollment } from "./security";
 import { getOidcAuthenticationContext } from "../../../apps/issuer/src/authorization-policy";
 import {
   createPasskeyBrowserToken,
@@ -22,6 +23,67 @@ after(() => prisma.$disconnect());
 const rpID = "portal.biel.dev.br";
 const origin = "https://portal.biel.dev.br";
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest();
+
+function totpCodeForFixture(secret: string, now: Date) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bytes: number[] = [];
+  let bits = 0;
+  let buffer = 0;
+  for (const character of secret) {
+    buffer = (buffer << 5) | alphabet.indexOf(character);
+    bits += 5;
+    if (bits >= 8) { bytes.push((buffer >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  const step = Math.floor(now.getTime() / 30_000);
+  const digest = createHmac("sha1", Buffer.from(bytes)).update(Buffer.from(step.toString(16).padStart(16, "0"), "hex")).digest();
+  return String((digest.readUInt32BE(digest[digest.length - 1]! & 15) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+
+test("registration challenge cannot survive second-factor enrollment/confirmation", integrationOptions, async () => {
+  for (const change of ["pending", "active"] as const) {
+    const user = await createTestUser({ label: `passkey-factor-switch-${change}` });
+    const session = await prisma.session.create({ data: { userId: user.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60_000) } });
+    const nonce = createPasskeyBrowserToken();
+    const registration = await startPasskeyRegistration(user.id, session.id, user.password, nonce);
+    const factor = await startTotpEnrollment(user.id, user.email);
+    if (change === "active") {
+      const now = new Date();
+      await confirmTotpEnrollment(user.id, totpCodeForFixture(factor.secret, now), now);
+      assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).secondFactorMethod, "TOTP");
+    } else {
+      assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id } })).status, "PENDING");
+    }
+    await assert.rejects(finishPasskeyRegistration(user.id, session.id, nonce, registerResponse(authenticator(), registration.challenge), "Should not exist"));
+    assert.equal(await prisma.passkeyCredential.count({ where: { userId: user.id } }), 0, "factor transition must not install a credential");
+    assert.equal(await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "PASSKEY_REGISTERED" } }), 0, "factor transition must not emit successful registration audit");
+  }
+});
+
+test("ACTIVE TOTP registration succeeds with fresh proof; revoking the factor invalidates another pending challenge", integrationOptions, async () => {
+  const user = await createTestUser({ label: "passkey-totp-fresh" });
+  const session = await prisma.session.create({ data: { userId: user.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60_000) } });
+  const { secret } = await startTotpEnrollment(user.id, user.email);
+  const previousWindow = new Date(Date.now() - 30_000);
+  await confirmTotpEnrollment(user.id, totpCodeForFixture(secret, previousWindow), previousWindow);
+
+  const firstNonce = createPasskeyBrowserToken();
+  const first = await startPasskeyRegistration(user.id, session.id, user.password, firstNonce, rpID, totpCodeForFixture(secret, new Date()));
+  await finishPasskeyRegistration(user.id, session.id, firstNonce, registerResponse(authenticator(), first.challenge), "Allowed with active TOTP");
+  assert.equal(await prisma.passkeyCredential.count({ where: { userId: user.id } }), 1);
+
+  const secondNonce = createPasskeyBrowserToken();
+  const nextWindow = new Date(Date.now() + 30_000);
+  const pending = await startPasskeyRegistration(user.id, session.id, user.password, secondNonce, rpID, totpCodeForFixture(secret, nextWindow));
+  // The ordinary disableTotp flow also revokes sessions. Change just this
+  // factor state under the canonical User lock to prove factor fencing itself.
+  await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+    await tx.totpFactor.update({ where: { userId: user.id }, data: { status: "REVOKED" } });
+  });
+  await assert.rejects(finishPasskeyRegistration(user.id, session.id, secondNonce, registerResponse(authenticator(), pending.challenge), "Should not exist"));
+  assert.equal(await prisma.passkeyCredential.count({ where: { userId: user.id } }), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "PASSKEY_REGISTERED" } }), 1);
+});
 
 async function awaitBlockedOn(blockingPid: number) {
   const until = Date.now() + 6_000;

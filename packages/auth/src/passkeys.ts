@@ -131,17 +131,43 @@ async function requireConfiguredTotpProof(tx: Prisma.TransactionClient, userId: 
   if (consumed.count !== 1) throw FAILURE;
 }
 
+// Bind a registration attempt to the actual factor policy and credential state
+// after its password/TOTP proof. All supported factor mutations acquire the
+// User lock before changing either User or TotpFactor. Exclude lastUsedStep:
+// consuming a normal TOTP assertion must not invalidate an otherwise valid
+// proof, while enabling, disabling or replacing the factor always must.
+async function registrationProofBinding(tx: Prisma.TransactionClient, userId: string) {
+  const user = await tx.user.findUnique({ where: { id: userId }, select: {
+    passwordHash: true, secondFactorMethod: true, updatedAt: true,
+    totpFactor: { select: { id: true, status: true, secretCiphertext: true, confirmedAt: true } }
+  } });
+  if (!user?.passwordHash) throw FAILURE;
+  const factor = user.totpFactor;
+  if (user.secondFactorMethod === "TOTP" && factor?.status !== "ACTIVE") throw FAILURE;
+  return {
+    passwordHash: user.passwordHash,
+    digest: hashPasskeyChallenge(JSON.stringify([
+      "passkey-registration-factor-policy-v2", user.passwordHash, user.updatedAt.toISOString(),
+      user.secondFactorMethod, factor?.id ?? null, factor?.status ?? null,
+      factor?.secretCiphertext ?? null, factor?.confirmedAt?.toISOString() ?? null
+    ]))
+  };
+}
+
 export async function startPasskeyRegistration(userId: string, sessionId: string, password: string, token: string, host = RP_ID, totpCode = "") {
   requireBrowserToken(token);
   await consumeSecurityProofAttempt(userId);
   const user = await checkActiveUser(userId, sessionId);
   if (!user.passwordHash || !await verifyPassword(user.passwordHash, password)) throw FAILURE;
-  await prisma.$transaction(async (tx) => {
+  const proofHash = await prisma.$transaction(async (tx) => {
     if (!await lockActiveLoginAccountInTransaction(tx, userId, "USER")) throw FAILURE;
     const lockedUser = await tx.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
     if (!lockedUser?.passwordHash || lockedUser.passwordHash !== user.passwordHash) throw FAILURE;
     await lockLiveSession(tx, userId, sessionId);
     await requireConfiguredTotpProof(tx, userId, totpCode);
+    const binding = await registrationProofBinding(tx, userId);
+    if (binding.passwordHash !== user.passwordHash) throw FAILURE;
+    return binding.digest;
   });
   const existing = await prisma.passkeyCredential.findMany({ where: { userId, revokedAt: null }, select: { credentialId: true, transports: true }, take: MAX_PASSKEYS });
   if (existing.length >= MAX_PASSKEYS) throw FAILURE;
@@ -152,7 +178,7 @@ export async function startPasskeyRegistration(userId: string, sessionId: string
     excludeCredentials: existing.map((entry) => ({ id: entry.credentialId, transports: entry.transports as never })),
     supportedAlgorithmIDs: [-7, -257], timeout: CHALLENGE_TTL_MS
   });
-  await saveChallenge(options.challenge, "REGISTRATION", token, rpID, origin, userId, sessionId, hashPasskeyChallenge(user.passwordHash));
+  await saveChallenge(options.challenge, "REGISTRATION", token, rpID, origin, userId, sessionId, proofHash);
   return options;
 }
 
@@ -172,9 +198,8 @@ export async function finishPasskeyRegistration(userId: string, sessionId: strin
   await prisma.$transaction(async (tx) => {
     if (!await lockActiveLoginAccountInTransaction(tx, userId, "USER")) throw FAILURE;
     if (row.expiresAt <= new Date()) throw FAILURE;
-    const lockedUser = await tx.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
-    if (!lockedUser?.passwordHash || hashPasskeyChallenge(lockedUser.passwordHash) !== row.proofHash) throw FAILURE;
     await lockLiveSession(tx, userId, sessionId);
+    if ((await registrationProofBinding(tx, userId)).digest !== row.proofHash) throw FAILURE;
     if (await tx.passkeyCredential.count({ where: { userId, revokedAt: null } }) >= MAX_PASSKEYS) throw FAILURE;
     await tx.passkeyCredential.create({ data: {
       credentialId: credential.id, publicKey: Buffer.from(credential.publicKey), counter: BigInt(credential.counter),
@@ -183,6 +208,7 @@ export async function finishPasskeyRegistration(userId: string, sessionId: strin
     } });
     await writeAuditLogInTransaction(tx, { eventType: "PASSKEY_REGISTERED", result: "SUCCESS", actorUserId: userId, resource: "identity.passkey" });
     await lockLiveSession(tx, userId, sessionId);
+    if ((await registrationProofBinding(tx, userId)).digest !== row.proofHash) throw FAILURE;
     if (row.expiresAt <= new Date()) throw FAILURE;
   });
 }
