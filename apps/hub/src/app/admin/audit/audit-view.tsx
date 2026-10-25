@@ -16,7 +16,7 @@ const safeRef = (value: string | null) => value && /^[a-f0-9]{64}$/u.test(value)
 
 export function AuditView({ filters, rows, hasNext }: { filters: AuditFilters; rows: AuditRow[]; hasNext: boolean }) {
   const activeCount = Object.entries(filters).filter(([key, value]) => !["page", "sort"].includes(key) && value !== "").length;
-  return <main className="admin-main" id="admin-content" tabIndex={-1}>
+  return <>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Auditoria</h1><p>Investigue eventos por identificadores seguros. Horários em {DISPLAY_TIME_ZONE_LABEL}.</p></div></header>
     <form method="get" action="/admin/audit" className="form-stack audit-filters" aria-label="Filtros da auditoria">
       <label>Busca por prefixo<input name="q" type="search" defaultValue={filters.q} maxLength={80} pattern={"[A-Za-z0-9_.\\-]+"} aria-describedby="audit-search-help" /></label>
@@ -60,5 +60,5 @@ export function AuditView({ filters, rows, hasNext }: { filters: AuditFilters; r
       <nav className="pagination" aria-label="Paginação da auditoria">{filters.page > 1 && <a className="button-secondary" href={auditPageHref(filters, filters.page - 1)}>Página anterior</a>}{hasNext && filters.page < 1000 && <a className="button-secondary" href={auditPageHref(filters, filters.page + 1)}>Próxima página</a>}</nav>
       {filters.page === 1000 && hasNext && <p>Limite de paginação atingido. Restrinja o intervalo ou os filtros.</p>}
     </section>
-  </main>;
+  </>;
 }
