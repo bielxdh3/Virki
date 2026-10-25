@@ -32,7 +32,7 @@
     "@virki/database": "0.1.0",
     "@node-rs/argon2": "^2.2.1",
     "jose": "^6.2.3",
-    "nodemailer": "^10.0.10"
+    "nodemailer": "^10.2.1"
   },
   "devDependencies": {
     "@types/nodemailer": "^8.0.2"

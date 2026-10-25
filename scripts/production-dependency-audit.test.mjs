@@ -32,6 +32,17 @@ const evaluate = (overrides = {}) => evaluateProductionDependencies({
   physicalForbidden: [], prismaBinaryFound: false, ...overrides
 });
 
+test("committed dependency lock respects global exact-version overrides", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+  for (const [name, exactVersion] of Object.entries(manifest.overrides ?? {})) {
+    if (typeof exactVersion !== "string") continue;
+    const installedVersion = lock.packages?.[`node_modules/${name}`]?.version;
+    assert.equal(installedVersion, exactVersion,
+      `${name}: a stale lockfile will fail npm ls in the production audit`);
+  }
+});
+
 test("production policy accepts only clean reported results and a present Prisma client", () => {
   const result = evaluate();
   assert.equal(result.status, "passed");
