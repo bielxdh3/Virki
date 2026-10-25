@@ -403,7 +403,10 @@ test("an elevation cannot be created from credentials rotated after password pro
     now
   }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
   try {
-    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE OF u, s");
+    // The rotation holds the User row. The elevation writer acquires User
+    // before Session, so its first lock wait is the User FOR UPDATE query.
+    // Waiting for its later JOIN would time out before that query can run.
+    await waitForBlockedPostgresQuery(blockerPid, 'FROM "User" WHERE "id"');
   } finally {
     release();
   }
