@@ -159,8 +159,8 @@ export async function listActiveSecurityElevations(actor: { id: string; role: st
       AND e."credentialKeyVersion" = c."keyVersion" AND c."keyVersion" > 0
       AND c."status" = 'ACTIVE'::"AdministrativeCredentialStatus" AND c."revokedAt" IS NULL
       AND u."role" = 'ADMIN'::"UserRole" AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
-      AND s."revokedAt" IS NULL AND s."expiresAt" > ${now}
-      AND (e."manualUntilRevoked" = TRUE OR e."expiresAt" > ${now})
+      AND s."revokedAt" IS NULL AND s."expiresAt" > (${now} AT TIME ZONE 'UTC')
+      AND (e."manualUntilRevoked" = TRUE OR e."expiresAt" > (${now} AT TIME ZONE 'UTC'))
     ORDER BY e."createdAt" DESC LIMIT 20
   `;
 }
@@ -184,8 +184,8 @@ export async function hasActiveSecurityElevation(userId: string, sessionId: stri
       AND c."keyVersion" > 0
       AND c."status" = 'ACTIVE'::"AdministrativeCredentialStatus" AND c."revokedAt" IS NULL
       AND u."role" = 'ADMIN'::"UserRole" AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
-      AND s."revokedAt" IS NULL AND s."expiresAt" > ${now}
-      AND (e."manualUntilRevoked" = TRUE OR e."expiresAt" > ${now})
+      AND s."revokedAt" IS NULL AND s."expiresAt" > (${now} AT TIME ZONE 'UTC')
+      AND (e."manualUntilRevoked" = TRUE OR e."expiresAt" > (${now} AT TIME ZONE 'UTC'))
     LIMIT 1
   `;
   return rows.length === 1;

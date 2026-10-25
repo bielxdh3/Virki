@@ -19,7 +19,7 @@ export async function lockAdminSessionInTransaction(transaction: Prisma.Transact
     SELECT u."id" FROM "User" u JOIN "Session" s ON s."userId" = u."id"
     WHERE u."id" = ${userId} AND u."role" = 'ADMIN'::"UserRole"
       AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
-      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL AND s."expiresAt" > ${now}
+      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL AND s."expiresAt" > (${now} AT TIME ZONE 'UTC')
     FOR UPDATE OF u, s
   `;
   if (rows.length !== 1) throw new AdministrationMutationError();
@@ -65,7 +65,7 @@ export async function requireSecurityElevationInTransaction(
       AND "status" = 'ACTIVE'::"SecurityElevationStatus"
       AND "revokedAt" IS NULL
       AND "credentialKeyVersion" = ${credential.keyVersion}
-      AND ("manualUntilRevoked" = TRUE OR "expiresAt" > ${checkedAt})
+      AND ("manualUntilRevoked" = TRUE OR "expiresAt" > (${checkedAt} AT TIME ZONE 'UTC'))
   `;
   if (activeRows.length === 0) throw new AdministrationMutationError();
 }
@@ -75,7 +75,7 @@ async function assertAdminSessionCurrentInTransaction(transaction: Prisma.Transa
     SELECT s."id" FROM "User" u JOIN "Session" s ON s."userId" = u."id"
     WHERE u."id" = ${userId} AND u."role" = 'ADMIN'::"UserRole"
       AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
-      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL AND s."expiresAt" > ${checkedAt}
+      AND s."id" = ${sessionId} AND s."revokedAt" IS NULL AND s."expiresAt" > (${checkedAt} AT TIME ZONE 'UTC')
   `;
   if (rows.length !== 1) throw new AdministrationMutationError();
 }

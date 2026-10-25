@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   AdministrationMutationError,
@@ -10,6 +11,22 @@ import {
   requireSecurityElevationInTransaction,
   resolveElevationDuration
 } from "./administration";
+
+test("raw administrative expiry checks normalize timestamptz parameters to UTC for Prisma timestamp columns", () => {
+  // Prisma persists DateTime as TIMESTAMP(3) without a time zone. Raw Date
+  // parameters are timestamptz: a non-UTC PostgreSQL TimeZone otherwise
+  // shifts expiration boundaries and can grant stale security elevation.
+  const files = [
+    ["./elevation-authorization.ts", 3],
+    ["./administration.ts", 4]
+  ] as const;
+  for (const [file, expectedChecks] of files) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    const safeChecks = source.match(/"expiresAt"\s*>\s*\(\$\{(?:now|checkedAt)\} AT TIME ZONE 'UTC'\)/gu) ?? [];
+    assert.equal(safeChecks.length, expectedChecks, `${file} must normalize every raw security expiry comparison`);
+    assert.doesNotMatch(source, /"expiresAt"\s*>\s*\$\{(?:now|checkedAt)\}/u, "raw expiry checks must not depend on PostgreSQL server timezone");
+  }
+});
 
 test("an elevation email code expires after ten minutes even when the elevation itself is long-lived", () => {
   const sentAt = new Date("2026-08-01T10:00:00.000Z");
