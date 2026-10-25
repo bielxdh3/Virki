@@ -4,8 +4,8 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import { EncryptedPostgresTransactionStore, type QueryExecutor } from "./postgres-store";
-import { hashFlowState, type AuthorizationTransaction } from "./store";
+import { EncryptedPostgresTransactionStore, type QueryExecutor } from "./postgres-store.js";
+import { hashFlowState, type AuthorizationTransaction } from "./store.js";
 
 /** Real PostgreSQL sessions, with no mock database or optional skip path. */
 const execFileAsync = promisify(execFile);

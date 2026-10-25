@@ -126,7 +126,8 @@ export function createRpHandler({ oidc, db, origin, sessionKey, revokeOnLogout =
           res.setHeader('Set-Cookie', [clearCookie(PREAUTH_COOKIE)]);
           return plain(res, 400, 'Sign-in failed.');
         }
-        if (!verified?.identity?.sub || !verified.identity.iss || !verified?.serverOnly?.accessToken) {
+        // The SDK already verifies issuer/JWKS and does not expose protocol proof fields.
+        if (!verified?.identity?.sub || !verified?.serverOnly?.accessToken) {
           res.setHeader('Set-Cookie', [clearCookie(PREAUTH_COOKIE)]);
           return plain(res, 400, 'Sign-in failed.');
         }
