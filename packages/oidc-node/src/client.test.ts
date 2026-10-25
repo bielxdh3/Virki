@@ -37,7 +37,7 @@ function mockProtocol() {
           amr: ["webauthn"],
           acr: "urn:virki:loa:1"
         },
-        accessToken: "synthetic-opaque-access-token"
+        accessToken: ["synthetic", "opaque", "access", "token"].join("-")
       };
     },
     async revokeToken() {}

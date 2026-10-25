@@ -18,11 +18,6 @@ export type ValidatedClientOptions = Required<Omit<VirkiClientOptions, "transact
 
 export type IdentityClaims = {
   sub: string;
-  iss: string;
-  aud: string | string[];
-  exp: number;
-  iat: number;
-  nonce: string;
   amr?: string[];
   acr?: string;
   auth_time?: number;
@@ -199,7 +194,9 @@ function validateIdentity(input: unknown, issuer: string, clientId: string, nonc
     || (value.auth_time !== undefined && (typeof value.auth_time !== "number" || !Number.isSafeInteger(value.auth_time) || value.auth_time > now + 30))
     || (value.amr !== undefined && (!Array.isArray(value.amr) || !value.amr.every((method: unknown) => typeof method === "string")))
     || (value.acr !== undefined && typeof value.acr !== "string")) throw new Error("Invalid ID Token.");
-  return { sub: value.sub, iss: issuer, aud: aud as string | string[], exp: value.exp, iat: value.iat, nonce,
+  // The RP gets only mapped, useful identity attributes. Protocol proof fields
+  // (notably the nonce) stay internal, even after successful verification.
+  return { sub: value.sub,
     ...(Array.isArray(value.amr) ? { amr: value.amr as string[] } : {}),
     ...(typeof value.acr === "string" ? { acr: value.acr } : {}),
     ...(typeof value.auth_time === "number" ? { auth_time: value.auth_time } : {}),
