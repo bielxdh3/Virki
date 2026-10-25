@@ -61,12 +61,13 @@ test("failed clone migration removes only unverified backup and clone artifacts;
 test("failed real production migration remains in maintenance with intact predecessor release and backup", linuxRehearsalOnly, (t) => {
   const f = disposableReleaseFixture(t, prior, candidate);
   const result = runProductionShellRehearsal(f,
-    ["maintenance_on", "stop_routed_services", "cleanup_failed_backup_verification", "create_verified_backup", "apply_production_migrations"],
+    ["assert_migration_guard_absent", "read_migration_guard", "assert_original_migration_backup", "write_migration_guard", "maintenance_on", "stop_routed_services", "cleanup_failed_backup_verification", "create_verified_backup", "apply_production_migrations"],
     "maintenance_on; create_verified_backup; apply_production_migrations", { failure: "production-migration", revisions: candidate });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /simulated production migration failure/u);
   assert.match(readFileSync(path.join(f.root, ".virki-maintenance"), "utf8"), new RegExp(`revision=${candidate}`));
   assert.equal(existsSync(path.join(f.root, ".virki-migration-verification")), true);
+  assert.match(readFileSync(path.join(f.root, ".virki-migration-integrity-guard"), "utf8"), /^phase=PREPARED$/mu, "failed migration keeps its durable checkpoint");
   initialState(f);
   assertNoExternalMutation(result);
   assert.doesNotMatch(result.operations, /compose up .*cloudflared/u);
@@ -78,7 +79,7 @@ test("failed final health retains maintenance, stops routed services and keeps p
   writeFileSync(marker, "verified disposable backup\n");
   writeFileSync(path.join(f.root, ".virki-maintenance"), `revision=${candidate}\n`);
   const result = runProductionShellRehearsal(f,
-    ["resume_services", "activate_source", "stop_routed_services"],
+    ["read_migration_guard", "assert_original_migration_backup", "recover_interrupted_verified_resume", "resume_services", "activate_source", "stop_routed_services"],
     "resume_services", { failure: "health", revisions: candidate });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /simulated health failure/u);
@@ -170,7 +171,7 @@ test("maintenance cannot be silently cleared by a failed migration status or hea
   writeFileSync(marker, "revision=" + candidate + "\n");
   writeFileSync(path.join(f.root, ".virki-migration-verification"), "verified disposable backup\n");
   const result = runProductionShellRehearsal(f,
-    ["resume_services", "activate_source", "stop_routed_services"],
+    ["read_migration_guard", "assert_original_migration_backup", "recover_interrupted_verified_resume", "resume_services", "activate_source", "stop_routed_services"],
     "resume_services", { failure: "migration-status", revisions: candidate });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /simulated migration status failure/u);
