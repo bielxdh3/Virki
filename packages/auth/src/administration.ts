@@ -9,7 +9,7 @@ import { AdministrationMutationError, assertAdminSessionCurrentInTransaction, lo
 
 export { ELEVATION_SCOPES, ELEVATION_SCOPE_ACTIONS, UI_ELEVATION_SCOPES } from "./elevation-scopes";
 export type { ElevationScope } from "./elevation-scopes";
-export { AdministrationMutationError, lockAdminSessionInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+export { AdministrationMutationError, assertAdminSessionCurrentInTransaction, lockAdminSessionInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export const ELEVATION_PROTOCOL_VERSION = 1;
 export type ElevationDuration = { kind: "TIMED"; minutes: 15 | 60 | 240 | 1440 } | { kind: "MANUAL"; confirmed: boolean };

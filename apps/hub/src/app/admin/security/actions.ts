@@ -11,6 +11,7 @@ import {
   startAdministrativeCredentialSetup,
   startSecurityElevation,
   verifySecurityElevation,
+  assertAdminSessionCurrentInTransaction,
   lockAdminSessionInTransaction,
   type ElevationDuration,
   type ElevationScope
@@ -80,11 +81,17 @@ export async function revokeElevationAction(formData: FormData): Promise<void> {
   const session = await requireAdminMutation(formData, "admin-elevation-revoke");
   const requestKey = readFormString(formData, "requestKey");
   const revoked = await prisma.$transaction(async (transaction) => {
+    // Acquire the same User -> Session locks as other ADMIN security mutations.
+    // A stale actor must never commit revocation/audit after an unrelated wait.
+    await lockAdminSessionInTransaction(transaction, session.user.id, session.id, new Date());
     const elevation = await transaction.securityElevation.findFirst({ where: { requestKey, userId: session.user.id, sessionId: session.id, status: "ACTIVE" }, select: { id: true } });
     if (!elevation) return false;
     const result = await transaction.securityElevation.updateMany({ where: { id: elevation.id, status: "ACTIVE" }, data: { status: "REVOKED", revokedAt: new Date() } });
     if (result.count !== 1) return false;
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(session.id), resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: hashAuditIdentifier(requestKey) } });
+    // The elevation UPDATE/audit INSERT can wait until this session expires.
+    // Recheck the current time after both writes, before the transaction commits.
+    await assertAdminSessionCurrentInTransaction(transaction, session.user.id, session.id, new Date());
     return true;
   });
   if (!revoked) redirect("/admin/security?error=elevation#admin-content");
