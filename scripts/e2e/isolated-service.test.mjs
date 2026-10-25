@@ -80,6 +80,33 @@ test("audit fixture cleanup uses the exact validated disposable target and migra
   }
 });
 
+test("CI audit cleanup role passes the real E2E disposable-database validator", () => {
+  const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const e2eJob = workflow.split("  authenticated-e2e:")[1];
+  assert.ok(e2eJob, "the authenticated E2E job exists");
+  const role = /^\s{10}audit_cleanup_role=([a-z_]+)$/mu.exec(e2eJob)?.[1];
+  assert.ok(role, "the E2E cleanup role is configured");
+  assert.match(
+    e2eJob,
+    /"\$audit_cleanup_role" "\$migrator_password" "\$host_port" > "\$audit_cleanup_url_file"/u,
+    "the cleanup URL uses the migration role's password"
+  );
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousConfirmation = process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM;
+  process.env.NODE_ENV = "test";
+  process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM = "disposable";
+  try {
+    const runtimeUrl = "postgresql://virki_runtime_test:runtime-only@127.0.0.1:55432/virki_e2e_test?schema=public";
+    const cleanupUrl = `postgresql://${role}:cleanup-only@127.0.0.1:55432/virki_e2e_test?schema=public`;
+    assert.doesNotThrow(() => validateAuditCleanupDatabase(cleanupUrl, runtimeUrl));
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousConfirmation === undefined) delete process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM;
+    else process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM = previousConfirmation;
+  }
+});
+
 test("fixture cleanup runs in order and reports fixed labels without raw errors", async () => {
   const events = [];
   const rawError = "untrusted database diagnostic sentinel";
