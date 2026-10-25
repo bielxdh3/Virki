@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
-import { AdministrationMutationError, changeAdministrativePassword } from "./administration";
+import { AdministrationMutationError, AdministrativePasswordReuseError, changeAdministrativePassword } from "./administration";
 import {
   approveAccountRecovery,
   consumeApprovedAccountRecovery,
@@ -294,4 +294,97 @@ test("V02: genuine ADMIN change committed first forbids a matching normal recove
   assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: fixture.requestId } })).status, "APPROVED");
   assert.equal(await recoveryAuditCount(fixture.requestId), 0);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: owner.id, eventType: "ADMIN_CREDENTIAL_CHANGED" } }), 1);
+});
+
+test("V02: approved normal recovery commits first and rejects concurrent same-secret ADMIN change", integrationOptions, async () => {
+  const fixture = await approvedAdminRecovery();
+  const { owner } = fixture;
+  let held!: () => void;
+  let unblock!: () => void;
+  const acquired = new Promise<void>((resolve) => { held = resolve; });
+  const gate = new Promise<void>((resolve) => { unblock = resolve; });
+  let holderPid = 0;
+  // Hold the credential only: the genuine recovery takes the User lock, then
+  // waits here. The genuine ADMIN writer must queue behind the recovery on User.
+  const holder = prisma.$transaction(async (tx) => {
+    [{ pid: holderPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    await tx.$queryRaw`SELECT "userId" FROM "AdministrativeCredential" WHERE "userId" = ${owner.id} FOR UPDATE`;
+    held();
+    await gate;
+  }, { timeout: 20_000 }).then(
+    () => ({ ok: true as const, error: null }),
+    (error: unknown) => ({ ok: false as const, error })
+  );
+  let recovery: Promise<HolderOutcome> | undefined;
+  let adminChange: Promise<HolderOutcome> | undefined;
+  try {
+    await waitForHolderLock(acquired, holder);
+    // Both operations propose the exact same new password. Recovery is the
+    // only operation allowed to commit, and must invalidate the old ADMIN proof.
+    recovery = consumeApprovedAccountRecovery(fixture.requestId, fixture.requestKey, NORMAL_NEXT, fixture.now, "ADMIN").then(
+      () => ({ ok: true as const, error: null }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
+    const recoveryPid = await waitForWaiter(holderPid, 'FROM "AdministrativeCredential"');
+    adminChange = changeAdministrativePassword({ id: owner.id, role: "ADMIN" }, fixture.ownerSessionId, NORMAL_NEXT, fixture.now).then(
+      () => ({ ok: true as const, error: null }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
+    await waitForWaiter(recoveryPid, 'FROM "User"');
+  } finally {
+    unblock();
+    // Never leave test-owned PG transactions running when observation fails.
+    await Promise.allSettled([holder, recovery, adminChange]);
+  }
+
+  assert.deepEqual(await holder, { ok: true, error: null });
+  assert.deepEqual(await recovery, { ok: true, error: null });
+  const rejectedAdmin = await adminChange;
+  assert.equal(rejectedAdmin?.ok, false);
+  assert.ok(rejectedAdmin?.error instanceof AdministrationMutationError,
+    "the stale ADMIN session/elevation must be rejected after recovery, not a transient PG error");
+
+  const stored = await storedPasswords(owner.id);
+  assert.equal(await verifyPassword(stored.normal, NORMAL_NEXT), true);
+  assert.equal(await verifyPassword(stored.normal, ADMIN_INITIAL), false);
+  assert.equal(await verifyPassword(stored.administrative.passwordHash, ADMIN_INITIAL), true);
+  assert.equal(await verifyPassword(stored.administrative.passwordHash, NORMAL_NEXT), false);
+  assert.equal(stored.administrative.keyVersion, 1, "rejected ADMIN change must not increment the credential version");
+  const consumed = await prisma.accountRecoveryRequest.findUniqueOrThrow({
+    where: { id: fixture.requestId }, select: { status: true, consumedAt: true }
+  });
+  assert.equal(consumed.status, "CONSUMED");
+  assert.ok(consumed.consumedAt);
+  assert.equal(await recoveryAuditCount(fixture.requestId), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: owner.id, eventType: "ADMIN_CREDENTIAL_CHANGED" } }), 0);
+  assert.ok((await prisma.session.findUniqueOrThrow({ where: { id: fixture.ownerSessionId } })).revokedAt,
+    "approved recovery must revoke the old ADMIN session");
+  assert.equal(await prisma.securityElevation.count({
+    where: { userId: owner.id, sessionId: fixture.ownerSessionId, status: "ACTIVE" }
+  }), 0);
+
+  await assert.rejects(
+    consumeApprovedAccountRecovery(fixture.requestId, fixture.requestKey, NORMAL_NEXT, fixture.now, "ADMIN"),
+    SecurityMutationError,
+    "the approved recovery token must be single-use, not an ADMIN-session failure"
+  );
+  assert.equal(await recoveryAuditCount(fixture.requestId), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: owner.id, eventType: "ADMIN_CREDENTIAL_CHANGED" } }), 0);
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: fixture.requestId } })).status, "CONSUMED");
+
+  // The race rejects the old ADMIN writer because recovery revokes its session.
+  // Independently prove the same proposed secret is rejected by the password
+  // equality guard when the actor has a freshly valid ADMIN session and proof.
+  const fresh = await seedAdminSessionWithElevation(owner.id, "ADMIN_CREDENTIAL_CHANGE", new Date());
+  await assert.rejects(
+    changeAdministrativePassword({ id: owner.id, role: "ADMIN" }, fresh.sessionId, NORMAL_NEXT),
+    AdministrativePasswordReuseError,
+    "a valid new ADMIN session must still reject the matching normal password"
+  );
+  const afterFreshAttempt = await storedPasswords(owner.id);
+  assert.equal(await verifyPassword(afterFreshAttempt.normal, NORMAL_NEXT), true);
+  assert.equal(await verifyPassword(afterFreshAttempt.administrative.passwordHash, ADMIN_INITIAL), true);
+  assert.equal(afterFreshAttempt.administrative.keyVersion, 1);
+  assert.equal(await recoveryAuditCount(fixture.requestId), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: owner.id, eventType: "ADMIN_CREDENTIAL_CHANGED" } }), 0);
 });
