@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import type { AuthorizationTransaction, TransactionStore } from "./store";
+import type { AuthorizationTransaction, TransactionStore } from "./store.js";
 
 /** A pg.Pool or pg.Client satisfies this interface. Never interpolate SQL values. */
 export type QueryExecutor = {

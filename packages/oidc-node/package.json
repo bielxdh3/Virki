@@ -1,15 +1,17 @@
 {
   "name": "@virki/oidc-node",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
   "exports": {
-    ".": { "types": "./src/index.ts", "default": "./src/index.ts" },
-    "./postgres-store": { "types": "./src/postgres-store.ts", "default": "./src/postgres-store.ts" }
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./postgres-store": { "types": "./dist/postgres-store.d.ts", "import": "./dist/postgres-store.js" }
   },
   "scripts": {
     "test": "tsx --test src/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
   },
   "engines": { "node": ">=22.13.0 <23" },
   "dependencies": { "openid-client": "6.8.8" }
