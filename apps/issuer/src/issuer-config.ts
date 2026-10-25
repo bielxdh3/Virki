@@ -20,7 +20,15 @@ export function readSigningJwks(value: string | undefined): { keys: Array<Record
   const keys = (parsed as { keys: unknown[] }).keys;
   if (!keys.length || keys.some((key) => !isPrivateSigningKey(key))) throw new Error("OIDC requires private ES256 signing keys with unique key IDs.");
   const ids = keys.map((key) => (key as Record<string, string>).kid);
-  if (new Set(ids).size !== ids.length) throw new Error("OIDC requires private ES256 signing keys with unique key IDs.");
+  // Distinct kids must actually identify distinct signing material. Aliasing
+  // the same EC public point under multiple IDs is not a cryptographic rotation.
+  const publicPoints = keys.map((key) => {
+    const { x, y } = key as Record<string, string>;
+    return `${x}.${y}`;
+  });
+  if (new Set(ids).size !== ids.length || new Set(publicPoints).size !== keys.length) {
+    throw new Error("OIDC requires private ES256 signing keys with unique key IDs.");
+  }
   return { keys: keys as Array<Record<string, string>> };
 }
 

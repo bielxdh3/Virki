@@ -27,6 +27,17 @@ test("signing JWKS accepts distinct valid ES256 private keys for rotation", asyn
   assert.deepEqual(readSigningJwks(JSON.stringify({ keys })), { keys });
 });
 
+test("signing JWKS fails closed when two different key IDs alias the same private key", async () => {
+  const key = await exportJWK((await generateKeyPair("ES256", { extractable: true })).privateKey);
+  const active = { ...key, kid: "active", alg: "ES256", use: "sig" };
+  const alias = { ...active, kid: "replacement" };
+  assert.throws(
+    () => readSigningJwks(JSON.stringify({ keys: [active, alias] })),
+    /OIDC.*key/u,
+    "rotation must not pretend two kid values identify independent signing material"
+  );
+});
+
 test("signing JWKS rejects duplicate IDs and malformed private EC coordinates", async () => {
   const jwk = await exportJWK((await generateKeyPair("ES256", { extractable: true })).privateKey);
   const valid = { ...jwk, kid: "current", alg: "ES256", use: "sig" };
