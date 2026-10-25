@@ -19,7 +19,7 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
         const entry = sessions.get(params[0]);
         return { rows: entry ? [{ subject: entry.subject }] : [] };
       }
-      if (sql.startsWith('DELETE FROM "VirkiRpSession"')) {
+      if (sql.startsWith('DELETE FROM "VirkiRpSession"') || sql.startsWith('WITH consumed AS (DELETE FROM "VirkiRpSession"')) {
         const removed = sessions.get(params[0]);
         sessions.delete(params[0]);
         return { rows: removed ? [{ ciphertext: removed.ciphertext, idHash: params[0] }] : [] };
@@ -121,6 +121,10 @@ test('login -> callback -> RP session rotation -> logout remains server-only', a
   assert.ok(page.body.includes('&lt;script&gt;bad()&lt;/script&gt;'));
   assert.ok(!page.body.includes('sensitive-access-token'));
   assert.equal((await request('POST', '/logout', { ...POST, origin: 'https://evil.example.test', cookie: newCookie })).status, 403);
+  const staleLogout = await request('POST', '/logout', { ...POST, cookie: `${SESSION_COOKIE}=${previous}` });
+  assert.equal(staleLogout.status, 409, 'Rotated predecessor cannot report successful signout');
+  assert.equal(staleLogout.headers['set-cookie'], undefined);
+  assert.equal(sessions.size, 1);
   const logout = await request('POST', '/logout', { ...POST, cookie: newCookie });
   assert.equal(logout.status, 303);
   assert.equal(sessions.size, 0);

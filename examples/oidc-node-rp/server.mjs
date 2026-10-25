@@ -58,8 +58,12 @@ async function insertSession(db, oldSessionId, newSessionId, issuer, identity, c
       // With PostgreSQL READ COMMITTED, DELETE locks the matching row; a
       // competing callback/logout receives zero RETURNING rows after it commits.
       // Never create two successor sessions from one predecessor.
+      // NOW() is fixed at BEGIN; when DELETE waits on another transaction's
+      // row lock, a formerly live session can expire before it is consumed.
+      // Evaluate the live-clock deadline AFTER acquiring/deleting the row.
+      // An empty CTE result rolls the entire DELETE back with no new cookie.
       const consumed = await connection.query(
-        'DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 AND "expiresAt" > NOW() RETURNING "idHash"',
+        'WITH consumed AS (DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 RETURNING "idHash", "expiresAt") SELECT "idHash" FROM consumed WHERE "expiresAt" > clock_timestamp()',
         [hashId(oldSessionId)]
       );
       if (consumed.rows?.length !== 1) throw new Error('RP predecessor already consumed.');
@@ -155,6 +159,10 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
         let removed = null;
         if (existingSession) {
           const result = await db.query('DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 RETURNING "tokenCiphertext" AS ciphertext', [hashId(existingSession)]);
+          // A concurrent callback might already have rotated this predecessor.
+          // Do not claim successful logout and clear a potentially newer cookie
+          // when this request did not actually revoke a live RP session.
+          if (result.rows?.length !== 1) return plain(res, 409, 'Sign-out not confirmed. Reload and retry.');
           removed = result.rows[0]?.ciphertext;
         }
         // Local logout remains effective even if revocation is unavailable upstream.
