@@ -11,6 +11,7 @@ import {
   startAdministrativeCredentialSetup,
   startSecurityElevation,
   verifySecurityElevation,
+  lockAdminSessionInTransaction,
   type ElevationDuration,
   type ElevationScope
 } from "@virki/auth/administration";
@@ -96,8 +97,24 @@ export async function revokeOtherSessionsAction(formData: FormData): Promise<voi
   return withHubAuditRequest(async () => {
   const session = await requireAdminMutation(formData, "admin-sessions-revoke");
   await prisma.$transaction(async (transaction) => {
+    // Match ADMIN credential mutation lock ordering (User -> current Session),
+    // so a concurrent deactivation/revocation cannot invalidate the actor
+    // while a target Session UPDATE is waiting on a different transaction.
+    await lockAdminSessionInTransaction(transaction, session.user.id, session.id, new Date());
     const result = await transaction.session.updateMany({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null }, data: { revokedAt: new Date() } });
     if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(session.id), resource: "session", message: "Other active admin sessions revoked.", metadata: { revokedCount: result.count } });
+    // Row locks cannot freeze time. A Session can expire during the target
+    // UPDATE or audit write; always verify fresh validity after those waits.
+    // DateTime is UTC timestamp without time zone, matching ADMIN auth checks.
+    const checkedAt = new Date();
+    const authorized = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT s."id" FROM "User" u JOIN "Session" s ON s."userId" = u."id"
+      WHERE u."id" = ${session.user.id} AND u."role" = 'ADMIN'::"UserRole"
+        AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
+        AND s."id" = ${session.id} AND s."revokedAt" IS NULL
+        AND s."expiresAt" > (${checkedAt} AT TIME ZONE 'UTC')
+    `;
+    if (authorized.length !== 1) throw new Error("Administrative session revocation rejected.");
   });
   revalidatePath("/admin/security");
   redirect("/admin/security?status=sessions#admin-content");
