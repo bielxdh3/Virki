@@ -22,14 +22,17 @@ async function addSession(userId: string, token = randomBytes(32).toString("base
   return { session, token };
 }
 
-async function requestContext<T>(host: string, token: string, origin: string, operation: () => Promise<T>): Promise<T> {
+async function requestContext<T>(host: string, token: string, origin: string, operation: () => Promise<T>, pathname = "/account/security"): Promise<T> {
   const { workAsyncStorage } = await import("next/dist/server/app-render/work-async-storage.external");
   const { workUnitAsyncStorage } = await import("next/dist/server/app-render/work-unit-async-storage.external");
   const { createRequestStoreForAPI } = await import("next/dist/server/async-storage/request-store");
   const { NextRequest } = await import("next/server");
-  const request = new NextRequest(`https://${host}/account/security`, { method: "POST", headers: { host, origin, cookie: `${auth.SESSION_COOKIE_NAME}=${token}` } });
-  const store = createRequestStoreForAPI(request, { pathname: "/account/security" }, { tags: [], expirationsByCacheKind: new Map() } as never, undefined, undefined, undefined);
-  return workAsyncStorage.run({ route: "/account/security" } as never, () => workUnitAsyncStorage.run(store, operation));
+  const request = new NextRequest(`https://${host}${pathname}`, { method: "POST", headers: { host, origin, cookie: `${auth.SESSION_COOKIE_NAME}=${token}` } });
+  const store = createRequestStoreForAPI(request, { pathname }, { tags: [], expirationsByCacheKind: new Map() } as never, undefined, undefined, undefined);
+  // Next's revalidatePath requires an incremental cache context for successful
+  // server actions; this lightweight request store tests the real action/DB.
+  const workStore = pathname === "/admin/security" ? { route: pathname, incrementalCache: {}, cacheLifeProfiles: {} } : { route: pathname };
+  return workAsyncStorage.run(workStore as never, () => workUnitAsyncStorage.run(store, operation));
 }
 
 test("USER revokes every active other session beyond the 50-row display limit, with one audit event", integrationOptions, async () => {
@@ -142,6 +145,57 @@ test("portal action requires correct origin, session-bound CSRF, USER role, conf
   assert.ok(await auth.getSessionByToken(current.token));
   assert.equal(await auth.getSessionByToken(other.token), null);
   assert.ok(await auth.getSessionByToken(adminOther.token));
+});
+
+test("ADMIN revokeOtherSessionsAction preserves the current session, revokes only its other sessions, and audits once", integrationOptions, async () => {
+  // Call the real protected Next server action with a real request context and
+  // disposable PostgreSQL; never substitute a mock of the revocation writer.
+  const previousHubHostname = process.env.VIRKI_HUB_HOSTNAME;
+  const previousAccessRequirement = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
+  process.env.VIRKI_HUB_HOSTNAME = "hub.example.invalid";
+  process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "false"; // test-only: no external Access service
+  try {
+  const { revokeOtherSessionsAction } = await import("../../../apps/hub/src/app/admin/security/actions");
+  const admin = await createTestUser({ role: "ADMIN", label: "admin-bulk-regression" });
+  const differentAdmin = await createTestUser({ role: "ADMIN", label: "other-admin-bulk-regression" });
+  const user = await createTestUser({ role: "USER", label: "user-bulk-regression" });
+  const current = await addSession(admin.id);
+  const otherFirst = await addSession(admin.id);
+  const otherSecond = await addSession(admin.id);
+  const differentAdminSession = await addSession(differentAdmin.id);
+  const userSession = await addSession(user.id);
+  const form = new FormData();
+  form.set(CSRF_FORM_FIELD_NAME, createSessionCsrfTokenFor(current.token, "admin-security"));
+  const invoke = () => requestContext("hub.example.invalid", current.token, "https://hub.example.invalid", () => revokeOtherSessionsAction(form), "/admin/security");
+  const expectSuccessfulRedirect = async () => assert.rejects(invoke(), (error: unknown) => {
+    const digest = error && typeof error === "object" && "digest" in error ? String(error.digest) : "";
+    assert.match(digest, /NEXT_REDIRECT;[^;]*;\/admin\/security\?status=sessions#admin-content;/u, `actual action rejection: ${error instanceof Error ? error.message : String(error)}; digest: ${digest}`);
+    return true;
+  });
+
+  await expectSuccessfulRedirect();
+  assert.ok(await auth.getSessionByToken(current.token), "the current ADMIN session must remain authenticated");
+  assert.equal(await auth.getSessionByToken(otherFirst.token), null);
+  assert.equal(await auth.getSessionByToken(otherSecond.token), null);
+  assert.ok(await auth.getSessionByToken(differentAdminSession.token), "another ADMIN's session is never a target");
+  assert.ok(await auth.getSessionByToken(userSession.token), "USER sessions are not affected");
+  const audits = await prisma.auditLog.findMany({
+    where: { actorUserId: admin.id, eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS" }
+  });
+  assert.equal(audits.length, 1, "both changes must produce exactly one committed audit event");
+  assert.equal(audits[0]?.actorRole, "ADMIN");
+  assert.equal(audits[0]?.sessionRef, auth.hashAuditSessionReference(current.session.id));
+  assert.equal((audits[0]?.metadata as { revokedCount?: number } | null)?.revokedCount, 2);
+
+  await expectSuccessfulRedirect();
+  assert.ok(await auth.getSessionByToken(current.token));
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.id, eventType: "AUTH_SESSION_REVOKED" } }), 1, "repeat requests must not invent a second mutation/audit");
+  } finally {
+    if (previousHubHostname === undefined) delete process.env.VIRKI_HUB_HOSTNAME;
+    else process.env.VIRKI_HUB_HOSTNAME = previousHubHostname;
+    if (previousAccessRequirement === undefined) delete process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
+    else process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = previousAccessRequirement;
+  }
 });
 
 test("single-session revoke rejects a current session expiring while its Session lock is held", integrationOptions, async () => {
