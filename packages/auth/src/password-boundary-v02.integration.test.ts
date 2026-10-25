@@ -343,6 +343,8 @@ test("V02: approved normal recovery commits first and rejects concurrent same-se
   assert.equal(rejectedAdmin?.ok, false);
   assert.ok(rejectedAdmin?.error instanceof AdministrationMutationError,
     "the stale ADMIN session/elevation must be rejected after recovery, not a transient PG error");
+  assert.equal(rejectedAdmin.error instanceof AdministrativePasswordReuseError, false,
+    "old session denied before equality check");
 
   const stored = await storedPasswords(owner.id);
   assert.equal(await verifyPassword(stored.normal, NORMAL_NEXT), true);
