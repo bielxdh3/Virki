@@ -5,6 +5,7 @@ import { createRpHandler } from './server.mjs';
 import { PREAUTH_COOKIE, SESSION_COOKIE, hashId, randomId } from './security.mjs';
 
 const ORIGIN = 'https://rp.example.test';
+const ISSUER = 'https://portal.example.test';
 const POST = { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-origin' };
 
 function fixture({ failInsert = false, failRevoke = false } = {}) {
@@ -25,6 +26,9 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
       }
       if (sql.startsWith('INSERT INTO "VirkiRpSession"')) {
         if (failInsert) throw new Error('simulated DB write failure with sensitive material');
+        // Physical PostgreSQL has issuer TEXT NOT NULL; this assertion must
+        // reject undefined instead of allowing a fake DB to mask a broken login.
+        assert.equal(params[1], ISSUER);
         sessions.set(params[0], { subject: params[2], ciphertext: params[3] });
         return { rows: [] };
       }
@@ -50,7 +54,7 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
       if (failRevoke) throw new Error('simulated token endpoint failure with sensitive material');
     }
   };
-  const handler = createRpHandler({ oidc, db, origin: ORIGIN, sessionKey: randomBytes(32) });
+  const handler = createRpHandler({ oidc, db, origin: ORIGIN, issuer: ISSUER, sessionKey: randomBytes(32) });
   const request = async (method, path, headers = {}, encrypted = true) => {
     const result = { status: 0, headers: {}, body: '' };
     const res = {
@@ -78,6 +82,14 @@ test('CSRF, method, TLS and Host are checked before issuing any binding', async 
   assert.equal((await request('POST', '/login', POST, false)).status, 400);
   assert.equal((await request('POST', '/login', { ...POST, host: 'evil.example.test' })).status, 400);
   assert.equal(events.login.length, 0);
+});
+
+test('RP accepts only an exact configured HTTPS issuer and never browser-provided issuer values', () => {
+  const oidc = { beginLogin: async () => {}, completeCallback: async () => {} };
+  const db = { connect: async () => {}, query: async () => {} };
+  for (const issuer of [undefined, 'http://portal.example.test', 'https://portal.example.test/other', 'https://portal.example.test?client=evil', 'https://attacker@portal.example.test']) {
+    assert.throws(() => createRpHandler({ oidc, db, origin: ORIGIN, issuer, sessionKey: randomBytes(32) }));
+  }
 });
 
 test('login -> callback -> RP session rotation -> logout remains server-only', async () => {

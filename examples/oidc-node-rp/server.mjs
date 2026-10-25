@@ -48,7 +48,7 @@ function rateLimiter({ max = 15, windowMs = 60_000, clock = Date.now } = {}) {
   };
 }
 
-async function insertSession(db, oldSessionId, newSessionId, identity, ciphertext) {
+async function insertSession(db, oldSessionId, newSessionId, issuer, identity, ciphertext) {
   // Pool.query BEGIN/COMMIT is NOT connection-affine; reserve one pg client.
   const connection = await db.connect();
   try {
@@ -58,7 +58,7 @@ async function insertSession(db, oldSessionId, newSessionId, identity, ciphertex
     }
     await connection.query(
       'INSERT INTO "VirkiRpSession" ("idHash", "issuer", "subject", "tokenCiphertext", "expiresAt") VALUES ($1,$2,$3,$4,$5)',
-      [hashId(newSessionId), identity.iss, identity.sub, ciphertext, new Date(Date.now() + SESSION_LIFETIME_MS)]
+      [hashId(newSessionId), issuer, identity.sub, ciphertext, new Date(Date.now() + SESSION_LIFETIME_MS)]
     );
     await connection.query('COMMIT');
   } catch {
@@ -73,8 +73,11 @@ async function insertSession(db, oldSessionId, newSessionId, identity, ciphertex
  * HTTPS server handler. No Virki portal cookies, no ID Token or access token in HTML,
  * HTTP headers, redirects or logs; only a random RP session ID reaches the browser.
  */
-export function createRpHandler({ oidc, db, origin, sessionKey, revokeOnLogout = true, generateId = randomId }) {
+export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOnLogout = true, generateId = randomId }) {
   const rpOrigin = parseServerOrigin(origin);
+  // The issuer is a pinned server configuration, NOT a claim supplied by the
+  // browser or an unchecked field of the SDK's deliberately reduced identity.
+  const trustedIssuer = parseServerOrigin(issuer).origin;
   if (!oidc || !db || typeof db.connect !== 'function' || typeof db.query !== 'function' || !(sessionKey instanceof Uint8Array) || sessionKey.byteLength !== 32) throw new Error('RP dependencies unavailable.');
   const limited = rateLimiter();
 
@@ -134,7 +137,7 @@ export function createRpHandler({ oidc, db, origin, sessionKey, revokeOnLogout =
         const newSessionId = generateId();
         if (!validId(newSessionId) || newSessionId === existingSession) throw new Error('Invalid RP random generator.');
         const tokenCiphertext = encryptToken(verified.serverOnly.accessToken, sessionKey, hashId(newSessionId));
-        await insertSession(db, existingSession, newSessionId, verified.identity, tokenCiphertext);
+        await insertSession(db, existingSession, newSessionId, trustedIssuer, verified.identity, tokenCiphertext);
         return redirect(res, '/', [clearCookie(PREAUTH_COOKIE), sessionCookie(SESSION_COOKIE, newSessionId)]);
       }
 

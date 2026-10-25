@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import test from "node:test";
 import * as oidc from "openid-client";
-import { createOidcProtocol, VirkiOidcNodeClient } from "./client.js";
+import { createOidcProtocol, createVirkiOidcClient, VirkiOidcNodeClient } from "./client.js";
 import { MemoryTransactionStore } from "./store.js";
 
 const issuer = "https://portal.biel.dev.br";
@@ -31,7 +31,7 @@ function fixture() {
   const publiclyTrusted = [first.publicKey.export({ format: "jwk" }) as Record<string, unknown>, rotated.publicKey.export({ format: "jwk" }) as Record<string, unknown>];
   const settings = { issuer, redirectUri, clientId, clientSecret, store: new MemoryTransactionStore() };
 
-  const config = new oidc.Configuration({
+  const metadata = {
     issuer,
     authorization_endpoint: `${issuer}/auth`,
     token_endpoint: `${issuer}/token`,
@@ -41,10 +41,11 @@ function fixture() {
     response_types_supported: ["code"],
     id_token_signing_alg_values_supported: ["ES256"],
     token_endpoint_auth_methods_supported: ["client_secret_basic"]
-  }, clientId, { id_token_signed_response_alg: "ES256", token_endpoint_auth_method: "client_secret_basic" }, oidc.ClientSecretBasic(clientSecret));
+  };
+  const config = new oidc.Configuration(metadata, clientId, { id_token_signed_response_alg: "ES256", token_endpoint_auth_method: "client_secret_basic" }, oidc.ClientSecretBasic(clientSecret));
   oidc.enableNonRepudiationChecks(config);
 
-  config[oidc.customFetch] = async (input, init) => {
+  const handleFetch: NonNullable<oidc.Configuration[typeof oidc.customFetch]> = async (input, init) => {
     const request = new Request(input, init as RequestInit);
     const path = new URL(request.url).pathname;
     const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -88,10 +89,15 @@ function fixture() {
     const token = `${data}.${mode === "tampered" ? randomBytes(64).toString("base64url") : signature}`;
     return json({ access_token: ["synthetic", "server", "only", "token"].join("-"), id_token: token, token_type: "Bearer", expires_in: 300 });
   };
+  config[oidc.customFetch] = handleFetch;
 
   const client = new VirkiOidcNodeClient(settings, createOidcProtocol(config));
   return {
     client,
+    settings,
+    metadata,
+    handleFetch,
+    setActiveNonce(value: string) { activeNonce = value; },
     setMode(next: TestTokenMode) { mode = next; },
     rotateKey() { signingKey = rotated; kid = "fixture-k2"; },
     get tokenExchanges() { return tokenExchanges; },
@@ -107,6 +113,44 @@ function fixture() {
     }
   };
 }
+
+test("public discovery factory rejects forged signed tokens, not just manually configured protocol adapters", async () => {
+  const f = fixture();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).pathname === "/.well-known/openid-configuration") {
+      return new Response(JSON.stringify(f.metadata), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return f.handleFetch(request.url, {
+      method: request.method,
+      headers: Object.fromEntries(request.headers.entries()),
+      redirect: "manual",
+      body: request.method !== "GET" ? await request.text() : undefined
+    });
+  };
+  try {
+    // This is the exact exported production constructor. The mock substitutes
+    // only transport and never manually enables JOSE verification on its config.
+    const client = await createVirkiOidcClient({ ...f.settings, store: new MemoryTransactionStore() });
+    const roundTrip = () => {
+      const binding = randomBytes(32).toString("base64url");
+      return client.beginLogin(binding).then(async (start) => {
+        f.setActiveNonce(start.url.searchParams.get("nonce")!);
+        const callback = new URL(redirectUri);
+        callback.searchParams.set("state", start.url.searchParams.get("state")!);
+        callback.searchParams.set("code", "discovery-fixture-code");
+        return client.completeCallback(callback, binding);
+      });
+    };
+    f.setMode("tampered");
+    await assert.rejects(roundTrip(), (error: unknown) => error instanceof Error && error.message === "OIDC callback rejected.");
+    f.setMode("valid");
+    assert.equal((await roundTrip()).identity.sub, "user-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("real openid-client verifies ES256 JWKS, expected nonce, PKCE exchange, and rotated signing key", async () => {
   const f = fixture();
