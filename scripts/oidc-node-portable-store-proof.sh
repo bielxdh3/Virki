@@ -4,6 +4,14 @@
 set -euo pipefail
 umask 077
 
+# libpq uses PGHOSTADDR as the network destination even when --host points to
+# a private Unix socket. Never inherit an operator's database connection env.
+unset PGHOSTADDR PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGPASSFILE
+unset PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGOPTIONS PGCONNECT_TIMEOUT
+unset PGSSLMODE PGSSLROOTCERT PGSSLCERT PGSSLKEY PGSSLCRL PGSSLCRLDIR
+unset PGTARGETSESSIONATTRS PGCHANNELBINDING PGREQUIREPEER PGREQUIREAUTH
+unset PGGSSENCMODE PGKRBSRVNAME PGAPPNAME PGCLIENTENCODING
+
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 : "${VIRKI_PG18_PORTABLE_BUNDLE:?Set VIRKI_PG18_PORTABLE_BUNDLE to an isolated, extracted PG18 bundle}"
 ROOT="$VIRKI_PG18_PORTABLE_BUNDLE/root"
@@ -58,6 +66,8 @@ export PGUSER="$(id -un)"
 started=true
 [[ "$("$BIN/psql" -d postgres -X -At -c 'SHOW listen_addresses')" == "" ]] || { echo "TCP unexpectedly enabled." >&2; exit 1; }
 [[ "$("$BIN/psql" -d postgres -X -At -c 'SHOW unix_socket_directories')" == "$SOCKET" ]] || { echo "Unexpected Unix socket location." >&2; exit 1; }
+[[ "$("$BIN/psql" -d postgres -X -At -c 'SHOW data_directory')" == "$DATA" ]] || { echo "Connected to unexpected PostgreSQL cluster." >&2; exit 1; }
+[[ "$("$BIN/psql" -d postgres -X -At -c 'SELECT inet_server_addr() IS NULL')" == t ]] || { echo "PostgreSQL connection is not a local Unix socket." >&2; exit 1; }
 
 export VIRKI_OIDC_PG_CONTAINER="virki-oidc-pg18-$OWNER"
 export VIRKI_OIDC_PG_ROLE=rp_oidc_owner
@@ -79,44 +89,35 @@ export VIRKI_OIDC_PSQL_BINARY="$BIN/psql"
 cat > "$SHIM/docker" <<'SHIM_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$#" -ge 5 && "$1" == exec && "$2" == --env ]] || exit 82
+[[ "$#" -eq 20 && "$1" == exec && "$2" == --env ]] || exit 82
 [[ "$3" == "PGPASSWORD=$VIRKI_OIDC_PG_PASSWORD" ]] || exit 83
 [[ "$4" == "$VIRKI_OIDC_PG_CONTAINER" && "$5" == psql ]] || exit 84
 shift 5
-args=()
-seen_host=false
-seen_role=false
-seen_database=false
-while (( $# )); do
-  case "$1" in
-    --host)
-      [[ "$#" -ge 2 && "$2" == 127.0.0.1 ]] || exit 85
-      seen_host=true
-      shift 2
-      ;;
-    --username)
-      [[ "$#" -ge 2 && "$2" == "$VIRKI_OIDC_PG_ROLE" ]] || exit 86
-      seen_role=true
-      args+=( "$1" "$2" )
-      shift 2
-      ;;
-    --dbname)
-      [[ "$#" -ge 2 && "$2" == "$VIRKI_OIDC_PG_DATABASE" ]] || exit 87
-      seen_database=true
-      args+=( "$1" "$2" )
-      shift 2
-      ;;
-    *)
-      args+=( "$1" )
-      shift
-      ;;
-  esac
-done
-[[ "$seen_host" == true && "$seen_role" == true && "$seen_database" == true ]] || exit 88
-exec "$VIRKI_OIDC_PSQL_BINARY" --host "$VIRKI_OIDC_PG_SOCKET" "${args[@]}"
+[[ "$#" -eq 15 && "$1" == --host && "$2" == 127.0.0.1 ]] || exit 85
+[[ "$3" == --username && "$4" == "$VIRKI_OIDC_PG_ROLE" ]] || exit 86
+[[ "$5" == --dbname && "$6" == "$VIRKI_OIDC_PG_DATABASE" ]] || exit 87
+[[ "$7" == --no-psqlrc && "$8" == --quiet && "$9" == --tuples-only && "${10}" == --no-align ]] || exit 88
+[[ "${11}" == '--field-separator=|' && "${12}" == --set && "${13}" == ON_ERROR_STOP=1 && "${14}" == --command ]] || exit 89
+# Rebuild the entire command; never forward any caller-supplied connection
+# options or alternate host/database. Only the known test SQL may vary.
+exec "$VIRKI_OIDC_PSQL_BINARY" --host "$VIRKI_OIDC_PG_SOCKET" --port "$PGPORT" \
+  --username "$VIRKI_OIDC_PG_ROLE" --dbname "$VIRKI_OIDC_PG_DATABASE" \
+  --no-psqlrc --quiet --tuples-only --no-align '--field-separator=|' \
+  --set ON_ERROR_STOP=1 --command "${15}"
 SHIM_SCRIPT
 chmod 700 "$SHIM/docker"
 export VIRKI_OIDC_DOCKER_BINARY="$SHIM/docker"
+
+# Noncanonical caller args must be rejected before psql even if the fixed
+# prefix would otherwise be accepted.
+if "$SHIM/docker" exec --env "PGPASSWORD=$VIRKI_OIDC_PG_PASSWORD" \
+  "$VIRKI_OIDC_PG_CONTAINER" psql \
+  --host 127.0.0.1 --username "$VIRKI_OIDC_PG_ROLE" --dbname "$VIRKI_OIDC_PG_DATABASE" \
+  --no-psqlrc --quiet --tuples-only --no-align '--field-separator=|' \
+  --set ON_ERROR_STOP=1 --command 'SELECT 1' --host=remote.example.invalid; then
+  echo "Unsafe extra PostgreSQL connection argument accepted." >&2
+  exit 1
+fi
 
 export VIRKI_OIDC_TSX_PATH="${VIRKI_OIDC_TSX_PATH:-$REPO/node_modules/tsx/dist/cli.mjs}"
 [[ -f "$VIRKI_OIDC_TSX_PATH" ]] || { echo "Linux tsx unavailable. Install local dependencies under Node22, or set VIRKI_OIDC_TSX_PATH to an isolated Linux tsx CLI." >&2; exit 1; }
