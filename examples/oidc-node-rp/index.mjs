@@ -34,7 +34,7 @@ async function main() {
       issuer, clientId: configured.OIDC_CLIENT_ID, clientSecret: confidentialCredential,
       redirectUri, store
     });
-    const handler = createRpHandler({ oidc, db: pool, origin: origin.origin, sessionKey: sessionCryptoKey(key),
+    const handler = createRpHandler({ oidc, db: pool, origin: origin.origin, issuer, sessionKey: sessionCryptoKey(key),
       revokeOnLogout: configured.RP_REVOKE_ON_LOGOUT !== 'false', generateId: randomRpSessionId });
     const server = createServer({
       key: readFileSync(configured.RP_TLS_KEY_FILE),
