@@ -23,6 +23,19 @@ const rpID = "portal.biel.dev.br";
 const origin = "https://portal.biel.dev.br";
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest();
 
+async function awaitBlockedOn(blockingPid: number) {
+  const until = Date.now() + 6_000;
+  while (Date.now() < until) {
+    const rows = await prisma.$queryRaw<Array<{ blocked: number }>>`
+      SELECT COUNT(*)::int AS blocked FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock' AND ${blockingPid} = ANY(pg_blocking_pids(pid))
+    `;
+    if ((rows[0]?.blocked ?? 0) > 0) return;
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  throw new Error("Expected physical PostgreSQL lock contention did not occur");
+}
+
 function authenticator() {
   const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const jwk = publicKey.export({ format: "jwk" });
@@ -134,4 +147,50 @@ test("passkey cryptography, account binding, replay, UV, RP, origin, revocation 
   const revokedToken = createPasskeyBrowserToken();
   const revokedChallenge = await startPasskeyAuthentication(revokedToken, "203.0.113.17");
   await assert.rejects(finishPasskeyAuthentication(revokedToken, assertion(key, user.id, revokedChallenge.challenge, { counter: 4 })));
+});
+
+test("challenge expiry while blocked by a physical PostgreSQL row lock cannot consume stale challenge", integrationOptions, async () => {
+  await assert.rejects(startPasskeyAuthentication(createPasskeyBrowserToken(), "::bad,forged"), "forwarded source must be a valid single IP address");
+  const browserNonce = createPasskeyBrowserToken();
+  const options = await startPasskeyAuthentication(browserNonce, "203.0.113.21");
+  const row = await prisma.passkeyChallenge.findUniqueOrThrow({ where: { challengeHash: hashPasskeyChallenge(options.challenge) } });
+  await prisma.passkeyChallenge.update({ where: { id: row.id }, data: { expiresAt: new Date(Date.now() + 1200) } });
+  let pending!: Promise<unknown>;
+  await prisma.$transaction(async tx => {
+    const [blocker] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    await tx.$queryRaw`SELECT "id" FROM "PasskeyChallenge" WHERE "id" = ${row.id} FOR UPDATE`;
+    // No valid authenticator needed here: a stale challenge must be denied BEFORE
+    // signature processing and must not be marked consumed after lock expiry.
+    pending = finishPasskeyAuthentication(browserNonce, {
+      id: randomBytes(32).toString("base64url"), rawId: randomBytes(32).toString("base64url"), type: "public-key",
+      response: { clientDataJSON: clientData("webauthn.get", options.challenge), authenticatorData: "AA", signature: "AA" },
+      clientExtensionResults: {}
+    });
+    await awaitBlockedOn(blocker!.pid);
+    await new Promise(resolve => setTimeout(resolve, 1400));
+  });
+  await assert.rejects(pending);
+  const after = await prisma.passkeyChallenge.findUniqueOrThrow({ where: { id: row.id } });
+  assert.equal(after.consumedAt, null, "stale challenge must remain unclaimed when physical lock releases");
+});
+
+test("account lock delay cannot convert an expired or revoked acting session into a successful passkey mutation", integrationOptions, async () => {
+  const timezone = await prisma.$queryRaw<Array<{ zone: string }>>`SELECT current_setting('TimeZone') AS zone`;
+  assert.equal(timezone[0]?.zone, "America/Porto_Velho", "exercise time-zone shifted PostgreSQL connection, not only UTC");
+  const user = await createTestUser({ label: "passkey-lock-expiry" });
+  const session = await prisma.session.create({ data: { userId: user.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60_000) } });
+  const row = await prisma.passkeyCredential.create({ data: {
+    userId: user.id, credentialId: randomBytes(32).toString("base64url"), publicKey: randomBytes(32), counter: 0n,
+    transports: ["internal"], backupEligible: false, backupState: false, name: "Original"
+  } });
+  let pending!: Promise<unknown>;
+  await prisma.$transaction(async tx => {
+    const [blocker] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+    pending = mutatePasskey(user.id, session.id, row.id, user.password, "rename", "Should never commit");
+    await awaitBlockedOn(blocker!.pid);
+    await tx.session.update({ where: { id: session.id }, data: { expiresAt: new Date(Date.now() - 1000), revokedAt: new Date() } });
+  });
+  await assert.rejects(pending);
+  assert.equal((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: row.id } })).name, "Original");
 });

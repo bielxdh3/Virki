@@ -58,6 +58,10 @@ try {
   };
   const migrate = spawnSync(process.execPath, [path.join(root, "packages", "database", "scripts", "prisma-migrate.mjs"), "deploy"], { cwd: root, env, stdio: "inherit", windowsHide: true, timeout: 180_000 });
   if (migrate.status !== 0 || migrate.error) throw new Error("Disposable migration failed");
+  // Force the database session away from UTC so TIMESTAMP vs TIMESTAMPTZ
+  // conversion mistakes cannot masquerade as correct session expiry checks.
+  docker(["exec", name, "psql", "--username", "virki_bootstrap", "--dbname", db,
+    "--set", "ON_ERROR_STOP=1", "--command", `ALTER DATABASE ${db} SET TIMEZONE TO 'America/Porto_Velho'`]);
   const tsxCli = createRequire(import.meta.url).resolve("tsx/cli");
   const suite = spawnSync(process.execPath, [tsxCli, "--test", "packages/auth/src/passkeys.integration.test.ts"], { cwd: root, env, stdio: "inherit", windowsHide: true, timeout: 180_000 });
   if (suite.status !== 0 || suite.error) throw new Error("Passkey disposable integration suite failed");

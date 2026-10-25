@@ -8,10 +8,12 @@ import {
 } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import {
+  authenticateUser,
   consumeRateLimitAttemptInTransaction,
   generateSessionToken,
   getSessionExpiresAt,
   hashSessionToken,
+  isTrustedClientAddress,
   normalizeEmail,
   verifyPassword
 } from "./index";
@@ -164,6 +166,7 @@ export async function finishPasskeyRegistration(userId: string, sessionId: strin
   const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
   await prisma.$transaction(async (tx) => {
     if (!await lockActiveLoginAccountInTransaction(tx, userId, "USER")) throw FAILURE;
+    if (row.expiresAt <= new Date()) throw FAILURE;
     const lockedUser = await tx.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
     if (!lockedUser?.passwordHash || hashPasskeyChallenge(lockedUser.passwordHash) !== row.proofHash) throw FAILURE;
     await lockLiveSession(tx, userId, sessionId);
@@ -174,12 +177,14 @@ export async function finishPasskeyRegistration(userId: string, sessionId: strin
       userId, name: safeName
     } });
     await writeAuditLogInTransaction(tx, { eventType: "PASSKEY_REGISTERED", result: "SUCCESS", actorUserId: userId, resource: "identity.passkey" });
+    await lockLiveSession(tx, userId, sessionId);
+    if (row.expiresAt <= new Date()) throw FAILURE;
   });
 }
 
 export async function startPasskeyAuthentication(token: string, source: string, email?: string, host = RP_ID, password = "") {
   requireBrowserToken(token);
-  if (process.env.NODE_ENV === "production" && !/^[0-9a-fA-F:.]{3,45}$/u.test(source)) throw FAILURE;
+  if (source ? !isTrustedClientAddress(source) : process.env.NODE_ENV === "production") throw FAILURE;
   const limiter = await prisma.$transaction(tx => consumeRateLimitAttemptInTransaction(tx, `passkey-start:v1:${source}`, new Date(), 30));
   if (!limiter.allowed) throw FAILURE;
   let userId: string | undefined;
@@ -192,8 +197,13 @@ export async function startPasskeyAuthentication(token: string, source: string, 
     const normalizedEmail = normalizeEmail(email);
     const accountLimit = await prisma.$transaction(tx => consumeRateLimitAttemptInTransaction(tx, `passkey-lookup:v1:${normalizedEmail}`, new Date(), 8));
     if (!accountLimit.allowed) throw FAILURE;
-    const user = await prisma.user.findUnique({ where: { email: normalizedEmail }, select: { id: true, passwordHash: true, isActive: true, accountStatus: true, role: true } });
-    if (user?.isActive && user.accountStatus === "ACTIVE" && user.role === "USER" && user.passwordHash && await verifyPassword(user.passwordHash, password)) {
+    // Use the existing constant-cost dummy-hash path for missing/inactive actors.
+    // The identity is still revalidated and pinned to the password verifier below.
+    const actor = await authenticateUser(normalizedEmail, password);
+    const user = actor?.role === "USER"
+      ? await prisma.user.findUnique({ where: { id: actor.id }, select: { id: true, passwordHash: true, isActive: true, accountStatus: true, role: true } })
+      : null;
+    if (user?.isActive && user.accountStatus === "ACTIVE" && user.role === "USER" && user.passwordHash) {
       userId = user.id;
       proofHash = hashPasskeyChallenge(user.passwordHash);
       const credentials = await prisma.passkeyCredential.findMany({ where: { userId, revokedAt: null }, select: { credentialId: true, transports: true }, take: MAX_PASSKEYS });
@@ -229,6 +239,7 @@ export async function finishPasskeyAuthentication(token: string, response: Authe
   if (newCounter < credential.counter || (credential.counter > 0n && newCounter <= credential.counter)) throw FAILURE;
   return prisma.$transaction(async (tx) => {
     if (!await lockActiveLoginAccountInTransaction(tx, credential.userId, "USER")) throw FAILURE;
+    if (row.expiresAt <= new Date()) throw FAILURE;
     if (row.proofHash) {
       const user = await tx.user.findUnique({ where: { id: credential.userId }, select: { passwordHash: true } });
       if (!user?.passwordHash || hashPasskeyChallenge(user.passwordHash) !== row.proofHash) throw FAILURE;
@@ -242,6 +253,7 @@ export async function finishPasskeyAuthentication(token: string, response: Authe
     const expiresAt = getSessionExpiresAt();
     await tx.session.create({ data: { userId: credential.userId, sessionKey: randomBytes(24).toString("base64url"), tokenHash: hashSessionToken(tokenValue), authenticationMethods: row.proofHash ? ["pwd", "webauthn"] : ["webauthn"], expiresAt } });
     await writeAuditLogInTransaction(tx, { eventType: "PASSKEY_AUTHENTICATED", result: "SUCCESS", actorUserId: credential.userId, resource: "identity.passkey" });
+    if (row.expiresAt <= new Date()) throw FAILURE;
     return { token: tokenValue, expiresAt };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
 }
@@ -269,5 +281,6 @@ export async function mutatePasskey(userId: string, sessionId: string, id: strin
     });
     if (result.count !== 1) throw FAILURE;
     await writeAuditLogInTransaction(tx, { eventType: operation === "rename" ? "PASSKEY_RENAMED" : "PASSKEY_REVOKED", result: "SUCCESS", actorUserId: userId, resource: "identity.passkey" });
+    await lockLiveSession(tx, userId, sessionId);
   });
 }
