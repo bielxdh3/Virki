@@ -52,6 +52,7 @@ try {
     ...process.env, NODE_ENV: "test", VIRKI_INTEGRATION_ENABLED: "true",
     VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
     VIRKI_PASSKEYS_ENABLED: "true",
+    VIRKI_PASSKEYS_NON_UTC_REQUIRED: "true",
     DATABASE_URL: url("virki_runtime_test", passwords.test),
     MIGRATION_DATABASE_URL: url("virki_migrator", passwords.migrator),
     VIRKI_OIDC_ADAPTER_KEY: randomBytes(32).toString("hex")

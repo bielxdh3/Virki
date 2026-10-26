@@ -286,7 +286,7 @@ export async function finishPasskeyAuthentication(token: string, response: Authe
     if (updated.count !== 1) throw FAILURE;
     const tokenValue = generateSessionToken();
     const expiresAt = getSessionExpiresAt();
-    await tx.session.create({ data: { userId: credential.userId, sessionKey: randomBytes(24).toString("base64url"), tokenHash: hashSessionToken(tokenValue), authenticationMethods: row.proofHash ? ["pwd", "webauthn"] : ["webauthn"], expiresAt } });
+    await tx.session.create({ data: { userId: credential.userId, sessionKey: randomBytes(24).toString("base64url"), tokenHash: hashSessionToken(tokenValue), authenticationMethods: row.proofHash ? ["pwd", "webauthn"] : ["webauthn"], createdAt: new Date(), expiresAt } });
     await writeAuditLogInTransaction(tx, { eventType: "PASSKEY_AUTHENTICATED", result: "SUCCESS", actorUserId: credential.userId, resource: "identity.passkey" });
     if (row.expiresAt <= new Date()) throw FAILURE;
     return { token: tokenValue, expiresAt };

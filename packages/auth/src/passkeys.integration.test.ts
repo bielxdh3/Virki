@@ -230,8 +230,11 @@ test("passkey cryptography, account binding, replay, UV, RP, origin, revocation 
   const login = await startPasskeyAuthentication(loginToken, "203.0.113.12");
   assert.equal(login.allowCredentials, undefined, "discoverable login does not expose stable IDs");
   const valid = assertion(key, user.id, login.challenge);
+  const startedAt = Date.now();
   const created = await finishPasskeyAuthentication(loginToken, valid);
   const issued = await prisma.session.findUniqueOrThrow({ where: { tokenHash: hashPasskeyChallenge(created.token) } });
+  assert.ok(Math.abs(issued.createdAt.getTime() - startedAt) < 120_000,
+    "Passkey login timestamp must represent the instant of authentication even under non-UTC PostgreSQL timezone");
   assert.deepEqual(issued.authenticationMethods, ["webauthn"]);
   assert.deepEqual(getOidcAuthenticationContext(issued.authenticationMethods), { amr: ["webauthn"], acr: "urn:virki:loa:1" });
   await assert.rejects(finishPasskeyAuthentication(loginToken, valid), "challenge replay blocked");
@@ -300,8 +303,12 @@ test("challenge expiry while blocked by a physical PostgreSQL row lock cannot co
 });
 
 test("account lock delay cannot convert an expired or revoked acting session into a successful passkey mutation", integrationOptions, async () => {
-  const timezone = await prisma.$queryRaw<Array<{ zone: string }>>`SELECT current_setting('TimeZone') AS zone`;
-  assert.equal(timezone[0]?.zone, "America/Porto_Velho", "exercise time-zone shifted PostgreSQL connection, not only UTC");
+  // The standard CI integration runner does not set a database timezone.
+  // The dedicated non-UTC laboratory DOES, and must prove that precondition.
+  if (process.env.VIRKI_PASSKEYS_NON_UTC_REQUIRED === "true") {
+    const timezone = await prisma.$queryRaw<Array<{ zone: string }>>`SELECT current_setting('TimeZone') AS zone`;
+    assert.equal(timezone[0]?.zone, "America/Porto_Velho", "dedicated non-UTC fixture must really exercise the configured timezone");
+  }
   const user = await createTestUser({ label: "passkey-lock-expiry" });
   const session = await prisma.session.create({ data: { userId: user.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60_000) } });
   const row = await prisma.passkeyCredential.create({ data: {
