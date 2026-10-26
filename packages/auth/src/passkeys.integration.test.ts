@@ -109,10 +109,10 @@ function clientData(type: "webauthn.create" | "webauthn.get", challenge: string,
   return Buffer.from(JSON.stringify({ type, challenge, origin: targetOrigin, crossOrigin: false })).toString("base64url");
 }
 
-function registerResponse(key: ReturnType<typeof authenticator>, challenge: string): RegistrationResponseJSON {
+function registerResponse(key: ReturnType<typeof authenticator>, challenge: string, flags = 0x45): RegistrationResponseJSON {
   const identifier = Buffer.from(key.credentialId, "base64url");
   const data = Buffer.concat([
-    sha(rpID), Buffer.from([0x45, 0, 0, 0, 0]), Buffer.alloc(16),
+    sha(rpID), Buffer.from([flags, 0, 0, 0, 0]), Buffer.alloc(16),
     Buffer.from([identifier.length >> 8, identifier.length & 255]), identifier, Buffer.from(key.key)
   ]);
   const attestation = isoCBOR.encode(new Map<string, string | Map<string, never> | Uint8Array>([["fmt", "none"], ["attStmt", new Map<string, never>()], ["authData", data]]));
@@ -123,8 +123,8 @@ function registerResponse(key: ReturnType<typeof authenticator>, challenge: stri
   };
 }
 
-function assertion(key: ReturnType<typeof authenticator>, userId: string, challenge: string, overrides: { targetOrigin?: string; targetRpId?: string; uv?: boolean; counter?: number; userHandle?: string } = {}): AuthenticationResponseJSON {
-  const data = Buffer.concat([sha(overrides.targetRpId ?? rpID), Buffer.from([overrides.uv === false ? 0x01 : 0x05]), Buffer.from([0, 0, 0, overrides.counter ?? 1])]);
+function assertion(key: ReturnType<typeof authenticator>, userId: string, challenge: string, overrides: { targetOrigin?: string; targetRpId?: string; uv?: boolean; counter?: number; userHandle?: string; flags?: number } = {}): AuthenticationResponseJSON {
+  const data = Buffer.concat([sha(overrides.targetRpId ?? rpID), Buffer.from([overrides.flags ?? (overrides.uv === false ? 0x01 : 0x05)]), Buffer.from([0, 0, 0, overrides.counter ?? 1])]);
   const encodedClient = clientData("webauthn.get", challenge, overrides.targetOrigin);
   const signed = Buffer.concat([data, sha(Buffer.from(encodedClient, "base64url"))]);
   return {
@@ -138,6 +138,69 @@ function assertion(key: ReturnType<typeof authenticator>, userId: string, challe
     clientExtensionResults: {}, authenticatorAttachment: "platform"
   };
 }
+
+test("signed backup eligibility is immutable while synced backup state and zero-counter assertions remain legal", integrationOptions, async () => {
+  const user = await createTestUser({ label: "passkey-synced-flags" });
+  const session = await prisma.session.create({ data: {
+    userId: user.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60_000)
+  } });
+  const isolated = authenticator();
+  const isolatedToken = createPasskeyBrowserToken();
+  const isolatedOptions = await startPasskeyRegistration(user.id, session.id, user.password, isolatedToken);
+  await finishPasskeyRegistration(user.id, session.id, isolatedToken, registerResponse(isolated, isolatedOptions.challenge, 0x45), "Device-bound fixture");
+  const before = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: isolated.credentialId } });
+  assert.equal(before.backupEligible, false);
+  assert.equal(before.backupState, false);
+  const wrongEligibility = createPasskeyBrowserToken();
+  const wrongOptions = await startPasskeyAuthentication(wrongEligibility, "203.0.113.31");
+  await assert.rejects(finishPasskeyAuthentication(wrongEligibility,
+    assertion(isolated, user.id, wrongOptions.challenge, { flags: 0x1d, counter: 0 })),
+  "A signature whose BE switches from 0 to 1 must never log in or change backupState");
+  assert.equal(await prisma.session.count({ where: { userId: user.id } }), 1);
+  const unchanged = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: isolated.credentialId } });
+  assert.equal(unchanged.backupEligible, false);
+  assert.equal(unchanged.backupState, false);
+
+  const synced = authenticator();
+  const syncedToken = createPasskeyBrowserToken();
+  const syncedOptions = await startPasskeyRegistration(user.id, session.id, user.password, syncedToken);
+  await finishPasskeyRegistration(user.id, session.id, syncedToken, registerResponse(synced, syncedOptions.challenge, 0x4d), "Synced synthetic fixture");
+  const initial = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } });
+  assert.equal(initial.backupEligible, true);
+  assert.equal(initial.backupState, false);
+  assert.equal(initial.counter, 0n);
+
+  const backupOnToken = createPasskeyBrowserToken();
+  const backupOn = await startPasskeyAuthentication(backupOnToken, "203.0.113.32");
+  await finishPasskeyAuthentication(backupOnToken, assertion(synced, user.id, backupOn.challenge, { flags: 0x1d, counter: 0 }));
+  assert.equal((await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } })).backupState, true);
+  const backupOffToken = createPasskeyBrowserToken();
+  const backupOff = await startPasskeyAuthentication(backupOffToken, "203.0.113.33");
+  await finishPasskeyAuthentication(backupOffToken, assertion(synced, user.id, backupOff.challenge, { flags: 0x0d, counter: 0 }));
+  assert.equal((await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } })).backupState, false);
+
+  const leftToken = createPasskeyBrowserToken();
+  const rightToken = createPasskeyBrowserToken();
+  const [left, right] = await Promise.all([
+    startPasskeyAuthentication(leftToken, "203.0.113.34"),
+    startPasskeyAuthentication(rightToken, "203.0.113.35")
+  ]);
+  const outcomes = await Promise.allSettled([
+    finishPasskeyAuthentication(leftToken, assertion(synced, user.id, left.challenge, { flags: 0x1d, counter: 0 })),
+    finishPasskeyAuthentication(rightToken, assertion(synced, user.id, right.challenge, { flags: 0x1d, counter: 0 }))
+  ]);
+  assert.equal(outcomes.filter(outcome => outcome.status === "fulfilled").length, 1,
+    "two distinct signed zero-counter challenges must serialize via the persistent revision CAS");
+  const beforeReverse = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } });
+  const reverseToken = createPasskeyBrowserToken();
+  const reverse = await startPasskeyAuthentication(reverseToken, "203.0.113.36");
+  await assert.rejects(finishPasskeyAuthentication(reverseToken,
+    assertion(synced, user.id, reverse.challenge, { flags: 0x05, counter: 0 })),
+  "A registered BE1 credential cannot silently regress to BE0");
+  const afterReverse = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } });
+  assert.equal(afterReverse.revision, beforeReverse.revision);
+  assert.equal(afterReverse.backupState, beforeReverse.backupState);
+});
 
 test("passkey cryptography, account binding, replay, UV, RP, origin, revocation and OIDC assurance on disposable PostgreSQL", integrationOptions, async () => {
   const user = await createTestUser({ label: "passkeys" });
