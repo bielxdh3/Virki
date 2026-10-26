@@ -44,6 +44,9 @@ function setup(t, { sha256 = false } = {}) {
   mkdirSync(repositoryRoot);
   mkdirSync(stagingParent, { mode: 0o700 });
   git(repositoryRoot, "init", "-b", "main", ...(sha256 ? ["--object-format=sha256"] : []));
+  // The test's archive must reflect Git's committed bytes, not system-wide
+  // Windows CRLF checkout settings that change the synthetic README object.
+  git(repositoryRoot, "config", "core.autocrlf", "false");
   git(repositoryRoot, "config", "user.email", "fixture@example.test");
   git(repositoryRoot, "config", "user.name", "Fixture");
   writeFileSync(path.join(repositoryRoot, "README.md"), "controlled fixture\n");
