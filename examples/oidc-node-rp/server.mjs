@@ -170,6 +170,19 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
       if (req.method === 'POST' && url.pathname === '/login' && !url.search) {
         if (!acceptedPost(req, rpOrigin.origin)) return plain(res, 403, 'Request rejected.');
         if (!limited(req.socket.remoteAddress)) return plain(res, 429, 'Too many requests.');
+        // An expired or revoked RP cookie must not strand a browser forever:
+        // logout correctly refuses to call stale-cookie revocation a success,
+        // while an explicit new login may safely discard a predecessor already
+        // absent from the authoritative RP database. Still-live predecessors
+        // are preserved for atomic DELETE/rotation at callback.
+        let staleSession = false;
+        if (existingSession) {
+          const known = await db.query(
+            'SELECT "idHash" FROM "VirkiRpSession" WHERE "idHash" = $1 AND "expiresAt" > clock_timestamp() LIMIT 1',
+            [hashId(existingSession)]
+          );
+          staleSession = known.rows?.length !== 1;
+        }
         const binding = generateId();
         if (!validId(binding)) throw new Error('Invalid RP random generator.');
         const flow = await oidc.beginLogin(binding);
@@ -180,7 +193,10 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
           [hashId(binding), new Date(Date.now() + 600_000)]
         );
         // beginLogin validates the authorization endpoint against the pinned issuer.
-        return redirect(res, String(flow.url), [sessionCookie(PREAUTH_COOKIE, binding, 600)]);
+        return redirect(res, String(flow.url),
+          staleSession
+            ? [clearCookie(SESSION_COOKIE), sessionCookie(PREAUTH_COOKIE, binding, 600)]
+            : [sessionCookie(PREAUTH_COOKIE, binding, 600)]);
       }
 
       if (req.method === 'GET' && url.pathname === '/oidc/callback') {
