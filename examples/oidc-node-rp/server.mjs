@@ -48,11 +48,20 @@ function rateLimiter({ max = 15, windowMs = 60_000, clock = Date.now } = {}) {
   };
 }
 
-async function insertSession(db, oldSessionId, newSessionId, issuer, identity, ciphertext) {
+async function insertSession(db, binding, oldSessionId, newSessionId, issuer, identity, ciphertext) {
   // Pool.query BEGIN/COMMIT is NOT connection-affine; reserve one pg client.
   const connection = await db.connect();
   try {
     await connection.query('BEGIN');
+    // A pending login is an RP-owned durable intent, not just a browser cookie.
+    // Logout and callbacks DELETE the SAME row under PostgreSQL row locking.
+    // If logout commits first, a previously verified callback cannot mint a
+    // session after the user has successfully signed out.
+    const intent = await connection.query(
+      'WITH consumed AS (DELETE FROM "VirkiRpPreauth" WHERE "bindingHash"=$1 RETURNING "expiresAt") SELECT "expiresAt" FROM consumed WHERE "expiresAt" > clock_timestamp()',
+      [hashId(binding)]
+    );
+    if (intent.rows?.length !== 1) throw new Error('RP login intent cancelled.');
     if (validId(oldSessionId)) {
       // A presented session must still be live and exclusively consumable.
       // With PostgreSQL READ COMMITTED, DELETE locks the matching row; a
@@ -75,6 +84,51 @@ async function insertSession(db, oldSessionId, newSessionId, issuer, identity, c
     await connection.query('COMMIT');
   } catch {
     try { await connection.query('ROLLBACK'); } catch { /* Treat as failed; never issue cookie. */ }
+    throw new Error('RP session unavailable.');
+  } finally {
+    connection.release();
+  }
+}
+
+async function revokeLocalSession(db, sessionId, binding) {
+  // With no RP session cookie, the server cannot prove that another
+  // concurrent browser/tab callback is not still in flight. Never return
+  // a *successful* logout based on absence of cookies alone.
+  if (!sessionId && !binding) return { stale: true, ciphertext: null };
+  const connection = await db.connect();
+  let stale = false;
+  try {
+    await connection.query('BEGIN');
+    let cancelled = false;
+    if (binding) {
+      const result = await connection.query(
+        'DELETE FROM "VirkiRpPreauth" WHERE "bindingHash" = $1 RETURNING "bindingHash"',
+        [hashId(binding)]
+      );
+      cancelled = result.rows?.length === 1;
+    }
+    let ciphertext = null;
+    if (sessionId) {
+      const result = await connection.query(
+        'DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 RETURNING "tokenCiphertext" AS ciphertext',
+        [hashId(sessionId)]
+      );
+      if (result.rows?.length !== 1) { stale = true; throw new Error('Stale RP logout.'); }
+      ciphertext = result.rows[0]?.ciphertext ?? null;
+    } else if (!cancelled) {
+      // The callback may already hold/consume this intent and mint a session.
+      // Never report successful logout without a cancellable pending login.
+      stale = true;
+      throw new Error('Unconfirmed RP logout.');
+    }
+    await connection.query('COMMIT');
+    // Cancelling one known preauth intent does not prove other tabs have no
+    // outstanding callback. Require a proven live RP session revocation
+    // before returning a successful logout response.
+    return { stale: !sessionId, ciphertext };
+  } catch {
+    try { await connection.query('ROLLBACK'); } catch { /* Never claim successful logout. */ }
+    if (stale) return { stale: true, ciphertext: null };
     throw new Error('RP session unavailable.');
   } finally {
     connection.release();
@@ -119,6 +173,12 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
         const binding = generateId();
         if (!validId(binding)) throw new Error('Invalid RP random generator.');
         const flow = await oidc.beginLogin(binding);
+        // Store before issuing the binding cookie. A failed DB write cannot
+        // create a cookie that bypasses the durable logout/callback fence.
+        await db.query(
+          'INSERT INTO "VirkiRpPreauth" ("bindingHash", "expiresAt") VALUES ($1, $2)',
+          [hashId(binding), new Date(Date.now() + 600_000)]
+        );
         // beginLogin validates the authorization endpoint against the pinned issuer.
         return redirect(res, String(flow.url), [sessionCookie(PREAUTH_COOKIE, binding, 600)]);
       }
@@ -149,22 +209,17 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
         const newSessionId = generateId();
         if (!validId(newSessionId) || newSessionId === existingSession) throw new Error('Invalid RP random generator.');
         const tokenCiphertext = encryptToken(verified.serverOnly.accessToken, sessionKey, hashId(newSessionId));
-        await insertSession(db, existingSession, newSessionId, trustedIssuer, verified.identity, tokenCiphertext);
+        await insertSession(db, binding, existingSession, newSessionId, trustedIssuer, verified.identity, tokenCiphertext);
         return redirect(res, '/', [clearCookie(PREAUTH_COOKIE), sessionCookie(SESSION_COOKIE, newSessionId)]);
       }
 
       if (req.method === 'POST' && url.pathname === '/logout' && !url.search) {
         if (!acceptedPost(req, rpOrigin.origin)) return plain(res, 403, 'Request rejected.');
         if (!limited(req.socket.remoteAddress)) return plain(res, 429, 'Too many requests.');
-        let removed = null;
-        if (existingSession) {
-          const result = await db.query('DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 RETURNING "tokenCiphertext" AS ciphertext', [hashId(existingSession)]);
-          // A concurrent callback might already have rotated this predecessor.
-          // Do not claim successful logout and clear a potentially newer cookie
-          // when this request did not actually revoke a live RP session.
-          if (result.rows?.length !== 1) return plain(res, 409, 'Sign-out not confirmed. Reload and retry.');
-          removed = result.rows[0]?.ciphertext;
-        }
+        const binding = parseCookie(req.headers.cookie, PREAUTH_COOKIE);
+        const outcome = await revokeLocalSession(db, existingSession, binding);
+        if (outcome.stale) return plain(res, 409, 'Sign-out not confirmed. Reload and retry.');
+        const removed = outcome.ciphertext;
         // Local logout remains effective even if revocation is unavailable upstream.
         if (revokeOnLogout && typeof removed === 'string') {
           try { await oidc.revokeAccessToken(decryptToken(removed, sessionKey, hashId(existingSession))); } catch { /* No sensitive exception output. */ }

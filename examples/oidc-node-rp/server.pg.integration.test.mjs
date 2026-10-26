@@ -25,7 +25,7 @@ function cookieValue(reply, name) {
   return line?.split(';')[0];
 }
 
-function fixture() {
+function fixture(db = pool) {
   const flowState = new Map();
   const oidc = {
     async beginLogin(binding) {
@@ -41,7 +41,7 @@ function fixture() {
     },
     async revokeAccessToken() {}
   };
-  const handler = createRpHandler({ oidc, db: pool, origin, issuer, sessionKey: randomBytes(32) });
+  const handler = createRpHandler({ oidc, db, origin, issuer, sessionKey: randomBytes(32) });
   const request = async (method, url, headers = {}) => {
     const result = { status: 0, headers: {}, body: '' };
     const response = {
@@ -229,5 +229,140 @@ test('PG18 stale logout never claims success while rotated successor survives', 
     assert.match((await request('GET', '/', { cookie: next })).body, /Not signed in/u);
   } finally {
     await pool.query('DELETE FROM "VirkiRpSession" WHERE "subject" = $1', ['physical-user']);
+  }
+});
+
+test('PG18 logout consumes pending login intent before an anonymous callback can commit', async () => {
+  let entered;
+  const begun = new Promise(resolve => { entered = resolve; });
+  let release;
+  const hold = new Promise(resolve => { release = resolve; });
+  let first = true;
+  const db = {
+    query: (...args) => pool.query(...args),
+    connect: async () => {
+      if (first) { first = false; entered(); await hold; }
+      return pool.connect();
+    }
+  };
+  const { request } = fixture(db);
+  const login = await request('POST', '/login', postHeaders);
+  assert.equal(login.status, 303);
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  const state = new URL(login.headers.location).searchParams.get('state');
+  const pending = request('GET', `/oidc/callback?state=${state}&code=code`, { cookie: binding });
+  try {
+    await Promise.race([begun, new Promise((_, reject) => setTimeout(() => reject(new Error('Callback did not reach PG connection gate.')), 3000))]);
+    const logout = await request('POST', '/logout', { ...postHeaders, cookie: binding });
+    assert.equal(logout.status, 409, 'No RP session was presented; pending-login cancellation is not global proof.');
+    assert.equal(logout.headers['set-cookie'], undefined);
+  } finally {
+    release();
+  }
+  const callback = await pending;
+  assert.equal(callback.status, 503);
+  assert.equal(callback.headers['set-cookie'], undefined);
+  const count = await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession" WHERE "subject"=$1', ['physical-user']);
+  assert.equal(count.rows[0].n, 0);
+});
+
+test('PG18 completed pending callback makes racing logout return 409, never false success', async () => {
+  let entered;
+  const committing = new Promise(resolve => { entered = resolve; });
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let first = true;
+  const db = {
+    query: (...args) => pool.query(...args),
+    connect: async () => {
+      const client = await pool.connect();
+      if (!first) return client;
+      first = false;
+      return {
+        query: async (...args) => {
+          if (args[0] === 'COMMIT') { entered(); await held; }
+          return client.query(...args);
+        },
+        release: () => client.release()
+      };
+    }
+  };
+  const { request } = fixture(db);
+  const login = await request('POST', '/login', postHeaders);
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  const state = new URL(login.headers.location).searchParams.get('state');
+  const callback = request('GET', `/oidc/callback?state=${state}&code=code`, { cookie: binding });
+  let logout;
+  try {
+    await Promise.race([committing, new Promise((_, reject) => setTimeout(() => reject(new Error('Callback did not reach COMMIT gate.')), 3000))]);
+    logout = request('POST', '/logout', { ...postHeaders, cookie: binding });
+    // The competing logout must wait on the deleted intent row.
+    let waiting = false;
+    for (let i = 0; i < 50; i += 1) {
+      const observed = await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%VirkiRpPreauth%'");
+      if (observed.rows[0].n > 0) { waiting = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(waiting, 'Logout must wait on callback intent row lock.');
+  } finally {
+    release();
+  }
+  const successful = await callback;
+  const stale = await logout;
+  assert.equal(successful.status, 303);
+  assert.equal(stale.status, 409);
+  assert.equal(stale.headers['set-cookie'], undefined);
+  const session = cookieValue(successful, SESSION_COOKIE);
+  assert.ok(session);
+  assert.match((await request('GET', '/', { cookie: session })).body, /Signed in as subject/u);
+  assert.equal((await request('POST', '/logout', { ...postHeaders, cookie: session })).status, 303);
+});
+
+test('PG18 preauth intent expired while its DELETE waits on a row lock cannot mint a session', async () => {
+  const { request } = fixture();
+  const login = await request('POST', '/login', postHeaders);
+  assert.equal(login.status, 303);
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  const bindingHash = hashId(binding.split('=')[1]);
+  const state = new URL(login.headers.location).searchParams.get('state');
+  await pool.query('UPDATE "VirkiRpPreauth" SET "expiresAt"=clock_timestamp() + interval \'2 seconds\' WHERE "bindingHash"=$1', [bindingHash]);
+  const lock = await pool.connect();
+  let pending;
+  try {
+    await lock.query('BEGIN');
+    await lock.query('SELECT "bindingHash" FROM "VirkiRpPreauth" WHERE "bindingHash"=$1 FOR UPDATE', [bindingHash]);
+    pending = request('GET', `/oidc/callback?state=${state}&code=code`, { cookie: binding });
+    let blockedBeforeExpiry = false;
+    for (let i = 0; i < 65; i += 1) {
+      const observed = await pool.query(`
+        SELECT
+          (SELECT COUNT(*)::int FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+             AND wait_event_type='Lock' AND query LIKE '%VirkiRpPreauth%') AS waiting,
+          (SELECT "expiresAt" > clock_timestamp() FROM "VirkiRpPreauth"
+             WHERE "bindingHash"=$1) AS live
+      `, [bindingHash]);
+      if (observed.rows[0].waiting > 0 && observed.rows[0].live) {
+        blockedBeforeExpiry = true;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.ok(blockedBeforeExpiry, 'Callback must wait on preauth row before expiry.');
+    let expired = false;
+    for (let i = 0; i < 85; i += 1) {
+      const observed = await pool.query('SELECT "expiresAt" <= clock_timestamp() AS expired FROM "VirkiRpPreauth" WHERE "bindingHash"=$1', [bindingHash]);
+      if (observed.rows[0]?.expired) { expired = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    assert.ok(expired, 'Preauth must expire while callback is physically waiting.');
+    await lock.query('COMMIT');
+    const response = await pending;
+    assert.equal(response.status, 503);
+    assert.equal(response.headers['set-cookie'], undefined);
+    assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession" WHERE "subject"=$1', ['physical-user'])).rows[0].n, 0);
+  } finally {
+    try { await lock.query('ROLLBACK'); } catch { /* Connection already committed. */ }
+    lock.release();
+    await pool.query('DELETE FROM "VirkiRpPreauth" WHERE "bindingHash"=$1', [bindingHash]);
   }
 });
