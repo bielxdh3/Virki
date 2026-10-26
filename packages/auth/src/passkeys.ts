@@ -234,7 +234,7 @@ export async function startPasskeyAuthentication(token: string, source: string, 
     const user = actor?.role === "USER"
       ? await prisma.user.findUnique({ where: { id: actor.id }, select: { id: true, passwordHash: true, isActive: true, accountStatus: true, role: true } })
       : null;
-    if (user?.isActive && user.accountStatus === "ACTIVE" && user.role === "USER" && user.passwordHash) {
+    if (user?.isActive && user.accountStatus === "ACTIVE" && user.role === "USER" && user.passwordHash && await verifyPassword(user.passwordHash, password)) {
       userId = user.id;
       proofHash = hashPasskeyChallenge(user.passwordHash);
       const credentials = await prisma.passkeyCredential.findMany({ where: { userId, revokedAt: null }, select: { credentialId: true, transports: true }, take: MAX_PASSKEYS });
