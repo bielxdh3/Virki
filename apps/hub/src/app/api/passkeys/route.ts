@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { getCurrentSession } from "../../../lib/auth";
+import { recordSecurityDenial } from "../../../lib/audit-denial";
 import { requestHost, getSurface, sameOriginFailureReason } from "../../../lib/surface";
 import { validateSessionCsrfToken } from "../../../lib/session-csrf";
-import { SESSION_COOKIE_NAME, getSessionCookieOptions } from "@virki/auth";
+import { SESSION_COOKIE_NAME, createAuditRequestMetadata, getSessionCookieOptions, hashAuditEmail, hashAuditSessionReference, normalizeEmail, writeAuditLog } from "@virki/auth";
 import {
   PASSKEY_BROWSER_COOKIE,
   createPasskeyBrowserToken,
@@ -60,16 +61,32 @@ function discardBrowserCookie(response: NextResponse) {
 export async function POST(request: Request) {
   const host = requestHost(request.headers);
   if (!passkeysEnabledForRequest(getSurface(request.headers), host)) return guardedJson({ error: "Unavailable" }, 404);
-  if (sameOriginFailureReason(request.headers)) return guardedJson({ error: "Rejected" }, 403);
+  if (sameOriginFailureReason(request.headers)) {
+    await recordSecurityDenial(request.headers, "portal-passkeys-origin", "csrf");
+    return guardedJson({ error: "Rejected" }, 403);
+  }
   const body = await boundedJson(request);
   if (!body) return guardedJson({ error: "Invalid request" }, 400);
   const action = property(body, "action", 40);
+  const auditState: { session: Awaited<ReturnType<typeof getCurrentSession>>; csrfDenied: boolean } = { session: null, csrfDenied: false };
+  async function requireProtectedSessionForRequest() {
+    const session = await getCurrentSession();
+    if (!session || session.user.role !== "USER") throw new Error("Rejected");
+    // Identify the authenticated USER before checking CSRF so rejected requests
+    // retain their verified audit actor without treating a bad proof as anonymous.
+    auditState.session = session;
+    if (!(await validateSessionCsrfToken(property(body!, "csrfToken", 1200), "account-security"))) {
+      auditState.csrfDenied = true;
+      throw new Error("Rejected");
+    }
+    return session;
+  }
   try {
     if (action === "login-options" || action === "register-options") {
       const browserToken = createPasskeyBrowserToken();
       let options;
       if (action === "register-options") {
-        const session = await requireProtectedSession(body);
+        const session = await requireProtectedSessionForRequest();
         options = await startPasskeyRegistration(session.user.id, session.id, property(body, "password"), browserToken, host, property(body, "totpCode", 6));
       } else {
         options = await startPasskeyAuthentication(browserToken, request.headers.get("cf-connecting-ip")?.trim() ?? "", property(body, "email", 320) || undefined, host, property(body, "password"));
@@ -93,7 +110,7 @@ export async function POST(request: Request) {
     }
 
     if (action === "register-verify" || action === "rename" || action === "revoke") {
-      const session = await requireProtectedSession(body);
+      const session = await requireProtectedSessionForRequest();
       if (action === "register-verify") {
         const browserToken = cookieValue(request.headers.get("cookie"), PASSKEY_BROWSER_COOKIE);
         await finishPasskeyRegistration(session.user.id, session.id, browserToken, body.response as RegistrationResponseJSON, property(body, "name", 80), host);
@@ -107,14 +124,27 @@ export async function POST(request: Request) {
 
     return guardedJson({ error: "Invalid request" }, 400);
   } catch {
+    const { session: auditedSession, csrfDenied } = auditState;
+    const loginAttempt = action === "login-options" || action === "login-verify";
+    let actorEmailHash: string | undefined;
+    if (action === "login-options") {
+      const email = property(body, "email", 320);
+      if (email) {
+        try { actorEmailHash = hashAuditEmail(normalizeEmail(email)); } catch { /* An unavailable pseudonymization key must not expose the email. */ }
+      }
+    }
+    // Audit outside the ceremony's transaction: rejected proofs roll back their transaction.
+    // Never persist the WebAuthn response, password, credential ID, challenge or raw email.
+    await writeAuditLog({
+      eventType: csrfDenied ? "CSRF_DENIED" : loginAttempt ? "AUTH_LOGIN_FAILURE" : "SECURITY_PROOF_REJECTED",
+      result: loginAttempt && !csrfDenied ? "FAILURE" : "DENIED",
+      actorUserId: auditedSession?.user.id,
+      actorRole: auditedSession?.user.role === "USER" ? "USER" : undefined,
+      sessionRef: auditedSession ? hashAuditSessionReference(auditedSession.id) : undefined,
+      actorEmailHash,
+      resource: "identity.passkey",
+      metadata: createAuditRequestMetadata(request.headers, `portal-passkeys-${action}`)
+    });
     return guardedJson({ error: "Authentication rejected or service unavailable" }, 403);
   }
-}
-
-async function requireProtectedSession(body: Record<string, unknown>) {
-  const session = await getCurrentSession();
-  if (!session || session.user.role !== "USER" || !(await validateSessionCsrfToken(property(body, "csrfToken", 1200), "account-security"))) {
-    throw new Error("Rejected");
-  }
-  return session;
 }
