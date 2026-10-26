@@ -21,6 +21,8 @@ function fixture() {
   let activeNonce = "";
   let tokenExchanges = 0;
   let revocations = 0;
+  let jwksRequests = 0;
+  const publishedKids = new Set(["fixture-k1", "fixture-k2"]);
   const assertClientSecretBasic = (header: string | null) => {
     if (!header?.startsWith("Basic ")) throw new Error("client_secret_basic is required; no client_secret_post fallback");
     const credentials = Buffer.from(header.slice(6), "base64").toString("utf8").split(":");
@@ -50,7 +52,9 @@ function fixture() {
     const path = new URL(request.url).pathname;
     const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } });
     if (path === "/jwks") {
-      return json({ keys: publiclyTrusted.map((key, index) => ({ ...key, kid: index === 0 ? "fixture-k1" : "fixture-k2", use: "sig", alg: "ES256" })) });
+      jwksRequests++;
+      return json({ keys: publiclyTrusted.map((key, index) => ({ ...key, kid: index === 0 ? "fixture-k1" : "fixture-k2", use: "sig", alg: "ES256" }))
+        .filter((key) => publishedKids.has(key.kid)) });
     }
     if (path === "/token/revocation") {
       assertClientSecretBasic(request.headers.get("authorization"));
@@ -100,6 +104,10 @@ function fixture() {
     setActiveNonce(value: string) { activeNonce = value; },
     setMode(next: TestTokenMode) { mode = next; },
     rotateKey() { signingKey = rotated; kid = "fixture-k2"; },
+    useInitialKey() { signingKey = first; kid = "fixture-k1"; },
+    publishKey(value: string) { publishedKids.add(value); },
+    removeKey(value: string) { publishedKids.delete(value); },
+    get jwksRequests() { return jwksRequests; },
     get tokenExchanges() { return tokenExchanges; },
     get revocations() { return revocations; },
     async roundTrip() {
@@ -149,6 +157,60 @@ test("public discovery factory rejects forged signed tokens, not just manually c
     assert.equal((await roundTrip()).identity.sub, "user-1");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("public factory caches pinned JWKS, rejects fresh unknown kid, and refreshes after rotation cooldown", async () => {
+  const f = fixture();
+  f.removeKey("fixture-k2"); // K2 is NOT prepublished at client startup.
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let clockAdvance = 0;
+  Date.now = () => originalNow() + clockAdvance;
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    assert.equal(new URL(request.url).origin, issuer, "Discovery, token exchange and JWKS must remain on the pinned issuer");
+    if (new URL(request.url).pathname === "/.well-known/openid-configuration") {
+      return new Response(JSON.stringify(f.metadata), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return f.handleFetch(request.url, {
+      method: request.method,
+      headers: Object.fromEntries(request.headers.entries()),
+      redirect: "manual",
+      body: request.method !== "GET" ? await request.text() : undefined
+    });
+  };
+  try {
+    const client = await createVirkiOidcClient({ ...f.settings, store: new MemoryTransactionStore() });
+    const callback = async () => {
+      const binding = randomBytes(32).toString("base64url");
+      const start = await client.beginLogin(binding);
+      f.setActiveNonce(start.url.searchParams.get("nonce")!);
+      const returnUrl = new URL(redirectUri);
+      returnUrl.searchParams.set("code", "rotation-fixture-code");
+      returnUrl.searchParams.set("state", start.url.searchParams.get("state")!);
+      return client.completeCallback(returnUrl, binding);
+    };
+    assert.equal((await callback()).identity.sub, "user-1");
+    assert.equal(f.jwksRequests, 1, "The initial JWKS contains only K1");
+    f.publishKey("fixture-k2");
+    f.rotateKey();
+    await assert.rejects(callback(), /OIDC callback rejected\./u, "A freshly cached K1-only JWKS cannot authorize a newly introduced K2");
+    assert.equal(f.jwksRequests, 1, "No unsafe JWKS cooldown bypass or alternate endpoint fallback");
+    clockAdvance = 61_000;
+    assert.equal((await callback()).identity.sub, "user-1", "New K2 accepted only after trusted issuer JWKS refresh");
+    assert.equal(f.jwksRequests, 2, "Unknown kid causes bounded JWKS refetch after cooldown");
+    f.removeKey("fixture-k1");
+    f.useInitialKey();
+    // Removing a key at the issuer is NOT an instant distributed token revocation:
+    // an already cached JWKS may still contain K1 within its bounded lifetime.
+    assert.equal((await callback()).identity.sub, "user-1", "K1 remains cached within the documented JWKS freshness window");
+    clockAdvance = 362_000; // >300 seconds since the issuer JWKS cache was refreshed.
+    await assert.rejects(callback(), /OIDC callback rejected\./u, "Removed K1 is denied after issuer JWKS cache expiry and refresh");
+    assert.equal(f.jwksRequests, 3, "Retired K1 never causes JWKS refresh from an unpinned authority");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
   }
 });
 
