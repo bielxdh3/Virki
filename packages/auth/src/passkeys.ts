@@ -264,6 +264,10 @@ export async function finishPasskeyAuthentication(token: string, response: Authe
     credential: { id: credential.credentialId, publicKey: new Uint8Array(credential.publicKey), counter: Number(credential.counter), transports: credential.transports as never }
   });
   if (!verified.verified) throw FAILURE;
+  // WebAuthn backup eligibility (BE) belongs to the credential and cannot
+  // change after registration. Backup state (BS) may change on synced keys.
+  // Keep signed assertion metadata consistent with our stored eligibility.
+  if ((verified.authenticationInfo.credentialDeviceType === "multiDevice") !== credential.backupEligible) throw FAILURE;
   if (row.expiresAt <= new Date()) throw FAILURE;
   const newCounter = BigInt(verified.authenticationInfo.newCounter);
   // Authenticator counters can remain zero on synced passkeys. CAS revision also fences concurrent zero-counter assertions.
