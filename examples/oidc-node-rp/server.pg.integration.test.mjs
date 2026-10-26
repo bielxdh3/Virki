@@ -232,6 +232,91 @@ test('PG18 stale logout never claims success while rotated successor survives', 
   }
 });
 
+test('PG18 fresh login recovers revoked cookie but preserves live-session atomic rotation', async () => {
+  try {
+    const { request, authorize } = fixture();
+    const first = await authorize();
+    assert.equal(first.status, 303);
+    const previous = cookieValue(first, SESSION_COOKIE);
+    assert.ok(previous);
+    const signedOut = await request('POST', '/logout', { ...postHeaders, cookie: previous });
+    assert.equal(signedOut.status, 303);
+    const stale = await request('POST', '/logout', { ...postHeaders, cookie: previous });
+    assert.equal(stale.status, 409);
+    assert.equal(stale.headers['set-cookie'], undefined);
+
+    const restart = await request('POST', '/login', { ...postHeaders, cookie: previous });
+    assert.equal(restart.status, 303);
+    assert.ok(restart.headers['set-cookie'].some(value => value.startsWith(`${SESSION_COOKIE}=`) && value.includes('Max-Age=0')));
+    const preauth = cookieValue(restart, PREAUTH_COOKIE);
+    assert.ok(preauth);
+    const state = new URL(restart.headers.location).searchParams.get('state');
+    const recovered = await request('GET', `/oidc/callback?state=${state}&code=test-code`, { cookie: preauth });
+    assert.equal(recovered.status, 303);
+    const active = cookieValue(recovered, SESSION_COOKIE);
+    assert.ok(active && active !== previous);
+    assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession" WHERE "subject"=$1', ['physical-user'])).rows[0].n, 1);
+
+    const liveStart = await request('POST', '/login', { ...postHeaders, cookie: active });
+    assert.equal(liveStart.status, 303);
+    assert.equal(liveStart.headers['set-cookie'].some(value => value.startsWith(`${SESSION_COOKIE}=`)), false);
+    const binding = cookieValue(liveStart, PREAUTH_COOKIE);
+    const nextState = new URL(liveStart.headers.location).searchParams.get('state');
+    const rotated = await request('GET', `/oidc/callback?state=${nextState}&code=test-code`,
+      { cookie: `${binding}; ${active}` });
+    assert.equal(rotated.status, 303);
+    assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession" WHERE "subject"=$1', ['physical-user'])).rows[0].n, 1);
+    const successor = cookieValue(rotated, SESSION_COOKIE);
+    assert.ok(successor && successor !== active);
+    assert.equal((await request('POST', '/logout', { ...postHeaders, cookie: successor })).status, 303);
+  } finally {
+    await pool.query('DELETE FROM "VirkiRpSession" WHERE "subject"=$1', ['physical-user']);
+  }
+});
+
+test('PG18 delayed successor cookie response cannot resurrect a consumed predecessor during reauthentication', async () => {
+  try {
+    const { request, authorize } = fixture();
+    const original = await authorize();
+    assert.equal(original.status, 303);
+    const predecessor = cookieValue(original, SESSION_COOKIE);
+
+    // Capture a legitimate rotation, but do not apply its HTTP Set-Cookie to
+    // the simulated browser yet (network-delayed response).
+    const delayed = await authorize(predecessor);
+    assert.equal(delayed.status, 303);
+    const firstSuccessor = cookieValue(delayed, SESSION_COOKIE);
+    assert.ok(firstSuccessor && firstSuccessor !== predecessor);
+
+    // The browser still presents the old cookie. Its row was consumed, so a
+    // new explicit login clears that stale browser value, not S1's DB row.
+    const anotherLogin = await request('POST', '/login', { ...postHeaders, cookie: predecessor });
+    assert.equal(anotherLogin.status, 303);
+    assert.ok(anotherLogin.headers['set-cookie'].some(value =>
+      value.startsWith(`${SESSION_COOKIE}=`) && value.includes('Max-Age=0')));
+    assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession" WHERE "idHash"=$1',
+      [hashId(firstSuccessor.split('=')[1])])).rows[0].n, 1);
+
+    const preauth = cookieValue(anotherLogin, PREAUTH_COOKIE);
+    const state = new URL(anotherLogin.headers.location).searchParams.get('state');
+    const independentlyCompleted = await request('GET', `/oidc/callback?state=${state}&code=test-code`,
+      { cookie: preauth });
+    assert.equal(independentlyCompleted.status, 303);
+    const secondSuccessor = cookieValue(independentlyCompleted, SESSION_COOKIE);
+    assert.ok(secondSuccessor && secondSuccessor !== firstSuccessor);
+    assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession" WHERE "idHash"=$1',
+      [hashId(predecessor.split('=')[1])])).rows[0].n, 0);
+    // Two separate already-verified sign-ins can coexist when HTTP responses
+    // reorder. The example never promises family-wide session linearizability.
+    assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession" WHERE "subject"=$1',
+      ['physical-user'])).rows[0].n, 2);
+    assert.equal((await request('POST', '/logout', { ...postHeaders, cookie: secondSuccessor })).status, 303);
+    assert.equal((await request('POST', '/logout', { ...postHeaders, cookie: firstSuccessor })).status, 303);
+  } finally {
+    await pool.query('DELETE FROM "VirkiRpSession" WHERE "subject"=$1', ['physical-user']);
+  }
+});
+
 test('PG18 logout consumes pending login intent before an anonymous callback can commit', async () => {
   let entered;
   const begun = new Promise(resolve => { entered = resolve; });

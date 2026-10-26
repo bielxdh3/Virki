@@ -29,6 +29,10 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
         const entry = sessions.get(params[0]);
         return { rows: entry ? [{ subject: entry.subject }] : [] };
       }
+      if (sql.startsWith('SELECT "idHash"')) {
+        const entry = sessions.get(params[0]);
+        return { rows: entry ? [{ idHash: params[0] }] : [] };
+      }
       if (sql.startsWith('DELETE FROM "VirkiRpSession"') || sql.startsWith('WITH consumed AS (DELETE FROM "VirkiRpSession"')) {
         const removed = sessions.get(params[0]);
         sessions.delete(params[0]);
@@ -234,4 +238,54 @@ test('cookie-less logout cannot falsely confirm sign-out while another callback 
   const response = await request('POST', '/logout', POST);
   assert.equal(response.status, 409);
   assert.equal(response.headers['set-cookie'], undefined);
+});
+
+test('explicit login recovers a revoked RP cookie without claiming successful logout', async () => {
+  const { request, sessions } = fixture();
+  const previous = randomId();
+  const former = `${SESSION_COOKIE}=${previous}`;
+  const page = await request('GET', '/', { cookie: former });
+  assert.match(page.body, /Not signed in/u);
+  const deniedLogout = await request('POST', '/logout', { ...POST, cookie: former });
+  assert.equal(deniedLogout.status, 409);
+  assert.equal(deniedLogout.headers['set-cookie'], undefined);
+  const login = await request('POST', '/login', { ...POST, cookie: former });
+  assert.equal(login.status, 303);
+  assert.ok(login.headers['set-cookie'].some(value => value.startsWith(`${SESSION_COOKIE}=`) && value.includes('Max-Age=0')),
+    'Explicit login must tell browser to discard an already-revoked RP cookie');
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  assert.ok(binding);
+  const signedIn = await request('GET', '/oidc/callback?state=valid-state&code=code', { cookie: binding });
+  assert.equal(signedIn.status, 303, 'Fresh browser binding must complete without a revoked predecessor');
+  assert.equal(sessions.size, 1);
+});
+
+test('login with a still-live RP cookie preserves it for atomic rotation', async () => {
+  const { request, sessions } = fixture();
+  const previous = randomId();
+  sessions.set(hashId(previous), { subject: 'previous', ciphertext: '' });
+  const login = await request('POST', '/login', { ...POST, cookie: `${SESSION_COOKIE}=${previous}` });
+  assert.equal(login.status, 303);
+  assert.equal(login.headers['set-cookie'].some(value => value.startsWith(`${SESSION_COOKIE}=`)), false,
+    'Live predecessor may only be replaced atomically during callback');
+  const callback = await request('GET', '/oidc/callback?state=valid-state&code=code',
+    { cookie: `${cookieValue(login, PREAUTH_COOKIE)}; ${SESSION_COOKIE}=${previous}` });
+  assert.equal(callback.status, 303);
+  assert.equal(sessions.has(hashId(previous)), false);
+  assert.equal(sessions.size, 1);
+});
+
+test('stale-cookie recovery fails closed without database authority', async () => {
+  const { request, db, events } = fixture();
+  const original = db.query;
+  db.query = async (sql, ...args) => {
+    if (sql.startsWith('SELECT "idHash"')) throw new Error('synthetic private database unavailable');
+    return original(sql, ...args);
+  };
+  const result = await request('POST', '/login',
+    { ...POST, cookie: `${SESSION_COOKIE}=${randomId()}` });
+  assert.equal(result.status, 503);
+  assert.equal(result.headers['set-cookie'], undefined);
+  assert.equal(events.login.length, 0, 'Do not create an auth flow when session authority is inaccessible');
+  assert.ok(!JSON.stringify(result).includes('synthetic private database unavailable'));
 });
