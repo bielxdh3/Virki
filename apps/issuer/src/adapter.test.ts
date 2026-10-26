@@ -197,6 +197,35 @@ test("authorization codes are persisted only for a redirect URI that is still re
   }
 });
 
+test("authorization code redemption rejects a redirect removed after issuance", async () => {
+  const original = process.env.VIRKI_OIDC_ADAPTER_KEY;
+  process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
+  const redirectUri = "https://project.example.invalid/previous-callback";
+  const stored = {
+    payloadCiphertext: encryptOidcPayload(JSON.stringify({
+      accountId: "user-id", clientId: "client-id", redirectUri, grantId: "grant-id"
+    }), env),
+    expiresAt: new Date(Date.now() + 90_000)
+  };
+  let currentlyRegistered = true;
+  try {
+    const database = {
+      oidcArtifact: { findUnique: async () => stored },
+      projectConnection: { findUnique: async () => ({
+        enabled: true,
+        redirectUris: currentlyRegistered ? [redirectUri] : ["https://project.example.invalid/new-callback"]
+      }) }
+    };
+    const adapter = new PrismaOidcAdapter("AuthorizationCode", database as never);
+    assert.equal((await adapter.find("issued-code"))?.redirectUri, redirectUri);
+    currentlyRegistered = false;
+    await assert.rejects(() => adapter.find("issued-code"), /invalid_grant/u);
+  } finally {
+    if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
+    else process.env.VIRKI_OIDC_ADAPTER_KEY = original;
+  }
+});
+
 test("grant-bound token persistence fails closed when the USER grant has been revoked", async () => {
   const original = process.env.VIRKI_OIDC_ADAPTER_KEY;
   process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
