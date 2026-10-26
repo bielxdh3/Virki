@@ -6,6 +6,7 @@ import { createServer as httpsServer } from 'node:https';
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { Pool } from 'pg';
 import { prisma } from '@virki/database';
@@ -39,17 +40,56 @@ const stop = server => new Promise(resolve => {
 const cookie = (response, name) => response.headers.getSetCookie()
   .find(value => value.startsWith(name + '='))?.split(';')[0];
 
+function requireOwnedLab() {
+  if (!owned || process.env.NODE_ENV !== 'test' || process.env.VIRKI_INTEGRATION_ENABLED !== 'true'
+    || process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== 'disposable'
+    || process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('Owned PostgreSQL/TLS proof is not enabled.');
+  const directory = process.env.VIRKI_COMPOSED_EXPECTED_PGDATA ?? '';
+  if (!/^\/tmp\/virki63-compose-transfer-[a-f0-9]{32}\/pgdata$/u.test(directory)) throw new Error('Owned scratch identity required.');
+  if (!process.env.NODE_EXTRA_CA_CERTS?.startsWith(directory.slice(0, -7) + '/tls/')) throw new Error('Trusted scratch certificate required.');
+  const core = new URL(process.env.DATABASE_URL ?? 'invalid:');
+  const rp = new URL(process.env.VIRKI_COMPOSED_RP_DATABASE_URL ?? 'invalid:');
+  for (const [url, role, database] of [[core, 'virki_runtime_test', 'virki_composed_core'], [rp, 'rp_composed_owner', 'rp_composed']]) {
+    if (url.protocol !== 'postgresql:' || url.hostname !== '127.0.0.1' || !/^[0-9]{4,5}$/u.test(url.port)
+      || url.username !== role || !/^[a-f0-9]{64}$/u.test(url.password)
+      || url.pathname !== '/' + database || url.hash) throw new Error('Unexpected PostgreSQL target.');
+  }
+  if (core.port !== rp.port || core.search !== '?schema=public' || rp.search) throw new Error('PostgreSQL URL override rejected.');
+  if (process.env.VIRKI_COMPOSED_TLS_KEY?.startsWith(directory.slice(0, -7) + '/tls/') !== true
+    || process.env.VIRKI_COMPOSED_TLS_CERT?.startsWith(directory.slice(0, -7) + '/tls/') !== true
+    || !/^\/tmp\/virki63-compose-transfer-[a-f0-9]{32}\/transport\/node_modules\/undici\/index\.js$/u.test(process.env.VIRKI_COMPOSED_UNDICI_PATH ?? '')) {
+    throw new Error('Owned TLS/HTTP transport missing.');
+  }
+  return directory;
+}
+
 test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and revoked grant', {
   skip: owned ? false : 'Owned private laboratory opt-in required',
   timeout: 120000
 }, async () => {
-  const { ProxyAgent, setGlobalDispatcher, getGlobalDispatcher } = await import('undici');
+  requireOwnedLab();
+  const { ProxyAgent, setGlobalDispatcher, getGlobalDispatcher } = await import(pathToFileURL(process.env.VIRKI_COMPOSED_UNDICI_PATH).href);
   const originalDispatcher = getGlobalDispatcher();
   const key = await readFile(process.env.VIRKI_COMPOSED_TLS_KEY);
   const cert = await readFile(process.env.VIRKI_COMPOSED_TLS_CERT);
   const pool = new Pool({ connectionString: process.env.VIRKI_COMPOSED_RP_DATABASE_URL, max: 10 });
   let child, proxy, facade, rp;
   try {
+    // The bootstrap runner verifies PGDATA and Unix-socket identity using its
+    // own cluster superuser BEFORE schema DDL. Runtime roles are intentionally
+    // denied pg_read_all_settings; do not elevate them to inspect data_directory.
+    const queryIdentity = 'SELECT current_user AS role, current_database() AS db, host(inet_server_addr()) AS server_addr, inet_server_port()::int AS port';
+    const coreMeta = await prisma.$queryRawUnsafe(queryIdentity);
+    const rpMeta = await pool.query(queryIdentity);
+    for (const [record, role, database] of [
+      [coreMeta[0], 'virki_runtime_test', 'virki_composed_core'],
+      [rpMeta.rows[0], 'rp_composed_owner', 'rp_composed']
+    ]) {
+      assert.equal(record?.role, role, 'Connected database role must be the isolated test role');
+      assert.equal(record?.db, database, 'Connected database must match the isolated test database');
+      assert.match(record?.server_addr ?? '', /^127\.0\.0\.1(?:\/32)?$/u, 'Connected database must be loopback');
+      assert.equal(record?.port, Number(new URL(process.env.DATABASE_URL).port), 'Connected database must use the owned cluster port');
+    }
     const reservation = httpServer();
     const issuerPort = await listen(reservation);
     await stop(reservation);
