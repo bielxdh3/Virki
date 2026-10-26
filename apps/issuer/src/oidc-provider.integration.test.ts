@@ -113,6 +113,19 @@ test("positive control: a valid exchange succeeds and the opaque access token re
   assert.equal(((await me.json()) as { sub: string }).sub, seeded.userId);
 });
 
+test("a redirect removed after authorization-code issuance cannot redeem the older code", integrationOptions, async () => {
+  const seeded = await seed();
+  const { code } = await issueCode(seeded);
+  await prisma.projectConnection.update({
+    where: { clientId: seeded.clientId },
+    data: { redirectUris: ["https://project.integration.invalid/new-callback"] }
+  });
+  const result = await exchange(seeded.clientId, code);
+  assert.equal(result.status, 400);
+  assert.equal(result.json.error, "invalid_grant");
+  assert.equal(result.json.access_token, undefined);
+});
+
 test("missing or wrong code_verifier is rejected and the code stays usable", integrationOptions, async () => {
   const seeded = await seed();
   const { code } = await issueCode(seeded);
