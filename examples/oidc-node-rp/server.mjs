@@ -6,10 +6,10 @@ import {
 
 const SESSION_LIFETIME_MS = 8 * 60 * 60_000;
 
-function securityHeaders(res) {
+function securityHeaders(res, trustedIssuer) {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', `default-src 'none'; form-action 'self' ${trustedIssuer}; base-uri 'none'; frame-ancestors 'none'`);
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
@@ -150,7 +150,7 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
   const limited = rateLimiter();
 
   return async function handle(req, res) {
-    securityHeaders(res);
+    securityHeaders(res, trustedIssuer);
     try {
       if (!req.socket.encrypted || req.headers.host !== rpOrigin.host || typeof req.url !== 'string'
         || !req.url.startsWith('/') || req.url.startsWith('//')) return plain(res, 400, 'Request rejected.');

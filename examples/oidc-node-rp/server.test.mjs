@@ -107,6 +107,21 @@ test('RP accepts only an exact configured HTTPS issuer and never browser-provide
   }
 });
 
+test('the RP login form permits only its configured issuer as a cross-origin form target', async () => {
+  const { request } = fixture();
+  const page = await request('GET', '/');
+  assert.equal(page.status, 200);
+  assert.equal(
+    page.headers['content-security-policy'],
+    "default-src 'none'; form-action 'self' https://portal.example.test; base-uri 'none'; frame-ancestors 'none'"
+  );
+  const started = await request('POST', '/login', POST);
+  assert.equal(started.status, 303);
+  assert.equal(started.headers['content-security-policy'], page.headers['content-security-policy']);
+  assert.equal(new URL(started.headers.location).origin, ISSUER);
+  assert.ok(!page.headers['content-security-policy'].includes('https://evil.example.test'));
+});
+
 test('login -> callback -> RP session rotation -> logout remains server-only', async () => {
   const { request, events, sessions } = fixture();
   const previous = randomId();
