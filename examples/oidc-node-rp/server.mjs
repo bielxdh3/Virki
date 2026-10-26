@@ -72,8 +72,8 @@ async function insertSession(db, binding, oldSessionId, newSessionId, issuer, id
       // Evaluate the live-clock deadline AFTER acquiring/deleting the row.
       // An empty CTE result rolls the entire DELETE back with no new cookie.
       const consumed = await connection.query(
-        'WITH consumed AS (DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 RETURNING "idHash", "expiresAt") SELECT "idHash" FROM consumed WHERE "expiresAt" > clock_timestamp()',
-        [hashId(oldSessionId)]
+        'WITH consumed AS (DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 AND "issuer" = $2 RETURNING "idHash", "expiresAt") SELECT "idHash" FROM consumed WHERE "expiresAt" > clock_timestamp()',
+        [hashId(oldSessionId), issuer]
       );
       if (consumed.rows?.length !== 1) throw new Error('RP predecessor already consumed.');
     }
@@ -90,7 +90,7 @@ async function insertSession(db, binding, oldSessionId, newSessionId, issuer, id
   }
 }
 
-async function revokeLocalSession(db, sessionId, binding) {
+async function revokeLocalSession(db, sessionId, binding, trustedIssuer) {
   // With no RP session cookie, the server cannot prove that another
   // concurrent browser/tab callback is not still in flight. Never return
   // a *successful* logout based on absence of cookies alone.
@@ -110,8 +110,10 @@ async function revokeLocalSession(db, sessionId, binding) {
     let ciphertext = null;
     if (sessionId) {
       const result = await connection.query(
-        'DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 RETURNING "tokenCiphertext" AS ciphertext',
-        [hashId(sessionId)]
+        // Never forward a token minted by a previous RP issuer to the current
+        // issuer's revocation endpoint after local issuer reconfiguration.
+        'DELETE FROM "VirkiRpSession" WHERE "idHash" = $1 AND "issuer" = $2 RETURNING "tokenCiphertext" AS ciphertext',
+        [hashId(sessionId), trustedIssuer]
       );
       if (result.rows?.length !== 1) { stale = true; throw new Error('Stale RP logout.'); }
       ciphertext = result.rows[0]?.ciphertext ?? null;
@@ -159,7 +161,10 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
       if (req.method === 'GET' && url.pathname === '/' && !url.search) {
         let current = null;
         if (existingSession) {
-          const result = await db.query('SELECT "subject" AS subject FROM "VirkiRpSession" WHERE "idHash" = $1 AND "expiresAt" > NOW() LIMIT 1', [hashId(existingSession)]);
+          // Do not authenticate sessions created under a former configured
+          // issuer after an RP-side issuer migration.
+          const result = await db.query('SELECT "subject" AS subject FROM "VirkiRpSession" WHERE "idHash" = $1 AND "issuer" = $2 AND "expiresAt" > clock_timestamp() LIMIT 1',
+            [hashId(existingSession), trustedIssuer]);
           current = result.rows[0]?.subject;
         }
         return html(res, current
@@ -178,8 +183,8 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
         let staleSession = false;
         if (existingSession) {
           const known = await db.query(
-            'SELECT "idHash" FROM "VirkiRpSession" WHERE "idHash" = $1 AND "expiresAt" > clock_timestamp() LIMIT 1',
-            [hashId(existingSession)]
+            'SELECT "idHash" FROM "VirkiRpSession" WHERE "idHash" = $1 AND "issuer" = $2 AND "expiresAt" > clock_timestamp() LIMIT 1',
+            [hashId(existingSession), trustedIssuer]
           );
           staleSession = known.rows?.length !== 1;
         }
@@ -233,7 +238,7 @@ export function createRpHandler({ oidc, db, origin, issuer, sessionKey, revokeOn
         if (!acceptedPost(req, rpOrigin.origin)) return plain(res, 403, 'Request rejected.');
         if (!limited(req.socket.remoteAddress)) return plain(res, 429, 'Too many requests.');
         const binding = parseCookie(req.headers.cookie, PREAUTH_COOKIE);
-        const outcome = await revokeLocalSession(db, existingSession, binding);
+        const outcome = await revokeLocalSession(db, existingSession, binding, trustedIssuer);
         if (outcome.stale) return plain(res, 409, 'Sign-out not confirmed. Reload and retry.');
         const removed = outcome.ciphertext;
         // Local logout remains effective even if revocation is unavailable upstream.
