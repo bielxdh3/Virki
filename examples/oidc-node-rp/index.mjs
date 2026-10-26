@@ -4,6 +4,7 @@ import { Pool } from 'pg';
 import { createVirkiOidcClient, randomRpSessionId } from '@virki/oidc-node';
 import { EncryptedPostgresTransactionStore } from '@virki/oidc-node/postgres-store';
 import { createRpHandler } from './server.mjs';
+import { validateRpDatabaseConnection } from './database-config.mjs';
 import { parseServerOrigin, sessionCryptoKey } from './security.mjs';
 
 async function main() {
@@ -17,11 +18,7 @@ async function main() {
     || new URL(redirectUri).search || new URL(redirectUri).hash) throw new Error('RP callback mismatch.');
   if (!/^[a-fA-F0-9]{64}$/u.test(configured.RP_ENCRYPTION_KEY_HEX ?? '')) throw new Error('RP key unavailable.');
   const key = Buffer.from(configured.RP_ENCRYPTION_KEY_HEX, 'hex');
-  const databaseUrl = new URL(configured.RP_DATABASE_URL);
-  if (!['postgresql:', 'postgres:'].includes(databaseUrl.protocol) || !databaseUrl.hostname) throw new Error('RP database unavailable.');
-  const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(databaseUrl.hostname);
-  if (!isLoopback && !configured.RP_DATABASE_SSL_CA_FILE) throw new Error('Remote PostgreSQL requires pinned TLS CA.');
-  if (databaseUrl.searchParams.has('sslmode')) throw new Error('Configure PG SSL with RP_DATABASE_SSL_CA_FILE only.');
+  validateRpDatabaseConnection(configured.RP_DATABASE_URL, configured.RP_DATABASE_SSL_CA_FILE);
   const pool = new Pool({
     connectionString: configured.RP_DATABASE_URL,
     max: 5, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10_000,
