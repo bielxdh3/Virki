@@ -32,6 +32,28 @@ const evaluate = (overrides = {}) => evaluateProductionDependencies({
   physicalForbidden: [], prismaBinaryFound: false, ...overrides
 });
 
+test("Docker production dependency stages contain every declared workspace manifest before npm ci", () => {
+  const dockerfile = readFileSync(new URL("../infra/Dockerfile.prod", import.meta.url), "utf8");
+  const root = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const workspaces = root.workspaces.flatMap((pattern) => {
+    const directory = pattern.replace(/\/\*$/u, "");
+    const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+    return Object.keys(lock.packages).filter((name) => name.startsWith(`${directory}/`) && name.split("/").length === 2);
+  });
+  for (const stage of ["build", "production-dependencies"]) {
+    const start = dockerfile.indexOf(` AS ${stage}`);
+    assert.ok(start >= 0, `Docker stage ${stage} exists`);
+    const installs = dockerfile.slice(start).split(/RUN npm ci\b/u)[0];
+    for (const workspace of workspaces) {
+      assert.ok(installs.includes(`COPY ${workspace}/package*.json ./${workspace}/`),
+        `${stage} omits ${workspace} before npm ci`);
+    }
+  }
+  assert.ok(dockerfile.includes(
+    "COPY --from=production-dependencies /app/packages/oidc-node/package.json ./packages/oidc-node/package.json"
+  ), "final production image must retain the new workspace manifest");
+});
+
 test("production image includes workspace-local runtime dependencies from the lockfile", () => {
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
   const dockerfile = readFileSync(new URL("../infra/Dockerfile.prod", import.meta.url), "utf8");

@@ -13,6 +13,7 @@ COPY apps/hub/package*.json ./apps/hub/
 COPY apps/issuer/package*.json ./apps/issuer/
 COPY packages/auth/package*.json ./packages/auth/
 COPY packages/database/package*.json ./packages/database/
+COPY packages/oidc-node/package*.json ./packages/oidc-node/
 COPY packages/database/prisma ./packages/database/prisma
 COPY packages/database/scripts ./packages/database/scripts
 RUN npm ci
@@ -58,6 +59,7 @@ COPY apps/hub/package*.json ./apps/hub/
 COPY apps/issuer/package*.json ./apps/issuer/
 COPY packages/auth/package*.json ./packages/auth/
 COPY packages/database/package*.json ./packages/database/
+COPY packages/oidc-node/package*.json ./packages/oidc-node/
 RUN npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS production
@@ -74,6 +76,7 @@ COPY --from=production-dependencies /app/apps/hub/package.json ./apps/hub/packag
 COPY --from=production-dependencies /app/apps/issuer/package.json ./apps/issuer/package.json
 COPY --from=production-dependencies /app/packages/auth/package.json ./packages/auth/package.json
 COPY --from=production-dependencies /app/packages/database/package.json ./packages/database/package.json
+COPY --from=production-dependencies /app/packages/oidc-node/package.json ./packages/oidc-node/package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=production-dependencies /app/packages/auth/node_modules ./packages/auth/node_modules
 

@@ -4,17 +4,58 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { discoverGenericIntegrationTests, assertGenericIntegrationSelection } from "./integration/discovery.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const testRoots = ["apps", "packages", "scripts", "e2e"];
 const skippedDirectories = new Set(["node_modules", ".next", "dist", "build", "coverage"]);
 const testFilePattern = /\.(test|spec)\.(ts|tsx|mjs|mts)$/;
-// Discovered by scripts/integration/run.mjs, which scans apps/ and packages/ only.
+// Located under apps/ and packages/; specialized integration suites use dedicated runners.
 const integrationFilePattern = /\.integration\.test\.ts$/;
 // Executed by the Playwright configuration (testDir: ./e2e).
 const playwrightSpecPattern = /^e2e\/.*\.spec\.(ts|tsx|mjs|mts)$/;
 // Each entry must name a file and give a one-line reason it cannot run in a runner above.
 const intentionallyExcluded = [];
+
+test("PG18 OIDC integration is isolated from generic discovery and explicit selection", () => {
+  const dedicated = "packages/oidc-node/src/postgres-store.integration.test.ts";
+  const files = discoverGenericIntegrationTests(root);
+  assert.ok(files.includes("packages/auth/src/passkeys.integration.test.ts"), "ordinary suites must stay discoverable");
+  assert.equal(files.includes(dedicated), false, "PG18 suite needs its separately provisioned runner");
+  assert.throws(() => assertGenericIntegrationSelection([dedicated]), /dedicated PostgreSQL 18 runner/u);
+  assert.throws(() => assertGenericIntegrationSelection([dedicated.replace(/\//gu, "\\")]), /dedicated PostgreSQL 18 runner/u);
+  for (const alias of [
+    "packages/oidc-node/src/../src/postgres-store.integration.test.ts",
+    "packages//oidc-node/src/postgres-store.integration.test.ts",
+    "packages/./oidc-node/src/postgres-store.integration.test.ts",
+    "packages/OIDC-NODE/src/postgres-store.integration.test.ts"
+  ]) {
+    assert.throws(() => assertGenericIntegrationSelection([alias]), /dedicated PostgreSQL 18 runner/u,
+      `generic runner must not accept PG18 path alias: ${alias}`);
+  }
+  assert.doesNotThrow(() => assertGenericIntegrationSelection(["packages/auth/src/passkeys.integration.test.ts"]));
+});
+
+test("excluded PG18 OIDC suite remains reachable through its owned disposable runner", () => {
+  const scripts = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).scripts;
+  assert.match(scripts["test:oidc-node:postgres"], /scripts\/oidc-node-disposable-postgres\.mjs/u);
+  const dedicatedRunner = readFileSync(path.join(root, "scripts", "oidc-node-disposable-postgres.mjs"), "utf8");
+  assert.match(dedicatedRunner, /postgres-store\.integration\.test\.ts/u);
+  assert.match(dedicatedRunner, /VIRKI_OIDC_PG_CONTAINER/u);
+});
+
+test("generic integration CLI rejects explicit PG18 selection before requiring a database", () => {
+  const dedicated = "packages/oidc-node/src/postgres-store.integration.test.ts";
+  const cli = spawnSync(process.execPath, [path.join(root, "scripts", "integration", "run.mjs"), dedicated], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 5_000,
+    env: { ...process.env, VIRKI_INTEGRATION_DATABASE_URL: "", VIRKI_CORE_TEST_DATABASE_CONFIRM: "" }
+  });
+  assert.equal(cli.status, 1);
+  assert.match(cli.stderr, /dedicated PostgreSQL 18 runner/u);
+});
 
 function collectTestFiles(directory, found) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
