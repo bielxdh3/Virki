@@ -189,6 +189,9 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
+      - name: Confidential Node OIDC SDK and RP example tests
+        run: npm run test:oidc-node
+
       - name: Public surface tests
         run: npm run test:public-site
 

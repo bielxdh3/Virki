@@ -1,0 +1,33 @@
+-- Apply ONLY to an independently provisioned RP-owned PostgreSQL database via psql -f.
+-- Flow state hashes are opaque, and the transaction fields are AES-256-GCM encrypted.
+CREATE TABLE IF NOT EXISTS "VirkiOidcLoginFlow" (
+  "stateHash" CHAR(64) PRIMARY KEY,
+  "ciphertext" TEXT NOT NULL,
+  "expiresAt" TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS "VirkiOidcLoginFlow_expiresAt_idx"
+  ON "VirkiOidcLoginFlow" ("expiresAt");
+
+-- RP-owned cancel/consume fence shared by callback and logout, never central Virki.
+CREATE TABLE IF NOT EXISTS "VirkiRpPreauth" (
+  "bindingHash" CHAR(64) PRIMARY KEY,
+  "expiresAt" TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS "VirkiRpPreauth_expiresAt_idx"
+  ON "VirkiRpPreauth" ("expiresAt");
+
+-- RP sessions are independent of portal/issuer sessions. Never expose these rows to a browser.
+CREATE TABLE IF NOT EXISTS "VirkiRpSession" (
+  "idHash" CHAR(64) PRIMARY KEY,
+  "issuer" TEXT NOT NULL,
+  "subject" TEXT NOT NULL,
+  "tokenCiphertext" TEXT NOT NULL,
+  "expiresAt" TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS "VirkiRpSession_expiresAt_idx"
+  ON "VirkiRpSession" ("expiresAt");
+
+-- Bounded housekeeping, e.g. via a trusted RP worker (never during user authorization):
+-- DELETE FROM "VirkiOidcLoginFlow" WHERE "expiresAt" < NOW();
+-- DELETE FROM "VirkiRpPreauth" WHERE "expiresAt" < NOW();
+-- DELETE FROM "VirkiRpSession" WHERE "expiresAt" < NOW();

@@ -1,0 +1,16 @@
+{
+  "name": "virki-oidc-node-rp-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0 <23" },
+  "scripts": {
+    "start": "node --env-file=.env index.mjs",
+    "test": "node --test app.test.mjs security.test.mjs server.test.mjs database-config.test.mjs",
+    "test:pg18": "node --test server.pg.integration.test.mjs"
+  },
+  "dependencies": {
+    "@virki/oidc-node": "file:../../packages/oidc-node",
+    "pg": "8.16.3"
+  }
+}
