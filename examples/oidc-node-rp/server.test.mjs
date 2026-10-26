@@ -10,11 +10,21 @@ const POST = { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencode
 
 function fixture({ failInsert = false, failRevoke = false } = {}) {
   const sessions = new Map();
+  const preauth = new Map();
   const events = { login: [], callbacks: [], revoked: [], sql: [] };
   const redeemed = new Set();
   const db = {
     async query(sql, params = []) {
       events.sql.push(sql);
+      if (sql.startsWith('INSERT INTO "VirkiRpPreauth"')) {
+        preauth.set(params[0], params[1]);
+        return { rows: [] };
+      }
+      if (sql.includes('DELETE FROM "VirkiRpPreauth"')) {
+        const entry = preauth.get(params[0]);
+        preauth.delete(params[0]);
+        return { rows: entry ? [{ expiresAt: entry, bindingHash: params[0] }] : [] };
+      }
       if (sql.startsWith('SELECT "subject"')) {
         const entry = sessions.get(params[0]);
         return { rows: entry ? [{ subject: entry.subject }] : [] };
@@ -65,7 +75,7 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
     await handler({ method, url: path, headers: { host: 'rp.example.test', ...headers }, socket: { encrypted, remoteAddress: '127.0.0.1' } }, res);
     return result;
   };
-  return { request, sessions, events };
+  return { request, sessions, preauth, events, db };
 }
 
 function cookieValue(response, name) {
@@ -190,4 +200,38 @@ test('upstream token revocation failure cannot restore a locally deleted RP sess
   assert.equal(sessions.size, 0);
   assert.equal(events.revoked.length, 1);
   assert.ok(!JSON.stringify(logout).includes('sensitive material'));
+});
+
+test('logout during pending anonymous callback fences session creation', async () => {
+  const { request, sessions, db } = fixture();
+  const login = await request('POST', '/login', POST);
+  const binding = cookieValue(login, PREAUTH_COOKIE);
+  assert.ok(binding);
+  let entering;
+  const entered = new Promise(resolve => { entering = resolve; });
+  let resume;
+  const held = new Promise(resolve => { resume = resolve; });
+  const actualConnect = db.connect;
+  let delayed = false;
+  db.connect = async () => {
+    if (!delayed) { delayed = true; entering(); await held; }
+    return actualConnect();
+  };
+  const callback = request('GET', '/oidc/callback?state=valid-state&code=code', { cookie: binding });
+  await entered;
+  const logout = await request('POST', '/logout', { ...POST, cookie: binding });
+  assert.equal(logout.status, 409, 'Anonymous logout cannot claim all in-flight logins were cancelled');
+  assert.equal(logout.headers['set-cookie'], undefined);
+  resume();
+  const returned = await callback;
+  assert.equal(returned.status, 503, 'Cancelled pending login cannot mint a new session');
+  assert.equal(returned.headers['set-cookie'], undefined);
+  assert.equal(sessions.size, 0);
+});
+
+test('cookie-less logout cannot falsely confirm sign-out while another callback may be in flight', async () => {
+  const { request } = fixture();
+  const response = await request('POST', '/logout', POST);
+  assert.equal(response.status, 409);
+  assert.equal(response.headers['set-cookie'], undefined);
 });
