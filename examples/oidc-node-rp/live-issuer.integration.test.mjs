@@ -41,14 +41,22 @@ const cookie = (response, name) => response.headers.getSetCookie()
   .find(value => value.startsWith(name + '='))?.split(';')[0];
 
 function requireOwnedLab() {
-  if (!owned || process.env.NODE_ENV !== 'test' || process.env.VIRKI_INTEGRATION_ENABLED !== 'true'
+  if (process.env.VIRKI_COMPOSED_OIDC_TEST !== 'true'
+    || process.env.NODE_ENV !== 'test' || process.env.VIRKI_INTEGRATION_ENABLED !== 'true'
     || process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== 'disposable'
     || process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('Owned PostgreSQL/TLS proof is not enabled.');
   const directory = process.env.VIRKI_COMPOSED_EXPECTED_PGDATA ?? '';
   if (!/^\/tmp\/virki63-compose-transfer-[a-f0-9]{32}\/pgdata$/u.test(directory)) throw new Error('Owned scratch identity required.');
   if (!process.env.NODE_EXTRA_CA_CERTS?.startsWith(directory.slice(0, -7) + '/tls/')) throw new Error('Trusted scratch certificate required.');
-  const core = new URL(process.env.DATABASE_URL ?? 'invalid:');
-  const rp = new URL(process.env.VIRKI_COMPOSED_RP_DATABASE_URL ?? 'invalid:');
+  let core, rp;
+  try {
+    core = new URL(process.env.DATABASE_URL ?? 'invalid:');
+    rp = new URL(process.env.VIRKI_COMPOSED_RP_DATABASE_URL ?? 'invalid:');
+  } catch {
+    // URL errors may carry the entire connection string (including password)
+    // in error.input. Never forward them into TAP diagnostics or CI logs.
+    throw new Error('Unexpected PostgreSQL target.');
+  }
   for (const [url, role, database] of [[core, 'virki_runtime_test', 'virki_composed_core'], [rp, 'rp_composed_owner', 'rp_composed']]) {
     if (url.protocol !== 'postgresql:' || url.hostname !== '127.0.0.1' || !/^[0-9]{4,5}$/u.test(url.port)
       || url.username !== role || !/^[a-f0-9]{64}$/u.test(url.password)
@@ -60,20 +68,68 @@ function requireOwnedLab() {
     || !/^\/tmp\/virki63-compose-transfer-[a-f0-9]{32}\/transport\/node_modules\/undici\/index\.js$/u.test(process.env.VIRKI_COMPOSED_UNDICI_PATH ?? '')) {
     throw new Error('Owned TLS/HTTP transport missing.');
   }
-  return directory;
+  return Number(core.port);
 }
+
+test('lab gate rejects DSN override, malformed secret-bearing URLs and insecure TLS', () => {
+  const names = [
+    'VIRKI_COMPOSED_OIDC_TEST', 'NODE_ENV', 'VIRKI_INTEGRATION_ENABLED',
+    'VIRKI_CORE_TEST_DATABASE_CONFIRM', 'NODE_TLS_REJECT_UNAUTHORIZED',
+    'VIRKI_COMPOSED_EXPECTED_PGDATA', 'DATABASE_URL', 'VIRKI_COMPOSED_RP_DATABASE_URL',
+    'NODE_EXTRA_CA_CERTS', 'VIRKI_COMPOSED_TLS_KEY', 'VIRKI_COMPOSED_TLS_CERT',
+    'VIRKI_COMPOSED_UNDICI_PATH'
+  ];
+  const original = new Map(names.map(name => [name, process.env[name]]));
+  const root = '/tmp/virki63-compose-transfer-' + 'a'.repeat(32);
+  const password = 'b'.repeat(64);
+  const coreUrl = 'postgresql://virki_runtime_test:' + password + '@127.0.0.1:54444/virki_composed_core?schema=public';
+  const rpUrl = 'postgresql://rp_composed_owner:' + password + '@127.0.0.1:54444/rp_composed';
+  try {
+    Object.assign(process.env, {
+      VIRKI_COMPOSED_OIDC_TEST: 'true', NODE_ENV: 'test',
+      VIRKI_INTEGRATION_ENABLED: 'true', VIRKI_CORE_TEST_DATABASE_CONFIRM: 'disposable',
+      VIRKI_COMPOSED_EXPECTED_PGDATA: root + '/pgdata',
+      DATABASE_URL: coreUrl, VIRKI_COMPOSED_RP_DATABASE_URL: rpUrl,
+      NODE_EXTRA_CA_CERTS: root + '/tls/ca.crt',
+      VIRKI_COMPOSED_TLS_KEY: root + '/tls/server.key',
+      VIRKI_COMPOSED_TLS_CERT: root + '/tls/server.crt',
+      VIRKI_COMPOSED_UNDICI_PATH: root + '/transport/node_modules/undici/index.js'
+    });
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    assert.equal(requireOwnedLab(), 54444);
+    process.env.DATABASE_URL = coreUrl + '&host=untrusted.example';
+    assert.throws(requireOwnedLab, /URL override rejected/u);
+    process.env.DATABASE_URL = coreUrl;
+    process.env.VIRKI_COMPOSED_RP_DATABASE_URL = rpUrl + '?sslmode=no-verify';
+    assert.throws(requireOwnedLab, /URL override rejected/u);
+    process.env.VIRKI_COMPOSED_RP_DATABASE_URL = rpUrl;
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    assert.throws(requireOwnedLab, /not enabled/u);
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    process.env.DATABASE_URL = coreUrl.replace(':54444/', ':invalid-port/');
+    assert.throws(requireOwnedLab, error =>
+      error?.message === 'Unexpected PostgreSQL target.' && !String(error).includes(password),
+      'Node URL parser must not expose database credentials in errors');
+  } finally {
+    for (const [name, value] of original) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
 
 test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and revoked grant', {
   skip: owned ? false : 'Owned private laboratory opt-in required',
   timeout: 120000
 }, async () => {
-  requireOwnedLab();
+  const ownedPgPort = requireOwnedLab();
   const { ProxyAgent, setGlobalDispatcher, getGlobalDispatcher } = await import(pathToFileURL(process.env.VIRKI_COMPOSED_UNDICI_PATH).href);
   const originalDispatcher = getGlobalDispatcher();
   const key = await readFile(process.env.VIRKI_COMPOSED_TLS_KEY);
   const cert = await readFile(process.env.VIRKI_COMPOSED_TLS_CERT);
   const pool = new Pool({ connectionString: process.env.VIRKI_COMPOSED_RP_DATABASE_URL, max: 10 });
-  let child, proxy, facade, rp;
+  let child, proxy, facade, rp, dispatcher;
+  const proxyTunnels = new Set();
   try {
     // The bootstrap runner verifies PGDATA and Unix-socket identity using its
     // own cluster superuser BEFORE schema DDL. Runtime roles are intentionally
@@ -88,7 +144,7 @@ test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and 
       assert.equal(record?.role, role, 'Connected database role must be the isolated test role');
       assert.equal(record?.db, database, 'Connected database must match the isolated test database');
       assert.match(record?.server_addr ?? '', /^127\.0\.0\.1(?:\/32)?$/u, 'Connected database must be loopback');
-      assert.equal(record?.port, Number(new URL(process.env.DATABASE_URL).port), 'Connected database must use the owned cluster port');
+      assert.equal(record?.port, ownedPgPort, 'Connected database must use the owned cluster port');
     }
     const reservation = httpServer();
     const issuerPort = await listen(reservation);
@@ -124,9 +180,13 @@ test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and 
     const destinations = new Map([['portal.localhost:443', facadePort]]);
     proxy = httpServer((req, res) => { res.writeHead(403); res.end(); });
     proxy.on('connect', (req, socket, head) => {
+      proxyTunnels.add(socket);
+      socket.once('close', () => proxyTunnels.delete(socket));
       const target = destinations.get(req.url);
       if (!target || head.length !== 0) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
       const upstream = connect(target, '127.0.0.1');
+      proxyTunnels.add(upstream);
+      upstream.once('close', () => proxyTunnels.delete(upstream));
       upstream.once('connect', () => {
         socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         socket.pipe(upstream); upstream.pipe(socket);
@@ -135,7 +195,8 @@ test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and 
       socket.on('error', () => upstream.destroy());
     });
     const proxyPort = await listen(proxy);
-    setGlobalDispatcher(new ProxyAgent('http://127.0.0.1:' + proxyPort));
+    dispatcher = new ProxyAgent('http://127.0.0.1:' + proxyPort);
+    setGlobalDispatcher(dispatcher);
     const user = await createTestUser({ label: 'oidc-composed' });
     const clientId = 'client-' + randomUUID();
     const secret = cookieId();
@@ -212,6 +273,10 @@ test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and 
     assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession"')).rows[0].n, 0);
   } finally {
     setGlobalDispatcher(originalDispatcher);
+    // CONNECT upgrades are not covered by HTTP server.closeAllConnections().
+    // Destroy only sockets accepted by this private test proxy before waiting
+    // for server.close(), including failure paths with an in-flight tunnel.
+    for (const socket of proxyTunnels) socket.destroy();
     if (rp) await stop(rp);
     if (proxy) await stop(proxy);
     if (facade) await stop(facade);
@@ -221,5 +286,6 @@ test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and 
     }
     await pool.end();
     await prisma.$disconnect();
+    if (dispatcher) await dispatcher.destroy();
   }
 });
