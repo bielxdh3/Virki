@@ -72,8 +72,9 @@ BEGIN
       AND relation.relname NOT IN (
         '_prisma_migrations', 'AccountRecoveryRequest', 'AdministrativeCredential',
         'AdministrativeRecoveryCode', 'AuditLog', 'DeviceChallenge', 'EmailDeliveryAttempt',
-        'EmailOutboxMessage', 'LoginRateLimit', 'OidcArtifact', 'ProjectConnection',
-        'RecoveryCode', 'SanitizedAuditReference', 'SecurityElevation', 'Session',
+        'EmailOutboxMessage', 'LoginRateLimit', 'OidcArtifact', 'PasskeyChallenge',
+        'PasskeyCredential', 'ProjectConnection', 'RecoveryCode',
+        'SanitizedAuditReference', 'SecurityElevation', 'Session',
         'TotpFactor', 'TrustedDevice', 'User', 'UserProjectGrant'
       )
       AND NOT EXISTS (
