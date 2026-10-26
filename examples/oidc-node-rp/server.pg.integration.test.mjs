@@ -317,6 +317,51 @@ test('PG18 delayed successor cookie response cannot resurrect a consumed predece
   }
 });
 
+test('PG18 persisted session from previous issuer is rejected without cross-issuer rotation or revocation', async () => {
+  const foreignIssuer = 'https://previous-issuer.example.invalid';
+  const previous = randomBytes(32).toString('base64url');
+  const previousHash = hashId(previous);
+  try {
+    await pool.query(
+      'INSERT INTO "VirkiRpSession" ("idHash","issuer","subject","tokenCiphertext","expiresAt") VALUES ($1,$2,$3,$4,NOW()+INTERVAL \'1 hour\')',
+      [previousHash, foreignIssuer, 'old-issuer-physical', 'v1.fake-old-issuer-ciphertext']
+    );
+    const { request } = fixture();
+    const oldCookie = `${SESSION_COOKIE}=${previous}`;
+    const page = await request('GET', '/', { cookie: oldCookie });
+    assert.match(page.body, /Not signed in/u, 'Current issuer must not accept earlier issuer session');
+    const oldLogout = await request('POST', '/logout', { ...postHeaders, cookie: oldCookie });
+    assert.equal(oldLogout.status, 409);
+    assert.equal(oldLogout.headers['set-cookie'], undefined);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM "VirkiRpSession" WHERE "idHash"=$1',
+      [previousHash])).rows[0].n, 1, 'Do not revoke a prior issuer session under the new issuer');
+
+    const start = await request('POST', '/login', { ...postHeaders, cookie: oldCookie });
+    assert.equal(start.status, 303);
+    assert.ok(start.headers['set-cookie'].some(line =>
+      line.startsWith(`${SESSION_COOKIE}=`) && line.includes('Max-Age=0')));
+    const binding = cookieValue(start, PREAUTH_COOKIE);
+    const state = new URL(start.headers.location).searchParams.get('state');
+    const hostile = await request('GET', `/oidc/callback?state=${state}&code=test-code`,
+      { cookie: `${binding}; ${oldCookie}` });
+    assert.equal(hostile.status, 503, 'Callback may not consume predecessor from a foreign issuer');
+    assert.equal(hostile.headers['set-cookie'], undefined);
+
+    const fresh = await request('POST', '/login', postHeaders);
+    const freshBinding = cookieValue(fresh, PREAUTH_COOKIE);
+    const newState = new URL(fresh.headers.location).searchParams.get('state');
+    const callback = await request('GET', `/oidc/callback?state=${newState}&code=test-code`,
+      { cookie: freshBinding });
+    assert.equal(callback.status, 303);
+    assert.ok(cookieValue(callback, SESSION_COOKIE));
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM "VirkiRpSession" WHERE "idHash"=$1',
+      [previousHash])).rows[0].n, 1, 'Previous authority state must not be mutated by current-issuer login');
+  } finally {
+    await pool.query('DELETE FROM "VirkiRpSession" WHERE "idHash"=$1 OR "subject"=$2',
+      [previousHash, 'physical-user']);
+  }
+});
+
 test('PG18 logout consumes pending login intent before an anonymous callback can commit', async () => {
   let entered;
   const begun = new Promise(resolve => { entered = resolve; });

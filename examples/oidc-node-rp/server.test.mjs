@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import { createRpHandler } from './server.mjs';
-import { PREAUTH_COOKIE, SESSION_COOKIE, hashId, randomId } from './security.mjs';
+import { PREAUTH_COOKIE, SESSION_COOKIE, encryptToken, hashId, randomId } from './security.mjs';
 
 const ORIGIN = 'https://rp.example.test';
 const ISSUER = 'https://portal.example.test';
@@ -27,23 +27,23 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
       }
       if (sql.startsWith('SELECT "subject"')) {
         const entry = sessions.get(params[0]);
-        return { rows: entry ? [{ subject: entry.subject }] : [] };
+        return { rows: entry?.issuer === params[1] ? [{ subject: entry.subject }] : [] };
       }
       if (sql.startsWith('SELECT "idHash"')) {
         const entry = sessions.get(params[0]);
-        return { rows: entry ? [{ idHash: params[0] }] : [] };
+        return { rows: entry?.issuer === params[1] ? [{ idHash: params[0] }] : [] };
       }
       if (sql.startsWith('DELETE FROM "VirkiRpSession"') || sql.startsWith('WITH consumed AS (DELETE FROM "VirkiRpSession"')) {
         const removed = sessions.get(params[0]);
-        sessions.delete(params[0]);
-        return { rows: removed ? [{ ciphertext: removed.ciphertext, idHash: params[0] }] : [] };
+        if (removed?.issuer === params[1]) sessions.delete(params[0]);
+        return { rows: removed?.issuer === params[1] ? [{ ciphertext: removed.ciphertext, idHash: params[0] }] : [] };
       }
       if (sql.startsWith('INSERT INTO "VirkiRpSession"')) {
         if (failInsert) throw new Error('simulated DB write failure with sensitive material');
         // Physical PostgreSQL has issuer TEXT NOT NULL; this assertion must
         // reject undefined instead of allowing a fake DB to mask a broken login.
         assert.equal(params[1], ISSUER);
-        sessions.set(params[0], { subject: params[2], ciphertext: params[3] });
+        sessions.set(params[0], { issuer: params[1], subject: params[2], ciphertext: params[3] });
         return { rows: [] };
       }
       if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] };
@@ -68,7 +68,8 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
       if (failRevoke) throw new Error('simulated token endpoint failure with sensitive material');
     }
   };
-  const handler = createRpHandler({ oidc, db, origin: ORIGIN, issuer: ISSUER, sessionKey: randomBytes(32) });
+  const sessionKey = randomBytes(32);
+  const handler = createRpHandler({ oidc, db, origin: ORIGIN, issuer: ISSUER, sessionKey });
   const request = async (method, path, headers = {}, encrypted = true) => {
     const result = { status: 0, headers: {}, body: '' };
     const res = {
@@ -79,7 +80,7 @@ function fixture({ failInsert = false, failRevoke = false } = {}) {
     await handler({ method, url: path, headers: { host: 'rp.example.test', ...headers }, socket: { encrypted, remoteAddress: '127.0.0.1' } }, res);
     return result;
   };
-  return { request, sessions, preauth, events, db };
+  return { request, sessions, preauth, events, db, sessionKey };
 }
 
 function cookieValue(response, name) {
@@ -109,7 +110,7 @@ test('RP accepts only an exact configured HTTPS issuer and never browser-provide
 test('login -> callback -> RP session rotation -> logout remains server-only', async () => {
   const { request, events, sessions } = fixture();
   const previous = randomId();
-  sessions.set(hashId(previous), { subject: 'stale old account', ciphertext: '' });
+  sessions.set(hashId(previous), { issuer: ISSUER, subject: 'stale old account', ciphertext: '' });
   const login = await request('POST', '/login', POST);
   assert.equal(login.status, 303);
   assert.ok(login.headers.location.startsWith('https://portal.example.test/auth?'));
@@ -263,7 +264,7 @@ test('explicit login recovers a revoked RP cookie without claiming successful lo
 test('login with a still-live RP cookie preserves it for atomic rotation', async () => {
   const { request, sessions } = fixture();
   const previous = randomId();
-  sessions.set(hashId(previous), { subject: 'previous', ciphertext: '' });
+  sessions.set(hashId(previous), { issuer: ISSUER, subject: 'previous', ciphertext: '' });
   const login = await request('POST', '/login', { ...POST, cookie: `${SESSION_COOKIE}=${previous}` });
   assert.equal(login.status, 303);
   assert.equal(login.headers['set-cookie'].some(value => value.startsWith(`${SESSION_COOKIE}=`)), false,
@@ -288,4 +289,57 @@ test('stale-cookie recovery fails closed without database authority', async () =
   assert.equal(result.headers['set-cookie'], undefined);
   assert.equal(events.login.length, 0, 'Do not create an auth flow when session authority is inaccessible');
   assert.ok(!JSON.stringify(result).includes('synthetic private database unavailable'));
+});
+
+test('switching configured issuer never authenticates a previous issuer session or rotates its cookie', async () => {
+  const { request, sessions } = fixture();
+  const previous = randomId();
+  const formerCookie = `${SESSION_COOKIE}=${previous}`;
+  sessions.set(hashId(previous), {
+    issuer: 'https://old-issuer.example.test', subject: 'old-issuer-sub', ciphertext: ''
+  });
+  const page = await request('GET', '/', { cookie: formerCookie });
+  assert.match(page.body, /Not signed in/u,
+    'An identity verified by a prior configured issuer must not be accepted as the new issuer');
+  const restarted = await request('POST', '/login', { ...POST, cookie: formerCookie });
+  assert.equal(restarted.status, 303);
+  assert.ok(restarted.headers['set-cookie'].some(v =>
+    v.startsWith(`${SESSION_COOKIE}=`) && v.includes('Max-Age=0')),
+  'Explicit sign-in after issuer change must retire browser cookie from the old issuer');
+  const preauth = cookieValue(restarted, PREAUTH_COOKIE);
+  assert.ok(preauth);
+  const verified = await request('GET', '/oidc/callback?state=valid-state&code=code', { cookie: preauth });
+  assert.equal(verified.status, 303);
+  assert.equal(sessions.has(hashId(previous)), true, 'Do not silently delete legacy issuer sessions');
+  assert.equal(sessions.size, 2, 'New issuer must issue an independent new session');
+});
+
+test('logout cannot forward a previous issuer access token to the new issuer revocation endpoint', async () => {
+  const { request, sessions, events, sessionKey } = fixture();
+  const previous = randomId();
+  sessions.set(hashId(previous), {
+    issuer: 'https://old-issuer.example.test', subject: 'old-account',
+    ciphertext: encryptToken('synthetic-OLD-issuer-access-token', sessionKey, hashId(previous))
+  });
+  const result = await request('POST', '/logout', { ...POST, cookie: `${SESSION_COOKIE}=${previous}` });
+  assert.equal(result.status, 409, 'A foreign-issuer RP session cannot be revoked under the new issuer identity');
+  assert.equal(result.headers['set-cookie'], undefined);
+  assert.deepEqual(events.revoked, [], 'A token from issuer A must never reach configured issuer B');
+  assert.equal(sessions.has(hashId(previous)), true, 'Do not silently alter a session belonging to another issuer');
+});
+
+test('callback cannot consume a predecessor session minted by a different issuer', async () => {
+  const { request, sessions } = fixture();
+  const previous = randomId();
+  sessions.set(hashId(previous), {
+    issuer: 'https://old-issuer.example.test', subject: 'old-account', ciphertext: ''
+  });
+  const started = await request('POST', '/login', POST);
+  assert.equal(started.status, 303);
+  const reply = await request('GET', '/oidc/callback?state=valid-state&code=code',
+    { cookie: `${cookieValue(started, PREAUTH_COOKIE)}; ${SESSION_COOKIE}=${previous}` });
+  assert.equal(reply.status, 503, 'A different issuer must not rotate an old issuer session');
+  assert.equal(reply.headers['set-cookie'], undefined);
+  assert.equal(sessions.has(hashId(previous)), true);
+  assert.equal(sessions.size, 1);
 });
