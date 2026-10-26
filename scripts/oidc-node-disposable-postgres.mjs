@@ -8,7 +8,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const sourceRoot = path.resolve(root, "..", "..");
 const container = `virki-oidc-pg18-${randomUUID()}`;
 const owner = randomUUID();
 const label = "org.virki.oidc-disposable-owner";
@@ -18,7 +17,7 @@ const role = "rp_oidc_owner";
 const schema = "rp_oidc_private";
 const adminPassword = randomBytes(32).toString("hex");
 const rolePassword = randomBytes(32).toString("hex");
-const tsx = process.env.VIRKI_OIDC_TSX_PATH || path.resolve(sourceRoot, "node_modules", "tsx", "dist", "cli.mjs");
+const tsx = process.env.VIRKI_OIDC_TSX_PATH || path.resolve(root, "node_modules", "tsx", "dist", "cli.mjs");
 const dockerBinary = process.env.VIRKI_OIDC_DOCKER_BINARY || "docker";
 let containerStarted = false;
 let cleaned = false;
