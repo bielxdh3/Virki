@@ -6,7 +6,7 @@
   "engines": { "node": ">=22.13.0 <23" },
   "scripts": {
     "start": "node --env-file=.env index.mjs",
-    "test": "node --test app.test.mjs security.test.mjs server.test.mjs",
+    "test": "node --test app.test.mjs security.test.mjs server.test.mjs database-config.test.mjs",
     "test:pg18": "node --test server.pg.integration.test.mjs"
   },
   "dependencies": {
