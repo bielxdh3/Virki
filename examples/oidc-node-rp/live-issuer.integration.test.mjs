@@ -257,13 +257,23 @@ test('actual issuer + SDK + HTTPS RP: signed login, durable session, logout and 
     assert.equal(stored.rows[0].issuer, issuer);
     assert.equal(stored.rows[0].subject, user.id);
     assert.match(stored.rows[0].tokenCiphertext, /^v1\./u);
-    assert.equal((await rpFetch('/', { headers: { cookie: localSession } })).status, 200);
+    const signedInPage = await rpFetch('/', { headers: { cookie: localSession } });
+    assert.equal(signedInPage.status, 200);
+    const signedInHtml = await signedInPage.text();
+    assert.match(signedInHtml, /Signed in as subject/u,
+      'A successful HTTP response alone does not prove an authenticated RP page');
+    assert.ok(signedInHtml.includes(`<code>${user.id}</code>`),
+      'The RP must render the identity verified by the issuer, not an anonymous page');
     const logout = await rpFetch('/logout', { method: 'POST', headers: {
       cookie: localSession, origin: rpOrigin, 'content-type': 'application/x-www-form-urlencoded',
       'sec-fetch-site': 'same-origin'
     } });
     assert.equal(logout.status, 303);
     assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM "VirkiRpSession"')).rows[0].n, 0);
+    const signedOutPage = await rpFetch('/', { headers: { cookie: localSession } });
+    assert.equal(signedOutPage.status, 200);
+    assert.match(await signedOutPage.text(), /Not signed in\./u,
+      'The former RP cookie must not show an authenticated page after logout');
     const pending = await authorize();
     await prisma.userProjectGrant.deleteMany({ where: { userId: user.id, connectionId: connection.id } });
     const rejected = await rpFetch(pending.callback.pathname + pending.callback.search,
