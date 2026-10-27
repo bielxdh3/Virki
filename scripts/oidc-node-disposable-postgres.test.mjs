@@ -219,7 +219,11 @@ test('OIDC runner cleanup distinguishes auto-removed containers from denied or u
     writeFileSync(runner, patched);
     writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
     writeFileSync(mockChild, `
-      export function spawnSync() { return { status: 0 }; }
+      export function spawnSync(_binary, _args, options) {
+        // The Docker runner must override a hostile inherited native marker
+        // before starting its PG18 child test process.
+        return { status: options.env.VIRKI_OIDC_PG_TRANSPORT === 'docker' ? 0 : 1 };
+      }
     `);
     writeFileSync(join(root, 'scripts', 'lib', 'mock-security.mjs'), `
       import { fileURLToPath } from 'node:url';
@@ -314,6 +318,7 @@ test('OIDC runner cleanup distinguishes auto-removed containers from denied or u
         env: {
           ...process.env, VIRKI_OIDC_TSX_PATH: tsx,
           VIRKI_FAKE_CLEANUP_SCENARIO: scenario, VIRKI_FAKE_DOCKER_LOG: log,
+          VIRKI_OIDC_PG_TRANSPORT: 'portable-native',
           DOCKER_HOST: 'tcp://production.example:2376', DOCKER_CONTEXT: 'production'
         }
       });

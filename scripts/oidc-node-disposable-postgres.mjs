@@ -200,6 +200,9 @@ try {
     cwd: root, stdio: "inherit", windowsHide: true, timeout: 210_000,
     env: {
       ...admittedDocker.subprocessEnv,
+      // Never inherit an opt-in portable-native marker into this explicitly
+      // admitted Docker fixture. The child must use this pinned daemon.
+      VIRKI_OIDC_PG_TRANSPORT: "docker",
       VIRKI_OIDC_PG_CONTAINER: acknowledgedContainerId,
       VIRKI_OIDC_PG_ROLE: role,
       VIRKI_OIDC_PG_PASSWORD: rolePassword,
