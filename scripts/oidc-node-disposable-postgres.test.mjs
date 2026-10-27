@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createAdmittedOidcDockerClient } from './lib/disposable-docker-session.mjs';
+import { createVerifiedPortableOidcPgClient } from './lib/oidc-portable-native-transport.mjs';
 
 const source = fileURLToPath(new URL('./oidc-node-disposable-postgres.mjs', import.meta.url));
 
@@ -127,6 +128,74 @@ test('direct PG18 integration entrypoint cannot bypass Docker admission', () => 
   assert.equal(run.status, 1,
     'direct invocation must fail before SQL and remote Docker calls: ' + run.stdout + run.stderr);
   assert.match(run.stdout + run.stderr, /Disposable Docker session refused:/u);
+});
+
+test('portable PG18 socket transport requires an owned private cluster, never an ambient Docker context', () => {
+  const owner = '12345678-1234-4123-8123-123456789abc';
+  const root = '/dev/shm/virki59-oidc-store-Ab1cD234';
+  const socket = root + '/socket';
+  const shim = root + '/tools/docker';
+  const psql = '/opt/private-pg18/root/usr/lib/postgresql/18/bin/psql';
+  const env = {
+    VIRKI_OIDC_PG_TRANSPORT: 'portable-native',
+    VIRKI_OIDC_PG_SOCKET: socket,
+    VIRKI_OIDC_DOCKER_BINARY: shim,
+    VIRKI_OIDC_PSQL_BINARY: psql,
+    VIRKI_OIDC_PG_CONTAINER: 'virki-oidc-pg18-' + owner,
+    VIRKI_OIDC_PG_ROLE: 'rp_oidc_owner',
+    VIRKI_OIDC_PG_DATABASE: 'rp_oidc_proof',
+    VIRKI_OIDC_PG_SCHEMA: 'rp_oidc_private',
+    VIRKI_OIDC_PG_PASSWORD: 'a'.repeat(64),
+    PGHOST: socket,
+    PGPORT: '25575',
+    PGHOSTADDR: '10.0.0.4',
+    PGSERVICE: 'production',
+    DOCKER_HOST: 'tcp://production.internal:2376',
+    DOCKER_CONTEXT: 'production',
+    LD_LIBRARY_PATH: '/opt/private-pg18/root/usr/lib/x86_64-linux-gnu'
+  };
+  const fsState = new Map([
+    [root, 'directory'], [socket, 'directory'], [root + '/pgdata', 'directory'],
+    [root + '/tools', 'directory'], [shim, 'file'],
+    [root + '/.owner', 'file'], [psql, 'file']
+  ]);
+  const fakeStat = (p) => ({
+    uid: 1001,
+    mode: p === psql ? 0o100755 : fsState.get(p) === 'file' ? 0o100600 : 0o40700,
+    isDirectory: () => fsState.get(p) === 'directory',
+    isFile: () => fsState.get(p) === 'file',
+    isSymbolicLink: () => false
+  });
+  const args = { env, platform: 'linux', uid: 1001, stat: fakeStat, read: () => owner + '\n' };
+  const admitted = createVerifiedPortableOidcPgClient(args);
+  assert.equal(admitted.binary, shim);
+  assert.equal(admitted.subprocessEnv.PGHOST, socket);
+  assert.equal(admitted.subprocessEnv.PGPORT, '25575');
+  assert.equal(admitted.subprocessEnv.PGHOSTADDR, undefined);
+  assert.equal(admitted.subprocessEnv.PGSERVICE, undefined);
+  assert.equal(admitted.subprocessEnv.DOCKER_HOST, undefined);
+  assert.equal(admitted.subprocessEnv.DOCKER_CONTEXT, undefined);
+  assert.equal(admitted.subprocessEnv.LD_LIBRARY_PATH, env.LD_LIBRARY_PATH);
+  for (const hostile of [
+    { VIRKI_OIDC_DOCKER_BINARY: '/usr/bin/docker' },
+    { VIRKI_OIDC_PG_SOCKET: '/tmp/prod/socket' },
+    { VIRKI_OIDC_PG_CONTAINER: 'virki-oidc-pg18-' + '0'.repeat(36) },
+    { PGHOST: '/var/run/postgresql' },
+    { VIRKI_OIDC_PG_ROLE: 'postgres' }
+  ]) {
+    assert.throws(() => createVerifiedPortableOidcPgClient({
+      ...args, env: { ...env, ...hostile }
+    }), /Portable PostgreSQL transport refused/u);
+  }
+  assert.throws(() => createVerifiedPortableOidcPgClient({
+    ...args, platform: 'win32'
+  }), /Portable PostgreSQL transport refused/u);
+  assert.throws(() => createVerifiedPortableOidcPgClient({
+    ...args, stat: (p) => p === root ? { ...fakeStat(p), mode: 0o40777 } : fakeStat(p)
+  }), /Portable PostgreSQL transport refused/u);
+  assert.throws(() => createVerifiedPortableOidcPgClient({
+    ...args, stat: (p) => p === shim ? { ...fakeStat(p), isSymbolicLink: () => true } : fakeStat(p)
+  }), /Portable PostgreSQL transport refused/u);
 });
 
 test('OIDC runner cleanup distinguishes auto-removed containers from denied or uncertain inspect', () => {

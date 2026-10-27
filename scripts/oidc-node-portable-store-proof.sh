@@ -107,6 +107,10 @@ exec "$VIRKI_OIDC_PSQL_BINARY" --host "$VIRKI_OIDC_PG_SOCKET" --port "$PGPORT" \
 SHIM_SCRIPT
 chmod 700 "$SHIM/docker"
 export VIRKI_OIDC_DOCKER_BINARY="$SHIM/docker"
+# Explicitly select the separately verified native socket transport. The
+# integration suite's default remains pinned local Docker; a bare CLI override
+# can never enable native mode or bypass Docker admission.
+export VIRKI_OIDC_PG_TRANSPORT=portable-native
 
 # Noncanonical caller args must be rejected before psql even if the fixed
 # prefix would otherwise be accepted.

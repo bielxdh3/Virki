@@ -11,12 +11,16 @@ import { hashFlowState, type AuthorizationTransaction } from "./store.js";
 const execFileAsync = promisify(execFile);
 const HEX64 = /^[a-f0-9]{64}$/u;
 const CIPHERTEXT = /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u;
-// This integration file is also directly runnable. Do not trust a caller's
-// Docker context/binary even when bypassing the disposable parent runner.
-const { createAdmittedOidcDockerClient } = await import(
-  new URL("../../../scripts/lib/disposable-docker-session.mjs", import.meta.url).href
-);
-const admittedDocker = createAdmittedOidcDockerClient();
+// The same test suite has two explicitly distinct, fail-closed transports:
+// pinned local Docker (default), or an owned native Unix-socket shim created
+// only by oidc-node-portable-store-proof.sh. Never trust an ambient CLI override.
+const nativeTransport = process.env.VIRKI_OIDC_PG_TRANSPORT === "portable-native"
+  ? (await import(new URL("../../../scripts/lib/oidc-portable-native-transport.mjs",
+    import.meta.url).href)).createVerifiedPortableOidcPgClient()
+  : null;
+const admittedDocker = nativeTransport ? null
+  : (await import(new URL("../../../scripts/lib/disposable-docker-session.mjs",
+    import.meta.url).href)).createAdmittedOidcDockerClient();
 
 function required(name: string): string {
   const value = process.env[name];
@@ -30,7 +34,9 @@ function config(): { container: string; role: string; password: string; database
   const password = required("VIRKI_OIDC_PG_PASSWORD");
   const database = required("VIRKI_OIDC_PG_DATABASE");
   const schema = required("VIRKI_OIDC_PG_SCHEMA");
-  if (!/^[a-f0-9]{64}$/u.test(container)
+  if (!(nativeTransport
+      ? /^virki-oidc-pg18-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(container)
+      : HEX64.test(container))
     || !/^[a-z][a-z0-9_]{0,30}$/u.test(role)
     || !/^[a-z][a-z0-9_]{0,30}$/u.test(database)
     || !/^[a-z][a-z0-9_]{0,30}$/u.test(schema)
@@ -43,14 +49,17 @@ function config(): { container: string; role: string; password: string; database
 async function psql(sql: string): Promise<string> {
   const c = config();
   try {
-    const { stdout } = await execFileAsync(admittedDocker.subprocessEnv.VIRKI_OIDC_DOCKER_BINARY, [
-      "--host", admittedDocker.subprocessEnv.DOCKER_HOST,
+    const transportEnv = nativeTransport?.subprocessEnv ?? admittedDocker.subprocessEnv;
+    const prefix = nativeTransport ? [] : ["--host", admittedDocker.subprocessEnv.DOCKER_HOST];
+    const { stdout } = await execFileAsync(
+      nativeTransport?.binary ?? admittedDocker.subprocessEnv.VIRKI_OIDC_DOCKER_BINARY, [
+      ...prefix,
       "exec", "--env", `PGPASSWORD=${c.password}`, c.container,
       "psql", "--host", "127.0.0.1", "--username", c.role, "--dbname", c.database,
       "--no-psqlrc", "--quiet", "--tuples-only", "--no-align", "--field-separator=|",
       "--set", "ON_ERROR_STOP=1", "--command", sql
     ], { encoding: "utf8", timeout: 30_000, windowsHide: true, maxBuffer: 128 * 1024,
-      env: admittedDocker.subprocessEnv });
+      env: transportEnv });
     return stdout.trim();
   } catch {
     throw new Error("Disposable PostgreSQL statement failed.");
