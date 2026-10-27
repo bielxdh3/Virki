@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAdmittedOidcDockerClient } from "./lib/disposable-docker-session.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const container = `virki-oidc-pg18-${randomUUID()}`;
@@ -18,14 +19,13 @@ const schema = "rp_oidc_private";
 const adminPassword = randomBytes(32).toString("hex");
 const rolePassword = randomBytes(32).toString("hex");
 const tsx = process.env.VIRKI_OIDC_TSX_PATH || path.resolve(root, "node_modules", "tsx", "dist", "cli.mjs");
-const dockerBinary = process.env.VIRKI_OIDC_DOCKER_BINARY || "docker";
+let admittedDocker;
 let containerStarted = false;
 let cleaned = false;
 
 function docker(args, timeout = 30_000) {
-  const run = spawnSync(dockerBinary, args, {
-    encoding: "utf8", windowsHide: true, timeout, maxBuffer: 128 * 1024
-  });
+  if (!admittedDocker) throw new Error("No admitted disposable Docker engine.");
+  const run = admittedDocker.invoke(args, timeout);
   if (run.error || run.status !== 0) {
     throw new Error(`Disposable Docker operation failed (${args[0]}).`);
   }
@@ -35,19 +35,32 @@ function docker(args, timeout = 30_000) {
 function cleanup() {
   if (cleaned || !containerStarted) return;
   cleaned = true;
-  const inspected = spawnSync(dockerBinary, [
+  const inspected = admittedDocker.invoke([
     "inspect", "--format", `{{index .Config.Labels "${label}"}}`, container
-  ], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
-  if (inspected.status !== 0) return; // --rm may have already completed cleanup.
+  ], 15_000);
+  if (inspected?.error || inspected?.status !== 0) {
+    // --rm can remove the container before cleanup, but a Docker timeout,
+    // permission error or daemon disconnect must never turn a passing test green.
+    const lastError = typeof inspected?.stderr === "string"
+      ? inspected.stderr.trim().split(/\r?\n/u).at(-1) : "";
+    const absent = !inspected?.error && [
+      `Error: No such object: ${container}`,
+      `Error response from daemon: No such container: ${container}`,
+      `Error response from daemon: No such object: ${container}`
+    ].includes(lastError);
+    if (!absent) {
+      console.error("Disposable PostgreSQL container cleanup inspection failed.");
+      process.exitCode = 1;
+    }
+    return;
+  }
   if (inspected.stdout.trim() !== owner) {
     console.error("Disposable PostgreSQL ownership mismatch; no cleanup attempted.");
     process.exitCode = 1;
     return;
   }
-  const removed = spawnSync(dockerBinary, ["rm", "--force", "--volumes", container], {
-    encoding: "utf8", windowsHide: true, timeout: 30_000
-  });
-  if (removed.status !== 0) {
+  const removed = admittedDocker.invoke(["rm", "--force", "--volumes", container], 30_000);
+  if (removed?.error || removed?.status !== 0) {
     console.error("Disposable PostgreSQL owned container cleanup failed.");
     process.exitCode = 1;
   } else {
@@ -69,6 +82,9 @@ process.once("SIGTERM", () => { cleanup(); process.exit(143); });
 
 try {
   if (!existsSync(tsx)) throw new Error("tsx from Virki's installed local dependencies is unavailable.");
+  // Fail closed before touching any Docker resource. Ambient DOCKER_HOST,
+  // DOCKER_CONTEXT and Docker CLI overrides must not select remote daemons.
+  admittedDocker = createAdmittedOidcDockerClient();
   docker(["image", "inspect", image]);
   // Unique name, ephemeral tmpfs, no mounted host files, and a Docker-allocated loopback port.
   // Even an uncertain docker-run exit is inspected for our exact owner label in finally.
@@ -85,9 +101,8 @@ try {
   if (!/^127\.0\.0\.1:[0-9]+$/u.test(bindings)) throw new Error("PG18 is not bound exclusively to loopback.");
   let ready = false;
   for (let attempt = 0; attempt < 90; attempt++) {
-    const health = spawnSync(dockerBinary, ["exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres"], {
-      encoding: "utf8", windowsHide: true, timeout: 5_000
-    });
+    const health = admittedDocker.invoke(["exec", container, "pg_isready",
+      "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres"], 5_000);
     if (health.status === 0) { ready = true; break; }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
   }
@@ -107,14 +122,14 @@ try {
   ], {
     cwd: root, stdio: "inherit", windowsHide: true, timeout: 210_000,
     env: {
-      ...process.env,
+      ...admittedDocker.subprocessEnv,
       VIRKI_OIDC_PG_CONTAINER: container,
       VIRKI_OIDC_PG_ROLE: role,
       VIRKI_OIDC_PG_PASSWORD: rolePassword,
       VIRKI_OIDC_PG_DATABASE: database,
       VIRKI_OIDC_PG_SCHEMA: schema,
       VIRKI_OIDC_TSX_PATH: tsx,
-      VIRKI_OIDC_DOCKER_BINARY: dockerBinary
+      VIRKI_OIDC_DOCKER_BINARY: admittedDocker.subprocessEnv.VIRKI_OIDC_DOCKER_BINARY
     }
   });
   if (test.error || test.status !== 0) throw new Error("OIDC PostgreSQL integration test failed.");

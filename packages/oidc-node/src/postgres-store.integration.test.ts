@@ -11,6 +11,12 @@ import { hashFlowState, type AuthorizationTransaction } from "./store.js";
 const execFileAsync = promisify(execFile);
 const HEX64 = /^[a-f0-9]{64}$/u;
 const CIPHERTEXT = /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u;
+// This integration file is also directly runnable. Do not trust a caller's
+// Docker context/binary even when bypassing the disposable parent runner.
+const { createAdmittedOidcDockerClient } = await import(
+  new URL("../../../scripts/lib/disposable-docker-session.mjs", import.meta.url).href
+);
+const admittedDocker = createAdmittedOidcDockerClient();
 
 function required(name: string): string {
   const value = process.env[name];
@@ -37,12 +43,14 @@ function config(): { container: string; role: string; password: string; database
 async function psql(sql: string): Promise<string> {
   const c = config();
   try {
-    const { stdout } = await execFileAsync(process.env.VIRKI_OIDC_DOCKER_BINARY || "docker", [
+    const { stdout } = await execFileAsync(admittedDocker.subprocessEnv.VIRKI_OIDC_DOCKER_BINARY, [
+      "--host", admittedDocker.subprocessEnv.DOCKER_HOST,
       "exec", "--env", `PGPASSWORD=${c.password}`, c.container,
       "psql", "--host", "127.0.0.1", "--username", c.role, "--dbname", c.database,
       "--no-psqlrc", "--quiet", "--tuples-only", "--no-align", "--field-separator=|",
       "--set", "ON_ERROR_STOP=1", "--command", sql
-    ], { encoding: "utf8", timeout: 30_000, windowsHide: true, maxBuffer: 128 * 1024 });
+    ], { encoding: "utf8", timeout: 30_000, windowsHide: true, maxBuffer: 128 * 1024,
+      env: admittedDocker.subprocessEnv });
     return stdout.trim();
   } catch {
     throw new Error("Disposable PostgreSQL statement failed.");
