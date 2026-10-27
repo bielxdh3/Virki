@@ -4,7 +4,8 @@ import { prisma } from "@virki/database";
 import { ACCOUNT_INVITATION_TTL_MS, provisionInvitedUserAccount } from "./account-invitation";
 import { authenticateUser, verifyPassword } from "./index";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation, uniqueEmail } from "./integration-fixtures";
-import { consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery } from "./security";
+import { hashAuditEmail } from "./audit";
+import { consumeApprovedAccountRecovery, getAccountRecoveryRequestId, RECOVERY_REQUEST_COOLDOWN_MS, requestAccountRecovery } from "./security";
 
 after(() => prisma.$disconnect());
 
@@ -43,6 +44,12 @@ test("an invited user has no password until the one-time link sets it", integrat
   assert.equal(created.role, "USER");
   assert.equal(await authenticateUser(email, "any-password-123"), null);
 
+  const creationAudit = await prisma.auditLog.findFirst({ where: { actorUserId: admin.id, eventType: "ACCOUNT_CREATED", resource: "account" }, orderBy: { createdAt: "desc" }, select: { metadata: true } });
+  const emailRef = (creationAudit?.metadata as { emailRef?: string } | null)?.emailRef;
+  assert.equal(emailRef, hashAuditEmail(email));
+  assert.equal(emailRef?.length, 89);
+  assert.equal(JSON.stringify(creationAudit?.metadata ?? null).includes(email), false);
+
   const opened = await getAccountRecoveryRequestId(requestKey, now);
   assert.ok(opened, "the emailed link opens the invitation");
   const request = await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: opened.id }, select: { status: true, purpose: true, reviewedByUserId: true, expiresAt: true, requestKeyHash: true } });
@@ -68,6 +75,39 @@ test("an invitation expires after 72 hours", integrationOptions, async () => {
   const late = new Date(now.getTime() + ACCOUNT_INVITATION_TTL_MS + 1000);
   assert.equal(await getAccountRecoveryRequestId(requestKey, late), null);
   await assert.rejects(consumeApprovedAccountRecovery(opened.id, requestKey, "Late-password-4242", late));
+});
+
+test("a live approved invitation blocks anonymous recovery after the request cooldown", integrationOptions, async () => {
+  const invited = await invite("invite-recovery-precedence");
+  const opened = await getAccountRecoveryRequestId(invited.requestKey, invited.now);
+  assert.ok(opened);
+
+  const afterCooldown = new Date(invited.now.getTime() + RECOVERY_REQUEST_COOLDOWN_MS + 1_000);
+  await requestAccountRecovery(invited.email, "pt-BR", afterCooldown);
+
+  const requests = await prisma.accountRecoveryRequest.findMany({ where: { userId: invited.userId }, orderBy: { createdAt: "asc" }, select: { status: true, purpose: true, emailVerifiedAt: true } });
+  assert.deepEqual(requests, [{ status: "APPROVED", purpose: "INVITATION", emailVerifiedAt: null }]);
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { recipientEmail: invited.email, kind: "ACCOUNT_RECOVERY" } }), 0);
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: invited.userId }, select: { emailVerifiedAt: true } })).emailVerifiedAt, null);
+
+  await consumeApprovedAccountRecovery(opened.id, invited.requestKey, "Invitation-owner-password-42", afterCooldown);
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: invited.userId }, select: { emailVerifiedAt: true } })).emailVerifiedAt?.getTime(), afterCooldown.getTime());
+});
+
+test("an expired invitation no longer blocks a new recovery request", integrationOptions, async () => {
+  const invited = await invite("invite-recovery-expired");
+  const late = new Date(invited.now.getTime() + ACCOUNT_INVITATION_TTL_MS + 1_000);
+  await requestAccountRecovery(invited.email, "pt-BR", late);
+
+  const requests = await prisma.accountRecoveryRequest.findMany({ where: { userId: invited.userId }, orderBy: { createdAt: "asc" }, select: { id: true, status: true, purpose: true, expiresAt: true } });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.purpose, "INVITATION");
+  assert.equal(requests[0]?.status, "APPROVED");
+  assert.ok(requests[0]!.expiresAt <= late);
+  assert.equal(requests[1]?.purpose, "RECOVERY");
+  assert.equal(requests[1]?.status, "PENDING");
+  assert.equal(await getAccountRecoveryRequestId(invited.requestKey, late), null);
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { recipientEmail: invited.email, kind: "ACCOUNT_RECOVERY" } }), 1);
 });
 
 test("a client-supplied purpose query cannot change invitation or recovery purpose", integrationOptions, async () => {

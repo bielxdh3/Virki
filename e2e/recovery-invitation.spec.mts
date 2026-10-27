@@ -287,7 +287,7 @@ test("approved USER recovery keeps recovery copy and rejects a short password on
   }
 });
 
-test("USER TOTP confirmation hides the enrollment secret and recovery codes after success", async ({ browser }) => {
+test("USER TOTP setup can restart after reload without restoring the pending secret", async ({ browser }) => {
   test.setTimeout(90_000);
   if (!e2eDatabaseUrl) throw new Error("TOTP E2E database is unavailable.");
   assertDisposableCoreTestDatabase(e2eDatabaseUrl, process.env);
@@ -457,15 +457,58 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     await factorSection.getByRole("button", { name: "Configurar aplicativo autenticador", exact: true }).click();
     const secretElement = factorSection.locator("code");
     await expect(secretElement).toHaveCount(1);
-    const secret = (await secretElement.textContent())?.trim() ?? "";
-    if (!/^[A-Z2-7]+=*$/u.test(secret)) throw new Error("E2E TOTP enrollment secret was invalid.");
+    const pendingSecret = (await secretElement.textContent())?.trim() ?? "";
+    if (!/^[A-Z2-7]+=*$/u.test(pendingSecret)) throw new Error("E2E TOTP enrollment secret was invalid.");
     const beginAction = (await Promise.all(actionResponses))[beginActionIndex];
     if (!beginAction) throw new Error("E2E TOTP enrollment action response was not observed.");
     if (process.env.VIRKI_E2E_HUB_MODE === "production") {
       expect(hasLow05NoStoreDirectives(beginAction.cacheControl)).toBe(true);
     }
+    const pendingCode = currentTotpCode(pendingSecret);
+    await page.reload();
+    await expect(factorSection.getByText("Existe uma configuração TOTP pendente.", { exact: true })).toBeVisible();
+    const restartButton = factorSection.getByRole("button", { name: "Reiniciar configuração do autenticador", exact: true });
+    const restartPassword = factorSection.getByLabel("Senha atual", { exact: true });
+    await expect(restartButton).toBeVisible();
+    await expect(restartPassword).toBeVisible();
+    const reloadedPendingState = await inspectSensitiveBrowserState(page, [pendingSecret, pendingCode]);
+    expect(reloadedPendingState.dom, "reload must not restore the pending secret in the document").toBe(false);
+    expect(reloadedPendingState.accessibility, "reload must not expose the pending secret to assistive technology").toBe(false);
+    expect(reloadedPendingState.history).toBe(false);
+    expect(reloadedPendingState.storage).toBe(false);
+    expect(reloadedPendingState.forms).toBe(false);
+    await restartPassword.focus();
+    await page.keyboard.press("Tab");
+    await expect(restartButton).toBeFocused();
+    await restartPassword.evaluate((input) => input.removeAttribute("maxlength"));
+    await restartPassword.fill("x".repeat(257));
+    await restartButton.click();
+    await expect(factorSection.getByRole("alert")).toContainText("Não foi possível iniciar.");
+    await expect(secretElement).toHaveCount(0);
+    await restartPassword.fill(fixture.user.password);
+    const restartActionIndex = actionResponses.length;
+    await restartButton.click();
+    await expect(secretElement).toHaveCount(1);
+    const secret = (await secretElement.textContent())?.trim() ?? "";
+    if (!/^[A-Z2-7]+=*$/u.test(secret)) throw new Error("E2E restarted TOTP enrollment secret was invalid.");
+    expect(secret).not.toBe(pendingSecret);
+    const restartAction = (await Promise.all(actionResponses))[restartActionIndex];
+    if (!restartAction) throw new Error("E2E TOTP restart action response was not observed.");
+    if (process.env.VIRKI_E2E_HUB_MODE === "production") {
+      expect(hasLow05NoStoreDirectives(restartAction.cacheControl)).toBe(true);
+    }
     const code = currentTotpCode(secret);
-    await factorSection.getByLabel("Código atual do aplicativo", { exact: true }).fill(code);
+    const staleCode = [
+      currentTotpCode(pendingSecret, Date.now() - 30_000),
+      currentTotpCode(pendingSecret),
+      currentTotpCode(pendingSecret, Date.now() + 30_000)
+    ].find((candidate) => candidate !== code);
+    if (!staleCode) throw new Error("E2E could not choose a distinct TOTP code from the replaced seed.");
+    const codeInput = factorSection.getByLabel("Código atual do aplicativo", { exact: true });
+    await codeInput.fill(staleCode);
+    await factorSection.getByRole("button", { name: "Ativar TOTP", exact: true }).click();
+    await expect(factorSection.getByRole("alert")).toContainText("Código inválido ou configuração expirada.");
+    await codeInput.fill(code);
     const activateActionIndex = actionResponses.length;
     await factorSection.getByRole("button", { name: "Ativar TOTP", exact: true }).click();
     await expect(factorSection.getByRole("heading", { name: "Códigos de recuperação — exibidos uma vez", exact: true })).toBeVisible();
@@ -478,7 +521,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     if (process.env.VIRKI_E2E_HUB_MODE === "production") {
       expect(hasLow05NoStoreDirectives(activateAction.cacheControl)).toBe(true);
     }
-    const sensitiveValues = [fixture.user.password, emailCode!, secret, code, ...codes];
+    const sensitiveValues = [fixture.user.password, emailCode!, pendingSecret, pendingCode, secret, code, ...codes];
     const visibleState = await inspectSensitiveBrowserState(page, sensitiveValues);
     expect(visibleState.dom).toBe(true);
     expect(visibleState.accessibility).toBe(true);
@@ -560,7 +603,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     const logoutEvidence = describeLow05Response(logoutResponse, logoutResponse.url(), portalUrl);
     console.log(`LOW-05 logout response: ${JSON.stringify({ method: "POST", ...logoutEvidence })}`);
     expect(logoutResponse.status()).toBe(303);
-    expect(logoutEvidence.cacheControl).toBe("no-store");
+    expect(logoutEvidence.cacheControl).toBe("private-no-store");
     expect((await context.cookies(portalUrl)).some(({ name }) => name === sessionCookieName)).toBe(false);
     expect((await database.session.findUnique({ where: { id: sessionId }, select: { revokedAt: true } }))?.revokedAt).not.toBeNull();
 
@@ -590,6 +633,7 @@ test("USER TOTP confirmation hides the enrollment secret and recovery codes afte
     expect(loggedOutState.history).toBe(false);
     expect(loggedOutState.storage).toBe(false);
     expect(loggedOutState.forms).toBe(false);
+
   } finally {
     if (sessionId) await database.session.updateMany({ where: { id: sessionId, revokedAt: null }, data: { revokedAt: new Date() } });
     await context.close();

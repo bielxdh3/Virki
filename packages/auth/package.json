@@ -18,6 +18,7 @@
     "./passkeys": "./src/passkeys.ts",
     "./account-invitation": "./src/account-invitation.ts",
     "./oidc-secrets": "./src/oidc-secrets.ts",
+    "./oidc-connection": "./src/oidc-connection.ts",
     "./administration": "./src/administration.ts",
     "./elevation-scopes": "./src/elevation-scopes.ts"
   },

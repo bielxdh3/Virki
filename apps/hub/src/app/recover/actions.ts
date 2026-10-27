@@ -2,24 +2,28 @@
 
 import { withHubAuditRequest } from "../../lib/audit-request";
 
+import { SESSION_COOKIE_NAME } from "@virki/auth";
 import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, getAccountRecoveryState, isAcceptableRecoveryPassword, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@virki/auth/security";
 import { requireSecurityElevation } from "@virki/auth/administration";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
-import { validateSessionCsrfToken } from "../../lib/session-csrf";
+import { validateSessionCsrfTokenFor } from "../../lib/session-csrf";
 import { cookies, headers } from "next/headers";
-import { redirect } from "next/navigation";
-import { recordSecurityDenial } from "../../lib/audit-denial";
+import { forbidden, redirect } from "next/navigation";
+import { recordSecurityDenial, recordSessionCsrfDenial } from "../../lib/audit-denial";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME, requiresRecoveryRequestSwitch } from "../../lib/recovery";
 import { clearRecoveryCandidateCookie, clearRecoveryCookie, RECOVERY_CANDIDATE_COOKIE, setRecoveryCandidateCookie, setRecoveryCookie } from "./recovery-cookie";
+import { EMAIL_INPUT_MAX_LENGTH, readBoundedFormString } from "../../lib/action-input-limits";
 
 export async function requestRecoveryAction(formData: FormData) {
   return withHubAuditRequest(async () => {
   const { requestHeaders } = await requireRecoveryAccess(formData, "recovery-request", "portal");
+  const email = readBoundedFormString(formData, "email", EMAIL_INPUT_MAX_LENGTH);
   try {
-    await requestAccountRecovery(read(formData, "email"), "pt-BR", new Date(), requestHeaders.get("cf-connecting-ip")?.trim());
+    if (email === null) throw new Error("Rejected.");
+    await requestAccountRecovery(email.trim(), "pt-BR", new Date(), requestHeaders.get("cf-connecting-ip")?.trim());
   } catch {
     await recordSecurityDenial(requestHeaders, "account-recovery-request", "rejected");
     // Keep account existence and mail-delivery state private.
@@ -31,8 +35,10 @@ export async function requestRecoveryAction(formData: FormData) {
 export async function requestAdministrativeRecoveryAction(formData: FormData) {
   return withHubAuditRequest(async () => {
   const { requestHeaders } = await requireRecoveryAccess(formData, "recovery-admin-request", "hub");
+  const email = readBoundedFormString(formData, "email", EMAIL_INPUT_MAX_LENGTH);
   try {
-    await requestAdministrativeAccountRecovery(read(formData, "email"), "pt-BR", new Date(), requestHeaders.get("cf-connecting-ip")?.trim());
+    if (email === null) throw new Error("Rejected.");
+    await requestAdministrativeAccountRecovery(email.trim(), "pt-BR", new Date(), requestHeaders.get("cf-connecting-ip")?.trim());
   } catch {
     await recordSecurityDenial(requestHeaders, "account-recovery-request", "rejected");
     // Keep account existence and mail-delivery state private.
@@ -124,10 +130,13 @@ export async function completeRecoveryAction(_previousState: RecoveryCompletionA
 export async function approveRecoveryAction(formData: FormData) {
   return withHubAuditRequest(async () => {
   const requestHeaders = await headers();
-  if (!hasSameOrigin(requestHeaders) || !(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "admin-security"))) { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "csrf"); redirect("/login"); }
-  if (getSurface(requestHeaders) !== "hub" || !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery-approve"))) { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "role"); redirect("/login"); }
+  const surface = getSurface(requestHeaders);
+  if (surface !== "hub" || !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery-approve"))) { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "role"); forbidden(); }
+  if (!hasSameOrigin(requestHeaders)) { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "csrf"); forbidden(); }
+  const sessionToken = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
+  if (!validateSessionCsrfTokenFor(sessionToken, read(formData, CSRF_FORM_FIELD_NAME), "admin-security")) { await recordSessionCsrfDenial(requestHeaders, "account-recovery-approve", sessionToken); forbidden(); }
   const session = await getCurrentSession();
-  if (!session || session.user.role !== "ADMIN") { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "role", session); redirect("/login"); }
+  if (!session || session.user.role !== "ADMIN") { await recordSecurityDenial(requestHeaders, "account-recovery-approve", "role", session); forbidden(); }
   try {
     await requireSecurityElevation(session.user.id, session.id, "ACCOUNT_STATE_CHANGE");
     await approveAccountRecovery(session.user, session.id, read(formData, "requestId"));
@@ -148,8 +157,9 @@ async function requireRecoveryAccess(formData: FormData, csrfScope: string, requ
       ? "portal"
       : "unknown";
   const recoverySurfaceAllowed = expectedSurface !== "unknown" && (!requiredSurface || expectedSurface === requiredSurface);
-  if (!hasSameOrigin(requestHeaders) || !recoverySurfaceAllowed || !validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: csrfScope }).valid) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "csrf"); redirect("/login"); }
-  if (expectedSurface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery"))) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); redirect("/login"); }
+  if (!recoverySurfaceAllowed) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); forbidden(); }
+  if (expectedSurface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery"))) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); forbidden(); }
+  if (!hasSameOrigin(requestHeaders) || !validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: csrfScope }).valid) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "csrf"); forbidden(); }
   return { requestHeaders, expectedRole: expectedSurface === "hub" ? "ADMIN" : "USER" };
 }
 

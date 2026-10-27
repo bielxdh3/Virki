@@ -79,7 +79,7 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   forwardedHeaders.set("x-virki-audit-request-id", auditRequestId);
   forwardedHeaders.delete("x-virki-audit-route");
   forwardedHeaders.delete("x-virki-audit-method");
-  if (/^\/(?:login(?:\/verify)?|api\/(?:passkeys|login(?:\/verify)?|logout)|admin\/(?:accounts|access|security|audit|connections)|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
+  if (/^\/(?:|login(?:\/verify)?|api\/(?:passkeys|login(?:\/verify)?|logout)|admin(?:\/(?:accounts|access|security|audit|connections))?|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
   forwardedHeaders.set("x-virki-audit-method", request.method);
   forwardedHeaders.set("x-nonce", nonce);
   forwardedHeaders.set("Content-Security-Policy", csp);
@@ -105,7 +105,13 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   if (isPublicPath(pathname, surface)) {
     const response = NextResponse.next({ request: { headers: forwardedHeaders } });
     // Issuer-proxied OIDC paths are answered by the issuer, which sets its own (single) Content-Security-Policy.
-    if (!isIssuerProxiedPath(pathname, surface)) response.headers.set("Content-Security-Policy", csp);
+    if (!isIssuerProxiedPath(pathname, surface)) {
+      response.headers.set("Content-Security-Policy", csp);
+      if (PUBLIC_ROUTES.has(pathname) && pathname !== "/api/health") {
+        response.headers.set("x-virki-request-id", auditRequestId);
+        response.headers.set("Cache-Control", PROTECTED_CACHE_CONTROL);
+      }
+    }
     return response;
   }
 

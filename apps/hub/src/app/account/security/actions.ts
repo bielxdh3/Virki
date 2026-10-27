@@ -2,28 +2,33 @@
 
 import { withHubAuditRequest } from "../../../lib/audit-request";
 
-import { revokeOtherAccountSessions, verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
+import { revokeOtherAccountSessions, SESSION_COOKIE_NAME, verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
 import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
-import { validateSessionCsrfToken } from "../../../lib/session-csrf";
+import { validateSessionCsrfTokenFor } from "../../../lib/session-csrf";
 import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt } from "@virki/auth/security";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
-import { headers } from "next/headers";
-import { recordSecurityDenial } from "../../../lib/audit-denial";
+import { forbidden, redirect } from "next/navigation";
+import { cookies, headers } from "next/headers";
+import { recordSecurityDenial, recordSessionCsrfDenial } from "../../../lib/audit-denial";
 import { getCurrentSession } from "../../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../../lib/surface";
+import { PASSWORD_INPUT_MAX_LENGTH, readBoundedFormString } from "../../../lib/action-input-limits";
 
 export type AccountSecurityState = { status: "idle" | "error" | "started" | "complete"; secret?: string; recoveryCodes?: string[] };
 
 export async function startTotpAction(_state: AccountSecurityState, formData: FormData): Promise<AccountSecurityState> {
   return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-totp-start");
+  const password = readBoundedFormString(formData, "password", PASSWORD_INPUT_MAX_LENGTH);
+  if (password === null) {
+    await recordSecurityDenial(await headers(), "account-security-proof", "rejected", session);
+    return { status: "error" };
+  }
   try {
     await consumeSecurityProofAttempt(session.user.id);
     const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { email: true, passwordHash: true, isActive: true } });
-    const password = readRaw(formData, "password");
     if (!user?.isActive || !user.passwordHash || !await verifyPassword(user.passwordHash, password)) throw new Error("Rejected.");
     const enrollment = await startTotpEnrollment(session.user.id, user.email);
     revalidatePath("/account/security");
@@ -131,11 +136,16 @@ export async function revokeOtherAccountSessionsAction(formData: FormData): Prom
       await recordSecurityDenial(await headers(), "account-sessions-revoke", "rejected", session);
       redirect("/account/security?error=sessions");
     }
+    const password = readBoundedFormString(formData, "password", PASSWORD_INPUT_MAX_LENGTH);
+    if (password === null) {
+      await recordSecurityDenial(await headers(), "account-sessions-revoke", "rejected", session);
+      redirect("/account/security?error=sessions");
+    }
     let revokedCount: number;
     try {
       await consumeSecurityProofAttempt(session.user.id);
       const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { passwordHash: true, role: true, isActive: true, accountStatus: true } });
-      if (!user?.isActive || user.accountStatus !== "ACTIVE" || user.role !== "USER" || !user.passwordHash || !await verifyPassword(user.passwordHash, readRaw(formData, "password"))) throw new Error("Rejected.");
+      if (!user?.isActive || user.accountStatus !== "ACTIVE" || user.role !== "USER" || !user.passwordHash || !await verifyPassword(user.passwordHash, password)) throw new Error("Rejected.");
       revokedCount = await revokeOtherAccountSessions(session.user.id, session.id);
     } catch {
       await recordSecurityDenial(await headers(), "account-sessions-revoke", "rejected", session);
@@ -166,14 +176,14 @@ export async function getAccountSecurityData() {
 async function requireAccountMutation(formData: FormData, source: string) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
-  if (!hasSameOrigin(requestHeaders)) { await recordSecurityDenial(requestHeaders, source, "csrf"); redirect("/login"); }
-  if (surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) { await recordSecurityDenial(requestHeaders, source, "role"); redirect("/login"); }
-  if (!(await validateSessionCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), "account-security"))) { await recordSecurityDenial(requestHeaders, source, "csrf"); redirect("/login"); }
+  if (surface === "unknown" || (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, source)))) { await recordSecurityDenial(requestHeaders, source, "role"); forbidden(); }
+  if (!hasSameOrigin(requestHeaders)) { await recordSecurityDenial(requestHeaders, source, "csrf"); forbidden(); }
+  const sessionToken = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
+  if (!validateSessionCsrfTokenFor(sessionToken, read(formData, CSRF_FORM_FIELD_NAME), "account-security")) { await recordSessionCsrfDenial(requestHeaders, source, sessionToken); forbidden(); }
   const session = await getCurrentSession();
-  if (!session) { await recordSecurityDenial(requestHeaders, source, "role"); redirect("/login"); }
-  if ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) { await recordSecurityDenial(requestHeaders, source, "role", session); redirect("/login"); }
+  if (!session) { await recordSecurityDenial(requestHeaders, source, "role"); forbidden(); }
+  if ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) { await recordSecurityDenial(requestHeaders, source, "role", session); forbidden(); }
   return session;
 }
 
 function read(formData: FormData, key: string): string { const value = formData.get(key); return typeof value === "string" ? value.trim() : ""; }
-function readRaw(formData: FormData, key: string): string { const value = formData.get(key); return typeof value === "string" ? value : ""; }

@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { runWithAuditContext, writeAuditLog } from "@virki/auth/audit";
-import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAttemptInTransaction, getSessionByToken, hashAuditIdentifier, hashAuditSessionReference, isTrustedClientAddress, writeAuditLogRequired } from "@virki/auth";
+import { SESSION_COOKIE_NAME, cleanupExpiredLoginRateLimits, consumeRateLimitAttemptInTransaction, getSessionByToken, hashAuditIdentifier, hashAuditSessionReference, isTrustedClientAddress, writeAuditLogRequired, type AuthenticatedSession } from "@virki/auth";
 import { prisma } from "@virki/database";
 import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } from "oidc-provider";
 import { installAuditResponseGate, requireAuditBeforeResponse, useNativeOidcResponse } from "./audit-gate";
@@ -9,7 +9,7 @@ import { readInteractionDetailsOrRespond } from "./interaction-error";
 import { createProviderEventAudit } from "./provider-audit";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { readIssuer, readSigningJwks } from "./issuer-config";
-import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
+import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, parseBasicClientId, parseBearerToken, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
 import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_PROVIDER_CLAIMS, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
@@ -192,23 +192,65 @@ provider.use(async (rawContext, next) => {
       return;
     }
     const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
-    if (await rateLimitRequest(context, (address) => selectAuthRateLimits(address, sessionCookie))) return;
+    if (await rateLimitRequest(context, (address) => [selectAuthRateLimits(address, null)[0]])) return;
+    const sessionResult = await resolveRateLimitSession(context, sessionCookie);
+    if (!sessionResult.ok) return;
+    if (await rateLimitRequest(context, (address) => [selectAuthRateLimits(address, sessionResult.session?.id ?? null)[1]])) return;
   } else if (isTokenEndpoint(context.method, context.path)) {
     const authorization = getString(context.req.headers.authorization) ?? undefined;
-    if (await rateLimitRequest(context, (address) => selectTokenRateLimits(address, authorization))) return;
+    if (await rateLimitRequest(context, (address) => [selectTokenRateLimits(address, null)[0]])) return;
+    const clientId = parseBasicClientId(authorization);
+    let registeredClientId: string | null = null;
+    if (clientId !== "invalid") {
+      try {
+        registeredClientId = (await prisma.projectConnection.findUnique({ where: { clientId }, select: { clientId: true } }))?.clientId ?? null;
+      } catch {
+        respondRateLimitStorageUnavailable(context);
+        return;
+      }
+    }
+    if (await rateLimitRequest(context, (address) => [selectTokenRateLimits(address, registeredClientId)[1]])) return;
   } else {
     const endpoint = getPublicOidcRateLimitEndpoint(context.method, context.path);
     if (endpoint) {
       const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
       const bearerAuthorization = getString(context.req.headers.authorization) ?? undefined;
-      if (await rateLimitRequest(context, (address) => selectPublicOidcRateLimits(address, sessionCookie, endpoint, bearerAuthorization))) return;
+      if (await rateLimitRequest(context, (address) => [selectPublicOidcRateLimits(address, null, endpoint)[0]])) return;
+      const presentedBearer = endpoint === "userinfo" ? parseBearerToken(bearerAuthorization) : null;
+      let validatedBearerToken: string | null = null;
+      let session: AuthenticatedSession | null = null;
+      try {
+        if (presentedBearer) {
+          if (await provider.AccessToken.find(presentedBearer)) validatedBearerToken = presentedBearer;
+        } else if (sessionCookie) {
+          session = await getSessionByToken(sessionCookie);
+        }
+      } catch {
+        respondRateLimitStorageUnavailable(context);
+        return;
+      }
+      if (await rateLimitRequest(context, (address) => [selectPublicOidcRateLimits(
+        address,
+        presentedBearer ? null : session?.id ?? null,
+        endpoint,
+        validatedBearerToken ?? undefined
+      )[1]])) return;
     }
   }
 
   const match = isInteractionPath(context.path) ? context.path.match(/^\/interaction\/([A-Za-z0-9_-]{8,80})$/u) : null;
   if (match) {
+    if (context.method !== "GET") {
+      context.status = 405;
+      context.set("Allow", "GET");
+      context.body = { error: "invalid_request" };
+      return;
+    }
     const sessionCookie = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
-    if (await rateLimitRequest(context, (address) => selectInteractionRateLimits(address, sessionCookie))) return;
+    if (await rateLimitRequest(context, (address) => [selectInteractionRateLimits(address, null)[0]])) return;
+    const sessionResult = await resolveRateLimitSession(context, sessionCookie);
+    if (!sessionResult.ok) return;
+    if (await rateLimitRequest(context, (address) => [selectInteractionRateLimits(address, sessionResult.session?.id ?? null)[1]])) return;
     await handleInteraction(context, match[1]);
     return;
   }
@@ -311,7 +353,10 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
     return;
   }
   await writeAuditLog({ eventType: "SSO_INTERACTION_STARTED", result: "INFO", resource: "sso.interaction", metadata: { requestRef: hashAuditIdentifier(uid) } });
-  const essentialAcr = getEssentialAcrRequest(interaction.prompt.details.acr);
+  // oidc-provider turns acr_values into claims.id_token.acr.values after parsing
+  // the claims parameter. Keep the raw essential request as a hard requirement
+  // even when that normalization replaces the original claim object.
+  const essentialAcr = getEssentialAcrRequest(interaction.prompt.details.acr, interaction.params.claims);
   if (essentialAcr.required && !supportsEssentialOidcAcrValues(essentialAcr.values)) {
     await denyInteraction(context);
     return;
@@ -321,14 +366,15 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
     uid,
     Buffer.from(cookieKey, "base64url")
   );
-  const sessionToken = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
-  const session = sessionToken ? await getSessionByToken(sessionToken) : null;
-
   const interactionReturnTo = new URL(`/interaction/${uid}`, issuer);
   if (authRequestStartedAtMs !== null) {
     interactionReturnTo.searchParams.set("virki_auth_request", getString(context.query.virki_auth_request) ?? "");
   }
 
+  // The rate-limit bucket lookup may have taken time; re-read the session at the
+  // authorization boundary so revocation during limiter work cannot authorize.
+  const sessionToken = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
+  const session = sessionToken ? await getSessionByToken(sessionToken) : null;
   if (!session) {
     const login = new URL("/login", issuer);
     login.searchParams.set("returnTo", `${interactionReturnTo.pathname}${interactionReturnTo.search}`);
@@ -392,13 +438,12 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
     return;
   }
 
-  const grant = interaction.grantId
-    ? await provider.Grant.find(interaction.grantId)
-    : new provider.Grant({ accountId: session.user.id, clientId });
-  if (!grant || !isOidcGrantBoundToInteraction(grant, session.user.id, clientId)) {
+  const existingGrant = interaction.grantId ? await provider.Grant.find(interaction.grantId) : undefined;
+  if (existingGrant && !isOidcGrantBoundToInteraction(existingGrant, session.user.id, clientId)) {
     await denyInteraction(context);
     return;
   }
+  const grant = existingGrant ?? new provider.Grant({ accountId: session.user.id, clientId });
   grant.addOIDCScope("openid profile email");
   const missingClaims = interaction.prompt.details.missingOIDCClaims;
   if (Array.isArray(missingClaims) && missingClaims.every((claim) => typeof claim === "string")) grant.addOIDCClaims(missingClaims);
@@ -442,8 +487,7 @@ async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: s
   const clientAddress = getString(context.req.headers["cf-connecting-ip"]) ?? undefined;
   if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(clientAddress)) {
     await writeRateLimitAuditOnce(context.req.socket.remoteAddress ?? "unknown", new Date(), "unavailable");
-    context.status = 503;
-    context.body = { error: "temporarily_unavailable" };
+    respondRateLimitStorageUnavailable(context);
     return true;
   }
   if (!isTrustedClientAddress(clientAddress)) return false;
@@ -458,17 +502,7 @@ async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: s
       return true;
     });
   } catch {
-    // Rate-limit storage failure must be observable, but never expose a DB
-    // exception, Authorization header, CF address or a session identifier.
-    // Throttle diagnostics while the database is down to avoid log flooding.
-    const timestamp = Date.now();
-    if (timestamp - lastRateLimitStorageOutageLogMs >= 60_000) {
-      lastRateLimitStorageOutageLogMs = timestamp;
-      console.error("OIDC rate limiter storage unavailable; refusing request with 503.");
-    }
-    context.status = 503;
-    context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
-    context.body = { error: "temporarily_unavailable" };
+    respondRateLimitStorageUnavailable(context);
     return true;
   }
   if (allowed) return false;
@@ -477,6 +511,31 @@ async function rateLimitRequest(context: KoaContextWithOIDC, select: (address: s
   context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
   context.body = { error: "temporarily_unavailable" };
   return true;
+}
+
+async function resolveRateLimitSession(
+  context: KoaContextWithOIDC,
+  sessionToken: string | null
+): Promise<{ ok: true; session: AuthenticatedSession | null } | { ok: false }> {
+  if (!sessionToken) return { ok: true, session: null };
+  try {
+    return { ok: true, session: await getSessionByToken(sessionToken) };
+  } catch {
+    respondRateLimitStorageUnavailable(context);
+    return { ok: false };
+  }
+}
+
+function respondRateLimitStorageUnavailable(context: KoaContextWithOIDC): void {
+  // Never expose a DB exception, Authorization header, source IP or session identifier.
+  const timestamp = Date.now();
+  if (timestamp - lastRateLimitStorageOutageLogMs >= 60_000) {
+    lastRateLimitStorageOutageLogMs = timestamp;
+    console.error("OIDC rate limiter storage unavailable; refusing request with 503.");
+  }
+  context.status = 503;
+  context.set("Retry-After", String(OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS));
+  context.body = { error: "temporarily_unavailable" };
 }
 
 async function writeRateLimitAuditOnce(clientAddress: string, now: Date, reason: "rate-limited" | "unavailable"): Promise<void> {
@@ -517,12 +576,28 @@ function getStringOrNumber(value: unknown): string | number | undefined {
   return typeof value === "string" || typeof value === "number" ? value : undefined;
 }
 
-function getEssentialAcrRequest(value: unknown): { required: boolean; values: string[] } {
-  if (!value || typeof value !== "object") return { required: false, values: [] };
-  const request = value as { essential?: unknown; value?: unknown; values?: unknown };
+function getEssentialAcrRequest(value: unknown, rawClaims: unknown): { required: boolean; values: string[] } {
+  const rawRequest = getRawEssentialAcrClaim(rawClaims);
+  const request = rawRequest ?? (value && typeof value === "object" ? value as { essential?: unknown; value?: unknown; values?: unknown } : undefined);
+  if (!request) return { required: false, values: [] };
   if (request.essential !== true) return { required: false, values: [] };
   if (typeof request.value === "string") return { required: true, values: [request.value] };
   return { required: true, values: Array.isArray(request.values) ? request.values.filter((item): item is string => typeof item === "string") : [] };
+}
+
+function getRawEssentialAcrClaim(rawClaims: unknown): { essential?: unknown; value?: unknown; values?: unknown } | undefined {
+  if (typeof rawClaims !== "string") return undefined;
+  try {
+    const claims: unknown = JSON.parse(rawClaims);
+    if (!claims || typeof claims !== "object") return undefined;
+    const idToken = (claims as { id_token?: unknown }).id_token;
+    if (!idToken || typeof idToken !== "object") return undefined;
+    const acr = (idToken as { acr?: unknown }).acr;
+    if (!acr || typeof acr !== "object" || (acr as { essential?: unknown }).essential !== true) return undefined;
+    return acr as { essential?: unknown; value?: unknown; values?: unknown };
+  } catch {
+    return undefined;
+  }
 }
 
 function safeOidcError(value: unknown): string {

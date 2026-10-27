@@ -31,12 +31,15 @@ export function validateProjectConnectionInput(input: {
   origin: string;
   launchUrl?: string;
   redirectUris: string;
-}) {
-  const name = input.name.trim();
-  const slug = input.slug.trim().toLowerCase();
+}, options: { existingName?: string; preserveExistingName?: boolean } = {}) {
+  const preservesExistingName = options.preserveExistingName !== false && options.existingName !== undefined
+    && (input.name === options.existingName || input.name === options.existingName.replace(/[\r\n]/gu, ""));
+  const name = preservesExistingName ? options.existingName : input.name.trim();
+  const slugInput = input.slug.trim();
+  const slug = slugInput.toLowerCase();
   const origin = requireCanonicalHttpsUrl(input.origin.trim(), true);
   const launchUrl = validateProjectLaunchUrl(origin, input.launchUrl ?? "");
-  if (!name || name.length > 80 || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(slug)) throw new ConnectionInputError();
+  if (!name || name.length > 80 || !preservesExistingName && /\p{Cc}/u.test(input.name) || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$/u.test(slugInput)) throw new ConnectionInputError();
   const redirectUris = input.redirectUris.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean).map((value) => requireCanonicalHttpsUrl(value, false));
   if (redirectUris.length < 1 || redirectUris.length > 10 || new Set(redirectUris).size !== redirectUris.length) throw new ConnectionInputError();
   return { name, slug, origin, launchUrl, redirectUris };

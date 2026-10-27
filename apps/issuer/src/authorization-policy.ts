@@ -112,7 +112,9 @@ export function requiresOidcAssuranceInteraction(input: {
   currentAcr: string | undefined;
   authenticationMethods: readonly string[];
 }): boolean {
-  const requestsMultiFactor = input.requestedAcrValues?.split(/\s+/u).includes(MULTI_FACTOR_ACR) ?? false;
+  const requestedAcrValues = splitAcrValues(input.requestedAcrValues);
+  const requestsMultiFactor = requestedAcrValues.includes(MULTI_FACTOR_ACR) &&
+    (!requestedAcrValues.includes(PASSWORD_ACR) || input.authenticationMethods.includes("mfa"));
   return requestsMultiFactor && (
     !input.authenticationMethods.includes("mfa") || input.currentAcr !== MULTI_FACTOR_ACR
   );
@@ -172,9 +174,17 @@ export function requiresFreshOidcAuthentication(input: {
     input.requestStartedAtMs === undefined || input.authenticatedAt.getTime() <= input.requestStartedAtMs
   )) return true;
 
-  const requestsMultiFactor = (input.requestedAcrValues?.split(/\s+/u).includes(MULTI_FACTOR_ACR) ?? false) ||
-    (input.requiredAcrValues?.includes(MULTI_FACTOR_ACR) ?? false);
-  if (requestsMultiFactor && !input.authenticationMethods.includes("mfa")) return true;
+  const requestedAcrValues = splitAcrValues(input.requestedAcrValues);
+  const requestsMultiFactor = (
+    requestedAcrValues.includes(MULTI_FACTOR_ACR) &&
+    (!requestedAcrValues.includes(PASSWORD_ACR) || input.authenticationMethods.includes("mfa"))
+  ) || (
+    input.requiredAcrValues?.includes(MULTI_FACTOR_ACR) &&
+    !input.requiredAcrValues.includes(PASSWORD_ACR)
+  );
+  if (requestsMultiFactor && !input.authenticationMethods.includes("mfa") && (
+    input.requestStartedAtMs === undefined || input.authenticatedAt.getTime() <= input.requestStartedAtMs
+  )) return true;
 
   if (input.maxAge === undefined) return false;
   const maxAge = typeof input.maxAge === "number" ? input.maxAge : Number(input.maxAge);
@@ -186,6 +196,10 @@ export function requiresFreshOidcAuthentication(input: {
   const now = Math.floor((input.requestStartedAtMs ?? (input.now ?? new Date()).getTime()) / 1_000);
   const authenticatedAt = Math.floor(input.authenticatedAt.getTime() / 1_000);
   return now - authenticatedAt > maxAge;
+}
+
+function splitAcrValues(value: string | undefined): string[] {
+  return value?.split(/\s+/u).filter(Boolean) ?? [];
 }
 
 export function hasValidOidcStateAndNonce(state: string, nonce: string, requiresNonce: boolean): boolean {

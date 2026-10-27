@@ -135,6 +135,29 @@ test("OIDC ACR loa:2 creates an interaction unless the provider session has curr
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:1", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
 });
 
+test("OIDC ACR alternatives allow a fresh password session without an MFA redirect loop", () => {
+  const now = new Date("2026-10-27T12:00:00.000Z");
+  const requestStartedAtMs = now.getTime();
+  const acrValues = "urn:virki:loa:2 urn:virki:loa:1";
+  const requiredAcrValues = ["urn:virki:loa:2", "urn:virki:loa:1"];
+
+  assert.equal(requiresOidcAssuranceInteraction({
+    requestedAcrValues: acrValues,
+    currentAcr: "urn:virki:loa:1",
+    authenticationMethods: ["pwd"]
+  }), false, "the current password ACR is one of the requested alternatives");
+  assert.equal(requiresFreshOidcAuthentication({
+    prompt: "login",
+    maxAge: undefined,
+    requestedAcrValues: acrValues,
+    requiredAcrValues,
+    requestStartedAtMs,
+    authenticatedAt: new Date(requestStartedAtMs + 1),
+    authenticationMethods: ["pwd"],
+    now
+  }), false, "a password-only session completed after prompt=login and satisfies the lower requested ACR");
+});
+
 test("OIDC authentication request markers bind proof timestamps to one interaction", () => {
   const key = Buffer.alloc(32, 7);
   const marker = createOidcAuthRequestMarker("interaction_123", 1_798_000_000_000, key);
@@ -165,6 +188,6 @@ test("OIDC prompt=login and max_age require recent central authentication", () =
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: 30, requestStartedAtMs, authenticatedAt: new Date(now.getTime() - 31_000), authenticationMethods, now }), true, "numeric default_max_age values are enforced");
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: "invalid", requestStartedAtMs, authenticatedAt: now, authenticationMethods, now }), true);
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
-  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: new Date(now.getTime() + 1), authenticationMethods: ["pwd"], now }), true, "MFA assurance is required even when a password-only session is new");
+  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: new Date(now.getTime() + 1), authenticationMethods: ["pwd"], now }), false, "one fresh password sign-in must stop repeated login redirects; an essential ACR2 claim still fails its separate assurance check");
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requiredAcrValues: ["urn:virki:loa:2"], requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
 });

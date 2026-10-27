@@ -1,8 +1,9 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useActionState, useEffect, useId, useRef, useState } from "react";
 import { updateProjectConnectionAction, type ConnectionEditActionState } from "../actions";
 
+const connectionSlugPattern = String.raw`^\s*[A-Za-z0-9](?:[A-Za-z0-9\-]{0,62}[A-Za-z0-9])?\s*$`;
 const initialState: ConnectionEditActionState = { status: "idle" };
 
 type ConnectionEditValues = {
@@ -17,9 +18,11 @@ type ConnectionEditValues = {
 
 export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: string; csrfFieldName: string; connection: ConnectionEditValues }) {
   const [state, action, pending] = useActionState(updateProjectConnectionAction, initialState);
+  const slugHelpId = useId();
   const reapplyButtonRef = useRef<HTMLButtonElement | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
   const [focusSaveAfterReapply, setFocusSaveAfterReapply] = useState(false);
+  const [cleanLegacyName, setCleanLegacyName] = useState(false);
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const [draft, setDraft] = useState(() => ({
     name: connection.name,
@@ -32,6 +35,8 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
 
   const conflictRevision = state.status === "conflict" ? state.latest.configurationRevision : null;
   const canReapplyDraft = state.status === "conflict" && draft.expectedRevision !== state.latest.configurationRevision;
+  const nameHasLegacyControlCharacter = /\p{Cc}/u.test(connection.name);
+  const namePattern = nameHasLegacyControlCharacter && !cleanLegacyName && draft.name === connection.name ? undefined : "[^\\p{Cc}]*";
 
   useEffect(() => {
     // <details> can be toggled natively before React finishes hydration.
@@ -65,8 +70,19 @@ export function ConnectionEditForm({ csrf, csrfFieldName, connection }: { csrf: 
       <input type="hidden" name={csrfFieldName} value={csrf} />
       <input type="hidden" name="connectionId" value={connection.id} />
       <input type="hidden" name="expectedRevision" value={draft.expectedRevision} />
-      <label>Nome<input name="name" required maxLength={80} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
-      <label>Identificador (slug)<input name="slug" required maxLength={48} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={draft.slug} onChange={(event) => setDraft((current) => ({ ...current, slug: event.target.value }))} /></label>
+      <label>Nome<input name="name" required maxLength={80} pattern={namePattern} title={namePattern ? "Não use caracteres de controle no nome." : undefined} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+      {nameHasLegacyControlCharacter && <label><input type="checkbox" name="cleanLegacyName" value="true" checked={cleanLegacyName} onChange={(event) => {
+        const shouldCleanLegacyName = event.currentTarget.checked;
+        setCleanLegacyName(shouldCleanLegacyName);
+        setDraft((current) => ({
+          ...current,
+          name: shouldCleanLegacyName
+            ? current.name.replace(/\p{Cc}/gu, "")
+            : current.name === connection.name.replace(/\p{Cc}/gu, "") ? connection.name : current.name,
+        }));
+      }} />Salvar o nome exibido e remover controles legados</label>}
+      <label>Identificador (slug)<input name="slug" required pattern={connectionSlugPattern} aria-describedby={slugHelpId} value={draft.slug} onChange={(event) => setDraft((current) => ({ ...current, slug: event.target.value }))} /></label>
+      <p id={slugHelpId} className="muted">Até 64 letras, números e hífens. Espaços externos são removidos e o valor é salvo em minúsculas.</p>
       <label>Origem HTTPS<input name="origin" type="url" required value={draft.origin} onChange={(event) => setDraft((current) => ({ ...current, origin: event.target.value }))} /></label>
       <label>URL de entrada (opcional)<input name="launchUrl" type="url" value={draft.launchUrl} onChange={(event) => setDraft((current) => ({ ...current, launchUrl: event.target.value }))} /></label>
       <label>Redirect URIs exatas<textarea name="redirectUris" required value={draft.redirectUris} onChange={(event) => setDraft((current) => ({ ...current, redirectUris: event.target.value }))} /></label>

@@ -214,3 +214,20 @@ test("obsolete recovery API requires authentication while real recovery routes s
   for (const path of ["/recover", "/recover/open"]) assert.equal((await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env)).status, 200);
   assert.equal((await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/api/recover", { headers: { host: "portal.biel.dev.br" } }), env)).status, 307);
 });
+
+test("sensitive public authentication responses carry no-store and server-generated correlation", async () => {
+  for (const path of ["/login", "/login/verify", "/api/login", "/api/login/verify", "/api/passkeys", "/api/logout", "/recover", "/recover/open"]) {
+    const response = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br", "x-virki-audit-request-id": "spoof" } }), env);
+    assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate", path);
+    const correlation = response.headers.get("x-virki-request-id") ?? "";
+    assert.match(correlation, /^[a-f0-9-]{36}$/u, path);
+    assert.equal(correlation, response.headers.get("x-middleware-request-x-virki-audit-request-id"), path);
+  }
+});
+
+test("root and admin audit attribution replace untrusted route headers", async () => {
+  for (const [host, path] of [["portal.biel.dev.br", "/"], ["hub.biel.dev.br", "/admin/"]] as const) {
+    const response = await evaluateProxyRequest(new NextRequest(`https://${host}${path}`, { headers: { host, cookie: `${SESSION_COOKIE_NAME}=synthetic`, "x-virki-audit-route": "/forged" } }), { ...env, NODE_ENV: "development", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false" });
+    assert.equal(response.headers.get("x-middleware-request-x-virki-audit-route"), path === "/" ? "/" : "/admin");
+  }
+});

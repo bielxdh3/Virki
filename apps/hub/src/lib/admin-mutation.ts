@@ -1,12 +1,13 @@
+import { SESSION_COOKIE_NAME } from "@virki/auth";
 import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
-import { validateSessionCsrfToken } from "./session-csrf";
+import { validateSessionCsrfTokenFor } from "./session-csrf";
 import { forbidden } from "next/navigation";
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { getCurrentSession } from "./auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "./cloudflare-access";
 import { getSurface, hasSameOrigin } from "./surface";
 import { isAdminRequestAllowed, isAdminRole, isHubAdminMutationSurface } from "./admin-policy";
-import { recordSecurityDenial } from "./audit-denial";
+import { recordSecurityDenial, recordSessionCsrfDenial } from "./audit-denial";
 
 type AdminSession = NonNullable<Awaited<ReturnType<typeof getCurrentSession>>>;
 
@@ -18,7 +19,8 @@ export async function requireAdminMutation(formData: FormData, source: string): 
   if (!isAdminRequestAllowed(surface, accessValid)) forbidden();
   if (!hasSameOrigin(requestHeaders)) { await recordSecurityDenial(requestHeaders, source, "csrf"); forbidden(); }
   const csrf = formData.get(CSRF_FORM_FIELD_NAME);
-  if (typeof csrf !== "string" || !(await validateSessionCsrfToken(csrf, getAdminCsrfScope(source)))) { await recordSecurityDenial(requestHeaders, source, "csrf"); forbidden(); }
+  const sessionToken = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
+  if (typeof csrf !== "string" || !validateSessionCsrfTokenFor(sessionToken, csrf, getAdminCsrfScope(source))) { await recordSessionCsrfDenial(requestHeaders, source, sessionToken); forbidden(); }
   const session = await getCurrentSession();
   if (!session || !isAdminRole(session.user.role)) { await recordSecurityDenial(requestHeaders, source, "role", session); forbidden(); }
   return session as AdminSession;

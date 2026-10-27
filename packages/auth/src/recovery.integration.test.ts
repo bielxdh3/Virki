@@ -2,16 +2,21 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
+import { provisionInvitedUserAccount } from "./account-invitation";
 import { hashAuditIdentifier } from "./audit";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
 import {
   approveAccountRecovery,
   consumeApprovedAccountRecovery,
+  generateRecoveryCode,
   getAccountRecoveryRequestId,
   getAccountRecoveryState,
+  hashRecoveryCode,
   requestAccountRecovery,
   requestAdministrativeAccountRecovery,
   RECOVERY_REQUEST_COOLDOWN_MS,
+  SecurityMutationError,
+  verifyRecoveryCode,
   verifyAccountRecoveryEmail
 } from "./security";
 import { hashPassword, lockRateLimitIdentifierInTransaction, verifyPassword } from "./index";
@@ -93,6 +98,116 @@ test("an anonymous request after approval cannot expire the approved recovery", 
   const stored = await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { passwordHash: true } });
   assert.equal(await verifyPassword(stored.passwordHash ?? "", newPassword), true);
   await assert.rejects(consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "integration-replayed-password", attackerTime));
+});
+
+test("concurrent anonymous recovery requests cannot race past a live invitation", integrationOptions, async () => {
+  const admin = await createTestUser({ role: "ADMIN", label: "invite-recovery-race-admin" });
+  const email = `${randomUUID()}@integration.invalid`;
+  const createdAt = new Date();
+  const { sessionId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", createdAt);
+  const { userId } = await provisionInvitedUserAccount({ id: admin.id }, sessionId, { email, displayName: "Convidado" }, createdAt);
+
+  const afterCooldown = new Date(createdAt.getTime() + RECOVERY_REQUEST_COOLDOWN_MS + 1_000);
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let blockerPid = 0;
+  const ownerLock = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 10_000 });
+  await ready;
+
+  const recoveries = Promise.allSettled([
+    requestAccountRecovery(email, "pt-BR", afterCooldown),
+    requestAccountRecovery(email, "pt-BR", afterCooldown)
+  ]);
+  let barrierError: unknown;
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, 'FROM "User"');
+  } catch (error) {
+    barrierError = error;
+  } finally {
+    release();
+  }
+  await ownerLock;
+  const outcomes = await recoveries;
+  if (barrierError) throw barrierError;
+  assert.ok(outcomes.every((result) => result.status === "fulfilled" || result.reason instanceof SecurityMutationError));
+
+  const requests = await prisma.accountRecoveryRequest.findMany({ where: { userId }, select: { status: true, purpose: true } });
+  assert.deepEqual(requests, [{ status: "APPROVED", purpose: "INVITATION" }]);
+  assert.equal(await prisma.emailOutboxMessage.count({ where: { recipientEmail: email, kind: "ACCOUNT_RECOVERY" } }), 0);
+});
+
+test("successful recovery-code consumption is single-use and records only a safe account reference", integrationOptions, async () => {
+  const user = await createTestUser({ label: "recovery-code-audit" });
+  const code = generateRecoveryCode();
+  const stored = await prisma.recoveryCode.create({ data: { userId: user.id, codeHash: hashRecoveryCode(code) }, select: { id: true } });
+
+  assert.equal(await verifyRecoveryCode(user.id, code), true);
+  assert.notEqual((await prisma.recoveryCode.findUniqueOrThrow({ where: { id: stored.id }, select: { usedAt: true } })).usedAt, null);
+  const audit = await prisma.auditLog.findMany({ where: { eventType: "RECOVERY_CODE_CONSUMED", actorUserId: user.id }, select: { message: true, metadata: true } });
+  assert.equal(audit.length, 1);
+  assert.deepEqual(audit[0]?.metadata, { targetRef: hashAuditIdentifier(user.id) });
+  assert.equal(JSON.stringify(audit[0]).includes(code), false);
+
+  assert.equal(await verifyRecoveryCode(user.id, code), false);
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "RECOVERY_CODE_CONSUMED", actorUserId: user.id } }), 1);
+});
+
+test("recovery-code consumption rolls back when its success audit cannot be stored", integrationOptions, async () => {
+  const user = await createTestUser({ label: "recovery-code-audit-rollback" });
+  const code = generateRecoveryCode();
+  const stored = await prisma.recoveryCode.create({ data: { userId: user.id, codeHash: hashRecoveryCode(code) }, select: { id: true } });
+  const client = prisma as unknown as {
+    $transaction: (callback: (transaction: object) => Promise<unknown>, options?: object) => Promise<unknown>;
+  };
+  const originalTransaction = client.$transaction;
+  client.$transaction = (callback, options) => originalTransaction.call(prisma, (transaction) => callback(new Proxy(transaction, {
+    get(target, property, receiver) {
+      if (property !== "auditLog") return Reflect.get(target, property, receiver);
+      const delegate = Reflect.get(target, property, target);
+      return new Proxy(delegate, {
+        get(delegateTarget, delegateProperty, delegateReceiver) {
+          if (delegateProperty === "create") return async () => { throw new Error("synthetic audit storage failure"); };
+          const value = Reflect.get(delegateTarget, delegateProperty, delegateReceiver);
+          return typeof value === "function" ? value.bind(delegateTarget) : value;
+        }
+      });
+    }
+  })), options);
+
+  try {
+    await assert.rejects(verifyRecoveryCode(user.id, code), /synthetic audit storage failure/u);
+  } finally {
+    client.$transaction = originalTransaction;
+  }
+
+  assert.equal((await prisma.recoveryCode.findUniqueOrThrow({ where: { id: stored.id }, select: { usedAt: true } })).usedAt, null);
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "RECOVERY_CODE_CONSUMED", actorUserId: user.id } }), 0);
+});
+
+test("security proof quota deliberately charges valid and invalid code attempts", integrationOptions, async () => {
+  const successful = await createTestUser({ label: "recovery-proof-quota-success" });
+  const validCodes = Array.from({ length: 6 }, generateRecoveryCode);
+  await prisma.recoveryCode.createMany({ data: validCodes.map((code) => ({ userId: successful.id, codeHash: hashRecoveryCode(code) })) });
+
+  for (const code of validCodes.slice(0, 5)) assert.equal(await verifyRecoveryCode(successful.id, code), true);
+  await assert.rejects(verifyRecoveryCode(successful.id, validCodes[5]!), SecurityMutationError,
+    "five successful security proofs exhaust the shared operation quota");
+  assert.equal((await prisma.recoveryCode.findFirstOrThrow({ where: { userId: successful.id, codeHash: hashRecoveryCode(validCodes[5]!) }, select: { usedAt: true } })).usedAt, null);
+
+  const failed = await createTestUser({ label: "recovery-proof-quota-failure" });
+  const validCode = generateRecoveryCode();
+  const stored = await prisma.recoveryCode.create({ data: { userId: failed.id, codeHash: hashRecoveryCode(validCode) }, select: { id: true } });
+  for (let attempt = 0; attempt < 5; attempt += 1) assert.equal(await verifyRecoveryCode(failed.id, "000000000000000000"), false);
+  await assert.rejects(verifyRecoveryCode(failed.id, validCode), SecurityMutationError,
+    "five failed security proofs still block a sixth valid operation");
+  assert.equal((await prisma.recoveryCode.findUniqueOrThrow({ where: { id: stored.id }, select: { usedAt: true } })).usedAt, null);
 });
 
 

@@ -128,10 +128,14 @@ export function hashDeviceToken(deviceToken: string): string {
 
 export function resolveLoginDeviceToken(
   candidate: string | undefined,
-  trustedDevice: { status: string; revokedAt: Date | null } | null
+  trustedDevice: { status: string; revokedAt: Date | null } | null,
+  hasActiveLoginChallenge = false
 ): { deviceToken: string; isTrusted: boolean } {
   if (candidate && isDeviceToken(candidate) && trustedDevice?.status === "TRUSTED" && trustedDevice.revokedAt === null) {
     return { deviceToken: candidate, isTrusted: true };
+  }
+  if (candidate && isDeviceToken(candidate) && !trustedDevice && hasActiveLoginChallenge) {
+    return { deviceToken: candidate, isTrusted: false };
   }
   return { deviceToken: generateDeviceToken(), isTrusted: false };
 }
@@ -297,7 +301,16 @@ export async function verifyRecoveryCode(userId: string, code: string): Promise<
     const row = await transaction.recoveryCode.findFirst({ where: { userId, codeHash: normalizedHash, usedAt: null }, select: { id: true } });
     if (!row) return false;
     const consumed = await transaction.recoveryCode.updateMany({ where: { id: row.id, usedAt: null }, data: { usedAt: new Date() } });
-    return consumed.count === 1;
+    if (consumed.count !== 1) return false;
+    await writeAuditLogInTransaction(transaction, {
+      eventType: "RECOVERY_CODE_CONSUMED",
+      result: "SUCCESS",
+      actorUserId: userId,
+      resource: "identity.recovery",
+      message: "Recovery code consumed.",
+      metadata: { targetRef: hashAuditIdentifier(userId) }
+    });
+    return true;
   });
 }
 
@@ -334,7 +347,13 @@ export async function startLoginCeremony(
       await transaction.trustedDevice.updateMany({ where: { userId, status: "TRUSTED", createdAt: { lte: new Date(now.getTime() - DEVICE_TRUST_TTL_MS) } }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
       const candidateHash = candidateToken ? hashDeviceToken(candidateToken) : undefined;
       const trusted = candidateHash ? await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash: candidateHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } }) : null;
-      const resolvedDevice = resolveLoginDeviceToken(candidateToken, trusted);
+      const activeLoginChallenge = candidateHash && !trusted
+        ? await transaction.deviceChallenge.findFirst({
+          where: { userId, deviceIdHash: candidateHash, status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null, expiresAt: { gt: now } },
+          select: { id: true }
+        })
+        : null;
+      const resolvedDevice = resolveLoginDeviceToken(candidateToken, trusted, Boolean(activeLoginChallenge));
       const resolvedDeviceToken = resolvedDevice.deviceToken;
       const deviceIdHash = hashDeviceToken(resolvedDeviceToken);
       const isTrusted = resolvedDevice.isTrusted;
@@ -357,17 +376,18 @@ export async function startLoginCeremony(
       }
 
       const totpOnly = Boolean(user.emailVerifiedAt) && requiresTotp && isTrusted;
+      stage = "challenge-revoke";
+      const recent = await transaction.deviceChallenge.findFirst({
+        where: { userId, deviceIdHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now }, createdAt: { gt: new Date(now.getTime() - LOGIN_EMAIL_CEREMONY_REUSE_MS), lte: now } },
+        orderBy: { createdAt: "desc" },
+        select: { ceremonyId: true }
+      });
+      if (recent) {
+        stage = "transaction-commit";
+        return { kind: "CEREMONY", ceremonyId: recent.ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
+      }
+
       if (!totpOnly) {
-        stage = "challenge-revoke";
-        const recent = await transaction.deviceChallenge.findFirst({
-          where: { userId, deviceIdHash, requiresTotp, status: "PENDING", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now }, createdAt: { gt: new Date(now.getTime() - LOGIN_EMAIL_CEREMONY_REUSE_MS), lte: now } },
-          orderBy: { createdAt: "desc" },
-          select: { ceremonyId: true }
-        });
-        if (recent) {
-          stage = "transaction-commit";
-          return { kind: "CEREMONY", ceremonyId: recent.ceremonyId, factor: "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
-        }
         stage = "ceremony-rate-limited";
         if (!await consumeLoginEmailCeremonyQuota(transaction, userId, isTrusted ? deviceIdHash : null, now, trustedClientAddress)) throw new SecurityMutationError();
       }
@@ -398,13 +418,15 @@ export async function startLoginCeremony(
 }
 
 // Persistent budget for login ceremonies that mail a code, charged even after a correct password so a
-// password holder cannot mail unbounded codes. A trusted device spends its own bucket, so someone who has
-// the password but not the owner's device token cannot exhaust the owner's budget; untrusted browsers
-// share the per-account bucket. The per-source bucket applies when the client address is known.
+// password holder cannot mail unbounded codes. Every device shares the account bucket; trusted devices
+// also have their own bucket, and the per-source bucket applies when the client address is known.
 async function consumeLoginEmailCeremonyQuota(transaction: Prisma.TransactionClient, userId: string, trustedDeviceIdHash: string | null, now: Date, trustedClientAddress?: string): Promise<boolean> {
-  const bucket = trustedDeviceIdHash ? `login-email-ceremony-device:${userId}:${trustedDeviceIdHash}` : `login-email-ceremony-account:${userId}`;
-  const account = await consumeRateLimitAttemptInTransaction(transaction, bucket, now, LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT);
+  const account = await consumeRateLimitAttemptInTransaction(transaction, `login-email-ceremony-account:${userId}`, now, LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT);
   if (!account.allowed) return false;
+  if (trustedDeviceIdHash) {
+    const device = await consumeRateLimitAttemptInTransaction(transaction, `login-email-ceremony-device:${userId}:${trustedDeviceIdHash}`, now, LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT);
+    if (!device.allowed) return false;
+  }
   if (!isTrustedClientAddress(trustedClientAddress)) return true;
   const source = await consumeRateLimitAttemptInTransaction(transaction, `login-email-ceremony-source:${trustedClientAddress}`, now, LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
   return source.allowed;
@@ -488,7 +510,7 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, devi
   }
 }
 
-export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, deviceToken: string, now = new Date(), expectedRole?: RequiredLoginRole): Promise<{ kind: "EMAIL_REQUIRED" } | { kind: "RECOVERED"; session: CreatedLoginSession }> {
+export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, deviceToken: string, now = new Date(), expectedRole?: RequiredLoginRole, trustedClientAddress?: string): Promise<{ kind: "EMAIL_REQUIRED" } | { kind: "RECOVERED"; session: CreatedLoginSession }> {
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken) || code.length > 32) throw new SecurityMutationError();
   const normalizedCode = normalizeRecoveryCodeInput(code);
   try {
@@ -500,7 +522,7 @@ export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, 
         // No recovery code is checked in this step, so it spends the email-ceremony budget, not verification attempts.
         // This step is reachable only from a TOTP-only ceremony, i.e. a device that is already trusted.
         if (!isValidRecoveryCodeInput(code)) throw new SecurityMutationError();
-        if (!await consumeLoginEmailCeremonyQuota(transaction, challenge.userId, challenge.deviceIdHash, now)) return { kind: "REJECTED" as const };
+        if (!await consumeLoginEmailCeremonyQuota(transaction, challenge.userId, challenge.deviceIdHash, now, trustedClientAddress)) throw new SecurityMutationError();
         const emailCode = generateNumericCode();
         const reopened = await transaction.deviceChallenge.updateMany({ where: { id: challenge.id, deviceIdHash: challenge.deviceIdHash, status: "VERIFIED", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now } }, data: { codeHash: hashSecurityCode(emailCode), status: "PENDING" } });
         if (reopened.count !== 1) throw new SecurityMutationError();
@@ -611,7 +633,17 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
       // An anonymous request never expires another request. While the owner holds an email-verified
       // request (awaiting approval or approved), a new request is not created at all; the owner
       // continues with the emailed approval link. Unverified requests coexist until one is verified.
-      const ownerProven = await transaction.accountRecoveryRequest.findFirst({ where: { userId: user.id, emailVerifiedAt: { not: null }, status: { in: ["PENDING", "APPROVED"] }, expiresAt: { gt: now } }, select: { id: true } });
+      const ownerProven = await transaction.accountRecoveryRequest.findFirst({
+        where: {
+          userId: user.id,
+          expiresAt: { gt: now },
+          OR: [
+            { emailVerifiedAt: { not: null }, status: { in: ["PENDING", "APPROVED"] } },
+            { purpose: "INVITATION", status: "APPROVED" }
+          ]
+        },
+        select: { id: true }
+      });
       if (ownerProven) return false;
       const attempt = await consumeRateLimitAttemptInTransaction(transaction, rateLimitIdentifier, now);
       if (!attempt.allowed) return false;

@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, parseBasicClientId, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits } from "./rate-limit-policy";
+import { getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, parseBasicClientId, parseBearerToken, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits } from "./rate-limit-policy";
 
 const basic = (value: string) => `Basic ${Buffer.from(value).toString("base64")}`;
 
-test("distinct cookies on one IP get independent buckets under the same ceiling", () => {
-  const a = selectAuthRateLimits("203.0.113.5", "cookie-a");
-  const b = selectAuthRateLimits("203.0.113.5", "cookie-b");
+test("validated sessions keep independent auth buckets across IPs under a shared source ceiling", () => {
+  const a = selectAuthRateLimits("203.0.113.5", "session-a");
+  const b = selectAuthRateLimits("203.0.113.5", "session-b");
   assert.notEqual(a[1].identifier, b[1].identifier);
+  assert.equal(a[1].identifier, selectAuthRateLimits("203.0.113.6", "session-a")[1].identifier);
   assert.equal(a[0].identifier, "oidc-auth-source:203.0.113.5");
   assert.equal(a[0].identifier, b[0].identifier);
   assert.deepEqual([a[0].maxAttempts, a[1].maxAttempts], [300, 30]);
-  assert.ok(!a[1].identifier.includes("cookie-a"));
+  assert.ok(!a[1].identifier.includes("session-a"));
 });
 
 test("no cookie shares the anonymous per-IP bucket and the ceiling is always present", () => {
@@ -29,16 +30,25 @@ test("client id is parsed from Basic and malformed input becomes invalid", () =>
   }
 });
 
+test("bearer parser accepts OAuth scheme casing and rejects malformed tokens", () => {
+  assert.equal(parseBearerToken("Bearer token-123456"), "token-123456");
+  assert.equal(parseBearerToken("bEaReR token-123456"), "token-123456");
+  assert.equal(parseBearerToken("Bearer short"), null);
+  assert.equal(parseBearerToken("Bearer token with spaces"), null);
+  assert.equal(parseBearerToken(undefined), null);
+});
+
 test("token buckets are per address and per client under a per-address ceiling", () => {
-  const client = (address: string, header: string) => selectTokenRateLimits(address, header)[1];
-  const [ceiling, rp] = selectTokenRateLimits("198.51.100.1", basic("rp:s"));
-  assert.notEqual(rp.identifier, client("198.51.100.2", basic("rp:s")).identifier);
-  assert.notEqual(rp.identifier, client("198.51.100.1", basic("other:s")).identifier);
-  assert.equal(rp.identifier, client("198.51.100.1", basic("rp:different")).identifier);
+  const client = (address: string, clientId: string | null) => selectTokenRateLimits(address, clientId)[1];
+  const [ceiling, rp] = selectTokenRateLimits("198.51.100.1", "rp");
+  assert.notEqual(rp.identifier, client("198.51.100.2", "rp").identifier);
+  assert.notEqual(rp.identifier, client("198.51.100.1", "other").identifier);
+  assert.equal(rp.identifier, client("198.51.100.1", "rp").identifier);
   assert.equal(rp.maxAttempts, 600);
-  assert.ok(!rp.identifier.includes("rp:s"));
+  assert.ok(!rp.identifier.includes("rp"));
+  assert.equal(client("198.51.100.1", null).identifier, client("198.51.100.1", "invalid").identifier);
   // Rotating client_id values from one address still hits the same ceiling bucket.
-  assert.equal(ceiling.identifier, selectTokenRateLimits("198.51.100.1", basic("rotated:s"))[0].identifier);
+  assert.equal(ceiling.identifier, selectTokenRateLimits("198.51.100.1", "rotated")[0].identifier);
   assert.equal(ceiling.maxAttempts, 2000);
 });
 
@@ -71,26 +81,27 @@ test("public OIDC endpoints with database-backed work have source and browser qu
   assert.equal(getPublicOidcRateLimitEndpoint("PUT", "/me"), null);
   assert.equal(getPublicOidcRateLimitEndpoint("GET", "/unknown"), null);
 
-  const checks = selectPublicOidcRateLimits("203.0.113.11", "browser-secret", "userinfo");
+  const checks = selectPublicOidcRateLimits("203.0.113.11", "session-id", "userinfo");
   assert.equal(checks[0].identifier, "oidc-public-source:userinfo:203.0.113.11");
   assert.equal(checks[0].maxAttempts, 300);
   assert.match(checks[1].identifier, /^oidc-public-userinfo-browser:[a-f0-9]{64}$/u);
   assert.equal(checks[1].maxAttempts, 30);
-  assert.equal(checks[1].identifier.includes("browser-secret"), false);
-  const tokenA = selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "Bearer token-for-client-a");
-  const tokenB = selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "Bearer token-for-client-b");
+  assert.ok(!checks[1].identifier.includes("session-id"));
+  assert.equal(checks[1].identifier, selectPublicOidcRateLimits("203.0.113.12", "session-id", "userinfo")[1].identifier);
+  const tokenA = selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "token-for-client-a");
+  const tokenB = selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "token-for-client-b");
   assert.equal(tokenA[0].identifier, tokenB[0].identifier, "shared IP ceiling must survive token rotation");
   assert.notEqual(tokenA[1].identifier, tokenB[1].identifier, "independent RP tokens must not collide in an anonymous bucket");
   assert.match(tokenA[1].identifier, /^oidc-public-userinfo-bearer:[a-f0-9]{64}$/u);
-  assert.equal(tokenA[1].identifier.includes("token-for-client-a"), false);
+  assert.ok(!tokenA[1].identifier.includes("token-for-client-a"));
   assert.equal(tokenA[1].maxAttempts, 30);
-  assert.equal(selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "Bearer bad")[1].identifier,
+  assert.equal(selectPublicOidcRateLimits("203.0.113.11", null, "userinfo", "bad token")[1].identifier,
     "oidc-public-userinfo-anonymous:203.0.113.11");
   assert.notEqual(tokenA[1].identifier,
     selectPublicOidcRateLimits("203.0.113.11", null, "userinfo")[1].identifier);
   assert.notEqual(
-    selectPublicOidcRateLimits("203.0.113.11", null, "session-end")[1].identifier,
-    selectPublicOidcRateLimits("203.0.113.11", null, "auth-action")[1].identifier
+    selectPublicOidcRateLimits("203.0.113.11", "session-id", "session-end")[1].identifier,
+    selectPublicOidcRateLimits("203.0.113.11", "session-id", "auth-action")[1].identifier
   );
 });
 
@@ -112,12 +123,12 @@ test("interaction routes are matched and have bounded source and browser rate bu
   assert.equal(isInteractionPath("/interaction/short"), false);
   assert.equal(isInteractionPath("/interaction/abcdefgh/extra"), false);
 
-  const checks = selectInteractionRateLimits("203.0.113.9", "browser-cookie");
+  const checks = selectInteractionRateLimits("203.0.113.9", "session-id");
   assert.equal(checks[0].identifier, "oidc-interaction-source:203.0.113.9");
   assert.equal(checks[0].maxAttempts, 300);
   assert.match(checks[1].identifier, /^oidc-interaction-browser:[a-f0-9]{64}$/u);
   assert.equal(checks[1].maxAttempts, 30);
-  assert.equal(checks[1].identifier.includes("browser-cookie"), false);
+  assert.ok(!checks[1].identifier.includes("session-id"));
 });
 
 test("rate-limit denial audit uses one fixed per-source window bucket", () => {

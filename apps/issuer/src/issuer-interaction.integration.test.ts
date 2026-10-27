@@ -1,13 +1,17 @@
 // Exercises the actual issuer listener and interaction handler, with synthetic keys and a guarded disposable DB.
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { connect as connectTcp, createServer } from "node:net";
 import { after, before, test } from "node:test";
-import { createSession, SESSION_COOKIE_NAME } from "@virki/auth";
-import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
+import { createRateLimitIdentifierHash } from "../../../packages/auth/src/rate-limit-config";
+import { createSession, getSessionByToken, SESSION_COOKIE_NAME } from "@virki/auth";
+import { grantProjectAccess, revokeProjectAccess } from "@virki/auth/administration";
+import { decryptOidcPayload, encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
 import { prisma } from "@virki/database";
-import { createTestUser, integrationOptions } from "../../../packages/auth/src/integration-fixtures";
+import { createTestUser, integrationOptions, queuedEmails, seedAdminSessionWithElevation } from "../../../packages/auth/src/integration-fixtures";
+import { selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectTokenRateLimits } from "./rate-limit-policy";
+import { createTotpSecret, startLoginCeremony, verifyLoginEmailCode, verifyLoginTotpCode } from "@virki/auth/security";
 
 let child: ChildProcess;
 let origin: string;
@@ -114,31 +118,358 @@ test("actual issuer rejects endpoint aliases and rate-limits the public userinfo
   assert.equal(methodAlias.status, 405);
   assert.equal(methodAlias.headers.get("allow"), "GET");
 
-  const headers = { "cf-connecting-ip": "198.51.100.204" };
+  const headers = { "cf-connecting-ip": randomClientAddress() };
   let response: Response | undefined;
   for (let attempt = 0; attempt < 31; attempt += 1) response = await fetch(`${origin}/me`, { headers, redirect: "manual" });
   assert.equal(response?.status, 429, "the public userinfo route must stop after its anonymous per-IP quota");
   assert.equal(response?.headers.get("retry-after"), "900");
 });
 
-async function seed() {
-  const user = await createTestUser({ label: "issuer-interaction" });
+test("rotating invalid session cookies share one anonymous interaction bucket", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  const clientAddress = randomClientAddress();
+  const sourceHeaders = { "cf-connecting-ip": clientAddress };
+  const started = await client.request(authorization(fixture.clientId), { headers: sourceHeaders });
+  assert.equal(started.status, 303);
+  const interactionUrl = new URL(started.headers.get("location")!, origin);
+  assert.match(interactionUrl.pathname, /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u);
+
+  const rotatedCookies = Array.from({ length: 301 }, () => randomBytes(32).toString("base64url"));
+  const trackedHashes = [
+    ...selectAuthRateLimits(clientAddress, null),
+    ...selectInteractionRateLimits(clientAddress, null)
+  ].map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+  const startedAt = performance.now();
+  const responses = await Promise.all(rotatedCookies.map((cookie) => {
+    client.setSession(cookie);
+    return client.request(interactionUrl.href, { headers: sourceHeaders });
+  }));
+  const elapsedMs = performance.now() - startedAt;
+
+  const storedBuckets = await prisma.loginRateLimit.count({ where: { identifierHash: { in: trackedHashes } } });
+  assert.equal(storedBuckets, 4,
+    "unknown cookies should share the auth source/anonymous and interaction source/anonymous rows");
+  const blocked = responses.filter((response) => response.status === 429).length;
+  const statusCounts = Object.fromEntries([...new Set(responses.map((response) => response.status))]
+    .map((status) => [String(status), responses.filter((response) => response.status === status).length]));
+  assert.equal(blocked, 271,
+    `300 requests must hit the source ceiling and 30-attempt anonymous bucket without identity amplification; statuses=${JSON.stringify(statusCounts)}`);
+  assert.equal(responses.filter((response) => response.status === 503).length, 0,
+    "the bounded flood must not turn limiter contention into storage errors");
+  console.log(`rotating invalid cookie load: requests=${responses.length}, rows=${storedBuckets}, denied_429=${blocked}, elapsed_ms=${elapsedMs.toFixed(1)}`);
+});
+
+test("unsupported interaction methods return 405 before auditing or consuming limiter rows", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  const clientAddress = randomClientAddress();
+  const headers = { "cf-connecting-ip": clientAddress };
+  const started = await client.request(authorization(fixture.clientId), { headers });
+  assert.equal(started.status, 303);
+  const interactionUrl = new URL(started.headers.get("location")!, origin);
+  assert.match(interactionUrl.pathname, /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u);
+  const trackedHashes = [...selectAuthRateLimits(clientAddress, null), ...selectInteractionRateLimits(clientAddress, null)]
+    .map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+  const beforeAudit = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  const beforeLimiter = await prisma.loginRateLimit.count({ where: { identifierHash: { in: trackedHashes } } });
+
+  for (const method of ["POST", "PUT", "HEAD", "DELETE"]) {
+    const response = await client.request(interactionUrl.href, { method, headers });
+    assert.equal(response.status, 405, `${method} must be rejected before interaction handling`);
+    assert.equal(response.headers.get("allow"), "GET");
+  }
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } }), beforeAudit);
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: { in: trackedHashes } } }), beforeLimiter);
+});
+
+test("rotating invalid bearer tokens share one anonymous UserInfo bucket", integrationOptions, async () => {
+  const clientAddress = randomClientAddress();
+  const rotatedTokens = Array.from({ length: 301 }, () => randomBytes(32).toString("base64url"));
+  const trackedHashes = [
+    ...selectPublicOidcRateLimits(clientAddress, null, "userinfo")
+  ].map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+  let response: Response | undefined;
+  let denied = 0;
+  const startedAt = performance.now();
+  for (const token of rotatedTokens) {
+    response = await fetch(`${origin}/me`, {
+      headers: { "cf-connecting-ip": clientAddress, authorization: `Bearer ${token}` },
+      redirect: "manual"
+    });
+    if (response.status === 429) denied += 1;
+  }
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.equal(response?.status, 429, "unknown bearer-token rotation must hit the shared source ceiling");
+  assert.equal(denied, 271, "the 300-request source budget and anonymous bucket must both be enforced");
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: { in: trackedHashes } } }), 2,
+    "unknown bearer tokens should share only the UserInfo source and anonymous rows");
+  console.log(`rotating invalid bearer load: requests=${rotatedTokens.length}, rows=2, denied_429=${denied}, elapsed_ms=${elapsedMs.toFixed(1)}`);
+});
+
+test("rotating unregistered Basic client IDs share one bounded invalid-token bucket", integrationOptions, async () => {
+  const clientAddress = randomClientAddress();
+  const clientIds = Array.from({ length: 301 }, () => `unregistered-${randomUUID()}`);
+  const authorizationFor = (clientId: string) => `Basic ${Buffer.from(`${clientId}:not-a-secret`).toString("base64")}`;
+  const trackedHashes = selectTokenRateLimits(clientAddress, null).map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+
+  const startedAt = performance.now();
+  for (const clientId of clientIds) {
+    const response = await fetch(`${origin}/token`, {
+      method: "POST",
+      headers: {
+        "cf-connecting-ip": clientAddress,
+        authorization: authorizationFor(clientId),
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({ grant_type: "client_credentials" }),
+      redirect: "manual"
+    });
+    assert.notEqual(response.status, 503, "bounded registered-client lookups must fail closed only on storage errors");
+  }
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: { in: trackedHashes } } }), 2,
+    "unregistered client IDs should share only the token source and invalid-client rows");
+  console.log(`rotating unregistered client load: requests=${clientIds.length}, rows=2, lookup_ceiling=2000/15m, elapsed_ms=${elapsedMs.toFixed(1)}`);
+});
+
+test("a validated browser session retains its per-session quota and completes a real OIDC flow", integrationOptions, async () => {
+  const fixture = await seed();
+  const clientAddress = randomClientAddress();
+  const client = browser();
+  const created = await createSession(fixture.userId);
+  const session = await getSessionByToken(created.token);
+  assert.ok(session);
+  client.setSession(created.token);
+
+  const result = await client.follow(authorization(fixture.clientId), { headers: { "cf-connecting-ip": clientAddress } });
+  assert.equal(result.origin, "https://project.integration.invalid");
+  assert.ok(result.searchParams.get("code"));
+
+  const sessionBuckets = [...selectAuthRateLimits(clientAddress, session.id), ...selectInteractionRateLimits(clientAddress, session.id)]
+    .map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: { in: sessionBuckets } } }), 4,
+    "the validated session must keep separate auth and interaction buckets alongside their source ceilings");
+});
+
+test("valid sessions can outpace one expired-row cleanup batch while staying under the source ceiling", integrationOptions, async () => {
+  const fixture = await seed();
+  const clientAddress = randomClientAddress();
+  const sessions = [] as Array<{ token: string; id: string }>;
+  for (let index = 0; index < 129; index += 1) {
+    const created = await createSession(fixture.userId);
+    const session = await getSessionByToken(created.token);
+    assert.ok(session, `session ${index + 1} must validate`);
+    sessions.push({ token: created.token, id: session.id });
+  }
+
+  const startedAt = performance.now();
+  for (const { token } of sessions) {
+    const client = browser();
+    client.setSession(token);
+    assert.equal((await client.request(authorization(fixture.clientId), { headers: { "cf-connecting-ip": clientAddress } })).status, 303);
+  }
+  const elapsedMs = performance.now() - startedAt;
+  const trackedHashes = [
+    ...selectAuthRateLimits(clientAddress, null).slice(0, 1),
+    ...sessions.map(({ id }) => selectAuthRateLimits(clientAddress, id)[1])
+  ].map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+  const generatedRows = await prisma.loginRateLimit.count({ where: { identifierHash: { in: trackedHashes } } });
+  assert.equal(generatedRows, 130, "129 distinct valid sessions create one source row and 129 identity rows");
+  console.log(`valid session cardinality: requests=129, rows=${generatedRows}, cleanup_batch_limit=128, elapsed_ms=${elapsedMs.toFixed(1)}`);
+});
+
+for (const invalidation of [
+  {
+    label: "revoked session",
+    apply: (sessionId: string, _userId: string) => prisma.session.update({ where: { id: sessionId }, data: { revokedAt: new Date() } })
+  },
+  {
+    label: "blocked account",
+    apply: (_sessionId: string, userId: string) => prisma.user.update({ where: { id: userId }, data: { isActive: false, accountStatus: "BLOCKED" } })
+  }
+]) {
+test(`interaction rechecks a ${invalidation.label} after its identity limiter wait`, integrationOptions, async () => {
+  const fixture = await seed();
+  const clientAddress = randomClientAddress();
+  const headers = { "cf-connecting-ip": clientAddress };
+  const client = browser();
+  const created = await createSession(fixture.userId);
+  const session = await getSessionByToken(created.token);
+  assert.ok(session);
+  client.setSession(created.token);
+  const started = await client.request(authorization(fixture.clientId), { headers });
+  assert.equal(started.status, 303);
+  const interactionUrl = started.headers.get("location");
+  assert.ok(interactionUrl);
+
+  const identityHash = createRateLimitIdentifierHash(selectInteractionRateLimits(clientAddress, session.id)[1].identifier);
+  let release!: () => void;
+  let locked!: () => void;
+  let blockerPid = 0;
+  const acquired = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${identityHash}, 0)) IS NULL AS "locked"`;
+    locked();
+    await gate;
+  }, { timeout: 10000 });
+  await acquired;
+
+  try {
+    const pendingResponse = client.request(interactionUrl, { headers });
+    const waiterPid = await waitForBlockedQuery(blockerPid, "pg_advisory_xact_lock");
+    assert.ok(waiterPid > 0, "the request must be blocked by this test's per-session limiter lock");
+    await invalidation.apply(session.id, fixture.userId);
+    release();
+
+    const response = await pendingResponse;
+    assert.equal(response.status, 303);
+    assert.equal(new URL(response.headers.get("location")!, origin).pathname, "/login",
+      "the authorization handler must re-read the session after limiter waiting");
+  } finally {
+    release();
+    await holder;
+  }
+});
+}
+
+test("a registered client and its real access token still use their scoped OIDC quotas", integrationOptions, async () => {
+  const fixture = await seed();
+  const clientAddress = randomClientAddress();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  const result = await client.follow(authorization(fixture.clientId), { headers: { "cf-connecting-ip": clientAddress } });
+  assert.ok(result.searchParams.get("code"));
+
+  const token = await exchange(fixture.clientId, result.searchParams.get("code")!, clientAddress);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.access_token);
+  const userinfo = await fetch(`${origin}/me`, {
+    headers: { "cf-connecting-ip": clientAddress, authorization: `Bearer ${token.body.access_token}` },
+    redirect: "manual"
+  });
+  assert.equal(userinfo.status, 200);
+
+  const tokenBuckets = selectTokenRateLimits(clientAddress, fixture.clientId).map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+  const userinfoBuckets = selectPublicOidcRateLimits(clientAddress, null, "userinfo", token.body.access_token).map(({ identifier }) => createRateLimitIdentifierHash(identifier));
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: { in: [...tokenBuckets, ...userinfoBuckets] } } }), 4,
+    "registered client and validated access token each retain their own source and identity rows");
+});
+
+test("issuer returns 503 when the source limiter cannot acquire its storage lock", integrationOptions, async () => {
+  const fixture = await seed();
+  const clientAddress = randomClientAddress();
+  const hash = createRateLimitIdentifierHash(selectAuthRateLimits(clientAddress, null)[0].identifier);
+  let release!: () => void;
+  let locked!: () => void;
+  const acquired = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = prisma.$transaction(async (transaction) => {
+    await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${hash}, 0)) IS NULL AS "locked"`;
+    locked();
+    await gate;
+  }, { timeout: 10000 });
+  await acquired;
+  try {
+    const response = await fetch(authorization(fixture.clientId), {
+      headers: { "cf-connecting-ip": clientAddress },
+      redirect: "manual"
+    });
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("retry-after"), "900");
+    assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: hash } }), 0,
+      "failed source storage must not create a partial limiter row or release the request");
+  } finally {
+    release();
+    await holder;
+  }
+});
+
+async function seed(options: { totpSecret?: string; origin?: string; redirectUris?: string[] } = {}) {
+  const user = await createTestUser({ label: "issuer-interaction", totpSecret: options.totpSecret });
   const clientId = `client-${randomUUID()}`;
   const connection = await prisma.projectConnection.create({ data: {
-    name: "Issuer interaction", slug: clientId, origin: "https://project.integration.invalid", clientId,
-    clientSecretCiphertext: encryptOidcClientSecret(clientSecret), redirectUris: [redirectUri]
+    name: "Issuer interaction", slug: clientId, origin: options.origin ?? "https://project.integration.invalid", clientId,
+    clientSecretCiphertext: encryptOidcClientSecret(clientSecret), redirectUris: options.redirectUris ?? [redirectUri]
   } });
   await prisma.userProjectGrant.create({ data: { userId: user.id, connectionId: connection.id } });
-  return { userId: user.id, clientId, connectionId: connection.id };
+  return { userId: user.id, email: user.email, clientId, connectionId: connection.id };
+}
+
+async function startConsentWithPreviousGrant(fixture: { userId: string; clientId: string }) {
+  const client = browser();
+  const created = await createSession(fixture.userId);
+  const session = await getSessionByToken(created.token);
+  assert.ok(session);
+  client.setSession(created.token);
+  const initial = await client.follow(authorization(fixture.clientId));
+  assert.ok(initial.searchParams.get("code"), "the initial authorization creates a provider Grant");
+
+  const pending = await client.request(authorization(fixture.clientId, { prompt: "consent" }));
+  assert.equal(pending.status, 303);
+  const interactionUrl = new URL(pending.headers.get("location")!, origin);
+  const uid = interactionUrl.pathname.split("/").at(-1)!;
+  const interaction = await prisma.oidcArtifact.findUnique({
+    where: { model_idHash: { model: "Interaction", idHash: hashOidcIdentifier(uid) } },
+    select: { payloadCiphertext: true }
+  });
+  assert.ok(interaction, "the provider persists the consent Interaction before handling it");
+  const payload = JSON.parse(decryptOidcPayload(interaction.payloadCiphertext)) as { grantId?: unknown };
+  assert.equal(typeof payload.grantId, "string", "the pending consent Interaction references the prior provider Grant");
+  const grantId = payload.grantId as string;
+  assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", idHash: hashOidcIdentifier(grantId) } }), 1);
+  return { client, interactionUrl, grantId, sessionId: session.id };
+}
+
+async function completeTotpLogin(fixture: { userId: string; email: string }, secret: string, now = new Date()) {
+  const start = await startLoginCeremony(fixture.userId, undefined, "pt-BR", now);
+  assert.equal(start.kind, "CEREMONY");
+  if (start.kind !== "CEREMONY") assert.fail("A new TOTP login must start a verification ceremony.");
+  const code = (await queuedEmails(fixture.email)).filter((message) => message.kind === "EMAIL_TWO_FACTOR" || message.kind === "NEW_DEVICE_VERIFICATION").at(-1)?.code;
+  assert.ok(code, "the real login ceremony queues its email verification code");
+  assert.deepEqual(await verifyLoginEmailCode(start.ceremonyId, code, start.deviceToken, now), { requiresTotp: true, session: null });
+  return verifyLoginTotpCode(start.ceremonyId, totpAt(secret, now), start.deviceToken, now);
+}
+
+function base32Decode(value: string): Buffer {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (const character of value) {
+    buffer = ((buffer << 5) | alphabet.indexOf(character)) & 0xffff;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((buffer >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function totpAt(secret: string, now: Date): string {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(now.getTime() / 1_000 / 30)));
+  const digest = createHmac("sha1", base32Decode(secret)).update(counter).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary = ((digest[offset] & 0x7f) << 24) | (digest[offset + 1] << 16) | (digest[offset + 2] << 8) | digest[offset + 3];
+  return String(binary % 1_000_000).padStart(6, "0");
 }
 
 function browser() {
   const cookies = new Map<string, string>();
   return {
     setSession: (token: string) => cookies.set(SESSION_COOKIE_NAME, token),
-    async request(url: string) {
+    async request(url: string, options: { method?: string; headers?: Record<string, string> } = {}) {
       assert.equal(new URL(url, origin).origin, origin, "All HTTP traffic must stay on the local issuer.");
-      const response = await fetch(new URL(url, origin), { redirect: "manual", headers: { cookie: [...cookies].map(([name, value]) => `${name}=${value}`).join("; ") } });
+      const response = await fetch(new URL(url, origin), { method: options.method ?? "GET", redirect: "manual", headers: {
+        cookie: [...cookies].map(([name, value]) => `${name}=${value}`).join("; "),
+        ...options.headers
+      } });
       for (const cookie of response.headers.getSetCookie()) {
         const pair = cookie.split(";", 1)[0];
         const index = pair.indexOf("=");
@@ -146,9 +477,9 @@ function browser() {
       }
       return response;
     },
-    async follow(url: string) {
+    async follow(url: string, options: { method?: string; headers?: Record<string, string> } = {}) {
       for (let hop = 0; hop < 16; hop += 1) {
-        const response = await this.request(url);
+        const response = await this.request(url, options);
         const location = response.headers.get("location");
         assert.ok(location, `Expected a redirect, received local status ${response.status}.`);
         const next = new URL(location, origin);
@@ -160,17 +491,39 @@ function browser() {
   };
 }
 
-function authorization(clientId: string, extra: Record<string, string> = {}) {
-  return `${origin}/auth?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: "openid",
+function authorization(clientId: string, extra: Record<string, string> = {}, requestedRedirectUri = redirectUri) {
+  return `${origin}/auth?${new URLSearchParams({ client_id: clientId, redirect_uri: requestedRedirectUri, response_type: "code", scope: "openid",
     state: randomBytes(24).toString("base64url"), nonce: randomBytes(24).toString("base64url"),
     code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", ...extra })}`;
 }
 
-async function exchange(clientId: string, code: string) {
+function randomClientAddress(): string {
+  return `2001:db8:${randomBytes(2).toString("hex")}::${randomBytes(2).toString("hex")}`;
+}
+
+async function waitForBlockedQuery(blockerPid: number, queryFragment: string): Promise<number> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const blocked = await prisma.$queryRaw<Array<{ pid: number }>>`
+      SELECT pid
+      FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
+        AND query LIKE ${`%${queryFragment}%`}
+      LIMIT 1
+    `;
+    if (blocked[0]) return blocked[0].pid;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment}.`);
+}
+
+async function exchange(clientId: string, code: string, clientAddress?: string) {
   const response = await fetch(`${origin}/token`, { method: "POST", headers: {
-    "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`
+    "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+    ...(clientAddress ? { "cf-connecting-ip": clientAddress } : {})
   }, body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirectUri, code_verifier: verifier }) });
-  return { status: response.status, body: await response.json() as { id_token?: string; error?: string } };
+  return { status: response.status, body: await response.json() as { access_token?: string; id_token?: string; error?: string } };
 }
 
 const reauthenticationRequests: Array<Record<string, string>> = [{ prompt: "login" }, { max_age: "0" }, { max_age: "1" }];
@@ -192,7 +545,7 @@ for (const request of reauthenticationRequests) {
   });
 }
 
-test("actual issuer keeps ACR2 after prompt-login account switching to a fresh password-only session", integrationOptions, async () => {
+test("actual issuer preserves essential ACR2 across mixed acr_values and rejects a fresh password-only account switch", integrationOptions, async () => {
   const original = await seed();
   const switched = await createTestUser({ label: "issuer-account-switch" });
   await prisma.userProjectGrant.create({ data: { userId: switched.id, connectionId: original.connectionId } });
@@ -205,7 +558,8 @@ test("actual issuer keeps ACR2 after prompt-login account switching to a fresh p
   const login = await client.follow(authorization(original.clientId, {
     prompt: "login",
     max_age: "0",
-    acr_values: "urn:virki:loa:2"
+    acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2"] } } })
   }));
   assert.equal(login.pathname, "/login");
   assert.equal(login.searchParams.get("reauth"), "1");
@@ -214,11 +568,279 @@ test("actual issuer keeps ACR2 after prompt-login account switching to a fresh p
   const switchedPasswordSession = await createSession(switched.id);
   client.setSession(switchedPasswordSession.token);
   const result = await client.follow(new URL(login.searchParams.get("returnTo")!, origin).href);
-  assert.equal(result.pathname, "/login", "A fresh account switch cannot satisfy the requested MFA assurance.");
-  assert.equal(result.searchParams.get("reauth"), "1");
-  assert.equal(result.searchParams.get("error"), null);
+  assert.equal(result.pathname, "/callback", "The provider must finish with a protocol error instead of asking the password-only account to repeat login forever.");
+  assert.equal(result.searchParams.get("error"), "access_denied");
   assert.equal(result.searchParams.get("code"), null);
 });
+
+test("actual provider accepts the lower essential ACR alternative after prompt-login password reauthentication", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  assert.ok((await client.follow(authorization(fixture.clientId))).searchParams.get("code"));
+  await prisma.session.updateMany({ where: { userId: fixture.userId }, data: { createdAt: new Date(Date.now() - 60_000) } });
+
+  const login = await client.follow(authorization(fixture.clientId, {
+    prompt: "login",
+    acr_values: "urn:virki:loa:2 urn:virki:loa:1",
+    claims: JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] }, amr: { essential: true } } })
+  }));
+  assert.equal(login.pathname, "/login");
+  const fresh = await createSession(fixture.userId);
+  assert.deepEqual((await getSessionByToken(fresh.token))?.authenticationMethods, ["pwd"]);
+  client.setSession(fresh.token);
+  const result = await client.follow(new URL(login.searchParams.get("returnTo")!, origin).href);
+  assert.ok(result.searchParams.get("code"), `one requested essential ACR is achievable; got ${result.searchParams.get("error") ?? result.pathname}`);
+
+  const token = await exchange(fixture.clientId, result.searchParams.get("code")!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(claims.acr, "urn:virki:loa:1");
+  assert.ok(claims.amr?.includes("pwd"), "the requested AMR claim must report the password method");
+  assert.equal(claims.amr?.includes("mfa"), false, "the password-only session must never be labeled as MFA");
+});
+
+test("actual provider prefers ACR2 when a real TOTP login satisfies mixed essential ACR values", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const fixture = await seed({ totpSecret: secret });
+  const client = browser();
+  client.setSession((await completeTotpLogin(fixture, secret, new Date(Date.now() - 60_000))).token);
+  assert.ok((await client.follow(authorization(fixture.clientId))).searchParams.get("code"));
+  await prisma.session.updateMany({ where: { userId: fixture.userId }, data: { createdAt: new Date(Date.now() - 60_000) } });
+
+  const login = await client.follow(authorization(fixture.clientId, {
+    prompt: "login",
+    acr_values: "urn:virki:loa:2 urn:virki:loa:1",
+    claims: JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] }, amr: { essential: true } } })
+  }));
+  assert.equal(login.pathname, "/login");
+  const fresh = await completeTotpLogin(fixture, secret);
+  assert.ok((await getSessionByToken(fresh.token))?.authenticationMethods.includes("mfa"));
+  client.setSession(fresh.token);
+  const result = await client.follow(new URL(login.searchParams.get("returnTo")!, origin).href);
+  assert.ok(result.searchParams.get("code"), `a verified MFA session satisfies the preferred ACR; got ${result.searchParams.get("error") ?? result.pathname}`);
+
+  const token = await exchange(fixture.clientId, result.searchParams.get("code")!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(claims.acr, "urn:virki:loa:2");
+  assert.ok(claims.amr?.includes("mfa"), "the returned MFA ACR must be backed by the TOTP session");
+});
+
+test("actual issuer denies an unsupported essential ACR without downgrading it", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  const result = await client.follow(authorization(fixture.clientId, {
+    claims: JSON.stringify({ id_token: { acr: { essential: true, value: "urn:virki:loa:3" } } })
+  }));
+  assert.equal(result.searchParams.get("error"), "access_denied");
+  assert.equal(result.searchParams.get("code"), null);
+});
+
+test("actual issuer rejects an unregistered client_id without redirecting to its supplied callback", integrationOptions, async () => {
+  const response = await fetch(authorization(`unregistered-${randomUUID()}`), { redirect: "manual" });
+  assert.ok(response.status >= 400 && response.status < 500, `unknown client_id must be a protocol client error, got ${response.status}`);
+  assert.equal(response.headers.get("location"), null, "an untrusted client_id cannot select a redirect destination");
+});
+
+test("actual issuer allows explicitly registered third-party callbacks per client and rejects mixed-client or malicious URIs", integrationOptions, async () => {
+  const callbackA = "https://login.alpha.integration.invalid/oidc/callback";
+  const callbackB = "https://login.beta.integration.invalid/oidc/callback";
+  const maliciousCallback = "https://attacker.integration.invalid/oidc/callback";
+  const fixture = await seed({ origin: "https://project.alpha.integration.invalid", redirectUris: [callbackA] });
+  const clientIdB = `client-${randomUUID()}`;
+  const connectionB = await prisma.projectConnection.create({ data: {
+    name: "Issuer interaction second client", slug: clientIdB, origin: "https://project.beta.integration.invalid", clientId: clientIdB,
+    clientSecretCiphertext: encryptOidcClientSecret(clientSecret), redirectUris: [callbackB]
+  } });
+  await prisma.userProjectGrant.create({ data: { userId: fixture.userId, connectionId: connectionB.id } });
+
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  for (const [clientId, callbackUri, callbackHost] of [
+    [fixture.clientId, callbackA, "https://login.alpha.integration.invalid"],
+    [clientIdB, callbackB, "https://login.beta.integration.invalid"]
+  ]) {
+    const result = await client.follow(authorization(clientId, {}, callbackUri));
+    assert.equal(result.origin, callbackHost, "an explicitly registered cross-origin callback is valid for its own client");
+    assert.equal(result.pathname, "/oidc/callback");
+    assert.ok(result.searchParams.get("code"), "the authorization code is returned to the exact registered callback");
+  }
+
+  for (const [clientId, callbackUri] of [
+    [fixture.clientId, callbackB],
+    [fixture.clientId, maliciousCallback],
+    [clientIdB, callbackA]
+  ]) {
+    const response = await client.request(authorization(clientId, {}, callbackUri));
+    assert.ok(response.status >= 400 && response.status < 500,
+      `unregistered URI ${callbackUri} for ${clientId} must be rejected by the actual OIDC provider`);
+    assert.equal(response.headers.get("location"), null, "invalid or another client's callback is never used as a redirect destination");
+  }
+});
+
+test("actual issuer completes a new OIDC grant after sequential project-access revocation and regrant", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  const initial = await client.follow(authorization(fixture.clientId));
+  assert.ok(initial.searchParams.get("code"));
+
+  const appGrant = await prisma.userProjectGrant.findUniqueOrThrow({
+    where: { userId_connectionId: { userId: fixture.userId, connectionId: fixture.connectionId } },
+    select: { id: true }
+  });
+  const artifactScope = { accountIdHash: hashOidcIdentifier(fixture.userId), clientIdHash: hashOidcIdentifier(fixture.clientId) };
+  const admin = await createTestUser({ role: "ADMIN", label: "issuer-regrant-admin" });
+  const elevation = await seedAdminSessionWithElevation(admin.id, "PROJECT_ACCESS_CHANGE");
+  const actor = { id: admin.id, role: "ADMIN" };
+  await revokeProjectAccess(actor, elevation.sessionId, appGrant.id);
+  assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", ...artifactScope } }), 0,
+    "revocation clears the prior provider Grant before access is re-granted");
+  await grantProjectAccess(actor, elevation.sessionId, fixture.userId, fixture.connectionId);
+
+  const reauthorized = await client.follow(authorization(fixture.clientId));
+  assert.ok(reauthorized.searchParams.get("code"), `freshly re-granted access should authorize; got ${reauthorized.searchParams.get("error") ?? reauthorized.pathname}`);
+  assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", ...artifactScope } }), 1);
+});
+
+test("actual issuer recovers when its Interaction write commits after the access-revocation artifact-delete snapshot", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  const initial = await client.follow(authorization(fixture.clientId));
+  assert.ok(initial.searchParams.get("code"));
+
+  const appGrant = await prisma.userProjectGrant.findUniqueOrThrow({
+    where: { userId_connectionId: { userId: fixture.userId, connectionId: fixture.connectionId } },
+    select: { id: true }
+  });
+  const artifactScope = { accountIdHash: hashOidcIdentifier(fixture.userId), clientIdHash: hashOidcIdentifier(fixture.clientId) };
+  const priorGrants = await prisma.oidcArtifact.findMany({ where: { model: "Grant", ...artifactScope }, select: { idHash: true } });
+  assert.equal(priorGrants.length, 1);
+
+  let deleted!: () => void;
+  let release!: () => void;
+  const deletionComplete = new Promise<void>((resolve) => { deleted = resolve; });
+  const commitGate = new Promise<void>((resolve) => { release = resolve; });
+  const revocation = prisma.$transaction(async (transaction) => {
+    assert.equal((await transaction.userProjectGrant.updateMany({
+      where: { id: appGrant.id, revokedAt: null }, data: { revokedAt: new Date() }
+    })).count, 1);
+    await transaction.oidcArtifact.deleteMany({ where: artifactScope });
+    // Match revokeProjectAccess ordering, then hold its DELETE snapshot open while the real provider writes.
+    deleted();
+    await commitGate;
+  }, { isolationLevel: "ReadCommitted", timeout: 10_000 });
+  await deletionComplete;
+
+  try {
+    const pending = await client.request(authorization(fixture.clientId, { prompt: "consent" }));
+    assert.equal(pending.status, 303);
+    const interactionUrl = new URL(pending.headers.get("location")!, origin);
+    const uid = interactionUrl.pathname.split("/").at(-1)!;
+    const interaction = await prisma.oidcArtifact.findUnique({
+      where: { model_idHash: { model: "Interaction", idHash: hashOidcIdentifier(uid) } },
+      select: { payloadCiphertext: true }
+    });
+    assert.ok(interaction, "the real provider persists its pending Interaction during the revoke transaction");
+    const payload = JSON.parse(decryptOidcPayload(interaction.payloadCiphertext)) as { grantId?: unknown };
+    assert.equal(typeof payload.grantId, "string");
+    assert.equal(hashOidcIdentifier(payload.grantId as string), priorGrants[0]!.idHash,
+      "the Interaction created before revoke commits still references the old provider Grant");
+
+    release();
+    await revocation;
+    assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", ...artifactScope } }), 0);
+    assert.equal(await prisma.oidcArtifact.count({ where: { model: "Interaction", idHash: hashOidcIdentifier(uid) } }), 1,
+      "the INSERT committed after the revocation DELETE snapshot remains pending");
+
+    const admin = await createTestUser({ role: "ADMIN", label: "issuer-regrant-race-admin" });
+    const elevation = await seedAdminSessionWithElevation(admin.id, "PROJECT_ACCESS_CHANGE");
+    await grantProjectAccess({ id: admin.id, role: "ADMIN" }, elevation.sessionId, fixture.userId, fixture.connectionId);
+    const result = await client.follow(interactionUrl.href);
+    assert.ok(result.searchParams.get("code"), `active regrant should recover the pending Interaction; got ${result.searchParams.get("error") ?? result.pathname}`);
+
+    const replay = await client.request(interactionUrl.href);
+    assert.ok(replay.status >= 400, `a completed provider Interaction must reject replay, got HTTP ${replay.status}`);
+    assert.equal(replay.headers.get("location"), null, "replay cannot issue a second authorization redirect");
+    assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", ...artifactScope } }), 1,
+      "replaying the completed Interaction cannot create a second provider Grant");
+  } finally {
+    release();
+    await revocation;
+  }
+});
+
+test("actual issuer creates a replacement for an absent provider Grant only with active project access", integrationOptions, async () => {
+  const fixture = await seed();
+  const { client, interactionUrl, grantId } = await startConsentWithPreviousGrant(fixture);
+  assert.equal((await prisma.oidcArtifact.deleteMany({ where: { model: "Grant", idHash: hashOidcIdentifier(grantId) } })).count, 1);
+
+  // Handler-state coverage: production access revocation also removes matching Interactions.
+  // This keeps the pending Interaction to exercise the safe missing-Grant branch; it does not
+  // claim to reproduce the concurrent revoke/upsert interleaving.
+  const result = await client.follow(interactionUrl.href);
+  assert.ok(result.searchParams.get("code"), `an absent prior provider Grant may be replaced after current access is verified; got ${result.searchParams.get("error")}`);
+  assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", accountIdHash: hashOidcIdentifier(fixture.userId), clientIdHash: hashOidcIdentifier(fixture.clientId) } }), 1);
+});
+
+for (const denial of [
+  {
+    label: "revoked project grant",
+    denialResponse: "callback" as const,
+    apply: (fixture: Awaited<ReturnType<typeof seed>>) => prisma.userProjectGrant.updateMany({ where: { userId: fixture.userId, connectionId: fixture.connectionId, revokedAt: null }, data: { revokedAt: new Date() } })
+  },
+  {
+    label: "blocked account",
+    denialResponse: "login" as const,
+    apply: (fixture: Awaited<ReturnType<typeof seed>>) => prisma.user.update({ where: { id: fixture.userId }, data: { isActive: false, accountStatus: "BLOCKED" } })
+  },
+  {
+    label: "disabled connection",
+    denialResponse: "protocol-error" as const,
+    apply: (fixture: Awaited<ReturnType<typeof seed>>) => prisma.projectConnection.update({ where: { id: fixture.connectionId }, data: { enabled: false } })
+  },
+  {
+    label: "revoked portal session",
+    denialResponse: "login" as const,
+    apply: (_fixture: Awaited<ReturnType<typeof seed>>, sessionId: string) => prisma.session.update({ where: { id: sessionId }, data: { revokedAt: new Date() } })
+  }
+]) {
+  test(`actual issuer does not renew an absent provider Grant after a ${denial.label}`, integrationOptions, async () => {
+    const fixture = await seed();
+    const pending = await startConsentWithPreviousGrant(fixture);
+    assert.equal((await prisma.oidcArtifact.deleteMany({ where: { model: "Grant", idHash: hashOidcIdentifier(pending.grantId) } })).count, 1);
+    await denial.apply(fixture, pending.sessionId);
+
+    const result = await pending.client.request(pending.interactionUrl.href);
+    const location = result.headers.get("location");
+    if (denial.denialResponse === "callback") {
+      assert.equal(result.status, 303, "the OIDC provider returns an authorization error to this client's registered callback");
+      assert.ok(location);
+      const destination = new URL(location);
+      assert.equal(destination.origin, new URL(redirectUri).origin);
+      assert.equal(destination.pathname, new URL(redirectUri).pathname);
+      assert.equal(destination.searchParams.get("error"), "access_denied");
+      assert.equal(destination.searchParams.get("code"), null);
+    } else if (denial.denialResponse === "login") {
+      assert.equal(result.status, 303, "a blocked or revoked session must return to local login without issuing a code");
+      assert.ok(location);
+      const destination = new URL(location, origin);
+      assert.equal(destination.origin, origin);
+      assert.equal(destination.pathname, "/login");
+      assert.equal(destination.searchParams.get("code"), null);
+    } else {
+      assert.ok(result.status >= 400, `a disabled connection must be rejected by the provider, got HTTP ${result.status}`);
+      assert.equal(location, null, "a disabled connection cannot redirect to a registered callback");
+    }
+    assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", accountIdHash: hashOidcIdentifier(fixture.userId), clientIdHash: hashOidcIdentifier(fixture.clientId) } }), 0,
+      "an absent provider Grant cannot be recreated after the server-side authorization check fails");
+  });
+}
 
 test("real client explicit claims consent finishes and includes the requested ID token claim", integrationOptions, async () => {
   const fixture = await seed();

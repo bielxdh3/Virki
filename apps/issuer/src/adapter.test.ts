@@ -28,8 +28,19 @@ test("pending Interaction indexes nested client and authenticated session withou
   const previous = process.env.VIRKI_OIDC_ADAPTER_KEY;
   process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
   const rows: Array<{ create: { clientIdHash: string | null; accountIdHash: string | null } }> = [];
+  const calls: Array<{ kind: string; sql?: string; values?: unknown[] }> = [];
   try {
-    const database = { oidcArtifact: { upsert: async (args: typeof rows[number]) => { rows.push(args); } } };
+    const database = {
+      $transaction: async (operation: (transaction: unknown) => Promise<void>) => operation({
+        $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+          calls.push({ kind: "connection-lock", sql: strings.join("?"), values });
+          return [{ id: "connection-id" }];
+        },
+        oidcArtifact: { upsert: async (args: typeof rows[number]) => { calls.push({ kind: "upsert" }); rows.push(args); } }
+      }),
+      oidcArtifact: { upsert: async () => assert.fail("Interaction persistence must share the connection lock transaction.") },
+      projectConnection: {}
+    };
     const adapter = new PrismaOidcAdapter("Interaction", database as never);
     await adapter.upsert("before-login", { params: { client_id: "client" } } as never, 300);
     await adapter.upsert("after-login", { params: { client_id: "client" }, session: { accountId: "user" } } as never, 300);
@@ -39,6 +50,35 @@ test("pending Interaction indexes nested client and authenticated session withou
       [hashOidcIdentifier("client"), hashOidcIdentifier("user")],
       [hashOidcIdentifier("client"), hashOidcIdentifier("result-user")]
     ]);
+    assert.deepEqual(calls.map(({ kind }) => kind), ["connection-lock", "upsert", "connection-lock", "upsert", "connection-lock", "upsert"]);
+    assert.match(calls[0].sql ?? "", /FROM "ProjectConnection"[\s\S]*"clientId" = \?[\s\S]*"enabled" = TRUE[\s\S]*FOR UPDATE/u);
+    assert.deepEqual(calls[0].values, ["client"]);
+  } finally {
+    if (previous === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
+    else process.env.VIRKI_OIDC_ADAPTER_KEY = previous;
+  }
+});
+
+test("pre-login Interaction persistence fails closed for disabled or deleted clients", async () => {
+  const previous = process.env.VIRKI_OIDC_ADAPTER_KEY;
+  process.env.VIRKI_OIDC_ADAPTER_KEY = env.VIRKI_OIDC_ADAPTER_KEY;
+  try {
+    for (const state of ["disabled", "deleted"]) {
+      let upserted = false;
+      const database = {
+        $transaction: async (operation: (transaction: unknown) => Promise<void>) => operation({
+          $queryRaw: async () => [],
+          oidcArtifact: { upsert: async () => { upserted = true; } }
+        }),
+        oidcArtifact: { upsert: async () => { upserted = true; } },
+        projectConnection: {}
+      };
+      await assert.rejects(
+        () => new PrismaOidcAdapter("Interaction", database as never).upsert("pending", { params: { client_id: `client-${state}` } } as never, 300),
+        /client/iu
+      );
+      assert.equal(upserted, false, `${state} clients must not persist interactions`);
+    }
   } finally {
     if (previous === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
     else process.env.VIRKI_OIDC_ADAPTER_KEY = previous;
@@ -158,10 +198,12 @@ test("grant-bound OIDC artifacts lock and recheck active account, connection, an
     } as never, 300);
 
     assert.deepEqual(calls.map(({ kind }) => kind), ["lock", "lock", "upsert"]);
-    assert.match(calls[0].sql ?? "", /grant_record\."revokedAt" IS NULL[\s\S]*account_record\."role" = 'USER'[\s\S]*account_record\."isActive" = TRUE[\s\S]*account_record\."accountStatus" = 'ACTIVE'[\s\S]*connection_record\."enabled" = TRUE/u);
-    assert.match(calls[0].sql ?? "", /FOR UPDATE OF grant_record, account_record, connection_record/u);
-    assert.match(calls[0].sql ?? "", /connection_record\."redirectUris" AS "redirectUris"/u);
-    assert.deepEqual(calls[0].values, ["user-id", "client-id"]);
+    const authorizationSql = calls[0].sql ?? "";
+    assert.match(authorizationSql, /WITH connection_record AS MATERIALIZED \([\s\S]*FROM "ProjectConnection"[\s\S]*"enabled" = TRUE[\s\S]*FOR UPDATE\s*\)/u);
+    assert.match(authorizationSql, /grant_record\."revokedAt" IS NULL[\s\S]*account_record\."role" = 'USER'[\s\S]*account_record\."isActive" = TRUE[\s\S]*account_record\."accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE OF grant_record, account_record/u);
+    assert.ok(authorizationSql.indexOf("FOR UPDATE") < authorizationSql.indexOf("FOR UPDATE OF grant_record, account_record"), "the connection row lock must be acquired before grant and account locks");
+    assert.match(authorizationSql, /connection_record\."redirectUris" AS "redirectUris"/u);
+    assert.deepEqual(calls[0].values, ["client-id", "user-id"]);
     assert.match(calls[1].sql ?? "", /FROM "OidcArtifact"[\s\S]*"model" = 'Grant'[\s\S]*FOR UPDATE/u);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
@@ -273,8 +315,11 @@ test("OIDC provider Grant records recheck active project access before persisten
     assert.equal(calls.length, 0);
     await new PrismaOidcAdapter("Grant", database as never).upsert("provider-grant-id", { accountId: "user-id", clientId: "client-id" } as never, 300);
     assert.deepEqual(calls.map(({ kind }) => kind), ["lock", "upsert"]);
-    assert.match(calls[0].sql ?? "", /grant_record\."revokedAt" IS NULL[\s\S]*account_record\."role" = 'USER'[\s\S]*account_record\."isActive" = TRUE[\s\S]*account_record\."accountStatus" = 'ACTIVE'[\s\S]*connection_record\."enabled" = TRUE/u);
-    assert.deepEqual(calls[0].values, ["user-id", "client-id"]);
+    const authorizationSql = calls[0].sql ?? "";
+    assert.match(authorizationSql, /WITH connection_record AS MATERIALIZED \([\s\S]*FROM "ProjectConnection"[\s\S]*"enabled" = TRUE[\s\S]*FOR UPDATE\s*\)/u);
+    assert.match(authorizationSql, /grant_record\."revokedAt" IS NULL[\s\S]*account_record\."role" = 'USER'[\s\S]*account_record\."isActive" = TRUE[\s\S]*account_record\."accountStatus" = 'ACTIVE'[\s\S]*FOR UPDATE OF grant_record, account_record/u);
+    assert.ok(authorizationSql.indexOf("FOR UPDATE") < authorizationSql.indexOf("FOR UPDATE OF grant_record, account_record"), "the connection row lock must be acquired before grant and account locks");
+    assert.deepEqual(calls[0].values, ["client-id", "user-id"]);
     assert.equal((calls[1].args as { create: { grantHash: string | null } }).create.grantHash, null);
   } finally {
     if (original === undefined) delete process.env.VIRKI_OIDC_ADAPTER_KEY;
