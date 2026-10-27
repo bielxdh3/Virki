@@ -42,6 +42,12 @@ export async function createTestUser(input: {
 }
 
 export async function seedAdminSessionWithElevation(userId: string, scope: ElevationScope, now = new Date()): Promise<{ sessionId: string; elevationId: string }> {
+  const credential = await prisma.administrativeCredential.upsert({
+    where: { userId },
+    create: { userId, passwordHash: await hashPassword(randomBytes(24).toString("base64url")), status: "ACTIVE" },
+    update: {},
+    select: { keyVersion: true }
+  });
   const session = await prisma.session.create({
     data: { userId, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000) },
     select: { id: true }
@@ -52,6 +58,7 @@ export async function seedAdminSessionWithElevation(userId: string, scope: Eleva
       sessionId: session.id,
       requestKey: randomBytes(24).toString("base64url"),
       protocolVersion: 1,
+      credentialKeyVersion: credential.keyVersion,
       scope,
       challengeHash: "integration-fixture",
       status: "ACTIVE",

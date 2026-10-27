@@ -2,7 +2,7 @@
 
 import { withHubAuditRequest } from "../../../lib/audit-request";
 
-import { verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
+import { revokeOtherAccountSessions, verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
 import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { validateSessionCsrfToken } from "../../../lib/session-csrf";
 import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt } from "@virki/auth/security";
@@ -80,8 +80,40 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
   if (!/^[A-Za-z0-9_-]{8,80}$/u.test(target) || target === session.id) redirect("/account/security?error=session");
   try {
     await prisma.$transaction(async (transaction) => {
+      // The bulk revoke and password writers lock User before Session. Keep
+      // this single-session writer in the same order to avoid a User/Session
+      // deadlock with concurrent bulk revocation or account recovery.
+      const users = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "User"
+        WHERE "id" = ${session.user.id} AND "role" = ${session.user.role}::"UserRole"
+          AND "isActive" = TRUE AND "accountStatus" = 'ACTIVE'::"AccountStatus"
+        FOR UPDATE
+      `;
+      if (users.length !== 1) throw new Error("Rejected.");
+      const liveSession = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Session"
+        WHERE "id" = ${session.id} AND "userId" = ${session.user.id}
+          AND "revokedAt" IS NULL
+        FOR UPDATE
+      `;
+      if (liveSession.length !== 1) throw new Error("Rejected.");
+      // The Session lock can outlive the current session. Check expiry with a
+      // fresh timestamp after the wait using Prisma's UTC DateTime semantics.
+      const currentSession = await transaction.session.findFirst({
+        where: { id: session.id, userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } },
+        select: { id: true }
+      });
+      if (!currentSession) throw new Error("Rejected.");
       const result = await transaction.session.updateMany({ where: { id: target, userId: session.user.id, revokedAt: null }, data: { revokedAt: new Date() } });
       if (result.count) await writeAuditLogInTransaction(transaction, { eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS", actorUserId: session.user.id, resource: "session", message: "Other account session revoked." });
+      // A target-row or audit-table lock can delay the commit past the
+      // current session's expiry. Reject within this transaction, so both
+      // the target revocation and success audit roll back atomically.
+      const stillLive = await transaction.session.findFirst({
+        where: { id: session.id, userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } },
+        select: { id: true }
+      });
+      if (!stillLive) throw new Error("Rejected.");
     });
   } catch {
     await recordSecurityDenial(await headers(), "account-session-revoke", "rejected", session);
@@ -92,6 +124,28 @@ export async function revokeAccountSessionAction(formData: FormData): Promise<vo
   });
 }
 
+export async function revokeOtherAccountSessionsAction(formData: FormData): Promise<void> {
+  return withHubAuditRequest(async () => {
+    const session = await requireAccountMutation(formData, "account-sessions-revoke");
+    if (session.user.role !== "USER" || read(formData, "confirmed") !== "yes") {
+      await recordSecurityDenial(await headers(), "account-sessions-revoke", "rejected", session);
+      redirect("/account/security?error=sessions");
+    }
+    let revokedCount: number;
+    try {
+      await consumeSecurityProofAttempt(session.user.id);
+      const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { passwordHash: true, role: true, isActive: true, accountStatus: true } });
+      if (!user?.isActive || user.accountStatus !== "ACTIVE" || user.role !== "USER" || !user.passwordHash || !await verifyPassword(user.passwordHash, readRaw(formData, "password"))) throw new Error("Rejected.");
+      revokedCount = await revokeOtherAccountSessions(session.user.id, session.id);
+    } catch {
+      await recordSecurityDenial(await headers(), "account-sessions-revoke", "rejected", session);
+      redirect("/account/security?error=sessions");
+    }
+    revalidatePath("/account/security");
+    redirect(`/account/security?status=${revokedCount > 0 ? "sessions" : "no-sessions"}`);
+  });
+}
+
 export async function getAccountSecurityData() {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
@@ -99,12 +153,14 @@ export async function getAccountSecurityData() {
   const session = await getCurrentSession();
   if (!session || (surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) return null;
   const now = new Date();
-  const [state, devices, sessions] = await Promise.all([
+  const [state, devices, otherSessions, otherSessionCount] = await Promise.all([
     getAccountSecurityState(session.user.id),
     listTrustedDevices(session.user.id),
-    prisma.session.findMany({ where: { userId: session.user.id, revokedAt: null, expiresAt: { gt: now } }, select: { id: true, createdAt: true, expiresAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 50 })
+    prisma.session.findMany({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null, expiresAt: { gt: now } }, select: { id: true, createdAt: true, expiresAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 49 }),
+    prisma.session.count({ where: { userId: session.user.id, id: { not: session.id }, revokedAt: null, expiresAt: { gt: now } } })
   ]);
-  return { session, state, devices, sessions };
+  const sessions = [{ id: session.id, createdAt: session.createdAt, expiresAt: session.expiresAt }, ...otherSessions];
+  return { session, state, devices, sessions, otherSessionCount };
 }
 
 async function requireAccountMutation(formData: FormData, source: string) {

@@ -11,12 +11,12 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
   try { filters = parseAuditFilters(await searchParams); }
   catch (error) {
     if (!(error instanceof AuditFilterError)) throw error;
-    return <main className="admin-main" id="admin-content" tabIndex={-1}><h1>Auditoria</h1><p className="form-error" role="alert">{error.message}</p><a className="button-secondary" href="/admin/audit">Limpar filtros</a></main>;
+    return <><h1>Auditoria</h1><p className="form-error" role="alert">{error.message}</p><a className="button-secondary" href="/admin/audit">Limpar filtros</a></>;
   }
   try {
     const rows = await prisma.auditLog.findMany({ ...buildAuditQuery(filters), select: auditSelect });
     return <AuditView filters={filters} rows={rows.slice(0, 50)} hasNext={rows.length > 50} />;
   } catch {
-    return <main className="admin-main" id="admin-content" tabIndex={-1}><h1>Auditoria</h1><p className="form-error" role="alert">Não foi possível consultar os eventos. Tente novamente em instantes.</p><a className="button-secondary" href="/admin/audit">Tentar novamente</a></main>;
+    return <><h1>Auditoria</h1><p className="form-error" role="alert">Não foi possível consultar os eventos. Tente novamente em instantes.</p><a className="button-secondary" href="/admin/audit">Tentar novamente</a></>;
   }
 }

@@ -14,6 +14,11 @@ const exposedFunctions = new Set([
   "cleanup_failed_backup_verification", "create_verified_backup", "cleanup_deploy_staging",
   "maintenance_on", "stop_routed_services", "apply_production_migrations",
   "resume_services", "activate_source",
+  // Keep the rehearsal linked to real checkpoint/recovery functions rather
+  // than masking new fail-closed dependencies with permissive no-op stubs.
+  "assert_migration_guard_absent", "read_migration_guard", "assert_original_migration_backup",
+  "write_migration_guard", "assert_migration_guard_verified",
+  "recover_interrupted_verified_resume",
 ]);
 
 export function disposableReleaseFixture(t, predecessor, candidate) {
@@ -75,9 +80,10 @@ run_clone_migrations() {
 }
 cleanup_clone() { rm -f -- "$2"; }
 verify_clone_cleanup() { [[ ! -e "$2" ]]; }
-identity_snapshot() { printf 'same-identity\n'; }
-recovery_snapshot() { printf 'same-recovery\n'; }
+identity_snapshot() { printf '1|2|3\n'; }
+recovery_snapshot() { printf 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n'; }
 assert_backup_verified() { [[ -f "$verification_path" ]]; }
+assert_tunnel_stopped() { :; }
 normalize_migration_history() { :; }
 run_migration_status() {
   if [[ "$failure" == migration-status ]]; then
@@ -128,6 +134,7 @@ readonly release_dir="$root/releases"
 readonly current_link="$root/current"
 readonly source_dir="$root/releases/$revision"
 readonly verification_path="$root/.virki-migration-verification"
+readonly migration_guard_path="$root/.virki-migration-integrity-guard"
 readonly maintenance_path="$root/.virki-maintenance"
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
 ${stubs}

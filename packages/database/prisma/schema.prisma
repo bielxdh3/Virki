@@ -121,6 +121,8 @@ model User {
   administrativeCredential AdministrativeCredential?
   administrativeRecoveryCodes AdministrativeRecoveryCode[]
   securityElevations       SecurityElevation[]
+  passkeyCredentials       PasskeyCredential[]
+  passkeyChallenges        PasskeyChallenge[]
 }
 
 model Session {
@@ -134,9 +136,49 @@ model Session {
   updatedAt  DateTime  @updatedAt
   revokedAt  DateTime?
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  passkeyChallenges PasskeyChallenge[]
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+model PasskeyCredential {
+  id               String    @id @default(cuid())
+  userId           String
+  credentialId     String    @unique
+  publicKey        Bytes
+  counter          BigInt    @default(0)
+  revision         Int       @default(0)
+  transports       String[]  @default([])
+  backupEligible   Boolean
+  backupState      Boolean
+  name             String
+  createdAt        DateTime  @default(now())
+  lastUsedAt       DateTime?
+  revokedAt        DateTime?
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+}
+
+model PasskeyChallenge {
+  id            String    @id @default(cuid())
+  challengeHash String    @unique
+  ceremony      String
+  userId        String?
+  sessionId     String?
+  browserHash   String
+  proofHash     String?
+  rpID          String
+  origin        String
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  user          User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session       Session?  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([browserHash, ceremony])
 }
 
 model LoginRateLimit {

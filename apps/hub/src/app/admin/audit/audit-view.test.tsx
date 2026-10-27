@@ -4,6 +4,19 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parseAuditFilters } from "@virki/auth/audit-query";
 import { AuditView } from "./audit-view";
+import AuditLayout from "./layout";
+import AuditLoading from "./loading";
+
+test("audit keeps one stable focus target around loading and settled route content", () => {
+  (globalThis as typeof globalThis & { React: typeof React }).React = React;
+  const loading = renderToStaticMarkup(<AuditLayout><AuditLoading /></AuditLayout>);
+  const settled = renderToStaticMarkup(<AuditLayout><AuditView filters={parseAuditFilters({})} rows={[]} hasNext={false} /></AuditLayout>);
+  for (const html of [loading, settled]) {
+    assert.equal((html.match(/<main\b/gu) ?? []).length, 1);
+    assert.match(html, /<main class="admin-main" id="admin-content" tabindex="-1">/u);
+    assert.match(html, /<h1>Auditoria<\/h1>/u);
+  }
+});
 
 test("audit investigation renders safe references and collapsed details without raw legacy payloads", () => {
   (globalThis as typeof globalThis & { React: typeof React }).React = React;

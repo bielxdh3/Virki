@@ -15,6 +15,7 @@
     "./csrf": "./src/csrf.ts",
     "./email": "./src/email.ts",
     "./security": "./src/security.ts",
+    "./passkeys": "./src/passkeys.ts",
     "./account-invitation": "./src/account-invitation.ts",
     "./oidc-secrets": "./src/oidc-secrets.ts",
     "./administration": "./src/administration.ts",
@@ -29,10 +30,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@virki/database": "0.1.0",
     "@node-rs/argon2": "^2.2.1",
+    "@simplewebauthn/server": "^13.3.3",
+    "@virki/database": "0.1.0",
     "jose": "^6.2.3",
-    "nodemailer": "^10.0.10"
+    "nodemailer": "^10.2.1"
   },
   "devDependencies": {
     "@types/nodemailer": "^8.0.2"

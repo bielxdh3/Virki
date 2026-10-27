@@ -8,6 +8,7 @@ const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)
 const adminActions = readFileSync(path.join(repositoryRoot, "apps", "hub", "src", "app", "admin", "actions.ts"), "utf8");
 const recoveryActions = readFileSync(path.join(repositoryRoot, "apps", "hub", "src", "app", "recover", "actions.ts"), "utf8");
 const administration = readFileSync(path.join(repositoryRoot, "packages", "auth", "src", "administration.ts"), "utf8");
+const adminSecurityActions = readFileSync(path.join(repositoryRoot, "apps", "hub", "src", "app", "admin", "security", "actions.ts"), "utf8");
 const invitation = readFileSync(path.join(repositoryRoot, "packages", "auth", "src", "account-invitation.ts"), "utf8");
 const security = readFileSync(path.join(repositoryRoot, "packages", "auth", "src", "security.ts"), "utf8");
 
@@ -72,4 +73,17 @@ test("project access service mutations retain their transactional elevation chec
     const mutation = body.indexOf(write);
     assert.ok(transaction >= 0 && authorization > transaction && mutation > authorization, `${name} must authorize inside its transaction before ${write}.`);
   }
+});
+
+test("ADMIN elevation revocation locks the acting session and revalidates it after the audit write", () => {
+  const body = exportedFunction(adminSecurityActions, "revokeElevationAction");
+  const transactionStart = body.indexOf("prisma.$transaction(");
+  const actorLock = body.indexOf("lockAdminSessionInTransaction(transaction, session.user.id, session.id,");
+  const mutation = body.indexOf("transaction.securityElevation.updateMany");
+  const audit = body.indexOf("writeAuditLogInTransaction(transaction,");
+  const finalCheck = body.indexOf("assertAdminSessionCurrentInTransaction(transaction, session.user.id, session.id,");
+  assert.ok(transactionStart >= 0 && actorLock > transactionStart && mutation > actorLock,
+    "ADMIN elevation revocation must lock the actor's session before writing");
+  assert.ok(audit > mutation && finalCheck > audit,
+    "ADMIN elevation revocation must revalidate the actor's session after audit persistence");
 });

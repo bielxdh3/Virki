@@ -189,6 +189,9 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
+      - name: Confidential Node OIDC SDK and RP example tests
+        run: npm run test:oidc-node
+
       - name: Public surface tests
         run: npm run test:public-site
 
@@ -390,7 +393,7 @@ jobs:
   authenticated-e2e:
     name: Authenticated browser E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 70
     env:
       VIRKI_CORE_TEST_DATABASE_CONFIRM: disposable
       VIRKI_E2E_ACCESS_DIAGNOSTICS: "true"
@@ -404,6 +407,12 @@ jobs:
         with:
           node-version: 22.20.0
           cache: npm
+
+      - name: Verify Node 22 and npm 10 E2E toolchain
+        shell: bash
+        run: |
+          [[ "$(node -p 'process.versions.node')" == 22.* ]]
+          [[ "$(npm --version)" == 10.* ]]
 
       - name: Install dependencies
         run: npm ci
@@ -454,11 +463,11 @@ jobs:
           runtime_role=virki_runtime
           migrator_role=virki_migrator
           e2e_test_role=virki_runtime_test
-          audit_cleanup_role=virki_audit_maintenance
+          audit_cleanup_role=virki_migrator
           audit_cleanup_url_file="$(mktemp "$RUNNER_TEMP/virki-e2e-audit-cleanup-url.XXXXXX")"
           chmod 600 "$audit_cleanup_url_file"
           printf 'VIRKI_E2E_AUDIT_CLEANUP_URL_FILE=%s\n' "$audit_cleanup_url_file" >> "$GITHUB_ENV"
-          printf '%s://%s:%s@127.0.0.1:%s/virki_e2e_test?schema=public' "$database_protocol" "$audit_cleanup_role" "$audit_maintenance_password" "$host_port" > "$audit_cleanup_url_file"
+          printf '%s://%s:%s@127.0.0.1:%s/virki_e2e_test?schema=public' "$database_protocol" "$audit_cleanup_role" "$migrator_password" "$host_port" > "$audit_cleanup_url_file"
           printf 'VIRKI_E2E_DATABASE_URL=%s://%s:%s@127.0.0.1:%s/virki_e2e_test?schema=public\n' "$database_protocol" "$e2e_test_role" "$e2e_password" "$host_port" >> "$GITHUB_ENV"
           printf 'DATABASE_URL=%s://%s:%s@127.0.0.1:%s/virki_e2e_test?schema=public\n' "$database_protocol" "$runtime_role" "$runtime_password" "$host_port" >> "$GITHUB_ENV"
           printf 'MIGRATION_DATABASE_URL=%s://%s:%s@127.0.0.1:%s/virki_e2e_test?schema=public\n' "$database_protocol" "$migrator_role" "$migrator_password" "$host_port" >> "$GITHUB_ENV"
@@ -497,17 +506,29 @@ jobs:
         run: |
           VIRKI_INTEGRATION_DATABASE_URL="$VIRKI_E2E_DATABASE_URL" npm run test:integration
 
-      - name: Grant fixture-scoped audit cleanup to disposable maintenance role
-        run: |
-          container_name="virki-e2e-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          docker exec "$container_name" psql -U virki_bootstrap -d virki_e2e_test \
-            --command='GRANT SELECT ("actorUserId") ON TABLE public."AuditLog" TO virki_audit_maintenance'
-
       - name: Run browser E2E
         run: |
           cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
-          trap 'unset cleanup_url; rm -f -- "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
+          # The next step runs production-mode E2E with this same isolated fixture.
+          # Do not delete its root-owned, mode-0600 credential here; the following
+          # step deletes it, and the always() cleanup does so on any earlier error.
+          trap 'unset cleanup_url' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e
+
+      - name: Run production Hub core browser E2E
+        env:
+          VIRKI_E2E_HUB_MODE: production
+          VIRKI_HUB_HOSTNAME: hub.localhost
+          VIRKI_PORTAL_HOSTNAME: portal.localhost
+          VIRKI_HUB_URL: https://hub.localhost
+          VIRKI_PORTAL_URL: https://portal.localhost
+          VIRKI_OIDC_PROXY_URL: http://127.0.0.1:3003
+        run: |
+          printf '127.0.0.1 access.e2e.invalid\n' | sudo tee -a /etc/hosts >/dev/null
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0 >/dev/null
+          cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
+          trap 'unset cleanup_url; rm -f -- "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- e2e/authenticated-journeys.spec.mts e2e/oidc-authorization-code.spec.mts
 
       - name: Remove disposable PostgreSQL
         if: always()

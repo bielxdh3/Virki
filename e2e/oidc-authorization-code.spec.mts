@@ -6,13 +6,16 @@ import { request as httpsRequest, createServer as createHttpsServer } from "node
 import { TLSSocket } from "node:tls";
 import { getDeviceCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
+import { hashOidcIdentifier } from "@virki/auth/oidc-secrets";
 import { PrismaClient } from "@virki/database";
 import { expect, test, type BrowserContext } from "@playwright/test";
+import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
 // @ts-expect-error This existing JavaScript safety helper has no declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 
 const portalUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://portal.localhost" : "https://portal.localhost:3001";
+const hubUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://hub.localhost" : "https://hub.localhost:3001";
 const deviceCookieName = getDeviceCookieName({ NODE_ENV: process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : process.env.NODE_ENV });
 const portal = new URL(portalUrl);
 const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
@@ -24,6 +27,7 @@ type OidcFixture = {
   user: { id: string; email: string; password: string; deviceToken: string };
   recoveryTargetUser: { id: string; email: string; password: string; deviceToken: string };
   accountSwitchUser: { id: string; email: string; password: string; deviceToken: string };
+  recoveryReviewer: { id: string; email: string; password: string; deviceToken: string; administrativePassword: string };
   projectConnectionId: string;
   oidc: { clientId: string; clientSecret: string };
 };
@@ -83,6 +87,10 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
 
   let context: BrowserContext | undefined;
   let weakerSessionContext: BrowserContext | undefined;
+  let adminGrantContext: BrowserContext | undefined;
+  let positiveGrantContext: BrowserContext | undefined;
+  let deniedGrantContext: BrowserContext | undefined;
+  let lifecycleConnection: { id: string; clientId: string; slug: string; name: string } | undefined;
   const databaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("OIDC E2E requires the explicit disposable database fixture.");
   assertDisposableCoreTestDatabase(databaseUrl, process.env);
@@ -134,6 +142,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       authorizationCode: string;
       verifier: string;
       requestNonce: string;
+      clientId?: string;
       expectedSubject: string;
       expectedEmail: string;
       expectedAcr: string;
@@ -146,7 +155,8 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
         redirect_uri: callbackUri,
         code_verifier: input.verifier
       }).toString();
-      const clientAuthorization = `Basic ${Buffer.from(`${fixture.oidc.clientId}:${fixture.oidc.clientSecret}`, "utf8").toString("base64")}`;
+      const expectedClientId = input.clientId ?? fixture.oidc.clientId;
+      const clientAuthorization = `Basic ${Buffer.from(`${expectedClientId}:${fixture.oidc.clientSecret}`, "utf8").toString("base64")}`;
       const tokenResponse = await requestHub(tokenPath, {
         ca: caCertificate,
         method: "POST",
@@ -185,7 +195,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
       expect(claims.iss).toBe(portalUrl);
       expect(claims.sub).toBe(input.expectedSubject);
-      expect(audience).toContain(fixture.oidc.clientId);
+      expect(audience).toContain(expectedClientId);
       expect(claims.nonce).toBe(input.requestNonce);
       expect(typeof claims.exp === "number" && claims.exp > Math.floor(Date.now() / 1_000)).toBe(true);
       expect(claims.acr).toBe(input.expectedAcr);
@@ -220,6 +230,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     const runAuthorizationFlow = async (input: {
       page: import("@playwright/test").Page;
       account: OidcFixture["user"];
+      clientId?: string;
       expectedAcr: string;
       extraParameters?: Record<string, string>;
       expectedSubject?: string;
@@ -246,6 +257,7 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
         authorizationCode,
         verifier,
         requestNonce,
+        clientId: input.clientId,
         expectedSubject: input.expectedSubject ?? input.account.id,
         expectedEmail: input.expectedEmail ?? input.account.email,
         expectedAcr: input.expectedAcr,
@@ -428,17 +440,181 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       requiresMfa: true
     });
     expect(steppedUpToken.claims.amr).toEqual(expect.arrayContaining(["pwd", "otp", "mfa"]));
+
+    // V09: an independent, run-scoped OIDC client starts with NO grant. The
+    // browser must grant and then revoke it through protected Server Actions.
+    // Reuse only the encrypted disposable client's secret material; no shared
+    // USER/project grant changes, and cleanup deletes this owned connection.
+    const baselineGrant = await prisma.userProjectGrant.findUniqueOrThrow({
+      where: { userId_connectionId: { userId: fixture.user.id, connectionId: fixture.projectConnectionId } },
+      select: { id: true, revokedAt: true, grantedByUserId: true }
+    });
+    expect(baselineGrant.revokedAt).toBeNull();
+    const sourceClient = await prisma.projectConnection.findUniqueOrThrow({
+      where: { id: fixture.projectConnectionId }, select: { clientSecretCiphertext: true }
+    });
+    const slug = `v09-grant-${randomBytes(8).toString("hex")}`;
+    lifecycleConnection = await prisma.projectConnection.create({
+      data: {
+        name: `V09 grant ${slug}`,
+        slug,
+        origin: "https://project.e2e.invalid",
+        enabled: true,
+        clientId: `biel_${randomBytes(18).toString("base64url")}`,
+        clientSecretCiphertext: sourceClient.clientSecretCiphertext,
+        redirectUris: [callbackUri]
+      },
+      select: { id: true, clientId: true, slug: true, name: true }
+    });
+    expect(await prisma.userProjectGrant.findUnique({
+      where: { userId_connectionId: { userId: fixture.user.id, connectionId: lifecycleConnection.id } }
+    })).toBeNull();
+
+    adminGrantContext = await browser.newContext();
+    await adminGrantContext.addCookies([{
+      name: deviceCookieName,
+      value: fixture.recoveryReviewer.deviceToken,
+      url: hubUrl,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax"
+    }]);
+    const adminPage = await adminGrantContext.newPage();
+    await addCloudflareAccessHeader(adminPage);
+    await adminPage.goto(`${hubUrl}/admin/security`);
+    await expect(adminPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Fsecurity`);
+    await adminPage.getByLabel("E-mail", { exact: true }).fill(fixture.recoveryReviewer.email);
+    await adminPage.getByLabel("Senha", { exact: true }).fill(fixture.recoveryReviewer.password);
+    await adminPage.getByRole("button", { name: "Entrar", exact: true }).click();
+    await expect(adminPage).toHaveURL(/\/login\/verify\?ceremony=/u);
+    const adminLoginCeremony = new URL(adminPage.url()).searchParams.get("ceremony");
+    if (!adminLoginCeremony) throw new Error("E2E reviewer MFA ceremony is missing.");
+    const adminLoginMessage = await prisma.emailOutboxMessage.findFirst({
+      where: { idempotencyKey: `security-ceremony:${adminLoginCeremony}`, recipientEmail: fixture.recoveryReviewer.email, kind: { in: ["EMAIL_TWO_FACTOR", "NEW_DEVICE_VERIFICATION"] } },
+      select: { payload: true }
+    });
+    if (!adminLoginMessage) throw new Error("E2E reviewer MFA message is missing.");
+    const adminLoginCode = decryptEmailPayload(adminLoginMessage.payload).code;
+    if (!/^\d{6}$/u.test(adminLoginCode ?? "")) throw new Error("E2E reviewer MFA message is invalid.");
+    await adminPage.getByLabel("Código", { exact: true }).fill(adminLoginCode!);
+    await adminPage.getByRole("button", { name: "Continuar", exact: true }).click();
+    await expect(adminPage).toHaveURL(`${hubUrl}/admin/security`);
+
+    const elevationSection = adminPage.locator("section.surface").filter({ has: adminPage.getByRole("heading", { name: "Elevação temporária", exact: true }) });
+    const elevationForm = elevationSection.locator("form").first();
+    await elevationForm.locator('select[name="scope"]').selectOption("PROJECT_ACCESS_CHANGE");
+    await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.recoveryReviewer.password);
+    await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(fixture.recoveryReviewer.administrativePassword);
+    await elevationForm.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
+    const verificationForm = elevationSection.locator("form").nth(1);
+    await expect(verificationForm.getByLabel("Código", { exact: true })).toBeVisible();
+    const requestKey = await verificationForm.locator('input[name="requestKey"]').inputValue();
+    const challengeMessage = await prisma.emailOutboxMessage.findFirst({
+      where: { idempotencyKey: `admin-elevation:${requestKey}`, recipientEmail: fixture.recoveryReviewer.email, kind: "ADMIN_EMAIL_VERIFICATION" },
+      select: { payload: true }
+    });
+    if (!challengeMessage) throw new Error("E2E reviewer elevation challenge is unavailable.");
+    const challengeCode = decryptEmailPayload(challengeMessage.payload).code;
+    if (!/^\d{6}$/u.test(challengeCode ?? "")) throw new Error("E2E reviewer elevation code is invalid.");
+    await verificationForm.getByLabel("Código", { exact: true }).fill(challengeCode!);
+    await verificationForm.getByRole("button", { name: "Ativar elevação", exact: true }).click();
+    await expect(adminPage).toHaveURL(`${hubUrl}/admin/security?status=elevation#admin-content`);
+
+    await adminPage.goto(`${hubUrl}/admin/access`);
+    const grantForm = adminPage.locator("form").filter({ has: adminPage.getByRole("button", { name: "Conceder acesso", exact: true }) });
+    await grantForm.locator('select[name="userId"]').selectOption(fixture.user.id);
+    await grantForm.locator('select[name="connectionId"]').selectOption(lifecycleConnection.id);
+    await grantForm.getByRole("button", { name: "Conceder acesso", exact: true }).click();
+    await expect(adminPage).toHaveURL(`${hubUrl}/admin/access?status=granted`);
+    const granted = await prisma.userProjectGrant.findUniqueOrThrow({
+      where: { userId_connectionId: { userId: fixture.user.id, connectionId: lifecycleConnection.id } },
+      select: { id: true, revokedAt: true, grantedByUserId: true }
+    });
+    expect(granted.revokedAt).toBeNull();
+    expect(granted.grantedByUserId).toBe(fixture.recoveryReviewer.id);
+
+    // Positive control on the SAME dynamic client: prove real code issuance,
+    // token exchange, signed ID token and userinfo BEFORE revoking the grant.
+    positiveGrantContext = await browser.newContext();
+    await positiveGrantContext.addCookies([{
+      name: deviceCookieName,
+      value: fixture.user.deviceToken,
+      url: portalUrl,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax"
+    }]);
+    const grantedPage = await positiveGrantContext.newPage();
+    const grantedToken = await runAuthorizationFlow({
+      page: grantedPage,
+      account: fixture.user,
+      clientId: lifecycleConnection.clientId,
+      expectedAcr: "urn:virki:loa:1",
+      extraParameters: { client_id: lifecycleConnection.clientId }
+    });
+    expect(grantedToken.claims.sub).toBe(fixture.user.id);
+
+    const revokeForm = adminPage.locator(`form:has(input[name="grantId"][value="${granted.id}"])`);
+    await expect(revokeForm).toBeVisible();
+    await revokeForm.getByRole("button", { name: "Revogar", exact: true }).click();
+    await expect(adminPage).toHaveURL(`${hubUrl}/admin/access?status=revoked`);
+    expect((await prisma.userProjectGrant.findUniqueOrThrow({ where: { id: granted.id } })).revokedAt).not.toBeNull();
+    expect(await prisma.userProjectGrant.findUniqueOrThrow({
+      where: { id: baselineGrant.id }, select: { revokedAt: true, grantedByUserId: true }
+    })).toEqual({ revokedAt: baselineGrant.revokedAt, grantedByUserId: baselineGrant.grantedByUserId });
+
+    deniedGrantContext = await browser.newContext();
+    await deniedGrantContext.addCookies([{
+      name: deviceCookieName,
+      value: fixture.user.deviceToken,
+      url: portalUrl,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax"
+    }]);
+    const deniedPage = await deniedGrantContext.newPage();
+    const deniedState = randomOpaqueValue();
+    const deniedChallenge = createHash("sha256").update(randomOpaqueValue(), "ascii").digest("base64url");
+    await deniedPage.goto(makeAuthorizationUrl(deniedChallenge, deniedState, randomOpaqueValue(), {
+      client_id: lifecycleConnection.clientId,
+      prompt: "login"
+    }).href);
+    await completePortalLoginIfNeeded(deniedPage, fixture.user, true, prisma);
+    const deniedCallback = await waitForAuthorizationCallback(deniedPage, callbackUri, nextCallback, []);
+    expect(deniedCallback.searchParams.get("state")).toBe(deniedState);
+    expect(deniedCallback.searchParams.get("error")).toBe("access_denied");
+    expect(deniedCallback.searchParams.has("code")).toBe(false);
   } finally {
+    // Delete only resources created by this test. Do not mutate the seeded
+    // project's grant or leave this OIDC client to pollute another test.
     try {
-      await context?.close();
+      try {
+        if (lifecycleConnection) {
+          await prisma.$transaction(async (transaction) => {
+            await transaction.oidcArtifact.deleteMany({
+              where: { clientIdHash: hashOidcIdentifier(lifecycleConnection!.clientId) }
+            });
+            const removed = await transaction.projectConnection.deleteMany({
+              where: { id: lifecycleConnection!.id, slug: lifecycleConnection!.slug, clientId: lifecycleConnection!.clientId }
+            });
+            expect(removed.count, "OIDC lifecycle connection cleanup failed.").toBe(1);
+          });
+        }
+      } finally {
+        await Promise.allSettled([adminGrantContext?.close(), positiveGrantContext?.close(), deniedGrantContext?.close()]);
+      }
     } finally {
       try {
-        await weakerSessionContext?.close();
+        await context?.close();
       } finally {
         try {
-          await prisma.$disconnect();
+          await weakerSessionContext?.close();
         } finally {
-          if (callbackServer.listening) await new Promise<void>((resolve) => callbackServer.close(() => resolve()));
+          try {
+            await prisma.$disconnect();
+          } finally {
+            if (callbackServer.listening) await new Promise<void>((resolve) => callbackServer.close(() => resolve()));
+          }
         }
       }
     }
@@ -649,7 +825,7 @@ async function completePortalLoginIfNeeded(
       loginResponse.headerValue("x-virki-e2e-login-reason"),
       loginResponse.headerValue("x-virki-e2e-access-reason")
     ]);
-    throw new Error(`OIDC login POST was denied (${loginDenialDiagnostic(loginReason, proxyReason)}; document-origin=${safeOriginKind(documentOrigin, portalUrl)}; request-origin=${safeOriginKind(requestOrigin, portalUrl)}).`);
+    throw new Error(`OIDC login POST was denied (${loginDenialDiagnostic(loginReason, proxyReason)}; document-origin=${safeOriginKind(documentOrigin, portalUrl)}; request-origin=${safeOriginKind(requestOrigin ?? undefined, portalUrl)}).`);
   }
   expect(documentOrigin).toBe(portalUrl);
   expect(requestOrigin).toBe(portalUrl);
@@ -871,13 +1047,14 @@ function randomOpaqueValue(): string {
 }
 
 function isOidcFixture(value: unknown): value is OidcFixture {
-  if (!isRecord(value) || !isRecord(value.user) || !isRecord(value.recoveryTargetUser) || !isRecord(value.accountSwitchUser) || !isRecord(value.oidc)) return false;
+  if (!isRecord(value) || !isRecord(value.user) || !isRecord(value.recoveryTargetUser) || !isRecord(value.accountSwitchUser) || !isRecord(value.recoveryReviewer) || !isRecord(value.oidc)) return false;
   return typeof value.user.id === "string" && typeof value.user.email === "string" &&
     typeof value.user.password === "string" && typeof value.user.deviceToken === "string" &&
     typeof value.recoveryTargetUser.id === "string" && typeof value.recoveryTargetUser.email === "string" &&
     typeof value.recoveryTargetUser.password === "string" && typeof value.recoveryTargetUser.deviceToken === "string" &&
     typeof value.accountSwitchUser.id === "string" && typeof value.accountSwitchUser.email === "string" &&
     typeof value.accountSwitchUser.password === "string" && typeof value.accountSwitchUser.deviceToken === "string" &&
+    typeof value.recoveryReviewer.id === "string" && typeof value.recoveryReviewer.email === "string" && typeof value.recoveryReviewer.password === "string" && typeof value.recoveryReviewer.deviceToken === "string" && typeof value.recoveryReviewer.administrativePassword === "string" &&
     typeof value.projectConnectionId === "string" && typeof value.oidc.clientId === "string" &&
     typeof value.oidc.clientSecret === "string";
 }

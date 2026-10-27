@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   AdministrationMutationError,
@@ -10,6 +11,22 @@ import {
   requireSecurityElevationInTransaction,
   resolveElevationDuration
 } from "./administration";
+
+test("raw administrative expiry checks normalize timestamptz parameters to UTC for Prisma timestamp columns", () => {
+  // Prisma persists DateTime as TIMESTAMP(3) without a time zone. Raw Date
+  // parameters are timestamptz: a non-UTC PostgreSQL TimeZone otherwise
+  // shifts expiration boundaries and can grant stale security elevation.
+  const files = [
+    ["./elevation-authorization.ts", 3],
+    ["./administration.ts", 4]
+  ] as const;
+  for (const [file, expectedChecks] of files) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    const safeChecks = source.match(/"expiresAt"\s*>\s*\(\$\{(?:now|checkedAt)\} AT TIME ZONE 'UTC'\)/gu) ?? [];
+    assert.equal(safeChecks.length, expectedChecks, `${file} must normalize every raw security expiry comparison`);
+    assert.doesNotMatch(source, /"expiresAt"\s*>\s*\$\{(?:now|checkedAt)\}/u, "raw expiry checks must not depend on PostgreSQL server timezone");
+  }
+});
 
 test("an elevation email code expires after ten minutes even when the elevation itself is long-lived", () => {
   const sentAt = new Date("2026-08-01T10:00:00.000Z");
@@ -65,6 +82,8 @@ for (const lockTarget of ["session", "elevation"] as const) test(`transactional 
   const transaction = {
     $queryRaw: async (parts: TemplateStringsArray, ...values: unknown[]) => {
       const sql = parts.join("");
+      if (sql.includes('FROM "User" WHERE "id"') && sql.includes("FOR UPDATE")) return [{ id: "admin-id" }];
+      if (sql.includes('FROM "AdministrativeCredential"')) return [{ passwordHash: "fixture", keyVersion: 1, status: "ACTIVE", revokedAt: null }];
       if (sql.includes('FROM "User" u JOIN "Session"') && sql.includes("FOR UPDATE OF u, s")) {
         if (lockTarget === "session") await waitUntilExpired();
         return [{ id: "session" }]; // The SELECT predicate was evaluated before its row-lock wait.
@@ -75,7 +94,7 @@ for (const lockTarget of ["session", "elevation"] as const) test(`transactional 
       }
       if (sql.includes('FROM "SecurityElevation"') && sql.includes("FOR UPDATE")) {
         if (lockTarget === "elevation") await waitUntilExpired();
-        return [{ id: "elevation" }]; // The SELECT predicate was evaluated before its row-lock wait.
+        return [{ id: "elevation", credentialKeyVersion: 1 }]; // The SELECT predicate was evaluated before its row-lock wait.
       }
       if (sql.includes('FROM "SecurityElevation"')) {
         const checkedAt = values.filter((value): value is Date => value instanceof Date).at(-1) ?? now;
@@ -89,4 +108,21 @@ for (const lockTarget of ["session", "elevation"] as const) test(`transactional 
     requireSecurityElevationInTransaction(transaction as never, "admin-id", "session-id", "ADMIN_RECOVERY_REGENERATE", now),
     AdministrationMutationError
   );
+});
+
+for (const credentialState of ["current", "rotated", "revoked", "missing-version"] as const) test(`transactional elevation checks ${credentialState} administrative credential`, async () => {
+  const transaction = {
+    $queryRaw: async (parts: TemplateStringsArray) => {
+      const sql = parts.join("");
+      if (sql.includes('FROM "User" WHERE "id"')) return [{ id: "admin-id" }];
+      if (sql.includes('FROM "User" u JOIN "Session"')) return [{ id: "session-id" }];
+      if (sql.includes('FROM "AdministrativeCredential"')) return [{ passwordHash: "fixture", keyVersion: credentialState === "rotated" ? 2 : 1, status: credentialState === "revoked" ? "REVOKED" : "ACTIVE", revokedAt: credentialState === "revoked" ? new Date() : null }];
+      if (sql.includes('FROM "SecurityElevation"') && sql.includes("FOR UPDATE")) return [{ id: "elevation-id", credentialKeyVersion: credentialState === "missing-version" ? null : 1 }];
+      if (sql.includes('FROM "SecurityElevation"')) return [{ id: "elevation-id" }];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  const authorization = requireSecurityElevationInTransaction(transaction as never, "admin-id", "session-id", "ADMIN_RECOVERY_REGENERATE", new Date());
+  if (credentialState === "current") await authorization;
+  else await assert.rejects(authorization, AdministrationMutationError);
 });

@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "incremental": false
+  },
+  "include": ["src/client.ts", "src/index.ts", "src/store.ts", "src/postgres-store.ts"],
+  "exclude": ["src/**/*.test.ts", "node_modules", "dist"]
+}

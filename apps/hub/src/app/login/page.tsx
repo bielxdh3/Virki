@@ -3,7 +3,9 @@ import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
-import { getSurface, safeReturnTo } from "../../lib/surface";
+import { getSurface, safeReturnTo, requestHost } from "../../lib/surface";
+import { passkeysEnabledForRequest } from "@virki/auth/passkeys";
+import { PasskeyLogin } from "./passkey-login";
 import { PasswordField } from "../password-field";
 
 export const dynamic = "force-dynamic";
@@ -41,6 +43,7 @@ export default async function LoginPage({ searchParams }: { searchParams?: Promi
           {params?.error ? <p className="form-error" role="alert">E-mail ou senha inválidos.</p> : null}
           <button className="button-primary" type="submit">Entrar</button>
         </form>
+        {passkeysEnabledForRequest(surface, requestHost(requestHeaders)) ? <PasskeyLogin returnTo={returnTo ?? "/"} /> : null}
         <a className="subtle-link" href="/recover">Recuperar conta</a>
       </section>
     </main>

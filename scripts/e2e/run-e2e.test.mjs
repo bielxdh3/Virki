@@ -99,6 +99,48 @@ test("an isolated runner can skip a duplicate production Hub build after its bui
   assert.equal(shouldBuildProductionHub({ VIRKI_E2E_HUB_BUILD_READY: "true" }), false);
 });
 
+test("production browser E2E refuses to silently skip the authenticated fixture", async () => {
+  const { assertProductionE2eFixture } = await import("./run-e2e.mjs");
+  assert.equal(typeof assertProductionE2eFixture, "function");
+  const fixture = {
+    VIRKI_E2E_HUB_MODE: "production",
+    VIRKI_E2E_DATABASE_URL: "postgresql://runtime-test@127.0.0.1:5432/virki_e2e_test",
+    VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "postgresql://migrator@127.0.0.1:5432/virki_e2e_test",
+    VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable"
+  };
+  assert.doesNotThrow(() => assertProductionE2eFixture(fixture));
+  assert.doesNotThrow(() => assertProductionE2eFixture({ VIRKI_E2E_HUB_MODE: "development" }));
+  assert.doesNotThrow(() => assertProductionE2eFixture({ VIRKI_E2E_HUB_MODE: "production" }, "win32"), "Windows creates the fixture inside its isolated Docker runner");
+  for (const key of ["VIRKI_E2E_DATABASE_URL", "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL", "VIRKI_CORE_TEST_DATABASE_CONFIRM"]) {
+    assert.throws(() => assertProductionE2eFixture({ ...fixture, [key]: "" }, "linux"), /disposable database fixture/u);
+  }
+  assert.throws(() => assertProductionE2eFixture({ ...fixture, VIRKI_E2E_DATABASE_URL: "postgresql://admin@remote.invalid/virki" }, "linux"), /local or isolated CI host/u);
+});
+
+test("CI runs production build/start core browser journeys after preserving the development suite", () => {
+  const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const e2eJob = workflow.slice(workflow.indexOf("  authenticated-e2e:"));
+  assert.match(e2eJob, /node-version: 22\.20\.0/u);
+  assert.match(e2eJob, /Verify Node 22 and npm 10 E2E toolchain/u);
+  assert.match(e2eJob, /run: npm ci/u);
+  const dev = workflow.indexOf("- name: Run browser E2E");
+  const production = workflow.indexOf("- name: Run production Hub core browser E2E");
+  const cleanup = workflow.indexOf("- name: Remove disposable PostgreSQL");
+  assert.ok(dev > 0 && production > dev && cleanup > production);
+  const stage = workflow.slice(production, cleanup);
+  const devStage = workflow.slice(dev, production);
+  assert.doesNotMatch(devStage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must be able to read the disposable cleanup fixture");
+  assert.match(stage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must remove its temporary credential");
+  assert.match(stage, /VIRKI_E2E_HUB_MODE: production/u);
+  assert.match(stage, /VIRKI_HUB_HOSTNAME: hub\.localhost/u);
+  assert.match(stage, /VIRKI_PORTAL_HOSTNAME: portal\.localhost/u);
+  assert.match(stage, /VIRKI_OIDC_PROXY_URL: http:\/\/127\.0\.0\.1:3003/u);
+  assert.match(stage, /127\.0\.0\.1 access\.e2e\.invalid/u, "the server-side Access JWKS fetch needs local DNS");
+  assert.match(stage, /net\.ipv4\.ip_unprivileged_port_start=0/u, "the unprivileged Hub process must bind HTTPS port 443");
+  assert.match(stage, /VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="\$cleanup_url" npm run test:e2e -- e2e\/authenticated-journeys\.spec\.mts e2e\/oidc-authorization-code\.spec\.mts/u);
+  assert.doesNotMatch(stage, /VIRKI_E2E_HUB_BUILD_READY/u, "the CI gate must build from source in its clean checkout");
+});
+
 test("production Hub E2E uses the production start adapter", () => {
   const tlsDirectory = mkdtempSync(resolve(tmpdir(), "virki-prod-hub-command-"));
   const keyPath = resolve(tlsDirectory, "server-key.pem");

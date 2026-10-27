@@ -169,12 +169,19 @@ test("invitation purpose survives URL spoofing and activates a USER once with on
       select: { id: true }
     });
     sessionId = session.id;
+    const credential = await database.administrativeCredential.upsert({
+      where: { userId: fixture.admin.id },
+      create: { userId: fixture.admin.id, passwordHash: await hashPassword(randomBytes(24).toString("base64url")), status: "ACTIVE" },
+      update: {},
+      select: { keyVersion: true }
+    });
     await database.securityElevation.create({
       data: {
         userId: fixture.admin.id,
         sessionId,
         requestKey: randomBytes(24).toString("base64url"),
         protocolVersion: 1,
+        credentialKeyVersion: credential.keyVersion,
         scope: "ACCOUNT_STATE_CHANGE",
         challengeHash: "e2e-fixture",
         status: "ACTIVE",

@@ -86,7 +86,7 @@ if (!nativeKernel) {
   });
 
   test("pure transition appends a new monotonic state without mutating predecessor", () => {
-    const request = { directory: "/tmp/virki-test-only", manifestSha256: digest, priorSha: predecessor,
+    const request = { directory: path.join(os.tmpdir(), "virki-test-only"), manifestSha256: digest, priorSha: predecessor,
       nextSha: next, nonce, sequence: 1, approvalDigest: approval };
     const seed = { version: 1, anchorSha: predecessor, entries: [] };
     const first = validateOfflineLedgerTransition(seed, request);
@@ -102,7 +102,7 @@ if (!nativeKernel) {
   });
 
   test("pure transition fails closed on predecessor forgery, replay and dirty history", async (t) => {
-    const request = { directory: "/tmp/virki-test-only", manifestSha256: digest, priorSha: predecessor,
+    const request = { directory: path.join(os.tmpdir(), "virki-test-only"), manifestSha256: digest, priorSha: predecessor,
       nextSha: next, nonce, sequence: 1, approvalDigest: approval };
     const initial = { version: 1, anchorSha: predecessor, entries: [] };
     const first = validateOfflineLedgerTransition(initial, request);

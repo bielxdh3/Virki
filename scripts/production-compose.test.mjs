@@ -39,6 +39,8 @@ test("production exposes only the public site and loopback application surfaces"
 test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared environment", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
+  assert.match(hub, /VIRKI_PASSKEYS_ENABLED:\s*\$\{VIRKI_PASSKEYS_ENABLED:-false\}/u,
+    "Production Hub must receive the explicitly enabled passkey rollout flag, defaulting to disabled");
   assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
   assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:\?/u);
   assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u);

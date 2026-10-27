@@ -5,6 +5,7 @@ import { prisma } from "@virki/database";
 import { createTestUser, integrationOptions } from "./integration-fixtures";
 import * as administration from "./administration";
 import { hashOidcIdentifier } from "./oidc-secrets";
+import { hashPassword } from "./index";
 
 after(() => prisma.$disconnect());
 
@@ -13,7 +14,8 @@ async function fixture() {
   const admin = await createTestUser({ role: "ADMIN", label: "grant-admin" });
   const user = await createTestUser({ label: "grant-target" });
   const session = await prisma.session.create({ data: { userId: admin.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 86400000) } });
-  await prisma.securityElevation.create({ data: { userId: admin.id, sessionId: session.id, requestKey: randomBytes(24).toString("base64url"), scope: "PROJECT_ACCESS_CHANGE", challengeHash: "fixture", status: "ACTIVE", expiresAt: new Date(Date.now() + 600000), protocolVersion: 1 } });
+  const credential = await prisma.administrativeCredential.create({ data: { userId: admin.id, passwordHash: await hashPassword(randomBytes(24).toString("base64url")), status: "ACTIVE" } });
+  await prisma.securityElevation.create({ data: { userId: admin.id, sessionId: session.id, requestKey: randomBytes(24).toString("base64url"), scope: "PROJECT_ACCESS_CHANGE", challengeHash: "fixture", status: "ACTIVE", expiresAt: new Date(Date.now() + 600000), protocolVersion: 1, credentialKeyVersion: credential.keyVersion } });
   const clientId = randomUUID();
   const connection = await prisma.projectConnection.create({ data: { name: "Fixture", slug: clientId, clientId, origin: "https://project.example.invalid", clientSecretCiphertext: "fixture", redirectUris: [] } });
   return { actor: { id: admin.id, role: "ADMIN" }, sessionId: session.id, userId: user.id, connectionId: connection.id, clientId };

@@ -163,6 +163,9 @@ const hubEnv = {
   VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: oidcPrivateConfigPath,
   VIRKI_E2E_TLS_KEY_PATH: tlsKeyPath,
   VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath,
+  ...(process.env.VIRKI_E2E_PASSKEYS === "true" && !productionHubMode
+    ? { VIRKI_PASSKEYS_ENABLED: "true", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }
+    : {}),
   ...(process.env.VIRKI_E2E_HUB_MODE === "production" ? { NODE_ENV: "production", VIRKI_E2E_HUB_MODE: "production" } : {})
 };
 process.env.VIRKI_E2E_ACCESS_AUDIENCE = accessAudience;

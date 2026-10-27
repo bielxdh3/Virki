@@ -1,0 +1,255 @@
+import "next/dist/server/node-environment-baseline";
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { after, test } from "node:test";
+import React from "react";
+import { prisma } from "@virki/database";
+import * as auth from "./index";
+import { createTestUser, integrationOptions } from "./integration-fixtures";
+import { CSRF_FORM_FIELD_NAME } from "./csrf";
+import { createSessionCsrfTokenFor } from "../../../apps/hub/src/lib/session-csrf";
+
+Object.assign(globalThis, { AsyncLocalStorage, React });
+after(() => prisma.$disconnect());
+
+type RevokeOthers = (userId: string, currentSessionId: string) => Promise<number>;
+const revokeOthers = (auth as Record<string, unknown>).revokeOtherAccountSessions as RevokeOthers;
+const expiry = () => new Date(Date.now() + 86_400_000);
+
+async function addSession(userId: string, token = randomBytes(32).toString("base64url")) {
+  const session = await prisma.session.create({ data: { userId, tokenHash: auth.hashSessionToken(token), expiresAt: expiry() } });
+  return { session, token };
+}
+
+async function requestContext<T>(host: string, token: string, origin: string, operation: () => Promise<T>, pathname = "/account/security"): Promise<T> {
+  const { workAsyncStorage } = await import("next/dist/server/app-render/work-async-storage.external");
+  const { workUnitAsyncStorage } = await import("next/dist/server/app-render/work-unit-async-storage.external");
+  const { createRequestStoreForAPI } = await import("next/dist/server/async-storage/request-store");
+  const { NextRequest } = await import("next/server");
+  const request = new NextRequest(`https://${host}${pathname}`, { method: "POST", headers: { host, origin, cookie: `${auth.SESSION_COOKIE_NAME}=${token}` } });
+  const store = createRequestStoreForAPI(request, { pathname }, { tags: [], expirationsByCacheKind: new Map() } as never, undefined, undefined, undefined);
+  // Next's revalidatePath requires an incremental cache context for successful
+  // server actions; this lightweight request store tests the real action/DB.
+  const workStore = pathname === "/admin/security" ? { route: pathname, incrementalCache: {}, cacheLifeProfiles: {} } : { route: pathname };
+  return workAsyncStorage.run(workStore as never, () => workUnitAsyncStorage.run(store, operation));
+}
+
+test("USER revokes every active other session beyond the 50-row display limit, with one audit event", integrationOptions, async () => {
+  assert.equal(typeof revokeOthers, "function");
+  const owner = await createTestUser({ label: "revoke-all-owner" });
+  const foreign = await createTestUser({ label: "revoke-all-foreign" });
+  const current = await addSession(owner.id);
+  const victim = await addSession(owner.id);
+  const unrelated = await addSession(foreign.id);
+  await prisma.session.createMany({ data: Array.from({ length: 54 }, () => ({ userId: owner.id, tokenHash: auth.hashSessionToken(randomBytes(32).toString("base64url")), expiresAt: expiry() })) });
+
+  assert.equal(await revokeOthers(owner.id, current.session.id), 55);
+  assert.ok(await auth.getSessionByToken(current.token));
+  assert.equal(await auth.getSessionByToken(victim.token), null);
+  assert.ok(await auth.getSessionByToken(unrelated.token));
+  assert.equal(await prisma.session.count({ where: { userId: owner.id, revokedAt: null } }), 1);
+  const audit = await prisma.auditLog.findMany({ where: { actorUserId: owner.id, eventType: "AUTH_SESSION_REVOKED" } });
+  assert.equal(audit.length, 1);
+  assert.equal((audit[0]?.metadata as { revokedCount?: number } | null)?.revokedCount, 55);
+  assert.equal(audit[0]?.actorRole, "USER");
+  assert.equal(audit[0]?.sessionRef, auth.hashAuditSessionReference(current.session.id));
+  assert.equal(await revokeOthers(owner.id, current.session.id), 0, "repeat submission is idempotent");
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: owner.id, eventType: "AUTH_SESSION_REVOKED" } }), 1);
+});
+
+test("foreign, revoked, expired, and ADMIN current sessions cannot authorize USER bulk revocation", integrationOptions, async () => {
+  assert.equal(typeof revokeOthers, "function");
+  const user = await createTestUser({ label: "revoke-all-isolation" });
+  const other = await createTestUser({ label: "revoke-all-other" });
+  const admin = await createTestUser({ role: "ADMIN", label: "revoke-all-admin" });
+  const current = await addSession(user.id);
+  const victim = await addSession(user.id);
+  const foreign = await addSession(other.id);
+  const adminCurrent = await addSession(admin.id);
+  const adminOther = await addSession(admin.id);
+
+  await assert.rejects(revokeOthers(user.id, foreign.session.id));
+  await assert.rejects(revokeOthers(admin.id, adminCurrent.session.id));
+  await prisma.session.update({ where: { id: current.session.id }, data: { revokedAt: new Date() } });
+  await assert.rejects(revokeOthers(user.id, current.session.id));
+  await prisma.session.update({ where: { id: current.session.id }, data: { revokedAt: null, expiresAt: new Date(Date.now() - 1) } });
+  const storedExpiry = await prisma.session.findUniqueOrThrow({ where: { id: current.session.id }, select: { expiresAt: true } });
+  assert.ok(storedExpiry.expiresAt.getTime() < Date.now(), "the current session must be expired before revocation is attempted");
+  await assert.rejects(revokeOthers(user.id, current.session.id));
+
+  assert.ok(await auth.getSessionByToken(victim.token));
+  assert.ok(await auth.getSessionByToken(adminOther.token));
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "AUTH_SESSION_REVOKED" } }), 0);
+});
+
+test("simultaneous USER bulk revocations remain idempotent and produce one audit for changed rows", integrationOptions, async () => {
+  assert.equal(typeof revokeOthers, "function");
+  const user = await createTestUser({ label: "revoke-all-race" });
+  const current = await addSession(user.id);
+  const other = await addSession(user.id);
+  const [first, second] = await Promise.all([revokeOthers(user.id, current.session.id), revokeOthers(user.id, current.session.id)]);
+  assert.equal(first + second, 1);
+  assert.ok(await auth.getSessionByToken(current.token));
+  assert.equal(await auth.getSessionByToken(other.token), null);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "AUTH_SESSION_REVOKED" } }), 1);
+});
+
+test("security page data reports all other sessions while keeping the current one in a bounded list", integrationOptions, async () => {
+  process.env.VIRKI_PORTAL_HOSTNAME = "portal.example.invalid";
+  const user = await createTestUser({ label: "revoke-all-list" });
+  const current = await addSession(user.id);
+  await prisma.session.createMany({ data: Array.from({ length: 55 }, () => ({ userId: user.id, tokenHash: auth.hashSessionToken(randomBytes(32).toString("base64url")), expiresAt: expiry() })) });
+  const { getAccountSecurityData } = await import("../../../apps/hub/src/app/account/security/actions");
+  const data = await requestContext("portal.example.invalid", current.token, "https://portal.example.invalid", getAccountSecurityData);
+  assert.equal(data?.otherSessionCount, 55);
+  assert.equal(data?.sessions.length, 50);
+  assert.equal(data?.sessions[0]?.id, current.session.id);
+});
+
+test("portal action requires correct origin, session-bound CSRF, USER role, confirmation, and password", integrationOptions, async () => {
+  process.env.VIRKI_PORTAL_HOSTNAME = "portal.example.invalid";
+  const { revokeOtherAccountSessionsAction } = await import("../../../apps/hub/src/app/account/security/actions");
+  assert.equal(typeof revokeOtherAccountSessionsAction, "function");
+  const user = await createTestUser({ label: "revoke-all-action" });
+  const admin = await createTestUser({ role: "ADMIN", label: "revoke-all-admin-action" });
+  const current = await addSession(user.id);
+  const other = await addSession(user.id);
+  const adminCurrent = await addSession(admin.id);
+  const adminOther = await addSession(admin.id);
+  const form = (token: string) => {
+    const data = new FormData();
+    data.set(CSRF_FORM_FIELD_NAME, createSessionCsrfTokenFor(token, "account-security"));
+    data.set("password", user.password);
+    data.set("confirmed", "yes");
+    return data;
+  };
+  const invoke = (token: string, origin: string, data: FormData) => requestContext("portal.example.invalid", token, origin, () => revokeOtherAccountSessionsAction(data));
+
+  await assert.rejects(invoke(current.token, "https://wrong.example.invalid", form(current.token)));
+  await assert.rejects(invoke(current.token, "https://portal.example.invalid", form(adminCurrent.token)));
+  const unconfirmed = form(current.token);
+  unconfirmed.delete("confirmed");
+  await assert.rejects(invoke(current.token, "https://portal.example.invalid", unconfirmed));
+  const badPassword = form(current.token);
+  badPassword.set("password", "incorrect-password");
+  await assert.rejects(invoke(current.token, "https://portal.example.invalid", badPassword));
+  await assert.rejects(invoke(adminCurrent.token, "https://portal.example.invalid", form(adminCurrent.token)));
+  assert.ok(await auth.getSessionByToken(other.token));
+  assert.ok(await auth.getSessionByToken(adminOther.token));
+
+  const { getAccountSecurityData } = await import("../../../apps/hub/src/app/account/security/actions");
+  const before = await requestContext("portal.example.invalid", current.token, "https://portal.example.invalid", getAccountSecurityData);
+  assert.equal(before?.otherSessionCount, 1);
+  await assert.rejects(invoke(current.token, "https://portal.example.invalid", form(current.token)));
+  assert.ok(await auth.getSessionByToken(current.token));
+  assert.equal(await auth.getSessionByToken(other.token), null);
+  assert.ok(await auth.getSessionByToken(adminOther.token));
+});
+
+test("ADMIN revokeOtherSessionsAction preserves the current session, revokes only its other sessions, and audits once", integrationOptions, async () => {
+  // Call the real protected Next server action with a real request context and
+  // disposable PostgreSQL; never substitute a mock of the revocation writer.
+  const previousHubHostname = process.env.VIRKI_HUB_HOSTNAME;
+  const previousAccessRequirement = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
+  process.env.VIRKI_HUB_HOSTNAME = "hub.example.invalid";
+  process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "false"; // test-only: no external Access service
+  try {
+  const { revokeOtherSessionsAction } = await import("../../../apps/hub/src/app/admin/security/actions");
+  const admin = await createTestUser({ role: "ADMIN", label: "admin-bulk-regression" });
+  const differentAdmin = await createTestUser({ role: "ADMIN", label: "other-admin-bulk-regression" });
+  const user = await createTestUser({ role: "USER", label: "user-bulk-regression" });
+  const current = await addSession(admin.id);
+  const otherFirst = await addSession(admin.id);
+  const otherSecond = await addSession(admin.id);
+  const differentAdminSession = await addSession(differentAdmin.id);
+  const userSession = await addSession(user.id);
+  const form = new FormData();
+  form.set(CSRF_FORM_FIELD_NAME, createSessionCsrfTokenFor(current.token, "admin-security"));
+  const invoke = () => requestContext("hub.example.invalid", current.token, "https://hub.example.invalid", () => revokeOtherSessionsAction(form), "/admin/security");
+  const expectSuccessfulRedirect = async () => assert.rejects(invoke(), (error: unknown) => {
+    const digest = error && typeof error === "object" && "digest" in error ? String(error.digest) : "";
+    assert.match(digest, /NEXT_REDIRECT;[^;]*;\/admin\/security\?status=sessions#admin-content;/u, `actual action rejection: ${error instanceof Error ? error.message : String(error)}; digest: ${digest}`);
+    return true;
+  });
+
+  await expectSuccessfulRedirect();
+  assert.ok(await auth.getSessionByToken(current.token), "the current ADMIN session must remain authenticated");
+  assert.equal(await auth.getSessionByToken(otherFirst.token), null);
+  assert.equal(await auth.getSessionByToken(otherSecond.token), null);
+  assert.ok(await auth.getSessionByToken(differentAdminSession.token), "another ADMIN's session is never a target");
+  assert.ok(await auth.getSessionByToken(userSession.token), "USER sessions are not affected");
+  const audits = await prisma.auditLog.findMany({
+    where: { actorUserId: admin.id, eventType: "AUTH_SESSION_REVOKED", result: "SUCCESS" }
+  });
+  assert.equal(audits.length, 1, "both changes must produce exactly one committed audit event");
+  assert.equal(audits[0]?.actorRole, "ADMIN");
+  assert.equal(audits[0]?.sessionRef, auth.hashAuditSessionReference(current.session.id));
+  assert.equal((audits[0]?.metadata as { revokedCount?: number } | null)?.revokedCount, 2);
+
+  await expectSuccessfulRedirect();
+  assert.ok(await auth.getSessionByToken(current.token));
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.id, eventType: "AUTH_SESSION_REVOKED" } }), 1, "repeat requests must not invent a second mutation/audit");
+  } finally {
+    if (previousHubHostname === undefined) delete process.env.VIRKI_HUB_HOSTNAME;
+    else process.env.VIRKI_HUB_HOSTNAME = previousHubHostname;
+    if (previousAccessRequirement === undefined) delete process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
+    else process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = previousAccessRequirement;
+  }
+});
+
+test("single-session revoke rejects a current session expiring while its Session lock is held", integrationOptions, async () => {
+  process.env.VIRKI_PORTAL_HOSTNAME = "portal.example.invalid";
+  const { getAccountSecurityData, revokeAccountSessionAction } = await import("../../../apps/hub/src/app/account/security/actions");
+  const user = await createTestUser({ label: "revoke-one-expired-after-lock" });
+  const current = await addSession(user.id);
+  const victim = await addSession(user.id);
+  // Warm the server action's request-context imports before starting the expiry clock.
+  assert.ok(await requestContext("portal.example.invalid", current.token, "https://portal.example.invalid", getAccountSecurityData));
+  // Stay below Prisma's five-second interactive transaction timeout, so an
+  // authorization regression cannot be hidden by a transaction timeout.
+  const expiresAt = new Date(Date.now() + 2_500);
+  await prisma.session.update({ where: { id: current.session.id }, data: { expiresAt } });
+  const form = new FormData();
+  form.set(CSRF_FORM_FIELD_NAME, createSessionCsrfTokenFor(current.token, "account-security"));
+  form.set("sessionId", victim.session.id);
+
+  let locked!: () => void;
+  let release!: () => void;
+  let blockerPid = 0;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "Session" WHERE "id" = ${current.session.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 15_000 });
+  await ready;
+  const action = requestContext("portal.example.invalid", current.token, "https://portal.example.invalid", () => revokeAccountSessionAction(form));
+  const outcome = action.then(() => "resolved", (error: unknown) => error);
+  try {
+    const deadline = Date.now() + 5_000;
+    let blocked = false;
+    while (Date.now() < deadline && !blocked) {
+      const rows = await prisma.$queryRaw<Array<{ blocked: number }>>`
+        SELECT count(*)::integer AS blocked
+        FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock'
+          AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
+          AND query LIKE ${`%FROM "Session"%`}
+      `;
+      blocked = (rows[0]?.blocked ?? 0) > 0;
+      if (!blocked) await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(blocked, true, "the action is waiting for the protected Session lock");
+    assert.ok(Date.now() < expiresAt.getTime(), "the session must still be valid while blocked");
+    await new Promise<void>((resolve) => setTimeout(resolve, expiresAt.getTime() - Date.now() + 100));
+  } finally {
+    release();
+    await holder;
+  }
+  const actionOutcome = await outcome;
+  assert.notEqual(actionOutcome, "resolved");
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: victim.session.id }, select: { revokedAt: true } })).revokedAt, null);
+});

@@ -115,6 +115,9 @@ function fixture(t) {
   mkdirSync(repositoryRoot);
   mkdirSync(stagingParent);
   git(repositoryRoot, "init", "-b", "main");
+  // Keep fixture blobs and Git archive bytes identical regardless of the host's
+  // global core.autocrlf setting; production integrity verification stays strict.
+  git(repositoryRoot, "config", "core.autocrlf", "false");
   git(repositoryRoot, "config", "user.email", "ci@example.test");
   git(repositoryRoot, "config", "user.name", "CI fixture");
   writeFileSync(path.join(repositoryRoot, "README.md"), "test exact source bytes\n");

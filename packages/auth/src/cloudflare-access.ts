@@ -35,6 +35,7 @@ type CloudflareAccessConfig = {
 };
 
 const CF_ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
+const CF_ACCESS_CLOCK_TOLERANCE_SECONDS = 30;
 
 const globalForCloudflareAccess = globalThis as unknown as {
   virkiCloudflareAccessJwks?: Map<string, ReturnType<typeof createRemoteJWKSet>>;
@@ -79,10 +80,12 @@ export async function validateCloudflareAccessJwt(
       audience: config.audience,
       issuer: config.teamDomain,
       algorithms: ["RS256"],
-      requiredClaims: ["exp", "iat", "nbf"]
+      requiredClaims: ["exp", "iat", "nbf"],
+      clockTolerance: CF_ACCESS_CLOCK_TOLERANCE_SECONDS
     });
 
-    if (payload.iat! > Math.floor(Date.now() / 1000) || payload.exp! <= payload.iat!) throw new Error("Invalid token lifetime.");
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.iat! > now + CF_ACCESS_CLOCK_TOLERANCE_SECONDS || payload.exp! <= now || payload.exp! <= payload.iat! || payload.exp! <= payload.nbf!) throw new Error("Invalid token lifetime.");
 
     return {
       allowed: true,

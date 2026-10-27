@@ -5,11 +5,11 @@ import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashAuditSes
 import { prisma, type Prisma } from "@virki/database";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
-import { AdministrationMutationError, lockAdminSessionInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { AdministrationMutationError, assertAdminSessionCurrentInTransaction, lockAdminSessionInTransaction, lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export { ELEVATION_SCOPES, ELEVATION_SCOPE_ACTIONS, UI_ELEVATION_SCOPES } from "./elevation-scopes";
 export type { ElevationScope } from "./elevation-scopes";
-export { AdministrationMutationError, lockAdminSessionInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+export { AdministrationMutationError, assertAdminSessionCurrentInTransaction, lockAdminSessionInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export const ELEVATION_PROTOCOL_VERSION = 1;
 export type ElevationDuration = { kind: "TIMED"; minutes: 15 | 60 | 240 | 1440 } | { kind: "MANUAL"; confirmed: boolean };
@@ -61,8 +61,8 @@ export async function completeAdministrativeCredentialSetup(input: {
     // Lock the session together with the ADMIN row. A revoked/expired session
     // after the preliminary password check must not activate a credential.
     await lockAdminSessionInTransaction(transaction, input.actor.id, input.sessionId, now);
-    const lockedAdmin = await transaction.$queryRaw<Array<{ id: string }>>`
-      SELECT "id"
+    const lockedAdmin = await transaction.$queryRaw<Array<{ id: string; passwordHash: string | null }>>`
+      SELECT "id", "passwordHash"
       FROM "User"
       WHERE "id" = ${input.actor.id}
         AND "role" = 'ADMIN'::"UserRole"
@@ -71,12 +71,23 @@ export async function completeAdministrativeCredentialSetup(input: {
       FOR UPDATE
     `;
     if (lockedAdmin.length !== 1) throw new AdministrationMutationError();
-    const credential = await transaction.administrativeCredential.findUnique({ where: { userId: input.actor.id }, select: { status: true } });
+    await assertNotNormalPassword(lockedAdmin[0]!.passwordHash, input.newPassword);
+    const credential = await lockAdministrativeCredentialInTransaction(transaction, input.actor.id);
     if (credential?.status === "ACTIVE") throw new AdministrationMutationError();
 
     const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_SETUP_SCOPE, now);
-    if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
-    const consumed = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING" }, data: { status: "CONSUMED", consumedAt: now } });
+    // A pending challenge can be locked by a concurrent writer. Under
+    // Serializable, an unchanged locked row does not force a retry when its
+    // OTP deadline passes, so validate fresh time only AFTER acquiring it.
+    const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "SecurityElevation" WHERE "id" = ${ceremony.id} FOR UPDATE
+    `;
+    if (locked.length !== 1) throw new AdministrationMutationError();
+    const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, checkedAt);
+    const currentCeremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_SETUP_SCOPE, checkedAt);
+    if (currentCeremony.id !== ceremony.id || !verifySecurityCode(input.code, currentCeremony.challengeHash)) throw new AdministrationMutationError();
+    const consumed = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING" }, data: { status: "CONSUMED", consumedAt: checkedAt } });
     if (consumed.count !== 1) throw new AdministrationMutationError();
     await transaction.securityElevation.updateMany({
       where: { userId: input.actor.id, scope: ADMIN_CREDENTIAL_SETUP_SCOPE, status: "PENDING", id: { not: ceremony.id } },
@@ -95,6 +106,12 @@ export async function completeAdministrativeCredentialSetup(input: {
     }
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
+    // Cleanup of existing recovery codes can itself wait on their row locks.
+    // Keep the initial OTP and Session valid through the final credential
+    // mutation; any failure here rolls back the whole setup transaction.
+    const finalCheckedAt = new Date(Math.max(checkedAt.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, finalCheckedAt);
+    if (!isElevationCeremonyOpen(currentCeremony, finalCheckedAt)) throw new AdministrationMutationError();
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.admin", message: "Administrative credential configured." });
     return recoveryCodes;
   }, { isolationLevel: "Serializable" });
@@ -135,10 +152,26 @@ export async function verifySecurityElevation(input: { actor: { id: string; role
     if (!isAllowedScope(ceremony.scope)) throw new AdministrationMutationError();
     if (typeof ceremony.credentialKeyVersion !== "number" || !Number.isSafeInteger(ceremony.credentialKeyVersion) || ceremony.credentialKeyVersion < 1) throw new AdministrationMutationError();
     await lockActiveAdministrativeCredentialVersion(transaction, input.actor.id, ceremony.credentialKeyVersion);
-    if (!verifySecurityCode(input.code, ceremony.challengeHash)) throw new AdministrationMutationError();
+    // The challenge must be locked before observing its deadline: a wait on
+    // User, Session, credential, or the challenge itself must not extend an OTP.
+    const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "SecurityElevation" WHERE "id" = ${ceremony.id} FOR UPDATE
+    `;
+    if (locked.length !== 1) throw new AdministrationMutationError();
+    const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+    // The session was checked before the credential/challenge locks. A later
+    // wait may cross session expiry, so revalidate without changing lock order.
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, checkedAt);
+    const currentCeremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, undefined, checkedAt);
+    if (currentCeremony.id !== ceremony.id || currentCeremony.scope !== ceremony.scope ||
+        currentCeremony.credentialKeyVersion !== ceremony.credentialKeyVersion) throw new AdministrationMutationError();
+    if (!verifySecurityCode(input.code, currentCeremony.challengeHash)) throw new AdministrationMutationError();
     // Timed elevations last their full duration from activation, not from the moment the code was emailed.
-    const activeExpiresAt = ceremony.manualUntilRevoked ? MANUAL_EXPIRY : new Date(now.getTime() + (ceremony.expiresAt.getTime() - ceremony.createdAt.getTime()));
-    const updated = await transaction.securityElevation.updateMany({ where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: now }, createdAt: { gt: getElevationCeremonyOpenedAfter(now) } }, data: { status: "ACTIVE", activatedAt: now, expiresAt: activeExpiresAt } });
+    const activeExpiresAt = currentCeremony.manualUntilRevoked ? MANUAL_EXPIRY : new Date(checkedAt.getTime() + (currentCeremony.expiresAt.getTime() - currentCeremony.createdAt.getTime()));
+    const updated = await transaction.securityElevation.updateMany({
+      where: { id: ceremony.id, status: "PENDING", expiresAt: { gt: checkedAt }, createdAt: { gt: getElevationCeremonyOpenedAfter(checkedAt), lte: checkedAt } },
+      data: { status: "ACTIVE", activatedAt: checkedAt, expiresAt: activeExpiresAt }
+    });
     if (updated.count !== 1) throw new AdministrationMutationError();
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_ACTIVATED", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.elevation", message: "Administrative elevation activated.", metadata: { requestRef: hashAuditIdentifier(input.requestKey) } });
   });
@@ -147,7 +180,21 @@ export async function verifySecurityElevation(input: { actor: { id: string; role
 export async function listActiveSecurityElevations(actor: { id: string; role: string }, sessionId: string, now = new Date()) {
   await requireAdminSession(actor, sessionId, now);
   await expireSecurityElevations(now);
-  return prisma.securityElevation.findMany({ where: { userId: actor.id, sessionId, status: "ACTIVE", OR: [{ manualUntilRevoked: true }, { expiresAt: { gt: now } }] }, orderBy: { createdAt: "desc" }, take: 20, select: { requestKey: true, scope: true, manualUntilRevoked: true, expiresAt: true, activatedAt: true } });
+  return prisma.$queryRaw<Array<{ requestKey: string; scope: string; manualUntilRevoked: boolean; expiresAt: Date; activatedAt: Date | null }>>`
+    SELECT e."requestKey", e."scope", e."manualUntilRevoked", e."expiresAt", e."activatedAt"
+    FROM "SecurityElevation" e
+    JOIN "User" u ON u."id" = e."userId"
+    JOIN "AdministrativeCredential" c ON c."userId" = e."userId"
+    JOIN "Session" s ON s."id" = e."sessionId" AND s."userId" = e."userId"
+    WHERE e."userId" = ${actor.id} AND e."sessionId" = ${sessionId}
+      AND e."status" = 'ACTIVE'::"SecurityElevationStatus" AND e."revokedAt" IS NULL
+      AND e."credentialKeyVersion" = c."keyVersion" AND c."keyVersion" > 0
+      AND c."status" = 'ACTIVE'::"AdministrativeCredentialStatus" AND c."revokedAt" IS NULL
+      AND u."role" = 'ADMIN'::"UserRole" AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
+      AND s."revokedAt" IS NULL AND s."expiresAt" > (${now} AT TIME ZONE 'UTC')
+      AND (e."manualUntilRevoked" = TRUE OR e."expiresAt" > (${now} AT TIME ZONE 'UTC'))
+    ORDER BY e."createdAt" DESC LIMIT 20
+  `;
 }
 
 export async function getAdministrativeCredentialState(userId: string) {
@@ -157,11 +204,23 @@ export async function getAdministrativeCredentialState(userId: string) {
 export async function hasActiveSecurityElevation(userId: string, sessionId: string, scope: string, now = new Date()): Promise<boolean> {
   if (!isDatabaseId(userId) || !isDatabaseId(sessionId) || !isAllowedScope(scope)) return false;
   await expireSecurityElevations(now);
-  const [row, session] = await Promise.all([
-    prisma.securityElevation.findFirst({ where: { userId, sessionId, scope, status: "ACTIVE", user: { role: "ADMIN", isActive: true, accountStatus: "ACTIVE" }, OR: [{ manualUntilRevoked: true }, { expiresAt: { gt: now } }] }, select: { id: true } }),
-    prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true, revokedAt: true, expiresAt: true } })
-  ]);
-  return Boolean(row && session?.userId === userId && !session.revokedAt && session.expiresAt > now);
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT e."id" FROM "SecurityElevation" e
+    JOIN "User" u ON u."id" = e."userId"
+    JOIN "Session" s ON s."id" = e."sessionId" AND s."userId" = u."id"
+    JOIN "AdministrativeCredential" c ON c."userId" = u."id"
+    WHERE e."userId" = ${userId} AND e."sessionId" = ${sessionId} AND e."scope" = ${scope}
+      AND e."status" = 'ACTIVE'::"SecurityElevationStatus"
+      AND e."revokedAt" IS NULL
+      AND e."credentialKeyVersion" = c."keyVersion"
+      AND c."keyVersion" > 0
+      AND c."status" = 'ACTIVE'::"AdministrativeCredentialStatus" AND c."revokedAt" IS NULL
+      AND u."role" = 'ADMIN'::"UserRole" AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
+      AND s."revokedAt" IS NULL AND s."expiresAt" > (${now} AT TIME ZONE 'UTC')
+      AND (e."manualUntilRevoked" = TRUE OR e."expiresAt" > (${now} AT TIME ZONE 'UTC'))
+    LIMIT 1
+  `;
+  return rows.length === 1;
 }
 
 export async function requireSecurityElevation(userId: string, sessionId: string, scope: ElevationScope, now = new Date()): Promise<void> {
@@ -172,6 +231,7 @@ export async function revokeSecurityElevation(actor: { id: string; role: string 
   await requireAdminSession(actor, sessionId, now);
   if (requestKey && !isRequestKey(requestKey)) throw new AdministrationMutationError();
   await prisma.$transaction(async (transaction) => {
+    await lockAdminSessionInTransaction(transaction, actor.id, sessionId, now);
     await transaction.securityElevation.updateMany({ where: { userId: actor.id, sessionId, status: "ACTIVE", ...(requestKey ? { requestKey } : {}) }, data: { status: "REVOKED", revokedAt: now } });
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(sessionId), resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: requestKey ? hashAuditIdentifier(requestKey) : null } });
   });
@@ -193,6 +253,8 @@ export async function changeAdministrativePassword(actor: { id: string; role: st
   const passwordHash = await hashPassword(newPassword);
   await prisma.$transaction(async (transaction) => {
     await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ADMIN_CREDENTIAL_CHANGE", now);
+    const currentAdmin = await transaction.user.findUnique({ where: { id: actor.id }, select: { passwordHash: true } });
+    await assertNotNormalPassword(currentAdmin?.passwordHash ?? null, newPassword);
     const changed = await transaction.administrativeCredential.updateMany({ where: { userId: actor.id, status: "ACTIVE", revokedAt: null }, data: { passwordHash, keyVersion: { increment: 1 } } });
     if (changed.count !== 1) throw new AdministrationMutationError();
     await transaction.securityElevation.updateMany({ where: { userId: actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
@@ -228,8 +290,10 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
   const passwordHash = await hashPassword(input.newPassword);
   const recoveryCodes = await prisma.$transaction(async (transaction) => {
     await lockAdminSessionInTransaction(transaction, input.actor.id, input.sessionId, now);
+    await lockAdministrativeCredentialInTransaction(transaction, input.actor.id);
     const currentAdmin = await transaction.user.findUnique({ where: { id: input.actor.id }, select: { emailVerifiedAt: true, passwordHash: true } });
     if (!currentAdmin?.emailVerifiedAt || currentAdmin.passwordHash !== admin.passwordHash) throw new AdministrationMutationError();
+    await assertNotNormalPassword(currentAdmin.passwordHash, input.newPassword);
     const code = await transaction.administrativeRecoveryCode.findFirst({ where: { userId: input.actor.id, codeHash: hashRecoveryCode(input.recoveryCode), usedAt: null }, select: { id: true } });
     if (!code) throw new AdministrationMutationError();
     const used = await transaction.administrativeRecoveryCode.updateMany({ where: { id: code.id, usedAt: null }, data: { usedAt: now } });
@@ -239,6 +303,10 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
     await transaction.securityElevation.updateMany({ where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
+    // Updating a recovery code (or deleting sibling codes) can wait after the
+    // initial User/Session locks. Recheck the live session before success;
+    // rejection rolls back the code use, credential change, and recovery data.
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, new Date(Math.max(now.getTime(), Date.now())));
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.admin", message: "Administrative credential recovered." });
     return recoveryCodes;
   });
@@ -279,14 +347,8 @@ async function getPendingCeremony(transaction: Prisma.TransactionClient, request
 }
 
 async function lockActiveAdministrativeCredentialVersion(transaction: Prisma.TransactionClient, userId: string, expectedKeyVersion: number): Promise<void> {
-  const credentials = await transaction.$queryRaw<Array<{ keyVersion: number; status: string; revokedAt: Date | null }>>`
-    SELECT "keyVersion", "status"::text AS "status", "revokedAt"
-    FROM "AdministrativeCredential"
-    WHERE "userId" = ${userId}
-    FOR UPDATE
-  `;
-  const credential = credentials[0];
-  if (credentials.length !== 1 || !credential || credential.status !== "ACTIVE" || credential.revokedAt || credential.keyVersion !== expectedKeyVersion) throw new AdministrationMutationError();
+  const credential = await lockAdministrativeCredentialInTransaction(transaction, userId);
+  if (credential?.status !== "ACTIVE" || credential.revokedAt || credential.keyVersion !== expectedKeyVersion) throw new AdministrationMutationError();
 }
 
 // expiresAt is the lifetime of the elevation once activated (up to 24h, or forever for MANUAL);

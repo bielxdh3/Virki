@@ -84,7 +84,22 @@ export class PrismaOidcAdapter implements Adapter {
 
   async find(id: string): Promise<AdapterPayload | undefined> {
     if (this.model === "Client") return this.findClient(id);
-    return this.readArtifact(await this.database.oidcArtifact.findUnique({ where: { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } } }));
+    const payload = await this.readArtifact(await this.database.oidcArtifact.findUnique({ where: { model_idHash: { model: this.model, idHash: hashOidcIdentifier(id) } } }));
+    if (this.model !== "AuthorizationCode" || !payload) return payload;
+    // An issued authorization code cannot outlive its registered callback.
+    // The provider checks that the exchanged URI matches the code, but does
+    // not revisit the live registration after the operator removes that URI.
+    if (typeof payload.clientId !== "string" || typeof payload.redirectUri !== "string") {
+      throw new errors.InvalidGrant("authorization code is no longer valid");
+    }
+    const connection = await this.database.projectConnection.findUnique({
+      where: { clientId: payload.clientId },
+      select: { enabled: true, redirectUris: true }
+    });
+    if (!connection?.enabled || !stringArray(connection.redirectUris).includes(payload.redirectUri)) {
+      throw new errors.InvalidGrant("authorization code is no longer valid");
+    }
+    return payload;
   }
 
   async findByUid(uid: string): Promise<AdapterPayload | undefined> {
