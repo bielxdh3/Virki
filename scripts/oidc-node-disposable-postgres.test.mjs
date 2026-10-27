@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -20,7 +20,8 @@ test('disposable PG runner finds its own installed tsx before invoking Docker', 
     copyFileSync(source, localRunner);
     for (const name of [
       'disposable-docker-session.mjs', 'disposable-docker-cleanup.mjs',
-      'disposable-docker-mutation-policy.mjs', 'production-boundary-assertion.mjs'
+      'disposable-docker-mutation-policy.mjs', 'production-boundary-assertion.mjs',
+      'disposable-docker-receipt-security.mjs'
     ]) {
       const dest = join(root, 'scripts', 'lib', name);
       mkdirSync(dirname(dest), { recursive: true });
@@ -139,19 +140,46 @@ test('OIDC runner cleanup distinguishes auto-removed containers from denied or u
     mkdirSync(dirname(tsx), { recursive: true });
     writeFileSync(tsx, '// Exists only to pass runner tsx preflight.\n');
     const original = readFileSync(source, 'utf8');
-    const patched = original.replace('import { spawnSync } from "node:child_process";',
-      'import { spawnSync } from "./mock-child.mjs";');
+    const patched = original
+      .replace('import { spawnSync } from "node:child_process";',
+        'import { spawnSync } from "./mock-child.mjs";')
+      .replace('from "./lib/disposable-docker-receipt-security.mjs";',
+        'from "./lib/mock-security.mjs";')
+      .replace('from "node:fs";', 'from "./mock-fs.mjs";');
     assert.notEqual(patched, original, 'fixture must replace child launcher to prevent DB access');
     writeFileSync(runner, patched);
     writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
     writeFileSync(mockChild, `
       export function spawnSync() { return { status: 0 }; }
     `);
+    writeFileSync(join(root, 'scripts', 'lib', 'mock-security.mjs'), `
+      import { fileURLToPath } from 'node:url';
+      import { join } from 'node:path';
+      export const ownerEvidenceDirectory = (_, kind) => join(
+        fileURLToPath(new URL("../../", import.meta.url)),
+        '.virki-mission-tmp', kind + '-docker-recovery'
+      );
+      export const ensurePrivateEvidenceDirectory = () => {};
+      export const assertPrivateEvidenceFile = () => {};
+    `);
+    writeFileSync(join(root, 'scripts', 'mock-fs.mjs'), `
+      export { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync } from 'node:fs';
+      import { writeSync as actualWriteSync } from 'node:fs';
+      export function writeSync(fd, bytes, offset, length) {
+        if (process.env.VIRKI_FAKE_CLEANUP_SCENARIO === 'zero-write') return 0;
+        return actualWriteSync(fd, bytes, offset, Math.min(length, 3));
+      }
+    `);
     // This private stub cannot launch Docker or connect to any daemon.
     writeFileSync(mockDocker, `
       import { appendFileSync } from 'node:fs';
       export function createAdmittedOidcDockerClient() {
-        let owner = null;
+        let owner = null, name, removed = false, inspectCount = 0;
+        const cid = 'a'.repeat(64);
+        const otherCid = 'b'.repeat(64);
+        const missing = (target) => ({
+          status: 1, stderr: 'Error: No such object: ' + target + '\\n'
+        });
         const record = (args) => appendFileSync(process.env.VIRKI_FAKE_DOCKER_LOG, JSON.stringify(args) + '\\n');
         return {
           subprocessEnv: { DOCKER_HOST: 'npipe:////./pipe/dockerDesktopLinuxEngine',
@@ -160,28 +188,35 @@ test('OIDC runner cleanup distinguishes auto-removed containers from denied or u
             record(args);
             const ok = (stdout = 'ok') => ({ status: 0, stdout });
             if (args[0] === 'run') {
+              name = args[args.indexOf('--name') + 1];
               owner = args[args.indexOf('--label') + 1].split('=').at(-1);
-              return ok('fake-container');
+              return ['run-error', 'late-create'].includes(process.env.VIRKI_FAKE_CLEANUP_SCENARIO)
+                ? { status: 1, stderr: 'lost Docker ACK' } : ok(cid);
             }
             if (args[0] === 'port') return ok('127.0.0.1:5432');
             if (args[0] === 'exec' && args.includes('SHOW server_version')) return ok('18.6');
             if (args[0] === 'inspect') {
+              inspectCount += 1;
               const scenario = process.env.VIRKI_FAKE_CLEANUP_SCENARIO;
-              if (scenario === 'absent') return {
-                status: 1, stderr: 'Error: No such object: ' + args.at(-1) + '\\n'
-              };
+              if (['absent', 'late-create'].includes(scenario) ||
+                  (removed && scenario !== 'still-present')) return missing(args.at(-1));
               if (scenario === 'denied') return {
                 status: 1, stderr: 'permission denied by daemon\\n'
               };
               if (scenario === 'timeout') return {
                 status: null, error: { code: 'ETIMEDOUT' }, stderr: ''
               };
-              if (scenario === 'wrong-owner') return ok('foreign-owner');
-              return ok(owner);
+              if (scenario === 'wrong-owner') return ok(cid + '|/' + name + '|foreign-owner');
+              if (scenario === 'id-swap') return ok(otherCid + '|/' + name + '|' + owner);
+              if (scenario === 'name-swap' && inspectCount > 1) {
+                return ok(cid + '|/replaced-name|' + owner);
+              }
+              return ok(cid + '|/' + name + '|' + owner);
             }
             if (args[0] === 'rm' && process.env.VIRKI_FAKE_CLEANUP_SCENARIO === 'rm-denied') {
               return { status: 1, stderr: 'permission denied' };
             }
+            if (args[0] === 'rm') removed = true;
             return ok();
           }
         };
@@ -193,9 +228,18 @@ test('OIDC runner cleanup distinguishes auto-removed containers from denied or u
       ['timeout', 1, false],
       ['wrong-owner', 1, false],
       ['rm-denied', 1, true],
-      ['owned', 0, true]
+      ['owned', 0, true],
+      ['run-error', 1, true],
+      ['late-create', 1, false],
+      ['id-swap', 1, false],
+      ['name-swap', 1, false],
+      ['still-present', 1, true],
+      ['zero-write', 1, false]
     ]) {
       const log = join(root, 'scenario-' + scenario + '.jsonl');
+      const receiptDir = join(root, '.virki-mission-tmp', 'oidc-docker-recovery');
+      mkdirSync(receiptDir, { recursive: true });
+      const before = new Set(readdirSync(receiptDir));
       const run = spawnSync(process.execPath, [runner], {
         cwd: root, encoding: 'utf8', timeout: 10_000, windowsHide: true,
         env: {
@@ -207,10 +251,24 @@ test('OIDC runner cleanup distinguishes auto-removed containers from denied or u
       assert.equal(run.error, undefined, scenario + ': isolated runner must complete');
       assert.equal(run.status, expected, scenario + ': no false green after uncertain cleanup');
       const calls = readFileSync(log, 'utf8').trim().split(/\r?\n/u).map(JSON.parse);
+      if (scenario === 'zero-write') {
+        assert.equal(calls.some((args) => args[0] === 'run'), false,
+          'incomplete receipt write must block Docker mutation');
+        continue;
+      }
       assert.equal(calls.some((args) => args[0] === 'run'), true, scenario + ': must simulate start');
       assert.equal(calls.some((args) => args[0] === 'inspect'), true, scenario + ': must inspect');
       assert.equal(calls.some((args) => args[0] === 'rm'), expectedRemoval,
         scenario + ': never delete an unverified object');
+      const created = readdirSync(receiptDir).filter((entry) => !before.has(entry));
+      assert.equal(created.length, 1, scenario + ': one durable owner receipt');
+      const journal = readFileSync(join(receiptDir, created[0]), 'utf8')
+        .trim().split(/\r?\n/u).map(JSON.parse);
+      assert.equal(journal[0].stage, 'RUN_PENDING', scenario);
+      if (scenario === 'late-create') {
+        assert.match(journal.at(-1).stage, /^RECONCILIATION_REQUIRED:/u);
+        assert.match(run.stderr, /reconcile.*\.jsonl/u);
+      }
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

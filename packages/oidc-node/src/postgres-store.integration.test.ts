@@ -30,7 +30,7 @@ function config(): { container: string; role: string; password: string; database
   const password = required("VIRKI_OIDC_PG_PASSWORD");
   const database = required("VIRKI_OIDC_PG_DATABASE");
   const schema = required("VIRKI_OIDC_PG_SCHEMA");
-  if (!/^virki-oidc-pg18-[a-f0-9-]{36}$/u.test(container)
+  if (!/^[a-f0-9]{64}$/u.test(container)
     || !/^[a-z][a-z0-9_]{0,30}$/u.test(role)
     || !/^[a-z][a-z0-9_]{0,30}$/u.test(database)
     || !/^[a-z][a-z0-9_]{0,30}$/u.test(schema)
