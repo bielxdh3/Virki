@@ -7,6 +7,8 @@ import { createRequire } from "node:module";
 import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, writeSync } from "node:fs";
 import path from "node:path";
 import { createAdmittedOidcDockerClient } from "./lib/disposable-docker-session.mjs";
+import { assertPrivateEvidenceFile, ensurePrivateEvidenceDirectory,
+  ownerEvidenceDirectory } from "./lib/disposable-docker-receipt-security.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const name = `virki-passkeys-${randomUUID().slice(0, 12)}`;
@@ -19,7 +21,7 @@ let started = false;
 let admittedDocker;
 let acknowledgedContainerId;
 let uncertainStart = false;
-const evidenceDir = path.join(root, ".virki-mission-tmp", "passkeys-docker-recovery");
+const evidenceDir = ownerEvidenceDirectory(root, "passkeys");
 const receiptPath = path.join(evidenceDir, `${owner}.jsonl`);
 const HEX_CID = /^[a-f0-9]{64}$/u;
 let receiptFd = null;
@@ -27,6 +29,7 @@ let receiptIdentity;
 
 function record(stage, containerId = null) {
   if (receiptFd === null) {
+    ensurePrivateEvidenceDirectory(evidenceDir);
     const parent = path.dirname(evidenceDir);
     mkdirSync(parent, { recursive: true, mode: 0o700 });
     if (lstatSync(parent).isSymbolicLink() || !lstatSync(parent).isDirectory()) {
@@ -38,7 +41,10 @@ function record(stage, containerId = null) {
     }
     receiptFd = openSync(receiptPath, "wx", 0o600);
     receiptIdentity = fstatSync(receiptFd, { bigint: true });
+    assertPrivateEvidenceFile(receiptPath);
   }
+  ensurePrivateEvidenceDirectory(evidenceDir);
+  assertPrivateEvidenceFile(receiptPath);
   const link = lstatSync(receiptPath, { bigint: true });
   const pinned = fstatSync(receiptFd, { bigint: true });
   if (!link.isFile() || link.isSymbolicLink() || link.dev !== pinned.dev ||
@@ -46,8 +52,17 @@ function record(stage, containerId = null) {
       pinned.ino !== receiptIdentity.ino) {
     throw new Error("Disposable Docker receipt path changed; reconciliation required.");
   }
-  writeSync(receiptFd, JSON.stringify({ stage, name, owner, containerId }) + "\n");
+  const bytes = Buffer.from(JSON.stringify({ stage, name, owner, containerId }) + "\n");
+  let written = 0;
+  while (written < bytes.length) {
+    const count = writeSync(receiptFd, bytes, written, bytes.length - written);
+    if (!Number.isSafeInteger(count) || count <= 0 || count > bytes.length - written) {
+      throw new Error("Disposable Docker receipt write could not be completed.");
+    }
+    written += count;
+  }
   fsyncSync(receiptFd);
+  assertPrivateEvidenceFile(receiptPath);
   // On POSIX also persist each directory entry before Docker mutations.
   if (process.platform !== "win32") {
     for (const directory of [evidenceDir, path.dirname(evidenceDir), root]) {
@@ -145,13 +160,13 @@ try {
   uncertainStart = false;
   let healthy = false;
   for (let i = 0; i < 90; i++) {
-    const status = docker(["inspect", "--format", "{{.State.Health.Status}}", name]);
+    const status = docker(["inspect", "--format", "{{.State.Health.Status}}", acknowledgedContainerId]);
     if (status === "healthy") { healthy = true; break; }
     if (status === "unhealthy") throw new Error("Disposable PostgreSQL initialization failed");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_000);
   }
   if (!healthy) throw new Error("Disposable PostgreSQL did not become healthy");
-  const mapped = docker(["port", name, "5432/tcp"]).split("\n")[0];
+  const mapped = docker(["port", acknowledgedContainerId, "5432/tcp"]).split("\n")[0];
   if (!/^127\.0\.0\.1:\d+$/u.test(mapped)) throw new Error("Database port was not exclusively loopback-bound");
   const port = mapped.slice("127.0.0.1:".length);
   const url = (role, password) => `postgresql://${role}:${password}@127.0.0.1:${port}/${db}?schema=public`;
@@ -168,7 +183,7 @@ try {
   if (migrate.status !== 0 || migrate.error) throw new Error("Disposable migration failed");
   // Force the database session away from UTC so TIMESTAMP vs TIMESTAMPTZ
   // conversion mistakes cannot masquerade as correct session expiry checks.
-  docker(["exec", name, "psql", "--username", "virki_bootstrap", "--dbname", db,
+  docker(["exec", acknowledgedContainerId, "psql", "--username", "virki_bootstrap", "--dbname", db,
     "--set", "ON_ERROR_STOP=1", "--command", `ALTER DATABASE ${db} SET TIMEZONE TO 'America/Porto_Velho'`]);
   const tsxCli = createRequire(import.meta.url).resolve("tsx/cli");
   const suite = spawnSync(process.execPath, [tsxCli, "--test", "packages/auth/src/passkeys.integration.test.ts"], { cwd: root, env, stdio: "inherit", windowsHide: true, timeout: 180_000 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -43,13 +43,38 @@ test("passkeys runner cleanup refuses foreign ownership and unknown Docker state
     const source = readFileSync(fileURLToPath(new URL("./passkeys-disposable-postgres.mjs", import.meta.url)), "utf8");
     assert.match(source, /import \{ spawnSync \} from "node:child_process";/u);
     assert.match(source, /createRequire\(import.meta.url\).resolve\("tsx\/cli"\)/u);
+    assert.match(source, /from "node:fs";/u);
+    assert.match(source, /disposable-docker-receipt-security\.mjs/u);
     writeFileSync(runner, source
       .replace('import { spawnSync } from "node:child_process";',
         'import { spawnSync } from "./fake-child.mjs";')
+      .replace('from "./lib/disposable-docker-receipt-security.mjs";',
+        'from "./lib/fake-security.mjs";')
+      .replace('from "node:fs";', 'from "./fake-fs.mjs";')
       .replace('createRequire(import.meta.url).resolve("tsx/cli")', '"fake-tsx"'));
     writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
     writeFileSync(join(root, "scripts", "fake-child.mjs"),
       'export function spawnSync() { return { status: 0 }; }\n');
+    writeFileSync(join(root, "scripts", "lib", "fake-security.mjs"), `
+      import { fileURLToPath } from "node:url";
+      import { join } from "node:path";
+      export const ownerEvidenceDirectory = (_, kind) => join(
+        fileURLToPath(new URL("../../", import.meta.url)),
+        ".virki-mission-tmp", kind + "-docker-recovery"
+      );
+      export const ensurePrivateEvidenceDirectory = () => {};
+      export const assertPrivateEvidenceFile = () => {};
+    `);
+    // Hostile filesystem can return positive short writes or zero bytes.
+    // A complete JSONL receipt must be persisted before ANY Docker run.
+    writeFileSync(join(root, "scripts", "fake-fs.mjs"), `
+      export { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync } from "node:fs";
+      import { writeSync as realWriteSync } from "node:fs";
+      export function writeSync(fd, bytes, offset, length) {
+        if (process.env.VIRKI_FAKE_CASE === "zero-write") return 0;
+        return realWriteSync(fd, bytes, offset, Math.min(length, 3));
+      }
+    `);
     writeFileSync(fakeClient, `
       import { appendFileSync } from "node:fs";
       export function createAdmittedOidcDockerClient() {
@@ -95,7 +120,8 @@ test("passkeys runner cleanup refuses foreign ownership and unknown Docker state
       ["foreign", 1, false], ["denied", 1, false],
       ["run-error", 1, true], ["late-create", 1, false],
       ["rm-error", 1, true], ["id-swap", 1, false],
-      ["name-swap", 1, false], ["still-present", 1, true]
+      ["name-swap", 1, false], ["still-present", 1, true],
+      ["zero-write", 1, false]
     ]) {
       const log = join(root, scenario + ".txt");
       const receiptDir = join(root, ".virki-mission-tmp", "passkeys-docker-recovery");
@@ -107,6 +133,10 @@ test("passkeys runner cleanup refuses foreign ownership and unknown Docker state
           DOCKER_HOST: "tcp://production.internal:2376", DOCKER_CONTEXT: "production" } });
       assert.equal(result.error, undefined, scenario);
       assert.equal(result.status, code, scenario + ": cleanup must fail closed");
+      if (scenario === "zero-write") {
+        assert.equal(existsSync(log), false, "zero-byte receipt write must deny Docker run");
+        continue;
+      }
       const calls = readFileSync(log, "utf8").trim().split(/\r?\n/u);
       assert.ok(calls.includes("run") && calls.includes("inspect"), scenario);
       assert.equal(calls.includes("rm"), remove, scenario);
