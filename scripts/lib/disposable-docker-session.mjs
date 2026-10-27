@@ -44,6 +44,37 @@ function scrubDockerEnvironment(env) {
   return Object.fromEntries(Object.entries(env).filter(([key]) => !/^DOCKER_/iu.test(key)));
 }
 
+// The OIDC PostgreSQL proof uses its own strictly named, labelled container
+// rather than the runtime/migrator fixture profile. Reuse this module's engine
+// admission (never ambient Docker contexts) for its entire CLI lifecycle.
+// Injecting a process launcher is allowed only for dependency-free tests.
+export function createAdmittedOidcDockerClient({
+  env = process.env, platform = process.platform, nativeArch = process.arch,
+  spawn = spawnSync
+} = {}) {
+  const { cli, host, arch } = selectEngine(platform, env, nativeArch);
+  if (spawn === spawnSync && !existsSync(cli)) refuse("pinned Docker CLI is unavailable");
+  const scopedEnv = Object.freeze({
+    ...scrubDockerEnvironment(env),
+    DOCKER_HOST: host,
+    VIRKI_OIDC_DOCKER_BINARY: cli
+  });
+
+  function invoke(args, timeout = 30_000) {
+    return spawn(cli, ["--host", host, ...args], {
+      encoding: "utf8", windowsHide: true, timeout, maxBuffer: 128 * 1024,
+      env: scopedEnv
+    });
+  }
+
+  const observed = invoke(["version", "--format", "{{.Server.Os}}|{{.Server.Arch}}"], 15_000);
+  if (observed?.error || observed?.status !== 0 ||
+      observed?.stdout?.trim() !== `linux|${arch}`) {
+    refuse(`explicit Linux/${arch} Docker endpoint was not verified`);
+  }
+  return Object.freeze({ invoke, subprocessEnv: scopedEnv });
+}
+
 function directoryIdentity(root, requireOwnerPrivate = true) {
   for (let cursor = root;; cursor = path.dirname(cursor)) {
     const entry = lstatSync(cursor, { bigint: true });

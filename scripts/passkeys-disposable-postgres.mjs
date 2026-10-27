@@ -5,23 +5,61 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { createAdmittedOidcDockerClient } from "./lib/disposable-docker-session.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const name = `virki-passkeys-${randomUUID().slice(0, 12)}`;
 const secret = () => randomBytes(32).toString("hex");
 const passwords = { bootstrap: secret(), runtime: secret(), migrator: secret(), audit: secret(), test: secret() };
 const db = "virki_passkey_test";
+const owner = randomUUID();
+const ownerLabel = "org.virki.passkeys-disposable-owner";
 let started = false;
+let admittedDocker;
 
 function docker(args, max = 60_000) {
-  const result = spawnSync("docker", args, { cwd: root, encoding: "utf8", windowsHide: true, timeout: max });
-  if (result.error || result.status !== 0) throw new Error(`Disposable docker ${args[0]} failed: ${result.stderr?.slice(0, 1000) ?? "unknown"}`);
+  if (!admittedDocker) throw new Error("No admitted disposable Docker engine.");
+  const result = admittedDocker.invoke(args, max);
+  if (result?.error || result?.status !== 0) throw new Error(`Disposable docker ${args[0]} failed.`);
   return result.stdout.trim();
 }
 
+function cleanup() {
+  if (!started) return;
+  const inspected = admittedDocker.invoke(["inspect", "--format",
+    `{{index .Config.Labels "${ownerLabel}"}}`, name], 15_000);
+  if (inspected?.error || inspected?.status !== 0) {
+    const lastError = typeof inspected?.stderr === "string"
+      ? inspected.stderr.trim().split(/\r?\n/u).at(-1) : "";
+    const missing = !inspected?.error && [
+      `Error: No such object: ${name}`,
+      `Error response from daemon: No such container: ${name}`,
+      `Error response from daemon: No such object: ${name}`
+    ].includes(lastError);
+    if (!missing) {
+      console.error("Passkey disposable cleanup inspection failed; manual reconciliation required.");
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (inspected.stdout?.trim() !== owner) {
+    console.error("Passkey disposable ownership mismatch; no removal attempted.");
+    process.exitCode = 1;
+    return;
+  }
+  const removed = admittedDocker.invoke(["rm", "--force", "--volumes", name], 30_000);
+  if (removed?.error || removed?.status !== 0) {
+    console.error("Passkey disposable container cleanup failed.");
+    process.exitCode = 1;
+  }
+}
+
 try {
+  admittedDocker = createAdmittedOidcDockerClient();
+  // Mark intent before the mutation: even an uncertain run ACK needs cleanup.
+  started = true;
   docker([
-    "run", "--detach", "--rm", "--name", name,
+    "run", "--detach", "--rm", "--name", name, "--label", `${ownerLabel}=${owner}`,
     "--publish", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql:rw,noexec,nosuid,nodev,size=512m",
     "--health-cmd", `pg_isready -h 127.0.0.1 -U virki_bootstrap -d ${db}`,
     "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "90",
@@ -35,7 +73,6 @@ try {
     "--volume", `${path.join(root, "scripts", "e2e", "20-virki-e2e-runtime-test-role.sh")}:/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh:ro`,
     "postgres:18.6-alpine3.24"
   ], 90_000);
-  started = true;
   let healthy = false;
   for (let i = 0; i < 90; i++) {
     const status = docker(["inspect", "--format", "{{.State.Health.Status}}", name]);
@@ -49,7 +86,7 @@ try {
   const port = mapped.slice("127.0.0.1:".length);
   const url = (role, password) => `postgresql://${role}:${password}@127.0.0.1:${port}/${db}?schema=public`;
   const env = {
-    ...process.env, NODE_ENV: "test", VIRKI_INTEGRATION_ENABLED: "true",
+    ...admittedDocker.subprocessEnv, NODE_ENV: "test", VIRKI_INTEGRATION_ENABLED: "true",
     VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
     VIRKI_PASSKEYS_ENABLED: "true",
     VIRKI_PASSKEYS_NON_UTC_REQUIRED: "true",
@@ -71,7 +108,5 @@ try {
   console.error(error instanceof Error ? error.message : "Passkey test harness failed");
   process.exitCode = 1;
 } finally {
-  if (started) {
-    try { docker(["rm", "--force", "--volumes", name]); } catch { console.error("Could not remove the uniquely named disposable container"); process.exitCode = 1; }
-  }
+  cleanup();
 }
