@@ -811,6 +811,25 @@ test("actual provider preserves password fallback for mixed voluntary ACR after 
   assert.deepEqual(setup.authenticatedMethods, ["pwd"]);
 });
 
+test("actual provider accepts a null voluntary ACR claim after password-only consent reuse", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  await establishPasswordAcrConsent(fixture, client);
+  const before = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  const result = await client.follow(authorization(fixture.clientId, {
+    claims: JSON.stringify({ id_token: { acr: null } })
+  }));
+  const code = result.searchParams.get("code");
+  assert.equal(Boolean(code), true, "null voluntary ACR must not deny a valid password-only session");
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } }), before,
+    "voluntary claim request must reuse existing consent");
+  const token = await exchange(fixture.clientId, code!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string };
+  assert.equal(claims.acr, "urn:virki:loa:1", "report the achieved assurance, without claiming MFA");
+});
+
 test("actual provider accepts an essential ACR claim without a value restriction using the achieved password ACR", integrationOptions, async () => {
   const fixture = await seed();
   const client = browser();

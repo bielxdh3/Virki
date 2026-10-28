@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
 import { writeAuditLog } from "@virki/auth/audit";
+import { createHubRenderProof, HUB_RENDER_PROVENANCE_HEADER, verifyHubRenderProof } from "./lib/hub-render-provenance";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
 
 const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";
@@ -79,6 +80,25 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   forwardedHeaders.set("x-virki-audit-request-id", auditRequestId);
   forwardedHeaders.delete("x-virki-audit-route");
   forwardedHeaders.delete("x-virki-audit-method");
+  const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const receivedProof = request.headers.get(HUB_RENDER_PROVENANCE_HEADER);
+  const validInternalHubRsc = surface === "local" &&
+    /^\/admin(?:\/|$)/u.test(pathname) &&
+    verifyHubRenderProof(receivedProof, sessionToken, env as NodeJS.ProcessEnv);
+  // x-forwarded-host must be bound to the verified ingress Host rather than a
+  // caller-supplied value, except when a prior Hub ingress has signed the
+  // session-bound internal RSC context.
+  const ingressHost = request.headers.get("host");
+  if (validInternalHubRsc) {
+    forwardedHeaders.set("x-forwarded-host", env.VIRKI_HUB_HOSTNAME ?? "hub.biel.dev.br");
+  } else if (ingressHost) forwardedHeaders.set("x-forwarded-host", ingressHost);
+  else forwardedHeaders.delete("x-forwarded-host");
+  forwardedHeaders.delete(HUB_RENDER_PROVENANCE_HEADER);
+  if (validInternalHubRsc) forwardedHeaders.set(HUB_RENDER_PROVENANCE_HEADER, receivedProof!);
+  else if (surface === "hub" && sessionToken) {
+    const proof = createHubRenderProof(sessionToken, env as NodeJS.ProcessEnv);
+    if (proof) forwardedHeaders.set(HUB_RENDER_PROVENANCE_HEADER, proof);
+  }
   if (/^\/(?:|login(?:\/verify)?|api\/(?:passkeys|login(?:\/verify)?|logout)|admin(?:\/(?:accounts|access|security|audit|connections))?|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
   forwardedHeaders.set("x-virki-audit-method", request.method);
   forwardedHeaders.set("x-nonce", nonce);
@@ -86,7 +106,7 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
 
   if (surface === "unknown") return withCsp(new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } }));
   // Loopback/Compose host names never pass through Cloudflare Access; in production they only serve the health probe.
-  if (surface === "local" && env.NODE_ENV === "production" && pathname !== "/api/health") return withCsp(new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } }));
+  if (surface === "local" && env.NODE_ENV === "production" && pathname !== "/api/health" && !validInternalHubRsc) return withCsp(new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } }));
 
   if (surface === "hub" && pathname !== "/api/health") {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);

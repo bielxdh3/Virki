@@ -3,6 +3,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { evaluateProxyRequest } from "./proxy";
+import { createHubRenderProof } from "./lib/hub-render-provenance";
 import { prisma } from "@virki/database";
 
 const env = { VIRKI_HUB_HOSTNAME: "hub.biel.dev.br", VIRKI_PORTAL_HOSTNAME: "portal.biel.dev.br", CLOUDFLARE_ACCESS_JWT_REQUIRED: "true" };
@@ -207,6 +208,46 @@ test("client-supplied internal request-path header never reaches the app", async
   const protectedResponse = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/account/security?tab=mfa", { headers: { ...spoof, cookie: `${SESSION_COOKIE_NAME}=x` } }), env);
   assert.equal(protectedResponse.status, 200);
   assert.equal(forwarded(protectedResponse), "/account/security?tab=mfa");
+});
+
+test("proxy binds forwarded host to ingress host, preventing spoofed internal Hub page context", async () => {
+  const forwardedHost = (response: Response) => response.headers.get("x-middleware-request-x-forwarded-host");
+  for (const host of ["localhost", "portal.biel.dev.br", "hub.biel.dev.br"] as const) {
+    const response = await evaluateProxyRequest(new NextRequest(`https://${host}/admin/access`, {
+      headers: {
+        host,
+        "x-forwarded-host": "hub.biel.dev.br",
+        "x-virki-request-path": "/admin/access",
+        cookie: `${SESSION_COOKIE_NAME}=synthetic`
+      }
+    }), { ...env, NODE_ENV: "development", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false" });
+    assert.equal(response.status, 200);
+    assert.equal(forwardedHost(response), host);
+    assert.equal(response.headers.get("x-middleware-request-x-virki-request-path"), "/admin/access");
+  }
+});
+
+test("only a valid session-bound Hub proof survives the loopback internal render boundary", async () => {
+  const environment = { ...env, NODE_ENV: "production" as const, VIRKI_CSRF_SIGNING_KEY: "ab".repeat(32) };
+  const proof = createHubRenderProof("synthetic", environment);
+  assert.ok(proof);
+  const request = (value: string) => new NextRequest("http://localhost/admin/access?status=granted", {
+    headers: {
+      host: "localhost",
+      "x-forwarded-host": "hub.biel.dev.br",
+      "x-virki-request-path": "/admin/forged",
+      "x-virki-hub-render-proof": value,
+      cookie: `${SESSION_COOKIE_NAME}=synthetic`
+    }
+  });
+  const permitted = await evaluateProxyRequest(request(proof), environment);
+  assert.equal(permitted.status, 200);
+  assert.equal(permitted.headers.get("x-middleware-request-x-forwarded-host"), "hub.biel.dev.br");
+  assert.equal(permitted.headers.get("x-middleware-request-x-virki-hub-render-proof"), proof);
+  assert.equal(permitted.headers.get("x-middleware-request-x-virki-request-path"), "/admin/access?status=granted");
+  const refused = await evaluateProxyRequest(request("forged"), environment);
+  assert.equal(refused.status, 404);
+  assert.equal(refused.headers.get("x-middleware-request-x-virki-hub-render-proof"), null);
 });
 
 

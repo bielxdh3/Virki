@@ -89,6 +89,8 @@ test("OIDC authentication claims report the persisted methods and assurance leve
 
 test("essential OIDC ACR parsing keeps essential alternatives separate from voluntary preferences", () => {
   assert.deepEqual(parseEssentialOidcAcrRequest(undefined), { required: false, valid: true, values: [] });
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: null } })),
+    { required: false, valid: true, values: [] }, "a null ACR claim is voluntary, not malformed essential assurance");
   assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { value: "urn:virki:loa:1" } } })),
     { required: false, valid: true, values: [] }, "a voluntary ACR claim does not become essential");
   assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, value: "urn:virki:loa:2" } } })),

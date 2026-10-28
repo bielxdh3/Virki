@@ -32,7 +32,9 @@ export function parseEssentialOidcAcrRequest(rawClaims: unknown): { required: bo
   if (idToken === undefined) return { required: false, valid: true, values: [] };
   if (!isRecord(idToken)) return invalid;
   const acr = idToken.acr;
-  if (acr === undefined) return { required: false, valid: true, values: [] };
+  // OIDC individual claims may use null to request inclusion of a claim
+  // without imposing an essential value/assurance constraint.
+  if (acr === undefined || acr === null) return { required: false, valid: true, values: [] };
   if (!isRecord(acr)) return invalid;
   if (acr.essential === undefined || acr.essential === false) return { required: false, valid: true, values: [] };
   if (acr.essential !== true) return invalid;

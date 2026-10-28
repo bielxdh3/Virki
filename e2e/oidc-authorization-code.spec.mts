@@ -532,6 +532,11 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
     expect(granted.revokedAt).toBeNull();
     expect(granted.grantedByUserId).toBe(fixture.recoveryReviewer.id);
 
+    // The client must stay on a usable, authorized admin page after the
+    // successful Server Action; a hard reload must not be needed to recover
+    // from an unexpected forbidden RSC response.
+    await expect(adminPage.getByRole("heading", { name: "Acessos", exact: true })).toBeVisible();
+
     // Positive control on the SAME dynamic client: prove real code issuance,
     // token exchange, signed ID token and userinfo BEFORE revoking the grant.
     positiveGrantContext = await browser.newContext();
