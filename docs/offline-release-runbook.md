@@ -500,6 +500,24 @@ free disk measurements, owner-approved manifest SHA-256, key IDs, policy
 revision and rollback procedure. Private credentials, raw database content,
 recovery factors or email payloads must not appear in logs or PR comments.
 
+The optional Windows Docker Desktop offline validation supervisor is explicitly
+selected with:
+
+```powershell
+node scripts/offline-ci-local-runner.mjs --offline --repository-root E:\Virki --expected-sha <full-40-character-SHA> --expected-branch main
+```
+
+It requires a clean exact HEAD and branch, invokes the checked-in isolated
+Linux/amd64 fixture with production Hub mode, and checks its exit, 19 ordered
+stage results, separate mandatory virgin-bootstrap test, local Docker cleanup,
+and retained test logs. The fixture itself performs the commands on disposable
+Docker resources; the supervisor writes only hashes and stage metadata to
+`offline-local-stage-receipts.json` beside the ignored `run-manifest.json`.
+Some console excerpts are tailed, and their hashes do not claim a full stdout
+record. A failed, interrupted or oversized run is blocked and must not be
+interpreted as a successful 19-stage check. This does not run CodeQL, Semgrep,
+GHCR or hosted GitHub CI; all remain separate release requirements.
+
 **Current release gate: BLOCKED.** The native installed trust policy, owner
 approval/signature, trusted image-loading/application path and source/host
 verification must be completed before any production mutation. Until that is

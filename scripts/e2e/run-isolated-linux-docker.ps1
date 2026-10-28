@@ -171,6 +171,7 @@ $script:untrackedFileEvidence = @()
 $script:unitTestFailures = @()
 $script:productionOperationsFailures = @()
 $script:integrationTestFailures = @()
+$script:bootstrapVirginExitCode = $null
 $script:runnerName = $runnerName
 $sourceHead = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the source HEAD for the isolated run manifest.' }
@@ -311,41 +312,53 @@ if ($IntegrationTestFile) {
 }
 
 function Invoke-Stage {
-  param([string]$Name, [string[]]$Command, [string[]]$Environment = @(), [string]$EvidenceLogPath)
+  param([string]$Name, [string[]]$Command, [string[]]$Environment = @(), [string]$EvidenceLogPath, [switch]$Preparatory)
   Write-Output "`n[$Name]"
   $startedAt = [DateTimeOffset]::UtcNow
   $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
   if ($EvidenceLogPath) {
-    $stageOutput = @(Invoke-PinnedDocker exec --workdir /workspace @Environment $script:runnerName @Command 2>&1)
+    # GNU timeout runs INSIDE the pinned disposable Linux container. Combined
+    # with the outer supervisor's total deadline, a stuck stage cannot claim
+    # completion or remain in a successful release evidence manifest.
+    $stageOutput = @(Invoke-PinnedDocker exec --workdir /workspace @Environment $script:runnerName timeout --kill-after=10s 1800s @Command 2>&1)
     $exitCode = $LASTEXITCODE
     $stageLines = [string[]]@($stageOutput | ForEach-Object { $_.ToString() })
     [System.IO.File]::WriteAllLines($EvidenceLogPath, $stageLines, [System.Text.UTF8Encoding]::new($false))
     foreach ($line in $stageLines) { Write-Output $line }
   } else {
-    Invoke-PinnedDocker exec --workdir /workspace @Environment $script:runnerName @Command
+    Invoke-PinnedDocker exec --workdir /workspace @Environment $script:runnerName timeout --kill-after=10s 1800s @Command
     $exitCode = $LASTEXITCODE
   }
   $stopwatch.Stop()
   $finishedAt = [DateTimeOffset]::UtcNow
-  $script:results.Add($Name + '=' + $exitCode)
-  $script:stageManifest.Add([ordered]@{
-    name = $Name
-    startedUtc = $startedAt.ToString('o')
-    finishedUtc = $finishedAt.ToString('o')
-    durationMs = [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 3)
-    exitCode = $exitCode
-  })
+  if ($Preparatory) {
+    # This independent virgin-database preflight is mandatory for integration
+    # and belongs to the integration gate. Preserve its separate raw log and
+    # status, but keep the release manifest's 19 named gates unchanged.
+    if ($Name -ne 'bootstrap-virgin-tests') { throw 'Unrecognized preparatory stage.' }
+    $script:bootstrapVirginExitCode = $exitCode
+  } else {
+    $script:results.Add($Name + '=' + $exitCode)
+    $script:stageManifest.Add([ordered]@{
+      name = $Name
+      startedUtc = $startedAt.ToString('o')
+      finishedUtc = $finishedAt.ToString('o')
+      durationMs = [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 3)
+      exitCode = $exitCode
+    })
+  }
   Write-Output ("[RESULT] {0} exit={1} durationMs={2}" -f $Name, $exitCode, [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 3))
+  if ($Preparatory -and $exitCode -ne 0) { throw 'Virgin database integration preflight failed.' }
 }
 
 function Invoke-LoggedStage {
-  param([string]$Name, [string]$LogName, [string]$CommandText, [string[]]$Environment = @(), [string]$EvidenceLogPath, [switch]$CaptureFullOutput)
+  param([string]$Name, [string]$LogName, [string]$CommandText, [string[]]$Environment = @(), [string]$EvidenceLogPath, [switch]$CaptureFullOutput, [switch]$Preparatory)
   $logOutputCommand = if ($CaptureFullOutput) { 'cat' } else { 'tail -n 80' }
   # Group the ENTIRE stage before redirection. Without parentheses, A && B
   # sends only B to the log, so an A failure leaves no file and tail masks
   # the actual error. Preserve the true compound command exit status.
   $shellCommand = '( ' + $CommandText + ' ) > /tmp/' + $LogName + '.log 2>&1; status=$?; ' + $logOutputCommand + ' /tmp/' + $LogName + '.log; exit $status'
-  Invoke-Stage -Name $Name -Command @('bash', '-lc', $shellCommand) -Environment $Environment -EvidenceLogPath $EvidenceLogPath
+  Invoke-Stage -Name $Name -Command @('bash', '-lc', $shellCommand) -Environment $Environment -EvidenceLogPath $EvidenceLogPath -Preparatory:$Preparatory
 }
 
 function Get-TapFailureManifest {
@@ -649,7 +662,7 @@ try {
       throw 'The virgin bootstrap fixture must use its isolated database target.'
     }
     $virginBootstrapEnvironment = @('--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $virginBootstrapUrl), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable', '--env', 'VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin')
-    Invoke-LoggedStage -Name 'bootstrap-virgin-tests' -LogName 'bootstrap-virgin-tests' -CommandText 'npm run test:integration -- packages/auth/src/bootstrap-first-admin.integration.test.ts' -Environment $virginBootstrapEnvironment -EvidenceLogPath $bootstrapVirginTestsEvidencePath -CaptureFullOutput
+    Invoke-LoggedStage -Name 'bootstrap-virgin-tests' -LogName 'bootstrap-virgin-tests' -CommandText 'npm run test:integration -- packages/auth/src/bootstrap-first-admin.integration.test.ts' -Environment $virginBootstrapEnvironment -EvidenceLogPath $bootstrapVirginTestsEvidencePath -CaptureFullOutput -Preparatory
     $integrationEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('MIGRATION_DATABASE_URL=' + $urls.integrationMigrator), '--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $urls.integration), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
     $integrationCommand = 'npm run test:integration' + $(if ($IntegrationTestFile) { ' -- ' + $IntegrationTestFile } else { '' })
     Invoke-LoggedStage -Name 'integration-tests' -LogName 'integration-tests' -CommandText $integrationCommand -Environment $integrationEnvironment -EvidenceLogPath $integrationTestsEvidencePath -CaptureFullOutput
@@ -716,6 +729,8 @@ try {
       productionOperationsLog = [System.IO.Path]::GetFileName($productionOperationsEvidencePath)
       productionOperationsFailureCount = $script:productionOperationsFailures.Count
       productionOperationsFailures = @($script:productionOperationsFailures)
+      bootstrapVirginTestsLog = if (Test-Path -LiteralPath $bootstrapVirginTestsEvidencePath) { [System.IO.Path]::GetFileName($bootstrapVirginTestsEvidencePath) } else { $null }
+      bootstrapVirginTestsExitCode = $script:bootstrapVirginExitCode
     }
     [System.IO.File]::WriteAllText($runManifestPath, ($runManifest | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
     Write-Output ('RUN_EVIDENCE_DIRECTORY=' + $runEvidenceDirectory)

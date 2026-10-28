@@ -61,6 +61,28 @@ test("accepts a complete clean exact-SHA 19-stage claim and hashes the exact byt
   assert.equal(validateOfflineCiEvidence(new Uint8Array(raw), revision).manifestSha256, accepted.manifestSha256);
 });
 
+test("accepts actual isolated Docker cleanup proof but refuses incomplete bootstrap or uncertain cleanup", () => {
+  const manifest = goodManifest();
+  Object.assign(manifest, {
+    dockerMutationJournal: "docker-mutations.jsonl",
+    dockerMutationUncertain: false,
+    dockerCleanupVerified: true,
+    bootstrapVirginTestsLog: "bootstrap-virgin-tests.tap.log",
+    bootstrapVirginTestsExitCode: 0,
+  });
+  assert.equal(validateOfflineCiEvidence(bytes(manifest), revision).stageCount, 19);
+  for (const [name, value] of [
+    ["dockerMutationUncertain", true], ["dockerCleanupVerified", false],
+    ["bootstrapVirginTestsExitCode", 1], ["bootstrapVirginTestsLog", "../../escape"],
+  ]) {
+    const altered = { ...manifest, [name]: value };
+    assert.throws(() => validateOfflineCiEvidence(bytes(altered), revision), name);
+  }
+  const missing = { ...manifest };
+  delete missing.bootstrapVirginTestsExitCode;
+  assert.throws(() => validateOfflineCiEvidence(bytes(missing), revision));
+});
+
 test("requires exact branch and exact full SHA; branch must be explicitly overridden for pre-merge run", () => {
   const manifest = goodManifest();
   manifest.sourceBranch = "cdx/virki-five-report-security-triage-20261020";

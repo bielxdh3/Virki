@@ -22,6 +22,8 @@ const MANIFEST_FIELDS = new Set([
   "integrationTestsFailures", "productionOperationsLog",
   "productionOperationsFailureCount", "productionOperationsFailures",
   "browserE2ELog", "exitCode", "failedStages", "stages",
+  "dockerMutationJournal", "dockerMutationUncertain", "dockerCleanupVerified",
+  "bootstrapVirginTestsLog", "bootstrapVirginTestsExitCode",
 ]);
 const STAGE_FIELDS = new Set([
   "name", "startedUtc", "finishedUtc", "durationMs", "exitCode",
@@ -171,8 +173,25 @@ export function validateOfflineCiEvidence(rawBytes, expectedRevision, expectedBr
     "unrecognized root evidence field");
   requireEvidence(manifest.sourceHead === expectedRevision, "source revision differs from requested SHA");
   requireEvidence(manifest.sourceBranch === expectedBranch, "source branch differs from expected branch");
-  requireEvidence(typeof manifest.runId === "string" && /^[a-f0-9]{10}$/u.test(manifest.runId),
+  requireEvidence(typeof manifest.runId === "string" && /^(?:[a-f0-9]{10}|[a-f0-9]{32})$/u.test(manifest.runId),
     "run identifier is invalid");
+  // The original pinned Docker Desktop harness records ownership and cleanup
+  // separately from the stage results. A successful cleanup must be observed;
+  // accepting partial ownership metadata would erase its fail-closed guard.
+  const dockerFields = ["dockerMutationJournal", "dockerMutationUncertain", "dockerCleanupVerified"];
+  if (dockerFields.some((key) => Object.hasOwn(manifest, key))) {
+    requireEvidence(dockerFields.every((key) => Object.hasOwn(manifest, key)) &&
+      manifest.dockerMutationJournal === "docker-mutations.jsonl" &&
+      manifest.dockerMutationUncertain === false && manifest.dockerCleanupVerified === true,
+    "Docker cleanup is unverified or has uncertain ownership");
+  }
+  const bootstrapFields = ["bootstrapVirginTestsLog", "bootstrapVirginTestsExitCode"];
+  if (bootstrapFields.some((key) => Object.hasOwn(manifest, key))) {
+    requireEvidence(bootstrapFields.every((key) => Object.hasOwn(manifest, key)) &&
+      manifest.bootstrapVirginTestsLog === "bootstrap-virgin-tests.tap.log" &&
+      manifest.bootstrapVirginTestsExitCode === 0,
+    "virgin bootstrap check is incomplete or unsuccessful");
+  }
   requireEvidence(compatibleVersion(manifest.nodeVersion, 22, 13, 0), "unsupported Node runtime claim");
   requireEvidence(compatibleVersion(manifest.npmVersion, 10, 9, 3), "unsupported npm runtime claim");
 

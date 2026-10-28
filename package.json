@@ -34,6 +34,7 @@
     "test:offline:daemon-identity": "node --test infra/offline/isolated-docker-daemon-identity.test.mjs",
     "test:offline:local-docker-fixture": "node --test infra/offline/disposable-local-docker.test.mjs",
     "test:offline:witness-read": "node --test scripts/offline-ledger-witness-proof.test.mjs",
+    "test:offline:ci-local": "node --test scripts/offline-ci-evidence.test.mjs scripts/offline-ci-local-runner.test.mjs",
     "test:offline:witness-cas:linux": "node --test scripts/offline-independent-witness-service.test.mjs infra/offline/disposable-witness-ledger-reservation.test.mjs",
     "test:offline:peer:container": "node infra/offline/native-peer/run-disposable-native-peer-test.mjs",
     "test:offline:supervisor:container": "node infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs",
