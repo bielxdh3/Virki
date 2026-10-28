@@ -53,6 +53,25 @@
  * A fake daemon cannot turn uncorrelated success prefixes into approval.
  */
 static const char *phases[] = {"LOAD", "INSPECT", "INFO"};
+/* The fake daemon also accepts real Docker HTTP request shapes. This payload
+ * is deliberately NOT a Docker archive: even a successful fixture exchange
+ * can never be mistaken for an imported image or admission evidence. */
+static const char *docker_http_requests[] = {
+  "GET /_ping HTTP/1.1\r\nHost: virki-disposable\r\nConnection: keep-alive\r\n\r\n",
+  "GET /v1.45/info HTTP/1.1\r\nHost: virki-disposable\r\nConnection: keep-alive\r\n\r\n",
+  "POST /v1.45/images/load?quiet=1 HTTP/1.1\r\n"
+    "Host: virki-disposable\r\nConnection: keep-alive\r\n"
+    "Content-Type: application/x-tar\r\nContent-Length: 16\r\n\r\nDISPOSABLE ONLY\n",
+  "GET /v1.45/images/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/json HTTP/1.1\r\n"
+    "Host: virki-disposable\r\nConnection: keep-alive\r\n\r\n",
+};
+static const char *docker_http_bodies[] = {
+  "OK",
+  "{\"ID\":\"disposable\"}",
+  "{\"stream\":\"fake-only\"}\n",
+  "{\"Id\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+};
+#define DOCKER_HTTP_PHASES 4
 static int child_pidfd = -1;
 static pid_t child_pid = -1;
 static char rootdir[80];
@@ -154,6 +173,28 @@ static bool write_all_until(int fd, const char *data, long long deadline) {
     offset += (size_t)wrote;
   }
   return true;
+}
+static bool http_success(char *out, size_t capacity, int phase) {
+  if (phase < 0 || phase >= DOCKER_HTTP_PHASES) return false;
+  const char *body = docker_http_bodies[phase];
+  int n = snprintf(out, capacity,
+    "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: keep-alive\r\n\r\n%s",
+    strlen(body), body);
+  return n > 0 && (size_t)n < capacity;
+}
+static bool read_http_request(int fd, const char *expected, long long deadline) {
+  size_t length = strlen(expected);
+  char buffer[256];
+  if (length > sizeof(buffer)) return false;
+  size_t received = 0;
+  while (received < length) {
+    if (!poll_ready_until(fd, POLLIN, deadline)) return false;
+    ssize_t got = recv(fd, buffer + received, length - received, MSG_DONTWAIT);
+    if (got < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+    if (got <= 0) return false;
+    received += (size_t)got;
+  }
+  return memcmp(buffer, expected, length) == 0 && no_surplus(fd);
 }
 static bool nonce_hex(char out[NONCE_HEX + 1]) {
   unsigned char raw[NONCE_HEX / 2];
@@ -458,11 +499,14 @@ static int serve_fake(const char *mode, int readyfd) {
     return 0;
   }
   if (strcmp(mode, "forked-writer") == 0 ||
-      strcmp(mode, "scm-rights-writer") == 0) {
+      strcmp(mode, "scm-rights-writer") == 0 ||
+      strcmp(mode, "docker-http-forked-writer") == 0 ||
+      strcmp(mode, "docker-http-scm-rights-writer") == 0) {
     /* The child accepted the connection, but an inherited socket FD lets a
      * DIFFERENT PID answer every request while the original child stays alive.
      * SCM_RIGHTS can also transfer the connected FD after acceptance. */
-    const bool transfer = strcmp(mode, "scm-rights-writer") == 0;
+    const bool transfer = strcmp(mode, "scm-rights-writer") == 0 ||
+      strcmp(mode, "docker-http-scm-rights-writer") == 0;
     int handoff[2] = {-1, -1};
     if (transfer && socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC,
                                0, handoff) != 0) return 46;
@@ -493,6 +537,40 @@ static int serve_fake(const char *mode, int readyfd) {
     fprintf(stderr, "DISPOSABLE_FIXTURE_DELEGATED_WRITER %ld\n", (long)getpid());
   }
   const long long deadline = monotonic_ms() + TRANSACTION_BUDGET_MS;
+  if (strncmp(mode, "docker-http-", 12) == 0) {
+    char response[256];
+    for (int i = 0; i < DOCKER_HTTP_PHASES; i++) {
+      if (!read_http_request(conn, docker_http_requests[i], deadline) ||
+          !http_success(response, sizeof(response), i)) return 50 + i;
+      if (i == 2 && strcmp(mode, "docker-http-stall-load") == 0) {
+        for (;;) pause();
+      }
+      if (i == 1 && strcmp(mode, "docker-http-bad-info") == 0)
+        response[9] = '4';
+      if (i == 2 && strcmp(mode, "docker-http-bad-load") == 0)
+        response[9] = '5';
+      if (i == 3 && strcmp(mode, "docker-http-bad-inspect") == 0)
+        response[9] = '4';
+      if (!write_all_until(conn, response, deadline)) return 55;
+      if (i == 0 && strcmp(mode, "docker-http-response-smuggling") == 0 &&
+          !write_all_until(conn, response, deadline)) return 56;
+      if (i == 0 && strcmp(mode, "docker-http-pipeline-valid") == 0) {
+        if (!http_success(response, sizeof(response), 1) ||
+            !write_all_until(conn, response, deadline)) return 57;
+      }
+      if (i == 2 && strcmp(mode, "docker-http-dead-after-load") == 0) {
+        close(conn);
+        return 0;
+      }
+    }
+    char end = 0;
+    (void)recv(conn, &end, 1, 0);
+    if (strcmp(mode, "docker-http-late-final-junk") == 0)
+      (void)write_all_until(conn, "JUNK", monotonic_ms() + TIMEOUT_MS);
+    close(conn);
+    if (strcmp(mode, "docker-http-nonzero-after-ack") == 0) return 58;
+    return 0;
+  }
   char nonce[NONCE_HEX + 1], response[80];
   for (int i = 0; i < 3; i++) {
     if (!request_frame(conn, phases[i], nonce, deadline)) return 35 + i;
@@ -583,7 +661,19 @@ int main(int argc, char **argv) {
       strcmp(mode, "slow-trickle") && strcmp(mode, "ignore-term") &&
       strcmp(mode, "late-final-junk") && strcmp(mode, "swap-owned-root") &&
       strcmp(mode, "nonzero-after-ack") && strcmp(mode, "forked-writer") &&
-      strcmp(mode, "scm-rights-writer"))
+      strcmp(mode, "scm-rights-writer") &&
+      strcmp(mode, "docker-http-normal") &&
+      strcmp(mode, "docker-http-bad-info") &&
+      strcmp(mode, "docker-http-bad-load") &&
+      strcmp(mode, "docker-http-bad-inspect") &&
+      strcmp(mode, "docker-http-dead-after-load") &&
+      strcmp(mode, "docker-http-response-smuggling") &&
+      strcmp(mode, "docker-http-forked-writer") &&
+      strcmp(mode, "docker-http-scm-rights-writer") &&
+      strcmp(mode, "docker-http-stall-load") &&
+      strcmp(mode, "docker-http-pipeline-valid") &&
+      strcmp(mode, "docker-http-late-final-junk") &&
+      strcmp(mode, "docker-http-nonzero-after-ack"))
     return blocked();
   if (!fixture_directory()) {
     teardown();
@@ -638,16 +728,30 @@ int main(int argc, char **argv) {
   good = good && peer_on_same_fd(sock, child_pid, ticks) &&
     same_provenance(child_pid, &observed);
   const long long transaction_deadline = monotonic_ms() + TRANSACTION_BUDGET_MS;
-  for (int i = 0; good && i < 3; i++) {
-    char nonce[NONCE_HEX + 1], request[80], expected[80];
-    good = nonce_hex(nonce) &&
-      frame(request, sizeof(request), "REQ", phases[i], nonce, NULL) &&
-      frame(expected, sizeof(expected), "ACK", phases[i], nonce, "OK") &&
-      write_all_until(sock, request, transaction_deadline) &&
-      read_exact_until(sock, expected, transaction_deadline, child_pid) &&
-      no_surplus(sock) &&
-      peer_on_same_fd(sock, child_pid, ticks) &&
-      same_provenance(child_pid, &observed);
+  const bool docker_http = strncmp(mode, "docker-http-", 12) == 0;
+  for (int i = 0; good && i < (docker_http ? DOCKER_HTTP_PHASES : 3); i++) {
+    char nonce[NONCE_HEX + 1], request[80], expected[256];
+    if (docker_http) {
+      /* Every Docker HTTP operation, including the image-upload request body,
+       * traverses exactly the FD authenticated against the kernel peer. */
+      good = peer_on_same_fd(sock, child_pid, ticks) &&
+        same_provenance(child_pid, &observed) &&
+        http_success(expected, sizeof(expected), i) &&
+        write_all_until(sock, docker_http_requests[i], transaction_deadline) &&
+        read_exact_until(sock, expected, transaction_deadline, child_pid) &&
+        no_surplus(sock) &&
+        peer_on_same_fd(sock, child_pid, ticks) &&
+        same_provenance(child_pid, &observed);
+    } else {
+      good = nonce_hex(nonce) &&
+        frame(request, sizeof(request), "REQ", phases[i], nonce, NULL) &&
+        frame(expected, sizeof(expected), "ACK", phases[i], nonce, "OK") &&
+        write_all_until(sock, request, transaction_deadline) &&
+        read_exact_until(sock, expected, transaction_deadline, child_pid) &&
+        no_surplus(sock) &&
+        peer_on_same_fd(sock, child_pid, ticks) &&
+        same_provenance(child_pid, &observed);
+    }
   }
   /* End-of-stream, not an instantaneous EAGAIN peek, proves the final reply
    * had no delayed suffix on the one connected kernel socket. */
@@ -660,6 +764,16 @@ int main(int argc, char **argv) {
   /* Real kernel-bound mechanics are proven, but not daemon root isolation.
    * Even if isolation were confirmed, this is NOT an owner-installed binary
    * and no release-pinned Docker image was verified. NEVER authorize here. */
+  if (docker_http) {
+    printf("{\"status\":\"SAME_FD_DOCKER_HTTP_DISPOSABLE_TEST_ONLY\","
+      "\"sameFdAcrossDockerHttpApiCalls\":true,"
+      "\"kernelSenderCredentialsMatchedAcrossDockerApiCalls\":true,"
+      "\"supervisedPidfdAcrossExchange\":true,"
+      "\"isolatedNamespacesApproved\":%s,"
+      "\"dockerLoadAuthorized\":false,\"deployAuthorized\":false}\n",
+      isolation ? "true" : "false");
+    return 0;
+  }
   printf("{\"status\":\"SAME_FD_KERNEL_PEER_AND_LIFECYCLE_TEST_ONLY\","
     "\"sameFdAcrossSyntheticLoadAndInspect\":true,"
     "\"supervisedPidfdAcrossExchange\":true,"

@@ -51,6 +51,43 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     assert.equal(result.output.isolatedNamespacesApproved, false);
     assert.equal(result.output.status, "SAME_FD_KERNEL_PEER_AND_LIFECYCLE_TEST_ONLY");
   });
+  await t.test("Docker API HTTP ping, info, load and inspect use one pinned kernel peer FD", () => {
+    const { result, output } = invoke("docker-http-normal");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(output.status, "SAME_FD_DOCKER_HTTP_DISPOSABLE_TEST_ONLY");
+    assert.equal(output.sameFdAcrossDockerHttpApiCalls, true);
+    assert.equal(output.kernelSenderCredentialsMatchedAcrossDockerApiCalls, true);
+    assert.equal(output.supervisedPidfdAcrossExchange, true);
+    assert.equal(output.isolatedNamespacesApproved, false);
+  });
+  await t.test("Docker API HTTP failures fail closed before accepting subsequent calls", (t2) => {
+    for (const scenario of ["docker-http-bad-info", "docker-http-bad-load",
+      "docker-http-bad-inspect", "docker-http-dead-after-load",
+      "docker-http-response-smuggling", "docker-http-forked-writer",
+      "docker-http-scm-rights-writer", "docker-http-stall-load",
+      "docker-http-pipeline-valid", "docker-http-late-final-junk",
+      "docker-http-nonzero-after-ack"]) {
+      const { result, output } = invoke(scenario);
+      assert.equal(result.status, 2, `${scenario}: ${result.stderr}`);
+      assert.equal(output.status, "BLOCKED");
+      // Nonclean fake-daemon exits intentionally retain forensic socket state.
+      // The test may remove only the exact generated root-owned fixture root.
+      const retained = /DISPOSABLE_FIXTURE_ROOT_PRESERVED (\/tmp\/virki-supervisor-[A-Za-z0-9]{8})/u.exec(result.stderr);
+      if (retained) {
+        const owned = retained[1];
+        const socket = path.join(owned, "engine.sock");
+        assert.equal(lstatSync(owned).isDirectory(), true);
+        assert.equal(lstatSync(owned).uid, 0);
+        assert.equal(lstatSync(owned).mode & 0o7777, 0o700);
+        assert.equal(lstatSync(socket).isSocket(), true);
+        assert.equal(lstatSync(socket).uid, 0);
+        t2.after(() => {
+          if (existsSync(socket)) unlinkSync(socket);
+          if (existsSync(owned)) rmdirSync(owned);
+        });
+      }
+    }
+  });
   await t.test("changed response after load fails closed while retaining daemon cleanup", () => {
     const result = invoke("bad-inspect");
     assert.equal(result.result.status, 2);
@@ -199,6 +236,12 @@ test("independent native same-FD kernel lifecycle remains nonauthorizing", {
     assert.match(source, /dockerLoadAuthorized\\":false/u);
     assert.doesNotMatch(source, /\b(?:system|popen|execvp|execve|execl|dlopen)\s*\(/u);
     assert.match(source, /independent_owner_service_pin = false/u);
+    assert.match(source, /POST \/v1\.45\/images\/load\?quiet=1/u);
+    assert.match(source, /GET \/v1\.45\/info/u);
+    assert.match(source, /GET \/_ping/u);
+    assert.match(source, /peer_on_same_fd\(sock, child_pid, ticks\)/u);
+    assert.match(source, /read_exact_until\(sock, expected, transaction_deadline, child_pid\)/u);
+    assert.doesNotMatch(source, /\b(?:system|popen|execvp|execl|execve|dlopen)\s*\(/u);
     assert.match(source, /SOCK_CLOEXEC/u);
     assert.match(source, /same_provenance\(child_pid, &observed\)/u);
     assert.match(source, /getrandom\(/u);
