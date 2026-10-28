@@ -7,6 +7,32 @@ hosted CodeQL approval or as permission to deploy.
 
 ## Explicit contingency preflight (read-only)
 
+For a **separate metadata-only inventory** of the configured remote native
+Linux target, run `npm run preflight:offline:host` from a checkout containing
+the ignored `.production.operator.json` or with the four
+`VIRKI_PRODUCTION_*` environment settings. Set `VIRKI_OFFLINE_SSH_USER`
+to the explicitly approved remote login user (never a shell command or
+`user@host`). Missing identity fails closed before SSH. The CLI uses
+`ssh -F none` for both the configuration check and the remote command,
+so an ambient user/system `ssh_config`, including `Match exec`, cannot
+execute local commands. Host, port and user are independently pinned from
+the operator configuration and explicit user input; the configured SSH
+alias is used solely as a known-hosts key lookup name. Strict host-key
+checking remains enabled; an unknown key is refused, not accepted on first
+use. The local known-hosts store is **not** an independently installed
+production trust root and cannot authorize release. The CLI also pins
+local-command execution off and clears all SSH forwardings; effective
+`ssh -G` settings must show those protections without any local command or
+forwarding stanza. The script reads only OS `stat` metadata of five fixed
+host paths.
+It never uses `sudo`, reads file contents, contacts Docker or PostgreSQL,
+or requires GitHub. An unreadable or missing path is **UNVERIFIED**, not proof
+that the component is absent. Even when every path's root ownership and mode
+are observable, `HOST_COMPONENTS_INSPECTED_ONLY` is **not** proof of trusted
+contents, supervised daemon identity, approval, backup or deploy readiness:
+both authorization booleans are always false. Unexpected SSH output, aliases,
+timeouts and incorrect targets fail closed with `HOST_READINESS_UNVERIFIED`.
+
 The GitHub-backed release remains the primary path. When GitHub Actions/GHCR
 is unavailable, the operator may **explicitly** inspect an independently signed
 offline release candidate without substituting local tests for hosted results:
@@ -342,6 +368,11 @@ No real Docker-in-Docker daemon is started or authorized.
 Startup errors before Docker CLI invocation are reported distinctly from errors
 after the CLI was invoked; once invoked, daemon contact **cannot be ruled out**
 even if the CLI reports failure or times out. Diagnostics never claim otherwise.
+The Windows PowerShell 5.1 ACL journal checks preserve the high-bit access
+mask `0x80020089` as a positive UInt32 decimal literal to avoid Windows
+PowerShell's signed-hex conversion overflow. Regression tests exercise actual
+create/append/remove and reject reparse ancestors and outsider read/write ACLs.
+Passing these development-only guards does not authenticate a production daemon.
 
 For local development **without contacting Docker at all**, native C fixtures
 also run with root inside a separately opted-in Ubuntu WSL2 test VM:

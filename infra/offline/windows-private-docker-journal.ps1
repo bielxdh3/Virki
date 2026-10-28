@@ -101,7 +101,10 @@ function Assert-Handle {
       # Private journal leaves must also deny outsider READ/LIST/READ_CONTROL:
       # the JSONL contains an unpredictable Docker owner-label token.
       $forbidden = if ($Strict) {
-        [uint32]0xD0156 -bor [uint32]0x80020089
+        # Windows PowerShell 5.1 parses high-bit hex literals as signed Int32;
+        # casting 0x80020089 directly to UInt32 raises an overflow exception.
+        # The decimal literal retains the exact security mask (0x80020089).
+        [uint32]0xD0156 -bor [uint32]2147614857
       } else { [uint32]0xD0040 }
       $forbidden = $forbidden -bor [uint32]0x50000000
       $rights = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$ace.AccessMask), 0)
