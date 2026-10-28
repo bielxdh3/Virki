@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useSensitiveFormAction } from "../../../lib/use-sensitive-form-action";
 import { createProjectConnectionAction, type ConnectionActionState } from "../actions";
 
+const connectionSlugPattern = String.raw`^\s*[A-Za-z0-9](?:[A-Za-z0-9\-]{0,62}[A-Za-z0-9])?\s*$`;
 const initialState: ConnectionActionState = { status: "idle" };
 
 export function ConnectionForm({ csrf }: { csrf: string }) {
@@ -12,8 +13,9 @@ export function ConnectionForm({ csrf }: { csrf: string }) {
   useEffect(() => { setCopied(false); }, [state.secret]);
   return <form action={action} className="form-stack">
     <input type="hidden" name="csrfToken" value={csrf} />
-    <label>Nome<input name="name" required maxLength={80} /></label>
-    <label>Identificador (slug)<input name="slug" required maxLength={48} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" /></label>
+    <label>Nome<input name="name" required maxLength={80} pattern={"[^\\p{Cc}]*"} title="Use até 80 caracteres sem caracteres de controle." /></label>
+    <label>Identificador (slug)<input name="slug" required pattern={connectionSlugPattern} aria-describedby="connection-slug-help" /></label>
+    <p id="connection-slug-help" className="muted">Até 64 letras, números e hífens. Espaços externos são removidos e o valor é salvo em minúsculas.</p>
     <label>Origem HTTPS<input name="origin" type="url" required placeholder="https://project.example.invalid" /></label>
     <label>URL de entrada (opcional)<input name="launchUrl" type="url" placeholder="https://project.example.invalid/login" /></label>
     <label>Redirect URIs exatas<textarea name="redirectUris" required placeholder="https://project.example.invalid/oidc/callback" /></label>

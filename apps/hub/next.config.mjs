@@ -7,7 +7,9 @@ const workspaceRoot = path.resolve(appDir, "../..");
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    authInterrupts: true
+    authInterrupts: true,
+    // Keep the framework's existing raw Server Action body cap explicit.
+    serverActions: { bodySizeLimit: "1mb" }
   },
   outputFileTracingRoot: workspaceRoot,
   serverExternalPackages: ["@node-rs/argon2", "@prisma/client"],

@@ -40,6 +40,20 @@ export class PrismaOidcAdapter implements Adapter {
       update: data,
       create: { model: this.model, idHash: hashOidcIdentifier(id), ...data }
     };
+    if (this.model === "Interaction") {
+      if (!indexedClientId) throw new errors.InvalidClient("OIDC interaction client is missing.");
+      await this.database.$transaction(async (transaction) => {
+        const connections = await transaction.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "ProjectConnection"
+          WHERE "clientId" = ${indexedClientId} AND "enabled" = TRUE
+          FOR UPDATE
+        `;
+        if (connections.length !== 1) throw new errors.InvalidClient("OIDC interaction client is unavailable.");
+        await transaction.oidcArtifact.upsert(artifact);
+      });
+      return;
+    }
     if (!projectAuthorizationModels.has(this.model)) {
       await this.database.oidcArtifact.upsert(artifact);
       return;
@@ -47,19 +61,24 @@ export class PrismaOidcAdapter implements Adapter {
 
     const { accountId, clientId } = getProjectAuthorizationContext(payload, grantBoundModels.has(this.model));
     await this.database.$transaction(async (transaction) => {
+      // Deletion locks the connection before cascading through grants; materialize that lock before taking grant/account row locks here.
       const activeGrant = await transaction.$queryRaw<Array<{ id: string; redirectUris: unknown }>>`
+        WITH connection_record AS MATERIALIZED (
+          SELECT "id", "redirectUris"
+          FROM "ProjectConnection"
+          WHERE "clientId" = ${clientId} AND "enabled" = TRUE
+          FOR UPDATE
+        )
         SELECT grant_record."id", connection_record."redirectUris" AS "redirectUris"
         FROM "UserProjectGrant" AS grant_record
         INNER JOIN "User" AS account_record ON account_record."id" = grant_record."userId"
-        INNER JOIN "ProjectConnection" AS connection_record ON connection_record."id" = grant_record."connectionId"
+        INNER JOIN connection_record ON connection_record."id" = grant_record."connectionId"
         WHERE grant_record."userId" = ${accountId}
-          AND connection_record."clientId" = ${clientId}
           AND grant_record."revokedAt" IS NULL
           AND account_record."role" = 'USER'
           AND account_record."isActive" = TRUE
           AND account_record."accountStatus" = 'ACTIVE'
-          AND connection_record."enabled" = TRUE
-        FOR UPDATE OF grant_record, account_record, connection_record
+        FOR UPDATE OF grant_record, account_record
       `;
       if (activeGrant.length !== 1) throw new errors.InvalidGrant("OIDC authorization is no longer active.");
       if (this.model === "AuthorizationCode" && (typeof payload.redirectUri !== "string" || !stringArray(activeGrant[0].redirectUris).includes(payload.redirectUri))) {

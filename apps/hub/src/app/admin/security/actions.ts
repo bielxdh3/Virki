@@ -22,15 +22,21 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { recordSecurityDenial } from "../../../lib/audit-denial";
-import { requireAdminMutation, readFormRawString, readFormString } from "../../../lib/admin-mutation";
+import { requireAdminMutation, readFormString } from "../../../lib/admin-mutation";
+import { PASSWORD_INPUT_MAX_LENGTH, readBoundedFormString } from "../../../lib/action-input-limits";
 
 export type SecurityFormState = { status: "idle" | "error" | "password-reuse" | "started" | "complete"; requestKey?: string; scope?: string; recoveryCodes?: string[] };
 
 export async function startCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   return withHubAuditRequest(async () => {
+  const normalPassword = readBoundedFormString(formData, "normalPassword", PASSWORD_INPUT_MAX_LENGTH);
   const session = await requireAdminMutation(formData, "admin-credential-setup");
+  if (normalPassword === null) {
+    await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session);
+    return { status: "error" };
+  }
   try {
-    const requestKey = await startAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, normalPassword: readFormRawString(formData, "normalPassword"), locale: "pt-BR" });
+    const requestKey = await startAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, normalPassword, locale: "pt-BR" });
     return { status: "started", requestKey };
   } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error) }; }
   });
@@ -38,9 +44,14 @@ export async function startCredentialSetupAction(_state: SecurityFormState, form
 
 export async function completeCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   return withHubAuditRequest(async () => {
+  const newPassword = readBoundedFormString(formData, "newPassword", PASSWORD_INPUT_MAX_LENGTH);
   const session = await requireAdminMutation(formData, "admin-credential-setup-complete");
+  if (newPassword === null) {
+    await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session);
+    return { status: "error" };
+  }
   try {
-    const recoveryCodes = await completeAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code"), newPassword: readFormRawString(formData, "newPassword") });
+    const recoveryCodes = await completeAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code"), newPassword });
     revalidatePath("/admin/security");
     return { status: "complete", recoveryCodes };
   } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error) }; }
@@ -49,14 +60,20 @@ export async function completeCredentialSetupAction(_state: SecurityFormState, f
 
 export async function startElevationAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   return withHubAuditRequest(async () => {
+  const normalPassword = readBoundedFormString(formData, "normalPassword", PASSWORD_INPUT_MAX_LENGTH);
+  const administrativePassword = readBoundedFormString(formData, "administrativePassword", PASSWORD_INPUT_MAX_LENGTH);
   const session = await requireAdminMutation(formData, "admin-elevation-start");
+  if (normalPassword === null || administrativePassword === null) {
+    await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session);
+    return { status: "error" };
+  }
   const scope = readFormString(formData, "scope") as ElevationScope;
   try {
     const durationValue = readFormString(formData, "duration");
     const duration: ElevationDuration = durationValue === "manual"
       ? { kind: "MANUAL", confirmed: readFormString(formData, "manualConfirmed") === "true" }
       : { kind: "TIMED", minutes: Number(durationValue) as 15 | 60 | 240 | 1440 };
-    const request = await startSecurityElevation({ actor: session.user, sessionId: session.id, normalPassword: readFormRawString(formData, "normalPassword"), administrativePassword: readFormRawString(formData, "administrativePassword"), scope, duration, locale: "pt-BR" });
+    const request = await startSecurityElevation({ actor: session.user, sessionId: session.id, normalPassword, administrativePassword, scope, duration, locale: "pt-BR" });
     return { status: "started", requestKey: request.requestKey, scope };
   } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error), scope }; }
   });
@@ -130,9 +147,14 @@ export async function revokeOtherSessionsAction(formData: FormData): Promise<voi
 
 export async function changeAdminPasswordAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   return withHubAuditRequest(async () => {
+  const newPassword = readBoundedFormString(formData, "newPassword", PASSWORD_INPUT_MAX_LENGTH);
   const session = await requireAdminMutation(formData, "admin-credential-change");
+  if (newPassword === null) {
+    await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session);
+    return { status: "error" };
+  }
   try {
-    await changeAdministrativePassword(session.user, session.id, readFormRawString(formData, "newPassword"));
+    await changeAdministrativePassword(session.user, session.id, newPassword);
     revalidatePath("/admin/security");
     return { status: "complete" };
   } catch (error) { await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session); return { status: passwordStatus(error) }; }
@@ -151,14 +173,20 @@ export async function regenerateAdminRecoveryCodesAction(_state: SecurityFormSta
 
 export async function recoverAdminCredentialAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   return withHubAuditRequest(async () => {
+  const normalPassword = readBoundedFormString(formData, "normalPassword", PASSWORD_INPUT_MAX_LENGTH);
+  const newPassword = readBoundedFormString(formData, "newPassword", PASSWORD_INPUT_MAX_LENGTH);
   const session = await requireAdminMutation(formData, "admin-credential-recovery");
+  if (normalPassword === null || newPassword === null) {
+    await recordSecurityDenial(await headers(), "admin-credential-recovery", "rejected", session);
+    return { status: "error" };
+  }
   try {
     const recoveryCodes = await recoverAdministrativeCredential({
       actor: session.user,
       sessionId: session.id,
-      normalPassword: readFormRawString(formData, "normalPassword"),
+      normalPassword,
       recoveryCode: readFormString(formData, "recoveryCode"),
-      newPassword: readFormRawString(formData, "newPassword")
+      newPassword
     });
     revalidatePath("/admin/security");
     return { status: "complete", recoveryCodes };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatAuditEmailReference, hashAuditEmail, sanitizeAuditMetadata, writeAuditLogInTransaction, type AuditMetadata, type AuditLogInput } from "./audit";
+import { createAuditLogData, formatAuditEmailReference, hashAuditEmail, safePersistedAuditMetadata, sanitizeAuditMetadata, writeAuditLogInTransaction, type AuditMetadata, type AuditLogInput } from "./audit";
 
 test("audit email references use keyed, versioned pseudonyms and preserve legacy display", () => {
   const firstKey = "11".repeat(32);
@@ -15,6 +15,28 @@ test("audit email references use keyed, versioned pseudonyms and preserve legacy
   assert.equal(formatAuditEmailReference(first), first.split(":")[2].slice(0, 10));
   assert.equal(formatAuditEmailReference("0123456789abcdef".repeat(4)), "0123456789");
   assert.throws(() => hashAuditEmail("member@example.invalid", { NODE_ENV: "production" } as NodeJS.ProcessEnv));
+});
+
+test("audit persistence retains a full email pseudonym and drops raw email metadata", () => {
+  const emailRef = `hmac-v1:0123456789abcdef:${"c".repeat(64)}`;
+
+  assert.deepEqual(safePersistedAuditMetadata({ emailRef }), { emailRef });
+  assert.deepEqual(safePersistedAuditMetadata({ emailRef: "member@example.invalid" }), {});
+});
+
+test("recovery-code consumption is categorized as security and stores only a safe account reference", () => {
+  const data = createAuditLogData({
+    eventType: "RECOVERY_CODE_CONSUMED",
+    result: "SUCCESS",
+    actorUserId: "synthetic-user-id",
+    resource: "identity.recovery",
+    message: "Recovery code consumed.",
+    metadata: { targetRef: "a".repeat(64) }
+  });
+
+  assert.equal(data.category, "SECURITY");
+  assert.deepEqual(data.metadata, { targetRef: "a".repeat(64) });
+  assert.equal(JSON.stringify(data).includes("Recovery code:"), false);
 });
 
 test("audit persistence keeps useful nested references", async () => {

@@ -70,6 +70,7 @@ if (migrate.status !== 0) throw new Error("Committed migrations could not be app
 
 writeFileSync(envFile, [
   `VIRKI_INTEGRATION_DATABASE_URL=${url("virki_runtime_test", passwords.test)}`,
+  `MIGRATION_DATABASE_URL=${url("virki_migrator", passwords.migrator)}`,
   "VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable",
   ""
 ].join("\n"), { mode: 0o600 });

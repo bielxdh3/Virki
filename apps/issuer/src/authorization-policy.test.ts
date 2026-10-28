@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, parseEssentialOidcAcrRequest, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const activeUserGrant = {
   revokedAt: null,
@@ -87,6 +87,31 @@ test("OIDC authentication claims report the persisted methods and assurance leve
   assert.equal(satisfiesEssentialOidcAcrValues(["urn:virki:loa:2"], ["pwd"]), false);
 });
 
+test("essential OIDC ACR parsing keeps essential alternatives separate from voluntary preferences", () => {
+  assert.deepEqual(parseEssentialOidcAcrRequest(undefined), { required: false, valid: true, values: [] });
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: null } })),
+    { required: false, valid: true, values: [] }, "a null ACR claim is voluntary, not malformed essential assurance");
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { value: "urn:virki:loa:1" } } })),
+    { required: false, valid: true, values: [] }, "a voluntary ACR claim does not become essential");
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, value: "urn:virki:loa:2" } } })),
+    { required: true, valid: true, values: ["urn:virki:loa:2"] });
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] } } })),
+    { required: true, valid: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] });
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true } } })),
+    { required: true, valid: true, values: ["urn:virki:loa:1", "urn:virki:loa:2"] },
+    "an essential ACR request without value or values accepts any supported local ACR");
+
+  for (const acr of [
+    { essential: true, value: "urn:virki:loa:2", values: ["urn:virki:loa:1"] },
+    { essential: true, value: "" },
+    { essential: true, values: [] },
+    { essential: true, values: ["urn:virki:loa:2", 1] }
+  ]) {
+    assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr } })),
+      { required: true, valid: false, values: [] }, `malformed essential ACR must be rejected: ${JSON.stringify(acr)}`);
+  }
+});
+
 test("OIDC provider session assurance, methods, and auth time must match the current central session", () => {
   const authenticatedAt = new Date("2026-10-02T12:00:00.000Z");
   const currentLoginTs = Math.floor(authenticatedAt.getTime() / 1_000);
@@ -128,11 +153,52 @@ test("OIDC provider session assurance, methods, and auth time must match the cur
   }), false, "auth_time must be refreshed after a new central session");
 });
 
-test("OIDC ACR loa:2 creates an interaction unless the provider session has current MFA assurance", () => {
+test("voluntary OIDC ACR loa:2 does not loop when password authentication cannot provide MFA", () => {
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd", "otp", "mfa"] }), true);
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:2", authenticationMethods: ["pwd", "otp", "mfa"] }), false);
-  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:1", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:1 urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false,
+    "a mixed voluntary preference may use the actually achieved password ACR");
+});
+
+test("essential MFA ACR overrides mixed voluntary values only when its own requirement is unmet", () => {
+  const requestedAcrValues = "urn:virki:loa:1 urn:virki:loa:2";
+  const mfaOnly = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2"] } } }));
+  const passwordAlternative = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] } } }));
+  const anySupportedAcr = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true } } }));
+  const unsupported = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, value: "urn:virki:loa:3" } } }));
+  const malformed = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", 1] } } }));
+
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: mfaOnly }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:2", authenticationMethods: ["pwd", "otp", "mfa"], essentialAcr: mfaOnly }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: passwordAlternative }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: undefined, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: anySupportedAcr }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: unsupported }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: malformed }), true);
+});
+
+test("OIDC ACR alternatives allow a fresh password session without an MFA redirect loop", () => {
+  const now = new Date("2026-10-27T12:00:00.000Z");
+  const requestStartedAtMs = now.getTime();
+  const acrValues = "urn:virki:loa:2 urn:virki:loa:1";
+  const requiredAcrValues = ["urn:virki:loa:2", "urn:virki:loa:1"];
+
+  assert.equal(requiresOidcAssuranceInteraction({
+    requestedAcrValues: acrValues,
+    currentAcr: "urn:virki:loa:1",
+    authenticationMethods: ["pwd"]
+  }), false, "the current password ACR is one of the requested alternatives");
+  assert.equal(requiresFreshOidcAuthentication({
+    prompt: "login",
+    maxAge: undefined,
+    requestedAcrValues: acrValues,
+    requiredAcrValues,
+    requestStartedAtMs,
+    authenticatedAt: new Date(requestStartedAtMs + 1),
+    authenticationMethods: ["pwd"],
+    now
+  }), false, "a password-only session completed after prompt=login and satisfies the lower requested ACR");
 });
 
 test("OIDC authentication request markers bind proof timestamps to one interaction", () => {
@@ -165,6 +231,6 @@ test("OIDC prompt=login and max_age require recent central authentication", () =
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: 30, requestStartedAtMs, authenticatedAt: new Date(now.getTime() - 31_000), authenticationMethods, now }), true, "numeric default_max_age values are enforced");
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: "invalid", requestStartedAtMs, authenticatedAt: now, authenticationMethods, now }), true);
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
-  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: new Date(now.getTime() + 1), authenticationMethods: ["pwd"], now }), true, "MFA assurance is required even when a password-only session is new");
+  assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requestedAcrValues: "urn:virki:loa:2", requestStartedAtMs, authenticatedAt: new Date(now.getTime() + 1), authenticationMethods: ["pwd"], now }), false, "one fresh password sign-in must stop repeated login redirects; an essential ACR2 claim still fails its separate assurance check");
   assert.equal(requiresFreshOidcAuthentication({ prompt: undefined, maxAge: undefined, requiredAcrValues: ["urn:virki:loa:2"], requestStartedAtMs, authenticatedAt: now, authenticationMethods: ["pwd"], now }), true);
 });

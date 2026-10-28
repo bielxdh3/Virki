@@ -17,7 +17,7 @@ import {
 } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
 import { cleanupInactiveSessions, hashAuditSessionReference, hashPassword, verifyPassword } from "./index";
-import { hashRecoveryCode } from "./security";
+import { generateNumericCode, hashRecoveryCode, hashSecurityCode } from "./security";
 
 after(() => prisma.$disconnect());
 
@@ -116,6 +116,98 @@ test("an elevation code cannot be verified after its ten-minute window", integra
     AdministrationMutationError
   );
   assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", new Date(start.getTime() + 11 * MINUTE)), false);
+});
+
+test("ADMIN proof and elevation-start quotas count both valid and failed operations", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id }, select: { keyVersion: true } });
+  const validCeremonies = Array.from({ length: 6 }, () => ({ requestKey: randomBytes(24).toString("base64url"), code: generateNumericCode() }));
+  await prisma.securityElevation.createMany({
+    data: validCeremonies.map(({ requestKey, code }) => ({
+      requestKey,
+      userId: admin.actor.id,
+      sessionId: admin.sessionId,
+      protocolVersion: 1,
+      credentialKeyVersion: credential.keyVersion,
+      scope: "PROJECT_ACCESS_CHANGE",
+      challengeHash: hashSecurityCode(code),
+      status: "PENDING",
+      manualUntilRevoked: false,
+      expiresAt: new Date(now.getTime() + 60 * MINUTE),
+      createdAt: new Date(now.getTime() - 1_000)
+    }))
+  });
+
+  for (const ceremony of validCeremonies.slice(0, 5)) {
+    await verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: ceremony.requestKey, code: ceremony.code, now });
+  }
+  await assert.rejects(
+    verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: validCeremonies[5]!.requestKey, code: validCeremonies[5]!.code, now }),
+    AdministrationMutationError,
+    "five successful proofs spend the shared ADMIN proof-operation quota"
+  );
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: validCeremonies[5]!.requestKey }, select: { status: true } })).status, "PENDING");
+
+  const failedAdmin = await setupAdmin();
+  const failedProofCode = "654321";
+  const failedRequestKey = randomBytes(24).toString("base64url");
+  await prisma.securityElevation.create({
+    data: {
+      requestKey: failedRequestKey,
+      userId: failedAdmin.actor.id,
+      sessionId: failedAdmin.sessionId,
+      protocolVersion: 1,
+      credentialKeyVersion: 1,
+      scope: "PROJECT_ACCESS_CHANGE",
+      challengeHash: hashSecurityCode(failedProofCode),
+      status: "PENDING",
+      manualUntilRevoked: false,
+      expiresAt: new Date(now.getTime() + 60 * MINUTE),
+      createdAt: new Date(now.getTime() - 1_000)
+    }
+  });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await assert.rejects(verifySecurityElevation({ actor: failedAdmin.actor, sessionId: failedAdmin.sessionId, requestKey: failedRequestKey, code: "000000", now }), AdministrationMutationError);
+  }
+  await assert.rejects(verifySecurityElevation({ actor: failedAdmin.actor, sessionId: failedAdmin.sessionId, requestKey: failedRequestKey, code: failedProofCode, now }), AdministrationMutationError);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: failedRequestKey }, select: { status: true } })).status, "PENDING");
+
+  const startAdmin = await setupAdmin();
+  const validStart = await startSecurityElevation({
+    actor: startAdmin.actor,
+    sessionId: startAdmin.sessionId,
+    normalPassword: NORMAL_PASSWORD,
+    administrativePassword: ADMIN_PASSWORD,
+    scope: "PROJECT_ACCESS_CHANGE",
+    duration: { kind: "TIMED", minutes: 15 },
+    locale: LOCALE,
+    now
+  });
+  assert.ok(validStart.requestKey);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await assert.rejects(startSecurityElevation({
+      actor: startAdmin.actor,
+      sessionId: startAdmin.sessionId,
+      normalPassword: "incorrect-normal-password",
+      administrativePassword: ADMIN_PASSWORD,
+      scope: "PROJECT_ACCESS_CHANGE",
+      duration: { kind: "TIMED", minutes: 15 },
+      locale: LOCALE,
+      now
+    }), AdministrationMutationError);
+  }
+  await assert.rejects(startSecurityElevation({
+    actor: startAdmin.actor,
+    sessionId: startAdmin.sessionId,
+    normalPassword: NORMAL_PASSWORD,
+    administrativePassword: ADMIN_PASSWORD,
+    scope: "PROJECT_ACCESS_CHANGE",
+    duration: { kind: "TIMED", minutes: 15 },
+    locale: LOCALE,
+    now
+  }), AdministrationMutationError, "a valid start is denied after five successful/failed start operations");
+  assert.equal(await prisma.securityElevation.count({ where: { userId: startAdmin.actor.id } }), 1);
 });
 
 for (const lockTarget of ["User", "SecurityElevation"] as const) test(`administrative OTP expiring during ${lockTarget} lock wait must not activate elevation`, integrationOptions, async () => {

@@ -3,8 +3,11 @@ import { headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "./auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "./cloudflare-access";
-import { getSurface, trustedReturnTo } from "./surface";
-import { isAdminRequestAllowed, isAdminRole } from "./admin-policy";
+import { getSurface, trustedReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./surface";
+import { isAdminPageRequestAllowed, isAdminRole } from "./admin-policy";
+import { HUB_RENDER_PROVENANCE_HEADER, verifyHubRenderProof } from "./hub-render-provenance";
+import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
+import { cookies } from "next/headers";
 import { recordSecurityDenial } from "./audit-denial";
 
 type AdminSession = NonNullable<Awaited<ReturnType<typeof getCurrentSession>>>;
@@ -16,7 +19,13 @@ export const requireAdminPage = cache(async (): Promise<AdminSession> => {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   const accessValid = isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "admin-page"));
-  if (!isAdminRequestAllowed(surface, accessValid)) forbidden();
+  const forwardedHost = requestHeaders.get("x-forwarded-host");
+  const trustedPath = requestHeaders.get(TRUSTED_REQUEST_PATH_HEADER);
+  const trustedInternalHubRsc = surface === "local" &&
+    /^\/admin(?:\/|\?|$)/u.test(trustedPath ?? "") &&
+    getSurface({ get: (header) => header.toLowerCase() === "host" ? forwardedHost : null }) === "hub" &&
+    verifyHubRenderProof(requestHeaders.get(HUB_RENDER_PROVENANCE_HEADER), (await cookies()).get(SESSION_COOKIE_NAME)?.value);
+  if (!isAdminPageRequestAllowed(surface, accessValid, trustedInternalHubRsc)) forbidden();
   const session = await getCurrentSession();
   if (!session) {
     const returnTo = trustedReturnTo(requestHeaders, surface) ?? "/admin/accounts";

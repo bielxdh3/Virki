@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomInt, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
@@ -19,6 +19,7 @@ import {
   type LoginCeremonyStart,
   requestAccountRecovery,
   regenerateRecoveryCodes,
+  revokeTrustedDevice,
   SecurityMutationError,
   startLoginCeremony,
   verifyAccountRecoveryEmail,
@@ -67,7 +68,7 @@ async function countOidcArtifacts(userId: string): Promise<number> {
   return prisma.oidcArtifact.count({ where: { accountIdHash: hashOidcIdentifier(userId) } });
 }
 
-async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string): Promise<void> {
+async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment?: string, minimumWaiters = 1): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const blocked = await prisma.$queryRaw<Array<{ waiters: number }>>`
@@ -75,12 +76,12 @@ async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: st
       FROM pg_stat_activity
       WHERE wait_event_type = 'Lock'
         AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
-        AND query LIKE ${`%${queryFragment}%`}
+        AND (${queryFragment ?? null}::text IS NULL OR query LIKE ${queryFragment ? `%${queryFragment}%` : null})
     `;
-    if ((blocked[0]?.waiters ?? 0) >= 1) return;
+    if ((blocked[0]?.waiters ?? 0) >= minimumWaiters) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
-  throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment}.`);
+  throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment ?? "any query"}.`);
 }
 
 // Email-factor login from a device. An untrusted candidate token is replaced by the server, so the
@@ -158,8 +159,13 @@ test("a TOTP device is trusted only after the TOTP step completes", integrationO
   assert.equal(await countTrustedRows(user.id, second.deviceToken), 1, "the device is trusted after the TOTP step");
 
   // forceFreshProof skips the remembered grant so the TOTP-only ceremony for the trusted device is observed.
-  const forced = ceremonyOf(await startLoginCeremony(user.id, second.deviceToken, "pt-BR", new Date(base.getTime() + 20_000), true));
+  const forcedAt = new Date(base.getTime() + 20_000);
+  const forced = ceremonyOf(await startLoginCeremony(user.id, second.deviceToken, "pt-BR", forcedAt, true));
   assert.equal(forced.factor, "TOTP", "a trusted TOTP device still requires TOTP and skips email");
+
+  const reused = ceremonyOf(await startLoginCeremony(user.id, second.deviceToken, "pt-BR", new Date(forcedAt.getTime() + 30_000), true));
+  assert.equal(reused.factor, "TOTP");
+  assert.equal(reused.ceremonyId, forced.ceremonyId, "a trusted TOTP-only ceremony is reused within the 60-second window");
 });
 
 test("an EMAIL-factor user keeps a remembered browser for 7 days", integrationOptions, async () => {
@@ -218,6 +224,175 @@ test("login email ceremonies are capped per trusted client source", integrationO
     }
   }
   assert.equal(successes, LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
+});
+
+test("an untrusted browser reuses its issued ceremony for 60 seconds and replaces it afterward", integrationOptions, async () => {
+  const user = await createTestUser({ label: "login-untrusted-reuse" });
+  const base = new Date();
+  const address = `2001:db8::${randomInt(1, 0xffff).toString(16)}`;
+  const first = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", base, false, undefined, address));
+  assert.equal(first.newDevice, true);
+  assert.equal(await countLoginMails(user.email), 1);
+
+  const withinWindow = ceremonyOf(await startLoginCeremony(user.id, first.deviceToken, "pt-BR", new Date(base.getTime() + 59_000), false, undefined, address));
+  assert.equal(withinWindow.ceremonyId, first.ceremonyId, "the server-issued untrusted cookie reuses its pending challenge within 60 seconds");
+  assert.equal(withinWindow.deviceToken, first.deviceToken, "the cookie value remains stable without becoming trusted");
+  assert.equal(await countLoginMails(user.email), 1);
+  assert.equal(await countTrustedRows(user.id, first.deviceToken), 0, "reusing an untrusted cookie does not establish device trust");
+  assert.equal(await prisma.deviceChallenge.count({ where: { userId: user.id, status: "PENDING" } }), 1);
+
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  const sourceId = createRateLimitIdentifierHash(`login-email-ceremony-source:${address}`);
+  const accountId = createRateLimitIdentifierHash(`login-email-ceremony-account:${user.id}`);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: sourceId } })).attempts, 1);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: accountId } })).attempts, 1);
+
+  const afterWindow = ceremonyOf(await startLoginCeremony(user.id, withinWindow.deviceToken, "pt-BR", new Date(base.getTime() + 61_000), false, undefined, address));
+  assert.equal(afterWindow.deviceToken, first.deviceToken, "a persisted untrusted-device cookie remains stable while its challenge is active");
+  assert.notEqual(afterWindow.ceremonyId, first.ceremonyId, "the 60-second reuse limit still starts a fresh challenge");
+  assert.equal((await prisma.deviceChallenge.findUniqueOrThrow({ where: { ceremonyId: first.ceremonyId } })).status, "REVOKED", "a fresh challenge revokes the older pending challenge for this device");
+  assert.equal(await prisma.deviceChallenge.count({ where: { userId: user.id, status: "PENDING" } }), 1);
+  assert.equal(await countLoginMails(user.email), 2);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: sourceId } })).attempts, 2);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: accountId } })).attempts, 2);
+
+  const result = await verifyLoginEmailCode(afterWindow.ceremonyId, await latestLoginCode(user.email), afterWindow.deviceToken, new Date(base.getTime() + 61_000));
+  assert.ok(result.session);
+  assert.equal(await countTrustedRows(user.id, first.deviceToken), 1, "the device becomes trusted only after the email proof succeeds");
+});
+
+test("a revoked trusted-device cookie cannot reuse its old login challenge", integrationOptions, async () => {
+  const user = await createTestUser({ label: "login-revoked-cookie" });
+  const base = new Date();
+  const initial = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", base));
+  await verifyLoginEmailCode(initial.ceremonyId, await latestLoginCode(user.email), initial.deviceToken, base);
+  const pending = ceremonyOf(await startLoginCeremony(user.id, initial.deviceToken, "pt-BR", new Date(base.getTime() + 10_000), true));
+  const trustedDevice = await prisma.trustedDevice.findUniqueOrThrow({
+    where: { userId_deviceIdHash: { userId: user.id, deviceIdHash: hashDeviceToken(initial.deviceToken) } },
+    select: { deviceKey: true }
+  });
+
+  await revokeTrustedDevice(user.id, trustedDevice.deviceKey);
+
+  const replacement = ceremonyOf(await startLoginCeremony(user.id, initial.deviceToken, "pt-BR", new Date(base.getTime() + 11_000), true));
+  assert.notEqual(replacement.deviceToken, initial.deviceToken, "a revoked device token is replaced rather than treated as a reusable untrusted cookie");
+  assert.equal(replacement.newDevice, true);
+  assert.notEqual(replacement.ceremonyId, pending.ceremonyId);
+  assert.equal((await prisma.deviceChallenge.findUniqueOrThrow({ where: { ceremonyId: pending.ceremonyId } })).status, "REVOKED");
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({
+    where: { userId_deviceIdHash: { userId: user.id, deviceIdHash: hashDeviceToken(initial.deviceToken) } },
+    select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true }
+  })).status, "REVOKED");
+  assert.equal(await countTrustedRows(user.id, replacement.deviceToken), 0);
+  assert.equal(await countLoginMails(user.email), 3, "initial verification, forced fresh proof, and replacement each queue one email");
+});
+
+test("a trusted-device revoke racing a blocked login start cannot leave a challenge on the revoked cookie", {
+  ...integrationOptions,
+  skip: "INCONCLUSIVE: the PostgreSQL barrier confirmed the start waiter but could not observe the revoke waiter behind the same blocker; no race outcome was established."
+}, async () => {
+  const secret = createTotpSecret();
+  const user = await createTestUser({ totpSecret: secret, label: "login-revoke-start-race" });
+  const deviceToken = randomBytes(32).toString("base64url");
+  const device = await prisma.trustedDevice.create({ data: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken) }, select: { deviceKey: true } });
+  const now = new Date();
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 10_000 });
+  await ready;
+
+  const starting = startLoginCeremony(user.id, deviceToken, "pt-BR", now, true, "USER")
+    .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+  let revoking!: Promise<{ ok: true } | { ok: false; error: unknown }>;
+  let revokeWaitedForAccount: boolean;
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE");
+    revoking = revokeTrustedDevice(user.id, device.deviceKey)
+      .then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+    revokeWaitedForAccount = await Promise.race([
+      waitForBlockedPostgresQuery(blockerPid, undefined, 2).then(() => true),
+      revoking.then(() => false)
+    ]);
+  } finally {
+    release();
+  }
+  await blocker;
+  const outcome = await starting;
+  const revokeOutcome = await revoking;
+  assert.equal(revokeOutcome.ok, true);
+  if (!outcome.ok) assert.ok(outcome.error instanceof SecurityMutationError);
+
+  const revoked = await prisma.trustedDevice.findUniqueOrThrow({ where: { deviceKey: device.deviceKey }, select: { status: true } });
+  assert.equal(revoked.status, "REVOKED");
+  assert.equal(await prisma.deviceChallenge.count({ where: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken), status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null } }), 0);
+  if (!revokeWaitedForAccount && outcome.ok && outcome.value.kind === "CEREMONY") {
+    assert.notEqual(outcome.value.deviceToken, deviceToken, "a start that runs after a completed revoke must not return the revoked cookie");
+  }
+});
+
+test("a trusted-device revoke racing TOTP verification invalidates the blocked challenge", {
+  ...integrationOptions,
+  skip: "INCONCLUSIVE: the PostgreSQL barrier confirmed the verifier waiter but could not observe the revoke waiter behind the same blocker; no race outcome was established."
+}, async () => {
+  const secret = createTotpSecret();
+  const user = await createTestUser({ totpSecret: secret, label: "login-revoke-verify-race" });
+  const deviceToken = randomBytes(32).toString("base64url");
+  const device = await prisma.trustedDevice.create({ data: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken) }, select: { deviceKey: true } });
+  const now = new Date();
+  const ceremony = ceremonyOf(await startLoginCeremony(user.id, deviceToken, "pt-BR", now, true, "USER"));
+  const sessionsBefore = await prisma.session.count({ where: { userId: user.id } });
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 10_000 });
+  await ready;
+
+  const verification = verifyLoginTotpCode(ceremony.ceremonyId, totpAt(secret, now), deviceToken, now, "USER")
+    .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+  let revoking!: Promise<{ ok: true } | { ok: false; error: unknown }>;
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE");
+    revoking = revokeTrustedDevice(user.id, device.deviceKey)
+      .then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+    await Promise.race([
+      waitForBlockedPostgresQuery(blockerPid, undefined, 2),
+      revoking
+    ]);
+  } finally {
+    release();
+  }
+  await blocker;
+  const outcome = await verification;
+  const revokeOutcome = await revoking;
+  assert.equal(revokeOutcome.ok, true);
+  if (!outcome.ok) assert.ok(outcome.error instanceof SecurityMutationError);
+
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { deviceKey: device.deviceKey }, select: { status: true } })).status, "REVOKED");
+  const finalChallenge = await prisma.deviceChallenge.findUniqueOrThrow({ where: { ceremonyId: ceremony.ceremonyId }, select: { status: true, consumedAt: true } });
+  assert.equal(finalChallenge.status, "REVOKED");
+  if (outcome.ok) {
+    assert.notEqual(finalChallenge.consumedAt, null, "a verification serialized before revocation may finish and consume its challenge");
+    assert.equal(await prisma.session.count({ where: { userId: user.id } }), sessionsBefore + 1);
+  } else {
+    assert.equal(finalChallenge.consumedAt, null);
+    assert.equal(await prisma.session.count({ where: { userId: user.id } }), sessionsBefore);
+    assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id }, select: { lastUsedStep: true } })).lastUsedStep, null);
+  }
 });
 
 test("concurrent login ceremony starts cannot exceed the account quota", integrationOptions, async () => {

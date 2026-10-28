@@ -16,6 +16,40 @@ export const OIDC_DISCOVERY_CONFIGURATION = {
   features: { claimsParameter: { enabled: true } }
 };
 
+export function parseEssentialOidcAcrRequest(rawClaims: unknown): { required: boolean; valid: boolean; values: string[] } {
+  const invalid = { required: true, valid: false, values: [] };
+  if (rawClaims === undefined) return { required: false, valid: true, values: [] };
+  if (typeof rawClaims !== "string") return invalid;
+
+  let claims: unknown;
+  try {
+    claims = JSON.parse(rawClaims);
+  } catch {
+    return invalid;
+  }
+  if (!isRecord(claims)) return invalid;
+  const idToken = claims.id_token;
+  if (idToken === undefined) return { required: false, valid: true, values: [] };
+  if (!isRecord(idToken)) return invalid;
+  const acr = idToken.acr;
+  // OIDC individual claims may use null to request inclusion of a claim
+  // without imposing an essential value/assurance constraint.
+  if (acr === undefined || acr === null) return { required: false, valid: true, values: [] };
+  if (!isRecord(acr)) return invalid;
+  if (acr.essential === undefined || acr.essential === false) return { required: false, valid: true, values: [] };
+  if (acr.essential !== true) return invalid;
+
+  if (Object.hasOwn(acr, "value") && Object.hasOwn(acr, "values")) return invalid;
+  if (!Object.hasOwn(acr, "value") && !Object.hasOwn(acr, "values")) {
+    return { required: true, valid: true, values: [...OIDC_SUPPORTED_ACR_VALUES] };
+  }
+  if (typeof acr.value === "string" && acr.value.length > 0) return { required: true, valid: true, values: [acr.value] };
+  if (!Array.isArray(acr.values) || acr.values.length === 0 || !acr.values.every((value) => typeof value === "string" && value.length > 0)) {
+    return invalid;
+  }
+  return { required: true, valid: true, values: acr.values as string[] };
+}
+
 export function requiresProjectAccessInteraction(
   accountId: string | undefined,
   clientId: string | undefined,
@@ -104,17 +138,32 @@ export function satisfiesEssentialOidcAcrValues(
 ): boolean {
   if (!supportsEssentialOidcAcrValues(requiredAcrValues)) return false;
   const achievedAcr = getOidcAuthenticationContext(authenticationMethods).acr;
-  return requiredAcrValues.includes(achievedAcr) || (achievedAcr === MULTI_FACTOR_ACR && requiredAcrValues.includes(PASSWORD_ACR));
+  return satisfiesEssentialOidcAcr(requiredAcrValues, achievedAcr);
+}
+
+function satisfiesEssentialOidcAcr(requiredAcrValues: readonly string[], achievedAcr: string | undefined): boolean {
+  return Boolean(achievedAcr && (requiredAcrValues.includes(achievedAcr) || (achievedAcr === MULTI_FACTOR_ACR && requiredAcrValues.includes(PASSWORD_ACR))));
 }
 
 export function requiresOidcAssuranceInteraction(input: {
   requestedAcrValues: string | undefined;
   currentAcr: string | undefined;
   authenticationMethods: readonly string[];
+  essentialAcr?: { required: boolean; valid: boolean; values: readonly string[] };
 }): boolean {
-  const requestsMultiFactor = input.requestedAcrValues?.split(/\s+/u).includes(MULTI_FACTOR_ACR) ?? false;
+  const essentialAcr = input.essentialAcr;
+  if (essentialAcr?.required && (
+    !essentialAcr.valid ||
+    !supportsEssentialOidcAcrValues(essentialAcr.values) ||
+    !satisfiesEssentialOidcAcrValues(essentialAcr.values, input.authenticationMethods) ||
+    !satisfiesEssentialOidcAcr(essentialAcr.values, input.currentAcr)
+  )) return true;
+
+  const requestedAcrValues = splitAcrValues(input.requestedAcrValues);
+  const requestsMultiFactor = requestedAcrValues.includes(MULTI_FACTOR_ACR) &&
+    (!requestedAcrValues.includes(PASSWORD_ACR) || input.authenticationMethods.includes("mfa"));
   return requestsMultiFactor && (
-    !input.authenticationMethods.includes("mfa") || input.currentAcr !== MULTI_FACTOR_ACR
+    input.authenticationMethods.includes("mfa") && input.currentAcr !== MULTI_FACTOR_ACR
   );
 }
 
@@ -172,9 +221,17 @@ export function requiresFreshOidcAuthentication(input: {
     input.requestStartedAtMs === undefined || input.authenticatedAt.getTime() <= input.requestStartedAtMs
   )) return true;
 
-  const requestsMultiFactor = (input.requestedAcrValues?.split(/\s+/u).includes(MULTI_FACTOR_ACR) ?? false) ||
-    (input.requiredAcrValues?.includes(MULTI_FACTOR_ACR) ?? false);
-  if (requestsMultiFactor && !input.authenticationMethods.includes("mfa")) return true;
+  const requestedAcrValues = splitAcrValues(input.requestedAcrValues);
+  const requestsMultiFactor = (
+    requestedAcrValues.includes(MULTI_FACTOR_ACR) &&
+    (!requestedAcrValues.includes(PASSWORD_ACR) || input.authenticationMethods.includes("mfa"))
+  ) || (
+    input.requiredAcrValues?.includes(MULTI_FACTOR_ACR) &&
+    !input.requiredAcrValues.includes(PASSWORD_ACR)
+  );
+  if (requestsMultiFactor && !input.authenticationMethods.includes("mfa") && (
+    input.requestStartedAtMs === undefined || input.authenticatedAt.getTime() <= input.requestStartedAtMs
+  )) return true;
 
   if (input.maxAge === undefined) return false;
   const maxAge = typeof input.maxAge === "number" ? input.maxAge : Number(input.maxAge);
@@ -186,6 +243,14 @@ export function requiresFreshOidcAuthentication(input: {
   const now = Math.floor((input.requestStartedAtMs ?? (input.now ?? new Date()).getTime()) / 1_000);
   const authenticatedAt = Math.floor(input.authenticatedAt.getTime() / 1_000);
   return now - authenticatedAt > maxAge;
+}
+
+function splitAcrValues(value: string | undefined): string[] {
+  return value?.split(/\s+/u).filter(Boolean) ?? [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function hasValidOidcStateAndNonce(state: string, nonce: string, requiresNonce: boolean): boolean {

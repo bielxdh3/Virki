@@ -58,7 +58,7 @@ export async function POST(request: Request) {
       return sessionResponse(await verifyLoginTotpCode(ceremony, code, deviceToken, new Date(), requiredRole), baseUrl, returnTo, surface, "totp", auditMetadata);
     }
     if (factor === "recovery") {
-      const result = await verifyLoginRecoveryCode(ceremony, code, deviceToken, new Date(), requiredRole);
+      const result = await verifyLoginRecoveryCode(ceremony, code, deviceToken, new Date(), requiredRole, request.headers.get("cf-connecting-ip")?.trim());
       if (result.kind === "EMAIL_REQUIRED") {
         const emailUrl = new URL("/login/verify", baseUrl);
         emailUrl.searchParams.set("ceremony", ceremony);

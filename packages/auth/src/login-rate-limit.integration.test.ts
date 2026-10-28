@@ -207,17 +207,38 @@ test("expired login limiter maintenance operates in bounded batches", integratio
   const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
   const now = new Date();
   const prefix = crypto.randomUUID();
-  const identifiers = Array.from({ length: 140 }, (_, i) => createRateLimitIdentifierHash(`batch-${prefix}-${i}`));
+  const expiredWindowStartedAt = new Date(now.getTime() - 86400_000);
+  const identifiers = Array.from({ length: 300 }, (_, i) => createRateLimitIdentifierHash(`batch-${prefix}-${i}`));
+  await prisma.loginRateLimit.deleteMany({ where: { expiresAt: { lte: now } } });
   await prisma.loginRateLimit.createMany({ data: identifiers.map((identifierHash) => ({
-    identifierHash, attempts: 1, windowStartedAt: new Date(now.getTime() - 86400_000), expiresAt: new Date(now.getTime() - 1000)
+    identifierHash, attempts: 1, windowStartedAt: expiredWindowStartedAt, expiresAt: new Date(now.getTime() - 1000)
   })) });
   try {
+    const footprint = await prisma.$queryRaw<Array<{ avgTupleBytes: number | null; relationBytes: bigint }>>`
+      SELECT AVG(pg_column_size(limiter))::float8 AS "avgTupleBytes",
+        pg_total_relation_size('"LoginRateLimit"')::bigint AS "relationBytes"
+      FROM "LoginRateLimit" AS limiter
+      WHERE limiter."windowStartedAt" = ${expiredWindowStartedAt}
+    `;
+    const elapsed: number[] = [];
+    const firstStartedAt = performance.now();
     const removedFirst = await cleanupExpiredLoginRateLimits(now);
-    assert.ok(removedFirst > 0 && removedFirst <= 128, `Expected a bounded cleanup batch, removed ${removedFirst}`);
-    assert.ok((await prisma.loginRateLimit.count({ where: { identifierHash: { in: identifiers } } })) > 0);
+    elapsed.push(performance.now() - firstStartedAt);
+    assert.equal(removedFirst, 128, `Expected the configured first cleanup batch, removed ${removedFirst}`);
+    const firstRemaining = await prisma.loginRateLimit.count({ where: { identifierHash: { in: identifiers } } });
+    assert.equal(firstRemaining, 172);
+    const startedAt = performance.now();
     const removedSecond = await cleanupExpiredLoginRateLimits(now);
-    assert.ok(removedSecond > 0 && removedSecond <= 128);
+    elapsed.push(performance.now() - startedAt);
+    assert.equal(removedSecond, 128);
+    const secondRemaining = await prisma.loginRateLimit.count({ where: { identifierHash: { in: identifiers } } });
+    assert.equal(secondRemaining, 44);
+    const thirdStartedAt = performance.now();
+    const removedThird = await cleanupExpiredLoginRateLimits(now);
+    elapsed.push(performance.now() - thirdStartedAt);
+    assert.equal(removedThird, 44);
     assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: { in: identifiers } } }), 0);
+    console.log(`expired limiter cleanup: expired_rows=300, removed_batches=128,128,44, remaining_after_batches=172,44,0, avg_heap_tuple_bytes=${footprint[0]?.avgTupleBytes?.toFixed(1) ?? "unavailable"}, relation_bytes=${footprint[0]?.relationBytes.toString() ?? "unavailable"}, batch_ms=${elapsed.map((time) => time.toFixed(1)).join(",")}`);
   } finally {
     await prisma.loginRateLimit.deleteMany({ where: { identifierHash: { in: identifiers } } });
   }

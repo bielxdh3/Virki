@@ -26,7 +26,7 @@ An ADMIN grants each USER entry under **Hub → Acessos**. The portal displays o
 - Refresh tokens, client credentials, dynamic client registration, request objects, device flow, and introspection are disabled
 - Token revocation is supported
 
-Use an exact registered HTTPS redirect URI. Wildcards, HTTP, userinfo, fragments, and noncanonical callback forms are rejected. The project must validate the token signature, issuer, audience/client, expiry, state, nonce, and PKCE verifier, then create its own local session. Do not forward or share Virki cookies.
+Use an exact registered HTTPS redirect URI. Wildcards, HTTP, userinfo, fragments, and noncanonical callback forms are rejected. Each callback URI is an explicit ADMIN trust decision for that client: verify control and intended use of its host before registration, including callbacks hosted on a different origin from the project. Different-origin callbacks are allowed for legitimate federated clients; they are not implicitly trusted merely because another URI or project origin is registered. An authorization request must match an exact URI on its own client, and an administrator must review changes to the list. The project must validate the token signature, issuer, audience/client, expiry, state, nonce, and PKCE verifier, then create its own local session. Do not forward or share Virki cookies.
 
 ## Consent and session behavior
 

@@ -8,10 +8,10 @@ export const OIDC_TOKEN_LIMIT = 600;
 export type RateLimitCheck = { identifier: string; maxAttempts: number };
 export type PublicOidcRateLimitEndpoint = "userinfo" | "session-end" | "auth-action";
 
-/** Ceiling first, then the bucket. The cookie only selects a bucket; it is never trusted for authentication. */
-export function selectAuthRateLimits(clientAddress: string, sessionCookieValue: string | null): RateLimitCheck[] {
-  const bucket = sessionCookieValue
-    ? `oidc-auth-browser:${createHash("sha256").update(sessionCookieValue).digest("hex")}`
+/** The caller passes a session ID only after validating the server-side session cookie. */
+export function selectAuthRateLimits(clientAddress: string, authenticatedSessionId: string | null): RateLimitCheck[] {
+  const bucket = authenticatedSessionId
+    ? `oidc-auth-browser:${createHash("sha256").update(authenticatedSessionId).digest("hex")}`
     : `oidc-source:${clientAddress}`;
   return [
     { identifier: `oidc-auth-source:${clientAddress}`, maxAttempts: OIDC_AUTH_SOURCE_CEILING },
@@ -23,9 +23,9 @@ export function isInteractionPath(path: string): boolean {
   return /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u.test(path);
 }
 
-export function selectInteractionRateLimits(clientAddress: string, sessionCookieValue: string | null): RateLimitCheck[] {
-  const bucket = sessionCookieValue
-    ? `oidc-interaction-browser:${createHash("sha256").update(sessionCookieValue).digest("hex")}`
+export function selectInteractionRateLimits(clientAddress: string, authenticatedSessionId: string | null): RateLimitCheck[] {
+  const bucket = authenticatedSessionId
+    ? `oidc-interaction-browser:${createHash("sha256").update(authenticatedSessionId).digest("hex")}`
     : `oidc-interaction-anonymous:${clientAddress}`;
   return [
     { identifier: `oidc-interaction-source:${clientAddress}`, maxAttempts: OIDC_AUTH_SOURCE_CEILING },
@@ -47,21 +47,18 @@ export function getPublicOidcRateLimitEndpoint(method: string, path: string): Pu
 
 export function selectPublicOidcRateLimits(
   clientAddress: string,
-  sessionCookieValue: string | null,
+  authenticatedSessionId: string | null,
   endpoint: PublicOidcRateLimitEndpoint,
-  authorization?: string
+  validatedBearerToken?: string
 ): RateLimitCheck[] {
-  // UserInfo is called by relying parties with an access token, not a Virki
-  // browser session. Use a digest as an untrusted *bucket selector*, never as
-  // authentication; the shared source ceiling remains effective against token
-  // rotation and invalid bearer-token floods.
-  const bearer = endpoint === "userinfo" && typeof authorization === "string" &&
-    /^Bearer [A-Za-z0-9._~+/-]{8,4096}={0,2}$/u.test(authorization)
-    ? authorization.slice(7) : null;
+  // Only server-validated sessions and access tokens select persistent identity buckets.
+  const bearer = endpoint === "userinfo" && typeof validatedBearerToken === "string" &&
+    /^[A-Za-z0-9._~+/-]{8,4096}={0,2}$/u.test(validatedBearerToken)
+    ? validatedBearerToken : null;
   const bucket = bearer
     ? `oidc-public-userinfo-bearer:${createHash("sha256").update(bearer).digest("hex")}`
-    : sessionCookieValue
-    ? `oidc-public-${endpoint}-browser:${createHash("sha256").update(sessionCookieValue).digest("hex")}`
+    : authenticatedSessionId
+    ? `oidc-public-${endpoint}-browser:${createHash("sha256").update(authenticatedSessionId).digest("hex")}`
     : `oidc-public-${endpoint}-anonymous:${clientAddress}`;
   return [
     { identifier: `oidc-public-source:${endpoint}:${clientAddress}`, maxAttempts: OIDC_AUTH_SOURCE_CEILING },
@@ -82,6 +79,12 @@ export function isNonCanonicalOidcEndpointPath(path: string): boolean {
 
 export function selectRateLimitAudit(clientAddress: string): RateLimitCheck {
   return { identifier: `oidc-rate-limit-audit:${clientAddress}`, maxAttempts: 1 };
+}
+
+export function parseBearerToken(authorization: string | undefined): string | null {
+  if (!authorization) return null;
+  const match = /^Bearer ([A-Za-z0-9._~+/-]{8,4096}={0,2})$/iu.exec(authorization);
+  return match?.[1] ?? null;
 }
 
 const MAX_BASIC_HEADER_LENGTH = 2048;
@@ -106,8 +109,8 @@ export function parseBasicClientId(authorization: string | undefined): string {
 // The per-source ceiling bounds an address that rotates client_id values to obtain fresh per-client buckets.
 export const OIDC_TOKEN_SOURCE_CEILING = 2000;
 
-export function selectTokenRateLimits(clientAddress: string, authorization: string | undefined): RateLimitCheck[] {
-  const clientRef = createHash("sha256").update(parseBasicClientId(authorization)).digest("hex").slice(0, 32);
+export function selectTokenRateLimits(clientAddress: string, registeredClientId: string | null): RateLimitCheck[] {
+  const clientRef = createHash("sha256").update(registeredClientId ?? "invalid").digest("hex").slice(0, 32);
   return [
     { identifier: `oidc-token-source:${clientAddress}`, maxAttempts: OIDC_TOKEN_SOURCE_CEILING },
     { identifier: `oidc-token:${clientAddress}:${clientRef}`, maxAttempts: OIDC_TOKEN_LIMIT }

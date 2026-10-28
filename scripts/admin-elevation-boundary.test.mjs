@@ -25,8 +25,8 @@ test("every inline elevated Hub mutation rechecks proof inside its transaction b
     ["createProjectConnectionAction", "PROJECT_CONNECTION_MANAGE", "transaction.projectConnection.create"],
     ["updateProjectConnectionAction", "PROJECT_CONNECTION_MANAGE", "transaction.projectConnection.update"],
     ["rotateProjectClientSecretAction", "PROJECT_CONNECTION_MANAGE", "compareAndSetProjectConnectionSecret(transaction"],
-    ["setProjectConnectionEnabledAction", "PROJECT_CONNECTION_MANAGE", "transaction.projectConnection.update"],
-    ["deleteProjectConnectionAction", "PROJECT_CONNECTION_MANAGE", "transaction.projectConnection.delete"],
+    ["setProjectConnectionEnabledAction", "PROJECT_CONNECTION_MANAGE", "setProjectConnectionEnabledInTransaction(transaction"],
+    ["deleteProjectConnectionAction", "PROJECT_CONNECTION_MANAGE", "deleteProjectConnectionInTransaction(transaction"],
   ];
 
   for (const [name, scope, write] of cases) {

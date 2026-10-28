@@ -43,6 +43,7 @@ export type AuditEventType =
   | "SECOND_FACTOR_DISABLED"
   | "SECOND_FACTOR_RECOVERED"
   | "RECOVERY_CODES_REGENERATED"
+  | "RECOVERY_CODE_CONSUMED"
   | "DEVICE_VERIFIED"
   | "TRUSTED_DEVICE_REVOKED"
   | "ACCOUNT_RECOVERY_REQUESTED"
@@ -134,14 +135,15 @@ export async function writeAuditLogInTransaction(
 }
 
 const PERSISTED_METADATA_KEYS = new Set([
-  "source", "cloudflareAccessPresent", "userAgentHash", "requestId", "route", "method", "requestRef", "ceremonyRef", "deviceRef", "targetRef", "userRef", "connectionRef", "clientRef", "invitationRef", "verificationFactor", "rememberedBrowser", "enabled", "scope", "error", "revokedCount", "deletedCount", "deletedRateLimitCount", "retentionDays", "redirectUrisChanged", "launchUrlConfigured", "originChanged", "redirectUriCount", "accessJwtRequired", "accessJwtStatus", "accessJwtReason", "nameChanged", "slugChanged", "launchUrlChanged"
+  "source", "cloudflareAccessPresent", "userAgentHash", "requestId", "route", "method", "requestRef", "ceremonyRef", "deviceRef", "targetRef", "userRef", "connectionRef", "clientRef", "invitationRef", "emailRef", "verificationFactor", "rememberedBrowser", "enabled", "scope", "error", "revokedCount", "deletedCount", "deletedRateLimitCount", "retentionDays", "redirectUrisChanged", "launchUrlConfigured", "originChanged", "redirectUriCount", "accessJwtRequired", "accessJwtStatus", "accessJwtReason", "nameChanged", "slugChanged", "launchUrlChanged"
 ]);
 export function safePersistedAuditMetadata(value: unknown): AuditMetadata | undefined {
   const sanitized = sanitizeAuditMetadata(value as AuditMetadata);
   if (!sanitized) return undefined;
-  return Object.fromEntries(Object.entries(sanitized).filter(([key, entry]) =>
-    (entry === REDACTED_METADATA_VALUE && isSensitiveMetadataKey(key, entry)) || (PERSISTED_METADATA_KEYS.has(key) && (entry === null || ["string", "boolean", "number"].includes(typeof entry)))
-  ));
+  return Object.fromEntries(Object.entries(sanitized).filter(([key, entry]) => {
+    const validEmailRef = key !== "emailRef" || (typeof entry === "string" && emailHashReference(entry) === entry);
+    return validEmailRef && ((entry === REDACTED_METADATA_VALUE && isSensitiveMetadataKey(key, entry)) || (PERSISTED_METADATA_KEYS.has(key) && (entry === null || ["string", "boolean", "number"].includes(typeof entry))));
+  }));
 }
 function digestReference(value: unknown): string | undefined {
   return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : undefined;
@@ -173,7 +175,7 @@ export function createAuditLogData(input: AuditLogInput) {
     message: input.message ? sanitizeMetadataString(input.message, "message").slice(0, MAX_MESSAGE_LENGTH) : undefined,
     metadata,
     schemaVersion: 1,
-    category: input.eventType.startsWith("AUTH_") ? "AUTH" : input.eventType.startsWith("SECOND_FACTOR_") || input.eventType.startsWith("RECOVERY_CODES_") || input.eventType.includes("DEVICE") ? "SECURITY" : input.eventType.split("_")[0],
+    category: input.eventType.startsWith("AUTH_") ? "AUTH" : input.eventType.startsWith("SECOND_FACTOR_") || input.eventType.startsWith("RECOVERY_CODES_") || input.eventType === "RECOVERY_CODE_CONSUMED" || input.eventType.includes("DEVICE") ? "SECURITY" : input.eventType.split("_")[0],
     severity: failed ? "WARNING" : "INFO",
     action: input.eventType.toLowerCase().replaceAll("_", "."),
     reason: input.reason ?? (failed ? "rejected" : input.result === "INFO" ? "observed" : "completed"),
@@ -408,6 +410,10 @@ function isSensitiveMetadataKey(key: string, value: unknown): boolean {
 }
 
 function sanitizeMetadataString(value: string, key: string): string {
+  if (key === "emailRef") {
+    return emailHashReference(value) === value ? value : REDACTED_METADATA_VALUE;
+  }
+
   const inspectionValue = replaceAuditControlCharacters(value.slice(0, MAX_METADATA_INSPECTION_LENGTH), "");
 
   const canonicalValue = replaceAuditControlCharacters(value.slice(0, MAX_METADATA_INSPECTION_LENGTH), " ");

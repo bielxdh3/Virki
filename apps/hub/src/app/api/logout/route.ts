@@ -16,7 +16,7 @@ import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
-import { recordSecurityDenial } from "../../../lib/audit-denial";
+import { recordSecurityDenial, recordSessionCsrfDenial } from "../../../lib/audit-denial";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
   });
 
   if (!csrfResult.valid) {
-    await recordSecurityDenial(request.headers, "logout-csrf", "csrf");
+    await recordSessionCsrfDenial(request.headers, "logout-csrf", sessionToken);
     return new NextResponse("Forbidden", { status: 403 });
   }
 
