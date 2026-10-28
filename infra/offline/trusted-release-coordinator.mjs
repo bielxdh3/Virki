@@ -22,6 +22,10 @@ const METADATA = Object.freeze([
   "dev", "ino", "uid", "gid", "mode", "nlink", "size", "mtimeNs", "ctimeNs",
 ]);
 const BLOCKED = Object.freeze({ status: "blocked", deployAuthorized: false });
+const FULL_SHA = /^[0-9a-f]{40}$/u;
+const DIGEST = /^[0-9a-f]{64}$/u;
+const NONCE = /^[0-9a-f]{32}$/u;
+const ED25519_B64 = /^[A-Za-z0-9+/]{86}==$/u;
 
 function check(ok) {
   if (!ok) throw new Error("Trusted offline coordinator blocked");
@@ -71,6 +75,41 @@ function sameInspection(first, second) {
     first.signatures.owner === second.signatures.owner &&
     first.signatures.builder === second.signatures.builder &&
     JSON.stringify(first.expected) === JSON.stringify(second.expected));
+}
+
+/**
+ * Pure mapping from the ALREADY independently checked owner signature and
+ * release manifest to the exact local ledger attempt. Exported for restricted
+ * nonauthorizing witness protocol rehearsals; caller-provided values never
+ * acquire trust through this mapping. Only the native installed coordinator
+ * may call the ledger persistence primitive after independent verification.
+ */
+export function deriveCheckedOfflineLedgerRequest({
+  manifest, verifiedManifestSha256, checkedSourceSha, checkedOwnerSignature,
+} = {}) {
+  check(manifest && typeof manifest === "object" && !Array.isArray(manifest) &&
+    DIGEST.test(verifiedManifestSha256) && FULL_SHA.test(checkedSourceSha) &&
+    ED25519_B64.test(checkedOwnerSignature) &&
+    Buffer.from(checkedOwnerSignature, "base64").toString("base64") === checkedOwnerSignature &&
+    manifest.source_sha === checkedSourceSha &&
+    FULL_SHA.test(manifest.predecessor_sha) &&
+    manifest.predecessor_sha !== checkedSourceSha &&
+    NONCE.test(manifest.nonce) &&
+    Number.isSafeInteger(manifest.sequence) && manifest.sequence > 0);
+  const approvalDigest = createHash("sha256")
+    .update("VIRKI_OFFLINE_COORDINATOR_OWNER_APPROVAL_V1\0")
+    .update(Buffer.from(verifiedManifestSha256, "hex"))
+    .update(Buffer.from(checkedOwnerSignature, "base64"))
+    .digest("hex");
+  return Object.freeze({
+    directory: FIXED_LEDGER_DIRECTORY,
+    manifestSha256: verifiedManifestSha256,
+    priorSha: manifest.predecessor_sha,
+    nextSha: checkedSourceSha,
+    nonce: manifest.nonce,
+    sequence: manifest.sequence,
+    approvalDigest,
+  });
 }
 
 /**
@@ -126,20 +165,11 @@ export async function coordinateTrustedOfflineRelease(request = {}) {
 
     // Persist the digest of the ACTUAL independently checked owner signature,
     // domain separated from any caller-provided approval or untrusted metadata.
-    const approvalDigest = createHash("sha256")
-      .update("VIRKI_OFFLINE_COORDINATOR_OWNER_APPROVAL_V1\0")
-      .update(Buffer.from(last.manifestDigest, "hex"))
-      .update(Buffer.from(last.signatures.owner, "base64"))
-      .digest("hex");
-    const attempt = recordOfflineReleaseAcceptance({
-      directory: FIXED_LEDGER_DIRECTORY,
-      manifestSha256: signed.verifiedManifestSha256,
-      priorSha: manifest.predecessor_sha,
-      nextSha: signed.sourceSha,
-      nonce: manifest.nonce,
-      sequence: manifest.sequence,
-      approvalDigest,
+    const ledgerRequest = deriveCheckedOfflineLedgerRequest({
+      manifest, verifiedManifestSha256: signed.verifiedManifestSha256,
+      checkedSourceSha: signed.sourceSha, checkedOwnerSignature: last.signatures.owner,
     });
+    const attempt = recordOfflineReleaseAcceptance(ledgerRequest);
     check(attempt.status === "attempted" &&
       attempt.pendingSha === signed.sourceSha &&
       attempt.sequence === manifest.sequence);

@@ -162,3 +162,32 @@ durable checkpoint outside the witness database's rollback domain; a signed
 read-only reconciliation procedure for ambiguous commits; independently
 reviewed native launcher and isolation; and integration tests on the actual
 owner-controlled host. **PRODUCTION NO-GO.**
+
+## Read-only native admission preparation (owner custody still absent)
+
+`infra/offline/trusted-witness-admission-preparation.mjs` now cross-checks
+owner Ed25519 CAS/consent signatures, a witness Ed25519 HEAD receipt, existing
+ledger sequence/previous head, release source SHA, and the exact
+domain-separated ledger attempt digest. The installed coordinator continues
+to derive its actual ledger request from independently checked candidate bytes;
+its new pure mapping `deriveCheckedOfflineLedgerRequest` creates no authority.
+Tests supply synthetic pins and signatures strictly as **untrusted input**.
+
+`CRYPTOGRAPHIC_BINDING_PREVIEW_ONLY` means only that these supplied bytes match
+cryptographically. It is **not** evidence of independently installed operator
+roots, freshness from an actual remote witness connection, nonrollbackable
+checkpoint storage, a durable native pre-CAS intent, consent revocation, or a
+CAS transaction. The preview never writes a ledger, contacts a service or
+grants release permission. Unexpected acknowledgements, caller-provided
+paths, transport callbacks and claimed authority are rejected. The existing
+`coordinateTrustedOfflineRelease` accepts only the candidate directory and
+does not import or trust this preview.
+
+The separately owned **native Linux** host must supply an audited installed
+launcher, root-protected owner/trust pins and revocations, an independent witness
+endpoint and mTLS credential custody, and an externally irreversible monotonic
+floor before any native CAS connector can be implemented. That connector must
+fsync a one-shot intent before CAS, quarantine ambiguous/lost acknowledgements,
+and require separately signed operator reconciliation. The current W1 localhost
+test client explicitly refuses non-fixture endpoints and cannot fill this role.
+No production acceptance, Docker import or activation was enabled.
