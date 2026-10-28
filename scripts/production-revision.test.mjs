@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  inspectOfflineProductionSource,
   inspectProductionSource,
   normalizeRevision,
   ProductionRevisionError,
@@ -183,6 +184,58 @@ test("source inspection rejects branch and local/remote revision mismatches", ()
       () => inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote }),
       "SOURCE_REMOTE_MISMATCH",
     );
+  });
+});
+
+test("offline signed source inspection works without GitHub while requiring cached origin/main and the signed SHA", () => {
+  withTestRepository((work, remote) => {
+    const revision = git(work, "rev-parse", "HEAD");
+    const tracked = git(work, "rev-parse", "refs/remotes/origin/main");
+    assert.equal(revision, tracked);
+    // Simulate GitHub being unavailable: remove the transport endpoint while
+    // preserving the clean, canonical local checkout and its tracking ref.
+    rmSync(remote, { recursive: true, force: true });
+    const result = inspectOfflineProductionSource({
+      repositoryRoot: work,
+      canonicalRemoteUrl: remote,
+      expectedRevision: revision,
+    });
+    assert.deepEqual(result, { branch: "main", revision });
+    expectCode(() => inspectProductionSource({ repositoryRoot: work, canonicalRemoteUrl: remote }),
+      "COMMAND_FAILED");
+    expectCode(() => inspectOfflineProductionSource({
+      repositoryRoot: work, canonicalRemoteUrl: remote, expectedRevision: "f".repeat(40),
+    }), "SOURCE_REMOTE_MISMATCH");
+
+    writeFileSync(path.join(work, "tracked.txt"), "local only\n");
+    git(work, "add", "tracked.txt");
+    git(work, "commit", "-m", "unpublished");
+    expectCode(() => inspectOfflineProductionSource({
+      repositoryRoot: work, canonicalRemoteUrl: remote, expectedRevision: git(work, "rev-parse", "HEAD"),
+    }), "SOURCE_REMOTE_MISMATCH");
+  });
+});
+
+test("offline source inspection refuses missing cached origin/main, a dirty checkout or a foreign origin", () => {
+  withTestRepository((work, remote) => {
+    const revision = git(work, "rev-parse", "HEAD");
+    git(work, "update-ref", "-d", "refs/remotes/origin/main");
+    expectCode(() => inspectOfflineProductionSource({
+      repositoryRoot: work, canonicalRemoteUrl: remote, expectedRevision: revision,
+    }), "COMMAND_FAILED");
+  });
+  withTestRepository((work, remote) => {
+    const revision = git(work, "rev-parse", "HEAD");
+    writeFileSync(path.join(work, "tracked.txt"), "dirty\n");
+    expectCode(() => inspectOfflineProductionSource({
+      repositoryRoot: work, canonicalRemoteUrl: remote, expectedRevision: revision,
+    }), "SOURCE_DIRTY_TRACKED");
+  });
+  withTestRepository((work) => {
+    const revision = git(work, "rev-parse", "HEAD");
+    expectCode(() => inspectOfflineProductionSource({
+      repositoryRoot: work, expectedRevision: revision,
+    }), "SOURCE_REPOSITORY_MISMATCH");
   });
 });
 

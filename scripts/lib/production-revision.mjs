@@ -148,3 +148,25 @@ export function inspectProductionSource({ repositoryRoot, execute = runCommand, 
 
   return { branch, revision };
 }
+
+// Signed offline releases cannot consult GitHub. The independently signed
+// accepted SHA is authoritative; the cached tracking ref is a consistency
+// check, not a substitute for the owner signature or trusted native host.
+export function inspectOfflineProductionSource({
+  repositoryRoot, expectedRevision, execute = runCommand,
+  canonicalRemoteUrl = CANONICAL_VIRKI_REMOTE,
+}) {
+  const source = inspectProductionSource({
+    repositoryRoot, expectedRevision: normalizeRevision(expectedRevision),
+    execute, canonicalRemoteUrl,
+  });
+  const tracked = requireSuccess(execute("git", [
+    "rev-parse", "--verify", "refs/remotes/origin/main^{commit}",
+  ], {
+    cwd: repositoryRoot, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+  }));
+  if (normalizeRevision(tracked) !== source.revision) {
+    throw new ProductionRevisionError("SOURCE_REMOTE_MISMATCH");
+  }
+  return source;
+}

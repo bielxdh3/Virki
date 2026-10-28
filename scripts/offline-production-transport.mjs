@@ -7,7 +7,7 @@ import { inspectUntrustedOfflineCandidate } from "../infra/offline/trusted-host-
 import { validateOfflineCiEvidence } from "./lib/offline-ci-evidence.mjs";
 import { verifyOfflineReleaseAttestation } from "./lib/offline-release-attestation.mjs";
 import { prepareOfflineTrustedReleasePolicy } from "./lib/offline-trusted-release-policy.mjs";
-import { inspectProductionSource } from "./lib/production-revision.mjs";
+import { inspectOfflineProductionSource } from "./lib/production-revision.mjs";
 import { isValidProductionConfig } from "./lib/production-config.mjs";
 import { runProductionPreflight, SSH_OPTIONS } from "./production-preflight.mjs";
 
@@ -231,7 +231,7 @@ export async function prepareVerifiedOfflineTransportPlan(inputs = {}) {
   requireIt(proof.sourceSha === policy.expectedRevision, "owner approval does not bind exact accepted source SHA");
   const ci = recheckSignedCi(candidateDirectory, candidate.expected);
   requireIt(ci.ok && ci.stageCount === 19, "local CI evidence does not have all 19 claimed stages");
-  const source = inspectProductionSource({ repositoryRoot });
+  const source = inspectOfflineProductionSource({ repositoryRoot, expectedRevision: proof.sourceSha });
   requireIt(source.branch === "main" && source.revision === proof.sourceSha,
     "main / origin/main does not match signed release");
 

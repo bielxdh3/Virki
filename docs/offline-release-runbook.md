@@ -5,6 +5,39 @@ The ordinary GitHub/CodeQL/GHCR deployment path remains unchanged. A successful
 local test run or a GitHub PR marked *mergeable* must never be represented as
 hosted CodeQL approval or as permission to deploy.
 
+## Explicit contingency preflight (read-only)
+
+The GitHub-backed release remains the primary path. When GitHub Actions/GHCR
+is unavailable, the operator may **explicitly** inspect an independently signed
+offline release candidate without substituting local tests for hosted results:
+
+```bash
+npm run preflight:offline -- --candidate /absolute/path/to/private/signed-candidate --trust /absolute/path/to/independent/operator-trust
+```
+
+This command uses `prepareVerifiedOfflineTransportPlan` with the checked-out
+canonical repository root. It validates the owner/builder signatures, private
+trust files, exact local `main` SHA, claimed evidence, protected SSH identity,
+and read-only native-host capacity checks. The signed source SHA must match
+the clean local `main` and the cached `refs/remotes/origin/main`. This
+offline-only source check performs **no `git ls-remote` or GitHub API call**;
+the cached ref alone is not an authority and cannot replace the owner-signed
+source identity. The ordinary hosted path still requires the live remote and
+exact-SHA hosted evidence. The preflight does **not** run the hosted
+`deploy:prod` command, copy artifacts, load Docker images, alter the ledger,
+run migrations, or activate services. The output intentionally excludes host
+configuration, credentials, full verifier diagnostics and file contents.
+
+`OFFLINE_NOT_READY` with exit code 1 means that prerequisites were absent,
+unsafe or could not be verified. `OFFLINE_PRETRANSFER_INSPECTED_ONLY` with
+exit code 0 means *only* that this preliminary inspection passed; both
+`transferAuthorized` and `deployAuthorized` remain `false`. A real offline
+release remains **NO-GO** until a separately owner-approved native trust root,
+independent ledger CAS, authenticated Docker daemon lifecycle, protected
+transfer, live backup/restore/migration and activation/rollback path have
+independent evidence. Never interpret the preflight as an emergency bypass of
+a failed security test.
+
 ## Boundaries and exact release identity
 
 - Use a clean named `main` checkout with `HEAD == refs/remotes/origin/main`
