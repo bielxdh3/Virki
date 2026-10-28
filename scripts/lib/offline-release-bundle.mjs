@@ -210,7 +210,10 @@ export async function prepareOfflineReleaseBundle({
   }
   const beforeParent = lstatSync(parent, { bigint: true });
   const bytes = readPinnedCi(ciPath);
-  const ciEvidence = validateOfflineCiEvidence(bytes, revision, "main");
+  // An unsigned manual offline release must never turn a generic 19-stage
+  // claim with omitted virgin-bootstrap/ownership fields into CI evidence.
+  // Hosted/legacy callers of the generic validator remain unchanged.
+  const ciEvidence = validateOfflineCiEvidence(bytes, revision, "main", { requireOfflineFixture: true });
   const git = await gitSourceGate(repo, revision, runner);
   const imageMetadata = {
     runtime: await readDockerImage(images.runtime, "runtime", revision, runner),

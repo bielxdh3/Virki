@@ -41,6 +41,9 @@ function claimedCi() {
     unitTestsFailureCount: 0, unitTestsFailures: [],
     integrationTestsFailureCount: 0, integrationTestsFailures: [],
     productionOperationsFailureCount: 0, productionOperationsFailures: [],
+    dockerMutationJournal: "docker-mutations.jsonl", dockerMutationUncertain: false,
+    dockerCleanupVerified: true, bootstrapVirginTestsLog: "bootstrap-virgin-tests.tap.log",
+    bootstrapVirginTestsExitCode: 0,
     stages: STAGES.map((name, i) => ({
       name, startedUtc: new Date(start + i * 10_000 + 1000).toISOString(),
       finishedUtc: new Date(start + i * 10_000 + 2000).toISOString(),
@@ -179,6 +182,22 @@ test("even newly re-signed local CI with failed stage is refused before Git or S
     trustedDirectory: f.trustedDirectory,
     repositoryRoot: f.repositoryRoot,
   }), /Invalid offline CI manifest.*stage 13/iu);
+});
+
+test("even newly re-signed 19-stage CI with omitted virgin/bootstrap fields is rejected before Git or SSH", rootProtectedLinuxOnly, async (t) => {
+  const f = fixture(t);
+  const report = claimedCi();
+  delete report.bootstrapVirginTestsLog;
+  delete report.bootstrapVirginTestsExitCode;
+  delete report.dockerMutationJournal;
+  delete report.dockerMutationUncertain;
+  delete report.dockerCleanupVerified;
+  replaceSignedCi(f, Buffer.from(JSON.stringify(report)));
+  await assert.rejects(prepareVerifiedOfflineTransportPlan({
+    candidateDirectory: f.candidateDirectory,
+    trustedDirectory: f.trustedDirectory,
+    repositoryRoot: f.repositoryRoot,
+  }), /offline Docker cleanup requires|offline virgin bootstrap requires/iu);
 });
 
 test("fails closed for missing independently protected inputs (no SSH and no deploy)", async (t) => {

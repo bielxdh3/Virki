@@ -107,7 +107,10 @@ function recheckSignedCi(candidateDirectory, expected) {
       identical(before, lstatSync(filename, { bigint: true })) &&
       sha256(bytes) === expected.ciReportSha256,
     "signed CI bytes changed during structural validation");
-    return validateOfflineCiEvidence(bytes, expected.sourceSha, "main");
+    // A separately signed offline candidate can still contain omitted CI
+    // preflight fields. Enforce the same fail-closed policy as the manual
+    // builder even when both signatures are cryptographically valid.
+    return validateOfflineCiEvidence(bytes, expected.sourceSha, "main", { requireOfflineFixture: true });
   } finally { closeSync(fd); }
 }
 

@@ -29,6 +29,9 @@ function manifest(revision) {
     workingTreePatchSha256: EMPTY, untrackedFiles: [],
     unitTestsFailureCount: 0, unitTestsFailures: [], integrationTestsFailureCount: 0,
     integrationTestsFailures: [], productionOperationsFailureCount: 0, productionOperationsFailures: [],
+    dockerMutationJournal: "docker-mutations.jsonl", dockerMutationUncertain: false,
+    dockerCleanupVerified: true, bootstrapVirginTestsLog: "bootstrap-virgin-tests.tap.log",
+    bootstrapVirginTestsExitCode: 0,
     exitCode: 0, failedStages: [],
     stages: STAGES.map((name, i) => ({ name,
       startedUtc: new Date(base + i * 10_000 + 1_000).toISOString(),
@@ -162,6 +165,18 @@ test("builds exact HEAD tar and immutable-ID Docker save archives, returning mea
   assert.equal(fixture.runLog.filter((call) => call.program === "docker" && call.args[0] === "save").length, 2);
   assert.ok(fixture.runLog.filter((call) => call.program === "docker" && call.args[0] === "save")
     .every((call) => Object.values(IMAGE_IDS).includes(call.args[3])));
+});
+
+test("manual bundle refuses fabricated 19-stage-only report without the separate virgin and Docker cleanup evidence", async (t) => {
+  const fixture = setup(t);
+  const incomplete = JSON.parse(readFileSync(fixture.ciManifestPath, "utf8"));
+  for (const field of ["dockerMutationJournal", "dockerMutationUncertain", "dockerCleanupVerified", "bootstrapVirginTestsLog", "bootstrapVirginTestsExitCode"]) {
+    delete incomplete[field];
+  }
+  writeFileSync(fixture.ciManifestPath, JSON.stringify(incomplete));
+  await assert.rejects(prepareOfflineReleaseBundle(fixture.options), /virgin|bootstrap|Docker|offline/u);
+  assert.deepEqual(readdirSync(fixture.stagingParent), []);
+  assert.equal(fixture.runLog.some((call) => call.program === "docker"), false);
 });
 
 test("rejects dirty tracked, staged, untracked, wrong branch, shifted origin SHA and foreign remote", async (t) => {

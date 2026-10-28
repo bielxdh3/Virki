@@ -149,8 +149,14 @@ function rejectDuplicateJsonKeys(source) {
  * @param {Uint8Array} rawBytes Exact raw run-manifest.json bytes, not a JS object.
  * @param {string} expectedRevision Full lower-case 40-hex Git commit SHA.
  * @param {string} [expectedBranch='main'] Branch explicitly expected by caller.
+ * @param {{requireOfflineFixture?: boolean}} [options] Offline-only mandatory
+ * virgin bootstrap and independently completed owned-Docker cleanup fields.
+ * The default preserves legacy generic/hosted structural checks.
  */
-export function validateOfflineCiEvidence(rawBytes, expectedRevision, expectedBranch = "main") {
+export function validateOfflineCiEvidence(rawBytes, expectedRevision, expectedBranch = "main", options = {}) {
+  requireEvidence(isRecord(options) && Object.keys(options).every((key) => key === "requireOfflineFixture") &&
+    (options.requireOfflineFixture === undefined || typeof options.requireOfflineFixture === "boolean"),
+  "invalid offline validation policy");
   requireEvidence(rawBytes instanceof Uint8Array && rawBytes.byteLength > 0 &&
     rawBytes.byteLength <= MAX_MANIFEST_BYTES, "raw bytes are missing or oversized");
   requireEvidence(typeof expectedRevision === "string" && /^[0-9a-f]{40}$/u.test(expectedRevision),
@@ -179,6 +185,11 @@ export function validateOfflineCiEvidence(rawBytes, expectedRevision, expectedBr
   // separately from the stage results. A successful cleanup must be observed;
   // accepting partial ownership metadata would erase its fail-closed guard.
   const dockerFields = ["dockerMutationJournal", "dockerMutationUncertain", "dockerCleanupVerified"];
+  if (options.requireOfflineFixture === true) {
+    for (const key of dockerFields) {
+      requireEvidence(Object.hasOwn(manifest, key), `offline Docker cleanup requires ${key}`);
+    }
+  }
   if (dockerFields.some((key) => Object.hasOwn(manifest, key))) {
     requireEvidence(dockerFields.every((key) => Object.hasOwn(manifest, key)) &&
       manifest.dockerMutationJournal === "docker-mutations.jsonl" &&
@@ -186,6 +197,11 @@ export function validateOfflineCiEvidence(rawBytes, expectedRevision, expectedBr
     "Docker cleanup is unverified or has uncertain ownership");
   }
   const bootstrapFields = ["bootstrapVirginTestsLog", "bootstrapVirginTestsExitCode"];
+  if (options.requireOfflineFixture === true) {
+    for (const key of bootstrapFields) {
+      requireEvidence(Object.hasOwn(manifest, key), `offline virgin bootstrap requires ${key}`);
+    }
+  }
   if (bootstrapFields.some((key) => Object.hasOwn(manifest, key))) {
     requireEvidence(bootstrapFields.every((key) => Object.hasOwn(manifest, key)) &&
       manifest.bootstrapVirginTestsLog === "bootstrap-virgin-tests.tap.log" &&

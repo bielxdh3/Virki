@@ -73,6 +73,18 @@ a failed security test.
   one run does not erase another run's failure; preserve all failures and the
   original run manifest. `validateOfflineCiEvidence` checks report shape, **not
   independently authenticated execution**.
+  The offline unsigned bundle builder and signed candidate pre-transfer
+  inspector now explicitly require **both** a completed, separately logged
+  virgin PostgreSQL bootstrap (`bootstrapVirginTestsLog` and
+  `bootstrapVirginTestsExitCode=0`) **and** complete owned Docker cleanup
+  (`dockerMutationJournal`, `dockerMutationUncertain=false`,
+  `dockerCleanupVerified=true`) in the exact 19-stage `ci-report.json`.
+  Omitting either entire group cannot be treated as a legacy successful run.
+  This strict rule is **offline-only**; the generic historical structural
+  validator retains compatibility for older hosted report shapes. The separate
+  `offline-local-stage-receipts.json` should also be retained with its SHA-256
+  and checked against the original run, but is not independent attestation and
+  is not an additional file in the fixed 11-file signed candidate.
 - Run Semgrep OSS separately, preserve its raw report and explicit per-finding
   dispositions. CodeQL is **NOT_RUN**; Semgrep is **not equivalent to CodeQL**.
   A replacement of assurance requires separate, explicit owner acceptance.

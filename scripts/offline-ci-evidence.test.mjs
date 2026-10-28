@@ -83,6 +83,34 @@ test("accepts actual isolated Docker cleanup proof but refuses incomplete bootst
   assert.throws(() => validateOfflineCiEvidence(bytes(missing), revision));
 });
 
+test("offline manual evidence refuses a structurally valid 19-stage report omitting virgin bootstrap and Docker cleanup", () => {
+  const absent = goodManifest();
+  // Generic historical/hosted structural evidence remains compatible.
+  assert.equal(validateOfflineCiEvidence(bytes(absent), revision).ok, true);
+  assert.throws(() => validateOfflineCiEvidence(bytes(absent), revision, "main", { requireOfflineFixture: true }),
+    /virgin|bootstrap|Docker|offline/u);
+  for (const mutation of [
+    (m) => { m.bootstrapVirginTestsLog = "bootstrap-virgin-tests.tap.log"; m.bootstrapVirginTestsExitCode = 0; },
+    (m) => { m.dockerMutationJournal = "docker-mutations.jsonl"; m.dockerMutationUncertain = false; m.dockerCleanupVerified = true; },
+  ]) {
+    const partial = goodManifest();
+    mutation(partial);
+    assert.throws(() => validateOfflineCiEvidence(bytes(partial), revision, "main", { requireOfflineFixture: true }));
+  }
+  const complete = goodManifest();
+  complete.bootstrapVirginTestsLog = "bootstrap-virgin-tests.tap.log";
+  complete.bootstrapVirginTestsExitCode = 0;
+  complete.dockerMutationJournal = "docker-mutations.jsonl";
+  complete.dockerMutationUncertain = false;
+  complete.dockerCleanupVerified = true;
+  assert.equal(validateOfflineCiEvidence(bytes(complete), revision, "main", { requireOfflineFixture: true }).ok, true);
+  for (const key of ["bootstrapVirginTestsLog", "bootstrapVirginTestsExitCode", "dockerMutationJournal", "dockerCleanupVerified", "dockerMutationUncertain"]) {
+    const removed = { ...complete };
+    delete removed[key];
+    assert.throws(() => validateOfflineCiEvidence(bytes(removed), revision, "main", { requireOfflineFixture: true }), key);
+  }
+});
+
 test("requires exact branch and exact full SHA; branch must be explicitly overridden for pre-merge run", () => {
   const manifest = goodManifest();
   manifest.sourceBranch = "cdx/virki-five-report-security-triage-20261020";

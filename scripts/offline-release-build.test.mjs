@@ -97,6 +97,9 @@ function ciManifest(revision) {
     unitTestsFailureCount: 0, unitTestsFailures: [],
     integrationTestsFailureCount: 0, integrationTestsFailures: [],
     productionOperationsFailureCount: 0, productionOperationsFailures: [],
+    dockerMutationJournal: "docker-mutations.jsonl", dockerMutationUncertain: false,
+    dockerCleanupVerified: true, bootstrapVirginTestsLog: "bootstrap-virgin-tests.tap.log",
+    bootstrapVirginTestsExitCode: 0,
     stages: STAGES.map((name, i) => ({
       name, startedUtc: new Date(start + i * 10000 + 1000).toISOString(),
       finishedUtc: new Date(start + i * 10000 + 2000).toISOString(),
@@ -215,6 +218,18 @@ test("builds a strict unsigned v1 manifest from actual source, Docker TARs and s
   assert.equal(manifest.evidence.scanner_report_sha256, digest(readFileSync(f.evidencePaths.scannerReportPath)));
   assert.equal(manifest.evidence.ci_report_sha256, digest(readFileSync(f.ciManifestPath)));
   assert.equal(Object.hasOwn(result, "signatures"), false);
+});
+
+test("unsigned manual release refuses 19-stage CI report if virgin bootstrap and owned Docker cleanup are omitted", async (t) => {
+  const f = fixture(t);
+  const incomplete = ciManifest(f.revision);
+  for (const field of ["dockerMutationJournal", "dockerMutationUncertain", "dockerCleanupVerified", "bootstrapVirginTestsLog", "bootstrapVirginTestsExitCode"]) {
+    delete incomplete[field];
+  }
+  writeFileSync(f.ciManifestPath, JSON.stringify(incomplete));
+  await assert.rejects(buildUnsignedOfflineRelease(f.options), /virgin|bootstrap|Docker|offline/u);
+  assert.deepEqual(readdirSync(f.stagingParent), []);
+  assert.equal(f.calls.some((call) => call.program === "docker"), false);
 });
 
 test("rejects dirty main, wrong SHA, branch and origin/main drift without generating a release", async (t) => {
