@@ -38,6 +38,7 @@
     "test:offline:witness-read": "node --test scripts/offline-ledger-witness-proof.test.mjs",
     "test:offline:ci-local": "node --test scripts/offline-ci-evidence.test.mjs scripts/offline-ci-local-runner.test.mjs",
     "test:offline:witness-cas:linux": "node --test scripts/offline-independent-witness-service.test.mjs infra/offline/disposable-witness-ledger-reservation.test.mjs",
+    "test:offline:floor-preview:linux": "node --test infra/offline/trusted-out-of-host-floor-evidence.test.mjs",
     "test:offline:peer:container": "node infra/offline/native-peer/run-disposable-native-peer-test.mjs",
     "test:offline:supervisor:container": "node infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs",
     "test:offline:readonly-bridge:linux": "node --test infra/offline/native-supervisor/native-docker-readonly-bridge.test.mjs",

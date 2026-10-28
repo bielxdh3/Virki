@@ -191,3 +191,37 @@ fsync a one-shot intent before CAS, quarantine ambiguous/lost acknowledgements,
 and require separately signed operator reconciliation. The current W1 localhost
 test client explicitly refuses non-fixture endpoints and cannot fill this role.
 No production acceptance, Docker import or activation was enabled.
+
+## Separate external-custody floor evidence contract (stage8, nonauthorizing)
+
+`infra/offline/trusted-out-of-host-floor-evidence.mjs` validates a strict
+cryptographic contract for a **third, independently signing** monotonic-floor
+operator. The source-only verifier accepts a challenge-bound signed witness
+HEAD and a separate Ed25519 floor HEAD for the same host, ledger, sequence,
+release head and receipt digest. The floor's signature also binds a hash of
+the exact owner-signed proposed CAS, the requested pre/post-CAS phase and a
+fresh 30-second time window. The three owner, witness and floor SPKI pins must
+be distinct. A post-CAS view additionally requires a signed witness CAS receipt
+for the exact owner request, the floor's independently signed resulting state,
+and an unambiguous confirmed ACK. A lost/unknown ACK is refused even if later
+evidence looks consistent: external operator reconciliation is required.
+
+Native test cases check signed HEAD versus floor rollback/fork, stale floors,
+wrong signatures and scopes, duplicate signing principals, request mutation,
+and uncertain acknowledgements. This is a **cryptographic evidence consistency
+preview only**. The caller currently supplies all three public keys and pins,
+so signatures do not prove that any signer, floor or fresh challenge actually
+came from a different host. No mTLS connection, remote operator process, owned
+secret, immutable external floor, custody audit or installed root is created
+here. A fully rolled-back bundle of once-valid locally supplied evidence is
+not an independently trusted minimum. The installed coordinator does not
+import this verifier, and every result has false ledger/CAS/transfer/Docker/
+deployment authorization. Production remains NO-GO.
+
+An actual gate requires owner-installed root-verified pins and revocation,
+mutually pinned remote TLS endpoints with separate key custody, a floor that
+the Virki host cannot rewind, native durable intent **before** any remote CAS,
+and a reviewed fail-closed operator reconciliation protocol for unknown remote
+commit outcomes. Only after these guarantees are provisioned and independently
+verified could the external floor become an authority for a native release
+decision. No current artifact or automated test makes that claim.
