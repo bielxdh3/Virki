@@ -423,23 +423,22 @@ test("USER completes Authorization Code + PKCE at a real HTTPS RP callback and c
       max_age: "0",
       acr_values: "urn:virki:loa:2"
     }).href);
-    await completePortalLoginIfNeeded(weakerSessionPage, fixture.user, true, prisma, true);
     await completePortalLoginIfNeeded(weakerSessionPage, fixture.user, true, prisma);
-    const steppedUpCallback = await waitForAuthorizationCallback(weakerSessionPage, callbackUri, nextCallback, []);
-    expect(steppedUpCallback.searchParams.get("state")).toBe(weakerState);
-    const steppedUpCode = steppedUpCallback.searchParams.get("code");
-    if (!steppedUpCode) throw new Error("OIDC step-up callback did not contain an authorization code.");
-    const steppedUpToken = await exchangeAndVerify({
-      authorizationCode: steppedUpCode,
+    const voluntaryCallback = await waitForAuthorizationCallback(weakerSessionPage, callbackUri, nextCallback, []);
+    expect(voluntaryCallback.searchParams.get("state")).toBe(weakerState);
+    const voluntaryCode = voluntaryCallback.searchParams.get("code");
+    if (!voluntaryCode) throw new Error("OIDC voluntary ACR callback did not contain an authorization code.");
+    const voluntaryToken = await exchangeAndVerify({
+      authorizationCode: voluntaryCode,
       verifier: weakerVerifier,
       requestNonce: weakerNonce,
       expectedSubject: fixture.user.id,
       expectedEmail: fixture.user.email,
-      expectedAcr: "urn:virki:loa:2",
-      requestStartedAtMs: weakerRequestStartedAtMs,
-      requiresMfa: true
+      expectedAcr: "urn:virki:loa:1",
+      requestStartedAtMs: weakerRequestStartedAtMs
     });
-    expect(steppedUpToken.claims.amr).toEqual(expect.arrayContaining(["pwd", "otp", "mfa"]));
+    expect(voluntaryToken.claims.amr).toEqual(expect.arrayContaining(["pwd"]));
+    expect(voluntaryToken.claims.amr).not.toContain("mfa");
 
     // V09: an independent, run-scoped OIDC client starts with NO grant. The
     // browser must grant and then revoke it through protected Server Actions.

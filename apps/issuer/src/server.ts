@@ -11,7 +11,7 @@ import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from 
 import { readIssuer, readSigningJwks } from "./issuer-config";
 import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, parseBasicClientId, parseBearerToken, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_PROVIDER_CLAIMS, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_PROVIDER_CLAIMS, parseEssentialOidcAcrRequest, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const issuer = readIssuer(process.env);
 const signingJwks = readSigningJwks(process.env.VIRKI_OIDC_SIGNING_JWKS);
@@ -64,10 +64,12 @@ policy.add(new interactionPolicy.Prompt({ name: "virki_assurance" }, new interac
     const token = getCookie(context.req.headers.cookie, SESSION_COOKIE_NAME);
     const session = token ? await getSessionByToken(token) : null;
     if (!session || session.user.id !== accountId) return false;
+    // Use the provider-validated original claims because acr_values normalization can replace an essential ACR claim.
     return requiresOidcAssuranceInteraction({
       requestedAcrValues: getString(context.oidc.params?.acr_values) ?? undefined,
       currentAcr: getString(context.oidc.acr) ?? undefined,
-      authenticationMethods: session.authenticationMethods
+      authenticationMethods: session.authenticationMethods,
+      essentialAcr: parseEssentialOidcAcrRequest(context.oidc.params?.claims)
     });
   }
 )), 2);
@@ -356,8 +358,8 @@ async function handleInteraction(context: KoaContextWithOIDC, uid: string): Prom
   // oidc-provider turns acr_values into claims.id_token.acr.values after parsing
   // the claims parameter. Keep the raw essential request as a hard requirement
   // even when that normalization replaces the original claim object.
-  const essentialAcr = getEssentialAcrRequest(interaction.prompt.details.acr, interaction.params.claims);
-  if (essentialAcr.required && !supportsEssentialOidcAcrValues(essentialAcr.values)) {
+  const essentialAcr = parseEssentialOidcAcrRequest(interaction.params.claims);
+  if (essentialAcr.required && (!essentialAcr.valid || !supportsEssentialOidcAcrValues(essentialAcr.values))) {
     await denyInteraction(context);
     return;
   }
@@ -574,30 +576,6 @@ function getString(value: unknown): string | null {
 
 function getStringOrNumber(value: unknown): string | number | undefined {
   return typeof value === "string" || typeof value === "number" ? value : undefined;
-}
-
-function getEssentialAcrRequest(value: unknown, rawClaims: unknown): { required: boolean; values: string[] } {
-  const rawRequest = getRawEssentialAcrClaim(rawClaims);
-  const request = rawRequest ?? (value && typeof value === "object" ? value as { essential?: unknown; value?: unknown; values?: unknown } : undefined);
-  if (!request) return { required: false, values: [] };
-  if (request.essential !== true) return { required: false, values: [] };
-  if (typeof request.value === "string") return { required: true, values: [request.value] };
-  return { required: true, values: Array.isArray(request.values) ? request.values.filter((item): item is string => typeof item === "string") : [] };
-}
-
-function getRawEssentialAcrClaim(rawClaims: unknown): { essential?: unknown; value?: unknown; values?: unknown } | undefined {
-  if (typeof rawClaims !== "string") return undefined;
-  try {
-    const claims: unknown = JSON.parse(rawClaims);
-    if (!claims || typeof claims !== "object") return undefined;
-    const idToken = (claims as { id_token?: unknown }).id_token;
-    if (!idToken || typeof idToken !== "object") return undefined;
-    const acr = (idToken as { acr?: unknown }).acr;
-    if (!acr || typeof acr !== "object" || (acr as { essential?: unknown }).essential !== true) return undefined;
-    return acr as { essential?: unknown; value?: unknown; values?: unknown };
-  } catch {
-    return undefined;
-  }
 }
 
 function safeOidcError(value: unknown): string {

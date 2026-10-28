@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
+import { createOidcAuthRequestMarker, getOidcAuthenticationContext, hasValidOidcAuthorizationQuery, hasValidOidcStateAndNonce, isCurrentActiveUserProjectGrant, isCurrentOidcAuthenticationContext, isOidcAccountEligible, isOidcGrantBoundToInteraction, isOidcInteractionPathBound, OIDC_DISCOVERY_CONFIGURATION, OIDC_SUPPORTED_ACR_VALUES, parseEssentialOidcAcrRequest, readOidcAuthRequestMarker, requiresFreshOidcAuthentication, requiresOidcAssuranceInteraction, requiresProjectAccessInteraction, satisfiesEssentialOidcAcrValues, supportsEssentialOidcAcrValues } from "./authorization-policy";
 
 const activeUserGrant = {
   revokedAt: null,
@@ -87,6 +87,29 @@ test("OIDC authentication claims report the persisted methods and assurance leve
   assert.equal(satisfiesEssentialOidcAcrValues(["urn:virki:loa:2"], ["pwd"]), false);
 });
 
+test("essential OIDC ACR parsing keeps essential alternatives separate from voluntary preferences", () => {
+  assert.deepEqual(parseEssentialOidcAcrRequest(undefined), { required: false, valid: true, values: [] });
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { value: "urn:virki:loa:1" } } })),
+    { required: false, valid: true, values: [] }, "a voluntary ACR claim does not become essential");
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, value: "urn:virki:loa:2" } } })),
+    { required: true, valid: true, values: ["urn:virki:loa:2"] });
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] } } })),
+    { required: true, valid: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] });
+  assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true } } })),
+    { required: true, valid: true, values: ["urn:virki:loa:1", "urn:virki:loa:2"] },
+    "an essential ACR request without value or values accepts any supported local ACR");
+
+  for (const acr of [
+    { essential: true, value: "urn:virki:loa:2", values: ["urn:virki:loa:1"] },
+    { essential: true, value: "" },
+    { essential: true, values: [] },
+    { essential: true, values: ["urn:virki:loa:2", 1] }
+  ]) {
+    assert.deepEqual(parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr } })),
+      { required: true, valid: false, values: [] }, `malformed essential ACR must be rejected: ${JSON.stringify(acr)}`);
+  }
+});
+
 test("OIDC provider session assurance, methods, and auth time must match the current central session", () => {
   const authenticatedAt = new Date("2026-10-02T12:00:00.000Z");
   const currentLoginTs = Math.floor(authenticatedAt.getTime() / 1_000);
@@ -133,6 +156,24 @@ test("voluntary OIDC ACR loa:2 does not loop when password authentication cannot
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:2", authenticationMethods: ["pwd", "otp", "mfa"] }), false);
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:1", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:1 urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false,
+    "a mixed voluntary preference may use the actually achieved password ACR");
+});
+
+test("essential MFA ACR overrides mixed voluntary values only when its own requirement is unmet", () => {
+  const requestedAcrValues = "urn:virki:loa:1 urn:virki:loa:2";
+  const mfaOnly = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2"] } } }));
+  const passwordAlternative = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", "urn:virki:loa:1"] } } }));
+  const anySupportedAcr = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true } } }));
+  const unsupported = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, value: "urn:virki:loa:3" } } }));
+  const malformed = parseEssentialOidcAcrRequest(JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2", 1] } } }));
+
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: mfaOnly }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:2", authenticationMethods: ["pwd", "otp", "mfa"], essentialAcr: mfaOnly }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: passwordAlternative }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: undefined, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: anySupportedAcr }), false);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: unsupported }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues, currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"], essentialAcr: malformed }), true);
 });
 
 test("OIDC ACR alternatives allow a fresh password session without an MFA redirect loop", () => {

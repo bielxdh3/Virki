@@ -413,6 +413,39 @@ async function seed(options: { totpSecret?: string; origin?: string; redirectUri
   return { userId: user.id, email: user.email, clientId, connectionId: connection.id };
 }
 
+async function establishPasswordAcrConsent(fixture: { userId: string; clientId: string }, client: ReturnType<typeof browser>) {
+  const passwordOnly = await createSession(fixture.userId);
+  const authenticatedMethods = (await getSessionByToken(passwordOnly.token))?.authenticationMethods;
+  assert.deepEqual(authenticatedMethods, ["pwd"]);
+  client.setSession(passwordOnly.token);
+
+  const request = {
+    acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: {
+      acr: { essential: true, values: ["urn:virki:loa:1", "urn:virki:loa:2"] },
+      amr: { essential: true }
+    } })
+  };
+  const authorizationResult = await client.follow(authorization(fixture.clientId, request));
+  const code = authorizationResult.searchParams.get("code");
+  assert.equal(Boolean(code), true, "the password ACR alternative must establish prior consent");
+  const token = await exchange(fixture.clientId, code!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(claims.acr, "urn:virki:loa:1");
+  assert.ok(claims.amr?.includes("pwd"));
+  assert.equal(claims.amr?.includes("mfa"), false);
+
+  const grantCount = await prisma.oidcArtifact.count({ where: {
+    model: "Grant",
+    accountIdHash: hashOidcIdentifier(fixture.userId),
+    clientIdHash: hashOidcIdentifier(fixture.clientId)
+  } });
+  assert.equal(grantCount, 1, "the provider must retain consent for the same account and client");
+  return { passwordOnly, authenticatedMethods, request };
+}
+
 async function startConsentWithPreviousGrant(fixture: { userId: string; clientId: string }) {
   const client = browser();
   const created = await createSession(fixture.userId);
@@ -504,10 +537,31 @@ function browser() {
   };
 }
 
+async function followIssuerRedirects(client: ReturnType<typeof browser>, startUrl: string) {
+  let current = new URL(startUrl);
+  const redirects: Array<{ from: string; status: number; to: string }> = [];
+  for (let hop = 0; hop < 16; hop += 1) {
+    const response = await client.request(current.href);
+    const location = response.headers.get("location");
+    if (!location) return { destination: current, status: response.status, redirects };
+    const next = new URL(location, origin);
+    redirects.push({ from: safeIssuerPath(current.pathname), status: response.status, to: safeIssuerPath(next.pathname) });
+    if (next.origin !== origin || next.pathname === "/login") {
+      return { destination: next, status: response.status, redirects };
+    }
+    current = next;
+  }
+  assert.fail("Issuer interaction did not converge within 16 local redirects.");
+}
+
 function authorization(clientId: string, extra: Record<string, string> = {}, requestedRedirectUri = redirectUri) {
   return `${origin}/auth?${new URLSearchParams({ client_id: clientId, redirect_uri: requestedRedirectUri, response_type: "code", scope: "openid",
     state: randomBytes(24).toString("base64url"), nonce: randomBytes(24).toString("base64url"),
     code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", ...extra })}`;
+}
+
+function safeIssuerPath(pathname: string): string {
+  return pathname.replace(/^\/interaction\/[A-Za-z0-9_-]{8,80}$/u, "/interaction/:id");
 }
 
 function randomClientAddress(): string {
@@ -615,6 +669,217 @@ test("actual provider returns the achieved ACR after prompt-login for voluntary 
   assert.equal(claims.acr, "urn:virki:loa:1");
   assert.ok(claims.amr?.includes("pwd"));
   assert.equal(claims.amr?.includes("mfa"), false);
+});
+
+test("actual provider enforces essential MFA ACR before reusing a password session and consent", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  const passwordOnly = await createSession(fixture.userId);
+  const authenticatedMethods = (await getSessionByToken(passwordOnly.token))?.authenticationMethods;
+  assert.deepEqual(authenticatedMethods, ["pwd"]);
+  client.setSession(passwordOnly.token);
+
+  const consentedRequest = {
+    acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:1", "urn:virki:loa:2"] } } })
+  };
+  const consented = await client.follow(authorization(fixture.clientId, consentedRequest));
+  const consentedCode = consented.searchParams.get("code");
+  assert.equal(Boolean(consentedCode), true, "the password ACR alternative must establish prior consent");
+  const consentedToken = await exchange(fixture.clientId, consentedCode!);
+  assert.equal(consentedToken.status, 200);
+  assert.ok(consentedToken.body.id_token);
+  const consentedClaims = JSON.parse(Buffer.from(consentedToken.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(consentedClaims.acr, "urn:virki:loa:1");
+  assert.equal(consentedClaims.amr?.includes("mfa") ?? false, false);
+
+  const grantCount = await prisma.oidcArtifact.count({ where: {
+    model: "Grant",
+    accountIdHash: hashOidcIdentifier(fixture.userId),
+    clientIdHash: hashOidcIdentifier(fixture.clientId)
+  } });
+  assert.equal(grantCount, 1, "the provider must retain the consent Grant for the same account and client");
+
+  const beforeOrdinaryRepeat = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  const ordinaryRepeat = await client.follow(authorization(fixture.clientId, consentedRequest));
+  assert.equal(Boolean(ordinaryRepeat.searchParams.get("code")), true, "ordinary authorization should reuse the provider session and prior consent");
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } }), beforeOrdinaryRepeat,
+    "ordinary authorization reuse must not start an interaction");
+
+  const beforeAttack = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  let current = new URL(authorization(fixture.clientId, {
+    acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2"] } } })
+  }));
+  const redirects: Array<{ from: string; status: number; to: string | null }> = [];
+  let final = current;
+  for (let hop = 0; hop < 16; hop += 1) {
+    const response = await client.request(current.href);
+    const location = response.headers.get("location");
+    const next = location ? new URL(location, origin) : null;
+    redirects.push({ from: safeIssuerPath(current.pathname), status: response.status, to: next ? safeIssuerPath(next.pathname) : null });
+    if (!next || next.origin !== origin || next.pathname === "/login") {
+      final = next ?? current;
+      break;
+    }
+    current = next;
+    if (hop === 15) assert.fail("Essential ACR session reuse did not converge within 16 local redirects.");
+  }
+
+  const interactionCount = (await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } })) - beforeAttack;
+  const code = final.searchParams.get("code");
+  let tokenEvidence: { status: number; acr: string | null; amr: string[] | null } | undefined;
+  if (code) {
+    const token = await exchange(fixture.clientId, code);
+    const claims = token.body.id_token
+      ? JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] }
+      : null;
+    tokenEvidence = { status: token.status, acr: claims?.acr ?? null, amr: claims?.amr ?? null };
+  }
+  console.log(`essential ACR session reuse evidence: ${JSON.stringify({
+    redirects,
+    finalPath: final.pathname,
+    protocolError: final.searchParams.get("error"),
+    reauth: final.searchParams.get("reauth") === "1",
+    interactionCount,
+    authenticatedMethods,
+    codeIssued: Boolean(code),
+    token: tokenEvidence
+  })}`);
+
+  assert.equal(Boolean(code), false, "essential MFA-only ACR must not issue a code from a password-only session");
+  assert.ok(final.pathname === "/login" || final.searchParams.has("error"),
+    "unmet essential MFA must start stronger authentication or return an OIDC denial");
+  if (final.pathname === "/login") assert.equal(final.searchParams.get("reauth"), "1");
+});
+
+test("actual provider accepts essential MFA ACR after a real TOTP session without forced login", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const fixture = await seed({ totpSecret: secret });
+  const client = browser();
+  const freshMfa = await completeTotpLogin(fixture, secret);
+  const session = await getSessionByToken(freshMfa.token);
+  assert.ok(session?.authenticationMethods.includes("mfa"), "the central login must verify TOTP before authorization");
+  client.setSession(freshMfa.token);
+
+  const request = {
+    acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: {
+      acr: { essential: true, values: ["urn:virki:loa:2"] },
+      amr: { essential: true }
+    } })
+  };
+  const first = await client.follow(authorization(fixture.clientId, request));
+  const firstCode = first.searchParams.get("code");
+  assert.equal(Boolean(firstCode), true, "a genuinely verified MFA session must satisfy essential ACR2");
+  const beforeRepeat = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  const repeat = await client.follow(authorization(fixture.clientId, request));
+  const code = repeat.searchParams.get("code");
+  assert.equal(Boolean(code), true, "the existing MFA provider session and consent must be reusable");
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } }), beforeRepeat,
+    "a satisfied essential ACR must not force another interaction");
+
+  const token = await exchange(fixture.clientId, code!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(claims.acr, "urn:virki:loa:2");
+  assert.ok(claims.amr?.includes("mfa"), "the issued MFA ACR must match the verified TOTP methods");
+});
+
+test("actual provider preserves password fallback for mixed voluntary ACR after consent reuse", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  const setup = await establishPasswordAcrConsent(fixture, client);
+  const before = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+  const result = await client.follow(authorization(fixture.clientId, {
+    acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: { amr: { essential: true } } })
+  }));
+  const code = result.searchParams.get("code");
+  assert.equal(Boolean(code), true, "a voluntary ACR preference must not require MFA from a password-only session");
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } }), before,
+    "prior consent and the provider session should be reused without another interaction");
+
+  const token = await exchange(fixture.clientId, code!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(claims.acr, "urn:virki:loa:1");
+  assert.ok(claims.amr?.includes("pwd"));
+  assert.equal(claims.amr?.includes("mfa"), false);
+  assert.deepEqual(setup.authenticatedMethods, ["pwd"]);
+});
+
+test("actual provider accepts an essential ACR claim without a value restriction using the achieved password ACR", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  await establishPasswordAcrConsent(fixture, client);
+  const before = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+
+  const result = await client.follow(authorization(fixture.clientId, {
+    claims: JSON.stringify({ id_token: { acr: { essential: true }, amr: { essential: true } } })
+  }));
+  const code = result.searchParams.get("code");
+  assert.equal(Boolean(code), true, "an essential ACR claim without a value qualifier must allow any achieved supported ACR");
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } }), before,
+    "a password session already supplies a supported ACR and prior consent covers the claim");
+
+  const token = await exchange(fixture.clientId, code!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(claims.acr, "urn:virki:loa:1");
+  assert.ok(claims.amr?.includes("pwd"));
+  assert.equal(claims.amr?.includes("mfa"), false);
+});
+
+test("actual issuer denies unsupported and malformed essential ACR without a login loop", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  await establishPasswordAcrConsent(fixture, client);
+
+  for (const [label, acr] of [
+    ["unsupported", { essential: true, value: "urn:virki:loa:3" }],
+    ["malformed", { essential: true, values: ["urn:virki:loa:2", 1] }]
+  ] as const) {
+    const before = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+    const result = await followIssuerRedirects(client, authorization(fixture.clientId, {
+      acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+      claims: JSON.stringify({ id_token: { acr } })
+    }));
+    assert.equal(Boolean(result.destination.searchParams.get("code")), false, `${label} essential ACR must not issue a code`);
+    assert.notEqual(result.destination.pathname, "/login", `${label} essential ACR must deny instead of looping through login`);
+    if (result.destination.origin !== origin) {
+      assert.equal(result.destination.searchParams.get("error"), "access_denied", `${label} essential ACR must return a protocol denial`);
+    } else {
+      assert.ok(result.status >= 400 && result.status < 500, `${label} essential ACR must be rejected at the provider boundary`);
+    }
+    const interactions = (await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } })) - before;
+    assert.ok(interactions <= 1, `${label} essential ACR must not create repeated interactions`);
+  }
+});
+
+test("actual provider returns a noninteractive OIDC error for prompt-none with unmet essential MFA", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  await establishPasswordAcrConsent(fixture, client);
+  const before = await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } });
+
+  const result = await followIssuerRedirects(client, authorization(fixture.clientId, {
+    prompt: "none",
+    acr_values: "urn:virki:loa:1 urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: { acr: { essential: true, values: ["urn:virki:loa:2"] } } })
+  }));
+
+  assert.equal(Boolean(result.destination.searchParams.get("code")), false, "prompt=none cannot issue a code without essential MFA");
+  assert.equal(result.destination.origin, new URL(redirectUri).origin);
+  assert.ok(["login_required", "interaction_required"].includes(result.destination.searchParams.get("error") ?? ""),
+    "prompt=none must return an OIDC noninteractive error");
+  assert.ok(result.redirects.every(({ to }) => !to.startsWith("/interaction/") && to !== "/login"),
+    "prompt=none cannot redirect through an interactive authentication loop");
+  assert.equal(await prisma.auditLog.count({ where: { eventType: "SSO_INTERACTION_STARTED" } }), before,
+    "a noninteractive denial must not start an interaction handler");
 });
 
 test("actual provider does not downgrade an essential ACR2 request on an existing password session", integrationOptions, async () => {
