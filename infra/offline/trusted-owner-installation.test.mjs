@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { AUDITED_VERIFIER_FILES } from "./trusted-host-installer.mjs";
 import {
   installOwnerApprovedVerifier, measureInstalledTrustedVerifierAtUseTime,
+  inspectNativeInstalledVerifierPinnedEsmClosure,
 } from "./trusted-owner-installation.mjs";
 
 const enabled = process.platform === "linux" && process.arch === "x64" &&
@@ -410,7 +411,7 @@ function runPinnedImportFixture(f, { mutation = "none", envOverride = {}, nodeFl
 }
 
 test("native Node22 actually imports real owner-signed eleven-file ESM graph from measured in-memory snapshots", fixtureOnly, (t) => {
-  for (const mutation of ["none", "swap-entry", "swap-dependency"]) {
+  for (const mutation of ["none", "swap-entry", "swap-dependency", "swap-import"]) {
     const f = setup(t, { realSource: true });
     installOwnerApprovedVerifier(f.request);
     const result = runPinnedImportFixture(f, { mutation });
@@ -418,13 +419,16 @@ test("native Node22 actually imports real owner-signed eleven-file ESM graph fro
     const loaded = JSON.parse(result.stdout.trim());
     assert.equal(loaded.status, "DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY");
     assert.equal(loaded.pinnedInventoryCount, 11);
-    assert.ok(loaded.actualNodeEsmLoads >= 2 && loaded.actualNodeEsmLoads <= 11);
+    assert.equal(loaded.actualNodeEsmLoads, 11,
+      "all eleven independently pinned ESM modules must pass the actual Node loader");
     assert.ok(loaded.loadedPaths.some((entry) =>
       entry.path === "infra/offline/trusted-host-entry.mjs"));
     assert.ok(loaded.loadedPaths.every((entry) =>
       f.files.some((pin) => pin.path === entry.path && pin.sha256 === entry.sha256)),
     "every byte string actually delivered to Node's loader must match the independently signed pins");
-    assert.equal(Object.hasOwn(loaded, "deployAuthorized"), false);
+    assert.equal(loaded.deployAuthorized, false);
+    assert.equal(loaded.dockerLoadAuthorized, false);
+    assert.equal(loaded.independentLedgerWitnessVerified, false);
   }
 });
 
@@ -452,13 +456,24 @@ test("native fixture refuses preload, changed pin, revocation and before-launch 
 });
 
 test("Node loader fails closed when ESM pathname disappears or becomes a symlink after the signed snapshot", fixtureOnly, (t) => {
-  for (const mutation of ["remove-entry", "symlink-entry"]) {
+  for (const mutation of ["remove-entry", "symlink-entry", "symlink-import"]) {
     const f = setup(t, { realSource: true });
     installOwnerApprovedVerifier(f.request);
     const result = runPinnedImportFixture(f, { mutation });
     assert.notEqual(result.status, 0, `expected fail closed after ${mutation}`);
     assert.doesNotMatch(result.stdout, /DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY/u);
   }
+});
+
+test("production ESM proof can only be entered through the independent native bootstrap and never authorizes release", async () => {
+  await assert.rejects(inspectNativeInstalledVerifierPinnedEsmClosure(),
+    /native Linux|bootstrap|independently provisioned/u);
+  const child = spawnSync(process.execPath, [moduleFile, "--inspect-installed-esm"], {
+    encoding: "utf8", timeout: 12000,
+    env: { PATH: process.env.PATH ?? "", HOME: os.tmpdir(), TMPDIR: os.tmpdir() },
+  });
+  assert.notEqual(child.status, 0);
+  assert.doesNotMatch(child.stdout, /NATIVE_PINNED_ESM_CLOSURE_MEASURED_ONLY/u);
 });
 
 test("valid prior-ledger rollback stays explicitly unwitnessed and cannot become release authorization", fixtureOnly, (t) => {

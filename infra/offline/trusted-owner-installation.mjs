@@ -585,9 +585,19 @@ const REVIEWED_BUILTINS = new Set([
   "node:child_process", "node:crypto", "node:fs", "node:fs/promises",
   "node:os", "node:path", "node:url",
 ]);
-const ENTRYPOINT = "infra/offline/trusted-host-entry.mjs";
+// Exercise every independently reviewed entry module. Measuring all eleven
+// source files is not the same as delivering every module to Node's compiler.
+const REVIEWED_ENTRIES = Object.freeze([
+  "infra/offline/trusted-host-entry.mjs",
+  "infra/offline/trusted-host-installer.mjs",
+  "infra/offline/trusted-image-import.mjs",
+  "infra/offline/trusted-image-loader.mjs",
+  "infra/offline/trusted-release-coordinator.mjs",
+  "infra/offline/trusted-source-git.mjs",
+]);
+const NATIVE_INSPECTION_ARG = "--inspect-installed-esm";
 
-function assertFreshNativeNodeLaunch() {
+function assertFreshNativeNodeLaunch(nativeInspection = false) {
   demand(process.execArgv.length === 0,
     "unreviewed Node startup flags, --import/--require/--loader or preload");
   // Node preloads, V8 snapshot/coverage injectors and ELF loader injection
@@ -596,26 +606,32 @@ function assertFreshNativeNodeLaunch() {
     /^(?:NODE_|LD_|DYLD_|V8_|UV_|ELECTRON_)/u.test(key));
   demand(forbidden.length === 0,
     "unreviewed native loader, Node startup or preload environment");
-  demand(process.argv.length === 2 &&
+  demand(process.argv.length === (nativeInspection ? 3 : 2) &&
     typeof process.argv[1] === "string" && path.isAbsolute(process.argv[1]),
   "a single fixed native launcher script is required");
+  if (nativeInspection) {
+    demand(process.argv[1] === BOOTSTRAP_ENTRY &&
+      process.argv[2] === NATIVE_INSPECTION_ARG,
+    "native inspection must be an exact invocation of the independently installed bootstrap");
+  }
 }
 
 /**
  * Diagnostic ONLY: exercise Node 22's synchronous ESM resolve/load hooks
  * against an already owner-approved, exact pinned in-memory byte snapshot.
- * The actual production process launcher and its environment have NOT been
- * independently attested, so non-fixture calls fail before registering hooks.
+ * This operation cannot grant deployment authority: Node has already started
+ * by the time it measures its interpreter and bootstrap. A separately audited
+ * native OS launcher remains necessary before any privileged release operation.
  *
  * Returns hashes of bytes passed to Node's loader, not execution permission.
  * The callback is available only inside disposable root tests for adversarial
  * disk swaps after snapshot capture; it is never part of a native host API.
  */
-export async function rehearseInstalledVerifierPinnedEsmImport(request = {},
-  { afterSnapshot } = {}) {
+async function inspectPinnedEsmClosure(request, { afterSnapshot, nativeInspection = false } = {}) {
   const mode = nativeMode(request);
-  demand(Boolean(mode.fixture), "native production ESM launch requires an audited external launcher");
-  assertFreshNativeNodeLaunch();
+  demand(nativeInspection ? !mode.fixture : Boolean(mode.fixture),
+    "native production ESM launch requires an independently installed bootstrap");
+  assertFreshNativeNodeLaunch(nativeInspection);
   demand(afterSnapshot === undefined || typeof afterSnapshot === "function",
     "fixture phase callback invalid");
   const attestation = measureInstalledTrustedVerifierAtUseTime(request);
@@ -637,8 +653,10 @@ export async function rehearseInstalledVerifierPinnedEsmImport(request = {},
     digests.set(url, file.sha256);
   }
   exactModuleTree(mode.destinations.code, mode.fixture);
-  const entry = pathToFileURL(path.join(mode.destinations.code, ...ENTRYPOINT.split("/"))).href;
-  demand(snapshots.has(entry) && snapshots.size === 11, "incomplete ESM snapshot");
+  const entries = REVIEWED_ENTRIES.map((relative) =>
+    pathToFileURL(path.join(mode.destinations.code, ...relative.split("/"))).href);
+  demand(entries.every((url) => snapshots.has(url)) &&
+    snapshots.size === 11, "incomplete ESM snapshot");
   afterSnapshot?.();
   // Only real Node import() execution through this hook is counted. A disk
   // inode replaced after capture cannot alter the immutable source supplied
@@ -650,7 +668,7 @@ export async function rehearseInstalledVerifierPinnedEsmImport(request = {},
         demand(REVIEWED_BUILTINS.has(specifier), "unreviewed native builtin import");
         return nextResolve(specifier, context);
       }
-      demand(specifier === entry || specifier.startsWith("./") || specifier.startsWith("../"),
+      demand(entries.includes(specifier) || specifier.startsWith("./") || specifier.startsWith("../"),
         "non-static/absolute/package ESM import forbidden");
       const resolved = nextResolve(specifier, context);
       demand(snapshots.has(resolved.url) && resolved.url.startsWith("file:") &&
@@ -671,15 +689,28 @@ export async function rehearseInstalledVerifierPinnedEsmImport(request = {},
       return { format: "module", shortCircuit: true, source: Buffer.from(bytes) };
     },
   });
-  const namespace = await import(entry);
-  demand(typeof namespace.verifyTrustedHostOfflineCandidate === "function" &&
-    consumed.has(entry), "native ESM entry was cached or failed to load via pinned hook");
+  for (const entry of entries) {
+    const namespace = await import(entry);
+    demand(consumed.has(entry) &&
+      (entry === entries[0]
+        ? typeof namespace.verifyTrustedHostOfflineCandidate === "function"
+        : Object.keys(namespace).length > 0),
+    "native ESM entry was cached or failed to load via pinned hook");
+  }
   for (const [url, digest] of consumed) {
     demand(digests.get(url) === digest, "actual Node load differs from approved ESM bytes");
   }
-  demand(consumed.size > 1 && consumed.size <= 11, "unexpected ESM module load graph");
+  demand(consumed.size === snapshots.size, "not every audited ESM dependency was delivered to Node");
+  if (nativeInspection) {
+    const final = measureInstalledTrustedVerifierAtUseTime(request);
+    demand(final.pinsetSha256 === attestation.pinsetSha256 &&
+      final.liveLedgerSha256 === attestation.liveLedgerSha256 &&
+      final.ownerInstallationApprovalDigest === attestation.ownerInstallationApprovalDigest,
+    "installed trust state changed during native inspection");
+  }
   return Object.freeze({
-    status: "DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY",
+    status: nativeInspection ? "NATIVE_PINNED_ESM_CLOSURE_MEASURED_ONLY" :
+      "DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY",
     pinnedInventoryCount: snapshots.size,
     actualNodeEsmLoads: consumed.size,
     loadedPaths: Object.freeze([...consumed.keys()].map((url) =>
@@ -687,8 +718,23 @@ export async function rehearseInstalledVerifierPinnedEsmImport(request = {},
         .split(path.sep).join("/"), sha256: consumed.get(url) }))),
     liveLedgerStatus: attestation.liveLedgerStatus,
     independentLedgerWitnessVerified: false,
-    restriction: "No production launcher, mutable ledger witness, Docker or release authority.",
+    dockerLoadAuthorized: false,
+    deployAuthorized: false,
+    restriction: "No independent native launcher attestation, ledger witness, Docker or release authority.",
   });
+}
+
+export async function rehearseInstalledVerifierPinnedEsmImport(request = {},
+  { afterSnapshot } = {}) {
+  return inspectPinnedEsmClosure(request, { afterSnapshot });
+}
+
+// Root-owned, owner-installed bootstrap only. The main source checkout cannot
+// invoke this inspection through arbitrary paths, environment or user-supplied
+// trust roots. Its proof means the Node ESM compiler received the pinned bytes;
+// it is NOT a capability to call any of the loaded verifier methods.
+export async function inspectNativeInstalledVerifierPinnedEsmClosure(request = {}) {
+  return inspectPinnedEsmClosure(request, { nativeInspection: true });
 }
 
 /**
@@ -783,8 +829,18 @@ export function installOwnerApprovedVerifier(request = {}, { onPhase } = {}) {
   });
 }
 
-// A checkout cannot serve as a root installer through a forged --install CLI.
+// A checkout cannot serve as a root installer or native inspector.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.stderr.write("Trusted bootstrap must be independently installed and invoked by reviewed operator code.\n");
-  process.exitCode = 2;
+  if (process.argv.length === 3 && process.argv[2] === NATIVE_INSPECTION_ARG) {
+    try {
+      const proof = await inspectNativeInstalledVerifierPinnedEsmClosure();
+      process.stdout.write(JSON.stringify(proof) + "\n");
+    } catch {
+      process.stderr.write("Installed ESM inspection refused; release remains blocked.\n");
+      process.exitCode = 2;
+    }
+  } else {
+    process.stderr.write("Trusted bootstrap must be independently installed and invoked by reviewed operator code.\n");
+    process.exitCode = 2;
+  }
 }

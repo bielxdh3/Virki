@@ -16,13 +16,15 @@ if (process.platform !== "linux" || process.arch !== "x64" ||
 }
 const request = JSON.parse(process.env.VIRKI_USEPOINT_REQUEST ?? "null");
 const mutation = process.env.VIRKI_USEPOINT_MUTATION ?? "none";
-if (!["none", "swap-entry", "swap-dependency", "remove-entry",
-  "symlink-entry"].includes(mutation)) {
+if (!["none", "swap-entry", "swap-dependency", "swap-import", "remove-entry",
+  "symlink-entry", "symlink-import"].includes(mutation)) {
   throw new Error("Unreviewed fixture mutation");
 }
 const target = ["swap-entry", "remove-entry", "symlink-entry"].includes(mutation) ?
   "infra/offline/trusted-host-entry.mjs" :
-  "scripts/lib/offline-release-attestation.mjs";
+  ["swap-import", "symlink-import"].includes(mutation) ?
+    "infra/offline/trusted-image-import.mjs" :
+    "scripts/lib/offline-release-attestation.mjs";
 const result = await rehearseInstalledVerifierPinnedEsmImport(request, {
   afterSnapshot() {
     if (mutation === "none") return;
@@ -31,7 +33,7 @@ const result = await rehearseInstalledVerifierPinnedEsmImport(request, {
     const original = readFileSync(file);
     renameSync(file, file + ".before-swap");
     if (mutation === "remove-entry") return;
-    if (mutation === "symlink-entry") {
+    if (mutation === "symlink-entry" || mutation === "symlink-import") {
       symlinkSync(file + ".before-swap", file);
       return;
     }

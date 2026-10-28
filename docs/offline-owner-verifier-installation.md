@@ -187,30 +187,45 @@ preload or Node startup argument. Neither binary is executed by this check.
 Those dependencies, witness semantics and end-to-end native
 host rehearsal remain blockers. **PRODUCTION NO-GO.**
 
-### Exact source bytes delivered to Node's ESM compiler (disposable only)
+### Exact source bytes delivered to Node's ESM compiler
 
 `rehearseInstalledVerifierPinnedEsmImport(request)` is a diagnostic experiment
 restricted to the independently signed **disposable native Linux root tmpfs**
 fixture. It invokes `measureInstalledTrustedVerifierAtUseTime` and then copies
 the eleven installed, root-protected, digest-checked modules to a private
 in-process byte snapshot. Node 22's synchronous `node:module.registerHooks`
-then resolves only modules inside the approved graph and supplies each module's
-exact snapshot bytes to the ESM loader. All builtin imports are checked
+then resolves only modules inside the approved graph and supplies all eleven
+exact snapshot byte buffers to the ESM loader by importing the six reviewed
+host entry modules. All builtin imports are checked
 against the reviewed builtin allowlist; package imports, extra filesystem
 modules, data URLs, query variants and other graph escapes fail closed.
 Returned `loadedPaths` represent hashes of the buffers that Node's real ESM
-loader consumed, not merely prior disk inspection. The read-only host entry
+loader consumed, not merely prior disk inspection. Every reviewed host entry
 is imported, but none of its release methods is called.
 
 Adversarial Linux tests use **all eleven real project ESM files** and an actual
-Ed25519 installation approval. Post-snapshot replacement of an entry or a
-transitive dependency cannot change the compiler's source: the tests compare
+Ed25519 installation approval confined to the disposable fixture.
+Post-snapshot replacement of an entry, a transitive dependency or the image
+import module cannot change the compiler's source: the tests compare
 actual loader bytes against the signed hashes. Removal or symlink replacement
 of the entry's path is refused when Node cannot resolve it to the exact pinned
 URL. A compromised source before the snapshot, an altered owner state, or an
 unreviewed `NODE_OPTIONS`, `LD_PRELOAD` or Node command-line flag is refused.
 
-The experiment explicitly **does not launch a production verifier**.
+A separate, explicitly read-only installed-bootstrap entrypoint can inspect the
+native Linux closure when independently approved and installed:
+`node /usr/local/lib/virki/offline-bootstrap/trusted-owner-installation.mjs
+--inspect-installed-esm`. This example documents the interface; production
+execution remains unapproved. The fixed native entry checks the exact bootstrap
+path, Node 22 and Git executable pins, root-owned signed installation state,
+approved ESM files, no startup flags or preloads, and an unchanged policy and
+ledger during inspection. Source checkouts, arbitrary trust roots and fixture
+parameters cannot access this native entry. It returns
+`NATIVE_PINNED_ESM_CLOSURE_MEASURED_ONLY` with
+`independentLedgerWitnessVerified:false`, `dockerLoadAuthorized:false`,
+and `deployAuthorized:false`; no release methods are invoked.
+
+This inspection **does not launch a production release verifier**.
 A flag/environment check inside JavaScript runs after Node and its native
 startup code have already executed. It therefore cannot attest absence of
 earlier `--import`, `--require`, `LD_PRELOAD`, loader hooks, startup snapshots,
@@ -218,9 +233,9 @@ interpreter helpers or dynamic-library injection. A separately installed,
 audited **native launcher** must validate those inputs before Node executes,
 start a fresh process under a restrictive execution environment, and bind its
 runtime loader to the approved snapshot without any module cache predating
-the hooks. That native design, kernel policy, live host test and the externally
-monotonic ledger witness remain unproven. Both exported diagnostic measurements
-explicitly set `independentLedgerWitnessVerified: false` and cannot authorize
+the hooks. That separately audited native launcher, kernel policy, live host
+test and externally monotonic ledger witness remain unproven. Every diagnostic
+inspection sets `independentLedgerWitnessVerified: false` and cannot authorize
 a release. **PRODUCTION NO-GO.**
 
 ## Disposable native validation
