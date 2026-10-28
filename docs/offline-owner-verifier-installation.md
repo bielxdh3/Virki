@@ -238,6 +238,70 @@ test and externally monotonic ledger witness remain unproven. Every diagnostic
 inspection sets `independentLedgerWitnessVerified: false` and cannot authorize
 a release. **PRODUCTION NO-GO.**
 
+### DEV-only static pre-Node byte guard (separate from the installer)
+
+`infra/offline/native-bootstrap/native-pre-node-guard.c` is a distinct,
+**non-authorizing** C launcher prototype. It is **not installed**, is not part
+of the eleven signed verifier modules, and cannot run a verifier, release,
+Docker API, ledger CAS, migration or deploy. The production-source binary
+rejects WSL/Windows, non-root, arbitrary arguments and unprovisioned roots.
+It requires separately operator-installed, root:root protected paths:
+`/etc/virki/offline-native-guard/owner-pin.txt`,
+`/etc/virki/offline-bootstrap/bootstrap-policy.json`,
+`/usr/bin/node` and the guard executable at
+`/usr/local/lib/virki/offline-bootstrap/native-pre-node-guard`.
+The private 0600 pin file uses the exact format
+`VIRKI_DEV_NATIVE_GUARD_PIN_V1` followed by lowercase SHA-256 values
+`bootstrap_sha256`, `node_sha256` and `launcher_sha256`. It is **not
+an owner signature**; no code here generates keys, derives an approval or
+provisions it. These bytes must be independently audited and installed by an
+operator, not constructed from source checkout or a release bundle.
+
+The prototype itself must be **statically linked** with no ELF interpreter.
+Before execution it measures three independent protected inodes through open
+file descriptors, checks directory ownership and non-writable ancestors,
+rejects symlinks/hardlinks, and compares SHA-256 using the kernel AF_ALG
+interface without dynamically loading crypto libraries. It also rejects
+unreviewed environment variables and ELF targets with `PT_INTERP` or
+`PT_DYNAMIC`; a hash alone would not pin a dynamic loader or its libraries.
+Only an owner-pinned static ELF copied into a sealed executable memfd may be
+invoked via `execveat`, and then **only for `--version`** in a
+privilege-dropped, no-new-privileges child with descriptor inheritance blocked
+and a bounded child lifetime. The output is strictly
+`DEV_ONLY_STATIC_BYTE_PROBE_NO_RELEASE_AUTHORITY`.
+
+The child also refuses inherited nonzero Linux `securebits` or ambient
+capabilities (notably `SECBIT_NO_SETUID_FIXUP` and locked variants). Before
+execution, while still privileged, it drops every supported capability from
+the kernel bounding set, clears the ambient set, drops supplementary groups
+and real/effective/saved UID/GID to 65534, explicitly clears the permitted,
+effective and inheritable sets through Linux `capset`, and verifies all
+four sets **and the bounding set** are zero using `capget` and `prctl`.
+An unavailable `CAP_SETPCAP`, an unsupported capability interface, a
+non-root caller or any inconsistent result refuses the launch, rather than
+silently skipping an incomplete drop.
+
+An independent child deadline uses `alarm(3)`. After UID/GID changes the
+child separately arms `PR_SET_PDEATHSIG=SIGKILL` and checks its original
+parent PID, because Linux clears the parent-death signal on credential
+transitions. Tests prove that parent `SIGKILL` terminates a fixture target
+which deliberately ignores `SIGALRM`; they also reproduce hostile ambient
+and no-setuid-fixup capabilities and test missing `CAP_SETPCAP`. A *trusted*
+static target is still an assumption: arbitrary malicious child code can
+change its own alarm or parent-death signal, and a child killed after orphaning
+may remain a zombie until its reaper collects it. Neither local timer nor
+fixture is a production isolation or unconditional scheduling guarantee.
+
+The normal Linux Node 22 build has `PT_INTERP` and is therefore refused;
+**this experiment does not establish a usable production Node launcher**.
+Genuine runtime approval still needs separately audited ELF interpreter and
+DSO provenance, pinned loader closure, native host/kernel provisioning and
+independent owner approval. The fixture-only build uses separate compile-time
+`VIRKI_TEST_ONLY_ROOT_FIXTURE` paths under private `/root` and synthetic
+**non-signing** checksum data to exercise real Linux root/ELF/execveat
+mechanics on WSL. It cannot authenticate a production host; normal builds
+unconditionally reject WSL. No host `/etc` paths are written by the tests.
+
 ## Disposable native validation
 
 The root fixture writes only beneath `/tmp/virki-owner-install-fixture-XXXXXX`
