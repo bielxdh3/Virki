@@ -40,6 +40,7 @@
     "test:offline:witness-cas:linux": "node --test scripts/offline-independent-witness-service.test.mjs infra/offline/disposable-witness-ledger-reservation.test.mjs",
     "test:offline:peer:container": "node infra/offline/native-peer/run-disposable-native-peer-test.mjs",
     "test:offline:supervisor:container": "node infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs",
+    "test:offline:readonly-bridge:linux": "node --test infra/offline/native-supervisor/native-docker-readonly-bridge.test.mjs",
     "test:production:runtime": "node scripts/production-runtime-smoke.mjs",
     "test:production:docker-safety": "node --test scripts/disposable-docker-cleanup.test.mjs scripts/disposable-docker-session.test.mjs scripts/e2e/isolated-docker-owner.mock.test.mjs",
     "test:production:migration:pg18": "cross-env VIRKI_V01_PG_REQUIRED=1 node --test scripts/production-migration-pg-failclosed.test.mjs",

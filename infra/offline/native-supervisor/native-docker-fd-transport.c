@@ -458,6 +458,11 @@ bool vdt_exchange(struct vdt_session *s, enum vdt_command command,
   s->active = false;
   if (response_size) *response_size = 0;
   if (response && capacity) response[0] = 0;
+#ifdef VDT_DISPOSABLE_READONLY
+  /* Separate DEV-only build: even a mistaken future callsite may never
+   * transmit Docker POST/load or image-inspect requests. Poison on misuse. */
+  if (command != VDT_PING && command != VDT_INFO) return false;
+#endif
   if (!response || capacity == 0 || !response_size || !no_pending_bytes(s->fd))
     return false;
   s->active = true;
