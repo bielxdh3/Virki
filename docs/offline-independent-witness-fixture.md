@@ -76,3 +76,89 @@ custody, authenticated mutually pinned network transport, independently durable
 monotonic checkpoints, a read-only/recovery reconciliation policy for ambiguous
 CAS outcomes, and a separately reviewed native installed entrypoint. Existing
 local SQLite+anchor rollback caveats still apply. Production remains NO-GO.
+
+## Mutually authenticated remote-session and checkpoint experiment
+
+`infra/offline/disposable-remote-witness-session.mjs` exercises a **real TLS
+client/server transport** around the existing signed HEAD and CAS protocol
+without contacting a production or external network. Its sole executable
+surface is limited to Linux, `VIRKI_DISPOSABLE_REMOTE_WITNESS=1`, a private
+operator-created `/tmp/virki-witness-transport-fixture-XXXXXX/checkpoint`
+directory and `localhost`. No deployed endpoint, pin or private key is
+selected by this repository and there is no coordinator import.
+
+The fixture operator provisions an owner key pin separately in a private
+`owner-root-pin.json`, then the owner signs a canonical, domain-separated
+consent binding the exact localhost endpoint/port, TLS server certificate SPKI
+SHA-256, client certificate SPKI SHA-256, witness signing-key pin, owner
+signing-key pin, Virki host and ledger identities, one specific owner-signed
+CAS request digest, initial checkpoint digest and expiration. The TLS client
+supplies an actual client certificate to a server that requires mutual TLS.
+Every connection checks the peer X.509 leaf certificate's DNS name, validity
+and consented SPKI pin **before sending any protocol bytes**. The signed HEAD
+must match a fresh client-generated challenge and the local checkpoint's
+sequence/head/receipt. The owner-signed CAS transition then requires a
+separately signed witness receipt for the exact request.
+
+The private checkpoint directory is opened once with `O_NOFOLLOW` and held
+by an inode-bound descriptor throughout both TLS exchanges. Subsequent
+reads/writes use the Linux `/proc/self/fd/N` anchor rather than reopening a
+replaceable pathname. The canonical directory inode, owner and mode are
+rechecked on HEAD return, immediately before CAS protocol bytes leave the TLS
+connection, after CAS and after persistence. A rename/swap of the checkpoint
+directory after HEAD cannot silently redirect an intention or permit CAS.
+Signed owner consent and CAS expiration are checked again after HEAD and
+immediately before CAS egress; a delayed valid HEAD cannot revive expired
+authorization. Keys, certificates and consent bytes are captured before awaits
+to prevent caller-side rebinding.
+
+Before CAS egress, a private `000000NN.intent` file is created with
+`O_EXCL`, fsynced, and followed by a directory fsync. A successful response
+produces a new exclusively created fsynced checkpoint containing its signed
+receipt, the exact canonical owner-signed consent plus Ed25519 signature, the
+durable original intent SHA-256 and predecessor digest, then an exclusive
+completion marker. Every historical checkpoint validates the original owner's
+consent signature against the separately pinned owner key, reconstructs
+the exact owner-signed CAS request from its authenticated witness receipt,
+and compares **both** original consent and CAS request hashes to the recorded
+intent. Changing those two hashes in an otherwise canonical, private regular
+intent file is now detected and rejected before any new HEAD/CAS exchange.
+The complete signed history is additionally rechecked after the asynchronous
+HEAD response and immediately before CAS bytes leave the authenticated TLS
+socket. During the pending CAS the expected new intent digest is admitted only
+as an unreconciled in-flight journal entry; completed checkpoints must still
+match every original signed consent and owner CAS. An adversary modifying an
+earlier intent while HEAD is in progress cannot advance the next sequence.
+A partial
+response, dropped connection, timeout, crash or failed fsync leaves an
+incomplete intent and blocks subsequent attempts, even if the remote witness
+committed. Existing checkpoints and signatures are checked before advancing.
+The protocol never retries a CAS automatically. Tests exercise actual TLS
+handshake/peer substitution, signed consent tampering, forged HEAD, replay, two
+consecutive checkpoints, incomplete completion and lost/truncated/surplus
+replies after a real disposable witness SQLite commit, path swaps during and
+after CAS, historical-intent substitution and consent expiry during delayed
+HEAD. Test keys/certificates
+exist only in private temporary directories and are never release trust roots.
+
+**Production limits:** the `localhost` consent and root-pin file are created
+by a disposable test operator, not an independently provisioned native owner.
+The witness service runs on the same test machine. Private local checkpoint
+files and fsync provide crash evidence, but a privileged actor who restores
+the entire checkpoint store to a previous valid prefix can still cause
+rollback. An independently held, nonrollbackable monotonic checkpoint is
+mandatory. No actual remote witness TLS host, CA, key custody or mutual TLS
+deployment has been established. A separately audited native launcher,
+operator reconciliation and coordinator integration remain blockers.
+Every successful experiment reports `witnessCasAuthorized:false`,
+`dockerLoadAuthorized:false` and `deployAuthorized:false`.
+
+Independent owner provisioning for production would need a root-protected
+owner public key/pin and revocation policy; a separately operated external
+witness hostname with pinned TLS certificate/SPKI, isolated mTLS client
+certificate and private key, and separately held witness Ed25519 signer key;
+host/ledger/transition-scoped signed owner consent; a remote monotonically
+durable checkpoint outside the witness database's rollback domain; a signed
+read-only reconciliation procedure for ambiguous commits; independently
+reviewed native launcher and isolation; and integration tests on the actual
+owner-controlled host. **PRODUCTION NO-GO.**
