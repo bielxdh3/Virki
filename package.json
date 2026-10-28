@@ -46,6 +46,7 @@
     "test:offline:manual:operator": "node --test scripts/offline-manual-operator-preflight.test.mjs",
     "test:offline:native-dynamic-closure:linux": "node --test infra/offline/native-bootstrap/native-dynamic-closure.test.mjs",
     "test:offline:images:local": "node --test scripts/offline-manual-image-build.test.mjs",
+    "test:offline:manual:activation": "node --test infra/offline/manual-activation-transaction.test.mjs infra/offline/manual-activation-journal.test.mjs infra/offline/manual-activation-lifecycle.test.mjs infra/offline/manual-activation-rollback.test.mjs",
     "test:production:runtime": "node scripts/production-runtime-smoke.mjs",
     "test:production:docker-safety": "node --test scripts/disposable-docker-cleanup.test.mjs scripts/disposable-docker-session.test.mjs scripts/e2e/isolated-docker-owner.mock.test.mjs",
     "test:production:migration:pg18": "cross-env VIRKI_V01_PG_REQUIRED=1 node --test scripts/production-migration-pg-failclosed.test.mjs",
