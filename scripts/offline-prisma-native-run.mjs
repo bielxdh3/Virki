@@ -6,7 +6,7 @@
 // No container is touched without matching random owner, pinned image and CID.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,9 @@ import {
 import {
   isVerifiedPrismaInvocationResult, isVerifiedSuccessfulCleanup,
 } from "./lib/offline-prisma-native-result.mjs";
+import {
+  INTERRUPT_TIMING, assertCommittedFirstDdl, deriveBlockedDdlProbe,
+} from "./lib/offline-prisma-native-ddl-observation.mjs";
 
 const ENDPOINT = "npipe:////./pipe/dockerDesktopLinuxEngine";
 const INSPECT = "{{json .}}";
@@ -53,6 +56,8 @@ export function runDisposablePrismaNative({
   const sourceRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
   const migrations = verifyCommittedStage2PrismaMigrations(path.join(sourceRoot,
     "packages/database/prisma/migrations"));
+  assertCommittedFirstDdl(readFileSync(path.join(sourceRoot,
+    "packages/database/prisma/migrations/20261001000000_security_polish/migration.sql"), "utf8"));
   const migrationDigest = createHash("sha256").update(JSON.stringify(migrations)).digest("hex");
   const journalIdentity = {
     directory: path.join(homedir(), ".virki", "offline-docker-reconciliation"),
@@ -160,11 +165,8 @@ export function runDisposablePrismaNative({
     const sql = (statement) => pg(["psql", "-X", "-qAt", "-U", "postgres",
       "-h", "/var/run/postgresql", "-d", "virki_clone", "-c", statement], { timeout: 7000 });
     const lock = `SELECT COUNT(*) FROM pg_locks WHERE relation = 'public."ProjectConnection"'::regclass ` +
-      `AND mode='AccessExclusiveLock' AND granted`;
-    const waiting = `SELECT COUNT(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid ` +
-      `WHERE a.datname='virki_clone' AND a.wait_event_type='Lock' ` +
-      `AND l.relation='public."ProjectConnection"'::regclass ` +
-      `AND l.mode='AccessExclusiveLock' AND NOT l.granted`;
+      `AND mode='ShareUpdateExclusiveLock' AND granted`;
+    const waiting = deriveBlockedDdlProbe();
     const pollExactlyOne = (statement, limit) => {
       for (let i = 0; i < limit; i++) if (sql(statement) === "1") return;
       refuse();
@@ -172,7 +174,7 @@ export function runDisposablePrismaNative({
     diagnosticPhase = "engine-interrupt-lock-acquire";
     background(created[0], ["exec", created[0].id, "psql", "-X", "-qAt",
       "-U", "postgres", "-h", "/var/run/postgresql", "-d", "virki_clone",
-      "-c", `BEGIN; LOCK TABLE "ProjectConnection" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(85);`],
+      "-c", `BEGIN; LOCK TABLE "ProjectConnection" IN SHARE UPDATE EXCLUSIVE MODE; SELECT pg_sleep(${INTERRUPT_TIMING.blockerSeconds});`],
     "prisma_test_exclusive_pg_lock_may_start");
     pollExactlyOne(lock, 48);
     journal("append", { event: "exclusive_pg_lock_granted" });
@@ -180,9 +182,41 @@ export function runDisposablePrismaNative({
     background(created[1], ["exec", created[1].id, "node",
       "/workspace/scripts/fixtures/offline-prisma-native/interrupt.mjs", "run"],
     "real_prisma_migrate_deploy_engine_may_start");
-    // PG observes an actual ALTER TABLE waiting on our guarded relation lock.
-    // There is no synthetic 'started' log or guessed sleep checkpoint.
-    pollExactlyOne(waiting, 65);
+    // Require both the actual waiting ALTER in PostgreSQL (joined to our
+    // private holder via pg_blocking_pids) and the real schema-engine
+    // executable with the right UID, PPID and Prisma CLI argv. Earlier
+    // AccessExclusiveLock could have blocked preliminary SELECTs instead.
+    const deadline = Date.now() + INTERRUPT_TIMING.observationTimeoutMs;
+    let sawEngine = false;
+    let matched = false;
+    while (Date.now() < deadline) {
+      ensure(sql(lock) === "1");
+      const state = exec(created[1], ["node", "/workspace/scripts/fixtures/offline-prisma-native/interrupt.mjs", "probe"],
+        { timeout: 12000 });
+      if (state === "PRISMA_CLI_EXITED_BEFORE_OBSERVATION") {
+        diagnosticCode = "PRISMA_CLI_EXITED_BEFORE_DDL";
+        refuse();
+      }
+      ensure(state === "EXACT_SCHEMA_ENGINE_UID_PPID_VERIFIED" || state === "ENGINE_NOT_YET_OBSERVED");
+      if (state === "EXACT_SCHEMA_ENGINE_UID_PPID_VERIFIED") sawEngine = true;
+      if (state === "EXACT_SCHEMA_ENGINE_UID_PPID_VERIFIED" && sql(waiting) === "1") {
+        matched = true;
+        break;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
+    if (!matched) {
+      diagnosticCode = sawEngine ? "ENGINE_ACTIVE_BUT_FIRST_DDL_NOT_BLOCKED" : "ENGINE_NEVER_VERIFIED";
+      refuse();
+    }
+    // Recheck immediately before SIGKILL; launch alone never suffices.
+    ensure(sql(lock) === "1" && sql(waiting) === "1" &&
+      exec(created[1], ["node", "/workspace/scripts/fixtures/offline-prisma-native/interrupt.mjs", "probe"],
+        { timeout: 12000 }) === "EXACT_SCHEMA_ENGINE_UID_PPID_VERIFIED");
+    ensure(sql(`SELECT COUNT(*) FROM "_prisma_migrations" WHERE migration_name='20261001000000_security_polish' ` +
+      `AND finished_at IS NULL AND rolled_back_at IS NULL`) === "1");
+    ensure(sql(`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='public' ` +
+      `AND table_name='ProjectConnection' AND column_name='launchUrl'`) === "0");
     journal("append", { event: "real_prisma_schema_engine_ddl_blocked_on_pg_lock" });
     diagnosticPhase = "engine-interrupt-exact-sigkill";
     ensure(exec(created[1], ["node", "/workspace/scripts/fixtures/offline-prisma-native/interrupt.mjs", "kill"],
@@ -199,11 +233,11 @@ export function runDisposablePrismaNative({
     { timeout: 15000 }) === "REAL_PRISMA_CLI_NONZERO_AFTER_SIGKILL");
     journal("append", { event: "real_prisma_cli_failed_after_engine_sigkill" });
     // Terminate ONLY the private PostgreSQL test lock backend, selected by
-    // its granted exclusive lock and exact controlled pg_sleep query marker.
+    // its granted private holder lock and controlled pg_sleep query marker.
     diagnosticPhase = "engine-interrupt-release-private-lock";
     const lockPid = sql(`SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid ` +
       `WHERE a.datname='virki_clone' AND l.relation='public."ProjectConnection"'::regclass ` +
-      `AND l.mode='AccessExclusiveLock' AND l.granted AND a.query LIKE '%pg_sleep(85)%'`);
+      `AND l.mode='ShareUpdateExclusiveLock' AND l.granted AND a.query LIKE '%pg_sleep(${INTERRUPT_TIMING.blockerSeconds})%'`);
     ensure(/^[1-9][0-9]{0,9}$/u.test(lockPid));
     ensure(sql(`SELECT pg_terminate_backend(${lockPid})`) === "t");
     ensure(sql(lock) === "0");

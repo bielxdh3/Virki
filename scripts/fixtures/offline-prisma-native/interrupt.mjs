@@ -4,8 +4,9 @@
 // proves the exact Prisma schema engine (not an unrelated test child) got SIGKILL.
 import { spawnSync } from "node:child_process";
 import {
-  constants, openSync, closeSync, readFileSync, readdirSync, writeFileSync,
+  constants, existsSync, openSync, closeSync, readFileSync, readdirSync, writeFileSync,
 } from "node:fs";
+import { INTERRUPT_TIMING } from "../../lib/offline-prisma-native-ddl-observation.mjs";
 
 const PRISMA = "/usr/local/lib/node_modules/prisma/build/index.js";
 const ENGINE = "/usr/local/lib/node_modules/@prisma/engines/schema-engine-debian-openssl-3.0.x";
@@ -33,11 +34,12 @@ const mode = process.argv[2];
 if (process.platform !== "linux" || typeof process.getuid !== "function" ||
     process.getuid() !== 70 || !process.env.VIRKI_PRISMA_NATIVE_DISPOSABLE ||
     process.env.DATABASE_URL || process.env.PGHOSTADDR || process.env.PGHOST ||
-    process.argv.length !== 3 || !["run", "kill", "result"].includes(mode)) refuse();
+    process.argv.length !== 3 || !["run", "kill", "result", "probe"].includes(mode)) refuse();
 if (mode === "run") {
   const command = [PRISMA, "migrate", "deploy", "--schema", SCHEMA];
   const result = spawnSync(process.execPath, command, {
-    shell: false, timeout: 60000, maxBuffer: 4096, encoding: "utf8",
+    shell: false, timeout: INTERRUPT_TIMING.engineTimeoutMs,
+    maxBuffer: 32768, encoding: "utf8",
     env: { ...process.env, DATABASE_URL },
   });
   const evidence = { status: result.status, signal: result.signal,
@@ -46,6 +48,12 @@ if (mode === "run") {
   try { writeFileSync(fd, JSON.stringify(evidence), "utf8"); } finally { closeSync(fd); }
   if (result.error || result.status === 0) refuse();
   process.stdout.write("REAL_PRISMA_CLI_FAILED_AFTER_ENGINE_SIGKILL\n");
+} else if (mode === "probe") {
+  const found = readdirSync("/proc").filter((p) => /^\d+$/u.test(p) && expectedEngine(p));
+  if (found.length > 1) refuse();
+  if (found.length === 1) process.stdout.write("EXACT_SCHEMA_ENGINE_UID_PPID_VERIFIED\n");
+  else if (existsSync(EXIT_MARKER)) process.stdout.write("PRISMA_CLI_EXITED_BEFORE_OBSERVATION\n");
+  else process.stdout.write("ENGINE_NOT_YET_OBSERVED\n");
 } else if (mode === "kill") {
   const found = readdirSync("/proc").filter((p) => /^\d+$/u.test(p) && expectedEngine(p));
   if (found.length !== 1) refuse();

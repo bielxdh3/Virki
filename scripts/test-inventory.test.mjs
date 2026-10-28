@@ -98,6 +98,17 @@ test("every test file is referenced by a root script or the CI workflow", () => 
   );
 });
 
+test("native Prisma DDL observation, P2 result, source and container tests are root-inventoried together", () => {
+  const scripts = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).scripts;
+  const unit = scripts["test:offline:prisma-native:unit"];
+  for (const filename of [
+    "scripts/offline-prisma-native-ddl-observation.test.mjs",
+    "scripts/offline-prisma-native-container.test.mjs",
+    "scripts/offline-prisma-native-source.test.mjs",
+    "scripts/lib/offline-prisma-native-result.test.mjs",
+  ]) assert.ok(unit.includes(filename), `missing from root native-Prisma unit inventory: ${filename}`);
+});
+
 test("integration test files live where the integration runner discovers them", () => {
   const misplaced = testFiles.filter((file) => integrationFilePattern.test(file) && !/^(apps|packages)\//u.test(file));
   assert.deepEqual(misplaced, [], "Integration tests must live under apps/ or packages/.");

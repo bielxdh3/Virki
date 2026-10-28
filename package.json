@@ -28,7 +28,7 @@
     "test:backup:docker-guard": "node --test scripts/backup-validation-docker.test.mjs",
     "test:offline:pg:container": "cross-env VIRKI_OFFLINE_PG_CONTAINER_TEST=1 node --test scripts/offline-pg-recovery-container.test.mjs",
     "test:offline:pg:protocol": "node --test scripts/offline-pg-docker-transport.test.mjs scripts/offline-pg-owner-reconciliation.test.mjs scripts/offline-pg-prisma-protocol.test.mjs",
-    "test:offline:prisma-native:unit": "node --test scripts/offline-prisma-native-container.test.mjs scripts/offline-prisma-native-source.test.mjs scripts/lib/offline-prisma-native-result.test.mjs",
+    "test:offline:prisma-native:unit": "node --test scripts/offline-prisma-native-container.test.mjs scripts/offline-prisma-native-source.test.mjs scripts/lib/offline-prisma-native-result.test.mjs scripts/offline-prisma-native-ddl-observation.test.mjs",
     "test:offline:prisma-native:real": "cross-env VIRKI_PRISMA_NATIVE_DISPOSABLE=1 node scripts/offline-prisma-native-run.mjs happy",
     "test:offline:rollback": "node --test scripts/offline-release-rollback-rehearsal.test.mjs",
     "test:backup:inventory": "node --test scripts/backup-retention-inventory.test.mjs",

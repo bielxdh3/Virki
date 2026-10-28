@@ -12,16 +12,38 @@ and an independent predecessor rollback clone were verified. Both containers
 and their socket volume were removed after exact owner checks, and the completed
 run's protected journal was cleared.
 
-The subsequent, separate **schema-engine SIGKILL experiment failed closed** at
-`engine-interrupt-await-real-ddl`: the test acquired its exclusive PostgreSQL
-table lock and launched a genuine Prisma CLI process, but did not observe a
-matching blocked `ALTER TABLE` in the bounded inspection window. **No SIGKILL
-was sent**. Consequently no interrupted-engine recovery, Prisma `P3009`,
-`resolve --rolled-back`, or successful resume has been demonstrated. The failed
-run's journal remains for reconciliation, despite exact owner-scoped cleanup
-showing zero matching containers and volumes. Earlier unresolved protected
-journals and a retained socket volume are preserved untouched. This fixture
-remains experimental WIP; **it is not production or deployment approval**.
+Two separately bounded **schema-engine SIGKILL experiments failed closed** at
+`engine-interrupt-await-real-ddl`. The original experiment held PostgreSQL
+`AccessExclusiveLock` and launched the real Prisma CLI but could not identify
+the expected blocked first DDL. The second experiment also verified a genuine
+running schema-engine executable with UID 70 and the Prisma CLI parent command,
+but exited `ENGINE_ACTIVE_BUT_FIRST_DDL_NOT_BLOCKED`: no real matching
+PostgreSQL `ALTER TABLE` wait was observed. **No SIGKILL was sent in either
+experiment**. Hence there is no `P3009`, engine-interruption or
+`resolve --rolled-back` recovery proof. Both failed owner journals were
+retained despite exact cleanup of those attempts' own containers/volumes;
+older unresolved journals and a historical volume remain untouched.
+
+The current Stage5 *diagnostic-only* static design (ported from W13 WIP after
+the second failed run) locks `"ProjectConnection"` using
+`SHARE UPDATE EXCLUSIVE`, which still conflicts with the
+`AccessExclusiveLock` needed by the committed first
+`ALTER TABLE "ProjectConnection" ADD COLUMN "launchUrl" TEXT` while
+permitting preliminary `SELECT` reads. The old holder's
+`ACCESS EXCLUSIVE` could have stopped Prisma before the expected DDL;
+this is a **hypothesis, not a proven root cause**. No disposable Docker run
+has tested the revised lock or observation code. The revised static contract
+requires the real PostgreSQL DDL text and ungranted lock, the exact
+`pg_blocking_pids` holder, a live UID/PPID/executable-checked schema engine,
+an unfinished migration and missing target column immediately before sending
+a signal. The PostgreSQL backend cannot independently attest to the Linux
+PID's authorship, and none of these conditions has yet passed together in a
+real run. The CLI, observation and blocker deadlines are bounded and ordered.
+
+The independent P2-negative-result and verified-cleanup guards remain
+mandatory: expected Prisma errors must result from a completed nonzero
+unsignaled invocation; successful status requires confirmed owner-scoped
+cleanup. This Stage5 forward-port is **not production or deployment approval**.
 
 Adversarial completion checks require a completed nonzero, **unsignaled** Docker
 CLI exit before accepting expected Prisma `P1003`/`P3009` or divergence errors.
@@ -31,8 +53,9 @@ owner's exact two containers and socket volume have been verifiably cleaned;
 otherwise the protected journal stays and the command fails closed. The
 standalone interrupted-engine experiment remains a separate unproven gate.
 
-`npm run test:offline:prisma-native:unit` checks the fixed Docker recipe and
-the independent migration-history checksum verifier without connecting to any
+`npm run test:offline:prisma-native:unit` checks the Docker recipe,
+the migration-history checksum verifier, the P2 result/cleanup predicates and
+the static DDL/lock/process-observation contract without connecting to any
 Docker daemon or PostgreSQL instance. `npm run test:offline:prisma-native:real`
 is an explicit Windows Docker Desktop **local-only** opt-in. It refuses Docker
 contexts, remote endpoints, ambient PostgreSQL URLs or credentials, and calls
@@ -82,13 +105,14 @@ before Docker starts; none is allowed to grant release authority or retry a fail
 recovery automatically.
 
 A synchronized SIGKILL *during* the real Prisma schema-engine migration is still
-missing. The experimental `interrupt` mode requires a real PostgreSQL
-`AccessExclusiveLock` and a blocked schema-engine DDL, plus an exact UID,
-executable, and Prisma parent-process check before sending `SIGKILL`. Its first
-bounded live attempt did not reach that checkpoint. Killing an unrelated child,
-or merely observing Prisma launch, would not prove interrupted migration or
-recovery. Further isolated diagnosis and independently reviewed evidence are
-required before this condition can be marked complete.
+missing. The revised experimental `interrupt` mode proposes a real PostgreSQL
+`ShareUpdateExclusiveLock` holder and an independently observed blocked
+`AccessExclusiveLock` on the exact first DDL, plus live UID, executable and
+Prisma parent-process checks before signaling. Both earlier bounded live
+experiments failed before that checkpoint. Killing an unrelated child or
+merely observing Prisma launch would not prove interruption/recovery. The
+new forward-port is static-only pending an independent security peer; **do not
+run a third blind Docker attempt** or claim restored production trust.
 
 Limitations: metadata provided by the local Docker daemon is a consistency
 check, **not an independent attestation** of its kernel identity or custody.
