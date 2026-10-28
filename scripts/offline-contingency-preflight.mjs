@@ -27,6 +27,8 @@ export async function runOfflineContingencyPreflight(input, { inspect = prepareV
       status: "OFFLINE_PRETRANSFER_INSPECTED_ONLY",
       revision: result.revision,
       signedManifestSha256: result.signedManifestSha256,
+      ...(DIGEST.test(result.signedEnvelopeSha256 ?? "")
+        ? { signedEnvelopeSha256: result.signedEnvelopeSha256 } : {}),
       deployAuthorized: false, transferAuthorized: false,
     });
   } catch {

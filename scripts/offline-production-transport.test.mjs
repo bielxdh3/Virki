@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { encodeCanonicalOfflineReleaseManifest } from "./lib/offline-release-attestation.mjs";
-import { prepareVerifiedOfflineTransportPlan, validateOfflineSshConfiguration } from "./offline-production-transport.mjs";
+import { buildPinnedOfflineSshOptions, prepareVerifiedOfflineTransportPlan, validateOfflineSshConfiguration } from "./offline-production-transport.mjs";
 
 const sha = (s) => s.repeat(40);
 const digest = (s) => s.repeat(64);
@@ -118,6 +118,7 @@ function fixture(t) {
   const operator = {
     version: 1, mode: "offline-signed-v1", enabled: true, expectedRevision: revision,
     sshAlias: "virki-prod", host: "virki.example.test", port: 2222, root: "/srv/virki",
+    sshUser: "virki",
     knownHostsSha256: "", runtimeExpandedBytes: 6 * 1024 ** 3,
     migratorExpandedBytes: 5 * 1024 ** 3, databaseBytes: 4 * 1024 ** 3,
   };
@@ -150,7 +151,7 @@ function replaceSignedCi(f, rawCi) {
 }
 
 test("SSH policy rejects unsafe settings and host mismatches before remote actions", () => {
-  const config = { sshAlias: "virki-prod", host: "virki.example.test", port: 2222, root: "/srv/virki" };
+  const config = { sshAlias: "virki-prod", host: "virki.example.test", port: 2222, root: "/srv/virki", sshUser: "debian" };
   const ssh = "hostname virki.example.test\nport 2222\nuser debian\nstricthostkeychecking yes\nproxycommand none\nproxyjump none\n";
   assert.equal(validateOfflineSshConfiguration(ssh, config).hostname, config.host);
   for (const bad of [
@@ -159,8 +160,21 @@ test("SSH policy rejects unsafe settings and host mismatches before remote actio
     ssh.replace("virki.example.test", "attacker.example"),
     ssh.replace("proxycommand none", "proxycommand sh -c evil"),
     ssh.replace("user debian", "user "),
+    ssh.replace("user debian", "user attacker"),
     ssh.replace("proxyjump none", "proxyjump attacker"),
   ]) assert.throws(() => validateOfflineSshConfiguration(bad, config));
+});
+
+test("offline transport SSH ignores ambient Match exec and pins host, port and user at the actual process boundary", () => {
+  const config = { sshAlias: "virki-prod", host: "virki.example.test", port: 2222, root: "/srv/virki", sshUser: "virki" };
+  const options = buildPinnedOfflineSshOptions("/etc/virki/offline-operator", config);
+  assert.deepEqual(options.slice(0, 2), ["-F", "none"]);
+  for (const exactOption of ["HostName=virki.example.test", "Port=2222", "User=virki", "StrictHostKeyChecking=yes",
+    "ProxyCommand=none", "ProxyJump=none", "PermitLocalCommand=no", "ClearAllForwardings=yes"]) {
+    assert.ok(options.includes(exactOption), `missing pinned SSH option ${exactOption}`);
+  }
+  assert.ok(options.includes("UserKnownHostsFile=/etc/virki/offline-operator/ssh-known-hosts"));
+  assert.throws(() => buildPinnedOfflineSshOptions("/tmp/test", { ...config, sshUser: "bad -oProxyCommand=evil" }));
 });
 
 test("complete owner-signed candidate with 19 claimed stages reaches strict Git gate, never SSH on a non-repository", rootProtectedLinuxOnly, async (t) => {
@@ -286,6 +300,7 @@ test("separately protected host-key pin, revision and capacity estimates cannot 
     { databaseBytes: 0 },
     { expectedRevision: sha("f") },
     { sshAlias: "-oProxyCommand=evil" },
+    { sshUser: "attacker; true" },
     { root: "/srv/../demanage" },
     { enabled: false },
   ]) {

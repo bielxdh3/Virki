@@ -15,7 +15,7 @@ import { runProductionPreflight, SSH_OPTIONS } from "./production-preflight.mjs"
 // load, source execution, owner signing, anti-replay write, or GHCR fallback.
 const TRUST_FILES = ["ledger.json", "ssh-known-hosts", "transport-policy.json", "trust-policy.json"];
 const POLICY_FIELDS = [
-  "version", "mode", "enabled", "expectedRevision", "sshAlias", "host", "port", "root",
+  "version", "mode", "enabled", "expectedRevision", "sshAlias", "host", "port", "root", "sshUser",
   "knownHostsSha256", "runtimeExpandedBytes", "migratorExpandedBytes", "databaseBytes",
 ];
 const SHA = /^[a-f0-9]{40}$/u;
@@ -123,7 +123,10 @@ function readOperatorPolicy(raw, pinnedKnownHosts) {
       (n) => Number.isSafeInteger(n) && n > 0 && n <= MAX_CAPACITY),
   "operator has not independently accepted this SHA/SSH fingerprint/capacity budget");
   const config = { sshAlias: p.sshAlias, host: p.host, port: p.port, root: p.root };
-  requireIt(isValidProductionConfig(config), "invalid pinned SSH endpoint");
+  requireIt(isValidProductionConfig(config) &&
+    typeof p.sshUser === "string" && /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u.test(p.sshUser),
+  "invalid pinned SSH endpoint or operator username");
+  config.sshUser = p.sshUser;
   const hostLine = Number(p.port) === 22 ? p.host : "[" + p.host + "]:" + p.port;
   const known = new TextDecoder("utf-8", { fatal: true }).decode(pinnedKnownHosts);
   const lines = known.trimEnd().split("\n");
@@ -153,6 +156,7 @@ export function validateOfflineSshConfiguration(output, config) {
   requireIt(map.get("hostname")?.toLowerCase() === config.host.toLowerCase() &&
     map.get("port") === String(config.port) &&
     /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u.test(map.get("user") ?? "") &&
+    (!config.sshUser || map.get("user") === config.sshUser) &&
     map.get("stricthostkeychecking") === "yes" &&
     map.get("proxycommand") === "none" && map.get("proxyjump") === "none",
   "SSH resolved peer differs from pinned host or does not strictly check keys");
@@ -170,18 +174,34 @@ const IDENTITY_SCRIPT = [
   "",
 ].join("\n");
 
-function approvedSshExecutor(trustedDirectory, config) {
-  const binary = lstatSync(SSH_PATH);
-  requireIt(binary.isFile() && binary.uid === 0 && (binary.mode & 0o022) === 0,
-    "root-owned protected OpenSSH executable unavailable");
-  const options = [
+export function buildPinnedOfflineSshOptions(trustedDirectory, config) {
+  requireIt(typeof trustedDirectory === "string" && path.isAbsolute(trustedDirectory) &&
+    isValidProductionConfig(config) &&
+    typeof config.sshUser === "string" && /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u.test(config.sshUser),
+  "independently accepted SSH endpoint, login and trusted path required");
+  return Object.freeze([
+    // -F none MUST precede the host: even ssh -G executes Match exec from an
+    // ambient ssh_config. Both the target and login user are independently
+    // pinned in the root-owned transport policy, never inferred from config.
+    "-F", "none",
+    "-o", "HostName=" + config.host,
+    "-o", "Port=" + config.port,
+    "-o", "User=" + config.sshUser,
     "-o", "StrictHostKeyChecking=yes",
     "-o", "UserKnownHostsFile=" + path.join(trustedDirectory, "ssh-known-hosts"),
     "-o", "GlobalKnownHostsFile=/dev/null",
     "-o", "UpdateHostKeys=no", "-o", "ProxyCommand=none",
     "-o", "ProxyJump=none", "-o", "ControlMaster=no",
     "-o", "ControlPath=none", "-o", "BatchMode=yes",
-  ];
+    "-o", "PermitLocalCommand=no", "-o", "ClearAllForwardings=yes",
+  ]);
+}
+
+function approvedSshExecutor(trustedDirectory, config) {
+  const binary = lstatSync(SSH_PATH);
+  requireIt(binary.isFile() && binary.uid === 0 && (binary.mode & 0o022) === 0,
+    "root-owned protected OpenSSH executable unavailable");
+  const options = buildPinnedOfflineSshOptions(trustedDirectory, config);
   return (command, args, extras = {}) => {
     requireIt(command === "ssh" && Array.isArray(args) &&
       (args[0] === "-G" || args.includes(config.sshAlias)),
@@ -262,7 +282,8 @@ export async function prepareVerifiedOfflineTransportPlan(inputs = {}) {
     "SSH target identity differs from the independently pinned signed host");
   const rechecked = await inspectUntrustedOfflineCandidate({ candidateDirectory });
   requireIt(rechecked.manifestDigest === candidate.manifestDigest &&
-    JSON.stringify(rechecked.expected) === JSON.stringify(candidate.expected),
+    JSON.stringify(rechecked.expected) === JSON.stringify(candidate.expected) &&
+    JSON.stringify(rechecked.signatures) === JSON.stringify(candidate.signatures),
   "candidate changed while performing remote read-only checks");
   requireIt(sha256(readProtectedInputs(trustedDirectory)["ssh-known-hosts"]) === policy.knownHostsSha256,
     "protected SSH host public key changed during verification");
@@ -271,6 +292,10 @@ export async function prepareVerifiedOfflineTransportPlan(inputs = {}) {
     deployAuthorized: false,
     transferAuthorized: false,
     signedManifestSha256: proof.manifestSha256,
+    // The signed manifest alone does not identify the signature envelope.
+    // Bind exactly the canonical signatures that passed use-time proof, so a
+    // subsequent local staging handoff can reject any replacement envelope.
+    signedEnvelopeSha256: sha256(Buffer.from(JSON.stringify(candidate.signatures))),
     revision: proof.sourceSha,
     host: config.host,
     port: Number(config.port),

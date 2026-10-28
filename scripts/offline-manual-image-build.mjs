@@ -167,7 +167,8 @@ function inspectCommittedTree(repositoryRoot, revision, execute) {
     const parts = rawName.split('/');
     requireIt(!parts.some((part) => part === '' || part.endsWith('.') || part.endsWith(' ') ||
       /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part) ||
-      /[<>:"\\|?*\u0000-\u001f]/u.test(part)) && !casefolded.has(filename),
+      (/[<>:"\\|?*]/u.test(part) || [...part].some((character) =>
+        character.codePointAt(0) < 32))) && !casefolded.has(filename),
     'Git source cannot be faithfully extracted to Windows pathnames');
     casefolded.add(filename);
     entries.push(Object.freeze({ file: rawName, objectId: match[2] }));
