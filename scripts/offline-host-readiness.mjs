@@ -24,12 +24,20 @@ const PINNED_SSH_OPTIONS = Object.freeze([
   "-o", "ClearAllForwardings=yes",
 ]);
 
-function pinnedReadOnlySshOptions(config, sshUser) {
+function pinnedReadOnlySshOptions(config, sshUser, pinnedProfile) {
   // -F none is essential: Match exec directives execute during ssh -G, even
   // when PermitLocalCommand=no. Never parse an ambient user/system config.
   return ["-F", "none", ...PINNED_SSH_OPTIONS,
     "-o", `HostName=${config.host}`, "-o", `Port=${config.port}`,
-    "-o", `User=${sshUser}`, "-o", `HostKeyAlias=${config.sshAlias}`];
+    "-o", `User=${sshUser}`, "-o", `HostKeyAlias=${config.sshAlias}`,
+    ...(pinnedProfile ? [
+      "-o", `UserKnownHostsFile=${pinnedProfile.knownHostsFile}`,
+      "-o", "GlobalKnownHostsFile=none", "-o", "HostKeyAlgorithms=ssh-ed25519",
+      "-o", "UpdateHostKeys=no", "-o", "IdentitiesOnly=yes",
+      "-o", "IdentityAgent=none", "-o", "PasswordAuthentication=no",
+      "-o", "KbdInteractiveAuthentication=no", "-o", "NumberOfPasswordPrompts=0",
+      "-i", pinnedProfile.identityFile,
+    ] : [])];
 }
 
 // OpenSSH -G prints StrictHostKeyChecking=yes as "true" on Windows, and
@@ -91,12 +99,16 @@ done
 export async function inspectOfflineHostReadiness({
   config = readProductionConfig(),
   sshUser = config?.sshUser ?? process.env.VIRKI_OFFLINE_SSH_USER,
+  // Used only after a separately verified fixed operator identity/profile.
+  pinnedProfile,
+  sshCommand = "ssh",
   execute = (command, args, options = {}) => {
     const result = spawnSync(command, args, {
       shell: false, windowsHide: true, encoding: "utf8",
       input: options.input,
       timeout: 15_000, maxBuffer: 4096,
       stdio: options.input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+      ...(options.env ? { env: options.env } : {}),
     });
     return { status: result.error || result.signal ? 1 : result.status, stdout: result.stdout ?? "" };
   },
@@ -105,12 +117,20 @@ export async function inspectOfflineHostReadiness({
     if (!isValidProductionConfig(config) ||
       !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/u.test(config.host) ||
       !/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u.test(sshUser ?? "")) return BLOCKED;
-    const options = pinnedReadOnlySshOptions(config, sshUser);
-    const resolved = execute("ssh", ["-G", ...options, config.host]);
+    if (pinnedProfile && (typeof pinnedProfile !== "object" ||
+        Object.keys(pinnedProfile).length !== 3 ||
+        typeof pinnedProfile.knownHostsFile !== "string" ||
+        typeof pinnedProfile.identityFile !== "string" ||
+        typeof pinnedProfile.environment !== "object" ||
+        sshCommand !== "/usr/bin/ssh")) return BLOCKED;
+    const options = pinnedReadOnlySshOptions(config, sshUser, pinnedProfile);
+    const invocationOptions = pinnedProfile ? { env: pinnedProfile.environment } : {};
+    const resolved = execute(sshCommand, ["-G", ...options, config.host], invocationOptions);
     if (resolved.status !== 0 || typeof resolved.stdout !== "string" || resolved.stdout.length > 8192) return BLOCKED;
     if (!validateReadOnlySshConfiguration(resolved.stdout, config, sshUser)) return BLOCKED;
 
-    const remote = execute("ssh", [...options, config.host, "bash -s --"], { input: SCRIPT });
+    const remote = execute(sshCommand, [...options, config.host, "bash -s --"],
+      { ...invocationOptions, input: SCRIPT });
     if (remote.status !== 0 || typeof remote.stdout !== "string" || remote.stdout.length > 512) return BLOCKED;
     const lines = remote.stdout.split(/\r?\n/u);
     if (lines.pop() !== "" || lines.length !== OFFLINE_COMPONENTS.length) return BLOCKED;
