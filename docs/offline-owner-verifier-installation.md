@@ -302,6 +302,49 @@ independent owner approval. The fixture-only build uses separate compile-time
 mechanics on WSL. It cannot authenticate a production host; normal builds
 unconditionally reject WSL. No host `/etc` paths are written by the tests.
 
+### Stage8 independent native dynamic-ELF closure preparation (non-authorizing)
+
+`infra/offline/native-bootstrap/native-dynamic-closure.c` and its adversarial
+Node22 test inspect a **real dynamically linked** Node Linux/amd64 binary. This
+is a separate, statically linked, read-only diagnostic; it does not modify the
+static launcher, execute dynamic Node, read private signing keys, or connect
+to the eleven-file installed verifier. The production-source build rejects
+WSL and missing, non-root-owned or writable operator inventory bytes at the
+fixed `/etc/virki/offline-native-guard/operator-elf-closure.txt` path.
+
+The exact inventory starts with `VIRKI_DEV_ELF_CLOSURE_V1` followed by
+ordered `SONAME canonical-absolute-path sha256` rows (starting with the
+fixed `node` executable and the loader). It is an **untrusted proposal**,
+not an owner signature. The diagnostic validates the complete transitive
+`DT_NEEDED` graph, SONAME names, `PT_INTERP` target, kernel-visible root
+file ownership, unwritable path ancestors, regular single-link inodes,
+canonical paths, bounded ELF metadata and SHA-256 of each opened FD. Verified
+bytes are copied into separate sealed `memfd` FDs and parsed from those
+immutable snapshots, not reloaded from mutable paths. The Debian/Ubuntu
+Node22 `$ORIGIN/../lib:$ORIGIN/` RUNPATH and its root-owned interpreter
+symlinks are accepted as **observed data only**, not as safe runtime
+resolution. Other RUNPATH/RPATH/audit/filter entries fail closed.
+
+The fixture-only binary uses an explicitly separate compile-time path under
+`/root/virki-elf-closure-fixture-*`, never creates an owner root, never
+signs an inventory and reads only the fixture's manifest and installed
+system Node libraries. Tests prove that a wrong main/loader/transitive DSO
+digest, missing or duplicate SONAME, altered inventory, injected environment
+or wrong executable causes refusal. Even successful output is only
+`DEV_ONLY_REAL_NODE22_ELF_CLOSURE_MEASURED_NO_EXEC_NO_AUTHORITY`.
+
+**Still required before a real independently trusted dynamic launch:**
+an operator-held Ed25519 public trust root, a signature on the exact
+versioned inventory, independently audited kernel/host/launcher bytes, and
+an immutable OS-enforced mount/loader namespace that binds the kernel's
+`PT_INTERP` open and every subsequent `DT_NEEDED`, `dlopen`, NSS and addon
+resolution to those approved bytes. The current pre-execution FD snapshots
+are not automatically consulted by the kernel's ELF interpreter or ld.so.
+An `execveat` of Node alone would restore the race; therefore **no dynamic
+execveat or release permission is implemented**. A root-owned manifest is
+not a substitute for an owner signature or a rollback-resistant witness.
+Production and native release activation remain **NO-GO**.
+
 ## Disposable native validation
 
 The root fixture writes only beneath `/tmp/virki-owner-install-fixture-XXXXXX`
