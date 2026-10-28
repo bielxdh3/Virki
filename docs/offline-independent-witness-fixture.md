@@ -42,3 +42,37 @@ Every response explicitly contains
 `witnessCasAuthorized:false`, `dockerLoadAuthorized:false`, and
 `deployAuthorized:false`. This protocol is not wired to the offline release
 coordinator and cannot grant production, Docker, or release permissions.
+
+## Disposable ledger-reservation CAS composition (not production wiring)
+
+`infra/offline/disposable-witness-ledger-reservation.mjs` adds a **test-only**
+composition of the existing pure ledger transition and witness verification.
+It requires `VIRKI_DISPOSABLE_WITNESS_SERVICE=1` on Linux, a separately supplied
+owner-signed CAS request, pinned Ed25519 witness and owner public keys, explicit
+host/ledger scope, and a checkpoint held **outside the ledger**. Its CAS
+`transitionSha256` is `SHA256("VIRKI_OFFLINE_WITNESS_LEDGER_RESERVATION_V1" +
+NUL + canonical JSON of the entire reservation request)`, including ledger
+directory, accepted manifest digest, predecessor/next SHA, nonce, sequence and
+owner approval digest. The test bridge validates a fresh signed HEAD against
+the external checkpoint, matches it with the ledger predecessor, verifies the
+independently signed CAS receipt, then calls a separately provided reservation
+function with an immutable exact request. It cannot issue owner approvals or
+sign witness receipts. No signer or fake production trust key is embedded.
+
+Witness CAS and ledger `O_EXCL` reservation are **not an atomic transaction**.
+If power fails after CAS or the witness reply is lost, the witness has advanced
+but the ledger reservation may not exist. The same transition MUST NOT be
+automatically retried, its checkpoint silently reset, or its witness state
+rewound. Independent operator recovery and monotonic checkpoint update must
+precede any next attempt. The current code explicitly refuses such replay.
+
+This bridge does **not** modify `trusted-release-coordinator.mjs`, enable an
+installed host entrypoint, transport a release, or authorize any deployment.
+It intentionally accepts in-process callbacks only in a disposable fixture:
+callbacks and caller-supplied pins are **not authenticated production remote
+trust**. Before any actual coordinator integration, the owner must independently
+provision a witness service on a distinct trust domain, secure signing-key
+custody, authenticated mutually pinned network transport, independently durable
+monotonic checkpoints, a read-only/recovery reconciliation policy for ambiguous
+CAS outcomes, and a separately reviewed native installed entrypoint. Existing
+local SQLite+anchor rollback caveats still apply. Production remains NO-GO.
