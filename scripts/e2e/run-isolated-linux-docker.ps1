@@ -347,7 +347,8 @@ function Invoke-Stage {
       exitCode = $exitCode
     })
   }
-  Write-Output ("[RESULT] {0} exit={1} durationMs={2}" -f $Name, $exitCode, [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 3))
+  $durationInvariant = [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 3).ToString('0.###', [System.Globalization.CultureInfo]::InvariantCulture)
+  Write-Output ("[RESULT] {0} exit={1} durationMs={2}" -f $Name, $exitCode, $durationInvariant)
   if ($Preparatory -and $exitCode -ne 0) { throw 'Virgin database integration preflight failed.' }
 }
 

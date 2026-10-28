@@ -89,6 +89,7 @@ test("forged reports, wrong SHA, skipped stages, duplicated results, replay and 
     "duplicate result": (f, input) => { input.stdout = Buffer.from(f.stdout.toString().replace(/\[RESULT\] lint exit=0 durationMs=1000/u, "[RESULT] lint exit=0 durationMs=1000\n[RESULT] lint exit=0 durationMs=1000")); },
     "stage reordered": (f, input) => { input.stdout = Buffer.from(f.stdout.toString().replace(/\[tooling-policy-dependencies\]/u, "[lint]")); },
     "reported stage exit differs": (f, input) => { input.stdout = Buffer.from(f.stdout.toString().replace(/\[RESULT\] build exit=0/u, "[RESULT] build exit=1")); },
+    "noncanonical comma duration remains rejected": (f, input) => { input.stdout = Buffer.from(f.stdout.toString().replace(/durationMs=1000/u, "durationMs=1000,5")); },
   };
   for (const [name, mutate] of Object.entries(attacks)) {
     await suite.test(name, () => {
@@ -101,6 +102,34 @@ test("forged reports, wrong SHA, skipped stages, duplicated results, replay and 
       } finally { f.cleanup(); }
     });
   }
+});
+
+test("Windows PowerShell 5.1 pt-BR real Invoke-Stage emits canonical invariant duration for strict receipts", { skip: process.platform !== "win32" }, () => {
+  // Extract the actual committed fixture function via the PowerShell AST.
+  // Its Docker dependency is a dummy: this regression never contacts a daemon.
+  const source = path.join(path.dirname(fileURLToPath(import.meta.url)), "e2e", "run-isolated-linux-docker.ps1");
+  const ps = `
+$ErrorActionPreference = 'Stop'
+$errors = $null
+$tokens = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('${source.replace(/'/gu, "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { throw 'Fixture did not parse' }
+$fn = $ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Stage'}, $true)
+if (-not $fn) { throw 'Real stage emitter missing' }
+Invoke-Expression $fn.Extent.Text
+function Invoke-PinnedDocker { $global:LASTEXITCODE = 0 }
+$script:runnerName = 'SYNTHETIC_TEST_ONLY'
+$script:results = [System.Collections.Generic.List[string]]::new()
+$script:stageManifest = [System.Collections.Generic.List[object]]::new()
+[System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('pt-BR')
+Invoke-Stage -Name 'runtime' -Command @('true')
+`;
+  const result = spawnSync("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", timeout: 10_000 });
+  assert.equal(result.status, 0, "isolated PowerShell stage stub must succeed");
+  const lines = result.stdout.split(/\r?\n/u);
+  const emitted = lines.find((line) => line.startsWith("[RESULT] runtime "));
+  assert.match(emitted, /^\[RESULT\] runtime exit=0 durationMs=[0-9]+(?:\.[0-9]+)?$/u);
 });
 
 test("bounded child executes real code and blocks stdout overflow and timeout", async () => {
