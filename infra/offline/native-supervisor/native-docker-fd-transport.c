@@ -449,6 +449,124 @@ static int make_verified_snapshot(int source, uint64_t length,
   }
   return sealed;
 }
+
+/* Consume an RFC 3629 UTF-8 scalar in JSON string payloads. In particular,
+ * reject forbidden lead octets, overlong forms, surrogate code points and
+ * values greater than U+10FFFF; these bytes are otherwise invisible to the
+ * narrow JSON field-name parser. `at` advances only within the bounded line. */
+static bool load_escape_hex16(const char *bytes, size_t end, size_t *at,
+                               unsigned *value) {
+  if (!bytes || !at || !value || *at > end || end - *at < 4) return false;
+  unsigned parsed = 0;
+  for (unsigned n = 0; n < 4; n++) {
+    const unsigned char digit = (unsigned char)bytes[(*at)++];
+    unsigned nibble;
+    if (digit >= '0' && digit <= '9') nibble = digit - '0';
+    else if (digit >= 'a' && digit <= 'f') nibble = digit - 'a' + 10;
+    else if (digit >= 'A' && digit <= 'F') nibble = digit - 'A' + 10;
+    else return false;
+    parsed = (parsed << 4) | nibble;
+  }
+  *value = parsed;
+  return true;
+}
+
+static bool load_utf8_scalar(const char *bytes, size_t end, size_t *at,
+                             unsigned char lead) {
+  unsigned count = 0;
+  unsigned char first_low = 0x80, first_high = 0xbf;
+  if (lead >= 0xc2 && lead <= 0xdf) count = 1;
+  else if (lead == 0xe0) { count = 2; first_low = 0xa0; }
+  else if (lead >= 0xe1 && lead <= 0xec) count = 2;
+  else if (lead == 0xed) { count = 2; first_high = 0x9f; }
+  else if (lead >= 0xee && lead <= 0xef) count = 2;
+  else if (lead == 0xf0) { count = 3; first_low = 0x90; }
+  else if (lead >= 0xf1 && lead <= 0xf3) count = 3;
+  else if (lead == 0xf4) { count = 3; first_high = 0x8f; }
+  else return false;
+  if (end - *at < count) return false;
+  for (unsigned n = 0; n < count; n++) {
+    unsigned char continuation = (unsigned char)bytes[(*at)++];
+    if (continuation < (n == 0 ? first_low : 0x80) ||
+        continuation > (n == 0 ? first_high : 0xbf)) return false;
+  }
+  return true;
+}
+
+/* Docker may return HTTP 200 yet report image-load failures in its NDJSON
+ * body. Accept only the narrow, observed {"stream":"..."} subset for the
+ * disposable transport. Any extra field (especially error/errorDetail),
+ * malformed JSON, incomplete final line, or oversized line fails closed.
+ * This is a receipt grammar check, never proof of image identity or admission;
+ * the caller must independently check the loaded image before considering
+ * any later action. Other daemon response formats remain UNVERIFIED. */
+static bool load_stream_receipt(const char *bytes, size_t size) {
+  if (!bytes || size == 0 || size > VDT_MAX_BODY) return false;
+  size_t pos = 0, lines = 0;
+  while (pos < size) {
+    if (++lines > 512) return false;
+    size_t start = pos;
+    while (pos < size && bytes[pos] != '\n') {
+      if (pos - start >= 16384) return false;
+      pos++;
+    }
+    if (pos == size) return false; /* NDJSON records require LF terminators. */
+    size_t end = pos++;
+    if (end > start && bytes[end - 1] == '\r') end--;
+    size_t at = start;
+#define SKIP_JSON_SPACE() while (at < end && (bytes[at] == ' ' || bytes[at] == '\t')) at++
+    SKIP_JSON_SPACE();
+    if (at >= end || bytes[at++] != '{') return false;
+    SKIP_JSON_SPACE();
+    static const char field[] = "\"stream\"";
+    if (end - at < sizeof field - 1 ||
+        memcmp(bytes + at, field, sizeof field - 1) != 0) return false;
+    at += sizeof field - 1;
+    SKIP_JSON_SPACE();
+    if (at >= end || bytes[at++] != ':') return false;
+    SKIP_JSON_SPACE();
+    if (at >= end || bytes[at++] != '"') return false;
+    bool has_content = false, terminated = false;
+    while (at < end) {
+      unsigned char c = (unsigned char)bytes[at++];
+      if (c == '"') { terminated = true; break; }
+      if (c < 0x20) return false;
+      if (c >= 0x80 && !load_utf8_scalar(bytes, end, &at, c)) return false;
+      has_content = true;
+      if (c == '\\') {
+        if (at >= end) return false;
+        char escaped = bytes[at++];
+        if (escaped == 'u') {
+          unsigned unicode;
+          if (!load_escape_hex16(bytes, end, &at, &unicode)) return false;
+          if (unicode >= 0xdc00 && unicode <= 0xdfff) return false;
+          if (unicode >= 0xd800 && unicode <= 0xdbff) {
+            /* RFC 8259's ABNF tolerates lone UTF-16 surrogates although
+             * they cannot form a Unicode scalar and consumers disagree on
+             * interpretation. Require immediately adjacent low surrogate. */
+            if (end - at < 6 || bytes[at] != '\\' || bytes[at + 1] != 'u')
+              return false;
+            at += 2;
+            unsigned low;
+            if (!load_escape_hex16(bytes, end, &at, &low) ||
+                low < 0xdc00 || low > 0xdfff) return false;
+          }
+        } else if (!(escaped == '"' || escaped == '\\' ||
+                     escaped == '/' || escaped == 'b' || escaped == 'f' ||
+                     escaped == 'n' || escaped == 'r' || escaped == 't'))
+          return false;
+      }
+    }
+    if (!terminated || !has_content) return false;
+    SKIP_JSON_SPACE();
+    if (at >= end || bytes[at++] != '}') return false;
+    SKIP_JSON_SPACE();
+    if (at != end) return false;
+#undef SKIP_JSON_SPACE
+  }
+  return lines > 0;
+}
+
 bool vdt_exchange(struct vdt_session *s, enum vdt_command command,
                   int archive_fd, uint64_t archive_size,
                   const char *image, char *response, size_t capacity,
@@ -543,6 +661,7 @@ bool vdt_exchange(struct vdt_session *s, enum vdt_command command,
     }
     response[body] = 0;
   }
+  if (command == VDT_LOAD && !load_stream_receipt(response, body)) goto fail;
   *response_size = body;
   if (!no_pending_bytes(s->fd) || !same_peer(s)) goto fail;
   if (sealed_fd >= 0) close(sealed_fd);

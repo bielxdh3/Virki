@@ -69,10 +69,46 @@ test("bounded, reusable native Linux FD transport remains nonauthorizing", {
           incoming = incoming.subarray(end + 4 + length);
           seen.push({ header, size: body.length,
             sha: createHash("sha256").update(body).digest("hex") });
-          const responseBody = phase === 0 ? "OK" :
+          let responseBody = phase === 0 ? "OK" :
             phase === 1 ? '{"ID":"disposable"}' :
             phase === 2 ? '{"stream":"test import receipt"}\n' :
             '{"Id":"sha256:' + "a".repeat(64) + '"}';
+          if (phase === 2) {
+            if (mode === "load-error-only") responseBody = '{"error":"archive refused"}\n';
+            if (mode === "load-error-after-stream") responseBody =
+              '{"stream":"processing"}\n{"error":"failed after processing"}\n';
+            if (mode === "load-error-detail") responseBody =
+              '{"errorDetail":{"message":"invalid tar"}}\n';
+            if (mode === "load-malformed-ndjson") responseBody =
+              '{"stream":"ok"}\n{"stream":false}\n';
+            if (mode === "load-unterminated-line") responseBody =
+              '{"stream":"ok"}';
+            if (mode === "load-empty-body") responseBody = "";
+            if (mode === "load-nul-body") responseBody =
+              '{"stream":"good"}\u0000\n';
+            if (mode === "load-escaped-nul") responseBody =
+              '{"stream":"unexpected\\' + '\u0000' + '"}\n';
+            if (mode === "load-chunked-error") responseBody =
+              '{"stream":"processing"}\n{"error":"failed"}\n';
+            if (mode === "load-extra-fields") responseBody =
+              '{"stream":"ok","error":"masked"}\n';
+            if (mode === "load-escaped-valid") responseBody =
+              '{"stream":"Loaded image ID: sha256:abc\\n"}\n';
+            if (mode === "load-escaped-surrogate-pair") responseBody =
+              '{"stream":"Emoji \\uD83D\\uDE03"}\n';
+            if (mode === "load-escaped-lone-high") responseBody =
+              '{"stream":"invalid \\uD800"}\n';
+            if (mode === "load-escaped-lone-low") responseBody =
+              '{"stream":"invalid \\uDC00"}\n';
+            if (mode === "load-valid-unicode") responseBody =
+              '{"stream":"Imagem pronta ✓"}\n';
+            if (mode === "load-invalid-utf8-ff") responseBody = Buffer.concat([
+              Buffer.from('{"stream":"'), Buffer.from([0xff]), Buffer.from('"}\n'),
+            ]);
+            if (mode === "load-invalid-utf8-overlong") responseBody = Buffer.concat([
+              Buffer.from('{"stream":"'), Buffer.from([0xc0, 0xaf]), Buffer.from('"}\n'),
+            ]);
+          }
           let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
             "Content-Length: " + Buffer.byteLength(responseBody) +
             "\r\nConnection: keep-alive\r\n\r\n";
@@ -85,7 +121,7 @@ test("bounded, reusable native Linux FD transport remains nonauthorizing", {
           if (mode === "chunked-smuggling" && phase === 0)
             headers = headers.replace("Connection: keep-alive",
               "Transfer-Encoding: chunked\r\nConnection: keep-alive");
-          if (["chunked-valid", "fragment-chunked", "chunked-trailer"].includes(mode) &&
+          if (["chunked-valid", "fragment-chunked", "chunked-trailer", "load-chunked-error"].includes(mode) &&
               phase === 2)
             headers = headers.replace(/Content-Length: [0-9]+\r\n/u,
               "Transfer-Encoding: chunked\r\n");
@@ -100,7 +136,7 @@ test("bounded, reusable native Linux FD transport remains nonauthorizing", {
               "X-Pad: " + "A".repeat(9000) + "\r\nConnection: keep-alive");
           if (mode === "dead-on-load" && phase === 2) { socket.destroy(); return; }
           if (mode === "stall-on-load" && phase === 2) return;
-          if (["chunked-valid", "fragment-chunked", "chunked-trailer"].includes(mode) &&
+          if (["chunked-valid", "fragment-chunked", "chunked-trailer", "load-chunked-error"].includes(mode) &&
               phase === 2) {
             const framed = Buffer.byteLength(responseBody).toString(16) + "\r\n" +
               responseBody + "\r\n0\r\n" +
@@ -118,7 +154,8 @@ test("bounded, reusable native Linux FD transport remains nonauthorizing", {
             socket.write(headers);
           else if (mode === "wrong-body" && phase === 0)
             socket.write(headers + "NO");
-          else socket.write(headers + responseBody);
+          else socket.write(Buffer.isBuffer(responseBody) ?
+            Buffer.concat([Buffer.from(headers), responseBody]) : headers + responseBody);
           if (mode === "mutate-after-info" && phase === 1) {
             mutated = true;
             writeFileSync(file, Buffer.alloc(payload.length, 0x5a));
@@ -238,6 +275,34 @@ test("bounded, reusable native Linux FD transport remains nonauthorizing", {
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.seen.length, 4);
   });
+  await t.test("escaped Docker stream JSON is a valid framed receipt", async () => {
+    const r = await run("load-escaped-valid");
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.seen.length, 4);
+  });
+  await t.test("valid surrogate pair escapes form one JSON Unicode scalar", async () => {
+    const r = await run("load-escaped-surrogate-pair");
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.seen.length, 4);
+  });
+  await t.test("valid Docker stream JSON may contain genuine UTF-8 scalar values", async () => {
+    const r = await run("load-valid-unicode");
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.seen.length, 4);
+  });
+  for (const mode of ["load-error-only", "load-error-after-stream",
+    "load-error-detail", "load-malformed-ndjson", "load-unterminated-line",
+    "load-empty-body", "load-nul-body", "load-escaped-nul", "load-chunked-error",
+    "load-extra-fields", "load-invalid-utf8-ff", "load-invalid-utf8-overlong",
+    "load-escaped-lone-high", "load-escaped-lone-low"]) {
+    await t.test(`HTTP 200 ${mode} must refuse before image inspect`, async () => {
+      const r = await run(mode);
+      assert.equal(r.code, 2, r.stderr);
+      assert.equal(r.seen.length, 3, `Unexpected request sequence: ${mode}`);
+      assert.equal(r.json.dockerLoadAuthorized, false);
+      assert.equal(r.json.deployAuthorized, false);
+    });
+  }
   await t.test("image ID injection cannot reach Docker inspect endpoint", async () => {
     const r = await run("normal", { clientMode: "bad-image-id" });
     assert.equal(r.code, 2, r.stderr);

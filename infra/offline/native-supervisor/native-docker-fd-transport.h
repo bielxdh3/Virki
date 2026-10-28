@@ -55,6 +55,12 @@ bool vdt_attach(struct vdt_session *session, int already_connected_fd,
  * installed usage requires a separately supervised, interruptible staging
  * boundary before any trust or production authority can be claimed.
  * For VDT_IMAGE_INSPECT, image_hex64 is the exact image digest in the URL.
+ * LOAD additionally requires nonempty, bounded, newline-terminated NDJSON
+ * records of exactly {"stream":"..."}; HTTP 200 with error/errorDetail,
+ * unexpected fields or malformed records fails and poisons the session.
+ * This strict subset may reject untested real-daemon response variants.
+ * A valid receipt cannot authorize a release; caller must independently
+ * establish the loaded image identity and owner-rooted signed TAR provenance.
  * The response must be fully consumed; caller interprets it as untrusted.
  * A failed exchange permanently invalidates this session. */
 bool vdt_exchange(struct vdt_session *session, enum vdt_command command,
