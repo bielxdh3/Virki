@@ -83,17 +83,19 @@ const userinfo = (accessToken: string) => fetch(`${origin}/me`, { headers: { aut
 const purge = (userId: string) => prisma.$transaction((transaction) => revokeUserOidcArtifactsInTransaction(transaction, userId));
 
 test("artifact storage removes nonpositive TTL rewrites and cleanup includes the exact expiry boundary", integrationOptions, async () => {
+  const fixture = await seed();
   const adapter = new PrismaOidcAdapter("Interaction");
+  const interactionPayload = { params: { client_id: fixture.clientId } } as never;
   const expiredId = randomUUID();
-  await adapter.upsert(expiredId, { params: {} } as never, 300);
-  await adapter.upsert(expiredId, { params: {} } as never, 0);
+  await adapter.upsert(expiredId, interactionPayload, 300);
+  await adapter.upsert(expiredId, interactionPayload, 0);
   assert.equal(await adapter.find(expiredId), undefined);
   assert.equal(await prisma.oidcArtifact.count({ where: { idHash: hashOidcIdentifier(expiredId) } }), 0);
 
   const cutoff = new Date(Date.now() + 3_000);
   const identifiers = [randomUUID(), randomUUID(), randomUUID()];
   for (const [index, id] of identifiers.entries()) {
-    await adapter.upsert(id, { params: {} } as never, 300);
+    await adapter.upsert(id, interactionPayload, 300);
     await prisma.oidcArtifact.update({ where: { model_idHash: { model: "Interaction", idHash: hashOidcIdentifier(id) } }, data: { expiresAt: new Date(cutoff.getTime() + index - 1) } });
   }
   await deleteExpiredOidcArtifacts(prisma, cutoff);

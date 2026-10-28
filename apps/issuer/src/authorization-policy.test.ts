@@ -128,10 +128,10 @@ test("OIDC provider session assurance, methods, and auth time must match the cur
   }), false, "auth_time must be refreshed after a new central session");
 });
 
-test("OIDC ACR loa:2 creates an interaction unless the provider session has current MFA assurance", () => {
+test("voluntary OIDC ACR loa:2 does not loop when password authentication cannot provide MFA", () => {
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd", "otp", "mfa"] }), true);
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:2", authenticationMethods: ["pwd", "otp", "mfa"] }), false);
-  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), true);
+  assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:2", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
   assert.equal(requiresOidcAssuranceInteraction({ requestedAcrValues: "urn:virki:loa:1", currentAcr: "urn:virki:loa:1", authenticationMethods: ["pwd"] }), false);
 });
 

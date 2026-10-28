@@ -116,7 +116,7 @@ export function requiresOidcAssuranceInteraction(input: {
   const requestsMultiFactor = requestedAcrValues.includes(MULTI_FACTOR_ACR) &&
     (!requestedAcrValues.includes(PASSWORD_ACR) || input.authenticationMethods.includes("mfa"));
   return requestsMultiFactor && (
-    !input.authenticationMethods.includes("mfa") || input.currentAcr !== MULTI_FACTOR_ACR
+    input.authenticationMethods.includes("mfa") && input.currentAcr !== MULTI_FACTOR_ACR
   );
 }
 

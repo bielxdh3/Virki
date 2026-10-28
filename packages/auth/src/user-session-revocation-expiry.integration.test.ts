@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { after, test } from "node:test";
 import React from "react";
-import { prisma } from "@virki/database";
+import { PrismaClient, prisma } from "@virki/database";
 import * as auth from "./index";
 import { AccountSessionRevocationError } from "./session-revocation";
 import { createTestUser, integrationOptions } from "./integration-fixtures";
@@ -151,13 +151,28 @@ test("USER bulk revoke rolls back a completed target UPDATE if the success audit
   const user = await createTestUser({ label: "bulk-post-audit-expiry" });
   const current = await addSession(user.id);
   const victim = await addSession(user.id);
+  const migrationUrl = process.env.MIGRATION_DATABASE_URL;
+  const integrationConnectionUrl = process.env.VIRKI_INTEGRATION_DATABASE_URL;
+  assert.ok(migrationUrl, "the isolated integration runner must provide its disposable migration-role URL for the AuditLog table lock");
+  assert.ok(integrationConnectionUrl, "the integration runner must provide its disposable runtime URL");
+  const migrationTarget = new URL(migrationUrl);
+  const integrationTarget = new URL(integrationConnectionUrl);
+  assert.equal(migrationTarget.hostname, "127.0.0.1");
+  assert.equal(decodeURIComponent(migrationTarget.username), "virki_migrator");
+  assert.equal(migrationTarget.hostname, integrationTarget.hostname);
+  assert.equal(migrationTarget.port, integrationTarget.port);
+  assert.equal(migrationTarget.pathname, integrationTarget.pathname);
+  assert.equal(migrationTarget.search, integrationTarget.search);
+  const auditLockClient = new PrismaClient({ datasources: { db: { url: migrationUrl } } });
   let acquired!: () => void;
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { acquired = resolve; });
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let blockerPid = 0;
-  const blocker = prisma.$transaction(async (tx) => {
+  const blocker = auditLockClient.$transaction(async (tx) => {
     [{ pid: blockerPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    // Keep the runtime role narrow; only this disposable migrator connection
+    // owns the table lock needed to prove a real audit INSERT wait.
     await tx.$executeRawUnsafe('LOCK TABLE "AuditLog" IN ACCESS EXCLUSIVE MODE');
     acquired();
     await gate;
@@ -186,13 +201,14 @@ test("USER bulk revoke rolls back a completed target UPDATE if the success audit
       if ((rows[0]?.count ?? 0) > 0) { observed = true; break; }
       await new Promise<void>((resolve) => setTimeout(resolve, 15));
     }
-    assert.equal(observed, true, "a real INSERT into AuditLog must be blocked after revoking the target");
+    assert.equal(observed, true, "a real AuditLog INSERT must wait on its actor FK after revoking the target");
     assert.ok(Date.now() < expiresAt.getTime(), "current session must be valid when audit INSERT starts waiting");
     await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, expiresAt.getTime() - Date.now() + 120)));
     assert.ok(Date.now() >= expiresAt.getTime(), "session must expire while audit INSERT still waits");
   } finally {
     release();
     await Promise.allSettled([blocker, outcome]);
+    await auditLockClient.$disconnect();
   }
   assert.equal((await blocker).ok, true);
   assert.equal((await outcome)?.ok, false, "post-audit expiry recheck must roll back the prior successful UPDATE");

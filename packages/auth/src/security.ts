@@ -72,6 +72,7 @@ export type LoginCeremonyFailureStage =
   | "account-state"
   | "account-lock-query"
   | "account-lock-no-match"
+  | "trusted-device-lock"
   | "trusted-device-lookup"
   | "remembered-challenges-revoke"
   | "remembered-session-create"
@@ -331,90 +332,111 @@ export async function startLoginCeremony(
 ): Promise<LoginCeremonyStart> {
   const candidateToken = deviceToken && isDeviceToken(deviceToken) ? deviceToken : undefined;
   let stage: LoginCeremonyFailureStage = "transaction-start";
-  try {
-    return await prisma.$transaction(async (transaction) => {
-      stage = "account-lookup";
-      const user = await transaction.user.findUnique({ where: { id: userId }, select: { id: true, email: true, emailNormalized: true, emailVerifiedAt: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } });
-      stage = "account-state";
-      if (!user?.isActive || user.accountStatus !== "ACTIVE" || (expectedRole && user.role !== expectedRole)) throw new SecurityMutationError();
-      stage = "account-lock-query";
-      const accountLocked = await lockActiveLoginAccountInTransaction(transaction, userId, expectedRole);
-      if (!accountLocked) {
-        stage = "account-lock-no-match";
-        throw new SecurityMutationError();
-      }
-      stage = "trusted-device-lookup";
-      await transaction.trustedDevice.updateMany({ where: { userId, status: "TRUSTED", createdAt: { lte: new Date(now.getTime() - DEVICE_TRUST_TTL_MS) } }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
-      const candidateHash = candidateToken ? hashDeviceToken(candidateToken) : undefined;
-      const trusted = candidateHash ? await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash: candidateHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } }) : null;
-      const activeLoginChallenge = candidateHash && !trusted
-        ? await transaction.deviceChallenge.findFirst({
-          where: { userId, deviceIdHash: candidateHash, status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null, expiresAt: { gt: now } },
-          select: { id: true }
-        })
-        : null;
-      const resolvedDevice = resolveLoginDeviceToken(candidateToken, trusted, Boolean(activeLoginChallenge));
-      const resolvedDeviceToken = resolvedDevice.deviceToken;
-      const deviceIdHash = hashDeviceToken(resolvedDeviceToken);
-      const isTrusted = resolvedDevice.isTrusted;
-      if (user.secondFactorMethod === "TOTP" && user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
-      const requiresTotp = user.secondFactorMethod === "TOTP";
-      // ADMIN logins always complete a fresh second factor; a remembered browser never yields a password-only ADMIN session.
-      const hasRememberedGrant = user.role !== "ADMIN" && Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    stage = "transaction-start";
+    try {
+      return await prisma.$transaction(async (transaction) => {
+        stage = "account-lookup";
+        const user = await transaction.user.findUnique({ where: { id: userId }, select: { id: true, email: true, emailNormalized: true, emailVerifiedAt: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } });
+        stage = "account-state";
+        if (!user?.isActive || user.accountStatus !== "ACTIVE" || (expectedRole && user.role !== expectedRole)) throw new SecurityMutationError();
+        stage = "account-lock-query";
+        const accountLocked = await lockActiveLoginAccountInTransaction(transaction, userId, expectedRole);
+        if (!accountLocked) {
+          stage = "account-lock-no-match";
+          throw new SecurityMutationError();
+        }
+        const candidateHash = candidateToken ? hashDeviceToken(candidateToken) : undefined;
+        if (candidateHash) {
+          stage = "trusted-device-lock";
+          await transaction.$queryRaw<Array<{ deviceKey: string }>>`
+            SELECT "deviceKey" FROM "TrustedDevice"
+            WHERE "userId" = ${userId} AND "deviceIdHash" = ${candidateHash}
+            FOR UPDATE
+          `;
+        }
+        stage = "trusted-device-lookup";
+        await transaction.trustedDevice.updateMany({ where: { userId, status: "TRUSTED", createdAt: { lte: new Date(now.getTime() - DEVICE_TRUST_TTL_MS) } }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
+        const trusted = candidateHash ? await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash: candidateHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } }) : null;
+        const activeLoginChallenge = candidateHash && !trusted
+          ? await transaction.deviceChallenge.findFirst({
+            where: { userId, deviceIdHash: candidateHash, status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null, expiresAt: { gt: now } },
+            select: { id: true }
+          })
+          : null;
+        const resolvedDevice = resolveLoginDeviceToken(candidateToken, trusted, Boolean(activeLoginChallenge));
+        const resolvedDeviceToken = resolvedDevice.deviceToken;
+        const deviceIdHash = hashDeviceToken(resolvedDeviceToken);
+        const isTrusted = resolvedDevice.isTrusted;
+        if (user.secondFactorMethod === "TOTP" && user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
+        const requiresTotp = user.secondFactorMethod === "TOTP";
+        // ADMIN logins always complete a fresh second factor; a remembered browser never yields a password-only ADMIN session.
+        const hasRememberedGrant = user.role !== "ADMIN" && Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
 
-      if (hasRememberedGrant && !forceFreshProof) {
-        stage = "remembered-challenges-revoke";
-        await revokeLoginChallenges(transaction, userId, deviceIdHash);
-        stage = "remembered-session-create";
-        const session = await createSessionInTransaction(transaction, userId, now);
-        stage = "transaction-commit";
-        return {
-          kind: "SESSION",
-          deviceToken: resolvedDeviceToken,
-          session
-        };
-      }
+        if (hasRememberedGrant && !forceFreshProof) {
+          stage = "remembered-challenges-revoke";
+          await revokeLoginChallenges(transaction, userId, deviceIdHash);
+          stage = "remembered-session-create";
+          const session = await createSessionInTransaction(transaction, userId, now);
+          stage = "transaction-commit";
+          return {
+            kind: "SESSION",
+            deviceToken: resolvedDeviceToken,
+            session
+          };
+        }
 
-      const totpOnly = Boolean(user.emailVerifiedAt) && requiresTotp && isTrusted;
-      stage = "challenge-revoke";
-      const recent = await transaction.deviceChallenge.findFirst({
-        where: { userId, deviceIdHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now }, createdAt: { gt: new Date(now.getTime() - LOGIN_EMAIL_CEREMONY_REUSE_MS), lte: now } },
-        orderBy: { createdAt: "desc" },
-        select: { ceremonyId: true }
-      });
-      if (recent) {
-        stage = "transaction-commit";
-        return { kind: "CEREMONY", ceremonyId: recent.ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
-      }
-
-      if (!totpOnly) {
-        stage = "ceremony-rate-limited";
-        if (!await consumeLoginEmailCeremonyQuota(transaction, userId, isTrusted ? deviceIdHash : null, now, trustedClientAddress)) throw new SecurityMutationError();
-      }
-      const code = totpOnly ? "totp-only" : generateNumericCode();
-      const ceremonyId = randomBytes(24).toString("base64url");
-      stage = "challenge-revoke";
-      await transaction.deviceChallenge.updateMany({ where: { userId, deviceIdHash, status: { in: ["PENDING", "VERIFIED"] } }, data: { status: "REVOKED" } });
-      stage = "challenge-code-hash";
-      const codeHash = hashSecurityCode(code);
-      stage = "challenge-create";
-      await transaction.deviceChallenge.create({ data: { userId, ceremonyId, deviceIdHash, emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), codeHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", expiresAt: new Date(now.getTime() + SECURITY_CEREMONY_TTL_MS), createdAt: now } });
-      if (!totpOnly) {
-        stage = "outbox-enqueue";
-        await enqueueEmailMessageForClient(transaction, {
-          idempotencyKey: `security-ceremony:${ceremonyId}`,
-          kind: isTrusted ? "EMAIL_TWO_FACTOR" : "NEW_DEVICE_VERIFICATION",
-          recipientEmail: user.email,
-          locale,
-          payload: { publicValues: { displayName: user.displayName ?? "" }, protectedValues: { code } }
+        const totpOnly = Boolean(user.emailVerifiedAt) && requiresTotp && isTrusted;
+        stage = "challenge-revoke";
+        const recent = await transaction.deviceChallenge.findFirst({
+          where: { userId, deviceIdHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now }, createdAt: { gt: new Date(now.getTime() - LOGIN_EMAIL_CEREMONY_REUSE_MS), lte: now } },
+          orderBy: { createdAt: "desc" },
+          select: { ceremonyId: true }
         });
-      }
-      stage = "transaction-commit";
-      return { kind: "CEREMONY", ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
-    }, { isolationLevel: "Serializable" });
-  } catch {
-    throw new LoginCeremonyStartError(stage);
+        if (recent) {
+          stage = "transaction-commit";
+          return { kind: "CEREMONY", ceremonyId: recent.ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
+        }
+
+        if (!totpOnly) {
+          stage = "ceremony-rate-limited";
+          if (!await consumeLoginEmailCeremonyQuota(transaction, userId, isTrusted ? deviceIdHash : null, now, trustedClientAddress)) throw new SecurityMutationError();
+        }
+        const code = totpOnly ? "totp-only" : generateNumericCode();
+        const ceremonyId = randomBytes(24).toString("base64url");
+        stage = "challenge-revoke";
+        await transaction.deviceChallenge.updateMany({ where: { userId, deviceIdHash, status: { in: ["PENDING", "VERIFIED"] } }, data: { status: "REVOKED" } });
+        stage = "challenge-code-hash";
+        const codeHash = hashSecurityCode(code);
+        stage = "challenge-create";
+        await transaction.deviceChallenge.create({ data: { userId, ceremonyId, deviceIdHash, emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), codeHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", expiresAt: new Date(now.getTime() + SECURITY_CEREMONY_TTL_MS), createdAt: now } });
+        if (!totpOnly) {
+          stage = "outbox-enqueue";
+          await enqueueEmailMessageForClient(transaction, {
+            idempotencyKey: `security-ceremony:${ceremonyId}`,
+            kind: isTrusted ? "EMAIL_TWO_FACTOR" : "NEW_DEVICE_VERIFICATION",
+            recipientEmail: user.email,
+            locale,
+            payload: { publicValues: { displayName: user.displayName ?? "" }, protectedValues: { code } }
+          });
+        }
+        stage = "transaction-commit";
+        return { kind: "CEREMONY", ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
+      }, { isolationLevel: "Serializable" });
+    } catch (error) {
+      if (attempt === 0 && isPrismaSerializationConflict(error)) continue;
+      throw new LoginCeremonyStartError(stage);
+    }
   }
+  throw new LoginCeremonyStartError(stage);
+}
+
+function isPrismaSerializationConflict(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const prismaError = error as { code?: unknown; meta?: unknown };
+  if (prismaError.code === "P2034") return true;
+  if (prismaError.code !== "P2010" || typeof prismaError.meta !== "object" || prismaError.meta === null) return false;
+  return "code" in prismaError.meta && (prismaError.meta as { code?: unknown }).code === "40001";
 }
 
 // Persistent budget for login ceremonies that mail a code, charged even after a correct password so a
@@ -579,6 +601,11 @@ export async function revokeTrustedDevice(userId: string, deviceKey: string): Pr
   if (!isCeremonyId(deviceKey)) throw new SecurityMutationError();
   const now = new Date();
   await prisma.$transaction(async (transaction) => {
+    // Take the same parent-before-device lock order as login start. This lets
+    // the serializable login retry against a fresh snapshot if revoke wins.
+    await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "User" WHERE "id" = ${userId} FOR KEY SHARE
+    `;
     const device = await transaction.trustedDevice.findFirst({ where: { deviceKey, userId }, select: { deviceIdHash: true } });
     const revoked = await transaction.trustedDevice.updateMany({ where: { deviceKey, userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
     if (!device || revoked.count !== 1) throw new SecurityMutationError();

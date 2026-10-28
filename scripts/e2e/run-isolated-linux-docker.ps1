@@ -146,6 +146,7 @@ $urls = @{
   migrator = & $databaseUrl 'virki_migrator' $passwords.migrator 'postgres'
   audit = & $databaseUrl 'virki_audit_maintenance' $passwords.audit 'postgres'
   integration = & $databaseUrl 'virki_runtime_test' $passwords.test '127.0.0.1'
+  integrationMigrator = & $databaseUrl 'virki_migrator' $passwords.migrator '127.0.0.1'
 }
 $script:results = [System.Collections.Generic.List[string]]::new()
 $script:stageManifest = [System.Collections.Generic.List[object]]::new()
@@ -649,7 +650,7 @@ try {
     }
     $virginBootstrapEnvironment = @('--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $virginBootstrapUrl), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable', '--env', 'VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin')
     Invoke-LoggedStage -Name 'bootstrap-virgin-tests' -LogName 'bootstrap-virgin-tests' -CommandText 'npm run test:integration -- packages/auth/src/bootstrap-first-admin.integration.test.ts' -Environment $virginBootstrapEnvironment -EvidenceLogPath $bootstrapVirginTestsEvidencePath -CaptureFullOutput
-    $integrationEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $urls.integration), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
+    $integrationEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('MIGRATION_DATABASE_URL=' + $urls.integrationMigrator), '--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $urls.integration), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
     $integrationCommand = 'npm run test:integration' + $(if ($IntegrationTestFile) { ' -- ' + $IntegrationTestFile } else { '' })
     Invoke-LoggedStage -Name 'integration-tests' -LogName 'integration-tests' -CommandText $integrationCommand -Environment $integrationEnvironment -EvidenceLogPath $integrationTestsEvidencePath -CaptureFullOutput
     $script:integrationTestFailures = @(Get-TapFailureManifest -Path $integrationTestsEvidencePath)

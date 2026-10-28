@@ -141,23 +141,36 @@ test("rotating invalid session cookies share one anonymous interaction bucket", 
     ...selectInteractionRateLimits(clientAddress, null)
   ].map(({ identifier }) => createRateLimitIdentifierHash(identifier));
   const startedAt = performance.now();
-  const responses = await Promise.all(rotatedCookies.map((cookie) => {
+  const observations = await Promise.all(rotatedCookies.map(async (cookie): Promise<{ status: number } | { transportError: string }> => {
     client.setSession(cookie);
-    return client.request(interactionUrl.href, { headers: sourceHeaders });
+    try {
+      const response = await client.request(interactionUrl.href, { headers: sourceHeaders });
+      return { status: response.status };
+    } catch (error) {
+      return { transportError: error instanceof Error ? error.name : "unknown" };
+    }
   }));
   const elapsedMs = performance.now() - startedAt;
 
   const storedBuckets = await prisma.loginRateLimit.count({ where: { identifierHash: { in: trackedHashes } } });
+  const httpStatuses = observations.flatMap((observation) => "status" in observation ? [observation.status] : []);
+  const transportErrors = observations.flatMap((observation) => "transportError" in observation ? [observation.transportError] : []);
+  const statusCounts = Object.fromEntries([...new Set(httpStatuses)].sort((left, right) => left - right)
+    .map((status) => [String(status), httpStatuses.filter((observed) => observed === status).length]));
+  const blocked = httpStatuses.filter((status) => status === 429).length;
+  const storageErrors = httpStatuses.filter((status) => status === 503).length;
+  console.log(`rotating invalid cookie load: ${JSON.stringify({ requests: observations.length, statuses: statusCounts, transportErrors: transportErrors.length, transportErrorKinds: [...new Set(transportErrors)].sort(), rows: storedBuckets, denied_429: blocked, storage_503: storageErrors, elapsed_ms: Number(elapsedMs.toFixed(1)) })}`);
+
+  assert.equal(observations.length, 301, "every planned cookie request must produce one observation");
+  assert.equal(transportErrors.length, 0, `request transport errors=${JSON.stringify(transportErrors)}`);
   assert.equal(storedBuckets, 4,
     "unknown cookies should share the auth source/anonymous and interaction source/anonymous rows");
-  const blocked = responses.filter((response) => response.status === 429).length;
-  const statusCounts = Object.fromEntries([...new Set(responses.map((response) => response.status))]
-    .map((status) => [String(status), responses.filter((response) => response.status === status).length]));
   assert.equal(blocked, 271,
     `300 requests must hit the source ceiling and 30-attempt anonymous bucket without identity amplification; statuses=${JSON.stringify(statusCounts)}`);
-  assert.equal(responses.filter((response) => response.status === 503).length, 0,
-    "the bounded flood must not turn limiter contention into storage errors");
-  console.log(`rotating invalid cookie load: requests=${responses.length}, rows=${storedBuckets}, denied_429=${blocked}, elapsed_ms=${elapsedMs.toFixed(1)}`);
+  assert.equal(storageErrors, 0,
+    `the bounded flood must not turn limiter contention into storage errors; statuses=${JSON.stringify(statusCounts)}`);
+  assert.deepEqual(statusCounts, { "303": 30, "429": 271 },
+    "all non-denied requests should remain normal login redirects, with no unclassified response status");
 });
 
 test("unsupported interaction methods return 405 before auditing or consuming limiter rows", integrationOptions, async () => {
@@ -573,6 +586,59 @@ test("actual issuer preserves essential ACR2 across mixed acr_values and rejects
   assert.equal(result.searchParams.get("code"), null);
 });
 
+test("actual provider returns the achieved ACR after prompt-login for voluntary ACR2 without MFA", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  const original = await createSession(fixture.userId);
+  client.setSession(original.token);
+  assert.ok((await client.follow(authorization(fixture.clientId))).searchParams.get("code"));
+  await prisma.session.updateMany({ where: { userId: fixture.userId }, data: { createdAt: new Date(Date.now() - 60_000) } });
+
+  const login = await client.follow(authorization(fixture.clientId, {
+    prompt: "login",
+    acr_values: "urn:virki:loa:2",
+    claims: JSON.stringify({ id_token: { amr: { essential: true } } })
+  }));
+  assert.equal(login.pathname, "/login");
+  assert.equal(login.searchParams.get("reauth"), "1");
+
+  const fresh = await createSession(fixture.userId);
+  assert.deepEqual((await getSessionByToken(fresh.token))?.authenticationMethods, ["pwd"]);
+  client.setSession(fresh.token);
+  const result = await client.follow(new URL(login.searchParams.get("returnTo")!, origin).href);
+  assert.ok(result.searchParams.get("code"), `voluntary ACR2 must fall back to the achieved password ACR; got ${result.searchParams.get("error") ?? result.pathname}`);
+
+  const token = await exchange(fixture.clientId, result.searchParams.get("code")!);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { acr?: string; amr?: string[] };
+  assert.equal(claims.acr, "urn:virki:loa:1");
+  assert.ok(claims.amr?.includes("pwd"));
+  assert.equal(claims.amr?.includes("mfa"), false);
+});
+
+test("actual provider does not downgrade an essential ACR2 request on an existing password session", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  const initial = await client.follow(authorization(fixture.clientId));
+  assert.ok(initial.searchParams.get("code"));
+
+  const login = await client.follow(authorization(fixture.clientId, {
+    claims: JSON.stringify({ id_token: { acr: { essential: true, value: "urn:virki:loa:2" } } })
+  }));
+  assert.equal(login.pathname, "/login", "an unsatisfied essential ACR may request a stronger authentication ceremony");
+  assert.equal(login.searchParams.get("reauth"), "1");
+
+  const passwordOnly = await createSession(fixture.userId);
+  assert.deepEqual((await getSessionByToken(passwordOnly.token))?.authenticationMethods, ["pwd"]);
+  client.setSession(passwordOnly.token);
+  const result = await client.follow(new URL(login.searchParams.get("returnTo")!, origin).href);
+  assert.equal(result.pathname, "/callback");
+  assert.equal(result.searchParams.get("error"), "access_denied", "a fresh password-only session still cannot satisfy essential ACR2");
+  assert.equal(result.searchParams.get("code"), null);
+});
+
 test("actual provider accepts the lower essential ACR alternative after prompt-login password reauthentication", integrationOptions, async () => {
   const fixture = await seed();
   const client = browser();
@@ -816,26 +882,28 @@ for (const denial of [
     assert.equal((await prisma.oidcArtifact.deleteMany({ where: { model: "Grant", idHash: hashOidcIdentifier(pending.grantId) } })).count, 1);
     await denial.apply(fixture, pending.sessionId);
 
-    const result = await pending.client.request(pending.interactionUrl.href);
-    const location = result.headers.get("location");
     if (denial.denialResponse === "callback") {
-      assert.equal(result.status, 303, "the OIDC provider returns an authorization error to this client's registered callback");
-      assert.ok(location);
-      const destination = new URL(location);
-      assert.equal(destination.origin, new URL(redirectUri).origin);
+      // interactionFinished first redirects back through the provider's /auth/{uid}
+      // action, which then returns the protocol error to the registered callback.
+      const destination = await pending.client.follow(pending.interactionUrl.href);
+      assert.equal(destination.origin, new URL(redirectUri).origin, `revoked project access must return to the registered callback; received ${destination.href}`);
       assert.equal(destination.pathname, new URL(redirectUri).pathname);
       assert.equal(destination.searchParams.get("error"), "access_denied");
       assert.equal(destination.searchParams.get("code"), null);
-    } else if (denial.denialResponse === "login") {
+    } else {
+      const result = await pending.client.request(pending.interactionUrl.href);
+      const location = result.headers.get("location");
+      if (denial.denialResponse === "login") {
       assert.equal(result.status, 303, "a blocked or revoked session must return to local login without issuing a code");
       assert.ok(location);
       const destination = new URL(location, origin);
       assert.equal(destination.origin, origin);
       assert.equal(destination.pathname, "/login");
       assert.equal(destination.searchParams.get("code"), null);
-    } else {
+      } else {
       assert.ok(result.status >= 400, `a disabled connection must be rejected by the provider, got HTTP ${result.status}`);
       assert.equal(location, null, "a disabled connection cannot redirect to a registered callback");
+      }
     }
     assert.equal(await prisma.oidcArtifact.count({ where: { model: "Grant", accountIdHash: hashOidcIdentifier(fixture.userId), clientIdHash: hashOidcIdentifier(fixture.clientId) } }), 0,
       "an absent provider Grant cannot be recreated after the server-side authorization check fails");
