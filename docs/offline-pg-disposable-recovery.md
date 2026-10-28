@@ -233,6 +233,62 @@ marker and prevents automatic retries.
 
 ## What these tests do **not** prove
 
+### CLI hardening and separate Prisma-engine admission protocol
+
+The disposable PostgreSQL container runner now uses the **fixed Authenticode-
+verified Docker Desktop executable** instead of searching `PATH` for `docker`.
+Every invocation uses the explicit local Linux named pipe, a fresh empty CLI
+config, a scrubbed subprocess environment, and a narrow allowlist of exact
+Docker commands. Ambient `DOCKER_*`, Compose, PostgreSQL connection/credential
+and Node execution overrides are refused. The runner still inspects its own
+random owner label and full immutable container ID before any cleanup; there
+is no generic `docker rm` or user-selectable engine, host or image. These
+consistency checks do not independently attest Docker daemon identity.
+
+**Lost-ACK/late-create custody:** before any `docker run`, this runner now
+creates a Windows NTFS ACL-guarded, handle-pinned, write-through owner intent
+record with `runProtectedWindowsJournalOperation` under the existing
+`~/.virki/offline-docker-reconciliation` directory. The record binds the
+random owner token, real disposable container name, exact image and pinned
+Docker Desktop endpoint. The journal file uses the existing restricted
+`virki-offline-fixture-<owner>` key; the independently bound container name is
+`virki-disposable-pg-<owner>`. If the CLI times out, loses its reply, reports an
+error, or cannot establish immutable-ID/owner-safe cleanup, the record is
+**retained for manual reconciliation**, even when an immediate inspect says
+the container is absent. A delayed create could appear later. On an
+acknowledged normal completion (or the sole expected pre-initialization
+malicious-URL rejection, exit 97), the record is removed only after confirmed
+absence or verified-ID removal followed by a second absence check. The
+runner never deletes a container merely from a name or uncertain response.
+This is a Windows disposable-fixture custody improvement, not guaranteed
+power-loss durability on arbitrary host storage and not production authority.
+
+`npm run test:offline:pg:protocol` additionally verifies a separate,
+non-authorizing **Prisma-engine recovery admission boundary**. It hashes the
+exact real `migration_lock.toml` and ordered checked-in `migration.sql` bytes
+with symlink/inode/tamper protections. With an explicit disposable-Linux opt-in,
+it atomically creates an owner-only, directory-fsynced exclusive attempt latch
+and flushes its SHA-bound metadata. A process killed after the checkpoint,
+partial payload, unsafe ownership, replay or changed migration SQL must NOT
+automatically resume. The latch is never deleted by the library. It returns
+`backupVerified:false`, `restoreVerified:false`,
+`prismaMigrationVerified:false`, `healthVerified:false`,
+`rollbackVerified:false`, and `deployAuthorized:false` even after a successful
+checkpoint: no untrusted runner may self-attest work it did not perform.
+
+The real no-network PostgreSQL suite proves its **committed Prisma SQL** can
+be run by `psql` with actual dump/restore/rollback and durable journal phases
+under a surviving disposable server; it does **not** run `prisma migrate deploy`
+in that same database. The existing independent Prisma-engine backup/restore
+fixture needs a randomly published **loopback host port**, so it is deliberately
+not reused for this strictly *no-published-ports* slice. A future executable
+integration requires an independently bounded Prisma runner inside the same
+private no-network namespace (or an authenticated private Unix socket), real
+`_prisma_migrations` validation, exact backup digest and schema/data health
+checks, externally durable failure/recovery checkpoints, and a separately
+audited rollback. The new protocol does not execute or approve that missing
+stage. Production remains **NO-GO**.
+
 - `postgres` inside a disposable container is a real database, but the
   sample accounts/secrets are synthetic. The fixture does not read actual
   accounts, credentials, OIDC tokens, encryption keys or deManage data.

@@ -27,6 +27,7 @@
     "test:backup:restore": "node scripts/backup-restore-validation.mjs",
     "test:backup:docker-guard": "node --test scripts/backup-validation-docker.test.mjs",
     "test:offline:pg:container": "cross-env VIRKI_OFFLINE_PG_CONTAINER_TEST=1 node --test scripts/offline-pg-recovery-container.test.mjs",
+    "test:offline:pg:protocol": "node --test scripts/offline-pg-docker-transport.test.mjs scripts/offline-pg-owner-reconciliation.test.mjs scripts/offline-pg-prisma-protocol.test.mjs",
     "test:offline:rollback": "node --test scripts/offline-release-rollback-rehearsal.test.mjs",
     "test:backup:inventory": "node --test scripts/backup-retention-inventory.test.mjs",
     "test:offline:rehearsal": "node --test scripts/offline-release-rehearsal.test.mjs",

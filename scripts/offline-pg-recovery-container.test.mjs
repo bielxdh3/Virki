@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import os, { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
+import {
+  assertDisposablePgDockerEnvironment, buildDisposablePgDockerInvocation,
+  requireSignedPgDockerCli,
+} from "./lib/offline-pg-docker-transport.mjs";
+import { runWithDurablePgOwnerIntent } from "./lib/offline-pg-owner-reconciliation.mjs";
+import { runProtectedWindowsJournalOperation } from "../infra/offline/disposable-local-docker.mjs";
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Intentionally PIN the Windows Docker Desktop Linux-engine named pipe. A
@@ -19,13 +27,21 @@ const cases = [
 ];
 const allowed = { skip: process.env.VIRKI_OFFLINE_PG_CONTAINER_TEST !== "1" &&
   "requires explicit disposable PostgreSQL test opt-in" };
-const options = { cwd: sourceRoot, timeout: 120_000, encoding: "utf8",
-  env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot },
-  windowsHide: true, maxBuffer: 65536 };
 let verifiedEngine = false;
 
-function localDocker(args) {
-  return spawnSync("docker", ["--host", DOCKER_ENDPOINT, ...args], options);
+function localDocker(args, ownership) {
+  // Never let a malicious PATH docker shim, inherited Docker context, or
+  // populated user CLI config redirect a fixture at another daemon.
+  assertDisposablePgDockerEnvironment();
+  const binary = requireSignedPgDockerCli();
+  const config = mkdtempSync(path.join(os.tmpdir(), "virki-pg-cli-config-"));
+  try {
+    const spec = buildDisposablePgDockerInvocation(args, config, ownership);
+    assert.equal(spec.binary, binary);
+    return spawnSync(spec.binary, spec.args, spec.options);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
 }
 
 function safeRollbackDiagnostic(stderr = "") {
@@ -66,33 +82,34 @@ function isolatedPostgres(fixtureCase, envOverride = null) {
       ...(envOverride === null ? [] : ["--env", envOverride]),
       IMAGE, "sh", "/workspace/scripts/fixtures/offline-pg-recovery/run.sh", fixtureCase,
     ];
-    let result;
-    try {
-      result = localDocker(args);
-    } finally {
-      // A CLI crash or timeout must not orphan a live database. Verify the
-      // independently assigned owner label BEFORE force-removing anything.
-      // Never delete unknown containers, images, networks, or volumes.
-      const inspection = localDocker([
-        "inspect", "--format",
-        `{{.Id}}|{{.Name}}|{{index .Config.Labels "${labelKey}"}}`, name,
-      ]);
-      if (inspection.status === 0) {
-        const [id, returnedName, returnedOwner] = inspection.stdout.trim().split("|");
-        assert.match(id, /^[a-f0-9]{64}$/u, "invalid immutable disposable Docker ID");
-        assert.equal(returnedName, "/" + name, "disposable container name changed");
-        assert.equal(returnedOwner, owner, "disposable container owner label changed");
-        // Inspect-by-name is only discovery. Deletion is by immutable ID to
-        // prevent removal of another container after a name-reuse race.
-        const cleanup = localDocker(["rm", "--force", "--volumes", id]);
-        assert.equal(cleanup.status, 0, "owned disposable database cleanup failed");
-      } else {
-        assert.equal(inspection.error, undefined, "Docker inspect unavailable during cleanup");
-        assert.match(inspection.stderr, /no such object|no such container/iu,
-          "unable to determine whether disposable database was removed");
-      }
-    }
-    return result;
+    // Existing Windows journal uses handle-bound ACL/inode checks and flushes
+    // the intent before Docker launch. Its fixture key is deliberately NOT the
+    // Docker container name; the protected record binds both exact values.
+    const journalIdentity = {
+      directory: path.join(homedir(), ".virki", "offline-docker-reconciliation"),
+      name: `virki-offline-fixture-${owner}`, owner,
+    };
+    const journal = {
+      create: () => runProtectedWindowsJournalOperation("create", {
+        ...journalIdentity,
+        line: JSON.stringify({ version: 1, fixture: "offline-postgres-recovery",
+          containerName: name, owner, engine: DOCKER_ENDPOINT, image: IMAGE,
+          state: "run_may_still_start", reconciliation: "manual_if_retained" }),
+      }),
+      append: (id) => runProtectedWindowsJournalOperation("append", {
+        ...journalIdentity, line: JSON.stringify({ event: "owned_container_seen", id }),
+      }),
+      clear: () => runProtectedWindowsJournalOperation("remove", journalIdentity),
+    };
+    return runWithDurablePgOwnerIntent({
+      name, owner, journal,
+      expectedExitCode: envOverride === "DATABASE_URL=postgresql://reject.invalid/invalid" ? 97 : 0,
+      launch: () => localDocker(args),
+      inspect: (target) => localDocker(["inspect", "--format",
+        `{{.Id}}|{{.Name}}|{{index .Config.Labels "${labelKey}"}}`, target],
+      target === name ? undefined : { id: target, name, owner }),
+      remove: (id) => localDocker(["rm", "--force", "--volumes", id], { id, name, owner }),
+    });
 }
 
 for (const fixtureCase of cases) {
