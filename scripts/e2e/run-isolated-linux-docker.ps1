@@ -9,6 +9,261 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# All host Git operations use a fixed signed binary and a deliberately empty
+# inherited Git configuration. Candidate .git/config may define executable
+# fsmonitor, filter.clean, diff.external and hooks. None is a trustworthy
+# instruction for a local CI snapshot.
+$script:pinnedGit = 'C:\Program Files\Git\cmd\git.exe'
+if (-not (Test-Path -LiteralPath $script:pinnedGit -PathType Leaf)) {
+  throw 'The pinned Git for Windows executable is missing.'
+}
+$gitSignature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $script:pinnedGit
+if ($gitSignature.Status -ne 'Valid' -or -not $gitSignature.SignerCertificate -or
+    -not $gitSignature.SignerCertificate.Subject.StartsWith('CN=Johannes Schindelin,', [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw 'Git for Windows Authenticode identity is unverified.'
+}
+foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name.StartsWith('GIT_', [System.StringComparison]::OrdinalIgnoreCase) })) {
+  Remove-Item -LiteralPath ('Env:' + $entry.Name)
+}
+$env:GIT_CONFIG_NOSYSTEM = '1'
+$env:GIT_CONFIG_GLOBAL = 'NUL'
+$env:GIT_NO_REPLACE_OBJECTS = '1'
+$env:GIT_ATTR_NOSYSTEM = '1'
+function Invoke-PinnedGit { & $script:pinnedGit -c core.fsmonitor=false -c core.hooksPath=NUL @args }
+$script:pinnedCleanRunner = $env:VIRKI_OFFLINE_PINNED_CLEAN_RUNNER -ceq '1'
+
+function Read-VerifiedGitObjectBytes {
+  param([string]$SourceRoot, [string]$Type, [string]$ObjectId)
+  if ($Type -cnotin @('commit', 'tree', 'blob') -or $ObjectId -cnotmatch '^[a-f0-9]{40}$') {
+    throw 'Invalid trusted Git object identity.'
+  }
+  # Git's local loose-object filename is NOT an authority. A same-account
+  # attacker can temporarily replace even the commit object under its original
+  # SHA filename and restore it before the Node postcheck. Authenticate every
+  # object's actual framed bytes, including commit and intermediate trees,
+  # before following any of its references to a PostgreSQL script.
+  # Read raw stdout: Windows PowerShell 5.1 native pipelines corrupt binary
+  # tree records and can re-encode UTF-8 or newline bytes.
+  $start = [System.Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = $script:pinnedGit
+  $start.WorkingDirectory = $SourceRoot
+  $start.Arguments = '-C "' + $SourceRoot + '" -c core.fsmonitor=false cat-file ' + $Type + ' ' + $ObjectId
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  $process = [System.Diagnostics.Process]::Start($start)
+  $memory = [System.IO.MemoryStream]::new()
+  try {
+    $chunk = [byte[]]::new(65536)
+    while (($received = $process.StandardOutput.BaseStream.Read($chunk, 0, $chunk.Length)) -gt 0) {
+      if ($memory.Length + $received -gt 1024 * 1024) {
+        $process.Kill()
+        throw 'Trusted Git object exceeds its fixed limit.'
+      }
+      $memory.Write($chunk, 0, $received)
+    }
+    if (-not $process.WaitForExit(30000) -or $process.ExitCode -ne 0) {
+      throw 'Pinned Git object extraction failed.'
+    }
+    $bytes = $memory.ToArray()
+    if ($bytes.Length -gt 1024 * 1024) { throw 'Trusted Git object exceeds its fixed limit.' }
+    $header = [System.Text.Encoding]::ASCII.GetBytes($Type + ' ' + $bytes.Length + [char]0)
+    $framed = [byte[]]::new($header.Length + $bytes.Length)
+    [System.Buffer]::BlockCopy($header, 0, $framed, 0, $header.Length)
+    [System.Buffer]::BlockCopy($bytes, 0, $framed, $header.Length, $bytes.Length)
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    try { $observedOid = [System.BitConverter]::ToString($sha1.ComputeHash($framed)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha1.Dispose() }
+    if ($observedOid -cne $ObjectId) { throw 'Trusted Git object content fails its independently computed framed SHA-1.' }
+    return $bytes
+  } finally {
+    $memory.Dispose()
+    $process.Dispose()
+  }
+}
+
+function Find-VerifiedGitTreeEntry {
+  param([byte[]]$Tree, [string]$Name, [switch]$Directory)
+  $result = $null
+  for ($offset = 0; $offset -lt $Tree.Length;) {
+    $space = [Array]::IndexOf($Tree, [byte]32, $offset)
+    if ($space -lt $offset) { throw 'Malformed pinned Git tree mode.' }
+    $nul = [Array]::IndexOf($Tree, [byte]0, $space + 1)
+    if ($nul -le $space + 1 -or $nul + 20 -gt $Tree.Length) {
+      throw 'Malformed pinned Git tree entry.'
+    }
+    $mode = [System.Text.Encoding]::ASCII.GetString($Tree, $offset, $space - $offset)
+    $entryName = [System.Text.Encoding]::ASCII.GetString($Tree, $space + 1, $nul - $space - 1)
+    if ($entryName -ceq $Name) {
+      if ($null -ne $result) { throw 'Duplicate pinned Git tree entry.' }
+      if ($Directory) {
+        if ($mode -cne '40000') { throw 'Pinned Git directory has an unexpected mode.' }
+      } elseif ($mode -cnotin @('100644', '100755')) {
+        throw 'Pinned Git file is not a regular blob.'
+      }
+      $oidBytes = [byte[]]::new(20)
+      [System.Buffer]::BlockCopy($Tree, $nul + 1, $oidBytes, 0, 20)
+      $result = [System.BitConverter]::ToString($oidBytes).Replace('-', '').ToLowerInvariant()
+    }
+    $offset = $nul + 21
+  }
+  if ($null -eq $result) { throw 'Pinned Git tree does not contain the requested entry.' }
+  return $result
+}
+
+function New-VerifiedCommittedGitBlob {
+  param([string]$SourceRoot, [string]$ExpectedHead, [string]$RelativePath, [string]$Destination)
+  if ($ExpectedHead -cnotmatch '^[a-f0-9]{40}$' -or
+      $RelativePath -cnotmatch '^[A-Za-z0-9._/-]{1,240}$' -or
+      $RelativePath.Contains('..') -or
+      -not [System.IO.Path]::IsPathRooted($Destination)) {
+    throw 'Invalid pinned Git blob extraction identity.'
+  }
+  $segments = $RelativePath.Split('/')
+  if (@($segments | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
+    throw 'Pinned Git blob path is not canonical.'
+  }
+  # A trusted SHA is meaningful only when the entire referenced object graph
+  # was verified at the point of extraction. Never use `rev-parse HEAD:path`
+  # against the original mutable object database: it trusts the directory
+  # contents under a named loose commit object without rehashing that commit.
+  $commit = Read-VerifiedGitObjectBytes -SourceRoot $SourceRoot -Type commit -ObjectId $ExpectedHead
+  $firstLineEnd = [Array]::IndexOf($commit, [byte]10)
+  if ($firstLineEnd -ne 45 -or
+      [System.Text.Encoding]::ASCII.GetString($commit, 0, 5) -cne 'tree ' -or
+      [System.Text.Encoding]::ASCII.GetString($commit, 5, 40) -cnotmatch '^[a-f0-9]{40}$') {
+    throw 'Trusted commit has no canonical pinned tree header.'
+  }
+  $treeOid = [System.Text.Encoding]::ASCII.GetString($commit, 5, 40)
+  for ($i = 0; $i -lt $segments.Length; $i++) {
+    $treeBytes = Read-VerifiedGitObjectBytes -SourceRoot $SourceRoot -Type tree -ObjectId $treeOid
+    $oid = Find-VerifiedGitTreeEntry -Tree $treeBytes -Name $segments[$i] -Directory:($i -lt $segments.Length - 1)
+    if ($i -lt $segments.Length - 1) { $treeOid = $oid }
+  }
+  $bytes = Read-VerifiedGitObjectBytes -SourceRoot $SourceRoot -Type blob -ObjectId $oid
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { $committedSha256 = [System.BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+    [System.IO.File]::WriteAllBytes($Destination, $bytes)
+    # The expected digest MUST be derived from the verified bytes in memory,
+    # not from the writable output path an adversary could swap after WriteAllBytes.
+    return $committedSha256
+}
+
+function New-IsolatedGitSnapshot {
+  param([string]$SourceRoot, [string]$SourceBranch, [string]$ExpectedHead,
+    [string]$SnapshotRoot, [string]$BundleFile, [string]$StagedPatchFile, [string]$WorkingPatchFile,
+    [switch]$PinnedCleanRunner)
+  if ($SourceBranch -notmatch '^(?!/)(?!.*(?:/\/|\.\.))[A-Za-z0-9._/-]{1,200}$' -or
+      $ExpectedHead -cnotmatch '^[a-f0-9]{40}$') { throw 'Invalid Git source snapshot identity.' }
+  $commonDir = (Invoke-PinnedGit -C $SourceRoot rev-parse --path-format=absolute --git-common-dir)
+  if ($LASTEXITCODE -ne 0 -or @($commonDir).Count -ne 1) { throw 'Git common object store is not available.' }
+  if (-not $PinnedCleanRunner) {
+    $sourceIndex = (Invoke-PinnedGit -C $SourceRoot rev-parse --path-format=absolute --git-path index)
+    if ($LASTEXITCODE -ne 0 -or @($sourceIndex).Count -ne 1) { throw 'Git index is not available.' }
+  }
+  $objects = [System.IO.Path]::GetFullPath((Join-Path ([string]$commonDir) 'objects'))
+  if (-not (Test-Path -LiteralPath $objects -PathType Container) -or
+      (-not $PinnedCleanRunner -and -not (Test-Path -LiteralPath ([string]$sourceIndex) -PathType Leaf))) {
+    throw 'Git source object store or index is unavailable.'
+  }
+  $safeGit = Join-Path $SnapshotRoot 'safe-git'
+  $safeObjects = Join-Path $safeGit 'objects'
+  New-Item -ItemType Directory -Path (Join-Path $safeObjects 'info') -Force -ErrorAction Stop | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $safeGit 'refs/heads') -Force -ErrorAction Stop | Out-Null
+  $safeConfigPath = Join-Path $safeGit 'config'
+  $safeConfigContents = "[core]`nrepositoryformatversion = 0`nbare = false`nfsmonitor = false`n"
+  [System.IO.File]::WriteAllText($safeConfigPath, $safeConfigContents, [System.Text.UTF8Encoding]::new($false))
+  [System.IO.File]::WriteAllText((Join-Path $safeGit 'HEAD'), "ref: refs/heads/$SourceBranch`n", [System.Text.UTF8Encoding]::new($false))
+  $headRef = Join-Path $safeGit ('refs/heads/' + $SourceBranch)
+  New-Item -ItemType Directory -Path (Split-Path -Parent $headRef) -Force -ErrorAction Stop | Out-Null
+  [System.IO.File]::WriteAllText($headRef, "$ExpectedHead`n", [System.Text.UTF8Encoding]::new($false))
+  # Preserve original --all semantics (branches, remote refs and tags), while
+  # refusing refs/replace: those can rebind a trusted SHA when the resulting
+  # bundle is cloned on Linux, where the host's Git environment is absent.
+  $sourceRefs = @(Invoke-PinnedGit -C $SourceRoot show-ref)
+  if ($LASTEXITCODE -ne 0 -or $sourceRefs.Count -gt 2048) { throw 'Git references cannot be safely inventoried.' }
+  $seenRefNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $safeRefFiles = [System.Collections.Generic.List[string]]::new()
+  $safeRefNames = [System.Collections.Generic.List[string]]::new()
+  $matchedBranch = $false
+  foreach ($entry in $sourceRefs) {
+    if (-not ($entry -cmatch '^([a-f0-9]{40}) (refs/[A-Za-z0-9._/-]{1,235})$')) {
+      throw 'Malformed Git reference in source inventory.'
+    }
+    $referenceHash = $Matches[1]
+    $referenceName = $Matches[2]
+    if ($referenceName -match '(?:\.\.|//|(?:^|/)\.|\.lock(?:/|$))' -or
+        $referenceName.EndsWith('/') -or -not $seenRefNames.Add($referenceName)) {
+      throw 'Unsafe or ambiguous Git reference in source inventory.'
+    }
+    if ($referenceName -ceq ('refs/heads/' + $SourceBranch)) {
+      if ($referenceHash -cne $ExpectedHead) { throw 'Source branch SHA changed before Git snapshot.' }
+      $matchedBranch = $true
+    }
+    if ($referenceName.StartsWith('refs/replace/', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    # The clean runner exports ONLY the verified HEAD. Other same-account
+    # refs and any dirty index/working-tree file must never cross this gate.
+    if ($PinnedCleanRunner -and $referenceName -cne ('refs/heads/' + $SourceBranch)) { continue }
+    $safeRefPath = Join-Path $safeGit $referenceName
+    New-Item -ItemType Directory -Path (Split-Path -Parent $safeRefPath) -Force -ErrorAction Stop | Out-Null
+    [System.IO.File]::WriteAllText($safeRefPath, "$referenceHash`n", [System.Text.UTF8Encoding]::new($false))
+    $safeRefFiles.Add($safeRefPath)
+    $safeRefNames.Add($referenceName)
+  }
+  if (-not $matchedBranch) { throw 'Original source branch reference is not present.' }
+  [System.IO.File]::WriteAllText((Join-Path $safeObjects 'info/alternates'), "$objects`n", [System.Text.UTF8Encoding]::new($false))
+  if (-not $PinnedCleanRunner) {
+    $safeIndexPath = Join-Path $safeGit 'index'
+    $sourceIndexBytes = [System.IO.File]::ReadAllBytes([string]$sourceIndex)
+    [System.IO.File]::WriteAllBytes($safeIndexPath, $sourceIndexBytes)
+  }
+  $safeArgs = @(('--git-dir=' + $safeGit), ('--work-tree=' + $SourceRoot), '-c', 'core.fsmonitor=false')
+  # Windows kernel sharing locks block writes, replacement and rename by a
+  # concurrent same-account process while Git consumes this exact configuration
+  # and index. Open all files read-only with FileShare.Read, then recheck the
+  # config under those locks before launching ANY Git command.
+  $pinnedFiles = @($safeConfigPath, (Join-Path $safeGit 'HEAD'),
+    (Join-Path $safeObjects 'info/alternates')) + $safeRefFiles.ToArray()
+  if (-not $PinnedCleanRunner) { $pinnedFiles += $safeIndexPath }
+  $locks = [System.Collections.Generic.List[System.IDisposable]]::new()
+  try {
+    foreach ($filename in $pinnedFiles) {
+      $locks.Add([System.IO.FileStream]::new($filename, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read))
+    }
+    if ([System.IO.File]::ReadAllText($safeConfigPath) -cne $safeConfigContents) {
+      throw 'Isolated Git config changed before its kernel pin was established.'
+    }
+    if (-not $PinnedCleanRunner -and -not [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals(
+        $sourceIndexBytes, [System.IO.File]::ReadAllBytes($safeIndexPath))) {
+      throw 'Isolated Git index changed before its kernel pin was established.'
+    }
+    # Enumerate only the originally pinned references, not `--all`, so a new
+    # attacker-added refs/replace path cannot enter the temporary bundle.
+    & $script:pinnedGit @safeArgs bundle create $BundleFile @($safeRefNames.ToArray())
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create safe Git bundle.' }
+    if ($PinnedCleanRunner) {
+      # NEVER read index, tracked checkout bytes, Git diff or untracked files
+      # after the Node clean gate. A transient edit could otherwise be packaged
+      # while the Node before/after source probes both report CLEAN.
+      [System.IO.File]::WriteAllBytes($StagedPatchFile, [byte[]]@())
+      [System.IO.File]::WriteAllBytes($WorkingPatchFile, [byte[]]@())
+      return @()
+    }
+    & $script:pinnedGit @safeArgs diff --no-ext-diff --no-textconv --cached --binary ('--output=' + $StagedPatchFile)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create safe staged Git patch.' }
+    & $script:pinnedGit @safeArgs diff --no-ext-diff --no-textconv --binary ('--output=' + $WorkingPatchFile)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create safe working Git patch.' }
+    $foundUntracked = @(& $script:pinnedGit @safeArgs ls-files --others --exclude-standard)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not inventory Git untracked files.' }
+    return $foundUntracked
+  } finally {
+    foreach ($handle in $locks) { $handle.Dispose() }
+  }
+}
+
 function Get-FileSha256([string]$LiteralPath) {
   $algorithm = [System.Security.Cryptography.SHA256]::Create()
   $stream = [System.IO.File]::OpenRead($LiteralPath)
@@ -76,14 +331,14 @@ $dockerProbe = Invoke-PinnedDocker version --format '{{.Server.Os}}|{{.Server.Ar
 if ($LASTEXITCODE -ne 0 -or ($dockerProbe | Out-String).Trim() -cne 'linux|amd64') {
   throw 'Isolated E2E refuses an unverified local Linux/amd64 Docker endpoint.'
 }
-$repositoryBranch = (& git -C $repoRoot branch --show-current).Trim()
+$repositoryBranch = (Invoke-PinnedGit -C $repoRoot branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $repositoryBranch -notmatch '^[A-Za-z0-9._/-]{1,240}$') {
   throw 'The isolated Docker snapshot requires a named local branch with a supported ref name.'
 }
 $runId = [Guid]::NewGuid().ToString('N')
 $evidenceRoot = Join-Path $repoRoot '.virki-mission-tmp/isolated-runs'
 $runEvidenceDirectory = Join-Path $evidenceRoot $runId
-$evidenceIgnore = (& git -C $repoRoot check-ignore --quiet '.virki-mission-tmp/isolated-runs')
+$evidenceIgnore = (Invoke-PinnedGit -C $repoRoot check-ignore --quiet '.virki-mission-tmp/isolated-runs')
 if ($LASTEXITCODE -ne 0) { throw 'The isolated run evidence directory must be Git-ignored.' }
 New-Item -ItemType Directory -Path $runEvidenceDirectory -ErrorAction Stop | Out-Null
 $productionOperationsEvidencePath = Join-Path $runEvidenceDirectory 'production-operations-tests.tap.log'
@@ -173,7 +428,7 @@ $script:productionOperationsFailures = @()
 $script:integrationTestFailures = @()
 $script:bootstrapVirginExitCode = $null
 $script:runnerName = $runnerName
-$sourceHead = (& git -C $repoRoot rev-parse HEAD).Trim()
+$sourceHead = (Invoke-PinnedGit -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the source HEAD for the isolated run manifest.' }
 Write-Output ("ISOLATED_RUN_ID=" + $runId)
 Write-Output ("SOURCE_BRANCH=" + $repositoryBranch)
@@ -394,16 +649,18 @@ function Assert-RunnerFileSha256 {
 try {
   New-Item -ItemType Directory -Path $snapshotDirectory -ErrorAction Stop | Out-Null
   $script:ownedResources.snapshot = $true
-  & git -C $repoRoot bundle create $bundlePath --all
-  if ($LASTEXITCODE -ne 0) { throw 'Could not create a temporary Git bundle.' }
-  & git -C $repoRoot diff --cached --binary ("--output=" + $stagedPatchPath)
-  if ($LASTEXITCODE -ne 0) { throw 'Could not snapshot staged worktree changes.' }
-  & git -C $repoRoot diff --binary ("--output=" + $workingPatchPath)
-  if ($LASTEXITCODE -ne 0) { throw 'Could not snapshot unstaged worktree changes.' }
-  $script:stagedPatchSha256 = Get-FileSha256 -LiteralPath $stagedPatchPath
-  $script:workingTreePatchSha256 = Get-FileSha256 -LiteralPath $workingPatchPath
-  $untrackedFiles = @(& git -C $repoRoot ls-files --others --exclude-standard)
-  if ($LASTEXITCODE -ne 0) { throw 'Could not inventory nonignored untracked files.' }
+  $untrackedFiles = @(New-IsolatedGitSnapshot -SourceRoot $repoRoot -SourceBranch $repositoryBranch -ExpectedHead $sourceHead -SnapshotRoot $snapshotDirectory -BundleFile $bundlePath -StagedPatchFile $stagedPatchPath -WorkingPatchFile $workingPatchPath -PinnedCleanRunner:$script:pinnedCleanRunner)
+  if ($script:pinnedCleanRunner) {
+    # Known SHA-256 of an empty byte string, NOT a mutable path's observed hash.
+    # Even if someone races a patch file before docker cp, the Docker-side
+    # verified bytes must be exactly empty before any attempt to apply them.
+    $script:stagedPatchSha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+    $script:workingTreePatchSha256 = $script:stagedPatchSha256
+    if ($untrackedFiles.Count -ne 0) { throw 'Pinned clean runner must never import untracked source.' }
+  } else {
+    $script:stagedPatchSha256 = Get-FileSha256 -LiteralPath $stagedPatchPath
+    $script:workingTreePatchSha256 = Get-FileSha256 -LiteralPath $workingPatchPath
+  }
   $allowedUntracked = @(
     'apps/hub/src/app/admin/accounts/account-state-control.test.tsx',
     'apps/hub/src/app/admin/accounts/account-state-control.tsx',
@@ -514,10 +771,42 @@ try {
     '--env', ("VIRKI_E2E_DATABASE_PASSWORD=" + $passwords.test),
     'postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24')
 
-  Invoke-PinnedDocker cp (Join-Path $repoRoot 'infra/postgres-init/10-virki-database-roles.sh') ($databaseName + ':/docker-entrypoint-initdb.d/10-virki-database-roles.sh') | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not copy the database role initializer.' }
-  Invoke-PinnedDocker cp (Join-Path $repoRoot 'scripts/e2e/20-virki-e2e-runtime-test-role.sh') ($databaseName + ':/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh') | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not copy the E2E role initializer.' }
+  foreach ($initFile in @(
+      @{ Relative = 'infra/postgres-init/10-virki-database-roles.sh'; Name = '10-virki-database-roles.sh' },
+      @{ Relative = 'scripts/e2e/20-virki-e2e-runtime-test-role.sh'; Name = '20-virki-e2e-runtime-test-role.sh' })) {
+    $sourceInitPath = Join-Path $repoRoot $initFile.Relative
+    $expectedInitSha256 = $null
+    if ($script:pinnedCleanRunner) {
+      # No direct checkout read/copy may cross the clean gate, including the
+      # PostgreSQL shell scripts run automatically on first container start.
+      $sourceInitPath = Join-Path $snapshotDirectory $initFile.Name
+      $expectedInitSha256 = New-VerifiedCommittedGitBlob -SourceRoot $repoRoot -ExpectedHead $sourceHead -RelativePath $initFile.Relative -Destination $sourceInitPath
+    }
+    $pinnedInitHandle = $null
+    try {
+      if ($script:pinnedCleanRunner) {
+        $pinnedInitHandle = [System.IO.FileStream]::new($sourceInitPath, [System.IO.FileMode]::Open,
+          [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        if ((Get-FileSha256 -LiteralPath $sourceInitPath) -cne $expectedInitSha256) {
+          throw 'Committed PostgreSQL initialization source changed before its file pin.'
+        }
+      }
+      $containerInitPath = '/docker-entrypoint-initdb.d/' + $initFile.Name
+      Invoke-PinnedDocker cp $sourceInitPath ($databaseName + ':' + $containerInitPath) | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw 'Could not copy a database role initializer.' }
+      if ($script:pinnedCleanRunner) {
+        # Round-trip verify the stopped container's exact init script BEFORE
+        # `docker start` can execute it. Its custody is held by the daemon.
+        $returnedInitPath = Join-Path $snapshotDirectory ('verified-' + $initFile.Name)
+        Invoke-PinnedDocker cp ($databaseName + ':' + $containerInitPath) $returnedInitPath | Out-Null
+        if ($LASTEXITCODE -ne 0 -or (Get-FileSha256 -LiteralPath $returnedInitPath) -cne $expectedInitSha256) {
+          throw 'Database role initializer changed across Docker copy boundary.'
+        }
+      }
+    } finally {
+      if ($null -ne $pinnedInitHandle) { $pinnedInitHandle.Dispose() }
+    }
+  }
   Invoke-PinnedDocker start $databaseName | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not start the disposable PostgreSQL container.' }
 
@@ -574,6 +863,13 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Could not read the cloned source HEAD.' }
   $clonedHead = $clonedHeadOutput.Trim()
   if ($clonedHead -cne $sourceHead) { throw 'The cloned snapshot does not match the source HEAD captured for this run.' }
+  if ($script:pinnedCleanRunner) {
+    # Verify the *consumed* immutable Git objects and materialized checkout
+    # inside the runner before any repo-supplied package/script can execute.
+    # This must happen after Docker copy+clone, not merely at host preflight.
+    Invoke-PinnedDocker exec --workdir /workspace $runnerName bash -lc 'set -eu; test ! -s /tmp/staged.patch; test ! -s /tmp/working-tree.patch; git -c core.fsmonitor=false fsck --full --strict --no-reflogs >/dev/null; test -z "$(git -c core.fsmonitor=false status --porcelain --untracked-files=all)"; git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --exit-code; git -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --exit-code'
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned clean source objects or checkout failed runtime integrity verification.' }
+  }
   Invoke-PinnedDocker exec --workdir /workspace $runnerName bash -lc 'if [ -s /tmp/staged.patch ]; then git apply --binary /tmp/staged.patch; fi; if [ -s /tmp/working-tree.patch ]; then git apply --binary /tmp/working-tree.patch; fi'
   if ($LASTEXITCODE -ne 0) { throw 'Could not apply the current worktree changes to the temporary clone.' }
   foreach ($relativePath in $untrackedFiles) {

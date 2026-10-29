@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { executeBoundedLocalCommand, buildLocalStageReceipts, readStableLocalEvidenceFile } from "./lib/offline-ci-local-runner.mjs";
+import { executeBoundedLocalCommand, executePinnedPowerShellScriptBytes, assertCleanGitWorktreeWithoutFilters, buildLocalStageReceipts, readStableLocalEvidenceFile } from "./lib/offline-ci-local-runner.mjs";
 
 const SHA = /^[a-f0-9]{40}$/u;
 const BRANCH = /^(?!\/)(?!.*(?:\/\/|\.\.))[A-Za-z0-9._/-]{1,200}$/u;
@@ -21,6 +21,9 @@ function isolatedWindowsEnvironment() {
   const env = Object.fromEntries(environmentNames.filter((key) => typeof process.env[key] === "string")
     .map((key) => [key, process.env[key]]));
   env.Path = [path.dirname(PINNED_GIT), "C:\\Windows\\System32", "C:\\Windows"].join(path.delimiter);
+  // Repository-local refs/replace must never rebind a trusted full commit SHA
+  // to an attacker tree, even though rev-parse HEAD still prints that SHA.
+  env.GIT_NO_REPLACE_OBJECTS = "1";
   return env;
 }
 
@@ -49,27 +52,50 @@ async function verifyGitExecutable() {
   return createHash("sha256").update(readFileSync(PINNED_GIT)).digest("hex");
 }
 
+async function assertExactCommittedScriptBytes(root, committedBlob, scriptBytes) {
+  // Read the committed object through pinned Git. Compare the exact Buffer to
+  // the blob's literal LF or Windows CRLF representation. This does not trust
+  // mutable worktree names, local Git filters or filter executables.
+  const output = await executeBoundedLocalCommand(PINNED_GIT,
+    ["-C", root, "-c", "core.fsmonitor=false", "cat-file", "blob", committedBlob],
+    { cwd: root, env: isolatedWindowsEnvironment(),
+      timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 });
+  if (output.exitCode !== 0 || output.truncated || output.timedOut || output.spawnError) {
+    blocked("pinned fixture bytes could not be bound to their Git blob");
+  }
+  const objectId = createHash("sha1").update(`blob ${output.stdout.length}\0`)
+    .update(output.stdout).digest("hex");
+  if (objectId !== committedBlob) blocked("pinned Git object content differs from its trusted object ID");
+  let crlfBytes;
+  try {
+    crlfBytes = Buffer.from(new TextDecoder("utf-8", { fatal: true }).decode(output.stdout)
+      .replace(/\r?\n/gu, "\r\n"), "utf8");
+  } catch { blocked("committed PowerShell fixture is not valid UTF-8"); }
+  if (!scriptBytes.equals(output.stdout) && !scriptBytes.equals(crlfBytes)) {
+    blocked("pinned launcher bytes differ from the committed revision");
+  }
+}
+
 async function assertCleanRevision(root, revision, branch) {
-  const [head, observedBranch, status, trackedScript, committedBlob, workingBlob] = await Promise.all([
+  const [head, observedBranch, trackedScript, committedBlob] = await Promise.all([
     git(root, "rev-parse", "HEAD"), git(root, "branch", "--show-current"),
-    git(root, "status", "--porcelain=v1", "--untracked-files=all"),
     git(root, "ls-files", "--error-unmatch", "--", SCRIPT),
     git(root, "rev-parse", `${revision}:${SCRIPT}`),
-    git(root, "hash-object", "--", SCRIPT),
   ]);
-  if (head !== revision || observedBranch !== branch || status !== "" || trackedScript !== SCRIPT) {
+  if (head !== revision || observedBranch !== branch || trackedScript !== SCRIPT ||
+      !SHA.test(committedBlob)) {
     blocked("expected clean exact source SHA, branch and tracked pinned launcher are required");
   }
+  try { await assertCleanGitWorktreeWithoutFilters(root, revision, isolatedWindowsEnvironment()); }
+  catch { blocked("expected clean exact source SHA, branch and tracked pinned launcher are required"); }
   const scriptPath = path.join(root, SCRIPT);
   if (lstatSync(scriptPath).isSymbolicLink() || !lstatSync(scriptPath).isFile()) {
     blocked("runner script is not a regular tracked file");
   }
-  // Compare the Git-filtered blob identity to handle Windows CRLF checkouts.
-  // Also bind raw bytes before/after execution against a transient replacement.
-  if (workingBlob !== committedBlob) {
-    blocked("pinned launcher bytes differ from the committed revision");
-  }
-  return createHash("sha256").update(readFileSync(scriptPath)).digest("hex");
+  const scriptBytes = readFileSync(scriptPath);
+  // Bind the bytes that PowerShell will execute to the committed Git object.
+  await assertExactCommittedScriptBytes(root, committedBlob, scriptBytes);
+  return { scriptBytes, sha256: createHash("sha256").update(scriptBytes).digest("hex") };
 }
 
 /** Explicit opt-in. The CLI never accepts an executable, command map or test result. */
@@ -82,7 +108,7 @@ export async function runOfflineCiLocally({ repositoryRoot, revision, branch, of
   const root = realpathSync(repositoryRoot);
   if (root !== path.resolve(repositoryRoot) || !existsSync(path.join(root, ".git"))) blocked("repository root is not canonical");
   const gitInitialSha256 = await verifyGitExecutable();
-  const launcherInitialSha256 = await assertCleanRevision(root, revision, branch);
+  const { scriptBytes: launcherBytes, sha256: launcherInitialSha256 } = await assertCleanRevision(root, revision, branch);
 
   const evidenceParent = path.join(root, ".virki-mission-tmp", "isolated-runs");
   if (await git(root, "check-ignore", ".virki-mission-tmp/isolated-runs") !== ".virki-mission-tmp/isolated-runs") {
@@ -98,9 +124,12 @@ export async function runOfflineCiLocally({ repositoryRoot, revision, branch, of
   // The PowerShell fixture resolves Git only from the pinned signed location.
   const env = isolatedWindowsEnvironment();
   env.VIRKI_E2E_HUB_MODE = "production";
+  // This is the strictly clean release/CI path. Source bytes must come ONLY
+  // from the independently verified committed Git graph: never a transient
+  // worktree diff, staged index change or untracked file after preflight.
+  env.VIRKI_OFFLINE_PINNED_CLEAN_RUNNER = "1";
   const startedUtc = new Date().toISOString();
-  const run = await executeBoundedLocalCommand(PINNED_POWERSHELL,
-    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path.join(root, SCRIPT)],
+  const run = await executePinnedPowerShellScriptBytes(launcherBytes, path.dirname(path.join(root, SCRIPT)),
     { cwd: root, env, timeoutMs: MAX_RUN_MS });
   if (run.exitCode !== 0 || run.timedOut || run.truncated || run.spawnError) {
     blocked(`isolated launcher failed (exit=${String(run.exitCode)}, timeout=${run.timedOut}, oversized=${run.truncated})`);
@@ -119,7 +148,7 @@ export async function runOfflineCiLocally({ repositoryRoot, revision, branch, of
   const receipt = buildLocalStageReceipts({ manifestBytes: rawManifest, stdout: run.stdout,
     revision, branch, stageLogDirectory: evidenceDir });
   if (receipt.runId !== path.basename(evidenceDir)) blocked("manifest run ID differs from isolated directory");
-  if (launcherInitialSha256 !== await assertCleanRevision(root, revision, branch)) {
+  if (launcherInitialSha256 !== (await assertCleanRevision(root, revision, branch)).sha256) {
     blocked("runner script changed while the isolated suite was executing");
   }
   if (gitInitialSha256 !== await verifyGitExecutable()) blocked("Git executable changed during validation");
