@@ -37,6 +37,7 @@
     "test:offline:local-docker-fixture": "node --test infra/offline/disposable-local-docker.test.mjs",
     "test:offline:witness-read": "node --test scripts/offline-ledger-witness-proof.test.mjs",
     "test:offline:ci-local": "node --test scripts/offline-ci-evidence.test.mjs scripts/offline-ci-local-runner.test.mjs",
+    "test:offline:codeql-cli:diagnostic": "node --test scripts/manual-codeql-cli-diagnostic.test.mjs",
     "test:offline:witness-cas:linux": "node --test scripts/offline-independent-witness-service.test.mjs infra/offline/disposable-witness-ledger-reservation.test.mjs",
     "test:offline:witness-remote:linux": "node --test scripts/offline-independent-witness-remote.test.mjs scripts/offline-independent-witness-service.test.mjs",
     "test:offline:floor-preview:linux": "node --test infra/offline/trusted-out-of-host-floor-evidence.test.mjs",
