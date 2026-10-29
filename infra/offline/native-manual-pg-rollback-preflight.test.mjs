@@ -118,3 +118,15 @@ test("TDD: malformed SHA, unknown fields and external files are refused", LINUX_
   f.put(".virki-migration-integrity-guard", readFileSync(file, "utf8") + "unknown=true\n");
   assert.throws(() => inspectProtectedManualPgRollback(f.request), /refused/iu);
 });
+
+test("TDD: rollback evidence rejects an unprotected writable ancestor even when leaf is root 0700", LINUX_ROOT, (t) => {
+  const f = fixture(t);
+  const parent = path.dirname(f.root);
+  chmodSync(parent, 0o777);
+  try {
+    assert.throws(() => inspectProtectedManualPgRollback(f.request), /refused/iu,
+      "an attacker may replace the trusted directory through a writable non-sticky parent");
+  } finally {
+    chmodSync(parent, 0o700);
+  }
+});

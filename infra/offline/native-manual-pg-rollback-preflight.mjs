@@ -32,6 +32,16 @@ function secureDirectory(folder) {
   const stat = lstatSync(folder, { bigint: true });
   need(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === 0n &&
     (stat.mode & 0o7777n) === 0o700n);
+  // A protected 0700 leaf is not protected if an attacker can rename its
+  // parent. A root-owned sticky public parent (/tmp or /dev/shm) is allowed:
+  // non-owners cannot rename the root-owned child in that directory.
+  for (let ancestor = path.dirname(folder);;) {
+    const parent = lstatSync(ancestor, { bigint: true });
+    need(parent.isDirectory() && !parent.isSymbolicLink() && parent.uid === 0n &&
+      ((parent.mode & 0o022n) === 0n || (parent.mode & 0o1000n) !== 0n));
+    if (ancestor === path.dirname(ancestor)) break;
+    ancestor = path.dirname(ancestor);
+  }
 }
 function openProtectedFile(filename, maxSize = BigInt(Number.MAX_SAFE_INTEGER)) {
   const before = lstatSync(filename, { bigint: true });
