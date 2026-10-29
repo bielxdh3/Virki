@@ -130,6 +130,21 @@ private_health() {
   assert_fingerprint "$source_db" "$baseline_fingerprint"
   require_equal "$(sql "$source_db" 'SELECT count(*) FROM "User" WHERE "offlineFixtureAdditive" IS NOT NULL')" 0 'private canary data probe failed'
 }
+fence_manual_writer() {
+  # A real PostgreSQL LOGIN-role fence, not a file-only 'maintenance' claim.
+  # This deliberately protects ONLY the isolated fixture's synthetic writer;
+  # production must independently fence ALL writers and ingress.
+  require_equal "$(sql postgres "SELECT rolcanlogin FROM pg_roles WHERE rolname='virki_manual_writer'")" t 'fixture writer role absent or already fenced'
+  sql postgres 'ALTER ROLE virki_manual_writer NOLOGIN' > /dev/null || refuse 'writer login fence failed'
+  sql postgres "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='virki_manual_writer' AND pid <> pg_backend_pid()" > /dev/null || refuse 'writer termination failed'
+  require_equal "$(sql postgres "SELECT rolcanlogin FROM pg_roles WHERE rolname='virki_manual_writer'")" f 'writer role did not stay fenced'
+  require_equal "$(sql postgres "SELECT count(*) FROM pg_stat_activity WHERE usename='virki_manual_writer'")" 0 'writer sessions remain active'
+  if psql -X -q -A -t -U virki_manual_writer -d "$source_db" -c 'SELECT 1' > /dev/null 2>"$fixture/pg-error"; then
+    refuse 'fenced writer reconnected'
+  fi
+  record writer_fenced maintenance
+  crash_point writer_fenced
+}
 canary_health() {
   # Return a probe failure so rollback can be requested without misreporting a
   # passed canary. A lost PG connection during rollback still keeps the latch.
@@ -235,13 +250,13 @@ rollback() {
 }
 crash_point() {
   case "${VIRKI_OFFLINE_PG_CASE:-}:$1" in
-    crash_live:live_migrated|crash_canary:canary_switched|crash_admit:latch_created|crash_rollback_clone:rollback_clone_created|crash_rollback_proven:rollback_proven|crash_rollback_dropped:rollback_dropped|crash_rollback_created:rollback_created|crash_rollback_loaded:rollback_loaded|crash_rollback_restored:rollback_restored)
+    manual_fence_sigkill:writer_fenced|crash_live:live_migrated|crash_canary:canary_switched|crash_admit:latch_created|crash_rollback_clone:rollback_clone_created|crash_rollback_proven:rollback_proven|crash_rollback_dropped:rollback_dropped|crash_rollback_created:rollback_created|crash_rollback_loaded:rollback_loaded|crash_rollback_restored:rollback_restored)
       kill -KILL "$$" ;;
   esac
 }
 attempt() {
   case "${VIRKI_OFFLINE_PG_CASE:-}" in
-    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error|canary_unhealthy|crash_canary|precanary_unhealthy|postcanary_unhealthy) ;;
+    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error|canary_unhealthy|crash_canary|precanary_unhealthy|postcanary_unhealthy|manual_fenced_rollback|manual_fence_sigkill) ;;
     *) refuse 'unsupported fixture case';;
   esac
   baseline_fingerprint="$(fingerprint "$source_db")"
@@ -251,8 +266,15 @@ attempt() {
   chmod 600 "$fixture/baseline.sha256"
   admit
   record maintenance attempted
+  prior_phase=maintenance
+  case "$VIRKI_OFFLINE_PG_CASE" in
+    manual_fenced_rollback|manual_fence_sigkill)
+      fence_manual_writer
+      prior_phase=writer_fenced
+      ;;
+  esac
   run_backup
-  record backed_up maintenance
+  record backed_up "$prior_phase"
   restore_into "$restore_db"
   assert_fingerprint "$restore_db" "$baseline_fingerprint"
   record restored backed_up
@@ -282,7 +304,7 @@ attempt() {
     printf '%s' 'broken' > "$backup"
   fi
   case "${VIRKI_OFFLINE_PG_CASE}" in
-    fail_live|corrupt_backup|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error)
+    fail_live|manual_fenced_rollback|corrupt_backup|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error)
       rollback
       return
       ;;

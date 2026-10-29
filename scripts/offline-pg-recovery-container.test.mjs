@@ -25,6 +25,7 @@ const cases = [
   "crash_rollback_created", "crash_rollback_loaded", "crash_rollback_restored",
   "rollback_precheckpoint_error",
   "canary_unhealthy", "crash_canary", "precanary_unhealthy", "postcanary_unhealthy",
+  "manual_fenced_rollback", "manual_fence_sigkill",
 ];
 const allowed = { skip: process.env.VIRKI_OFFLINE_PG_CONTAINER_TEST !== "1" &&
   "requires explicit disposable PostgreSQL test opt-in" };

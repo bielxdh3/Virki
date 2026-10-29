@@ -34,6 +34,12 @@ psql -X -q -v ON_ERROR_STOP=1 -d virki_control -c "CREATE TABLE recovery_attempt
 psql -X -q -v ON_ERROR_STOP=1 -d postgres -c "CREATE ROLE virki_migrator NOLOGIN" > /dev/null 2>"$fixture/pg-error" || exit 104
 psql -X -q -v ON_ERROR_STOP=1 -d postgres -c "CREATE ROLE virki_runtime NOLOGIN" > /dev/null 2>"$fixture/pg-error" || exit 105
 psql -X -q -v ON_ERROR_STOP=1 -d postgres -c "CREATE ROLE virki_audit_maintenance NOLOGIN" > /dev/null 2>"$fixture/pg-error" || exit 106
+case "${1:-}" in
+  manual_fenced_rollback|manual_fence_sigkill)
+    # An isolated synthetic application writer, never a production role.
+    psql -X -q -v ON_ERROR_STOP=1 -d postgres -c 'CREATE ROLE virki_manual_writer LOGIN' > /dev/null 2>"$fixture/pg-error" || exit 183
+    ;;
+esac
 for migration in /workspace/packages/database/prisma/migrations/*/migration.sql; do
   test -f "$migration" || exit 107
   psql -X -q -v ON_ERROR_STOP=1 -d virki_source -f "$migration" > /dev/null 2>"$fixture/pg-error" ||
@@ -59,7 +65,22 @@ test "$protected_count" = t ||
   { echo 'Representative security data is incomplete' >&2; exit 133; }
 
 case "${1:-}" in
-  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error|canary_unhealthy|crash_canary|precanary_unhealthy|postcanary_unhealthy)
+  manual_fenced_rollback|manual_fence_sigkill)
+    # Prove there is an ACTUAL connected writer to terminate. Both server and
+    # client are confined to this disposable, networkless PostgreSQL cluster.
+    psql -X -q -v ON_ERROR_STOP=1 -d postgres -c 'GRANT CONNECT ON DATABASE virki_source TO virki_manual_writer' > /dev/null 2>"$fixture/pg-error" || exit 200
+    psql -X -qAt -U virki_manual_writer -d virki_source -c 'SELECT pg_sleep(90)' > /dev/null 2>"$fixture/writer.err" &
+    for iteration in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      active="$(psql -X -qAt -d postgres -c "SELECT count(*) FROM pg_stat_activity WHERE usename='virki_manual_writer' AND state='active'")"
+      test "$active" = 1 && break
+      sleep 0.1
+    done
+    test "${active:-0}" = 1 || exit 201
+    ;;
+esac
+
+case "${1:-}" in
+  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error|canary_unhealthy|crash_canary|precanary_unhealthy|postcanary_unhealthy|manual_fenced_rollback|manual_fence_sigkill)
     export VIRKI_OFFLINE_PG_CASE="$1"
     case "$1" in
       happy)
@@ -67,6 +88,40 @@ case "${1:-}" in
           { echo 'Happy-path recovery rehearsal failed' >&2; exit 110; }
         test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = completed || exit 111
         test "$(cat "$fixture/private-route")" = canary || exit 177
+        ;;
+      manual_fenced_rollback)
+        # Real source database DDL and real pg_dump/pg_restore into a NEW
+        # independently verified clone followed by actual rollback restore.
+        # Only fixture writer role is fenced; no production authority.
+        psql -X -qAt -U virki_manual_writer -d virki_source -c 'SELECT 1' > /dev/null 2>"$fixture/pg-error" || exit 184
+        sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" || exit 185
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 186
+        test "$(psql -X -qAt -d postgres -c "SELECT rolcanlogin FROM pg_roles WHERE rolname='virki_manual_writer'")" = f || exit 187
+        test "$(psql -X -qAt -d postgres -c "SELECT count(*) FROM pg_stat_activity WHERE usename='virki_manual_writer'")" = 0 || exit 202
+        if psql -X -qAt -U virki_manual_writer -d virki_source -c 'SELECT 1' > /dev/null 2>"$fixture/pg-error"; then exit 188; fi
+        test -f "$fixture/.attempted" && test -s "$fixture/virki.dump" || exit 189
+        test "$(cat "$fixture/private-route")" = predecessor || exit 190
+        current_inventory="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/inventory.psql 2>"$fixture/pg-error")"
+        test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 191
+        VIRKI_OFFLINE_PG_CASE=happy
+        export VIRKI_OFFLINE_PG_CASE
+        if sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/replay.err"; then exit 192; fi
+        ;;
+      manual_fence_sigkill)
+        ( sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" ) &
+        pid=$!
+        status=0
+        wait "$pid" || status=$?
+        test "$status" = 137 || exit 193
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = writer_fenced || exit 194
+        test "$(psql -X -qAt -d postgres -c "SELECT rolcanlogin FROM pg_roles WHERE rolname='virki_manual_writer'")" = f || exit 195
+        test "$(psql -X -qAt -d postgres -c "SELECT count(*) FROM pg_stat_activity WHERE usename='virki_manual_writer'")" = 0 || exit 203
+        if psql -X -qAt -U virki_manual_writer -d virki_source -c 'SELECT 1' > /dev/null 2>"$fixture/pg-error"; then exit 196; fi
+        test -f "$fixture/.attempted" && test ! -e "$fixture/virki.dump" || exit 197
+        test "$(cat "$fixture/private-route")" = predecessor || exit 198
+        VIRKI_OFFLINE_PG_CASE=happy
+        export VIRKI_OFFLINE_PG_CASE
+        if sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/replay.err"; then exit 199; fi
         ;;
       canary_unhealthy)
         sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" || exit 161

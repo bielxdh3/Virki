@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   assertDisposablePgDockerEnvironment, buildDisposablePgDockerInvocation,
 } from "./lib/offline-pg-docker-transport.mjs";
@@ -51,4 +53,26 @@ test("foreign hosts, arbitrary subcommands and caller contexts cannot be injecte
 test("fixture refuses ambient PostgreSQL credentials and unsafe node execution overrides", () => {
   for (const key of ["DATABASE_URL", "MIGRATION_DATABASE_URL", "PGHOST", "PGPASSWORD", "NODE_OPTIONS", "COMPOSE_FILE"])
     assert.throws(() => assertDisposablePgDockerEnvironment({ [key]: "injected" }), /refus/iu);
+});
+
+test("new owner-fenced manual rollback cases use only the pinned no-network PostgreSQL fixture", () => {
+  const owner = "c".repeat(32);
+  const name = `virki-disposable-pg-${owner}`;
+  const image = "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
+  // Use the native filesystem path, exactly as the transport's SOURCE pin
+  // does. A URL pathname is not a Windows path, and translating a POSIX path
+  // to backslashes breaks the same allowlist when tests run in Linux/WSL.
+  const source = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+  for (const scenario of ["manual_fenced_rollback", "manual_fence_sigkill"]) {
+    const args = ["run", "--rm", "--pull=never", "--platform=linux/amd64",
+      "--name", name, "--label", `dev.virki.disposable.pg-owner=${owner}`,
+      "--network=none", "--read-only", "--user=postgres", "--cap-drop=ALL",
+      "--security-opt=no-new-privileges", "--pids-limit=128",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m,uid=70,gid=70,mode=700",
+      "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,size=512m,uid=70,gid=70,mode=700",
+      "--mount", `type=bind,src=${source},dst=/workspace,readonly`,
+      "--workdir", "/workspace", "--env", "VIRKI_OFFLINE_PG_DISPOSABLE=1",
+      image, "sh", "/workspace/scripts/fixtures/offline-pg-recovery/run.sh", scenario];
+    assert.deepEqual(buildDisposablePgDockerInvocation(args, config).args.slice(-args.length), args);
+  }
 });
