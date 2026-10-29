@@ -45,6 +45,32 @@ unresolved intent which cannot be silently retried, skipped or removed.
 The exercise runs only as WSL root under a private `/dev/shm` Linux tmpfs
 fixture; its entrypoints deliberately refuse native production Linux.
 
+`infra/offline/manual-native-activation-safety.mjs` adds a separate read-only
+native safety inspection. It reads a fixed root-owned policy and checkpoint,
+verifies the owner and witness Ed25519 stage approval against distinct *installed*
+SPKI pins, requires the complete disposable journal head to match the persisted
+checkpoint (not merely its sequence), checks the actual protected maintenance
+marker format, and requires the existing protected PostgreSQL rollback preflight
+before live migration or later stages. A pending, changed or interrupted intent
+blocks the next stage; it cannot automatically recover or resume writers.
+The final use-point reinspection requires both the latest committed journal
+sequence and the exact chained checkpoint digest to remain unchanged. A durable
+concurrent completion at the next sequence therefore refuses a stale decision.
+Only a separately installed owner supervisor with an exclusive transaction lock
+could make this check atomic with subsequent production effects.
+Its WSL-root fixture uses only scoped `/dev/shm/virki-manual-safety-fixture-*`
+and `/dev/shm/virki-manual-activation-fixture-*` paths. Every result explicitly
+retains false deployment, Docker, writer-resume, rollback, physical writer-fence,
+host-measurement, off-host floor and private-health authorization flags.
+
+This module is **not** part of the independently pinned production ESM closure.
+The owner must first supply and independently peer-review a native installed
+driver, immutable closure inventory, physical use-point checks, real monotonic
+off-host floor, authentic writer-quiescence, health and rollback outcomes.
+Native Linux use currently refuses because its durable journal implementation
+is intentionally WSL-fixture-only. The new read-only guard therefore establishes
+no production authority and must not be invoked as an activation entrypoint.
+
 Rollback is an independently owner-approved reconciliation, not the next
 normal activation stage. `manual-activation-rollback.mjs` validates a preview
 binding the owner/witness signatures to the original writer fence, backup,
