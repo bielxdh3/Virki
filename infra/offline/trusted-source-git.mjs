@@ -152,7 +152,7 @@ function treePathSafe(value) {
     value.split("/").every((entry) => entry && entry !== "." && entry !== "..") &&
     !/^[A-Za-z]:/u.test(value);
 }
-function authenticatedGitTree(repo, revision) {
+function authenticatedGitTree(repo, revision, ownerSignedManual = false) {
   const configKeys = gitText(repo, "config", "--local", "--name-only", "--list").split("\n");
   requireIt(configKeys.every((key) => !/^(?:remote\.|url\.|include\.|includeif\.|extensions\.partialclone$|core\.sshcommand$|core\.alternaterefscommand$|core\.fsmonitor$)/iu.test(key)),
     "trusted Git cannot use remote, include, partial clone or executable configuration");
@@ -162,9 +162,14 @@ function authenticatedGitTree(repo, revision) {
     "shallow Git object store is not independently complete");
   requireIt(gitText(repo, "rev-parse", "--show-object-format=storage") === "sha1",
     "unsupported trusted Git object format");
-  requireIt(gitText(repo, "symbolic-ref", "HEAD") === "refs/heads/main" &&
-    gitText(repo, "show-ref", "--verify", "--hash", "refs/heads/main") === revision,
-  "host's independently maintained main must equal pinned commit");
+  // Existing hosted mode MUST continue pinning the host's own main. The
+  // separate manual preview can instead authenticate an exact owner-approved
+  // commit object, even when it is not the tip of any named branch.
+  if (!ownerSignedManual) {
+    requireIt(gitText(repo, "symbolic-ref", "HEAD") === "refs/heads/main" &&
+      gitText(repo, "show-ref", "--verify", "--hash", "refs/heads/main") === revision,
+    "host's independently maintained main must equal pinned commit");
+  }
   requireIt(gitText(repo, "cat-file", "-t", revision) === "commit",
     "pinned object is not a Git commit");
   // fsck validates the stored commit, tree and blob object identities, not just
@@ -191,7 +196,7 @@ function authenticatedGitTree(repo, revision) {
   return Object.freeze({ objects, timestamp: Number(timestamp) });
 }
 
-async function inspectSource(request) {
+async function inspectSource(request, ownerSignedManual = false) {
   exact(request, PREVIEW_KEYS);
   requireIt(process.platform === "linux" && typeof process.getuid === "function" &&
     process.getuid() === 0 && constants.O_NOFOLLOW && constants.O_NONBLOCK,
@@ -231,7 +236,7 @@ async function inspectSource(request) {
     requireIt(pin.sha === candidateSourceSha, "candidate SHA differs from independent host pin");
     const rootBefore = requirePrivateDirectory(trustedGitDirectory, "independent bare Git directory");
     requireNoGitAliases(trustedGitDirectory);
-    const source = authenticatedGitTree(trustedGitDirectory, pin.sha);
+    const source = authenticatedGitTree(trustedGitDirectory, pin.sha, ownerSignedManual);
     // The existing streaming parser still authenticates actual Git blobs,
     // file modes, directory entries and the canonical commit timestamp.
     const verified = verifySourceTarFdAgainstGit(sourceFd, pin.sha, source.objects,
@@ -258,6 +263,15 @@ async function inspectSource(request) {
  */
 export async function inspectUntrustedSourceGitForPreview(request = {}) {
   return inspectSource(request);
+}
+
+/** Manual ONLY Git source preview. Requires an independently supplied SHA pin
+ * and owner signature verification by the caller; this primitive does neither
+ * and therefore NEVER authorizes a release. Hosted inspection above continues
+ * to require main === pin. Native caller pins its Git and SHA paths itself.
+ */
+export async function inspectManualGitSourceForPreview(request = {}) {
+  return inspectSource(request, true);
 }
 
 /** Native installed-host READ-ONLY source inspection. No trusted path, SHA or
