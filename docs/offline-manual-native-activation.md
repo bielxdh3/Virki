@@ -71,6 +71,31 @@ Native Linux use currently refuses because its durable journal implementation
 is intentionally WSL-fixture-only. The new read-only guard therefore establishes
 no production authority and must not be invoked as an activation entrypoint.
 
+`infra/offline/native-supervisor/owner-installed-manual-supervisor.mjs`
+assembles a narrowly scoped **read-only** use-point gate around the existing
+activation safety and PostgreSQL rollback inspections. Native mode accepts no
+arguments and requires an independently protected installed executable path,
+its separately root-owned SHA-256 pin, and successful installed verifier
+re-measurement. It loads the stage approval and witness HEAD from fixed owner
+files, validates the Ed25519 witness signature and freshness, and cross-binds
+host/manifest/source/attempt/owner/witness/floor pins with the separately
+installed witness-bridge policy. It checks the protected Git commit pin against
+the candidate SHA, then reuses the complete activation journal and, when
+applicable, protected PostgreSQL migration/backup/restore preconditions.
+All files are reread after the composed checks. A commit pin is **not** an
+independent verification of the entire source archive; a signed HEAD is **not**
+an independent monotonic floor or proof that the CAS committed. These remain
+explicit external blockers. No action is authorized by this inspection.
+
+`scripts/offline-manual-native-supervisor.mjs` is a zero-argument inspection
+command whose exit status remains `2` even if all local nonauthorizing evidence
+checks pass. It does not invoke `production-server.sh`, Docker, PostgreSQL,
+SSH or any cloud route. The WSL disposable fixture mode accepts only a private
+root-owned `/dev/shm/virki-manual-safety-fixture-*` directory; this grants no
+native host, Docker or rollout authority. This supervisor is not in the
+existing independently signed native executable/dependency inventory; owner
+installation, auditing and durable native rollback execution remain **NO-GO**.
+
 Rollback is an independently owner-approved reconciliation, not the next
 normal activation stage. `manual-activation-rollback.mjs` validates a preview
 binding the owner/witness signatures to the original writer fence, backup,

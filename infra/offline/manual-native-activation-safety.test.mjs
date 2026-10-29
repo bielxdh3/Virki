@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync,
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync,
   writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,8 @@ import { createDisposableManualActivationJournal, persistDisposableManualActivat
   persistDisposableManualActivationCompletion,
   inspectDisposableManualActivationJournal } from "./manual-activation-journal.mjs";
 import { inspectNativeManualActivationSafety } from "./manual-native-activation-safety.mjs";
+import { inspectInstalledManualSupervisorReadiness } from "./native-supervisor/owner-installed-manual-supervisor.mjs";
+import { WITNESS_READ_DOMAIN } from "../../scripts/lib/offline-independent-witness-service.mjs";
 
 const fixtureOnly = { skip: process.platform !== "linux" || process.getuid?.() !== 0 ||
   !/microsoft|wsl/iu.test(os.release()) };
@@ -218,4 +220,96 @@ test("RED: concurrent independently fsynced next completion invalidates stale us
     assert.equal(concurrentCommitCount, 1);
     assert.equal(inspectDisposableManualActivationJournal({ directory: journalDirectory }).sequence, 1);
     assert.throws(() => inspectNativeManualActivationSafety(args(stage)), /refused/u);
+  }));
+
+function installedSupervisorFixture(state) {
+  const { dir, current, policy, store, storeText } = state;
+  const checkpoint = current();
+  const stage = MANUAL_ACTIVATION_STAGES[checkpoint.sequence];
+  const now = Math.floor(Date.now() / 1000);
+  const request = { version: 1, domain: WITNESS_READ_DOMAIN,
+    challenge: sha("fixed-supervisor-challenge"),
+    hostIdentitySha256: policy.hostIdentitySha256,
+    ledgerIdSha256: sha("fixture-independent-ledger") };
+  const message = { ...request, sequence: 1, headSha: policy.candidateSha,
+    receiptSha256: sha("remote-witness-confirmed-cas"), issuedAt: now,
+    expiresAt: now + 30 };
+  const signature = sign(null, Buffer.from(JSON.stringify(message)), witness.privateKey).toString("base64");
+  const receipt = { message, signature, receiptSha256: sha(JSON.stringify({ message, signature })) };
+  store(path.join(dir, "witness-head.json"), {
+    version: 1, expectedSourceSha: policy.candidateSha,
+    expectedReceiptSha256: message.receiptSha256,
+    request, receipt,
+  });
+  store(path.join(dir, "witness-bridge-policy.json"), {
+    version: 1, hostIdentitySha256: policy.hostIdentitySha256,
+    ledgerIdSha256: request.ledgerIdSha256,
+    manifestSha256: policy.manifestSha256,
+    sourceSha: policy.candidateSha,
+    activationAttemptId: policy.attemptId,
+    ownerPinSha256: policy.ownerPinSha256,
+    witnessPinSha256: policy.witnessPinSha256,
+    floorPinSha256: policy.floorPinSha256,
+  });
+  store(path.join(dir, "stage-proof.json"), proof(checkpoint, stage));
+  storeText(path.join(dir, "source-pin.sha"), `${policy.candidateSha}\n`);
+  return { fixtureRoot: dir };
+}
+
+test("RED: integrated root-installed source/witness/stage/journal gate stays nonauthorizing", fixtureOnly,
+  () => fixture((state) => {
+    const request = installedSupervisorFixture(state);
+    const result = inspectInstalledManualSupervisorReadiness(request);
+    assert.equal(result.status, "HOST_SUPERVISOR_EVIDENCE_ONLY");
+    assert.equal(result.sourceCommitPinMatched, true);
+    assert.equal(result.signedWitnessHeadMatched, true);
+    assert.equal(result.activationJournalMatched, true);
+    assert.equal(result.witnessFloorVerified, false);
+    assert.equal(result.nativeRootInstallerVerified, false);
+    assert.equal(result.deployAuthorized, false);
+    assert.equal(result.rollbackAuthorized, false);
+    assert.equal(result.resumeWritersAuthorized, false);
+  }));
+
+test("RED: no caller keys, executors or arbitrary production paths allowed", fixtureOnly,
+  () => fixture((state) => {
+    const request = installedSupervisorFixture(state);
+    for (const field of ["keys", "executor", "trusted", "deployAuthorized", "productionRoot"])
+      assert.throws(() => inspectInstalledManualSupervisorReadiness({ ...request, [field]: true }), /refused/u);
+    assert.throws(() => inspectInstalledManualSupervisorReadiness({ fixtureRoot: "/srv/virki" }), /refused/u);
+    assert.throws(() => inspectInstalledManualSupervisorReadiness({}), /refused/u);
+  }));
+
+test("RED: source pin spoof, witness signature replay, tampered stage permit and missing PG blocked", fixtureOnly,
+  () => fixture((state) => {
+    const { dir, policy, store, storeText, advance } = state;
+    const request = installedSupervisorFixture(state);
+    const source = path.join(dir, "source-pin.sha");
+    storeText(source, `${"f".repeat(40)}\n`);
+    assert.throws(() => inspectInstalledManualSupervisorReadiness(request), /refused/u);
+    storeText(source, `${policy.candidateSha}\n`);
+    const witnessFile = path.join(dir, "witness-head.json");
+    const signedHead = JSON.parse(readFileSync(witnessFile, "utf8"));
+    store(witnessFile, { ...signedHead, receipt: { ...signedHead.receipt,
+      signature: signedHead.receipt.signature.replace(/^./u, (c) => c === "A" ? "B" : "A") } });
+    assert.throws(() => inspectInstalledManualSupervisorReadiness(request), /refused/u);
+    store(witnessFile, signedHead);
+    const stageFile = path.join(dir, "stage-proof.json");
+    const stage = JSON.parse(readFileSync(stageFile, "utf8"));
+    store(stageFile, { ...stage, measuredHostIdentitySha256: "f".repeat(64) });
+    assert.throws(() => inspectInstalledManualSupervisorReadiness(request), /refused/u);
+    store(stageFile, stage);
+    const witnessPolicyFile = path.join(dir, "witness-bridge-policy.json");
+    const witnessPolicy = JSON.parse(readFileSync(witnessPolicyFile, "utf8"));
+    store(witnessPolicyFile, { ...witnessPolicy, ledgerIdSha256: "9".repeat(64) });
+    assert.throws(() => inspectInstalledManualSupervisorReadiness(request), /refused/u);
+    store(witnessPolicyFile, witnessPolicy);
+    store(witnessPolicyFile, { ...witnessPolicy, floorPinSha256: pin(owner) });
+    assert.throws(() => inspectInstalledManualSupervisorReadiness(request), /refused/u);
+    store(witnessPolicyFile, witnessPolicy);
+    for (let i = 0; i < 4; i++) advance();
+    installedSupervisorFixture(state);
+    // An owner-signed transition history without the actual immutable
+    // PostgreSQL backup/clone and maintenance guard is insufficient.
+    assert.throws(() => inspectInstalledManualSupervisorReadiness(request), /refused/u);
   }));
