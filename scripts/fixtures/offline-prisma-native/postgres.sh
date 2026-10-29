@@ -9,9 +9,10 @@ test "${DATABASE_URL:-}" = '' && test "${MIGRATION_DATABASE_URL:-}" = '' || exit
 test "${PGHOST:-}" = '' && test "${PGHOSTADDR:-}" = '' || exit 93
 test ! -S /var/run/docker.sock || exit 94
 test "$(stat -f -c %t /tmp)" = 1021994 || exit 95
-test "$(stat -f -c %t /var/lib/postgresql/data)" = 1021994 || exit 96
+test "$(stat -f -c %t /var/lib/postgresql)" = 1021994 || exit 96
 umask 077
 mkdir -m 700 /tmp/virki-proof
+mkdir -m 700 /var/lib/postgresql/data
 initdb --auth-local=trust --auth-host=reject -D /var/lib/postgresql/data > /tmp/virki-proof/pg.log 2>&1 || exit 97
 # No TCP listener at all: the only client transport is a Unix socket in a
 # random owner-labelled Docker volume shared with a fixed Node runner. Both

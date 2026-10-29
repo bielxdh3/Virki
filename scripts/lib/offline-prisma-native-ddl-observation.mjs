@@ -23,7 +23,11 @@ export function deriveBlockedDdlProbe() {
   // but conflicts with the real ALTER's AccessExclusiveLock. PG visibility
   // alone does not prove which user-space process owns the waiting backend:
   // orchestrator also checks the actual Linux engine UID/PPID/executable.
-  return `SELECT COUNT(*) FROM pg_locks l
+  return `SELECT COUNT(*) ${blockedDdlFrom()}`;
+}
+
+function blockedDdlFrom() {
+  return `FROM pg_locks l
   JOIN pg_stat_activity a ON a.pid = l.pid
   JOIN pg_locks h ON h.pid = ANY(pg_blocking_pids(a.pid))
   JOIN pg_stat_activity b ON b.pid = h.pid
@@ -32,7 +36,7 @@ export function deriveBlockedDdlProbe() {
     AND a.usename = 'postgres'
     AND a.client_addr IS NULL
     AND a.wait_event_type = 'Lock'
-    AND a.query ~ '^[[:space:]]*ALTER[[:space:]]+TABLE[[:space:]]+"ProjectConnection"[[:space:]]+ADD[[:space:]]+COLUMN[[:space:]]+"launchUrl"[[:space:]]+TEXT[[:space:]]*;?[[:space:]]*$'
+    AND a.query ~ '^CREATE EXTENSION IF NOT EXISTS pgcrypto;[[:space:]]+ALTER[[:space:]]+TABLE[[:space:]]+"ProjectConnection"[[:space:]]+ADD[[:space:]]+COLUMN[[:space:]]+"launchUrl"[[:space:]]+TEXT;'
     AND l.relation = 'public."ProjectConnection"'::regclass
     AND l.mode = 'AccessExclusiveLock'
     AND l.granted = false
@@ -42,4 +46,42 @@ export function deriveBlockedDdlProbe() {
     AND b.datname = 'virki_clone'
     AND b.query LIKE '%pg_sleep(${INTERRUPT_TIMING.blockerSeconds})%'
     AND b.query LIKE '%LOCK TABLE "ProjectConnection" IN SHARE UPDATE EXCLUSIVE MODE%'`;
+}
+
+/** Only one PostgreSQL connection to the exact migration DDL is a valid target. */
+export function deriveBlockedDdlBackendIdentityProbe() {
+  return `SELECT DISTINCT a.pid::text || '|' || ` +
+    `(EXTRACT(EPOCH FROM a.backend_start) * 1000000)::bigint::text ${blockedDdlFrom()}`;
+}
+
+export function parseBlockedDdlBackendIdentity(output) {
+  const match = /^([1-9][0-9]{0,9})\|([1-9][0-9]{15})$/u.exec(output);
+  if (!match || Number(match[1]) > 2147483647) refuse();
+  return Object.freeze({ pid: Number(match[1]), startedMicroseconds: match[2] });
+}
+
+function validIdentity(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      !Number.isSafeInteger(value.pid) || value.pid < 1 || value.pid > 2147483647 ||
+      typeof value.startedMicroseconds !== "string" ||
+      !/^[1-9][0-9]{15}$/u.test(value.startedMicroseconds)) refuse();
+}
+
+/** Verify live exact migration SQL + owner lock + original session epoch atomically
+ * with the termination. Zero or multiple matches means NO backend is killed.
+ * The sole PostgreSQL server lives in the owner-verified, networkless container. */
+export function deriveBlockedDdlBackendTermination(value) {
+  validIdentity(value);
+  return `SELECT CASE WHEN COUNT(*) = 1 THEN pg_terminate_backend(MIN(pid), 5000) ` +
+    `ELSE FALSE END FROM (SELECT DISTINCT a.pid ${blockedDdlFrom()} ` +
+    `AND a.pid = ${value.pid} ` +
+    `AND (EXTRACT(EPOCH FROM a.backend_start) * 1000000)::bigint = ${value.startedMicroseconds}` +
+    `) AS uniquely_pinned_disposable_backend`;
+}
+
+export function deriveBlockedDdlBackendAbsence(value) {
+  validIdentity(value);
+  return `SELECT COUNT(*) FROM pg_stat_activity a WHERE a.pid = ${value.pid} ` +
+    `AND a.datname = 'virki_clone' ` +
+    `AND (EXTRACT(EPOCH FROM a.backend_start) * 1000000)::bigint = ${value.startedMicroseconds}`;
 }

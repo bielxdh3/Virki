@@ -14,9 +14,9 @@ const owner = "b".repeat(32);
 test("no-host-port Prisma and PG both have no network, share only an owned Unix socket volume", () => {
   const plan = planDisposablePrismaNative({ owner, socketVolume: `virki-prisma-sock-${owner}` });
   assert.deepEqual(plan.pg.image,
-    "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24");
+    "sha256:57b23a0326ee442e83b3d3fa027c5a148be0a392d7c91d1ca4e1e70131ee859a");
   assert.deepEqual(plan.node.image,
-    "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8");
+    "sha256:b3836fa4137b0d202cb83631ddf53e76800deac5c3d4af9130db49a1b8690ce4");
   assert.ok(plan.pg.args.includes("--network=none"));
   assert.ok(plan.node.args.includes("--network=none"));
   assert.ok(plan.pg.args.includes("--mount"));
@@ -44,7 +44,7 @@ test("refuses malicious CID and owner-controlled container selection", () => {
 test("Docker inspected container identity and port/network boundaries are mandatory", () => {
   const expected = { id: pg, name: `virki-prisma-pg-${owner}`, owner,
     socketVolume: `virki-prisma-sock-${owner}`,
-    imageId: "sha256:" + "c".repeat(64), imageRef: "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
+    imageId: "sha256:" + "c".repeat(64), imageRef: "sha256:57b23a0326ee442e83b3d3fa027c5a148be0a392d7c91d1ca4e1e70131ee859a",
     network: "none" };
   const healthy = { Id: pg, Name: `/${expected.name}`,
     Config: { Image: expected.imageRef, Labels: { "dev.virki.prisma-native.owner": owner } },

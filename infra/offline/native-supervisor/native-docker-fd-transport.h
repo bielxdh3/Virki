@@ -67,5 +67,22 @@ bool vdt_exchange(struct vdt_session *session, enum vdt_command command,
                   int archive_fd, uint64_t archive_size,
                   const char *image_hex64, char *response, size_t response_cap,
                   size_t *response_size);
+/* Large-image path: LOAD only. `archive_fd` is an already authenticated,
+ * root/private, single-owner read-only regular descriptor to a completely
+ * unlinked staging inode (nlink=0), backed by disk, never its upload pathname.
+ * Before POST the boundary copies into a SHA-256-pinned immutable memfd
+ * with F_SEAL_WRITE/GROW/SHRINK/SEAL, then rehashes the SEALED snapshot.
+ * No unsealed disk FD is ever streamed: same-UID processes can force-break
+ * Linux leases. Up to 8 GiB require MemAvailable and cgroup-v2 headroom
+ * measured as archive size + 50% + 512MiB reserve. Snapshots are sequential.
+ * This check is not a reservation or OOM guarantee: independent supervision
+ * must still kill stalled staging before any production authority is claimed.
+ * Caller must close the staging writer BEFORE calling and durably record
+ * a one-shot attempt before the first possible POST. This transport never
+ * creates an admission capability; failed exchange may mutate the daemon. */
+bool vdt_exchange_detached(struct vdt_session *session, int archive_fd,
+                           uint64_t archive_size, const char *archive_sha256,
+                           char *response, size_t response_cap,
+                           size_t *response_size);
 void vdt_detach(struct vdt_session *session);
 #endif

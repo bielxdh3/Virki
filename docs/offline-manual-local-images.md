@@ -68,3 +68,5 @@ reconciliation rather than guessing which daemon resources can be deleted.
 Do not point the staging parent inside the Git checkout. No command here
 installs independent owner trust, proves an off-host monotonic ledger witness,
 attests a native isolated Docker daemon or moves a release into production.
+The separate native host interface and two-image disposable FD/receipt proof
+are documented in [manual native image import](offline-manual-native-image-import.md).

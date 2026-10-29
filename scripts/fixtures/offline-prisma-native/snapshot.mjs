@@ -27,7 +27,7 @@ function copyPinned(from, to) {
   return bytes;
 }
 if (process.platform !== "linux" || process.env.VIRKI_PRISMA_NATIVE_DISPOSABLE !== "1" ||
-    typeof process.getuid !== "function" || process.getuid() !== 70 ||
+    typeof process.getuid !== "function" || process.getuid() !== 1000 ||
     process.env.DATABASE_URL || process.env.PGHOST || process.env.PGHOSTADDR) refuse();
 const sourcePlan = verifyCommittedStage2PrismaMigrations(path.join(source, "migrations"));
 mkdirSync(target, { mode: 0o700 });

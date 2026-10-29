@@ -27,6 +27,7 @@
 #define VDT_MAX_HEADER 8192
 #define VDT_MAX_BODY (256 * 1024)
 #define VDT_MAX_UPLOAD (64ULL * 1024 * 1024)
+#define VDT_MAX_DETACHED_UPLOAD (8ULL * 1024 * 1024 * 1024)
 #define VDT_STAGING_BASE_MS 3000
 #define VDT_STAGING_BYTES_PER_SECOND (16ULL * 1024 * 1024)
 #define VDT_STAGING_MAX_MS 8000
@@ -373,19 +374,160 @@ static long long stage_deadline(uint64_t length) {
   if (budget > VDT_STAGING_MAX_MS) budget = VDT_STAGING_MAX_MS;
   return now + budget;
 }
+/* Large sealed-memory snapshot staging uses a separate deadline.
+ * 16MiB/s minimum budget + 10s grace, capped at
+ * 10 minutes. This is an absolute time bound, not guaranteed interruptibility
+ * for a kernel pread; a killable native supervisor remains compulsory. */
+static long long detached_stage_deadline(uint64_t length) {
+  if (!length || length > VDT_MAX_DETACHED_UPLOAD) return -1;
+  long long now = clock_ms();
+  if (now < 0) return -1;
+  long long seconds = 10 + (long long)((length + VDT_STAGING_BYTES_PER_SECOND - 1) /
+    VDT_STAGING_BYTES_PER_SECOND);
+  if (seconds > 600) seconds = 600;
+  return now + seconds * 1000;
+}
+/* Admission is deliberately memory conservative, not a memory reservation:
+ * reject whenever actual kernel MemAvailable or cgroup v2 available headroom
+ * cannot accommodate the next full sealed snapshot PLUS 50% and 512MiB
+ * operating reserve. The host supervisor must still handle concurrent OOM.
+ * Caller never sends a POST until the complete snapshot is sealed+rehash-pinned.
+ * Missing/unreadable cgroup controls fail closed (no optimism from /proc). */
+static bool read_memory_value(const char *filename, uint64_t *value,
+                              bool *unlimited) {
+  int fd = open(filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return false;
+  char contents[64] = {0};
+  ssize_t n = read(fd, contents, sizeof contents - 1);
+  close(fd);
+  if (n <= 0 || n >= (ssize_t)sizeof contents - 1) return false;
+  contents[n] = 0;
+  if (!strcmp(contents, "max\n") || !strcmp(contents, "max")) {
+    if (!unlimited) return false;
+    *unlimited = true;
+    return true;
+  }
+  errno = 0;
+  char *end = NULL;
+  unsigned long long number = strtoull(contents, &end, 10);
+  if (errno || end == contents || (*end && strcmp(end, "\n"))) return false;
+  *value = (uint64_t)number;
+  if (unlimited) *unlimited = false;
+  return true;
+}
+static bool large_snapshot_memory_budget(uint64_t length) {
+#if defined(VIRKI_DISPOSABLE_MANUAL_BATCH) && defined(VIRKI_DISPOSABLE_DENY_LARGE_MEMORY)
+  (void)length;
+  return false; /* Disposable-only TDD: force fail-closed before any POST. */
+#endif
+  if (length <= VDT_MAX_UPLOAD || length > VDT_MAX_DETACHED_UPLOAD) return
+    length <= VDT_MAX_UPLOAD;
+  uint64_t required = length + length / 2 + (512ULL << 20);
+  FILE *mem = fopen("/proc/meminfo", "r");
+  if (!mem) return false;
+  char line[256] = {0};
+  unsigned long long kib = 0;
+  bool found = false;
+  while (fgets(line, sizeof line, mem)) {
+    if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) {
+      found = true; break;
+    }
+  }
+  fclose(mem);
+  if (!found || kib > UINT64_MAX / 1024 ||
+      kib * 1024ULL < required) return false;
+  /* cgroup v2 unified hierarchy; walk ancestor limits, not just leaf. */
+  FILE *cg = fopen("/proc/self/cgroup", "r");
+  if (!cg) return false;
+  char group[512] = {0};
+  found = false;
+  while (fgets(line, sizeof line, cg)) {
+    if (!strncmp(line, "0::/", 4)) {
+      size_t size = strcspn(line + 3, "\n");
+      if (size >= sizeof group) break;
+      memcpy(group, line + 3, size);
+      group[size] = 0;
+      found = true; break;
+    }
+  }
+  fclose(cg);
+  if (!found || group[0] != '/' || strstr(group, "..") ||
+      strpbrk(group, "\\ 	")) return false;
+  char directory[768];
+  if (snprintf(directory, sizeof directory, "/sys/fs/cgroup%s", group) >=
+      (int)sizeof directory) return false;
+  bool checked = false;
+  for (;;) {
+    char maximum[896], usage[896];
+    if (snprintf(maximum, sizeof maximum, "%s/memory.max", directory) >=
+        (int)sizeof maximum ||
+        snprintf(usage, sizeof usage, "%s/memory.current", directory) >=
+        (int)sizeof usage) return false;
+    uint64_t max = 0, current = 0;
+    bool unlimited = false;
+    if (access(maximum, F_OK) == 0) {
+      if (!read_memory_value(maximum, &max, &unlimited) ||
+          !read_memory_value(usage, &current, NULL) ||
+          (!unlimited && (max < current || max - current < required)))
+        return false;
+      checked = true;
+    } else if (strcmp(directory, "/sys/fs/cgroup")) return false;
+    if (!strcmp(directory, "/sys/fs/cgroup")) break;
+    char *slash = strrchr(directory, '/');
+    if (!slash || slash <= directory + strlen("/sys/fs/cgroup")) {
+      strcpy(directory, "/sys/fs/cgroup");
+    } else *slash = 0;
+  }
+  return checked;
+}
 /* Snapshot is complete, independently SHA-pinned, and sealed BEFORE any
  * Docker HTTP mutation request is transmitted. Original archive FD changes
  * afterwards cannot influence the bytes emitted by this session. */
+static bool verify_sealed_digest(int fd, uint64_t length,
+                                 const char *expected_hex, long long deadline) {
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  bool good = ctx && EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) == 1;
+  char block[65536];
+  for (uint64_t at = 0; good && at < length;) {
+    if (!before_deadline(deadline)) { good = false; break; }
+    size_t amount = length - at > sizeof block ?
+      sizeof block : (size_t)(length - at);
+    ssize_t got = pread(fd, block, amount, (off_t)at);
+    if (got <= 0 || !before_deadline(deadline) ||
+        EVP_DigestUpdate(ctx, block, (size_t)got) != 1) {
+      good = false; break;
+    }
+    at += (uint64_t)got;
+  }
+  unsigned char digest[EVP_MAX_MD_SIZE] = {0};
+  unsigned digest_length = 0;
+  if (good) good = EVP_DigestFinal_ex(ctx, digest, &digest_length) == 1 &&
+    digest_length == 32 && before_deadline(deadline);
+  if (ctx) EVP_MD_CTX_free(ctx);
+  char actual[65] = {0};
+  static const char hex[] = "0123456789abcdef";
+  if (good) for (size_t i = 0; i < 32; i++) {
+    actual[2 * i] = hex[digest[i] >> 4];
+    actual[2 * i + 1] = hex[digest[i] & 15];
+  }
+  return good && !strcmp(actual, expected_hex);
+}
 static int make_verified_snapshot(int source, uint64_t length,
                                   const char *expected_hex,
-                                  long long deadline) {
-  if (!hex64(expected_hex) || length == 0 || length > VDT_MAX_UPLOAD ||
+                                  long long deadline, bool large) {
+  if (!hex64(expected_hex) || length == 0 ||
+      length > (large ? VDT_MAX_DETACHED_UPLOAD : VDT_MAX_UPLOAD) ||
+      (large && !large_snapshot_memory_budget(length)) ||
       !before_deadline(deadline))
     return -1;
   struct stat before, after, copy_state;
   if (fstat(source, &before) || !before_deadline(deadline) ||
       !S_ISREG(before.st_mode) ||
-      before.st_nlink != 1 || before.st_size < 0 ||
+      before.st_nlink != (large ? 0U : 1U) ||
+      (large && (before.st_uid != geteuid() ||
+                 (before.st_mode & 07777) != 0600 ||
+                 (fcntl(source, F_GETFL) & O_ACCMODE) != O_RDONLY)) ||
+      before.st_size < 0 ||
       (uint64_t)before.st_size != length) return -1;
   int sealed = memfd_create("virki-untrusted-archive-snapshot",
                             MFD_ALLOW_SEALING | MFD_CLOEXEC);
@@ -443,7 +585,8 @@ static int make_verified_snapshot(int source, uint64_t length,
       fcntl(sealed, F_GET_SEALS) != seals ||
       fstat(sealed, &copy_state) || !S_ISREG(copy_state.st_mode) ||
       (uint64_t)copy_state.st_size != length ||
-      !before_deadline(deadline)) {
+      !before_deadline(deadline) ||
+      !verify_sealed_digest(sealed, length, expected_hex, deadline)) {
     close(sealed);
     return -1;
   }
@@ -567,10 +710,10 @@ static bool load_stream_receipt(const char *bytes, size_t size) {
   return lines > 0;
 }
 
-bool vdt_exchange(struct vdt_session *s, enum vdt_command command,
-                  int archive_fd, uint64_t archive_size,
-                  const char *image, char *response, size_t capacity,
-                  size_t *response_size) {
+static bool exchange(struct vdt_session *s, enum vdt_command command,
+                     int archive_fd, uint64_t archive_size,
+                     const char *image, char *response, size_t capacity,
+                     size_t *response_size, bool detached) {
   if (!s || !s->active) return false;
   /* Any invalid call poisons the session until detach and fresh supervision. */
   s->active = false;
@@ -588,18 +731,21 @@ bool vdt_exchange(struct vdt_session *s, enum vdt_command command,
   if (!same_peer(s)) goto fail;
   struct stat before = {0}, after = {0};
   if (command == VDT_LOAD) {
-    const long long staging_expires_at = stage_deadline(archive_size);
+    const long long staging_expires_at = detached ?
+      detached_stage_deadline(archive_size) : stage_deadline(archive_size);
     if (staging_expires_at < 0) goto fail;
-    if (archive_fd < 0 || archive_size == 0 || archive_size > VDT_MAX_UPLOAD ||
-        fstat(archive_fd, &before) || !S_ISREG(before.st_mode) ||
-        before.st_nlink != 1 || before.st_size < 0 ||
-        (uint64_t)before.st_size != archive_size ||
+    if (archive_fd < 0 || archive_size == 0 ||
+        archive_size > (detached ? VDT_MAX_DETACHED_UPLOAD : VDT_MAX_UPLOAD))
+      goto fail;
+    if (fstat(archive_fd, &before) || !S_ISREG(before.st_mode) ||
+        before.st_size < 0 || (uint64_t)before.st_size != archive_size ||
         !before_deadline(staging_expires_at)) goto fail;
-    /* Establish the absolute staging timer before the first byte read or
-     * memfd allocation. Upload timeout starts only after a sealed snapshot
-     * is complete; staging has its own independently bounded allocation. */
+    /* Both paths send exclusively from a full, immutable F_SEAL_WRITE
+     * snapshot. For large archives, require measured per-host memory
+     * headroom BEFORE allocating, then seal+rehash before first POST.
+     * NEVER rely on F_SETLEASE: another same-UID process can force-break it. */
     sealed_fd = make_verified_snapshot(archive_fd, archive_size, image,
-                                       staging_expires_at);
+                                      staging_expires_at, detached);
     if (sealed_fd < 0) goto fail;
   } else if (archive_fd != -1 || archive_size != 0) goto fail;
   char path[160];
@@ -624,9 +770,12 @@ bool vdt_exchange(struct vdt_session *s, enum vdt_command command,
   if (n <= 0 || n >= (int)sizeof request) goto fail;
   long long budget = VDT_TIMEOUT_MS;
   if (command == VDT_LOAD) {
-    /* 5s + 1s per 64 MiB, capped at 240s, one absolute deadline. */
-    budget = 5000 + (long long)((archive_size + (64ULL << 20) - 1) /
-      (64ULL << 20)) * 1000;
+    /* Detached disk-backed path needs independently bounded real TAR upload;
+     * fixed 64MiB/s assumption would terminate 1.33GiB staging too early. */
+    budget = detached ? 15000 + (long long)((archive_size + (8ULL << 20) - 1) /
+      (8ULL << 20)) * 1000 :
+      5000 + (long long)((archive_size + (64ULL << 20) - 1) /
+        (64ULL << 20)) * 1000;
     if (budget > VDT_MAX_LOAD_BUDGET_MS) budget = VDT_MAX_LOAD_BUDGET_MS;
   }
   long long deadline = clock_ms() + budget;
@@ -672,4 +821,20 @@ fail:
   if (response_size) *response_size = 0;
   s->active = false;
   return false;
+}
+
+bool vdt_exchange(struct vdt_session *s, enum vdt_command command,
+                  int archive_fd, uint64_t archive_size,
+                  const char *image, char *response, size_t capacity,
+                  size_t *response_size) {
+  return exchange(s, command, archive_fd, archive_size,
+                  image, response, capacity, response_size, false);
+}
+
+bool vdt_exchange_detached(struct vdt_session *s, int archive_fd,
+                           uint64_t archive_size, const char *archive_sha256,
+                           char *response, size_t response_cap,
+                           size_t *response_size) {
+  return exchange(s, VDT_LOAD, archive_fd, archive_size, archive_sha256,
+                  response, response_cap, response_size, true);
 }

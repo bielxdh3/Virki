@@ -24,7 +24,12 @@ import {
 } from "./lib/offline-prisma-native-result.mjs";
 import {
   INTERRUPT_TIMING, assertCommittedFirstDdl, deriveBlockedDdlProbe,
+  deriveBlockedDdlBackendIdentityProbe, parseBlockedDdlBackendIdentity,
+  deriveBlockedDdlBackendTermination, deriveBlockedDdlBackendAbsence,
 } from "./lib/offline-prisma-native-ddl-observation.mjs";
+import {
+  classifyPrismaPostkillExit, assertPrismaPostkillDatabaseState,
+} from "./lib/offline-prisma-postkill.mjs";
 
 const ENDPOINT = "npipe:////./pipe/dockerDesktopLinuxEngine";
 const INSPECT = "{{json .}}";
@@ -94,6 +99,7 @@ export function runDisposablePrismaNative({
   let finished = false;
   let volumeAttempted = false;
   let volumeAccepted = false;
+  let postkillZeroExitAnomaly = false;
   const created = [];
   let imageIDs = {};
   const runOwned = (kind, spec) => {
@@ -125,7 +131,7 @@ export function runDisposablePrismaNative({
     ensure(db !== URL_MISSING || (command[0] === "status" && expectedCode === "P1003"));
     verifyEntry(created[1]);
     const cmd = ["exec", "--env", `DATABASE_URL=${db}`, created[1].id,
-      "node", "/usr/local/lib/node_modules/prisma/build/index.js", "migrate", ...command,
+      "node", "/app/node_modules/prisma/build/index.js", "migrate", ...command,
       "--schema", "/tmp/virki-prisma/schema.prisma"];
     // Prisma can emit multi-line, formatted diagnostics. A 4 KiB child
     // buffer previously masked the actual negative-case result as UNKNOWN.
@@ -167,6 +173,7 @@ export function runDisposablePrismaNative({
     const lock = `SELECT COUNT(*) FROM pg_locks WHERE relation = 'public."ProjectConnection"'::regclass ` +
       `AND mode='ShareUpdateExclusiveLock' AND granted`;
     const waiting = deriveBlockedDdlProbe();
+    const backendIdentityProbe = deriveBlockedDdlBackendIdentityProbe();
     const pollExactlyOne = (statement, limit) => {
       for (let i = 0; i < limit; i++) if (sql(statement) === "1") return;
       refuse();
@@ -217,21 +224,78 @@ export function runDisposablePrismaNative({
       `AND finished_at IS NULL AND rolled_back_at IS NULL`) === "1");
     ensure(sql(`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='public' ` +
       `AND table_name='ProjectConnection' AND column_name='launchUrl'`) === "0");
+    // Pin only the backend running the exact immutable migration SQL and
+    // blocked by OUR private holder. PID alone is insufficient; retain its
+    // PostgreSQL backend_start with microsecond precision against reuse.
+    const pendingDdlBackend = parseBlockedDdlBackendIdentity(sql(backendIdentityProbe));
+    ensure(sql(waiting) === "1");
+    journal("append", { event: "real_prisma_waiting_pg_backend_unique_identity_pinned",
+      pid: pendingDdlBackend.pid, backendStartMicros: pendingDdlBackend.startedMicroseconds });
     journal("append", { event: "real_prisma_schema_engine_ddl_blocked_on_pg_lock" });
     diagnosticPhase = "engine-interrupt-exact-sigkill";
     ensure(exec(created[1], ["node", "/workspace/scripts/fixtures/offline-prisma-native/interrupt.mjs", "kill"],
       { timeout: 12000 }) === "EXACT_PRISMA_SCHEMA_ENGINE_SIGKILL_SENT");
     journal("append", { event: "exact_prisma_schema_engine_sigkill_sent" });
+    // PostgreSQL can continue executing the enqueued ALTER even after the
+    // Prisma schema-engine process is killed. Terminate ONLY its still-blocked
+    // owner-pinned backend BEFORE releasing the private holder lock. This is
+    // the actual session failure injection, not synthesized migration history.
+    diagnosticPhase = "engine-interrupt-terminate-exact-waiting-pg-backend";
+    ensure(sql(lock) === "1" && sql(waiting) === "1" &&
+      sql(backendIdentityProbe) === `${pendingDdlBackend.pid}|${pendingDdlBackend.startedMicroseconds}`);
+    journal("append", { event: "real_prisma_postkill_waiting_backend_termination_may_start",
+      pid: pendingDdlBackend.pid, backendStartMicros: pendingDdlBackend.startedMicroseconds });
+    ensure(sql(deriveBlockedDdlBackendTermination(pendingDdlBackend)) === "t");
+    ensure(sql(deriveBlockedDdlBackendAbsence(pendingDdlBackend)) === "0" &&
+      sql(waiting) === "0" && sql(lock) === "1");
+    journal("append", { event: "real_prisma_postkill_waiting_backend_terminated",
+      pid: pendingDdlBackend.pid, backendStartMicros: pendingDdlBackend.startedMicroseconds });
+    journal("append", { event: "real_prisma_postkill_waiting_backend_absent" });
     let runnerExited = false;
-    for (let i = 0; i < 42; i++) {
+    const exitDeadline = Date.now() + 75000;
+    while (Date.now() < exitDeadline) {
       const marker = docker(["exec", created[1].id, "test", "-s", "/tmp/virki-prisma-engine-exit.json"],
         { timeout: 5000 });
       if (!marker.error && marker.status === 0) { runnerExited = true; break; }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
     }
-    ensure(runnerExited && exec(created[1], ["node",
-      "/workspace/scripts/fixtures/offline-prisma-native/interrupt.mjs", "result"],
-    { timeout: 15000 }) === "REAL_PRISMA_CLI_NONZERO_AFTER_SIGKILL");
-    journal("append", { event: "real_prisma_cli_failed_after_engine_sigkill" });
+    if (!runnerExited) {
+      diagnosticCode = "PRISMA_EXIT_MARKER_TIMEOUT";
+      refuse();
+    }
+    const exitEvidence = JSON.parse(exec(created[1], ["cat", "/tmp/virki-prisma-engine-exit.json"]));
+    const exitClass = classifyPrismaPostkillExit(exitEvidence);
+    // Only known safe lines from the pinned disposable fixture are journaled.
+    // Neither the PostgreSQL URL nor arbitrary CLI stdout/stderr is persisted.
+    for (const channel of ["stdout", "stderr"]) {
+      const summary = exitEvidence[channel];
+      ensure(summary && Number.isSafeInteger(summary.byteLength) &&
+        summary.byteLength >= 0 && summary.byteLength <= 32768 &&
+        /^[a-f0-9]{64}$/u.test(summary.sha256) &&
+        Array.isArray(summary.safeLines) && summary.safeLines.length <= 6 &&
+        summary.safeLines.every((line) => typeof line === "string" &&
+          line.length <= 120 && /^(?:Prisma schema loaded from \/tmp\/virki-prisma\/schema\.prisma|Error: P[0-9]{4}|All migrations have been successfully applied\.|Applying migration `(?:0_init|[0-9]{14}_[a-z0-9_]+)`|[0-9]{1,3} migrations found in prisma\/migrations)$/u.test(line)));
+    }
+    journal("append", { event: "real_prisma_cli_exit_marker_observed",
+      status: exitEvidence.status, signal: exitEvidence.signal, error: exitEvidence.error,
+      stdout: exitEvidence.stdout, stderr: exitEvidence.stderr });
+    if (exitClass.zeroExitAnomaly) {
+      postkillZeroExitAnomaly = true;
+      journal("append", { event: "postkill_cli_zero_exit_anomaly_latched_not_success" });
+    } else {
+      ensure(exec(created[1], ["node",
+        "/workspace/scripts/fixtures/offline-prisma-native/interrupt.mjs", "result"],
+      { timeout: 15000 }) === "REAL_PRISMA_CLI_NONZERO_AFTER_SIGKILL");
+      journal("append", { event: "real_prisma_cli_failed_after_engine_sigkill" });
+    }
+    const postkillState = `SELECT ` +
+      `(SELECT count(*) FROM "_prisma_migrations" WHERE migration_name='20261001000000_security_polish' AND finished_at IS NULL AND rolled_back_at IS NULL)::text || '|' || ` +
+      `(SELECT count(*) FROM "_prisma_migrations" WHERE migration_name='20261001000000_security_polish' AND finished_at IS NOT NULL)::text || '|' || ` +
+      `(SELECT count(*) FROM "_prisma_migrations" WHERE migration_name='20261001000000_security_polish' AND rolled_back_at IS NOT NULL)::text || '|' || ` +
+      `(SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='ProjectConnection' AND column_name='launchUrl')::text`;
+    diagnosticPhase = "engine-interrupt-postkill-database-before-release";
+    assertPrismaPostkillDatabaseState(sql(postkillState));
+    journal("append", { event: "real_postkill_migration_unfinished_column_absent_before_release" });
     // Terminate ONLY the private PostgreSQL test lock backend, selected by
     // its granted private holder lock and controlled pg_sleep query marker.
     diagnosticPhase = "engine-interrupt-release-private-lock";
@@ -244,9 +308,10 @@ export function runDisposablePrismaNative({
     // The actual engine died mid-migration. Prisma must now fail closed on
     // the incomplete row; explicit rolled-back resolution allows reapply.
     diagnosticPhase = "engine-interrupt-prisma-failed-history";
-    ensure(sql(`SELECT COUNT(*) FROM "_prisma_migrations" ` +
-      `WHERE migration_name='20261001000000_security_polish' ` +
-      `AND finished_at IS NULL AND rolled_back_at IS NULL`) === "1");
+    assertPrismaPostkillDatabaseState(sql(postkillState));
+    journal("append", { event: "real_postkill_migration_unfinished_column_absent_after_release" });
+    // Even a zero-status first CLI cannot authorize recovery. The fresh Prisma
+    // invocation must independently exit nonzero and return EXACT P3009.
     nodePrisma(URL_CLONE, ["deploy"], { expectedCode: "P3009" });
     journal("append", { event: "real_prisma_p3009_after_schema_engine_sigkill" });
     diagnosticPhase = "engine-interrupt-prisma-resolve-rollback";
@@ -294,11 +359,11 @@ export function runDisposablePrismaNative({
     runOwned("node", plan.node);
     journal("append", { event: "preflight_containers_verified" });
     diagnosticPhase = "prisma-dependency-files";
-    ensure(docker(["exec", created[1].id, "test", "-r", "/usr/local/lib/node_modules/prisma/build/index.js"]).status === 0);
+    ensure(docker(["exec", created[1].id, "test", "-r", "/app/node_modules/prisma/build/index.js"]).status === 0);
     ensure(docker(["exec", created[1].id, "test", "-r", "/workspace/packages/database/prisma/schema.prisma"]).status === 0);
-    ensure(docker(["exec", created[1].id, "test", "-x", "/usr/local/lib/node_modules/@prisma/engines/schema-engine-debian-openssl-3.0.x"]).status === 0);
+    ensure(docker(["exec", created[1].id, "test", "-x", "/opt/virki-prisma/schema-engine-linux-musl-openssl-3.0.x"]).status === 0);
     diagnosticPhase = "prisma-cli-version";
-    const versionOutput = docker(["exec", created[1].id, "node", "/usr/local/lib/node_modules/prisma/build/index.js", "--version"],
+    const versionOutput = docker(["exec", created[1].id, "node", "/app/node_modules/prisma/build/index.js", "--version"],
       { timeout: 90000, maxBuffer: 8192 });
     if (versionOutput.error || versionOutput.status !== 0 ||
         !/\b6\.19\.3\b/u.test(`${versionOutput.stdout ?? ""}\n${versionOutput.stderr ?? ""}`)) {
@@ -413,11 +478,13 @@ export function runDisposablePrismaNative({
     journal("append", { event: "rollback_restored_and_proven" });
     finished = true;
     return Object.freeze({ status: interrupted ?
-      "REAL_PRISMA_SCHEMA_ENGINE_SIGKILL_RECOVERED_DISPOSABLE_ONLY" :
+      postkillZeroExitAnomaly ? "REAL_PRISMA_P3009_RECOVERED_WITH_CLI_ZERO_EXIT_ANOMALY_DIAGNOSTIC_ONLY" :
+        "REAL_PRISMA_SCHEMA_ENGINE_SIGKILL_RECOVERED_DISPOSABLE_ONLY" :
       "REAL_PRISMA_MIGRATE_DEPLOY_DISPOSABLE_ONLY",
       migrationCount: Number(history), backupSha256: baselineSha,
       wrongDatabaseRefusedByPrisma: !interrupted,
       prismaSchemaEngineSigkillRecovered: interrupted,
+      postkillZeroExitAnomaly, prismaP3009IndependentlyVerified: interrupted,
       noHostPublishedPorts: true, networkIsolated: true,
       productionProof: false, transferAuthorized: false, deployAuthorized: false });
   } finally {
@@ -444,7 +511,8 @@ export function runDisposablePrismaNative({
           !/no such volume/iu.test(gone.stderr ?? "")) cleaned = false;
       } catch { cleaned = false; }
     }
-    if (started && finished && cleaned && created.length === 2 && volumeAttempted && volumeAccepted) {
+    if (started && finished && cleaned && created.length === 2 && volumeAttempted && volumeAccepted &&
+        !postkillZeroExitAnomaly) {
       journal("remove");
     }
     // Private Docker CLI config contains no credentials and never reuses a

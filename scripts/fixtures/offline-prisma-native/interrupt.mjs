@@ -7,9 +7,10 @@ import {
   constants, existsSync, openSync, closeSync, readFileSync, readdirSync, writeFileSync,
 } from "node:fs";
 import { INTERRUPT_TIMING } from "../../lib/offline-prisma-native-ddl-observation.mjs";
+import { summarizePrismaPostkillOutput } from "../../lib/offline-prisma-postkill.mjs";
 
-const PRISMA = "/usr/local/lib/node_modules/prisma/build/index.js";
-const ENGINE = "/usr/local/lib/node_modules/@prisma/engines/schema-engine-debian-openssl-3.0.x";
+const PRISMA = "/app/node_modules/prisma/build/index.js";
+const ENGINE = "/opt/virki-prisma/schema-engine-linux-musl-openssl-3.0.x";
 const SCHEMA = "/tmp/virki-prisma/schema.prisma";
 const EXIT_MARKER = "/tmp/virki-prisma-engine-exit.json";
 const DATABASE_URL = "postgresql://postgres@localhost:5432/virki_clone?host=/var/run/postgresql";
@@ -22,7 +23,7 @@ function expectedEngine(pid) {
   const argv = cmd(pid);
   if (argv[0] !== ENGINE) return false;
   const status = readProc(pid, "status");
-  if (!/^Uid:\s+70\s+70\s+70\s+70\s*$/mu.test(status)) return false;
+  if (!/^Uid:\s+1000\s+1000\s+1000\s+1000\s*$/mu.test(status)) return false;
   const parent = /^PPid:\s+(\d+)\s*$/mu.exec(status)?.[1];
   if (!parent) return false;
   const parentArgs = cmd(parent);
@@ -32,7 +33,7 @@ function expectedEngine(pid) {
 
 const mode = process.argv[2];
 if (process.platform !== "linux" || typeof process.getuid !== "function" ||
-    process.getuid() !== 70 || !process.env.VIRKI_PRISMA_NATIVE_DISPOSABLE ||
+    process.getuid() !== 1000 || !process.env.VIRKI_PRISMA_NATIVE_DISPOSABLE ||
     process.env.DATABASE_URL || process.env.PGHOSTADDR || process.env.PGHOST ||
     process.argv.length !== 3 || !["run", "kill", "result", "probe"].includes(mode)) refuse();
 if (mode === "run") {
@@ -43,7 +44,9 @@ if (mode === "run") {
     env: { ...process.env, DATABASE_URL },
   });
   const evidence = { status: result.status, signal: result.signal,
-    error: result.error?.code ?? null };
+    error: result.error?.code ?? null,
+    stdout: summarizePrismaPostkillOutput(result.stdout ?? ""),
+    stderr: summarizePrismaPostkillOutput(result.stderr ?? "") };
   const fd = openSync(EXIT_MARKER, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
   try { writeFileSync(fd, JSON.stringify(evidence), "utf8"); } finally { closeSync(fd); }
   if (result.error || result.status === 0) refuse();
