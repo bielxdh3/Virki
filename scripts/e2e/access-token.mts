@@ -7,6 +7,14 @@ import type { Page } from "@playwright/test";
 const HUB_URL = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://hub.localhost" : "https://hub.localhost:3001";
 
 type RegisteredSigningKey = { kid: string; privateKey: KeyObject };
+type PublicRsaJwk = {
+  kty: "RSA";
+  kid: string;
+  alg: "RS256";
+  use: "sig";
+  n: string;
+  e: string;
+};
 
 let registeredSigningKey: Promise<RegisteredSigningKey> | undefined;
 
@@ -56,7 +64,7 @@ async function getRegisteredSigningKey(issuer: string): Promise<RegisteredSignin
   }
 }
 
-async function registerSigningKey(issuer: string): Promise<RegisteredSigningKey> {
+export async function registerSigningKey(issuer: string): Promise<RegisteredSigningKey> {
   const keyFile = process.env.VIRKI_E2E_ACCESS_SIGNING_KEY_FILE;
   if (!keyFile) throw new Error("Synthetic E2E Cloudflare Access signing key is unavailable.");
   let key: unknown;
@@ -66,11 +74,16 @@ async function registerSigningKey(issuer: string): Promise<RegisteredSigningKey>
     throw new Error("Synthetic E2E Cloudflare Access signing key is invalid.");
   }
   if (!isSigningKey(key)) throw new Error("Synthetic E2E Cloudflare Access signing key is invalid.");
-  await registerTestSigningKey(issuer, key.publicJwk);
+  // A malformed fixture can smuggle private JWK members (d/p/q/dp/dq/qi/oth)
+  // or arbitrary properties into publicJwk. Project the exact public RSA set
+  // before constructing an outbound request, rather than serializing the input.
+  const { kty, kid, alg, use, n, e } = key.publicJwk;
+  const publicJwk: PublicRsaJwk = { kty, kid, alg, use, n, e };
+  await registerTestSigningKey(issuer, publicJwk);
   return { kid: key.kid, privateKey: createPrivateKey(key.privateKey) };
 }
 
-async function registerTestSigningKey(issuer: string, jwk: Record<string, unknown>): Promise<void> {
+async function registerTestSigningKey(issuer: string, jwk: PublicRsaJwk): Promise<void> {
   const registrationToken = process.env.VIRKI_E2E_JWKS_REGISTRATION_TOKEN;
   if (!registrationToken) throw new Error("Synthetic E2E Cloudflare Access registration token is unavailable.");
 
@@ -85,7 +98,7 @@ async function registerTestSigningKey(issuer: string, jwk: Record<string, unknow
   if (!response.ok) throw new Error("Synthetic E2E Cloudflare Access key registration failed.");
 }
 
-function isSigningKey(value: unknown): value is { kid: string; publicJwk: Record<string, unknown>; privateKey: string } {
+function isSigningKey(value: unknown): value is { kid: string; publicJwk: PublicRsaJwk; privateKey: string } {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   const publicJwk = candidate.publicJwk;
@@ -94,5 +107,6 @@ function isSigningKey(value: unknown): value is { kid: string; publicJwk: Record
   return typeof candidate.kid === "string" && candidate.kid.length > 0 &&
     typeof candidate.privateKey === "string" && candidate.privateKey.includes("PRIVATE KEY") &&
     jwk.kid === candidate.kid && jwk.kty === "RSA" && jwk.alg === "RS256" && jwk.use === "sig" &&
-    typeof jwk.n === "string" && typeof jwk.e === "string";
+    typeof jwk.n === "string" && /^[A-Za-z0-9_-]+$/u.test(jwk.n) &&
+    typeof jwk.e === "string" && /^[A-Za-z0-9_-]+$/u.test(jwk.e);
 }
