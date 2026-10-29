@@ -136,7 +136,7 @@ location, private staging root and fresh owner nonce.
    using visudo -c to validate it. The only delegated privileges are exactly
    FOUR argument-exact commands (no wildcards, shell, arbitrary options or SETENV):
 
-    Defaults:virki-offline env_reset,!setenv,!requiretty
+    Defaults:virki-offline env_reset,!setenv
     Cmnd_Alias VIRKI_OFFLINE_TRANSFER = /usr/bin/node /usr/local/lib/virki/offline-transfer/offline-host-transfer-receiver.mjs, \
         /usr/bin/node /usr/local/lib/virki/offline-transfer/offline-host-transfer-receiver.mjs --read-probe, \
         /usr/bin/node /usr/local/lib/virki/offline-transfer/offline-host-transfer-receiver.mjs --read-docker, \
@@ -150,6 +150,25 @@ location, private staging root and fresh owner nonce.
    Sudo policy and the installed Node runtime must be independently audited;
    sudo env_reset must remain in effect. No unrestricted sudo permissions
    may be granted to this account.
+   For an independently pinned owner-installable native account/authorized_keys,
+   exact sudoers and per-user Match readiness blueprint, see
+   [offline-owner-ssh-bootstrap.md](offline-owner-ssh-bootstrap.md).
+   The native readiness guard must prove that an inherited
+   `AuthorizedKeysCommand` and trusted user CA are both disabled
+   specifically for `virki-offline` in effective `sshd -T -C`; otherwise
+   an unrelated ambient SSH key source could bypass the pinned single
+   `authorized_keys` file. The host's effective Ed25519 private key must
+   independently derive the owner-pinned public SPKI. These checks do
+   not change other users' shared sshd settings.
+   Before the Include is installed, independently capture and owner-pin
+   the nine exact root/nobody/unrelated-admin sshd -T/-C baseline contexts
+   in /etc/virki/offline-ssh-bootstrap/shared-sshd-baseline.json.
+   The native inspector compares the full current outputs against these
+   pre-install bytes and refuses drift. The disposable native regression
+   places Include EARLY before trailing globals; parser success or nine
+   contexts does not attest every principal or an already running daemon.
+   This setup still requires effective native sshd inspection and a real
+   disposable sshd E2E; no live host installation is authorized.
 4. Provision and attest existing native Linux/amd64 release trust:
    /etc/virki/offline-release and /var/lib/virki/offline-release, signer
    revocations, builder/owner pins, machine-id, replay predecessor and ledger.
