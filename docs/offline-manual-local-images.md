@@ -14,7 +14,10 @@ and all required base images/npm dependencies **already cached**:
 
 ```powershell
 $env:VIRKI_MANUAL_IMAGES_LOCAL_BUILD = '1'
-npm run images:offline:manual -- --repository E:\Virki --staging-parent E:\VirkiOfflineBuilds
+npm run images:offline:manual -- --repository E:\Virki `
+  --staging-parent E:\VirkiOfflineBuilds `
+  --npm-cache-receipt E:\VirkiOfflineBuilds\npm-offline-XXXXXX\npm-offline-cache-receipt.json `
+  --prisma-engine-dir E:\VirkiOfflineBuilds\prisma-engines-XXXXXXXXXXXXXXXXXXXXXXXX\context
 ```
 
 The command requires a clean committed source checkout and locally runs `git
@@ -31,8 +34,17 @@ inheritance disabled). A group-writable or inherited ACL fails before Docker.
 The Docker Desktop Linux engine endpoint is
 pinned to its local named pipe, not an ambient Docker context, network or remote
 daemon. Both targets use `--pull=false`, `--network=none`, `linux/amd64`, and
-the exact source revision build arg. An offline npm dependency cache miss is a
-**failure**, never permission to reenable networking.
+the exact source revision build arg. The offline npm cache must first be
+prepared separately with `cache:offline:npm`, using exact SHA-512-integrity
+tarballs from the official registry. Its owner-private receipt, source commit,
+package-lock digest and all 339 blobs are checked before a named BuildKit
+cache context is admitted. Only two reviewed `npm ci` steps are changed to
+`npm ci --offline` in a temporary derived Dockerfile, and the canonical Git
+Dockerfile remains unchanged. The separate native Prisma engine sidecar is
+prepared with `cache:offline:prisma-engines` and checked against exact pinned
+gzip and ELF64 hashes; see `docs/offline-manual-prisma-engines.md`. Missing or
+altered npm packages or native engines are a **failure**, never permission to
+reenable networking or ignore Prisma engine checksums.
 
 Successful builds must pass fresh `docker image inspect` for exact full source
 SHA, canonical OCI source, Linux/amd64 and `node:node`; runtime and migrator

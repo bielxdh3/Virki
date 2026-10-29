@@ -5,7 +5,6 @@ import { mkdirSync, mkdtempSync, realpathSync, readFileSync, readdirSync, lstatS
 import { finished } from 'node:stream/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyOfflineDockerSaveTar } from './lib/offline-docker-tar-verifier.mjs';
 
 // An independent GitHub/GHCR-free DEVELOPER image builder. It builds only
 // committed source and emits unsigned local evidence, never release authority.
@@ -23,6 +22,7 @@ const BASE_IMAGE = `node:22-alpine@sha256:${BASE_DIGEST}`;
 const REVIEWED_DOCKERFILE_SHA256 = '9c75a70445f8df7184d6c4e321c95524210504e18760c3ff1d280534a40563ef';
 const WINDOWS_DOCKER = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe';
 const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+const WINDOWS_WSL = 'C:\\Windows\\System32\\wsl.exe';
 const ENGINE = 'npipe:////./pipe/dockerDesktopLinuxEngine';
 const ROLES = Object.freeze([['runtime', 'production'], ['migrator', 'migrator']]);
 
@@ -86,6 +86,49 @@ export function createOfflineManualImagePlan({ revision, stagingDirectory, attem
   }));
 }
 
+export function createOfflineManualBuildWithCachePlan({
+  revision, stagingDirectory, attemptId, npmCacacheDirectory, prismaEngineDirectory,
+} = {}) {
+  const plan = createOfflineManualImagePlan({ revision, stagingDirectory, attemptId });
+  const cacache = canonicalAbsolute(npmCacacheDirectory);
+  const engines = canonicalAbsolute(prismaEngineDirectory);
+  requireIt(path.basename(cacache) === '_cacache',
+    'offline npm BuildKit context must contain only the npm content-addressed cache');
+  const dockerfile = path.join(canonicalAbsolute(stagingDirectory), 'Dockerfile.manual-offline');
+  return Object.freeze(plan.map((item) => {
+    const args = [...item.buildArgs];
+    const index = args.indexOf('-f');
+    requireIt(index >= 0 && args[index + 1], 'Dockerfile pin missing');
+    args[index + 1] = dockerfile;
+    args.splice(index, 0, '--no-cache', '--build-context', `offline-npm-cacache=${cacache}`,
+      '--build-context', `offline-prisma-engines=${engines}`);
+    return Object.freeze({ ...item, buildArgs: Object.freeze(args) });
+  }));
+}
+
+export function assertOfflineNpmCacheReceipt(receipt, {
+  parent, receiptDirectory, revision, lockSha256,
+} = {}) {
+  const keys = ['status', 'sourceSha', 'packageLockSha256', 'packages', 'totalBytes',
+    'cacheDirectory', 'buildNetwork', 'ghcr', 'ownerSignatureVerified', 'deployAuthorized'];
+  requireIt(receipt && typeof receipt === 'object' && !Array.isArray(receipt) &&
+    Object.keys(receipt).length === keys.length &&
+    keys.every((key) => Object.hasOwn(receipt, key)) &&
+    receipt.status === 'DEV_CACHE_VERIFIED_ONLY' &&
+    FULL_SHA.test(revision ?? '') && receipt.sourceSha === revision &&
+    /^[a-f0-9]{64}$/u.test(lockSha256 ?? '') && receipt.packageLockSha256 === lockSha256 &&
+    receipt.packages === 339 && Number.isSafeInteger(receipt.totalBytes) &&
+    receipt.totalBytes > 0 && receipt.totalBytes <= 8 * 1024 ** 3 &&
+    receipt.buildNetwork === 'none' && receipt.ghcr === 'NOT_USED' &&
+    receipt.ownerSignatureVerified === false && receipt.deployAuthorized === false &&
+    canonicalAbsolute(receiptDirectory) === receiptDirectory &&
+    path.dirname(receiptDirectory) === canonicalAbsolute(parent) &&
+    /^npm-offline-[a-zA-Z0-9_-]{6,}$/u.test(path.basename(receiptDirectory)) &&
+    receipt.cacheDirectory === path.join(receiptDirectory, 'cache', '_cacache'),
+  'offline npm cache receipt does not bind exact source/lock or owner-private cache');
+  return receipt.cacheDirectory;
+}
+
 export function assertOfflineLocalImageInspect(raw, { revision, role } = {}) {
   requireIt(FULL_SHA.test(revision ?? '') && ROLES.some(([item]) => item === role), 'invalid expected image identity');
   let inspected;
@@ -101,6 +144,65 @@ export function assertOfflineLocalImageInspect(raw, { revision, role } = {}) {
       'org.opencontainers.image.revision': revision,
       'org.opencontainers.image.source': OCI_SOURCE,
     }) });
+}
+
+/** Dedicated Linux Node O_NOFOLLOW broker; no shell, Windows to WSL E: only. */
+export function pinnedWindowsPathToWsl(filename) {
+  requireIt(typeof filename === 'string' && /^E:\\[A-Za-z0-9_.-]+(?:\\[A-Za-z0-9_.-]+)*$/u.test(filename) &&
+    path.win32.normalize(filename) === filename &&
+    filename.split('\\').slice(1).every((part) => part !== '.' && part !== '..' &&
+      !part.endsWith('.') && !part.endsWith(' ')),
+  'WSL source path is not a canonical limited E: local pathname');
+  return '/mnt/e/' + filename.slice(3).split('\\').join('/');
+}
+
+export function assertLinuxTarVerificationResult(raw, expected) {
+  let result;
+  try { result = JSON.parse(raw); } catch { requireIt(false, 'invalid Linux Docker TAR verification reply'); }
+  const fields = ['status', 'role', 'imageId', 'revision', 'source', 'platform', 'user',
+    'archiveSha256', 'archiveSizeBytes', 'layerCount', 'ownerSignatureVerified',
+    'dockerLoadAuthorized', 'transferAuthorized', 'deployAuthorized'];
+  requireIt(result && typeof result === 'object' && !Array.isArray(result) &&
+    Object.keys(result).length === fields.length && fields.every((f) => Object.hasOwn(result, f)) &&
+    result.status === 'LOCAL_DOCKER_TAR_BYTES_VERIFIED_ONLY' &&
+    result.role === expected?.role && result.imageId === expected?.imageId &&
+    result.revision === expected?.revision && result.archiveSha256 === expected?.archiveSha256 &&
+    result.archiveSizeBytes === expected?.archiveSizeBytes &&
+    result.source === OCI_SOURCE && result.platform === 'linux/amd64' &&
+    result.user === 'node:node' && Number.isSafeInteger(result.layerCount) &&
+    result.layerCount >= 1 && result.layerCount <= 256 &&
+    result.ownerSignatureVerified === false && result.dockerLoadAuthorized === false &&
+    result.transferAuthorized === false && result.deployAuthorized === false,
+  'Linux Docker TAR response mismatches pinned image identity or falsely authorizes deployment');
+  return result;
+}
+
+function verifyWindowsTarThroughLinux({ archivePath, expectedImageId, expectedRevision,
+  expectedArchiveSha256, expectedArchiveSizeBytes, role }) {
+  requireIt(process.platform === 'win32' && lstatSync(WINDOWS_WSL).isFile(),
+    'pinned Windows WSL executable unavailable');
+  const script = fileURLToPath(new URL('./offline-local-tar-verify-linux.mjs', import.meta.url));
+  const source = pinnedWindowsPathToWsl(script);
+  const linuxArchive = pinnedWindowsPathToWsl(archivePath);
+  const result = spawnSync(WINDOWS_WSL, [
+    '-d', 'Ubuntu', '-u', 'root', '--', '/usr/bin/node', source,
+    '--archive', linuxArchive, '--image-id', expectedImageId,
+    '--revision', expectedRevision, '--sha256', expectedArchiveSha256,
+    '--size', String(expectedArchiveSizeBytes), '--role', role,
+  ], { shell: false, windowsHide: true, encoding: 'utf8',
+    timeout: 600000, maxBuffer: 8192, env: {
+      SystemRoot: process.env.SystemRoot, windir: process.env.windir,
+      PATH: 'C:\\Windows\\System32;C:\\Windows',
+      WSLENV: '',
+    } });
+  requireIt(!result.error && !result.signal && result.status === 0 &&
+    typeof result.stdout === 'string' && result.stdout.length < 4096,
+  'Linux O_NOFOLLOW Docker TAR verifier did not confirm the immutable archive');
+  return assertLinuxTarVerificationResult(result.stdout.trim(), {
+    role, imageId: expectedImageId, revision: expectedRevision,
+    archiveSha256: expectedArchiveSha256,
+    archiveSizeBytes: expectedArchiveSizeBytes,
+  });
 }
 
 // `docker build --pull=false` does NOT guarantee no registry access when a
@@ -217,7 +319,8 @@ async function fileSha256(filename) {
  * deployment, image import to a remote host, rollback or success assertion.
  * All generated source/image receipts remain unsigned and NOT_AUTHORIZED.
  */
-export async function buildOfflineManualImages({ repositoryRoot, stagingParent, revision } = {}) {
+export async function buildOfflineManualImages({ repositoryRoot, stagingParent, revision,
+  npmCacheReceiptPath, prismaEngineDirectory } = {}) {
   requireIt(process.platform === 'win32' && process.arch === 'x64', 'only reviewed local Windows Docker Desktop supported');
   requireIt(process.env.VIRKI_MANUAL_IMAGES_LOCAL_BUILD === '1', 'explicit local build opt-in missing');
   const repo = canonicalAbsolute(repositoryRoot);
@@ -228,6 +331,25 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
   requireIt(!childOf(repo, parent) && !childOf(parent, repo) && repo !== parent,
     'temporary source and repository roots must be disjoint');
   requireIt(FULL_SHA.test(revision ?? ''), 'invalid requested source SHA');
+  const enginesPath = canonicalAbsolute(prismaEngineDirectory);
+  const relativeEngines = path.relative(parent, enginesPath);
+  requireIt(relativeEngines && relativeEngines !== '.' &&
+    !relativeEngines.startsWith('..' + path.sep) && relativeEngines !== '..' &&
+    !path.isAbsolute(relativeEngines) && relativeEngines.split(path.sep).length <= 2,
+  'Prisma engine context must be within the owner-private staging parent');
+  failIfAliases(enginesPath);
+  requireIt(typeof npmCacheReceiptPath === 'string' &&
+    canonicalAbsolute(npmCacheReceiptPath) === npmCacheReceiptPath &&
+    path.basename(npmCacheReceiptPath) === 'npm-offline-cache-receipt.json',
+  'exact owner-private npm cache receipt is required before a network-isolated image build');
+  const receiptDirectory = path.dirname(npmCacheReceiptPath);
+  requireIt(path.dirname(receiptDirectory) === parent, 'npm cache must share the protected owner staging parent');
+  failIfAliases(receiptDirectory);
+  const receiptStat = lstatSync(npmCacheReceiptPath);
+  requireIt(receiptStat.isFile() && !receiptStat.isSymbolicLink() &&
+    receiptStat.nlink === 1 && receiptStat.size > 0 && receiptStat.size <= 4096,
+  'npm cache receipt is an unsafe or oversized file');
+  const receipt = JSON.parse(readFileSync(npmCacheReceiptPath, 'utf8'));
   requireIt(lstatSync(WINDOWS_DOCKER).isFile(), 'pinned Docker Desktop executable missing');
 
   // Authenticode verifies the CLI before first daemon contact; a third-party
@@ -240,7 +362,6 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
   const emptyConfig = mkdtempSync(path.join(parent, 'docker-cli-'));
   const session = mkdtempSync(path.join(parent, 'manual-images-'));
   const attemptId = randomBytes(12).toString('hex');
-  const plan = createOfflineManualImagePlan({ revision, stagingDirectory: session, attemptId });
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (/^(DOCKER_|BUILDKIT_|GIT_)/iu.test(key) || /^(HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/iu.test(key)) delete env[key];
@@ -248,6 +369,7 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
   env.DOCKER_CONFIG = emptyConfig;
   env.DOCKER_HOST = ENGINE;
   env.DOCKER_CONTEXT = 'default';
+  env.DOCKER_BUILDKIT = '1';
   const docker = (args, timeout = 30000) => run(WINDOWS_DOCKER, ['--host', ENGINE, '--config', emptyConfig, ...args],
     { env, timeout });
   let phase = 'source-preflight';
@@ -268,18 +390,54 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
     phase = 'source-blob-integrity';
     assertSourceMatchesCommittedBlobs(context, blobs);
     assertPinnedDockerfile(context);
+    // Cache receipt and all 339 SRI-bound blobs MUST match Git's canonical
+    // package-lock; an unsigned JSON success claim cannot substitute for bytes.
+    phase = 'npm-cache-integrity';
+    const { officialTarballPlan, verifyNpmCacacheIndex } = await import('./offline-npm-cache.mjs');
+    const { verifyOfflinePrismaEngineDirectory,
+      derivePinnedOfflineDockerfileWithPrismaEngines } =
+      await import('./offline-prisma-engine-cache.mjs');
+    const lockBytes = readFileSync(path.join(context, 'package-lock.json'));
+    const lockSha256 = createHash('sha256').update(lockBytes).digest('hex');
+    const cacheDirectory = assertOfflineNpmCacheReceipt(receipt, {
+      parent, receiptDirectory, revision, lockSha256,
+    });
+    failIfAliases(path.dirname(cacheDirectory));
+    failIfAliases(cacheDirectory);
+    const entries = officialTarballPlan(JSON.parse(lockBytes.toString('utf8')));
+    requireIt(entries.length === 339, 'npm lockfile tarball inventory changed');
+    const verified = await verifyNpmCacacheIndex(path.dirname(cacheDirectory), entries);
+    requireIt(verified.verified === receipt.packages && verified.totalBytes === receipt.totalBytes,
+    'npm cache contains unverified or inconsistent package bytes');
+    phase = 'prisma-engine-integrity';
+    const engines = verifyOfflinePrismaEngineDirectory(enginesPath);
+    const derivedDockerfile = path.join(session, 'Dockerfile.manual-offline');
+    writeFileSync(derivedDockerfile, derivePinnedOfflineDockerfileWithPrismaEngines(
+      readFileSync(path.join(context, 'infra', 'Dockerfile.prod'), 'utf8')),
+    { flag: 'wx', mode: 0o600 });
+    const buildPlan = createOfflineManualBuildWithCachePlan({ revision,
+      stagingDirectory: session, attemptId, npmCacacheDirectory: cacheDirectory,
+      prismaEngineDirectory: enginesPath });
     // Docker image inspect is a local-only metadata query, unlike build/pull.
     phase = 'cached-base-inspect';
     assertOfflineCachedBaseImage(docker(['image', 'inspect', BASE_IMAGE, '--format', '{{json .}}']));
     const imageIds = new Set();
     const metadata = {};
-    for (const item of plan) {
+    for (const item of buildPlan) {
       phase = `${item.role}-source-integrity`;
       assertSourceMatchesCommittedBlobs(context, blobs);
+      const checked = await verifyNpmCacacheIndex(path.dirname(cacheDirectory), entries);
+      requireIt(checked.totalBytes === verified.totalBytes && checked.verified === 339,
+        'npm cache changed before isolated image build');
+      verifyOfflinePrismaEngineDirectory(enginesPath);
       phase = `${item.role}-image-build`;
       docker(item.buildArgs, 1200000);
       phase = `${item.role}-post-build-integrity`;
       assertSourceMatchesCommittedBlobs(context, blobs);
+      const afterCache = await verifyNpmCacacheIndex(path.dirname(cacheDirectory), entries);
+      requireIt(afterCache.totalBytes === verified.totalBytes && afterCache.verified === 339,
+        'npm cache changed during isolated image build');
+      verifyOfflinePrismaEngineDirectory(enginesPath);
       phase = `${item.role}-image-inspect`;
       const inspected = assertOfflineLocalImageInspect(docker(['image', 'inspect', item.tag, '--format', '{{json .}}']),
         { revision, role: item.role });
@@ -291,7 +449,7 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
       requireIt(Number.isSafeInteger(size) && size > 0 && size <= 8 * 1024 ** 3, 'unsafe exported Docker TAR length');
       const digest = await fileSha256(item.tarPath);
       phase = `${item.role}-tar-verify`;
-      await verifyOfflineDockerSaveTar({
+      verifyWindowsTarThroughLinux({
         archivePath: item.tarPath, expectedImageId: inspected.imageId,
         expectedRevision: revision, expectedArchiveSha256: digest,
         expectedArchiveSizeBytes: size, role: item.role,
@@ -304,6 +462,8 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
       status: 'LOCAL_SOURCE_AND_IMAGES_VERIFIED_ONLY',
       sourceSha: revision, directory: session, sourceArchive: archive,
       sourceArchiveSha256: await fileSha256(archive), images: metadata,
+      npmCacheLockSha256: lockSha256, npmCachePackagesVerified: 339,
+      prismaEngineCommit: engines.engineCommit, prismaEngineTarget: engines.target,
       hostedCi: 'NOT_RUN', codeql: 'NOT_RUN', ghcr: 'NOT_USED',
       ownerSignatureVerified: false, deployAuthorized: false, transferAuthorized: false,
     });
@@ -319,11 +479,14 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const runEntry = async () => {
-    requireIt(process.argv.length === 6 && process.argv[2] === '--repository' &&
-      process.argv[4] === '--staging-parent', 'usage: --repository <absolute-path> --staging-parent <absolute-path>');
+    requireIt(process.argv.length === 10 && process.argv[2] === '--repository' &&
+      process.argv[4] === '--staging-parent' && process.argv[6] === '--npm-cache-receipt' &&
+      process.argv[8] === '--prisma-engine-dir',
+    'usage: --repository <absolute-path> --staging-parent <absolute-path> --npm-cache-receipt <absolute-path> --prisma-engine-dir <absolute-path>');
     const revision = run('git', ['rev-parse', '--verify', 'HEAD'], { cwd: process.argv[3] }).trim();
     const result = await buildOfflineManualImages({ repositoryRoot: process.argv[3],
-      stagingParent: process.argv[5], revision });
+      stagingParent: process.argv[5], revision, npmCacheReceiptPath: process.argv[7],
+      prismaEngineDirectory: process.argv[9] });
     process.stdout.write(JSON.stringify(result) + '\n');
   };
   runEntry().catch((error) => {

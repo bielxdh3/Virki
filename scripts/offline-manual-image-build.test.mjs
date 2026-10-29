@@ -7,8 +7,10 @@ import os from 'node:os';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createOfflineManualImagePlan, assertOfflineLocalImageInspect, assertOfflineCachedBaseImage,
-  assertSourceMatchesCommittedBlobs, requirePrivateWindowsStagingParent,
-  assertPinnedOfflineDockerfileText } from './offline-manual-image-build.mjs';
+  assertSourceMatchesCommittedBlobs, createOfflineManualBuildWithCachePlan,
+  requirePrivateWindowsStagingParent, assertOfflineNpmCacheReceipt,
+  assertPinnedOfflineDockerfileText, pinnedWindowsPathToWsl,
+  assertLinuxTarVerificationResult } from './offline-manual-image-build.mjs';
 
 const revision = 'a'.repeat(40);
 const stage = process.platform === 'win32' ? 'E:\\VirkiBuilds\\attempt-1234' : '/tmp/virki-builds/attempt-1234';
@@ -28,6 +30,108 @@ test('a manual local image plan exports both exact-SHA roles without GitHub Acti
     assert.ok(item.tarPath.endsWith(`${item.role}.tar`));
   }
   assert.notEqual(plan[0].tag, plan[1].tag);
+});
+
+test('manual image build uses only verified external npm cache and derived pinned Dockerfile when offline', () => {
+  const root = path.resolve(os.tmpdir(), 'virki-example-staging');
+  const cacheDir = path.resolve(os.tmpdir(), 'virki-example-cache', '_cacache');
+  const prismaDir = path.resolve(os.tmpdir(), 'virki-example-prisma-engines');
+  const plan = createOfflineManualBuildWithCachePlan({
+    revision, stagingDirectory: root, attemptId: '1234567890abcdef12345678',
+    npmCacacheDirectory: cacheDir, prismaEngineDirectory: prismaDir,
+  });
+  assert.equal(plan.length, 2);
+  for (const item of plan) {
+    const args = item.buildArgs;
+    assert.equal(args[0], 'build');
+    assert.ok(args.includes('--pull=false'));
+    assert.ok(args.includes('--network=none'));
+    assert.ok(args.includes('--no-cache'));
+    assert.ok(args.includes(`offline-npm-cacache=${cacheDir}`));
+    assert.ok(args.includes(`offline-prisma-engines=${prismaDir}`));
+    assert.ok(args.includes(path.join(root, 'Dockerfile.manual-offline')));
+    assert.ok(!args.includes(path.join(root, 'source', 'infra', 'Dockerfile.prod')));
+    assert.ok(!/ghcr|actions|--push|--secret/iu.test(args.join(' ')));
+  }
+  assert.throws(() => createOfflineManualBuildWithCachePlan({ revision,
+    stagingDirectory: root, attemptId: '1234567890abcdef12345678',
+    npmCacacheDirectory: '../foreign', prismaEngineDirectory: prismaDir,
+  }));
+  assert.throws(() => createOfflineManualBuildWithCachePlan({ revision,
+    stagingDirectory: root, attemptId: '1234567890abcdef12345678',
+    npmCacacheDirectory: cacheDir, prismaEngineDirectory: '../foreign',
+  }));
+});
+
+test('npm cache receipt is cryptographically bound to the exact committed lock, source and private staging root', () => {
+  const parent = path.resolve(os.tmpdir(), 'virki-private-parent');
+  const dir = path.join(parent, 'npm-offline-abcdef');
+  const cacheDirectory = path.join(dir, 'cache', '_cacache');
+  const lockSha256 = 'b'.repeat(64);
+  const receipt = {
+    status: 'DEV_CACHE_VERIFIED_ONLY', sourceSha: revision,
+    packageLockSha256: lockSha256,
+    packages: 339, totalBytes: 13589, cacheDirectory,
+    buildNetwork: 'none', ghcr: 'NOT_USED',
+    ownerSignatureVerified: false, deployAuthorized: false,
+  };
+  assert.equal(assertOfflineNpmCacheReceipt(receipt, {
+    parent, receiptDirectory: dir, revision, lockSha256,
+  }), cacheDirectory);
+  for (const altered of [
+    { ...receipt, sourceSha: 'c'.repeat(40) },
+    { ...receipt, packageLockSha256: 'd'.repeat(64) },
+    { ...receipt, cacheDirectory: path.join(parent, 'sibling', '_cacache') },
+    { ...receipt, packages: 338 },
+    { ...receipt, ownerSignatureVerified: true },
+    { ...receipt, deployAuthorized: true },
+    { ...receipt, ghcr: 'USED' },
+    { ...receipt, totalBytes: 0 },
+    { ...receipt, unexpected: 'false' },
+  ]) assert.throws(() => assertOfflineNpmCacheReceipt(altered, {
+    parent, receiptDirectory: dir, revision, lockSha256,
+  }));
+});
+
+test('the Linux TAR broker converts ONLY canonical E-drive absolute paths; no command or traversal substitution', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const file = 'E:\\VirkiManualPrivate20261028\\manual-images-ABC123\\runtime.tar';
+  assert.equal(pinnedWindowsPathToWsl(file),
+    '/mnt/e/VirkiManualPrivate20261028/manual-images-ABC123/runtime.tar');
+  for (const invalid of [
+    'D:\\other\\runtime.tar',
+    'E:\\Virki\\..\\other\\runtime.tar',
+    'E:\\Virki\\foreign; touch /tmp/x',
+    'E:\\Virki\\other`bad',
+    'E:\\Virki\\trailing.\\runtime.tar',
+    'E:\\Virki\\folder\\name with spaces.tar',
+    'E:\\Virki\\runtime.tar\n',
+    'E:\\Virki\\runtime.tar&&bad',
+    'relative\\runtime.tar',
+    '\\\\evil\\share\\runtime.tar',
+  ]) assert.throws(() => pinnedWindowsPathToWsl(invalid));
+});
+
+test('native WSL TAR result is exact pinned unsigned evidence, not an authorization', () => {
+  const expected = { role: 'runtime', imageId: `sha256:${'b'.repeat(64)}`,
+    revision, archiveSha256: 'c'.repeat(64), archiveSizeBytes: 2048 };
+  const preview = { status: 'LOCAL_DOCKER_TAR_BYTES_VERIFIED_ONLY', ...expected,
+    source: 'https://github.com/bielxdh3/Virki', platform: 'linux/amd64',
+    user: 'node:node', layerCount: 3, ownerSignatureVerified: false,
+    dockerLoadAuthorized: false, transferAuthorized: false, deployAuthorized: false };
+  assert.deepEqual(assertLinuxTarVerificationResult(JSON.stringify(preview), expected), preview);
+  for (const invalid of [
+    { ...preview, deployAuthorized: true },
+    { ...preview, dockerLoadAuthorized: true },
+    { ...preview, role: 'migrator' },
+    { ...preview, imageId: `sha256:${'d'.repeat(64)}` },
+    { ...preview, archiveSha256: 'e'.repeat(64) },
+    { ...preview, archiveSizeBytes: 1024 },
+    { ...preview, source: 'https://evil.invalid' },
+    { ...preview, unexpected: 'OK' },
+    { ...preview, layerCount: 0 },
+  ]) assert.throws(() => assertLinuxTarVerificationResult(JSON.stringify(invalid), expected));
 });
 
 test('manual build plan rejects role, revision, directory and attempt-id substitutions', () => {
