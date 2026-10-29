@@ -221,6 +221,58 @@ static bool trusted_exact(struct vdt_session *s, char *bytes, size_t size,
   }
   return true;
 }
+/* Docker Engine 29.5.1 adds bounded metadata headers to otherwise standard
+ * HTTP/1.1 replies. Admit only the observed names and narrow value grammars;
+ * unfamiliar headers and duplicate metadata still terminate the session. */
+static bool decimal_ascii(const char *value, size_t min, size_t max) {
+  size_t len = strlen(value);
+  if (len < min || len > max) return false;
+  for (size_t i = 0; i < len; ++i)
+    if (value[i] < '0' || value[i] > '9') return false;
+  return true;
+}
+static bool docker_version(const char *value) {
+  if (strncmp(value, "Docker/", 7)) return false;
+  const char *next = value + 7;
+  for (unsigned field = 0; field < 3; ++field) {
+    unsigned number = 0, digits = 0;
+    while (*next >= '0' && *next <= '9') {
+      if (++digits > 4) return false;
+      number = number * 10 + (unsigned)(*next++ - '0');
+    }
+    if (digits == 0 || (field == 0 && number == 0) ||
+        (field < 2 && number >= 1000)) return false;
+    if (field < 2 && *next++ != '.') return false;
+  }
+  return strcmp(next, " (linux)") == 0;
+}
+static bool docker_http_date(const char *value) {
+  static const char *const weekdays[] = {
+    "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"
+  };
+  static const char *const months[] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+  };
+  if (strlen(value) != 29 || value[3] != ',' || value[4] != ' ' ||
+      value[7] != ' ' || value[11] != ' ' || value[16] != ' ' ||
+      value[19] != ':' || value[22] != ':' || value[25] != ' ' ||
+      memcmp(value + 26, "GMT", 3)) return false;
+  bool weekday = false, month = false;
+  for (size_t i = 0; i < sizeof weekdays / sizeof *weekdays; ++i)
+    if (!memcmp(value, weekdays[i], 3)) weekday = true;
+  for (size_t i = 0; i < sizeof months / sizeof *months; ++i)
+    if (!memcmp(value + 8, months[i], 3)) month = true;
+  if (!weekday || !month) return false;
+  for (size_t i = 0; i < 29; ++i) {
+    if (i == 5 || i == 6 || (i >= 12 && i <= 15) ||
+        i == 17 || i == 18 || i == 20 || i == 21 ||
+        i == 23 || i == 24) {
+      if (value[i] < '0' || value[i] > '9') return false;
+    }
+  }
+  return true;
+}
 static bool response_headers(struct vdt_session *s, size_t *body_size,
                              bool *chunked, long long deadline) {
   char headers[VDT_MAX_HEADER + 1];
@@ -234,8 +286,9 @@ static bool response_headers(struct vdt_session *s, size_t *body_size,
   headers[n] = 0;
   const char *start = "HTTP/1.1 200 OK\r\n";
   if (strncmp(headers, start, strlen(start)) != 0) return false;
-  bool saw_length = false, keep_alive = false, saw_type = false;
+  bool saw_length = false, saw_connection = false, saw_type = false;
   bool saw_transfer = false;
+  unsigned metadata_seen = 0;
   size_t declared = 0;
   char *line = headers + strlen(start);
   size_t count = 0;
@@ -255,8 +308,8 @@ static bool response_headers(struct vdt_session *s, size_t *body_size,
         declared = declared * 10 + (size_t)(*digits - '0');
       }
     } else if (strcasecmp(line, "Connection: keep-alive") == 0) {
-      if (keep_alive) return false;
-      keep_alive = true;
+      if (saw_connection) return false;
+      saw_connection = true;
     } else if (strcasecmp(line, "Transfer-Encoding: chunked") == 0) {
       if (saw_transfer) return false;
       saw_transfer = true;
@@ -268,14 +321,46 @@ static bool response_headers(struct vdt_session *s, size_t *body_size,
           strcmp(value, "text/plain; charset=utf-8") &&
           strcmp(value, "application/x-ndjson")) return false;
     } else {
-      /* Avoid TE/CL request smuggling, upgrade, trailers, duplicate headers,
-       * unsupported transfer encodings and side channels. Extend only after
-       * inspecting actual pinned-daemon responses in an isolated Linux lab. */
-      return false;
+      static const char *const keys[] = {
+        "Api-Version: ", "Builder-Version: ", "Cache-Control: ",
+        "Docker-Experimental: ", "Ostype: ", "Pragma: ",
+        "Server: ", "Swarm: ", "Date: "
+      };
+      bool accepted = false;
+      for (unsigned i = 0; i < sizeof keys / sizeof *keys; ++i) {
+        size_t key_len = strlen(keys[i]);
+        if (strncmp(line, keys[i], key_len)) continue;
+        if (metadata_seen & (1U << i)) return false;
+        metadata_seen |= 1U << i;
+        const char *value = line + key_len;
+        switch (i) {
+          case 0:
+            accepted = value[0] == '1' && value[1] == '.' &&
+              decimal_ascii(value + 2, 1, 3); break;
+          case 1: accepted = decimal_ascii(value, 1, 3); break;
+          case 2:
+            accepted = strcmp(value, "no-cache, no-store, must-revalidate") == 0;
+            break;
+          case 3:
+            accepted = strcmp(value, "false") == 0 ||
+              strcmp(value, "true") == 0; break;
+          case 4: accepted = strcmp(value, "linux") == 0; break;
+          case 5: accepted = strcmp(value, "no-cache") == 0; break;
+          case 6: accepted = docker_version(value); break;
+          case 7:
+            accepted = strcmp(value, "inactive") == 0 ||
+              strcmp(value, "active") == 0; break;
+          case 8: accepted = docker_http_date(value); break;
+        }
+        break;
+      }
+      if (!accepted) return false;
     }
     line = end + 2;
   }
-  if (!keep_alive || saw_length == saw_transfer ||
+  /* HTTP/1.1 persists by default. An explicit Connection header must be
+   * exactly keep-alive; other values are refused by the parser above. */
+  if (saw_length == saw_transfer ||
       (saw_length && declared == 0)) return false;
   *chunked = saw_transfer;
   *body_size = declared;

@@ -112,6 +112,29 @@ test("bounded, reusable native Linux FD transport remains nonauthorizing", {
           let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
             "Content-Length: " + Buffer.byteLength(responseBody) +
             "\r\nConnection: keep-alive\r\n\r\n";
+          if (["docker-real-ping-headers", "docker-duplicate-api-version",
+            "docker-invalid-server", "docker-plus-version", "docker-unknown-header"]
+            .includes(mode) && phase === 0) {
+            headers = "HTTP/1.1 200 OK\r\nApi-Version: 1.54\r\n" +
+              "Builder-Version: 2\r\n" +
+              "Cache-Control: no-cache, no-store, must-revalidate\r\n" +
+              "Docker-Experimental: false\r\nOstype: linux\r\nPragma: no-cache\r\n" +
+              "Server: Docker/29.5.1 (linux)\r\nSwarm: inactive\r\n" +
+              "Date: Thu, 29 Oct 2026 04:07:01 GMT\r\n" +
+              "Content-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+            if (mode === "docker-duplicate-api-version")
+              headers = headers.replace("Builder-Version: 2\r\n",
+                "Api-Version: 1.54\r\nBuilder-Version: 2\r\n");
+            if (mode === "docker-invalid-server")
+              headers = headers.replace("Server: Docker/29.5.1 (linux)",
+                "Server: evil-proxy");
+            if (mode === "docker-plus-version")
+              headers = headers.replace("Server: Docker/29.5.1 (linux)",
+                "Server: Docker/+29.5.1 (linux)");
+            if (mode === "docker-unknown-header")
+              headers = headers.replace("Builder-Version: 2\r\n",
+                "X-Unreviewed: 1\r\nBuilder-Version: 2\r\n");
+          }
           if (mode === "duplicate-length" && phase === 0)
             headers = headers.replace("Connection: keep-alive",
               "Content-Length: 2\r\nConnection: keep-alive");
@@ -201,6 +224,19 @@ test("bounded, reusable native Linux FD transport remains nonauthorizing", {
     assert.equal(r.seen[2].size, payload.length);
     assert.equal(r.seen[2].sha, createHash("sha256").update(payload).digest("hex"));
   });
+  await t.test("real Docker 29.5.1 ping headers with implicit HTTP/1.1 keepalive", async () => {
+    const r = await run("docker-real-ping-headers");
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.seen.length, 4);
+  });
+  for (const mode of ["docker-duplicate-api-version", "docker-invalid-server",
+    "docker-plus-version", "docker-unknown-header"]) {
+    await t.test(`real Docker header variation ${mode} must fail closed before info`, async () => {
+      const r = await run(mode);
+      assert.equal(r.code, 2);
+      assert.equal(r.seen.length, 1);
+    });
+  }
   await t.test("peer identity mismatch refuses before any Docker HTTP exchange", async () => {
     const r = await run("normal", { pid: 1 });
     assert.equal(r.code, 2);
