@@ -48,7 +48,7 @@
     "test:offline:manual:operator": "node --test scripts/offline-manual-operator-preflight.test.mjs",
     "test:offline:native-dynamic-closure:linux": "node --test infra/offline/native-bootstrap/native-dynamic-closure.test.mjs",
     "test:offline:images:local": "node --test scripts/offline-manual-image-build.test.mjs",
-    "test:offline:manual:activation": "node --test infra/offline/manual-activation-transaction.test.mjs infra/offline/manual-activation-journal.test.mjs infra/offline/manual-activation-lifecycle.test.mjs infra/offline/manual-activation-rollback.test.mjs",
+    "test:offline:manual:activation": "node --test infra/offline/manual-activation-transaction.test.mjs infra/offline/manual-activation-journal.test.mjs infra/offline/manual-activation-lifecycle.test.mjs infra/offline/manual-activation-rollback.test.mjs scripts/offline-manual-native-supervisor.test.mjs",
     "test:offline:manual:cli": "node --test scripts/deploy-manual.test.mjs scripts/lib/offline-manual-staging.test.mjs",
     "test:offline:npm:cache": "node --test scripts/offline-npm-cache.test.mjs",
     "test:offline:prisma:engines": "node --test scripts/offline-prisma-engine-cache.test.mjs",
