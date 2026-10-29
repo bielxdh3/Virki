@@ -499,6 +499,36 @@ test("CI and CodeQL run on stacked cdx pull requests while production builds rem
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
 });
 
+test("PR88 stage17 base triggers CI and CodeQL without extending push or release authority", () => {
+  const expectedPullRequestBranches = [
+    "main", "cdx/**", "feat/virki-offline-manual-npm-stage17-20261028",
+  ];
+  const branchList = (source, name) => {
+    const normalized = source.replace(/\r\n/gu, "\n");
+    const trigger = /^on:\n\x20{2}push:\n\x20{4}branches:\n((?:\x20{6}- [^\n]+\n)+)\x20{2}pull_request:\n\x20{4}branches:\n((?:\x20{6}- [^\n]+\n)+)/mu.exec(normalized);
+    assert.ok(trigger, `${name} must keep separate, explicit push and pull_request branch filters`);
+    const decode = (lines) => lines.trimEnd().split("\n").map((line) => {
+      const entry = /^\x20{6}- (?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_./*-]+))$/u.exec(line);
+      assert.ok(entry, `${name} branch filters must be literal allowlist entries: ${line}`);
+      return entry[1] ?? entry[2] ?? entry[3];
+    });
+    assert.doesNotMatch(normalized, /^\x20{2}pull_request_target:/mu);
+    return { push: decode(trigger[1]), pullRequest: decode(trigger[2]) };
+  };
+  for (const [name, source] of [["CI", workflow], ["CodeQL", codeqlWorkflow]]) {
+    const branches = branchList(source, name);
+    assert.deepEqual(branches.push, ["main"], `${name} must not run on stage17 pushes`);
+    assert.deepEqual(branches.pullRequest, expectedPullRequestBranches,
+      `${name} must allow exactly PR88's base, not all feat/* branches`);
+  }
+  assert.equal(publicationNeedsAreSafe(workflow), true,
+    "PR88 checks must never enable the production image publishing job");
+  assert.match(codeqlWorkflow, /output: codeql-results[\s\S]*?upload: never/u);
+  assert.doesNotMatch(codeqlWorkflow, /packages: write|secrets\.GITHUB_TOKEN|docker push/u);
+  assert.match(codeqlEvidenceWorkflow, /github\.event\.workflow_run\.event == 'push' &&\s*\n\s*github\.event\.workflow_run\.head_branch == 'main'/u);
+  assert.match(codeqlEvidenceWorkflow, /github\.event\.workflow_run\.head_repository\.full_name == github\.repository/u);
+});
+
 test("CodeQL analysis stays read-only and preserves SARIF for later trusted publication", () => {
   assert.match(codeqlWorkflow, /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/u);
   assert.match(codeqlWorkflow, /uses: github\/codeql-action\/(?:init|analyze)@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4\.38\.2/u);

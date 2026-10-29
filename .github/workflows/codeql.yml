@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - "cdx/**"
+      - "feat/virki-offline-manual-npm-stage17-20261028"
   schedule:
     - cron: "29 11 * * 1"
 
