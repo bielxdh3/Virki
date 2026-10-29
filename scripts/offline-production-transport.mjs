@@ -21,6 +21,10 @@ const POLICY_FIELDS = [
 const SHA = /^[a-f0-9]{40}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const SSH_PATH = "/usr/bin/ssh";
+// Independently owner-installed fixed native receiver root and SSH login.
+const RESTRICTED_HOST_ROOT = "/srv/virki";
+const RESTRICTED_HOST_USER = "virki-offline";
+const SSH_IDENTITY = "/etc/virki/offline-transfer/ssh-identity";
 const MAX_CAPACITY = 8 * 1024 ** 4;
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 function refuse(reason) { throw new Error("Offline production transport refused: " + reason); }
@@ -138,6 +142,25 @@ function readOperatorPolicy(raw, pinnedKnownHosts) {
   return { policy: p, config };
 }
 
+/** Root-protected transfer authority: caller supplies only an existing path. */
+export function loadPinnedOfflineTransferAuthority(trustedDirectory) {
+  const inputs = readProtectedInputs(trustedDirectory);
+  const { policy, config } = readOperatorPolicy(inputs["transport-policy.json"], inputs["ssh-known-hosts"]);
+  const releasePolicy = parseStrict(inputs["trust-policy.json"],
+    ["version", "mode", "enabled", "ownerAssuranceAccepted", "hostIdentitySha256",
+      "ledgerAnchorSha", "platform", "builder", "owner", "revokedKeyIds", "revokedPinsSha256"],
+    "protected owner trust policy");
+  const trust = prepareOfflineTrustedReleasePolicy({
+    policyBytes: inputs["trust-policy.json"],
+    ledgerBytes: inputs["ledger.json"],
+    measuredHostIdentitySha256: releasePolicy.hostIdentitySha256,
+  });
+  return Object.freeze({
+    config: Object.freeze(config), policy: Object.freeze(policy),
+    owner: trust.trustedKeys.owner, knownHostsSha256: sha256(inputs["ssh-known-hosts"]),
+  });
+}
+
 // Checks effective OpenSSH settings. Actual peer identity is authenticated by
 // a separate pinned known_hosts supplied to the real ssh process below.
 export function validateOfflineSshConfiguration(output, config) {
@@ -188,7 +211,7 @@ export function buildPinnedOfflineSshOptions(trustedDirectory, config) {
     "-o", "Port=" + config.port,
     "-o", "User=" + config.sshUser,
     "-o", "StrictHostKeyChecking=yes",
-    "-o", "UserKnownHostsFile=" + path.join(trustedDirectory, "ssh-known-hosts"),
+    "-o", "UserKnownHostsFile=" + path.posix.join(trustedDirectory, "ssh-known-hosts"),
     "-o", "GlobalKnownHostsFile=/dev/null",
     "-o", "UpdateHostKeys=no", "-o", "ProxyCommand=none",
     "-o", "ProxyJump=none", "-o", "ControlMaster=no",
@@ -201,15 +224,27 @@ function approvedSshExecutor(trustedDirectory, config) {
   const binary = lstatSync(SSH_PATH);
   requireIt(binary.isFile() && binary.uid === 0 && (binary.mode & 0o022) === 0,
     "root-owned protected OpenSSH executable unavailable");
-  const options = buildPinnedOfflineSshOptions(trustedDirectory, config);
+  requireIt(config.root === RESTRICTED_HOST_ROOT &&
+    config.sshUser === RESTRICTED_HOST_USER, "restricted offline native host root/login not owner-approved");
+  const options = [
+    ...buildPinnedOfflineSshOptions(trustedDirectory, config),
+    "-o", "HostKeyAlgorithms=ssh-ed25519",
+    "-o", "PreferredAuthentications=publickey",
+    "-o", "PasswordAuthentication=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+    "-o", "RequestTTY=no", "-T", "-i", SSH_IDENTITY,
+  ];
   return (command, args, extras = {}) => {
     requireIt(command === "ssh" && Array.isArray(args) &&
       (args[0] === "-G" || args.includes(config.sshAlias)),
     "remote command outside approved SSH host");
-    const result = spawnSync(SSH_PATH, [...options, ...args], {
-      input: extras.input, encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024,
+    const safeArgs = args[0] === "-G" ? args : rewriteOfflineProbeRequest(args, extras.input, config);
+    const result = spawnSync(SSH_PATH, [...options, ...safeArgs], {
+      // Never transmit caller-supplied shell code: only owner-installed probes.
+      input: undefined, encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024,
       shell: false,
-      stdio: extras.input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
     return {
       status: result.error ? 1 : (Number.isInteger(result.status) ? result.status : 1),
@@ -217,6 +252,23 @@ function approvedSshExecutor(trustedDirectory, config) {
       stderr: "",
     };
   };
+}
+
+/** Offline-only compatibility adapter: legacy bash probes become fixed SSH commands. */
+export function rewriteOfflineProbeRequest(args, input, config) {
+  requireIt(config?.root === RESTRICTED_HOST_ROOT &&
+    config?.sshUser === RESTRICTED_HOST_USER &&
+    Array.isArray(args) && args.length === SSH_OPTIONS.length + 2 &&
+    args.slice(0, SSH_OPTIONS.length).every((value, i) => value === SSH_OPTIONS[i]) &&
+    args[SSH_OPTIONS.length] === config.sshAlias &&
+    typeof input === "string" && input.length > 0 && input.length <= 16384,
+  "unapproved restricted SSH read-only probe request");
+  const remote = args.at(-1);
+  const kind = remote === "bash -s -- probe " + RESTRICTED_HOST_ROOT ? "offline-probe-v1" :
+    remote === "bash -s -- docker " + RESTRICTED_HOST_ROOT ? "offline-docker-v1" :
+      remote === "bash -s -- identity " + RESTRICTED_HOST_ROOT ? "offline-identity-v1" : null;
+  requireIt(kind !== null, "unapproved remote bash command rejected");
+  return [...args.slice(0, -1), kind];
 }
 
 /**
@@ -276,7 +328,8 @@ export async function prepareVerifiedOfflineTransportPlan(inputs = {}) {
   requireIt(remote.status === 0 && remote.platform === "linux/amd64" &&
     remote.capacity?.ok === true,
   "eight native Linux probes or remote disk budget failed");
-  const identity = execute("ssh", [...SSH_OPTIONS, config.sshAlias, "bash -s --"], { input: IDENTITY_SCRIPT });
+  const identity = execute("ssh", [...SSH_OPTIONS, config.sshAlias,
+    "bash -s -- identity " + RESTRICTED_HOST_ROOT], { input: IDENTITY_SCRIPT });
   const match = /^VIRKI_OFFLINE_HOST_ID_SHA256=([a-f0-9]{64})\r?\n?$/u.exec(identity.stdout);
   requireIt(identity.status === 0 && match?.[1] === trust.hostIdentitySha256,
     "SSH target identity differs from the independently pinned signed host");
