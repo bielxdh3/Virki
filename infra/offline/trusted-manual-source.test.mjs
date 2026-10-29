@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { inspectUntrustedSourceGitForPreview } from "./trusted-source-git.mjs";
 import { inspectManualOwnerApproval, inspectManualRootSourceForPreview,
-  verifyInstalledManualRootSource } from "./trusted-manual-source.mjs";
+  recheckInstalledManualOwnerAtUseTime, verifyInstalledManualRootSource } from "./trusted-manual-source.mjs";
 
 const hash = (v) => createHash("sha256").update(v).digest("hex");
 const DOMAIN = Buffer.from("VIRKI_MANUAL_ROOT_SOURCE_APPROVAL_V1\0");
@@ -115,6 +115,9 @@ test("non-main exact commit is authenticated only through root-installed owner p
   assert.equal(report.archiveSha256, f.archiveSha256);
   assert.equal(report.ciSourceBranch, "owner-approved-pr86");
   assert.equal(report.sequence, 7);
+  assert.equal(report.expiresAt, f.document.validUntilSeconds);
+  assert.equal(report.approvalSha256,
+    hash(readFileSync(path.join(f.trustDirectory, "approval.json"))));
   assert.equal(report.deployAuthorized, false);
   assert.equal(Object.isFrozen(report), true);
   await assert.rejects(inspectUntrustedSourceGitForPreview({
@@ -132,6 +135,11 @@ test("without actual owner-provisioned native verifier, release remains blocked"
   await assert.rejects(verifyInstalledManualRootSource({
     candidateDirectory: path.dirname(f.archivePath),
   }), /refused/u);
+  assert.throws(() => recheckInstalledManualOwnerAtUseTime({
+    candidate: f.candidate, nowSeconds: 1700000010, ownerKeyPem: f.owner.publicKeyPem,
+  }), /refused/u, "uninstalled caller cannot inject clock, signing identity or authority");
+  assert.throws(() => recheckInstalledManualOwnerAtUseTime({ candidate: f.candidate }),
+    /refused/u, "uninstalled pure source tree cannot serve as root authority");
 });
 
 test("missing root key, attacker replacing pin and untrusted symlink are rejected", async (t) => {

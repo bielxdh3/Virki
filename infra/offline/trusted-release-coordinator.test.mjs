@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
+  chmodSync, chownSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
   readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -53,7 +53,9 @@ for (const relative of [
   "infra/offline/trusted-image-import.mjs",
   "infra/offline/trusted-image-loader.mjs",
   "infra/offline/trusted-host-entry.mjs",
+  "infra/offline/trusted-manual-source.mjs",
   "infra/offline/trusted-source-git.mjs",
+  "scripts/lib/offline-ci-evidence.mjs",
   "scripts/lib/offline-release-ledger.mjs",
   "scripts/lib/offline-release-attestation.mjs",
   "scripts/lib/offline-docker-tar-verifier.mjs",
@@ -64,8 +66,10 @@ for (const relative of [
   mkdirSync(path.dirname(pathname), { recursive: true, mode: 0o700 });
   copyFileSync(path.join(root, relative), pathname);
   chmodSync(pathname, 0o600);
+  chownSync(pathname, 0, 0);
 }
-const { coordinateTrustedOfflineRelease } = await import(pathToFileURL(TRUSTED_ENTRY));
+const { coordinateTrustedOfflineRelease, coordinateTrustedManualOfflineRelease } =
+  await import(pathToFileURL(TRUSTED_ENTRY));
 const { importApprovedOfflineImage, importApprovedOfflineImages } = await import(pathToFileURL(
   path.join(INSTALL, "infra/offline/trusted-image-import.mjs")));
 
@@ -213,6 +217,92 @@ function buildFixture() {
   resign();
   return { directory, work, sourceSha, manifest, resign, policy, ledger, runtime, migrator };
 }
+function buildSyntheticManualFixture() {
+  // Entirely disposable test keys, Git objects and evidence. These records are
+  // synthetic parser fixtures; they cannot attest actual CI or owner consent.
+  const f = buildFixture();
+  git("-C", f.work, "checkout", "-qb", "approved-source");
+  writeFileSync(path.join(f.work, "README.md"), "approved non-main source fixture\n");
+  git("-C", f.work, "add", ".");
+  git("-C", f.work, "commit", "-qm", "manual candidate");
+  const manualSha = git("-C", f.work, "rev-parse", "HEAD");
+  git("-C", f.work, "push", "-q", GIT, "approved-source:approved-source");
+  const archive = path.join(f.directory, "source.tar");
+  git(`--git-dir=${GIT}`, "archive", "--format=tar", `--output=${archive}`, manualSha);
+  chmodSync(archive, 0o600);
+  const source = readFileSync(archive);
+  f.manifest.source_sha = manualSha;
+  f.manifest.source_archive_sha256 = hash(source);
+  f.manifest.source_archive_size_bytes = source.length;
+  f.manifest.evidence.scanner_rules_commit = manualSha;
+  for (const role of ["runtime", "migrator"]) {
+    const image = dockerSave(manualSha, role);
+    writeFileSync(path.join(f.directory, `${role}.tar`), image.bytes, { mode: 0o600 });
+    f.manifest[`${role}_image`] = {
+      archive_sha256: image.archive_sha256,
+      archive_size_bytes: image.archive_size_bytes, image_id: image.image_id,
+    };
+  }
+  const stages = [
+    "tooling-policy-dependencies", "tooling-policy-tests", "chromium-dependencies",
+    "production-hub-build", "runtime", "secrets-scan", "production-revision-tests",
+    "backup-inventory-tests", "production-operations-tests", "public-site-tests",
+    "unit-tests", "integration-tests", "browser-e2e", "lint", "typecheck",
+    "prisma-validate", "build", "windows-ca-helper-tests", "worktree-diff-check",
+  ];
+  const start = Date.parse("2026-10-28T12:00:00Z");
+  const when = (delta) => new Date(start + delta).toISOString();
+  const emptyHash = hash(Buffer.alloc(0));
+  const ci = {
+    runId: "123456789a", sourceBranch: "approved-source", sourceHead: manualSha,
+    startedUtc: when(0), finishedUtc: when(300000),
+    nodeVersion: "v22.22.1", npmVersion: "10.9.3",
+    stagedPatchSha256: emptyHash, workingTreePatchSha256: emptyHash,
+    untrackedFiles: [], unitTestsFailureCount: 0, unitTestsFailures: [],
+    integrationTestsFailureCount: 0, integrationTestsFailures: [],
+    productionOperationsFailureCount: 0, productionOperationsFailures: [],
+    exitCode: 0, failedStages: [],
+    stages: stages.map((name, i) => ({ name, startedUtc: when(i * 10000 + 1000),
+      finishedUtc: when(i * 10000 + 2000), durationMs: 1000, exitCode: 0 })),
+    dockerMutationJournal: "docker-mutations.jsonl", dockerMutationUncertain: false,
+    dockerCleanupVerified: true, bootstrapVirginTestsLog: "bootstrap-virgin-tests.tap.log",
+    bootstrapVirginTestsExitCode: 0,
+  };
+  const reportBytes = Buffer.from(JSON.stringify(ci));
+  writeFileSync(path.join(f.directory, "ci-report.json"), reportBytes, { mode: 0o600 });
+  f.manifest.evidence.ci_report_sha256 = hash(reportBytes);
+  f.resign();
+
+  const manualOwner = generateKeyPairSync("ed25519");
+  const manualRoot = "/etc/virki/manual-source";
+  mkdirSync(manualRoot, { mode: 0o700 });
+  chmodSync(manualRoot, 0o700);
+  const keyId = "manual-test-owner";
+  const owner = { version: 1, keyId,
+    publicKeyPem: manualOwner.publicKey.export({ format: "pem", type: "spki" }) };
+  const doc = { version: 1, mode: "owner-manual-source-sha-v1",
+    repository: "https://github.com/bielxdh3/Virki.git", sourceSha: manualSha,
+    ciSourceBranch: "approved-source", sourceArchiveSha256: hash(source),
+    ciReportSha256: hash(reportBytes),
+    runtimeImageId: f.manifest.runtime_image.image_id,
+    migratorImageId: f.manifest.migrator_image.image_id,
+    hostIdentitySha256: f.policy.hostIdentitySha256, sequence: 1,
+    validFromSeconds: Math.floor(Date.now() / 1000) - 10,
+    validUntilSeconds: Math.floor(Date.now() / 1000) + 300 };
+  const signature = sign(null, Buffer.concat([
+    Buffer.from("VIRKI_MANUAL_ROOT_SOURCE_APPROVAL_V1\0"),
+    Buffer.from(JSON.stringify(doc)),
+  ]), manualOwner.privateKey).toString("base64");
+  writeJson(path.join(manualRoot, "owner-key.json"), owner);
+  writeJson(path.join(manualRoot, "approval.json"), { document: doc, signatureBase64: signature });
+  writeJson(path.join(manualRoot, "counter.json"), { version: 1,
+    lastAcceptedSequence: 0, approvedSequence: 1, revokedKeyIds: [], revokedPinsSha256: [] });
+  writeFileSync("/etc/virki/manual-source-owner.spki.sha256",
+    hash(manualOwner.publicKey.export({ format: "der", type: "spki" })) + "\n",
+    { mode: 0o600 });
+  writeFileSync("/etc/virki/manual-source-commit.sha", manualSha + "\n", { mode: 0o600 });
+  return { ...f, manualSha, manualRoot };
+}
 function reset() {
   rmSync(POLICY, { recursive: true, force: true });
   rmSync(LEDGER, { recursive: true, force: true });
@@ -220,6 +310,9 @@ function reset() {
   rmSync("/var/lib/virki/offline-staging", { recursive: true, force: true });
   rmSync("/var/lib/virki/offline-import-quarantine", { recursive: true, force: true });
   rmSync(PIN, { force: true });
+  rmSync("/etc/virki/manual-source", { recursive: true, force: true });
+  rmSync("/etc/virki/manual-source-owner.spki.sha256", { force: true });
+  rmSync("/etc/virki/manual-source-commit.sha", { force: true });
 }
 function locked() { return existsSync(path.join(LEDGER, ".offline-release.lock")); }
 function state() { return JSON.parse(readFileSync(path.join(LEDGER, "ledger.json"), "utf8")); }
@@ -231,6 +324,7 @@ async function setupIsolatedImportSink(t) {
   const fake = path.join(endpoint, "docker");
   copyFileSync(path.join(root, "infra/offline/fixtures/fake-image-import-docker"), fake);
   chmodSync(fake, 0o700);
+  chownSync(fake, 0, 0);
   writeFileSync("/etc/virki/offline-import-cli.sha256", hash(readFileSync(fake)) + "\n", { mode: 0o600 });
   const socket = path.join(endpoint, "docker.sock");
   const listener = createServer();
@@ -274,6 +368,120 @@ test("disposable Linux root transaction coordinator denies, reserves once and pe
     const { coordinateTrustedOfflineRelease: uninstalled } =
       await import("./trusted-release-coordinator.mjs");
     assert.equal((await uninstalled({ candidateDirectory: "/invalid" })).status, "blocked");
+    const { coordinateTrustedManualOfflineRelease: uninstalledManual } =
+      await import("./trusted-release-coordinator.mjs");
+    assert.equal((await uninstalledManual({ candidateDirectory: "/invalid" })).status, "blocked");
+  });
+  await t.test("manual release cannot reserve from hosted signatures without separate owner root permit", async () => {
+    reset();
+    const f = buildFixture();
+    const denied = await coordinateTrustedManualOfflineRelease({ candidateDirectory: f.directory });
+    assert.equal(denied.status, "blocked");
+    assert.equal(locked(), false);
+    for (const extra of [{ ownerKeyPem: "attacker" }, { manualGitPin: f.sourceSha },
+      { approved: true }, { ownerCounter: 1 }]) {
+      assert.equal((await coordinateTrustedManualOfflineRelease({
+        candidateDirectory: f.directory, ...extra,
+      })).status, "blocked");
+      assert.equal(locked(), false);
+    }
+  });
+  await t.test("independent owner manual non-main Git SHA stages; hosted main remains pinned", async () => {
+    reset();
+    const f = buildSyntheticManualFixture();
+    assert.notEqual(f.manualSha, f.sourceSha);
+    assert.equal(git(`--git-dir=${GIT}`, "show-ref", "--verify", "--hash",
+      "refs/heads/main"), f.sourceSha);
+    assert.equal((await coordinateTrustedOfflineRelease({
+      candidateDirectory: f.directory,
+    })).status, "blocked", "hosted coordinator still requires the main commit");
+    assert.equal(locked(), false);
+    const pinnedOwner = "/etc/virki/manual-source-owner.spki.sha256";
+    const original = readFileSync(pinnedOwner);
+    writeFileSync(pinnedOwner, "a".repeat(64) + "\n");
+    assert.equal((await coordinateTrustedManualOfflineRelease({
+      candidateDirectory: f.directory,
+    })).status, "blocked", "untrusted manual owner pin cannot reserve an attempt");
+    assert.equal(locked(), false);
+    writeFileSync(pinnedOwner, original);
+    const staged = await coordinateTrustedManualOfflineRelease({ candidateDirectory: f.directory });
+    assert.equal(staged.status, "manual-staged");
+    assert.equal(staged.deployAuthorized, false);
+    assert.equal(staged.sourceSha, f.manualSha);
+    assert.equal(locked(), true);
+    assert.equal(state().entries.length, 0);
+    assert.equal((await coordinateTrustedManualOfflineRelease({
+      candidateDirectory: f.directory,
+    })).status, "blocked", "same approved sequence cannot stage again");
+  });
+  await t.test("owner approval expiring after verified Git and before attempted ledger must refuse", async () => {
+    reset();
+    const f = buildSyntheticManualFixture();
+    // The independently signed release manifest remains live throughout;
+    // ONLY the separate Ed25519 manual-source permit crosses its expiry.
+    const originalNow = Date.now;
+    f.manifest.expires_at = Math.floor(originalNow() / 1000) + 1200;
+    f.resign();
+    const { default: fs } = await import("node:fs");
+    const { syncBuiltinESMExports } = await import("node:module");
+    const stat = fs.lstatSync;
+    let ownerPinInspected = false;
+    let expiredAtLateCiRead = false;
+    // This hook fires only after the manual SHA pin has been read and the
+    // expensive Git TAR inspection has finished: safeCiReport is the next
+    // reader of this file. The clock jump represents elapsed real wall time.
+    fs.lstatSync = (pathname, ...args) => {
+      if (pathname === "/etc/virki/manual-source-commit.sha") ownerPinInspected = true;
+      if (ownerPinInspected && pathname === path.join(f.directory, "ci-report.json")) {
+        expiredAtLateCiRead = true;
+        Date.now = () => originalNow() + 600000;
+      }
+      return stat(pathname, ...args);
+    };
+    syncBuiltinESMExports();
+    try {
+      const result = await coordinateTrustedManualOfflineRelease({ candidateDirectory: f.directory });
+      assert.equal(expiredAtLateCiRead, true, "late expiry injection reached actual CI read after Git");
+      assert.equal(result.status, "blocked", "no attempt may survive owner approval expiry");
+      assert.equal(locked(), false, "expired owner permit must never acquire durable ledger lock");
+      assert.equal(state().entries.length, 0);
+    } finally {
+      fs.lstatSync = stat;
+      Date.now = originalNow;
+      syncBuiltinESMExports();
+    }
+  });
+  await t.test("owner key revoked after Git verification and before ledger cannot reserve", async () => {
+    reset();
+    const f = buildSyntheticManualFixture();
+    const { default: fs } = await import("node:fs");
+    const { syncBuiltinESMExports } = await import("node:module");
+    const stat = fs.lstatSync;
+    let ownerPinInspected = false;
+    let revokedAtLateCiRead = false;
+    fs.lstatSync = (pathname, ...args) => {
+      if (pathname === "/etc/virki/manual-source-commit.sha") ownerPinInspected = true;
+      if (ownerPinInspected && pathname === path.join(f.directory, "ci-report.json") &&
+          !revokedAtLateCiRead) {
+        revokedAtLateCiRead = true;
+        const counterPath = path.join(f.manualRoot, "counter.json");
+        const counter = JSON.parse(readFileSync(counterPath, "utf8"));
+        counter.revokedKeyIds.push("manual-test-owner");
+        writeJson(counterPath, counter);
+      }
+      return stat(pathname, ...args);
+    };
+    syncBuiltinESMExports();
+    try {
+      const result = await coordinateTrustedManualOfflineRelease({ candidateDirectory: f.directory });
+      assert.equal(revokedAtLateCiRead, true, "real late revocation hook fired after Git check");
+      assert.equal(result.status, "blocked");
+      assert.equal(locked(), false);
+      assert.equal(state().entries.length, 0);
+    } finally {
+      fs.lstatSync = stat;
+      syncBuiltinESMExports();
+    }
   });
   await t.test("signed builder and owner + host-pinned Git stage only and durably reserve once", async () => {
     reset();

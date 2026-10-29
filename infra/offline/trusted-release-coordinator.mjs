@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectUntrustedOfflineCandidate, verifyTrustedHostOfflineCandidate } from "./trusted-host-entry.mjs";
+import { recheckInstalledManualOwnerAtUseTime,
+  verifyInstalledManualRootSource } from "./trusted-manual-source.mjs";
 import { verifyInstalledTrustedSourceGit } from "./trusted-source-git.mjs";
 import { recordOfflineReleaseAcceptance } from "../../scripts/lib/offline-release-ledger.mjs";
 
@@ -113,6 +115,44 @@ export function deriveCheckedOfflineLedgerRequest({
 }
 
 /**
+ * Pure, NON-AUTHORIZING join of independently verified native manual source,
+ * owner/builder-signed manifest and the observed candidate. The native caller
+ * alone obtains these values from fixed host roots; no request supplies them.
+ */
+export function verifyCheckedManualCoordinatorJoin({ manual, signed, inspected, manifest } = {}) {
+  check(manual && typeof manual === "object" && !Array.isArray(manual) &&
+    JSON.stringify(Object.keys(manual)) === JSON.stringify([
+      "status", "deployAuthorized", "sourceSha", "archiveSha256",
+      "ciSourceBranch", "sequence", "expiresAt", "approvalSha256",
+    ]) &&
+    manual.status === "OWNER_MANUAL_SOURCE_INSPECTED_RELEASE_BLOCKED" &&
+    manual.deployAuthorized === false &&
+    typeof manual.ciSourceBranch === "string" &&
+    manual.ciSourceBranch.length > 0 && manual.ciSourceBranch !== "main" &&
+    signed?.status === "INSPECTED_ONLY_RELEASE_BLOCKED" &&
+    signed.deployAuthorized === false &&
+    DIGEST.test(signed.verifiedManifestSha256) &&
+    Array.isArray(signed.checkedImageRoles) &&
+    signed.checkedImageRoles.length === 2 &&
+    signed.checkedImageRoles.includes("runtime") &&
+    signed.checkedImageRoles.includes("migrator") &&
+    inspected?.manifestDigest === signed.verifiedManifestSha256 &&
+    FULL_SHA.test(manual.sourceSha) &&
+    DIGEST.test(manual.archiveSha256) &&
+    manual.sourceSha === signed.sourceSha &&
+    manual.sourceSha === inspected.expected?.sourceSha &&
+    manual.archiveSha256 === inspected.expected.sourceArchiveSha256 &&
+    DIGEST.test(manual.approvalSha256) &&
+    Number.isSafeInteger(manual.expiresAt) && manual.expiresAt > 0 &&
+    Number.isSafeInteger(manual.sequence) && manual.sequence > 0 &&
+    Number.isSafeInteger(inspected.expected.lastSequence) &&
+    manual.sequence === inspected.expected.lastSequence + 1 &&
+    manifest?.source_sha === manual.sourceSha &&
+    manifest.sequence === manual.sequence);
+  return true;
+}
+
+/**
  * Compose host-pinned signature + image inspection, independently pinned Git
  * source verification and an exclusive, durable attempted ledger reservation.
  *
@@ -123,7 +163,7 @@ export function deriveCheckedOfflineLedgerRequest({
  * Every outcome is NON-AUTHORIZING. A staged attempt requires subsequent
  * independent host review and a different, separately approved operator path.
  */
-export async function coordinateTrustedOfflineRelease(request = {}) {
+async function coordinateCheckedOfflineRelease(request, manualMode) {
   try {
     requireNativeRoot();
     check(request !== null && typeof request === "object" && !Array.isArray(request) &&
@@ -144,12 +184,19 @@ export async function coordinateTrustedOfflineRelease(request = {}) {
       signed.checkedImageRoles.includes("runtime") &&
       signed.checkedImageRoles.includes("migrator"));
 
-    const source = await verifyInstalledTrustedSourceGit({ candidateDirectory });
-    check(source.status === "INDEPENDENT_GIT_SOURCE_INSPECTED_RELEASE_BLOCKED" &&
-      source.deployAuthorized === false &&
-      source.sourceSha === signed.sourceSha &&
-      source.archiveSha256 === first.expected.sourceArchiveSha256 &&
-      source.archiveSizeBytes === first.expected.sourceArchiveSizeBytes);
+    let manual;
+    if (manualMode) {
+      // This separate owner-signed trust domain authenticates an exact Git
+      // object without relaxing the hosted coordinator's main-only pin.
+      manual = await verifyInstalledManualRootSource({ candidateDirectory });
+    } else {
+      const source = await verifyInstalledTrustedSourceGit({ candidateDirectory });
+      check(source.status === "INDEPENDENT_GIT_SOURCE_INSPECTED_RELEASE_BLOCKED" &&
+        source.deployAuthorized === false &&
+        source.sourceSha === signed.sourceSha &&
+        source.archiveSha256 === first.expected.sourceArchiveSha256 &&
+        source.archiveSizeBytes === first.expected.sourceArchiveSizeBytes);
+    }
 
     const last = await inspectUntrustedOfflineCandidate({ candidateDirectory });
     sameInspection(first, last);
@@ -162,6 +209,9 @@ export async function coordinateTrustedOfflineRelease(request = {}) {
       manifest.source_sha === signed.sourceSha &&
       manifest.predecessor_sha === last.expected.predecessorSha &&
       manifest.sequence === last.expected.lastSequence + 1);
+    if (manualMode) {
+      verifyCheckedManualCoordinatorJoin({ manual, signed, inspected: last, manifest });
+    }
 
     // Persist the digest of the ACTUAL independently checked owner signature,
     // domain separated from any caller-provided approval or untrusted metadata.
@@ -169,12 +219,35 @@ export async function coordinateTrustedOfflineRelease(request = {}) {
       manifest, verifiedManifestSha256: signed.verifiedManifestSha256,
       checkedSourceSha: signed.sourceSha, checkedOwnerSignature: last.signatures.owner,
     });
+    if (manualMode) {
+      // Crucial last-use owner revocation and expiry check. No async work is
+      // allowed between reading the root-installed authority and the durable
+      // ledger attempt. Time is obtained locally, never from the request.
+      const refreshed = recheckInstalledManualOwnerAtUseTime({
+        candidate: {
+          sourceSha: last.expected.sourceSha,
+          sourceArchiveSha256: last.expected.sourceArchiveSha256,
+          ciReportSha256: last.expected.ciReportSha256,
+          runtimeImageId: last.expected.runtimeImage.imageId,
+          migratorImageId: last.expected.migratorImage.imageId,
+          hostIdentitySha256: last.expected.hostIdentitySha256,
+        },
+      });
+      check(refreshed.status === "MANUAL_OWNER_RECHECKED_NONAUTHORIZING" &&
+        refreshed.deployAuthorized === false &&
+        refreshed.sourceSha === manual.sourceSha &&
+        refreshed.ciSourceBranch === manual.ciSourceBranch &&
+        refreshed.sequence === manual.sequence &&
+        refreshed.expiresAt === manual.expiresAt &&
+        refreshed.approvalSha256 === manual.approvalSha256 &&
+        Math.floor(Date.now() / 1000) < refreshed.expiresAt);
+    }
     const attempt = recordOfflineReleaseAcceptance(ledgerRequest);
     check(attempt.status === "attempted" &&
       attempt.pendingSha === signed.sourceSha &&
       attempt.sequence === manifest.sequence);
     return Object.freeze({
-      status: "staged", deployAuthorized: false,
+      status: manualMode ? "manual-staged" : "staged", deployAuthorized: false,
       sourceSha: signed.sourceSha,
       verifiedManifestSha256: signed.verifiedManifestSha256,
       sequence: attempt.sequence,
@@ -183,4 +256,18 @@ export async function coordinateTrustedOfflineRelease(request = {}) {
     // Never disclose a verifier's failure as a usable admission token.
     return BLOCKED;
   }
+}
+
+
+/** Hosted lane: independently pinned main === source SHA. */
+export async function coordinateTrustedOfflineRelease(request = {}) {
+  return coordinateCheckedOfflineRelease(request, false);
+}
+
+/** Manual lane: a separate root-installed Ed25519 owner permit and independent
+ * Git SHA pin must agree with the signed release, CI branch, images and ledger.
+ * Staging is an attempted reservation only, never deployment authorization.
+ */
+export async function coordinateTrustedManualOfflineRelease(request = {}) {
+  return coordinateCheckedOfflineRelease(request, true);
 }

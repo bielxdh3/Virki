@@ -212,7 +212,8 @@ export function inspectManualOwnerApproval({ ownerBytes, approvalBytes, counterB
   "candidate source, images, CI digest or host mismatch signed owner approval");
   return Object.freeze({ sourceSha: doc.sourceSha, ciSourceBranch: doc.ciSourceBranch,
     ciReportSha256: doc.ciReportSha256, sequence: doc.sequence,
-    expiresAt: doc.validUntilSeconds, deployAuthorized: false });
+    expiresAt: doc.validUntilSeconds, approvalSha256: sha256(approvalBytes),
+    deployAuthorized: false });
 }
 
 /** ROOT-owned rehearsal with explicit paths; NEVER usable to authorize release.
@@ -252,7 +253,8 @@ export async function inspectManualRootSourceForPreview({ trustDirectory, ownerP
   return Object.freeze({ status: "OWNER_MANUAL_SOURCE_PREVIEW_ONLY",
     deployAuthorized: false, sourceSha: source.sourceSha,
     archiveSha256: source.archiveSha256, ciSourceBranch: approved.ciSourceBranch,
-    sequence: approved.sequence });
+    sequence: approved.sequence, expiresAt: approved.expiresAt,
+    approvalSha256: approved.approvalSha256 });
 }
 
 function requireNativeInstalled() {
@@ -327,4 +329,31 @@ export async function verifyInstalledManualRootSource(request = {}) {
   "candidate changed across inspections");
   return Object.freeze({ ...preview, status: "OWNER_MANUAL_SOURCE_INSPECTED_RELEASE_BLOCKED",
     deployAuthorized: false });
+}
+
+/** Last-use native owner authorization. This synchronous primitive rereads the
+ * fixed independent Ed25519 key, revocations, sequence and SHA/SPKI pins after
+ * all expensive TAR and CI work. Only already verified manifest claims may be
+ * passed by the installed coordinator. No caller time, key, policy or root.
+ * No ledger or deployment mutation occurs in this verification function.
+ */
+export function recheckInstalledManualOwnerAtUseTime(request = {}) {
+  requireNativeInstalled();
+  exact(request, ["candidate"], "native last-use manual request");
+  const trusted = readRootTrust({ trustDirectory: TRUST_ROOT });
+  const ownerPin = pinnedText(OWNER_SPKI_PIN, HASH);
+  const sourcePin = pinnedText(COMMIT_PIN, SHA);
+  const result = inspectManualOwnerApproval({
+    ownerBytes: trusted["owner-key.json"],
+    approvalBytes: trusted["approval.json"],
+    counterBytes: trusted["counter.json"],
+    independentlyPinnedOwnerSpkiSha256: ownerPin,
+    independentlyPinnedCommitSha: sourcePin,
+    candidate: request.candidate,
+    nowSeconds: Math.floor(Date.now() / 1000),
+  });
+  return Object.freeze({ status: "MANUAL_OWNER_RECHECKED_NONAUTHORIZING",
+    sourceSha: result.sourceSha, ciSourceBranch: result.ciSourceBranch,
+    sequence: result.sequence, expiresAt: result.expiresAt,
+    approvalSha256: result.approvalSha256, deployAuthorized: false });
 }
