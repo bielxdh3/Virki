@@ -15,6 +15,7 @@ const CASES = new Set([
   "crash_admit", "crash_rollback_clone", "crash_rollback_proven", "crash_rollback_dropped",
   "crash_rollback_created", "crash_rollback_loaded", "crash_rollback_restored",
   "rollback_precheckpoint_error",
+  "canary_unhealthy", "crash_canary", "precanary_unhealthy", "postcanary_unhealthy",
 ]);
 function refuse() { throw new Error("Disposable PostgreSQL Docker transport refused."); }
 const same = (a, b) => a.length === b.length && a.every((item, i) => item === b[i]);

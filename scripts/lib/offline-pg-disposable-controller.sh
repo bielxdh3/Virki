@@ -28,6 +28,7 @@ control_db=virki_control
 source_db=virki_source
 restore_db=virki_restore
 rollback_db=virki_rollback
+route_file="$fixture/private-route"
 inventory_sql=/workspace/scripts/fixtures/offline-pg-recovery/inventory.psql
 
 sql() {
@@ -120,6 +121,49 @@ assert_schema() {
   require_equal "$(sql "$1" "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='EmailOutboxMessage' AND column_name='payload'")" 1 'outbox schema incompatible'
   require_equal "$(sql "$1" "SELECT count(*) FROM information_schema.tables WHERE table_schema='virki_security' AND table_name='audit_retention_policy'")" 1 'audit policy schema incompatible'
 }
+private_health() {
+  # The only canary probe is a private Unix socket on the owned isolated PG
+  # cluster. No public routing, Cloudflare or production service is contacted.
+  pg_isready -h /tmp -p 5432 -d "$source_db" > /dev/null 2>"$fixture/pg-error" ||
+    refuse 'private PostgreSQL health unavailable'
+  assert_schema "$source_db"
+  assert_fingerprint "$source_db" "$baseline_fingerprint"
+  require_equal "$(sql "$source_db" 'SELECT count(*) FROM "User" WHERE "offlineFixtureAdditive" IS NOT NULL')" 0 'private canary data probe failed'
+}
+canary_health() {
+  # Return a probe failure so rollback can be requested without misreporting a
+  # passed canary. A lost PG connection during rollback still keeps the latch.
+  pg_isready -h /tmp -p 5432 -d "$source_db" > /dev/null 2>"$fixture/pg-error" || return 1
+  measured="$(sql "$source_db" 'SELECT count(*) FROM "User" WHERE "offlineFixtureAdditive" IS NOT NULL')" || return 1
+  test "$measured" = 0 || return 1
+  measured="$(fingerprint "$source_db")" || return 1
+  test "$measured" = "$baseline_fingerprint"
+}
+read_route() {
+  test -f "$route_file" && test ! -L "$route_file" || refuse 'private route marker missing'
+  test "$(stat -c %u:%g:%a "$route_file")" = '70:70:600' || refuse 'private route marker untrusted'
+  cat "$route_file"
+}
+switch_route() {
+  expected="$1"
+  next="$2"
+  case "$expected:$next" in
+    predecessor:canary|canary:predecessor) ;;
+    *) refuse 'private route transition invalid';;
+  esac
+  require_equal "$(read_route)" "$expected" 'private route changed before switch'
+  # Only a disposable marker is atomically replaced; this is a fixture proof
+  # of the pre-switch journal fence, not an external service routing operation.
+  staged="$fixture/.private-route-next"
+  test ! -e "$staged" || refuse 'ambiguous pending private route switch'
+  ( set -C; printf '%s\n' "$next" > "$staged" ) 2>/dev/null ||
+    refuse 'private route stage already exists'
+  chmod 600 "$staged"
+  sync -f "$staged" > /dev/null 2>"$fixture/pg-error" || refuse 'route stage sync failed'
+  mv "$staged" "$route_file" || refuse 'route atomic replace failed'
+  sync -f "$fixture" > /dev/null 2>"$fixture/pg-error" || refuse 'route parent sync failed'
+  require_equal "$(read_route)" "$next" 'private route readback failed'
+}
 rollback() {
   verify_backup
   # Persist each irreversible boundary in the separate control database.
@@ -127,9 +171,18 @@ rollback() {
   # replay checks the ACTUAL database state and never trusts the phase alone.
   phase="$(last_phase)"
   case "$phase" in
-    live_migrated) record rollback_started live_migrated ;;
+    live_migrated|private_healthy|canary_prepared|canary_active) record rollback_started "$phase" ;;
     rollback_started|rollback_proven|rollback_rebuild|rollback_restored) ;;
     *) refuse 'rollback journal phase is unsupported' ;;
+  esac
+  # A canary may have switched immediately before a process died. Inspect
+  # actual route state and fence it to predecessor BEFORE PG restore. Never
+  # resume writers as an inferred consequence of rollback.
+  route="$(read_route)"
+  case "$route" in
+    predecessor) ;;
+    canary) switch_route canary predecessor ;;
+    *) refuse 'unknown private route state';;
   esac
   # Reuse ONLY an existing independently VERIFIED clone. Never overwrite,
   # clean, or delete a partially restored clone automatically. Operator must
@@ -182,13 +235,13 @@ rollback() {
 }
 crash_point() {
   case "${VIRKI_OFFLINE_PG_CASE:-}:$1" in
-    crash_live:live_migrated|crash_admit:latch_created|crash_rollback_clone:rollback_clone_created|crash_rollback_proven:rollback_proven|crash_rollback_dropped:rollback_dropped|crash_rollback_created:rollback_created|crash_rollback_loaded:rollback_loaded|crash_rollback_restored:rollback_restored)
+    crash_live:live_migrated|crash_canary:canary_switched|crash_admit:latch_created|crash_rollback_clone:rollback_clone_created|crash_rollback_proven:rollback_proven|crash_rollback_dropped:rollback_dropped|crash_rollback_created:rollback_created|crash_rollback_loaded:rollback_loaded|crash_rollback_restored:rollback_restored)
       kill -KILL "$$" ;;
   esac
 }
 attempt() {
   case "${VIRKI_OFFLINE_PG_CASE:-}" in
-    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error) ;;
+    happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error|canary_unhealthy|crash_canary|precanary_unhealthy|postcanary_unhealthy) ;;
     *) refuse 'unsupported fixture case';;
   esac
   baseline_fingerprint="$(fingerprint "$source_db")"
@@ -234,9 +287,39 @@ attempt() {
       return
       ;;
   esac
-  require_equal "$(sql "$source_db" 'SELECT count(*) FROM "User" WHERE "offlineFixtureAdditive" IS NOT NULL')" 0 'fixture health failed'
-  assert_fingerprint "$source_db" "$baseline_fingerprint"
-  record completed live_migrated
+  if test "${VIRKI_OFFLINE_PG_CASE}" = precanary_unhealthy; then
+    sql "$source_db" "UPDATE \"User\" SET \"offlineFixtureAdditive\"='health-failure'" > /dev/null ||
+      refuse 'could not inject disposable pre-canary health failure'
+  fi
+  if ! (private_health); then
+    rollback
+    return
+  fi
+  record private_healthy live_migrated
+  require_equal "$(read_route)" predecessor 'unexpected predecessor route'
+  record canary_prepared private_healthy
+  switch_route predecessor canary
+  crash_point canary_switched
+  record canary_active canary_prepared
+  if test "${VIRKI_OFFLINE_PG_CASE}" = canary_unhealthy; then
+    # Deliberately contaminate only disposable synthetic rows AFTER canary
+    # activation, proving the health probe rejects a real SQL discrepancy.
+    sql "$source_db" "UPDATE \"User\" SET \"offlineFixtureAdditive\"='health-failure'" > /dev/null ||
+      refuse 'could not inject disposable canary health failure'
+  fi
+  if ! canary_health; then
+    rollback
+    return
+  fi
+  if test "${VIRKI_OFFLINE_PG_CASE}" = postcanary_unhealthy; then
+    sql "$source_db" "UPDATE \"User\" SET \"offlineFixtureAdditive\"='health-failure'" > /dev/null ||
+      refuse 'could not inject disposable post-canary health failure'
+  fi
+  if ! (private_health); then
+    rollback
+    return
+  fi
+  record completed canary_active
   # Full release acceptance is never claimed, even on success.
 }
 case "${1:-}" in
@@ -246,7 +329,7 @@ case "${1:-}" in
     control 'SELECT phase FROM recovery_attempt WHERE id=1' ;;
   reconcile)
     case "$(last_phase)" in
-      live_migrated|rollback_started|rollback_proven|rollback_rebuild|rollback_restored) ;;
+      live_migrated|private_healthy|canary_prepared|canary_active|rollback_started|rollback_proven|rollback_rebuild|rollback_restored) ;;
       *) refuse 'reconciliation requires an interrupted, uncommitted rollback' ;;
     esac
     test -f "$fixture/.attempted" || refuse 'attempt latch missing during reconciliation'

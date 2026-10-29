@@ -14,6 +14,10 @@ umask 077
 export PGHOST=/tmp PGPORT=5432 PGUSER=postgres PGDATABASE=postgres
 mkdir -m 700 /tmp/virki-pg-recovery
 fixture=/tmp/virki-pg-recovery
+printf '%s\n' predecessor > "$fixture/private-route"
+chmod 600 "$fixture/private-route"
+sync -f "$fixture/private-route" || exit 175
+sync -f "$fixture" || exit 176
 initdb --auth-local=trust -D /var/lib/postgresql/data > "$fixture/init.log" 2>&1 || { echo 'Disposable cluster initialization failed' >&2; exit 99; }
 pg_ctl -D /var/lib/postgresql/data -o "-c listen_addresses='' -c unix_socket_directories=/tmp" -w start > "$fixture/pg-start.log" 2>&1 ||
   { echo 'Disposable PostgreSQL could not start' >&2; exit 100; }
@@ -55,13 +59,48 @@ test "$protected_count" = t ||
   { echo 'Representative security data is incomplete' >&2; exit 133; }
 
 case "${1:-}" in
-  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error)
+  happy|incompatible|tamper|fail_live|crash_live|corrupt_backup|race|crash_admit|crash_rollback_clone|crash_rollback_proven|crash_rollback_dropped|crash_rollback_created|crash_rollback_loaded|crash_rollback_restored|rollback_precheckpoint_error|canary_unhealthy|crash_canary|precanary_unhealthy|postcanary_unhealthy)
     export VIRKI_OFFLINE_PG_CASE="$1"
     case "$1" in
       happy)
         sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" ||
           { echo 'Happy-path recovery rehearsal failed' >&2; exit 110; }
         test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = completed || exit 111
+        test "$(cat "$fixture/private-route")" = canary || exit 177
+        ;;
+      canary_unhealthy)
+        sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" || exit 161
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 162
+        test "$(cat "$fixture/private-route")" = predecessor || exit 163
+        test -f "$fixture/.attempted" || exit 164
+        current_inventory="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/inventory.psql 2>"$fixture/pg-error")"
+        test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 165
+        ;;
+      precanary_unhealthy|postcanary_unhealthy)
+        sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" || exit 178
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 179
+        test "$(cat "$fixture/private-route")" = predecessor || exit 180
+        test -f "$fixture/.attempted" || exit 181
+        current_inventory="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/inventory.psql 2>"$fixture/pg-error")"
+        test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 182
+        ;;
+      crash_canary)
+        ( sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/controller.err" ) &
+        pid=$!
+        killed=0
+        wait "$pid" || killed=$?
+        test "$killed" = 137 || exit 166
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = canary_prepared || exit 167
+        test "$(cat "$fixture/private-route")" = canary || exit 168
+        test -f "$fixture/.attempted" || exit 169
+        VIRKI_OFFLINE_PG_CASE=happy
+        export VIRKI_OFFLINE_PG_CASE
+        if sh /workspace/scripts/lib/offline-pg-disposable-controller.sh attempt > /dev/null 2>"$fixture/replay.err"; then exit 170; fi
+        sh /workspace/scripts/lib/offline-pg-disposable-controller.sh reconcile > /dev/null 2>"$fixture/reconcile.err" || exit 171
+        test "$(psql -X -qAt -d virki_control -c 'SELECT phase FROM recovery_attempt WHERE id=1')" = rolled_back || exit 172
+        test "$(cat "$fixture/private-route")" = predecessor || exit 173
+        current_inventory="$(psql -X -qAt -v ON_ERROR_STOP=1 -d virki_source -f /workspace/scripts/fixtures/offline-pg-recovery/inventory.psql 2>"$fixture/pg-error")"
+        test "$current_inventory" = "$(cat "$fixture/baseline.sha256")" || exit 174
         ;;
       crash_live)
         # Keep postgres supervisor alive while killing ONLY the child. Its

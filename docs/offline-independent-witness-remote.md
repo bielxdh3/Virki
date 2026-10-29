@@ -138,3 +138,71 @@ Run the tests on a Linux Node 22 host with `openssl` available:
 ```bash
 node --test scripts/offline-independent-witness-remote.test.mjs scripts/offline-independent-witness-service.test.mjs
 ```
+
+## Narrow host CAS-to-ledger/activation bridge (separate owner installation)
+
+`infra/offline/host-witness-ledger-activation-bridge.mjs` implements a **local
+use-point verification and durable intent**, independently of the existing
+stage18 activation machinery. It is not a deploy, ledger-write or activation
+entrypoint. On a native Linux host it requires root and reads only a fixed
+owner-installed `0600` policy at `/etc/virki/offline-witness-bridge.json`;
+the intent directory is fixed at `/var/lib/virki/offline-witness-bridge`
+(`0700`, root-owned). A disposable WSL-root fixture accepts a strictly scoped
+`/dev/shm/virki-witness-bridge-fixture-*` directory when
+`VIRKI_DISPOSABLE_WITNESS_BRIDGE=1` is set. Never use this fixture for an
+external operator installation.
+
+The owner's policy has these exact ordered JSON fields:
+
+```text
+version: 1
+hostIdentitySha256, ledgerIdSha256, manifestSha256: 64 lowercase hex
+manifestFile: root-owned regular 0600 file holding the exact manifest bytes
+sourceSha: approved 40 lowercase hex Git SHA
+ledgerDirectory: root-owned 0700 directory with ledger.json (0600)
+activationCheckpointFile: root-owned 0600 canonical JSON snapshot
+activationAttemptId: 32 lowercase hex
+expectedSequence: independently approved predecessor sequence
+expectedHeadSha: 40 lowercase hex
+expectedReceiptSha256: 64 lowercase hex
+ownerPublicKeyPem, ownerPinSha256: owner Ed25519 public key and SPKI pin
+witnessPublicKeyPem, witnessPinSha256: witness Ed25519 public key and SPKI pin
+floorPublicKeyPem, floorPinSha256: distinct external custodian Ed25519 public key and SPKI pin
+```
+
+The proof package must contain exact, independently signed CAS request and
+receipt, a fresh signed witness HEAD, and a challenge-bound external floor
+acknowledgement with phase `after` and `ack=confirmed`. The bridge checks the
+floor key differs from both owner and witness keys, verifies cryptographic
+proofs with the **installed** pins, cross-checks the transition digest against
+`offlineWitnessLedgerTransitionDigest(ledgerRequest)`, and reads real pinned
+manifest, ledger and activation-checkpoint files. It requires an owner-signed
+first `fence-writers` stage approval with the matching manifest, host identity,
+attempt ID, sequence and previous checkpoint digest. It rechecks host files
+immediately before writing an exclusive fsynced receipt-scoped intent.
+
+The intent permanently blocks replay of that receipt on this host. A failed
+operation after remote CAS and before intent, an interrupted write, or an
+ambiguous network acknowledgement **requires owner reconciliation**; neither
+client nor bridge retries or resets state. The bridge cannot prove that an
+externally signed floor was delivered by a physically independent service;
+actual separately operated custody, certificates, authenticated transport,
+root policy and immutable independent sequence history must be owner-installed
+and confirmed. The caller also needs an independently authenticated host
+identity measurement and real host service fencing. Later activation stages
+require their own durable journal and independently authorized use points;
+this bridge covers the initial release entry only.
+
+The production backup/migration/writer-fencing mechanisms already implemented
+in `scripts/production-server.sh` are to be reused by a future owner-installed
+supervisor; this bridge does not duplicate them. It also cannot authorize
+source SHA `c3ea768` or draft stage17/18 code under the hosted main-only
+release policy. Every result retains `ledgerAttemptAuthorized:false`,
+`witnessCasAuthorized:false`, `dockerLoadAuthorized:false` and
+`deployAuthorized:false`.
+
+The adversarial WSL-root fixture is run with:
+
+```bash
+VIRKI_DISPOSABLE_WITNESS_BRIDGE=1 node --test infra/offline/host-witness-ledger-activation-bridge.test.mjs
+```
