@@ -4,13 +4,13 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createOfflineManualImagePlan, assertOfflineLocalImageInspect, assertOfflineCachedBaseImage,
   assertSourceMatchesCommittedBlobs, createOfflineManualBuildWithCachePlan,
   requirePrivateWindowsStagingParent, assertOfflineNpmCacheReceipt,
   assertPinnedOfflineDockerfileText, pinnedWindowsPathToWsl,
-  assertLinuxTarVerificationResult } from './offline-manual-image-build.mjs';
+  assertLinuxTarVerificationResult, buildOfflineManualImages } from './offline-manual-image-build.mjs';
 
 const revision = 'a'.repeat(40);
 const stage = process.platform === 'win32' ? 'E:\\VirkiBuilds\\attempt-1234' : '/tmp/virki-builds/attempt-1234';
@@ -215,6 +215,136 @@ test('extracted Docker build source is bound to exact Git blob bytes and rejects
     assert.throws(() => assertSourceMatchesCommittedBlobs(dir, [item]));
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('P2 baseline: a same-user adversary poisons actual planned Docker argv context and restores it before postcheck', () => {
+  // The fake Docker accepts the *real* build argv but never contacts a daemon.
+  // Two separate current-user attacker processes do a deterministic swap and
+  // restoration around the fake Docker context read (no timing guesses).
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'virki-build-race-w17-'));
+  try {
+    const source = path.join(dir, 'source');
+    mkdirSync(source);
+    const original = Buffer.from('reviewed Git bytes\n');
+    const injected = Buffer.from('adversary image bytes\n');
+    const filename = path.join(source, 'payload.txt');
+    writeFileSync(filename, original);
+    const oid = createHash('sha1').update(`blob ${original.length}\0`)
+      .update(original).digest('hex');
+    const inventory = [{ file: 'payload.txt', objectId: oid }];
+    const plan = createOfflineManualBuildWithCachePlan({
+      revision, stagingDirectory: dir, attemptId: '1234567890abcdef12345678',
+      npmCacacheDirectory: path.join(dir, 'cache', '_cacache'),
+      prismaEngineDirectory: path.join(dir, 'engines'),
+    });
+    assert.equal(plan[0].buildArgs[0], 'build');
+    assert.equal(plan[0].buildArgs.at(-1), source,
+      'fake consumer must resolve the exact same source context verified below');
+    assert.equal(plan[0].buildArgs[plan[0].buildArgs.indexOf('-f') + 1],
+      path.join(dir, 'Dockerfile.manual-offline'),
+      'the real builder also passes a separately mutable derived Dockerfile');
+    assert.ok(plan[0].buildArgs.includes(`offline-npm-cacache=${path.join(dir, 'cache', '_cacache')}`));
+    assert.ok(plan[0].buildArgs.includes(`offline-prisma-engines=${path.join(dir, 'engines')}`));
+    const attacker = path.join(dir, 'same-user-attacker.mjs');
+    const fakeDocker = path.join(dir, 'fake-docker.mjs');
+    writeFileSync(attacker, [
+      "import { writeFileSync } from 'node:fs';",
+      'writeFileSync(process.argv[2], Buffer.from(process.argv[3], "base64"));',
+    ].join('\n'));
+    writeFileSync(fakeDocker, [
+      "import { spawnSync } from 'node:child_process';",
+      "import { readFileSync } from 'node:fs';",
+      "import path from 'node:path';",
+      'const context = process.argv.at(-1);',
+      'const file = path.join(context, "payload.txt");',
+      'for (const bytes of [process.env.ATTACK_BYTES]) {',
+      '  const flip = spawnSync(process.execPath, [process.env.ATTACK_SCRIPT, file, bytes]);',
+      '  if (flip.status !== 0) process.exit(10);',
+      '}',
+      'const consumed = readFileSync(file);',
+      'const restore = spawnSync(process.execPath, [process.env.ATTACK_SCRIPT, file, process.env.CLEAN_BYTES]);',
+      'if (restore.status !== 0) process.exit(11);',
+      'process.stdout.write(consumed);',
+    ].join('\n'));
+    assertSourceMatchesCommittedBlobs(source, inventory); // Genuine preflight.
+    const fake = spawnSync(process.execPath, [fakeDocker, ...plan[0].buildArgs], {
+      cwd: dir, encoding: null, timeout: 5000, env: {
+        ...process.env, ATTACK_SCRIPT: attacker,
+        ATTACK_BYTES: injected.toString('base64'), CLEAN_BYTES: original.toString('base64'),
+      },
+    });
+    assert.equal(fake.status, 0, String(fake.stderr));
+    assertSourceMatchesCommittedBlobs(source, inventory); // Genuine clean postflight.
+    assert.deepEqual(readFileSync(filename), original, 'adversary restored checkout bytes');
+    assert.deepEqual(fake.stdout, injected,
+      'baseline demonstrates that Git pre/post hashes do not bind Docker consumed bytes');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('P2 at-use: production Docker build launcher must refuse all unsealed contexts before fake daemon reads', async () => {
+  const module = await import('./offline-manual-image-build.mjs');
+  assert.equal(typeof module.launchOfflineManualDockerBuild, 'function',
+    'the builder requires one production at-use launch seam, not a synthetic test-only guard');
+  const directory = path.resolve(os.tmpdir(), 'virki-w17-mutability-model');
+  const source = path.join(directory, 'source');
+  const dockerfile = path.join(directory, 'Dockerfile.manual-offline');
+  const cache = path.join(directory, 'cache', '_cacache');
+  const engines = path.join(directory, 'engines');
+  const [planned] = createOfflineManualBuildWithCachePlan({
+    revision, stagingDirectory: directory, attemptId: '1234567890abcdef12345678',
+    npmCacacheDirectory: cache, prismaEngineDirectory: engines,
+  });
+  assert.equal(planned.buildArgs.at(-1), source);
+  assert.equal(planned.buildArgs[planned.buildArgs.indexOf('-f') + 1], dockerfile);
+  assert.ok(planned.buildArgs.includes(`offline-npm-cacache=${cache}`));
+  assert.ok(planned.buildArgs.includes(`offline-prisma-engines=${engines}`));
+  let launches = 0;
+  const fakeDocker = () => { launches += 1; throw Error('UNSAFE_FAKE_DOCKER_CONSUMER_REACHED'); };
+  assert.throws(() => module.launchOfflineManualDockerBuild(planned, fakeDocker),
+    /Manual image build blocked:.*immutable.*(?:source|context).*Dockerfile.*npm.*Prisma/iu);
+  assert.equal(launches, 0, 'the real production launch seam must deny BEFORE any Docker invocation');
+  const live = readFileSync(fileURLToPath(new URL('./offline-manual-image-build.mjs', import.meta.url)), 'utf8');
+  assert.match(live, /launchOfflineManualDockerBuild\(item, docker\)/u,
+    'full production builder must actually invoke the guarded launcher, not bypass it');
+  assert.doesNotMatch(live, /docker\(item\.buildArgs,\s*1200000\)/u,
+    'the previous unsafe direct Docker launch must no longer exist');
+});
+
+test('P2 at-entry: public image builder refuses unsealed contexts before touching staging or contacting Docker', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  // This invokes the actual public build API, not only the exported sink helper.
+  // Deliberately absent paths guarantee there cannot be a real source export,
+  // local daemon access, or new build artifact during this negative test.
+  const parent = path.join(os.tmpdir(), `virki-never-stage-${process.pid}-${Date.now()}`);
+  assert.equal(existsSync(parent), false, 'negative staging fixture must not already exist');
+  const previous = process.env.VIRKI_MANUAL_IMAGES_LOCAL_BUILD;
+  process.env.VIRKI_MANUAL_IMAGES_LOCAL_BUILD = '1';
+  try {
+    await assert.rejects(buildOfflineManualImages({
+      repositoryRoot: path.join(parent, 'missing-source'),
+      stagingParent: path.join(parent, 'missing-parent'),
+      revision,
+      npmCacheReceiptPath: path.join(parent, 'missing-parent', 'npm-offline-abcdef', 'npm-offline-cache-receipt.json'),
+      prismaEngineDirectory: path.join(parent, 'missing-parent', 'prisma-engines-abcdef', 'context'),
+    }), /Manual image build blocked: immutable source context, Dockerfile, npm cache and Prisma engine bytes cannot be independently bound at Docker read-time/u,
+    'the public entry must refuse this untrusted build BEFORE alias/DACL/file checks or daemon calls');
+    assert.equal(existsSync(parent), false, 'refusal must not create a staging parent or artifacts');
+  } finally {
+    if (previous === undefined) delete process.env.VIRKI_MANUAL_IMAGES_LOCAL_BUILD;
+    else process.env.VIRKI_MANUAL_IMAGES_LOCAL_BUILD = previous;
+  }
+});
+
+test('manual image builder docs disclose the deliberate current security hold', () => {
+  for (const file of ['offline-manual-local-images.md', 'offline-manual-npm-cache.md']) {
+    const content = readFileSync(new URL(`../docs/${file}`, import.meta.url), 'utf8');
+    assert.match(content,
+      /\*\*Security hold: `images:offline:manual` is deliberately disabled\.\*\*/u,
+      `${file} must not promise a functioning local DEV image build while all four contexts remain unsealed`);
   }
 });
 

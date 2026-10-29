@@ -2,6 +2,18 @@
 
 **Status: investigational developer fixture. This is not an owner-signed release, a GHCR substitute, or a production installation path.**
 
+**Security hold: `images:offline:manual` is deliberately disabled.**
+
+The local image builder now fails closed at its public API entry, **before
+staging filesystem writes or contacting Docker**, because the committed Git
+source, derived Dockerfile, npm cache and Prisma engine BuildKit contexts are
+not independently immutable at Docker read-time. Same-user substitution and
+restoration can pass pre/post verification. A private Windows DACL for that
+same user is not sufficient. The earlier command lines and successful local
+build observations below are **historical DEV evidence**, not steps that
+currently generate images. Cache prewarm and independent inspection remain
+separate, nonauthorizing operations. Production remains NOT AUTHORIZED.
+
 The canonical `infra/Dockerfile.prod` is pinned by SHA-256 and intentionally
 unchanged. Its `build` and `production-dependencies` stages each run `npm ci`;
 `--network=none` alone cannot satisfy a missing registry tarball. The exact
@@ -59,16 +71,18 @@ unchanged; no host `node_modules`, build-time credentials or npmrc files enter
 the container. The host architecture is irrelevant to dependency selection:
 `npm ci` resolves optional platform packages **inside the Linux build**.
 
-The manual local image builder now requires `--npm-cache-receipt` and refuses
-to run Docker without an exact, independently rechecked cache inventory. Its
+Before this fail-closed hold, the local image builder required
+`--npm-cache-receipt` and refused to run Docker without an exact, independently
+rechecked cache inventory. Its
 cache receipt must name the same canonical committed source SHA and raw Git
 `package-lock.json` digest, and live under the same protected owner staging
 parent as the build. **An unsigned cache receipt alone never suffices**: all
 339 SHA-512 tarball bytes and corresponding npm cacache indices are rechecked
 before the first build and before/after each image build.
 
-After the explicit online prewarm has finished and the receipt exists, build
-the two targets using the *same clean Git checkout*:
+The previously supported invocation below is **now blocked**, even if the
+explicit online prewarm has finished and the receipt exists. It formerly
+built the two targets using the *same clean Git checkout*:
 
 ```powershell
 $env:VIRKI_MANUAL_IMAGES_LOCAL_BUILD = '1'
@@ -78,7 +92,7 @@ npm run images:offline:manual -- --repository E:\Virki `
   --prisma-engine-dir E:\VirkiOfflineBuilds\prisma-engines-XXXXXXXXXXXXXXXXXXXXXXXX\context
 ```
 
-The builder's actual Docker invocation is equivalent to the following (with
+The historical builder's Docker invocation was equivalent to the following (with
 the existing exact source SHA, base digest, private staging and image
 verification checks still mandatory):
 
@@ -97,11 +111,12 @@ to the `_cacache` directory, not an npm cache containing logs or credentials.
 absent: separately inspect the *exact* `node:22-alpine@sha256:0a7108...`
 RepoDigest before build. This image became locally cached later on 2026-10-28;
 the full private 339-tarball cache has since been prewarmed and SHA-512
-verified. Both local runtime and migrator targets then built successfully with
+verified. Both local runtime and migrator targets previously built successfully with
 an explicit pinned Prisma engine sidecar and `--network=none`; final TAR
 validation and independent peer review remain separate gates. The integrated
-builder refuses incomplete cache or native engines BEFORE Docker rather than
-attempting a network-enabled fallback.
+builder previously refused incomplete cache or native engines BEFORE Docker
+rather than attempting a network-enabled fallback. The current security hold
+refuses all local image creation even when these caches are valid.
 
 ## Isolated local BuildKit fixture
 

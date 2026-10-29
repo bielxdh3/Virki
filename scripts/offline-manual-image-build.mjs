@@ -25,8 +25,10 @@ const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powe
 const WINDOWS_WSL = 'C:\\Windows\\System32\\wsl.exe';
 const ENGINE = 'npipe:////./pipe/dockerDesktopLinuxEngine';
 const ROLES = Object.freeze([['runtime', 'production'], ['migrator', 'migrator']]);
+const UNSEALED_DOCKER_CONTEXT = 'immutable source context, Dockerfile, npm cache and Prisma engine bytes cannot be independently bound at Docker read-time';
 
 function requireIt(ok, label) { if (!ok) throw Error('Manual image build blocked: ' + label); }
+function refuseUnsealedDockerContext() { requireIt(false, UNSEALED_DOCKER_CONTEXT); }
 function canonicalAbsolute(filename) {
   requireIt(typeof filename === 'string' && filename.length > 3 && filename.length < 4096 &&
     path.isAbsolute(filename) && path.normalize(filename) === filename && !filename.includes('\0'), 'noncanonical absolute path');
@@ -306,6 +308,24 @@ export function assertSourceMatchesCommittedBlobs(directory, entries) {
   requireIt(observed.size === expected.size, 'extracted source missing Git blobs');
 }
 
+/**
+ * FAIL-CLOSED until an independently enforced, immutable at-use transport is
+ * available for ALL build inputs. Checking Git hashes before/after `docker build`
+ * does not bind what the daemon reads from current-user-writable Windows paths:
+ * the source directory, derived Dockerfile, npm cacache and Prisma engines can
+ * each be substituted and restored while Docker consumes them. A private DACL
+ * restricted to this same Windows user does NOT prevent such an attacker.
+ *
+ * This guard is deliberately not bypassable with a caller-supplied flag,
+ * environment variable or fabricated receipt. It blocks local image creation;
+ * it never asserts owner authentication or deployment authorization.
+ */
+export function launchOfflineManualDockerBuild(item, docker) {
+  requireIt(item && Array.isArray(item.buildArgs) && item.buildArgs[0] === 'build' &&
+    typeof docker === 'function', 'invalid offline Docker build launch request');
+  refuseUnsealedDockerContext();
+}
+
 async function fileSha256(filename) {
   const sha = createHash('sha256');
   const stream = createReadStream(filename, { highWaterMark: 256 * 1024 });
@@ -323,6 +343,10 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
   npmCacheReceiptPath, prismaEngineDirectory } = {}) {
   requireIt(process.platform === 'win32' && process.arch === 'x64', 'only reviewed local Windows Docker Desktop supported');
   requireIt(process.env.VIRKI_MANUAL_IMAGES_LOCAL_BUILD === '1', 'explicit local build opt-in missing');
+  // Hard stop before filesystem reads, staging writes, Docker base inspection,
+  // or any daemon contact. A same-user DACL cannot seal the four build inputs.
+  // Planning and nonauthorizing cache-inspection APIs remain available.
+  refuseUnsealedDockerContext();
   const repo = canonicalAbsolute(repositoryRoot);
   const parent = canonicalAbsolute(stagingParent);
   failIfAliases(repo);
@@ -431,7 +455,7 @@ export async function buildOfflineManualImages({ repositoryRoot, stagingParent, 
         'npm cache changed before isolated image build');
       verifyOfflinePrismaEngineDirectory(enginesPath);
       phase = `${item.role}-image-build`;
-      docker(item.buildArgs, 1200000);
+      launchOfflineManualDockerBuild(item, docker);
       phase = `${item.role}-post-build-integrity`;
       assertSourceMatchesCommittedBlobs(context, blobs);
       const afterCache = await verifyNpmCacacheIndex(path.dirname(cacheDirectory), entries);

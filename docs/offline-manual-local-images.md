@@ -2,13 +2,29 @@
 
 **Status: local development/export only. Production release NOT AUTHORIZED.**
 
-The `images:offline:manual` command provides the *local image-build* portion
-of the future independent manual path. It builds the `runtime` and `migrator`
-targets from the **committed Git tree** using `infra/Dockerfile.prod`. It never
-downloads a Virki image or SARIF from GHCR, queries Actions, publishes images,
-connects over SSH, or alters a production host.
+**Security hold: `images:offline:manual` is deliberately disabled.**
 
-On a Windows operator workstation with the reviewed Authenticode-signed Docker
+As of the 2026-10-29 fail-closed patch, even an explicitly opted-in invocation
+refuses image construction **before staging filesystem operations or contacting
+the Docker daemon**. Extracted Git source, derived Dockerfile, the npm cache,
+and the Prisma engine named context are all writable by the current Windows
+user. A same-user attacker can swap and restore bytes while Docker reads them;
+hashes before and after cannot bind what Docker consumed. An owner-only Windows
+DACL does not establish a separate trust boundary against the same user.
+Local DEV image creation will remain disabled until all four input classes
+have independently enforced immutable at-use custody and review. This tool
+never signs or deploys a production release.
+
+The instructions below record a *historical DEV prototype*, **not a presently
+executable image-build procedure**. The previous command provided the local
+image-build portion of the future independent manual path: it built `runtime`
+and `migrator` from the **committed Git tree** using `infra/Dockerfile.prod`.
+It did not download a Virki image or SARIF from GHCR, query Actions, publish images,
+connect over SSH, or alter a production host.
+
+## Historical invocation — not currently executable
+
+Previously, on a Windows operator workstation with the reviewed Authenticode-signed Docker
 Desktop CLI, an existing private staging directory on a non-repository volume,
 and all required base images/npm dependencies **already cached**:
 
@@ -20,7 +36,7 @@ npm run images:offline:manual -- --repository E:\Virki `
   --prisma-engine-dir E:\VirkiOfflineBuilds\prisma-engines-XXXXXXXXXXXXXXXXXXXXXXXX\context
 ```
 
-The command requires a clean committed source checkout and locally runs `git
+The earlier command required a clean committed source checkout and ran `git
 -c core.autocrlf=false archive`; the extracted temporary Docker build context contains only tracked,
 regular Git blobs, after rejection of links/submodules and restricted secret,
 backup or archived data paths. It rechecks every extracted file against its
@@ -54,7 +70,7 @@ checked with the existing strict `verifyOfflineDockerSaveTar` parser, including
 archive member graph, image labels and layer digests. Only after every check
 does the tool write `local-image-receipt.json` with source and image hashes.
 
-Output always declares `hostedCi=NOT_RUN`, `codeql=NOT_RUN`, `ghcr=NOT_USED`,
+Historical successful output declared `hostedCi=NOT_RUN`, `codeql=NOT_RUN`, `ghcr=NOT_USED`,
 `ownerSignatureVerified=false`, `transferAuthorized=false`, and
 `deployAuthorized=false`. The receipt is an **unsigned, local build inventory**;
 it may supply source/image IDs to `offline-release-build.mjs`, but independent
@@ -63,7 +79,7 @@ are still required. The `offline-release-build.mjs` command will independently
 create its own three-file candidate bundle; do not substitute this receipt for
 the owner-signed candidate.
 
-The tool preserves failed attempts and generated image tags for manual
+The historical tool preserved failed attempts and generated image tags for manual
 reconciliation rather than guessing which daemon resources can be deleted.
 Do not point the staging parent inside the Git checkout. No command here
 installs independent owner trust, proves an off-host monotonic ledger witness,
