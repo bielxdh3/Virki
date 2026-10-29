@@ -115,6 +115,12 @@ function verifyPrivateFile(file) {
   return readPinnedPrivateFile(file, MAX_KEY_BYTES, "signer or owner key");
 }
 
+// TLS credentials and operator pins must be pinned to the same inode and
+// private permissions as the witness's signing material.
+export function readIndependentWitnessCredential(file) {
+  return readPinnedPrivateFile(file, MAX_KEY_BYTES, "TLS credential");
+}
+
 function verifyPrivateDirectory(path) {
   requireWitness(isAbsolute(path), "store paths must be absolute");
   const stats = lstatSync(path);
@@ -210,8 +216,10 @@ export class IndependentOfflineWitness {
   constructor({ directory, anchorDirectory, keyFile, expectedKeyPinSha256,
     ownerPublicKeyFile, expectedOwnerPinSha256,
     hostIdentitySha256, ledgerIdSha256, repositoryDirectory } = {}) {
-    requireWitness(process.platform === "linux" && process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE === "1",
-      "Linux disposable fixture is required");
+    requireWitness(process.platform === "linux" && (
+      process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE === "1" ||
+      process.env.VIRKI_WITNESS_MODE === "remote"),
+    "Linux self-hosted witness process is required");
     requireWitness(HEX64.test(hostIdentitySha256) && HEX64.test(ledgerIdSha256) &&
       HEX64.test(expectedKeyPinSha256) && HEX64.test(expectedOwnerPinSha256),
     "invalid operator-pinned witness and owner identities");
@@ -441,7 +449,8 @@ export class IndependentOfflineWitness {
       this.db.prepare("INSERT INTO events(seq,request_id,challenge,message,signature) VALUES(?,?,?,?,?)")
         .run(message.sequence, message.requestId, message.challenge,
           JSON.stringify(message), receipt.signature);
-      if (process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "beforeCommit") process.exit(74);
+      if (process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE === "1" &&
+          process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "beforeCommit") process.exit(74);
       requireWitness(Math.floor(Date.now() / 1000) < request.ownerExpiresAt,
         "CAS owner authorization expired before SQLite COMMIT");
       this.db.exec("COMMIT");
@@ -449,9 +458,11 @@ export class IndependentOfflineWitness {
     } finally {
       if (!committed) this.db.exec("ROLLBACK");
     }
-    if (process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "afterCommitBeforeAnchor") process.exit(73);
+    if (process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE === "1" &&
+        process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "afterCommitBeforeAnchor") process.exit(73);
     this.writeAnchor(receipt.message.sequence, receipt.receiptSha256);
-    if (process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "afterAnchor") process.exit(75);
+    if (process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE === "1" &&
+        process.env.VIRKI_DISPOSABLE_WITNESS_FAULT === "afterAnchor") process.exit(75);
     return receipt;
   }
 

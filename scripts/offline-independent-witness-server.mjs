@@ -1,27 +1,34 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, realpathSync, unlinkSync } from "node:fs";
 import { createServer } from "node:http";
+import { createServer as createTlsServer } from "node:https";
+import { isIP } from "node:net";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { IndependentOfflineWitness } from "./lib/offline-independent-witness-service.mjs";
+import { IndependentOfflineWitness, readIndependentWitnessCredential } from "./lib/offline-independent-witness-service.mjs";
 
-// Exposes only a disposable, private Linux UNIX socket. It is not a production
-// witness authority and never communicates with a Docker daemon or host service.
-if (process.platform !== "linux" || process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE !== "1") {
-  throw new Error("Independent witness socket is available only for disposable Linux tests");
+// Transport modes share the same signed CAS ledger; only the remote service
+// can be deployed on a separately administered, native Linux witness machine.
+const remote = process.env.VIRKI_WITNESS_MODE === "remote";
+if (process.platform !== "linux" || (!remote && process.env.VIRKI_DISPOSABLE_WITNESS_SERVICE !== "1")) {
+  throw new Error("Linux witness requires explicit remote mode or disposable fixture");
 }
 
 process.umask(0o077);
 const root = realpathSync(resolve(fileURLToPath(new URL("..", import.meta.url))));
 const config = process.env;
-const socket = config.VIRKI_WITNESS_SOCKET;
-if (!socket || !isAbsolute(socket) || socket.length > 95) throw new Error("private absolute UNIX socket path required");
-const socketFolder = realpathSync(resolve(socket, ".."));
-const stats = lstatSync(socketFolder);
-if (!stats.isDirectory() || (stats.mode & 0o077) || stats.uid !== process.getuid() ||
-  socketFolder === root || socketFolder.startsWith(`${root}${sep}`)) {
-  throw new Error("UNIX socket directory must be private and outside the repository");
+let socket;
+if (!remote) {
+  socket = config.VIRKI_WITNESS_SOCKET;
+  if (!socket || !isAbsolute(socket) || socket.length > 95) throw new Error("private absolute UNIX socket path required");
+  const socketFolder = realpathSync(resolve(socket, ".."));
+  const stats = lstatSync(socketFolder);
+  if (!stats.isDirectory() || (stats.mode & 0o077) || stats.uid !== process.getuid() ||
+    socketFolder === root || socketFolder.startsWith(`${root}${sep}`)) {
+    throw new Error("UNIX socket directory must be private and outside the repository");
+  }
+  if (existsSync(socket)) throw new Error("existing UNIX socket must be reconciled manually");
 }
-if (existsSync(socket)) throw new Error("existing UNIX socket must be reconciled manually");
 
 const witness = new IndependentOfflineWitness({
   directory: config.VIRKI_WITNESS_DB_DIRECTORY,
@@ -35,10 +42,45 @@ const witness = new IndependentOfflineWitness({
   repositoryDirectory: root,
 });
 
-const server = createServer(async (request, response) => {
+let pinnedClient;
+let listener;
+if (remote) {
+  if (!isIP(config.VIRKI_WITNESS_BIND_HOST) ||
+      !/^\d{1,5}$/u.test(config.VIRKI_WITNESS_BIND_PORT ?? "")) {
+    throw new Error("remote TLS witness requires explicit IP and TCP port");
+  }
+  const port = Number(config.VIRKI_WITNESS_BIND_PORT);
+  if (port > 65535 || (!port && config.VIRKI_DISPOSABLE_WITNESS_SERVICE !== "1")) {
+    throw new Error("invalid remote TLS port");
+  }
+  pinnedClient = config.VIRKI_WITNESS_TLS_CLIENT_CERT_SHA256;
+  if (!/^[0-9a-f]{64}$/u.test(pinnedClient ?? "")) {
+    throw new Error("remote TLS witness requires exact client certificate pin");
+  }
+  const tlsFile = (name) => {
+    const path = config[name];
+    if (!path || !isAbsolute(path)) throw new Error(`absolute TLS credential ${name} required`);
+    const actual = realpathSync(path);
+    if (actual === root || actual.startsWith(`${root}${sep}`)) {
+      throw new Error("TLS credentials must remain outside repository");
+    }
+    return readIndependentWitnessCredential(path);
+  };
+  listener = { port, hostname: config.VIRKI_WITNESS_BIND_HOST,
+    tls: { key: tlsFile("VIRKI_WITNESS_TLS_KEY"), cert: tlsFile("VIRKI_WITNESS_TLS_CERT"),
+      ca: tlsFile("VIRKI_WITNESS_TLS_CA"), minVersion: "TLSv1.3", handshakeTimeout: 10000,
+      requestCert: true, rejectUnauthorized: true } };
+}
+
+const handler = async (request, response) => {
   response.setHeader("Content-Type", "application/json");
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("Connection", "close");
+  if (remote && (!request.socket.authorized || !request.socket.getPeerCertificate()?.raw ||
+      createHash("sha256").update(request.socket.getPeerCertificate().raw).digest("hex") !== pinnedClient)) {
+    response.writeHead(403).end('{"error":"CLIENT_IDENTITY_REFUSED"}');
+    return;
+  }
   if (request.method !== "POST" || !["/v1/cas", "/v1/head"].includes(request.url)) {
     response.writeHead(404).end('{"error":"NOT_FOUND"}');
     return;
@@ -56,7 +98,7 @@ const server = createServer(async (request, response) => {
     if (raw !== JSON.stringify(payload)) throw new Error("noncanonical request JSON");
     const result = request.url === "/v1/cas" ? witness.cas(payload) : witness.read(payload);
     response.writeHead(request.url === "/v1/cas" ? 201 : 200).end(JSON.stringify({
-      status: "DISPOSABLE_WITNESS_ONLY", witnessCasAuthorized: false,
+      status: remote ? "INDEPENDENT_WITNESS_RECEIPT" : "DISPOSABLE_WITNESS_ONLY", witnessCasAuthorized: false,
       dockerLoadAuthorized: false, deployAuthorized: false, receipt: result,
     }));
   } catch (error) {
@@ -67,19 +109,29 @@ const server = createServer(async (request, response) => {
       error: corrupted ? "WITNESS_INTEGRITY_FAILURE" : conflict ? "CAS_CONFLICT" : "WITNESS_REFUSED",
     }));
   }
-});
+};
+const server = remote ? createTlsServer(listener.tls, handler) : createServer(handler);
 server.requestTimeout = 10000;
 server.headersTimeout = 10000;
 server.timeout = 10000;
 server.maxRequestsPerSocket = 1;
-server.listen(socket, () => {
-  chmodSync(socket, 0o600);
-  process.stdout.write("WITNESS_DISPOSABLE_READY\n");
-});
+server.maxConnections = 64;
+if (remote) {
+  server.listen(listener.port, listener.hostname, () => {
+    process.stdout.write(`WITNESS_REMOTE_READY ${server.address().port}\n`);
+  });
+} else {
+  server.listen(socket, () => {
+    chmodSync(socket, 0o600);
+    process.stdout.write("WITNESS_DISPOSABLE_READY\n");
+  });
+}
 const close = () => {
   server.close(() => {
     witness.close();
-    try { unlinkSync(socket); } catch { /* removed by test fixture */ }
+    if (socket) {
+      try { unlinkSync(socket); } catch { /* removed by test fixture */ }
+    }
     process.exit(0);
   });
 };
