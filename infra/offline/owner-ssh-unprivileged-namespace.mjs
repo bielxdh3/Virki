@@ -111,9 +111,13 @@ export function buildDisposableUnprivilegedSshSandbox(options = {}) {
       }
       // fd 3 is inherited into the child. bwrap --ro-bind-fd consumes this
       // exact open file description and does not resolve sourceDirectory.
+      // --clearenv only runs AFTER execve has already invoked the host ELF
+      // loader. A hostile inherited LD_PRELOAD/LD_AUDIT would run a constructor
+      // with the host UID BEFORE bwrap can create its sandbox. Supply no
+      // inherited environment at execve; bwrap sets the tiny sandbox env itself.
       return spawnSync(BWRAP, args, {
         shell: false, timeout: 10_000, encoding: "utf8", maxBuffer: 8192,
-        stdio: ["ignore", "pipe", "pipe", fd],
+        env: {}, stdio: ["ignore", "pipe", "pipe", fd],
       });
     } finally { closeSync(fd); }
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, renameSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, renameSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -86,6 +86,82 @@ test("concurrent directory rename after source FD is opened cannot alter the nat
     attacker.once("error", reject);
   });
   assert.equal(readFileSync(evidence, "utf8"), "SWAPPED", "attacker must really swap while the original script executes");
+});
+
+test("RED/attacker ELF constructor via inherited LD_PRELOAD cannot execute in host bwrap before --clearenv", { skip: !linux }, (t) => {
+  const folder = lab(t);
+  const sourceDirectory = path.join(folder, "source");
+  mkdirSync(sourceDirectory, { mode: 0o700 });
+  writeFileSync(path.join(sourceDirectory, "entry.sh"), "#!/bin/sh\necho NAMESPACE_EXECUTED\n");
+  const payload = path.join(folder, "constructor.c");
+  const library = path.join(folder, "constructor.so");
+  const marker = path.join(folder, "host-pre-namespace-loader-marker");
+  writeFileSync(payload, `
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
+__attribute__((constructor))
+static void witness_loader_entry(void) {
+  char exe[PATH_MAX];
+  ssize_t count = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+  if (count < 0 || (size_t)count >= sizeof(exe)) return;
+  exe[count] = '\\0';
+  /* Only flag the ELF loader executing in bwrap itself. The parent Node
+   * subprocess also inherits LD_PRELOAD but must not count as the exploit. */
+  if (strcmp(exe, "/usr/bin/bwrap") != 0) return;
+  const char *marker = getenv("VIRKI_W20_LOADER_MARKER");
+  if (marker == NULL) return;
+  int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) return;
+  char note[80];
+  int size = snprintf(note, sizeof(note), "HOST_PRE_NAMESPACE_LOADER_UID=%lu\\n",
+    (unsigned long)getuid());
+  if (size > 0) (void)write(fd, note, (size_t)size);
+  (void)close(fd);
+}
+`);
+  const compile = spawnSync("/usr/bin/gcc", ["-shared", "-fPIC", "-Wall", "-Wextra",
+    "-Werror", "-o", library, payload], { encoding: "utf8", timeout: 10000 });
+  assert.equal(compile.status, 0, compile.stderr);
+  // Positive control proves this actual native library really runs a
+  // constructor in host bwrap before any sandbox setup. The marker is a
+  // disposable file under the ordinary unprivileged test user's own /tmp.
+  const controlMarker = path.join(folder, "control-host-loader-marker");
+  const vulnerableControl = spawnSync(BWRAP, ["--version"], {
+    encoding: "utf8", timeout: 10000, shell: false,
+    env: { LD_PRELOAD: library, VIRKI_W20_LOADER_MARKER: controlMarker },
+  });
+  assert.equal(vulnerableControl.status, 0, vulnerableControl.stderr);
+  assert.match(readFileSync(controlMarker, "utf8"),
+    new RegExp(`^HOST_PRE_NAMESPACE_LOADER_UID=${process.getuid()}\\n$`, "u"),
+    "host-side native loader exploit must be live for this regression to count");
+  const attackerScript = `
+    import { buildDisposableUnprivilegedSshSandbox } from ${JSON.stringify(
+      new URL("./owner-ssh-unprivileged-namespace.mjs", import.meta.url).href)};
+    const plan = buildDisposableUnprivilegedSshSandbox({
+      sourceDirectory: process.argv[1], script: "entry.sh"
+    });
+    const result = plan.run();
+    process.stdout.write(result.stdout ?? "");
+    process.stderr.write(result.stderr ?? "");
+    process.exit(result.status ?? 99);
+  `;
+  const attack = spawnSync(process.execPath, ["--input-type=module", "-e",
+    attackerScript, sourceDirectory], {
+    encoding: "utf8", shell: false, timeout: 10000,
+    env: { ...process.env, LD_PRELOAD: library,
+      LD_LIBRARY_PATH: folder, LD_AUDIT: "", NODE_OPTIONS: "",
+      VIRKI_W20_LOADER_MARKER: marker },
+  });
+  assert.equal(attack.status, 0, attack.stderr);
+  assert.match(attack.stdout, /NAMESPACE_EXECUTED/u);
+  assert.equal(existsSync(marker), false,
+    "LD_PRELOAD must not run its host-UID constructor in bwrap before namespace setup");
 });
 
 test("no project-owned script runs with actual host root before namespace entry", () => {

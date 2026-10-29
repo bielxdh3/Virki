@@ -38,6 +38,21 @@ with `O_DIRECTORY|O_NOFOLLOW`, checks the inode identity, passes it as child
 fd 3, and closes it only after bwrap exits. Renamed paths cannot redirect this
 bind. Changes to the original scripts still run only inside the namespace.
 
+**P2 host-loader boundary (W50 → W20):** bwrap's `--clearenv` happens *after*
+`execve` starts its native ELF loader. A caller-inherited `LD_PRELOAD`,
+`LD_AUDIT`, `LD_LIBRARY_PATH` or other hostile environment could therefore
+execute a constructor as the **host UID** before bwrap unshares the sandbox.
+The `run()` launcher now passes an explicit **empty child environment**
+(`spawnSync(..., { env: {} })`) to `/usr/bin/bwrap`, retaining the exact
+descriptor-based `--ro-bind-fd 3`. bwrap itself creates the intended
+in-namespace `PATH`, `HOME` and `LC_ALL` with literal `--setenv` arguments.
+No caller-provided environment is consulted for the executable or policy.
+A real WSL nonroot adversarial regression compiles a disposable native
+`LD_PRELOAD` constructor that activates **only inside the bwrap executable**,
+confirms the constructor's live host-UID effect in a direct positive control,
+then confirms no host marker appears when the same hostile environment calls
+`plan.run()` and the fixture successfully starts inside the namespace.
+
 Use the exact fixed argument builder in
 `infra/offline/owner-ssh-unprivileged-namespace.mjs`, which accepts only
 `sourceDirectory` and a single `.sh` basename. It reads both the **real
