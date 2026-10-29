@@ -340,7 +340,12 @@ test('P2 at-entry: public image builder refuses unsealed contexts before touchin
 });
 
 test('manual image builder docs disclose the deliberate current security hold', () => {
-  for (const file of ['offline-manual-local-images.md', 'offline-manual-npm-cache.md']) {
+  for (const file of [
+    'offline-manual-local-images.md',
+    'offline-manual-npm-cache.md',
+    'offline-manual-prisma-engines.md',
+    'offline-manual-native-image-import.md',
+  ]) {
     const content = readFileSync(new URL(`../docs/${file}`, import.meta.url), 'utf8');
     assert.match(content,
       /\*\*Security hold: `images:offline:manual` is deliberately disabled\.\*\*/u,

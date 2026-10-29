@@ -2,6 +2,15 @@
 
 **Development-only image build inputs. Not an owner-signed release, independent trust root, or production installation.**
 
+**Security hold: `images:offline:manual` is deliberately disabled.**
+
+The native engine prewarm remains a separate, nonauthorizing DEV preparation
+step. The manual image builder refuses all local builds before staging or
+Docker until independently immutable at-use custody protects the Git source,
+derived Dockerfile, npm cache and Prisma named context from same-user edits.
+The build instructions and observations below describe historical DEV tests,
+not a currently executable path to create runtime or migrator images.
+
 In a real `--network=none` build, all 339 npm tarballs installed offline, but
 the `prisma:generate` postinstall then attempted to fetch the Prisma library
 engine from `binaries.prisma.sh`. It failed without network. Do **not** use
@@ -29,15 +38,16 @@ $env:VIRKI_OFFLINE_PRISMA_ENGINES_WARM = '1'
 npm run cache:offline:prisma-engines -- --staging-parent E:\VirkiOfflineBuilds
 ```
 
-Pass that returned `context` directory to `images:offline:manual` alongside
-the npm cache receipt. The image builder rechecks exactly two file names,
+Historically, the returned `context` directory was passed to
+`images:offline:manual` alongside the npm cache receipt. The previous image
+builder rechecked exactly two file names,
 byte lengths, ELF64/x86_64 headers and both pinned uncompressed SHA-256 hashes
-before and after each Docker build. The temporary Dockerfile injects only
+before and after each Docker build. The temporary Dockerfile injected only
 BuildKit `COPY --from=offline-prisma-engines` and the exact supported Prisma 6
 `PRISMA_QUERY_ENGINE_LIBRARY` and `PRISMA_SCHEMA_ENGINE_BINARY` paths into the
-original pinned Node Alpine build stage. It changes the two npm install RUNs
+original pinned Node Alpine build stage. It changed the two npm install RUNs
 to `npm ci --offline`, without changing canonical Git source or production
-Dockerfile. Neither Docker build can access the network.
+Dockerfile. Neither historical Docker build could access the network.
 
 An actual disposable test completed `npm ci --offline`, `prisma generate` and
 then a full local Virki `runtime` build with `--pull=false --no-cache

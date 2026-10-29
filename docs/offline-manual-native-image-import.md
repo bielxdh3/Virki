@@ -1,6 +1,17 @@
 # Manual native two-image import: exact host contract and disposable evidence
 
 **State: integration fixture tested; real owner installation and release are BLOCKED.**
+
+**Security hold: `images:offline:manual` is deliberately disabled.**
+
+The Windows DEV builder cannot currently create new runtime/migrator TARs:
+its Git source, derived Dockerfile, npm cache and Prisma named context have no
+independently immutable at-use custody against same-user substitution. The
+previously created TARs and their receipts are historical, nonauthorizing
+evidence; do not rebuild, load, import or alter the original archives. The
+step below describing image creation is a future contract, not an executable
+current procedure. The native importer and production activation remain NO-GO.
+
 The manual lane is self-hosted and does not depend on Actions, GHCR or any
 external image registry. An independently accepted owner/builder Ed25519
 candidate and native host custody are mandatory. This file does not establish
@@ -25,8 +36,9 @@ either custody or signing authority.
    daemon binary hash, daemon PID/start ticks, socket inode, exact cgroup and
    mount/network/PID namespaces. A real supervisor must continuously retain
    ownership and prevent connection forwarding to a production Docker daemon.
-3. The builder creates committed-tree runtime/migrator image TARs with
-   `npm run images:offline:manual`, then independently obtains the approved
+3. A future independently protected builder must create committed-tree
+   runtime/migrator image TARs (the historical DEV prototype command was
+   `npm run images:offline:manual`, currently blocked), then independently obtain the approved
    eleven-file candidate. Its canonical manifest must bind both SHA-256 TARs,
    distinct immutable image IDs, exact Git commit, owner/builder signatures,
    source TAR and evidence inventory, and measured host identity. Source
