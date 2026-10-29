@@ -89,7 +89,9 @@ test("operator-protected pin bytes cannot omit, duplicate, reorder or replace an
   const f = setup(t);
   const previousInventory = f.files.filter((entry) => ![
     "infra/offline/trusted-image-import.mjs",
+    "infra/offline/trusted-manual-source.mjs",
     "infra/offline/trusted-release-coordinator.mjs",
+    "scripts/lib/offline-ci-evidence.mjs",
     "scripts/lib/offline-release-ledger.mjs",
   ].includes(entry.path));
   assert.equal(previousInventory.length, 8,

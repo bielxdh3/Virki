@@ -156,7 +156,7 @@ test("root bootstrap requires an actual independent Ed25519 approval and publish
   const f = setup(t);
   const result = installOwnerApprovedVerifier(f.request);
   assert.equal(result.status, "DISPOSABLE_OWNER_APPROVED_INSTALL_REHEARSAL");
-  assert.equal(result.verifierFiles, 11);
+  assert.equal(result.verifierFiles, 13);
   const state = JSON.parse(readFileSync(path.join(f.locations.bootstrap, "installation-state.json")));
   assert.equal(state.status, "installed");
   assert.equal(state.lastSequence, 1);
@@ -304,17 +304,17 @@ test("production invocation cannot come from a source checkout, even with arbitr
   assert.match(child.stderr, /independently installed/u);
 });
 
-test("use-time trust remeasures eleven genuine ESM modules after independently signed installation", fixtureOnly, (t) => {
+test("use-time trust remeasures all thirteen genuine ESM modules after independently signed installation", fixtureOnly, (t) => {
   const f = setup(t, { realSource: true });
   for (const item of f.files) {
     const disk = readFileSync(path.join(f.locations.source, ...item.path.split("/")));
     assert.ok(disk.includes(Buffer.from("import ")), `${item.path} must contain real reviewed code`);
     assert.equal(sha(disk), item.sha256);
   }
-  assert.equal(installOwnerApprovedVerifier(f.request).verifierFiles, 11);
+  assert.equal(installOwnerApprovedVerifier(f.request).verifierFiles, 13);
   const measurement = measureInstalledTrustedVerifierAtUseTime(f.request);
   assert.equal(measurement.status, "INSTALLED_VERIFIER_BYTES_MEASURED_ONLY");
-  assert.equal(measurement.installedModules, 11);
+  assert.equal(measurement.installedModules, 13);
   assert.equal(measurement.liveLedgerSequence, 0);
   assert.equal(measurement.liveLedgerStatus, "INITIAL_LEDGER_INSPECTED_NOT_AUTHORIZED");
   assert.equal(Object.hasOwn(measurement, "releaseAuthorized"), false);
@@ -410,7 +410,7 @@ function runPinnedImportFixture(f, { mutation = "none", envOverride = {}, nodeFl
   });
 }
 
-test("native Node22 actually imports real owner-signed eleven-file ESM graph from measured in-memory snapshots", fixtureOnly, (t) => {
+test("native Node22 actually imports the real thirteen-file ESM graph from measured in-memory snapshots", fixtureOnly, (t) => {
   for (const mutation of ["none", "swap-entry", "swap-dependency", "swap-import"]) {
     const f = setup(t, { realSource: true });
     installOwnerApprovedVerifier(f.request);
@@ -418,9 +418,9 @@ test("native Node22 actually imports real owner-signed eleven-file ESM graph fro
     assert.equal(result.status, 0, `mutation=${mutation}: ${result.stderr}`);
     const loaded = JSON.parse(result.stdout.trim());
     assert.equal(loaded.status, "DISPOSABLE_NODE22_PINNED_ESM_IMPORT_PROVEN_ONLY");
-    assert.equal(loaded.pinnedInventoryCount, 11);
-    assert.equal(loaded.actualNodeEsmLoads, 11,
-      "all eleven independently pinned ESM modules must pass the actual Node loader");
+    assert.equal(loaded.pinnedInventoryCount, 13);
+    assert.equal(loaded.actualNodeEsmLoads, 13,
+      "all thirteen independently pinned ESM modules must pass the actual Node loader");
     assert.ok(loaded.loadedPaths.some((entry) =>
       entry.path === "infra/offline/trusted-host-entry.mjs"));
     assert.ok(loaded.loadedPaths.every((entry) =>

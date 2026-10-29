@@ -14,6 +14,7 @@ const HOST_ENTRIES = Object.freeze([
   "infra/offline/trusted-host-entry.mjs",
   "infra/offline/trusted-image-import.mjs",
   "infra/offline/trusted-image-loader.mjs",
+  "infra/offline/trusted-manual-source.mjs",
   "infra/offline/trusted-release-coordinator.mjs",
   "infra/offline/trusted-source-git.mjs",
 ]);
@@ -260,6 +261,17 @@ test("installed host entries have an exactly pinned, deterministic and closed ex
   assert.ok(graph.includes("scripts/lib/offline-source-tar-verifier.mjs"));
   assert.ok(!graph.includes("scripts/lib/offline-release-bundle.mjs"),
     "builder/CI modules cannot be evaluated by host-native source verification");
+});
+
+test("native manual owner source verifier and its CI parser are in the owner-installed executable closure", () => {
+  const manual = "infra/offline/trusted-manual-source.mjs";
+  const ci = "scripts/lib/offline-ci-evidence.mjs";
+  assert.ok(AUDITED_VERIFIER_FILES.includes(manual),
+    "manual verifier is currently only source code and must be independently pinned at installation");
+  assert.ok(AUDITED_VERIFIER_FILES.includes(ci),
+    "manual-source CI parser must not load unaudited bytes from the upload");
+  assert.deepEqual(AUDITED_VERIFIER_FILES, discoverClosure(root, [...HOST_ENTRIES, manual]),
+    "all imports of the installed manual entry must be included in the pinned inventory");
 });
 
 test("unreviewed static import, dynamic import, package import and vanished import all fail closed", (t) => {

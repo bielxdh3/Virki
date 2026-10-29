@@ -5,6 +5,7 @@ import { chmodSync, lstatSync, mkdtempSync, readFileSync, readdirSync,
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { AUDITED_VERIFIER_FILES } from "../infra/offline/trusted-host-installer.mjs";
 import { createManualNativeHostReviewPackage, verifyManualNativeImageReceiptForReview,
   NATIVE_HOST_REVIEW_FILES } from "./offline-manual-native-host-package.mjs";
 
@@ -105,8 +106,8 @@ test("native host code review package uses a separate source ID and exact fixed 
   assert.equal(lstatSync(result.directory).mode & 0o777, 0o700);
   const inventory = JSON.parse(readFileSync(path.join(result.directory, "inventory.json"), "utf8"));
   assert.equal(inventory.status, result.status);
-  assert.equal(inventory.modules.length, 11);
-  assert.equal(inventory.native.length, NATIVE_HOST_REVIEW_FILES.length - 11);
+  assert.equal(inventory.modules.length, AUDITED_VERIFIER_FILES.length);
+  assert.equal(inventory.native.length, NATIVE_HOST_REVIEW_FILES.length - AUDITED_VERIFIER_FILES.length);
   for (const item of [...inventory.modules, ...inventory.native]) {
     const file = path.join(result.directory, item.group, ...item.path.split("/"));
     assert.equal(SHA(readFileSync(file)), item.sha256);

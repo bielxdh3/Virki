@@ -28,8 +28,10 @@ const AUDITED_FILES = Object.freeze([
   "infra/offline/trusted-host-installer.mjs",
   "infra/offline/trusted-image-import.mjs",
   "infra/offline/trusted-image-loader.mjs",
+  "infra/offline/trusted-manual-source.mjs",
   "infra/offline/trusted-release-coordinator.mjs",
   "infra/offline/trusted-source-git.mjs",
+  "scripts/lib/offline-ci-evidence.mjs",
   "scripts/lib/offline-docker-tar-verifier.mjs",
   "scripts/lib/offline-release-attestation.mjs",
   "scripts/lib/offline-release-ledger.mjs",
@@ -532,7 +534,8 @@ export function measureInstalledTrustedVerifierAtUseTime(request = {}) {
   const pins = json(pinsBytes, ["version", "mode", "files", "trustPolicySha256", "ledgerSha256"],
     "independent verifier inventory");
   checkPins(pins, policyBytes, initialLedgerBytes);
-  demand(pins.files.length === 11, "the complete eleven-file reviewed closure is mandatory");
+  demand(pins.files.length === AUDITED_FILES.length,
+    "the complete independently reviewed verifier closure is mandatory");
   const baseline = checkOfflineHostPolicy(policyBytes, initialLedgerBytes,
     host, trust.ownerPublicKeySha256);
   const approvalBytes = readPrivate(bootstrap, "installation-approval.json", 16384, fixture);
@@ -585,13 +588,14 @@ const REVIEWED_BUILTINS = new Set([
   "node:child_process", "node:crypto", "node:fs", "node:fs/promises",
   "node:os", "node:path", "node:url",
 ]);
-// Exercise every independently reviewed entry module. Measuring all eleven
+// Exercise every independently reviewed entry module. Measuring all thirteen
 // source files is not the same as delivering every module to Node's compiler.
 const REVIEWED_ENTRIES = Object.freeze([
   "infra/offline/trusted-host-entry.mjs",
   "infra/offline/trusted-host-installer.mjs",
   "infra/offline/trusted-image-import.mjs",
   "infra/offline/trusted-image-loader.mjs",
+  "infra/offline/trusted-manual-source.mjs",
   "infra/offline/trusted-release-coordinator.mjs",
   "infra/offline/trusted-source-git.mjs",
 ]);
@@ -656,7 +660,7 @@ async function inspectPinnedEsmClosure(request, { afterSnapshot, nativeInspectio
   const entries = REVIEWED_ENTRIES.map((relative) =>
     pathToFileURL(path.join(mode.destinations.code, ...relative.split("/"))).href);
   demand(entries.every((url) => snapshots.has(url)) &&
-    snapshots.size === 11, "incomplete ESM snapshot");
+    snapshots.size === AUDITED_FILES.length, "incomplete ESM snapshot");
   afterSnapshot?.();
   // Only real Node import() execution through this hook is counted. A disk
   // inode replaced after capture cannot alter the immutable source supplied
