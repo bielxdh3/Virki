@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -78,6 +78,22 @@ test("RED→GREEN: Ubuntu Validate coordinator routes to the Linux CI Docker gua
     "CI must never export raw Docker owner receipts as workflow artifacts");
   assert.match(coordinator, /runOwnedLocalLinuxFixture\(args, \{ cwd: sourceRoot, timeout: 60_000 \}\)/u);
   assert.match(implementation, /if \(platform === "linux"\)\s*\{\s*assertFixtureArguments\(args, cwd, timeout\);\s*return runOwnedHostedLinuxFixture/u);
+});
+
+test("CodeQL scans the real coordinator Docker CLI fixture as .mjs without changing its bytes", () => {
+  const fixture = path.join(root, "infra", "offline", "fixtures", "fake-image-import-docker.mjs");
+  const legacy = path.join(root, "infra", "offline", "fixtures", "fake-image-import-docker");
+  const caller = readFileSync(path.join(root, "infra", "offline", "trusted-release-coordinator.test.mjs"), "utf8");
+  const attributes = readFileSync(path.join(root, ".gitattributes"), "utf8");
+  assert.equal(existsSync(legacy), false, "extensionless executable must not remain unscanned");
+  assert.equal(existsSync(fixture), true, "actual Docker sink must be a recognized JS module");
+  assert.match(caller, /fixtures\/fake-image-import-docker\.mjs/u,
+    "the real disposable coordinator must use the scanned JS fixture");
+  assert.match(attributes, /^infra\/offline\/fixtures\/fake-image-import-docker\.mjs text eol=lf$/mu);
+  assert.match(readFileSync(fixture, "utf8"), /^#!\/usr\/local\/bin\/node\n/u);
+  assert.equal(createHash("sha256").update(readFileSync(fixture)).digest("hex"),
+    "83c9cbd0db1a83474aebf5a147f94a5bb5916cd9655014a5717332809deaae86",
+  "the executable fixture must remain byte-identical across the extension rename");
 });
 
 test("RED→GREEN: Linux CI coordinator uses pinned Unix Docker and owned immutable-ID cleanup", {

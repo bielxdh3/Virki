@@ -322,7 +322,7 @@ async function setupIsolatedImportSink(t) {
   mkdirSync(endpoint, { recursive: true, mode: 0o700 });
   chmodSync(endpoint, 0o700);
   const fake = path.join(endpoint, "docker");
-  copyFileSync(path.join(root, "infra/offline/fixtures/fake-image-import-docker"), fake);
+  copyFileSync(path.join(root, "infra/offline/fixtures/fake-image-import-docker.mjs"), fake);
   chmodSync(fake, 0o700);
   chownSync(fake, 0, 0);
   writeFileSync("/etc/virki/offline-import-cli.sha256", hash(readFileSync(fake)) + "\n", { mode: 0o600 });
