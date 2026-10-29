@@ -5,6 +5,8 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isIP } from "node:net";
+import { remoteWitnessHead } from "../../scripts/lib/offline-independent-witness-remote-client.mjs";
 import { validateOfflineLedgerTransition } from "../../scripts/lib/offline-release-ledger.mjs";
 import { verifyIndependentWitnessCasReceipt } from "../../scripts/lib/offline-independent-witness-service.mjs";
 import { offlineWitnessLedgerTransitionDigest } from "./disposable-witness-ledger-reservation.mjs";
@@ -18,7 +20,13 @@ import { activationSigningBytes } from "./manual-activation-transaction.mjs";
 // identity measurement remain separate owner-only prerequisites.
 const TRUST = "/etc/virki/offline-witness-bridge.json";
 const INTENTS = "/var/lib/virki/offline-witness-bridge";
-const WSL_FIXTURE = /^\/dev\/shm\/virki-witness-bridge-fixture-[a-zA-Z0-9]{6,64}\/(?:owner-installed-trust\.json|intents)$/u;
+const TRANSPORT = "/etc/virki/offline-witness-transport.json";
+const PROOF = "/etc/virki/offline-witness-proof.json";
+// The optional owner-root level is exclusively for adversarial WSL fixtures:
+// it permits testing an unprotected ancestor WITHOUT changing /dev/shm itself.
+const WSL_FIXTURE = /^\/dev\/shm\/virki-witness-bridge-fixture-[a-zA-Z0-9]{6,64}(?:\/owner-root)?\/(?:owner-installed-trust\.json|intents)$/u;
+const WSL_TRANSPORT = /^\/dev\/shm\/virki-witness-bridge-fixture-[a-zA-Z0-9]{6,64}(?:\/owner-root)?\/owner-installed-transport\.json$/u;
+const WSL_PROOF = /^\/dev\/shm\/virki-witness-bridge-fixture-[a-zA-Z0-9]{6,64}(?:\/owner-root)?\/owner-installed-proof\.json$/u;
 const HEX64 = /^[0-9a-f]{64}$/u;
 const HEX40 = /^[0-9a-f]{40}$/u;
 const HEX32 = /^[0-9a-f]{32}$/u;
@@ -32,10 +40,18 @@ function exact(value, fields) {
 }
 function directoryOwned(folder) {
   demand(typeof folder === "string" && path.isAbsolute(folder) &&
-    path.normalize(folder) === folder && realpathSync.native(folder) === folder);
-  const s = lstatSync(folder);
-  demand(s.isDirectory() && !s.isSymbolicLink() && s.uid === 0 && s.gid === 0 &&
-    (s.mode & 0o7777) === 0o700);
+    path.normalize(folder) === folder && !folder.includes("\0") &&
+    realpathSync.native(folder) === folder);
+  // The private 0700 leaf can be renamed by an unprivileged user if ANY
+  // ancestor is writable without sticky protection. Verify every component,
+  // including /dev/shm (root-owned sticky) in disposable WSL fixtures.
+  for (let current = folder;; current = path.dirname(current)) {
+    const s = lstatSync(current, { bigint: true });
+    demand(s.isDirectory() && !s.isSymbolicLink() && s.uid === 0n && s.gid === 0n &&
+      (current === folder ? (s.mode & 0o7777n) === 0o700n :
+        (s.mode & 0o022n) === 0n || (s.mode & 0o1000n) !== 0n));
+    if (current === path.dirname(current)) break;
+  }
 }
 function safeFile(file, maxBytes) {
   demand(typeof file === "string" && path.isAbsolute(file) && path.normalize(file) === file);
@@ -93,14 +109,22 @@ function trustedLocations(input) {
     (input.intentDirectory === undefined || input.intentDirectory === INTENTS));
   return { policy: TRUST, intents: INTENTS };
 }
-function recordIntent(intents, input) {
+function recordIntent(intents, input, suffix = ".intent") {
   directoryOwned(intents);
+  demand([".intent", ".confirmed"].includes(suffix) && HEX64.test(input.receiptSha256));
   const bytes = Buffer.from(JSON.stringify(input));
   demand(bytes.length <= 4096);
-  const target = path.join(intents, `${input.receiptSha256}.intent`);
+  const target = path.join(intents, `${input.receiptSha256}${suffix}`);
+  const dirFd = openSync(intents, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const original = fstatSync(dirFd, { bigint: true });
+    const sameDirectory = (s) => s.isDirectory() && !s.isSymbolicLink() &&
+      ["dev", "ino", "uid", "gid", "mode"].every((key) => s[key] === original[key]);
+    demand(sameDirectory(lstatSync(intents, { bigint: true })));
   // Existing or partially written intent always blocks retry. No replacement,
   // unlink, timeout reset or rollback path is provided.
-  const fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
+  const fd = openSync(`/proc/self/fd/${dirFd}/${path.basename(target)}`,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
     constants.O_NOFOLLOW, 0o600);
   try {
     for (let index = 0; index < bytes.length;) {
@@ -110,9 +134,19 @@ function recordIntent(intents, input) {
     }
     fsyncSync(fd);
   } finally { closeSync(fd); }
-  const dirFd = openSync(intents, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+  fsyncSync(dirFd);
+  demand(sameDirectory(fstatSync(dirFd, { bigint: true })) &&
+    sameDirectory(lstatSync(intents, { bigint: true })));
   demand(safeFile(target, 4096).equals(bytes));
+  } finally { closeSync(dirFd); }
+}
+
+function signedAuthorityFresh(input, issuedAt = Math.floor(Date.now() / 1000)) {
+  const stageExpiry = input.stageApproval?.message?.expiresAt;
+  const floorExpiry = input.evidence?.floorReceipt?.message?.expiresAt;
+  const casExpiry = input.evidence?.casRequest?.ownerExpiresAt;
+  return [stageExpiry, floorExpiry, casExpiry].every((expiry) =>
+    Number.isSafeInteger(expiry) && issuedAt < expiry);
 }
 
 /**
@@ -234,6 +268,7 @@ export function recordHostWitnessLedgerActivationBridge(input = {}) {
         JSON.stringify(ledgerState) &&
       JSON.stringify(readExactJson(policy.activationCheckpointFile, 32768)) ===
         JSON.stringify(checkpoint));
+    demand(signedAuthorityFresh(input));
     recordIntent(locations.intents, intent);
     return Object.freeze({ status: "BRIDGE_INTENT_RECORDED_NONAUTHORIZING",
       manifestSha256: intent.manifestSha256, sourceSha: intent.sourceSha,
@@ -241,4 +276,123 @@ export function recordHostWitnessLedgerActivationBridge(input = {}) {
       ledgerAttemptAuthorized: false, witnessCasAuthorized: false,
       dockerLoadAuthorized: false, deployAuthorized: false });
   } catch { refuse(); }
+}
+
+/**
+ * An owner-installed native route from a confirmed, independently signed CAS
+ * and external floor to a fresh TLS 1.3 witness HEAD and durable host intent.
+ * The nonauthorizing intent is fsynced before the network use point. If HEAD
+ * times out, disagrees, or the host changes, the intent is permanently
+ * uncertain and cannot be replayed as a new attempt.
+ *
+ * The remote CAS is deliberately NOT issued here: its private owner signer
+ * belongs to a separate operator. No local fixture proves physical off-host
+ * custody, and a live HEAD cannot itself establish a nonrollbackable floor.
+ */
+export async function recordHostWitnessLedgerActivationWithLiveWitness(input = {}) {
+  exact(input, ["installedPolicyFile", "intentDirectory", "installedTransportFile",
+    "ledgerState", "ledgerRequest", "checkpoint", "stageApproval", "evidence"]);
+  const { installedTransportFile, ...bridgeInput } = input;
+  const locations = trustedLocations(bridgeInput);
+  const isFixture = locations.policy !== TRUST;
+  demand(isFixture ? WSL_TRANSPORT.test(installedTransportFile) &&
+    path.dirname(installedTransportFile) === path.dirname(locations.policy) :
+    installedTransportFile === undefined || installedTransportFile === TRANSPORT);
+  const transportFile = isFixture ? installedTransportFile : TRANSPORT;
+  const policy = readExactJson(locations.policy, 16384);
+  const policyDigest = sha(JSON.stringify(policy));
+  const transport = readExactJson(transportFile, 8192);
+  const transportDigest = sha(JSON.stringify(transport));
+  exact(transport, ["version", "hostname", "port", "serverCertSha256",
+    "caFile", "clientCertFile", "clientKeyFile"]);
+  demand(transport.version === 1 && isIP(transport.hostname) !== 0 &&
+    Number.isSafeInteger(transport.port) && transport.port >= 1 &&
+    transport.port <= 65535 && HEX64.test(transport.serverCertSha256));
+  // Production witness must be on another machine. Only disposable WSL tests
+  // may bind loopback; no caller-selected network target is trusted.
+  if (!isFixture) {
+    demand(!/^(?:127\.|0\.|169\.254\.|22[4-9]\.|23\d\.|24\d\.|25\d\.|::|fe80:|ff)/iu.test(transport.hostname));
+  }
+  const config = {
+    hostname: transport.hostname, port: transport.port,
+    serverCertSha256: transport.serverCertSha256,
+    ca: safeFile(transport.caFile, 16384),
+    cert: safeFile(transport.clientCertFile, 16384),
+    key: safeFile(transport.clientKeyFile, 16384),
+    publicKeyPem: policy.witnessPublicKeyPem, pinSha256: policy.witnessPinSha256,
+    ownerPublicKeyPem: policy.ownerPublicKeyPem, ownerPinSha256: policy.ownerPinSha256,
+    hostIdentitySha256: policy.hostIdentitySha256, ledgerIdSha256: policy.ledgerIdSha256,
+  };
+  // This operation checks the exact owner CAS, distinct signed external floor,
+  // host ledger, manifest and first activation-stage owner authorization, then
+  // makes the receipt-scoped intent durable. It will refuse any repeat.
+  const recorded = recordHostWitnessLedgerActivationBridge(bridgeInput);
+  // Capture the exact verified authority before awaiting remote I/O; mutable
+  // caller objects may not extend expiry or swap signed material afterward.
+  const authorityUntil = Math.min(bridgeInput.stageApproval.message.expiresAt,
+    bridgeInput.evidence.floorReceipt.message.expiresAt,
+    bridgeInput.evidence.casRequest.ownerExpiresAt);
+  const stageDigest = sha(JSON.stringify(bridgeInput.stageApproval));
+  const floorDigest = sha(JSON.stringify(bridgeInput.evidence.floorReceipt));
+  const casDigest = sha(JSON.stringify(bridgeInput.evidence.casRequest));
+  const uncertain = () => Object.freeze({
+    ...recorded, status: "BRIDGE_INTENT_LIVE_UNCERTAIN_NONAUTHORIZING",
+    reconciliationRequired: true,
+  });
+  try {
+    const head = await remoteWitnessHead(config, {
+      minimumSequence: recorded.sequence,
+      expectedHeadSha: recorded.sourceSha,
+      minimumReceiptSha256: recorded.receiptSha256,
+    });
+    demand(Math.floor(Date.now() / 1000) < authorityUntil &&
+      signedAuthorityFresh(bridgeInput) &&
+      sha(JSON.stringify(bridgeInput.stageApproval)) === stageDigest &&
+      sha(JSON.stringify(bridgeInput.evidence.floorReceipt)) === floorDigest &&
+      sha(JSON.stringify(bridgeInput.evidence.casRequest)) === casDigest &&
+      sha(JSON.stringify(readExactJson(locations.policy, 16384))) === policyDigest &&
+      sha(JSON.stringify(readExactJson(transportFile, 8192))) === transportDigest &&
+      sha(safeFile(policy.manifestFile, 1048576)) === policy.manifestSha256 &&
+      JSON.stringify(readExactJson(path.join(policy.ledgerDirectory, "ledger.json"), 1048576)) ===
+        JSON.stringify(bridgeInput.ledgerState) &&
+      JSON.stringify(readExactJson(policy.activationCheckpointFile, 32768)) ===
+        JSON.stringify(bridgeInput.checkpoint));
+    const confirmation = {
+      version: 1, receiptSha256: recorded.receiptSha256,
+      hostIdentitySha256: policy.hostIdentitySha256, ledgerIdSha256: policy.ledgerIdSha256,
+      manifestSha256: recorded.manifestSha256,
+      transportSha256: transportDigest, liveHead: head.signedReceipt,
+    };
+    // Recheck the signed validity window at the last synchronous use point,
+    // after all host-state reads, immediately before the O_EXCL sidecar.
+    demand(Math.floor(Date.now() / 1000) < authorityUntil &&
+      signedAuthorityFresh(bridgeInput));
+    recordIntent(locations.intents, confirmation, ".confirmed");
+    return Object.freeze({ ...recorded,
+      status: "BRIDGE_INTENT_LIVE_CONFIRMED_NONAUTHORIZING",
+      reconciliationRequired: false });
+  } catch {
+    // A remote request may have succeeded even if its reply was lost. The
+    // already-fsynced .intent remains; no deletion or automatic retry exists.
+    return uncertain();
+  }
+}
+
+/** Owner-installed native operator entry: a fixed private proof file only. */
+export async function recordInstalledHostWitnessManualIntent(args = []) {
+  demand(Array.isArray(args) && process.platform === "linux" && process.getuid?.() === 0);
+  const fixture = process.env.VIRKI_DISPOSABLE_WITNESS_BRIDGE === "1" &&
+    /wsl|microsoft/iu.test(os.release());
+  const source = fixture ? args[0] : PROOF;
+  demand(fixture ? args.length === 1 && WSL_PROOF.test(source) :
+    args.length === 0 && !/wsl|microsoft/iu.test(os.release()));
+  const root = path.dirname(source);
+  const installedPolicyFile = fixture ? path.join(root, "owner-installed-trust.json") : TRUST;
+  const installedTransportFile = fixture ? path.join(root, "owner-installed-transport.json") : TRANSPORT;
+  const intentDirectory = fixture ? path.join(root, "intents") : INTENTS;
+  const proof = readExactJson(source, 32768);
+  exact(proof, ["ledgerState", "ledgerRequest", "checkpoint", "stageApproval", "evidence"]);
+  return recordHostWitnessLedgerActivationWithLiveWitness({
+    installedPolicyFile, intentDirectory, installedTransportFile, ...proof,
+  });
 }

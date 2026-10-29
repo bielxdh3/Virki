@@ -193,6 +193,78 @@ identity measurement and real host service fencing. Later activation stages
 require their own durable journal and independently authorized use points;
 this bridge covers the initial release entry only.
 
+The owner-installed live route is
+`recordHostWitnessLedgerActivationWithLiveWitness(input)`, exported by the same
+module. The caller supplies the same signed CAS/floor/stage proof with the
+additional ordered `installedTransportFile` field (between `intentDirectory`
+and `ledgerState`). For native Linux it reads the **fixed** root-owned `0600`
+transport file `/etc/virki/offline-witness-transport.json` in `/etc/virki`
+(`0700`). Its canonical JSON fields, in order, are:
+
+```text
+version: 1
+hostname: independent witness numeric IP (not loopback/multicast)
+port: TLS witness port 1–65535
+serverCertSha256: exact TLS server X.509 DER certificate SHA-256
+caFile, clientCertFile, clientKeyFile: absolute, root-owned 0600 paths
+```
+
+The installed owner and witness Ed25519 pins and host/ledger identities are
+read from the separate fixed bridge policy. The client uses TLS 1.3 with CA
+verification, pinned peer certificate, client certificate and private client
+TLS key. The owner CAS private key **is not installed in the activation host**;
+its exact signed CAS receipt and separate external floor receipt must already
+exist. The bridge validates their signatures and exact scope, persists the
+exclusive fsynced `<receiptSha256>.intent`, and then reads a **fresh**
+challenge-bound HEAD from the actual pinned witness over mTLS. Its sequence,
+head SHA and receipt SHA must equal the signed post-CAS floor exactly. It
+rechecks installed policy, transport, manifest, ledger and activation checkpoint
+after that network round trip. It also rechecks the original signed owner-stage,
+external floor and owner-CAS expirations **after** the awaited mTLS response;
+any expiry leaves the pre-existing `.intent` uncertain and blocks a second
+attempt. A valid remote HEAD alone cannot extend an expired owner permit.
+Only then can it fsync the separate
+`<receiptSha256>.confirmed` containing the live signed HEAD. Returned status
+`BRIDGE_INTENT_LIVE_CONFIRMED_NONAUTHORIZING` remains a proof/intent only,
+with every deployment/ledger/authorization flag false.
+
+The native operator command is
+`node scripts/offline-host-witness-manual-intent.mjs`. It has no command-line
+arguments on production Linux and reads only the private root-owned canonical
+`/etc/virki/offline-witness-proof.json` (`0600`). Its five ordered fields are
+`ledgerState`, `ledgerRequest`, `checkpoint`, `stageApproval`, `evidence`, with
+the schema and signature checks described above. It chooses the fixed policy,
+transport and intent paths itself, instead of receiving these paths from the
+proof file. The disposable WSL-root test can pass only the precisely named
+`/dev/shm/virki-witness-bridge-fixture-*/owner-installed-proof.json` with the
+fixture switch. The command exits `0` when confirmed, `3` when uncertain, and
+`2` if the installed proof or trust is refused; neither result invokes a host
+action or authorizes release.
+
+If the remote HEAD is unreachable, has advanced, has been rolled back, fails
+mTLS, or a host use-point changes, the function returns
+`BRIDGE_INTENT_LIVE_UNCERTAIN_NONAUTHORIZING` and `reconciliationRequired:true`.
+The `.intent` remains durably present without `.confirmed` and blocks replay;
+the owner must reconcile independently. Crash or I/O failure during the
+confirmation write likewise leaves a blocked intent, even if the remote HEAD
+was read successfully. The transport file and its TLS keys must be installed
+and protected by the owner; WSL-root allows only
+`/dev/shm/virki-witness-bridge-fixture-*/owner-installed-transport.json` with
+the existing disposable fixture switch. Signed floor signatures in local tests
+are **simulated by a distinct disposable signer**; they never prove separate
+physical custody, independent monotonic media, or deployment readiness.
+
+Every installed policy, proof, transport, TLS key/certificate, manifest,
+ledger, checkpoint and intent directory requires a root-owned private `0700`
+parent; **all ancestors up to `/`** must be root-owned, non-symlink directories
+that are not group/world-writable, unless protected by the root-owned sticky
+bit (as with `/dev/shm`). The intent is created exclusively relative to an
+opened and rechecked directory descriptor and fsynced there. A disposable
+adversarial WSL test demonstrates that `nobody` can rename a root-owned `0700`
+tree under a deliberately unsafe non-sticky `0777` ancestor; the bridge must
+reject that entire tree *before* an intent is written. This is not protection
+against a malicious root operator or a physical rollback of all trusted media.
+
 The production backup/migration/writer-fencing mechanisms already implemented
 in `scripts/production-server.sh` are to be reused by a future owner-installed
 supervisor; this bridge does not duplicate them. It also cannot authorize
