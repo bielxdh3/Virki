@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -169,6 +169,22 @@ test("rejects relative, traversal, missing and root candidate paths", linuxCandi
   for (const candidateDirectory of ["./bundle", ".", "../bundle", "/", null, ""]) {
     await assert.rejects(inspectUntrustedOfflineCandidate({ candidateDirectory }));
   }
+});
+
+test("rejects an owner-private candidate beneath an attacker-renameable nonsticky parent", linuxCandidateOnly, async (t) => {
+  const f = fixture(t);
+  const outer = mkdtempSync(path.join(os.tmpdir(), "virki-entry-ancestor-"));
+  t.after(() => rmSync(outer, { recursive: true, force: true }));
+  const parent = path.join(outer, "unsafe-parent");
+  mkdirSync(parent, { mode: 0o700 });
+  const candidate = path.join(parent, "candidate");
+  renameSync(f.candidateDirectory, candidate);
+  chmodSync(parent, 0o777);
+  try {
+    await assert.rejects(inspectUntrustedOfflineCandidate({ candidateDirectory: candidate }),
+      /ancestor|writable|renameable|protected/iu,
+      "a private leaf cannot prevent an attacker from replacing its writable parent");
+  } finally { chmodSync(parent, 0o700); }
 });
 
 test("native trusted entry always rejects developer WSL kernel before opening bundle", async (t) => {

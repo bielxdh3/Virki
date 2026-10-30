@@ -62,6 +62,22 @@ function ensureRoot(directory) {
   requireIt(stat.isDirectory() && stat.uid === BigInt(process.getuid?.() ?? -1) &&
     (stat.mode & 0o7777n) === 0o700n,
   "candidate directory must be a private owner-only real directory");
+  // A 0700 leaf can still be replaced as a pathname through an ancestor
+  // writable by OTHER principals when it is not protected by sticky rules.
+  // A same-UID attacker remains outside this nonauthorizing preview's trust
+  // guarantee; a native importer must pin actual consumption independently.
+  const expectedOwner = BigInt(process.getuid?.() ?? -1);
+  for (let ancestor = path.dirname(directory);;) {
+    const parent = lstatSync(ancestor, { bigint: true });
+    const mode = parent.mode & 0o7777n;
+    const rootSticky = parent.uid === 0n && (mode & 0o1000n) !== 0n;
+    requireIt(parent.isDirectory() && !parent.isSymbolicLink() &&
+      (parent.uid === 0n || parent.uid === expectedOwner) &&
+      ((mode & 0o022n) === 0n || rootSticky),
+    "candidate has an attacker-writable or renameable ancestor");
+    if (ancestor === path.dirname(ancestor)) break;
+    ancestor = path.dirname(ancestor);
+  }
   return stat;
 }
 async function inspectRegularFile(directory, name, maxSize, collect = false) {
