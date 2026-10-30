@@ -24,9 +24,17 @@ function isObject(value) {
 function validateCodeqlRun(run) {
   if (!isObject(run) || !Array.isArray(run.results)) invalidSarif("each run needs a results array.");
   const driver = run.tool?.driver;
-  if (!isObject(driver) || driver.name !== "CodeQL command-line toolchain"
-    || driver.organization !== "GitHub" || typeof driver.version !== "string"
-    || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(driver.version)) {
+  // Both layouts are observed from CodeQL tooling: documented toolchain
+  // exports `version`, while the pinned CLI 2.27.3 emits `CodeQL` plus
+  // `semanticVersion`. Accept only these two consistent pairs, not an
+  // arbitrary version alias or missing/version-conflicting provenance.
+  const version = driver?.name === "CodeQL command-line toolchain" &&
+    driver.semanticVersion === undefined ? driver.version
+    : driver?.name === "CodeQL" && driver.version === undefined
+      ? driver.semanticVersion : null;
+  if (!isObject(driver) || driver.organization !== "GitHub"
+    || typeof version !== "string"
+    || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(version)) {
     invalidSarif("expected a versioned CodeQL CLI driver.");
   }
   if (!isObject(run.properties) || !["sarif-latest", "sarifv2.1.0"].includes(

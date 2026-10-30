@@ -78,6 +78,34 @@ test("CodeQL documented driver/version and consistent ruleIndex are accepted", (
   assert.throws(() => evaluateCodeqlSarif([document]), /Invalid SARIF/u);
 });
 
+test("CodeQL 2.27.3 actual CLI exporter driver fields are validated without blessing findings", () => {
+  const actual = sarif([{
+    ruleId: "js/file-system-race", path: "scripts/offline-manual-image-build.mjs",
+    lineFingerprint: "not-reviewed:1", columnFingerprint: "7"
+  }]);
+  const driver = actual.runs[0].tool.driver;
+  driver.name = "CodeQL";
+  driver.semanticVersion = "2.27.3";
+  delete driver.version;
+  actual.runs[0].properties["semmle.formatSpecifier"] = "sarifv2.1.0";
+  actual.runs[0].automationDetails = { id: "/language:javascript-typescript/" };
+  const evaluated = evaluateCodeqlSarif([actual]);
+  assert.equal(evaluated.ok, false, "raw scanner results are NOT an allowlist approval");
+  assert.equal(evaluated.violations[0].reason, "unreviewed-finding");
+
+  for (const mutate of [
+    (d) => { d.organization = "Attacker"; },
+    (d) => { d.semanticVersion = "invalid"; },
+    (d) => { d.name = "Untrusted CodeQL"; },
+    (d) => { d.version = "2.27.2"; },
+    (d) => { delete d.semanticVersion; },
+  ]) {
+    const forged = structuredClone(actual);
+    mutate(forged.runs[0].tool.driver);
+    assert.throws(() => evaluateCodeqlSarif([forged]), /Invalid SARIF/u);
+  }
+});
+
 test("RED→GREEN: SARIF 2.1 artifactLocation index, rule and invocation consistency fail closed", () => {
   const valid = sarif([accepted]);
   assert.equal(evaluateCodeqlSarif([valid]).ok, true,
@@ -150,7 +178,7 @@ test("CodeQL rule components with no rules are allowed and driver index -1 resol
 
 test("CodeQL policy refuses fake or unversioned driver and missing exporter proof", () => {
   for (const mutation of [
-    (run) => { run.tool.driver.name = "CodeQL"; },
+    (run) => { run.tool.driver.name = "Fake CodeQL"; },
     (run) => { run.tool.driver.organization = "Untrusted"; },
     (run) => { delete run.tool.driver.version; },
     (run) => { run.tool.driver.semanticVersion = run.tool.driver.version; delete run.tool.driver.version; },
