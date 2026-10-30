@@ -10,6 +10,12 @@ Its hosted `deploy` action authenticates GHCR/CI and must keep doing so.
 
 `infra/offline/native-manual-pg-rollback-preflight.mjs` is a narrow reusable
 read-only prerequisite for a future owner-installed native recovery entrypoint.
+It refuses execution outside the fixed existing supervisor import tree,
+`/usr/local/lib/virki/offline-release/infra/offline/native-manual-pg-rollback-preflight.mjs`,
+and rejects WSL, non-root real/effective UID/GID, non-native filesystems,
+unprotected ancestors or writable/non-root installed module bytes. These checks
+run **after Node has loaded JavaScript**, so they cannot replace an independently
+trusted native launcher and verified transitive ESM/ELF first-exec closure.
 It validates protected root-owned `0700` release and backup directories, a
 canonical predecessor `current` symlink, an intact predecessor release marker,
 the pending `PREPARED`/`VERIFIED` migration guard, the maintenance marker and
@@ -72,7 +78,12 @@ verification, nor source an uploaded production script. A peer-reviewed
 installed adapter is still needed for source/image admission and actual
 rollback; this read-only invariant checker is not that adapter.
 
-Tests in `infra/offline/native-manual-pg-rollback-preflight.test.mjs` exercise
-the file invariants under WSL root on private `/dev/shm` fixtures. That
-validates the read-only filesystem boundary only; it is not real production
-authority, a PostgreSQL restore E2E, or installed native host attestation.
+The ordinary-user test in
+`infra/offline/native-manual-pg-rollback-preflight.test.mjs` checks native
+eligibility and WSL/checkout refusal without privileged execution. Its seven
+root-only filesystem tests are **SKIPPED** from Windows/WSL and mutable
+checkouts; they require a separately owner-installed and independently
+verified native Linux fixture. Never run root Node/test scripts or generated
+native binaries directly from DrvFS or an untrusted worktree. Previous WSL-root
+fixture results are historical only, not current proof of native rollback,
+writer fencing, PostgreSQL restore or installed-host attestation.
