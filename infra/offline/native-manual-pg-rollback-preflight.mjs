@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
   closeSync, constants, fstatSync, lstatSync, openSync, readFileSync,
-  readlinkSync, readSync, realpathSync,
+  readlinkSync, readSync, realpathSync, statfsSync,
 } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Read-only native rollback precondition. This module provides no restore,
 // Docker command, approval minting, route switch or production entrypoint.
@@ -15,6 +17,10 @@ const SHA64 = /^[a-f0-9]{64}$/u;
 const BACKUP = /^virki-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}\.dump$/u;
 const SNAPSHOT = /^[0-9]+\|[0-9]+\|[0-9]+$/u;
 const IO_BLOCK = 64 * 1024;
+// The existing owner-installed supervisor imports this exact sibling module.
+// Do not introduce a disconnected second installation path for rollback.
+const INSTALLED_ENTRY = "/usr/local/lib/virki/offline-release/infra/offline/native-manual-pg-rollback-preflight.mjs";
+const NATIVE_FS = new Set([0xef53n, 0x58465342n, 0x9123683en]); // ext4, XFS, btrfs
 
 function refuse() { throw new Error("Protected manual PostgreSQL rollback preflight refused"); }
 function need(condition) { if (!condition) refuse(); }
@@ -42,6 +48,34 @@ function secureDirectory(folder) {
     if (ancestor === path.dirname(ancestor)) break;
     ancestor = path.dirname(ancestor);
   }
+}
+/** Pure eligibility predicate, NEVER an installation/signature/first-exec proof. */
+export function nativePgRollbackRuntimeEligibility({
+  platform, arch, uid, euid, gid, egid, kernelRelease, entryPath,
+} = {}) {
+  return platform === "linux" && arch === "x64" && uid === 0 &&
+    euid === 0 && gid === 0 && egid === 0 &&
+    typeof kernelRelease === "string" && !/microsoft|wsl/iu.test(kernelRelease) &&
+    entryPath === INSTALLED_ENTRY;
+}
+function requireNativeInstalledPgInspector() {
+  const filename = fileURLToPath(import.meta.url);
+  need(nativePgRollbackRuntimeEligibility({
+    platform: process.platform, arch: process.arch,
+    uid: process.getuid?.(), euid: process.geteuid?.(),
+    gid: process.getgid?.(), egid: process.getegid?.(),
+    kernelRelease: os.release(), entryPath: filename,
+  }));
+  // Any Node code from a checkout was already loaded before this check. Do
+  // NOT execute root Node from DrvFS/checkout; a separately trusted native
+  // owner installer/launcher is indispensable for actual first-exec safety.
+  need(realpathSync.native(filename) === filename &&
+    NATIVE_FS.has(statfsSync(filename, { bigint: true }).type));
+  secureDirectory(path.dirname(filename));
+  const source = lstatSync(filename, { bigint: true });
+  need(source.isFile() && !source.isSymbolicLink() && source.uid === 0n &&
+    source.gid === 0n && source.nlink === 1n &&
+    (source.mode & 0o7777n) === 0o600n);
 }
 function openProtectedFile(filename, maxSize = BigInt(Number.MAX_SAFE_INTEGER)) {
   const before = lstatSync(filename, { bigint: true });
@@ -111,10 +145,10 @@ function hashProtectedBackup(filename, expectedSha) {
  */
 export function inspectProtectedManualPgRollback(request = {}) {
   try {
+    requireNativeInstalledPgInspector();
     exact(request, ["productionRoot", "expectedNewSha", "expectedPredecessorSha"]);
     const { productionRoot: root, expectedNewSha, expectedPredecessorSha } = request;
-    need(process.platform === "linux" && process.getuid?.() === 0 &&
-      SHA40.test(expectedNewSha) && SHA40.test(expectedPredecessorSha) &&
+    need(SHA40.test(expectedNewSha) && SHA40.test(expectedPredecessorSha) &&
       expectedNewSha !== expectedPredecessorSha &&
       typeof root === "string" && root !== "/" &&
       path.isAbsolute(root) && path.normalize(root) === root);

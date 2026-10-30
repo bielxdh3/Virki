@@ -6,11 +6,39 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { inspectProtectedManualPgRollback } from "./native-manual-pg-rollback-preflight.mjs";
+import {
+  inspectProtectedManualPgRollback, nativePgRollbackRuntimeEligibility,
+} from "./native-manual-pg-rollback-preflight.mjs";
 
+// Do NOT launch root Node from a checkout, including WSL/DrvFS. Even a skip
+// executes after Node has loaded the test module. Native root testing requires
+// a separately verified owner-installed copy at a fixed root-private path.
+const TRUSTED_ROOT_TEST = "/usr/local/lib/virki/offline-release/infra/offline/native-manual-pg-rollback-preflight.test.mjs";
 const LINUX_ROOT = { skip: process.platform !== "linux" || process.getuid?.() !== 0 ||
-  !/microsoft|wsl/iu.test(os.release()) };
+  process.geteuid?.() !== 0 || /microsoft|wsl/iu.test(os.release()) ||
+  fileURLToPath(import.meta.url) !== TRUSTED_ROOT_TEST };
+
+test("nonroot contract: WSL, wrong effective root and mutable checkout cannot be a native rollback verifier", () => {
+  const installed = "/usr/local/lib/virki/offline-release/infra/offline/native-manual-pg-rollback-preflight.mjs";
+  const valid = { platform: "linux", arch: "x64", uid: 0, euid: 0, gid: 0,
+    egid: 0, kernelRelease: "6.9.0-native", entryPath: installed };
+  assert.equal(nativePgRollbackRuntimeEligibility(valid), true,
+    "identity/OS/path eligibility is NOT proof of an owner-installed trusted loader");
+  for (const change of [
+    { kernelRelease: "5.15.153-microsoft-standard-WSL2" },
+    { kernelRelease: "6.6.0-wsl" },
+    { platform: "win32" }, { arch: "arm64" },
+    { uid: 1000 }, { euid: 1000 }, { gid: 1000 }, { egid: 1000 },
+    { entryPath: "/mnt/e/Virki/infra/offline/native-manual-pg-rollback-preflight.mjs" },
+    { entryPath: "/tmp/native-manual-pg-rollback-preflight.mjs" },
+  ]) assert.equal(nativePgRollbackRuntimeEligibility({ ...valid, ...change }), false);
+  if (process.platform !== "linux" || process.getuid?.() !== 0) {
+    assert.throws(() => inspectProtectedManualPgRollback({}), /refused/iu,
+      "unprivileged checkout must fail without consulting caller-controlled production paths");
+  }
+});
 const NEW = "a".repeat(40);
 const OLD = "b".repeat(40);
 const sha = (data) => createHash("sha256").update(data).digest("hex");
