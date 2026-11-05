@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import test from "node:test";
+import nodemailer from "nodemailer";
+import { isSingleMailboxAddress } from "./email-address";
 import {
   claimNextEmailMessage,
   createDeterministicTestTransport,
@@ -77,6 +79,38 @@ test("SMTP configuration is fail-closed without contacting the provider", () => 
     isSmtpEmailTransportConfigured({ ...configured, VIRKI_EMAIL_SMTP_SECURE: "sometimes" }),
     false
   );
+});
+
+test("SMTP accepts exactly one mailbox and rejects parsed recipient lists", () => {
+  for (const valid of ["alice@example.invalid", "alice.smith+trial@sub.example.invalid", "josé@exemplo.com", "alice@exemplo.com.br", "alice@bücher.example"]) {
+    assert.equal(isSingleMailboxAddress(valid), true);
+  }
+  for (const invalid of [
+    "alice@example.invalid,attacker@example.invalid",
+    "Alice <alice@example.invalid>",
+    "alice@example.invalid; attacker@example.invalid",
+    '"Alice, Bob" <alice@example.invalid>',
+    "alice@example.invalid\r\nBcc:attacker@example.invalid",
+    "alice..smith@example.invalid",
+    "alice@example.invalid (comment)"
+  ]) assert.equal(isSingleMailboxAddress(invalid), false, invalid);
+});
+
+test("SMTP mocked delivery hands Nodemailer one structured recipient and rejects address lists", async (context) => {
+  const recipients: unknown[] = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (message: { to: unknown }) => { recipients.push(message.to); }
+  }) as never);
+  const transport = createSmtpEmailTransport({
+    VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+    VIRKI_EMAIL_SMTP_USER: "test@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+    VIRKI_EMAIL_FROM: "no-reply@example.invalid"
+  });
+  await transport.send({ to: "josé@bücher.example", subject: "fixture", text: "fixture" });
+  assert.deepEqual(recipients, [[{ name: "", address: "josé@bücher.example" }]]);
+  await assert.rejects(transport.send({ to: "alice@example.invalid,attacker@example.invalid", subject: "fixture", text: "fixture" }));
+  assert.equal(recipients.length, 1);
 });
 
 test("SMTP delivery failures are redacted without contacting an external provider", async () => {

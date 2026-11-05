@@ -3,7 +3,7 @@
 import { withHubAuditRequest } from "../../lib/audit-request";
 
 import { randomBytes } from "node:crypto";
-import { hashAuditSessionReference, normalizeEmail, writeAuditLogInTransaction } from "@virki/auth";
+import { hashAuditSessionReference, isSingleMailboxAddress, normalizeEmail, writeAuditLogInTransaction } from "@virki/auth";
 import { provisionInvitedUserAccount } from "@virki/auth/account-invitation";
 import { revokeUserAuthenticationProofsInTransaction } from "@virki/auth/security";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
@@ -60,7 +60,7 @@ export async function createAccountAction(formData: FormData): Promise<void> {
     await requireSecurityElevation(actor.user.id, actor.id, "ACCOUNT_STATE_CHANGE");
     const email = normalizeEmail(rawEmail.trim());
     const displayName = readFormString(formData, "displayName");
-    if (!/^\S+@\S+\.\S+$/u.test(email) || displayName.length > 80) throw new Error("Invalid account input.");
+    if (!isSingleMailboxAddress(email) || displayName.length > 80) throw new Error("Invalid account input.");
     await provisionInvitedUserAccount(actor.user, actor.id, { email, displayName: displayName || null });
     revalidatePath("/admin/accounts");
     redirect("/admin/accounts?status=created");

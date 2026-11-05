@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import type { EmailTransport, EmailTransportMessage } from "./email";
+import { isSingleMailboxAddress } from "./email-address";
 
 const DEFAULT_SMTP_PORT = 587;
 const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
@@ -78,9 +79,10 @@ export function createSmtpEmailTransport(
   return {
     async send(message: EmailTransportMessage): Promise<void> {
       try {
+        if (!isSingleMailboxAddress(message.to)) throw new Error("Invalid recipient.");
         await transporter.sendMail({
           from: config.from,
-          to: message.to,
+          to: [{ name: "", address: message.to }],
           subject: message.subject,
           text: message.text,
           ...(config.replyTo ? { replyTo: config.replyTo } : {})
@@ -93,5 +95,5 @@ export function createSmtpEmailTransport(
 }
 
 function isEmailAddress(value: string | undefined): value is string {
-  return Boolean(value && value.length <= 254 && /^[^\s@]+@[^\s@]+$/.test(value));
+  return Boolean(value && isSingleMailboxAddress(value));
 }

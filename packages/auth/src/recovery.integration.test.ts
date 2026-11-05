@@ -80,6 +80,14 @@ test("an anonymous request cannot expire a verified recovery awaiting approval",
 
 test("an anonymous request after approval cannot expire the approved recovery", integrationOptions, async () => {
   const owner = await createTestUser({ label: "recovery-approved" });
+  const passkey = await prisma.passkeyCredential.create({ data: {
+    userId: owner.id, credentialId: `synthetic-${randomUUID()}`, publicKey: Buffer.from("synthetic-public-key"),
+    name: "Old device", backupEligible: false, backupState: false
+  }, select: { id: true } });
+  await prisma.totpFactor.create({ data: { userId: owner.id, secretCiphertext: "synthetic-encrypted-secret", keyVersion: 1, status: "ACTIVE" } });
+  const oldCode = generateRecoveryCode();
+  await prisma.recoveryCode.create({ data: { userId: owner.id, codeHash: hashRecoveryCode(oldCode) } });
+  await prisma.user.update({ where: { id: owner.id }, data: { secondFactorMethod: "TOTP" } });
   const admin = await createTestUser({ role: "ADMIN", label: "recovery-approver" });
   const start = new Date();
   const { sessionId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", start);
@@ -97,7 +105,36 @@ test("an anonymous request after approval cannot expire the approved recovery", 
   await consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, newPassword, attackerTime);
   const stored = await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { passwordHash: true } });
   assert.equal(await verifyPassword(stored.passwordHash ?? "", newPassword), true);
+  assert.equal((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: passkey.id }, select: { revokedAt: true } })).revokedAt?.getTime(), attackerTime.getTime());
+  assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: owner.id }, select: { status: true } })).status, "REVOKED");
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { secondFactorMethod: true } })).secondFactorMethod, "EMAIL");
+  assert.equal(await prisma.recoveryCode.count({ where: { userId: owner.id } }), 0);
   await assert.rejects(consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "integration-replayed-password", attackerTime));
+});
+
+test("ADMIN normal-account recovery preserves its distinct TOTP policy and recovery codes", integrationOptions, async () => {
+  const owner = await createTestUser({ role: "ADMIN", label: "admin-normal-recovery-mfa" });
+  const reviewer = await createTestUser({ role: "ADMIN", label: "admin-normal-recovery-reviewer" });
+  const now = new Date();
+  const { sessionId } = await seedAdminSessionWithElevation(reviewer.id, "ACCOUNT_STATE_CHANGE", now);
+  await prisma.administrativeCredential.create({ data: {
+    userId: owner.id, passwordHash: await hashPassword("independent-admin-credential-1"), status: "ACTIVE"
+  } });
+  await prisma.totpFactor.create({ data: { userId: owner.id, secretCiphertext: "admin-synthetic-secret", keyVersion: 1, status: "ACTIVE" } });
+  const retainedCodeHash = hashRecoveryCode(generateRecoveryCode());
+  await prisma.recoveryCode.create({ data: { userId: owner.id, codeHash: retainedCodeHash } });
+  await prisma.user.update({ where: { id: owner.id }, data: { secondFactorMethod: "TOTP" } });
+
+  await requestAdministrativeAccountRecovery(owner.email, "pt-BR", now);
+  const pending = await openLatestRecovery(owner.email, now, "ADMIN");
+  await verifyAccountRecoveryEmail(pending.requestId, pending.requestKey, pending.code ?? "", now, "ADMIN");
+  await approveAccountRecovery({ id: reviewer.id, role: "ADMIN" }, sessionId, pending.requestId, now);
+  const approved = await openLatestRecovery(owner.email, now, "ADMIN");
+  await consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "new-normal-admin-password-2", now, "ADMIN");
+
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { secondFactorMethod: true } })).secondFactorMethod, "TOTP");
+  assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: owner.id }, select: { status: true } })).status, "ACTIVE");
+  assert.equal(await prisma.recoveryCode.count({ where: { userId: owner.id, codeHash: retainedCodeHash } }), 1);
 });
 
 test("concurrent anonymous recovery requests cannot race past a live invitation", integrationOptions, async () => {
