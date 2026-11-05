@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
-import { writeAuditLog } from "@virki/auth/audit";
+import { writeHubAccessDenialAudit } from "./lib/access-denial-audit";
 import { createHubRenderProof, HUB_RENDER_PROVENANCE_HEADER, verifyHubRenderProof } from "./lib/hub-render-provenance";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
 
@@ -111,7 +111,7 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   if (surface === "hub" && pathname !== "/api/health") {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);
     if (!access.allowed) {
-      await writeAuditLog({ eventType: access.status === "missing" ? "ACCESS_JWT_MISSING" : "ACCESS_JWT_INVALID", result: "DENIED", reason: "cloudflare", resource: "hub", metadata: { requestId: auditRequestId, source: "hub-ingress", accessJwtStatus: access.status } });
+      await writeHubAccessDenialAudit({ eventType: access.status === "missing" ? "ACCESS_JWT_MISSING" : "ACCESS_JWT_INVALID", result: "DENIED", reason: "cloudflare", resource: "hub", metadata: { requestId: auditRequestId, source: "hub-ingress", accessJwtStatus: access.status } });
       const headers = new Headers({ "Cache-Control": "no-store" });
       if (env.NODE_ENV === "development" && env.VIRKI_E2E_ACCESS_DIAGNOSTICS === "true" && access.reason) {
         headers.set("x-virki-e2e-access-reason", access.reason);
