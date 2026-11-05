@@ -17,6 +17,13 @@ function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function validSemver(value) {
+  if (typeof value !== "string") return false;
+  const parts = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(value);
+  return Boolean(parts) && (!parts[1] || parts[1].split(".").every((identifier) =>
+    !/^\d+$/u.test(identifier) || identifier === "0" || !identifier.startsWith("0")));
+}
+
 // CodeQL's documented SARIF contains rules for queries in the analysis and
 // artifacts for files referenced by results. Neither is a coverage inventory.
 // Keep this validator structural; only the exact-SHA hosted workflow provides
@@ -24,9 +31,13 @@ function isObject(value) {
 function validateCodeqlRun(run) {
   if (!isObject(run) || !Array.isArray(run.results)) invalidSarif("each run needs a results array.");
   const driver = run.tool?.driver;
-  if (!isObject(driver) || driver.name !== "CodeQL command-line toolchain"
-    || driver.organization !== "GitHub" || typeof driver.version !== "string"
-    || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(driver.version)) {
+  // CodeQL CLI SARIF has two observed metadata shapes. Require the exact
+  // name/version-field pairing so arbitrary scan tools cannot impersonate it.
+  const legacyDriver = driver?.name === "CodeQL command-line toolchain"
+    && driver.semanticVersion === undefined && validSemver(driver.version);
+  const currentDriver = driver?.name === "CodeQL"
+    && driver.version === undefined && validSemver(driver.semanticVersion);
+  if (!isObject(driver) || driver.organization !== "GitHub" || (!legacyDriver && !currentDriver)) {
     invalidSarif("expected a versioned CodeQL CLI driver.");
   }
   if (!isObject(run.properties) || !["sarif-latest", "sarifv2.1.0"].includes(
@@ -99,8 +110,15 @@ function validateCodeqlRun(run) {
     }
     const registeredIndex = ruleTables[componentIndex].get(result.ruleId);
     if (registeredIndex === undefined) invalidSarif("result rule is absent from referenced component.");
-    if (!Number.isSafeInteger(result.ruleIndex) || result.ruleIndex !== registeredIndex) {
-      invalidSarif("result ruleIndex does not match ruleId.");
+    // Earlier exporters used result.ruleIndex. Hosted CodeQL 2.27.1 instead
+    // emits result.rule.index, scoped to result.rule.toolComponent. Accept
+    // either, but never a missing or inconsistent index.
+    const legacyIndexPresent = result.ruleIndex !== undefined;
+    const componentIndexPresent = isObject(result.rule) && result.rule.index !== undefined;
+    if ((!legacyIndexPresent && !componentIndexPresent)
+      || (legacyIndexPresent && (!Number.isSafeInteger(result.ruleIndex)
+        || result.ruleIndex !== registeredIndex))) {
+      invalidSarif("result rule index does not match ruleId.");
     }
     if (result.rule !== undefined && (!isObject(result.rule)
       || (result.rule.id !== undefined && result.rule.id !== result.ruleId)
