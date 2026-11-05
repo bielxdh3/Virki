@@ -114,6 +114,9 @@ jobs:
       - name: Production control tests
         run: npm run test:production-revision
 
+      - name: Disposable Cloudflared staging guards
+        run: node --test scripts/cloudflared-staging.test.mjs
+
       - name: Root-protected offline transport test fixtures
         if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
         # The normal runner cannot open the fixture's 0700 root-only trust
