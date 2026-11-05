@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   existsSync, mkdtempSync, rmSync, renameSync, mkdirSync, writeFileSync,
-  readFileSync, linkSync,
+  readFileSync, linkSync, symlinkSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -193,6 +193,75 @@ test("simulated full-ID labeled inspection and cleanup uses no real Docker", (t)
     completed: false, cleanupConfirmed,
   }), true);
   assert.equal(existsSync(owned), false);
+});
+
+test("RED: swapping a validated CID pathname for a different inode with identical ID never reaches Docker", (t) => {
+  const { owned, cidfile } = prepareOwnedFixtureDirectory();
+  const originalName = path.join(owned, "saved-original-id");
+  t.after(() => rmSync(owned, { recursive: true, force: true }));
+  writeFileSync(cidfile, fullId + "\n");
+  const foreignId = fullId;
+  let invoked = 0;
+  const confirmed = cleanupOwnedContainer(cidfile, planDisposableFixture({
+    ownerToken: token, cidfile,
+  }), {}, {
+    beforeCidOpen() {
+      renameSync(cidfile, originalName);
+      writeFileSync(cidfile, foreignId + "\n");
+    },
+    run(args) {
+      invoked += 1;
+      return args.includes("inspect") ?
+        { status: 0, stdout: args.at(-1) + " " + token + "\n" } :
+        { status: 0, stdout: "removed\n" };
+    },
+  });
+  assert.equal(confirmed, false, "same bytes in a replacement inode must not satisfy CID verification");
+  assert.equal(invoked, 0, "neither inspect nor container rm may use a replaced pathname");
+  assert.equal(readFileSync(originalName, "utf8"), fullId + "\n");
+  assert.equal(readFileSync(cidfile, "utf8"), foreignId + "\n");
+});
+
+test("RED: a symlink substituted after CID preflight cannot redirect Docker cleanup", (t) => {
+  const { owned, cidfile } = prepareOwnedFixtureDirectory();
+  const originalName = path.join(owned, "saved-original-id");
+  const foreign = mkdtempSync(path.join(os.tmpdir(), "virki-race-foreign-cid-"));
+  const foreignFile = path.join(foreign, "foreign-cid");
+  t.after(() => {
+    rmSync(owned, { recursive: true, force: true });
+    rmSync(foreign, { recursive: true, force: true });
+  });
+  writeFileSync(cidfile, fullId + "\n");
+  writeFileSync(foreignFile, "b".repeat(64) + "\n");
+  // Windows developer mode or elevated token may be needed for symlinks.
+  const preflightLink = path.join(owned, "symlink-probe");
+  try { symlinkSync(foreignFile, preflightLink, "file"); }
+  catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+      t.skip("filesystem permissions prohibit symlink creation");
+      return;
+    }
+    throw error;
+  }
+  let invoked = 0;
+  const confirmed = cleanupOwnedContainer(cidfile, planDisposableFixture({
+    ownerToken: token, cidfile,
+  }), {}, {
+    beforeCidOpen() {
+      renameSync(cidfile, originalName);
+      renameSync(preflightLink, cidfile);
+    },
+    run(args) {
+      invoked += 1;
+      return args.includes("inspect") ?
+        { status: 0, stdout: args.at(-1) + " " + token + "\n" } :
+        { status: 0, stdout: "removed\n" };
+    },
+  });
+  assert.equal(confirmed, false);
+  assert.equal(invoked, 0);
+  assert.equal(readFileSync(originalName, "utf8"), fullId + "\n");
+  assert.equal(readFileSync(foreignFile, "utf8"), "b".repeat(64) + "\n");
 });
 
 test("unexpected contents in owner fixture are never recursively erased", (t) => {
