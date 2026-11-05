@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { evaluateCodeqlSarif } from "./codeql-sarif-policy.mjs";
-import { codeqlDocument } from "./fixtures/codeql-documented-sarif.mjs";
+import { codeqlDocument, codeqlHostedCliDocument } from "./fixtures/codeql-documented-sarif.mjs";
 
 const sarif = codeqlDocument;
 
@@ -76,6 +76,76 @@ test("CodeQL documented driver/version and consistent ruleIndex are accepted", (
   delete result.rule;
   delete result.locations[0].physicalLocation.artifactLocation.uri;
   assert.throws(() => evaluateCodeqlSarif([document]), /Invalid SARIF/u);
+});
+
+test("hosted CodeQL 2.27.1 driver and component-scoped rule indexes are accepted", () => {
+  const hosted = codeqlHostedCliDocument([accepted]);
+  const run = hosted.runs[0];
+  const result = run.results[0];
+  assert.equal(run.tool.driver.name, "CodeQL");
+  assert.equal(run.tool.driver.semanticVersion, "2.27.1");
+  assert.equal(run.tool.driver.rules.length, 0);
+  assert.equal(run.tool.extensions[1].rules[result.rule.index].id, result.ruleId);
+  assert.equal("ruleIndex" in result, false);
+  assert.equal(evaluateCodeqlSarif([hosted]).ok, true);
+  assert.equal(evaluateCodeqlSarif([codeqlHostedCliDocument([])]).ok, true);
+
+  const unreviewed = codeqlHostedCliDocument([
+    { ruleId: "js/path-injection", path: "apps/hub/src/path.ts", lineFingerprint: "new:1", columnFingerprint: "5" }
+  ]);
+  assert.deepEqual(evaluateCodeqlSarif([unreviewed]).violations.map((violation) => violation.reason),
+    ["unreviewed-finding"]);
+});
+
+test("hosted CLI metadata must be an exact supported CodeQL driver/version pairing", () => {
+  const changes = [
+    (run) => { run.tool.driver.name = "CodeQL command-line toolchain"; },
+    (run) => { run.tool.driver.organization = "SomeoneElse"; },
+    (run) => { delete run.tool.driver.semanticVersion; },
+    (run) => { run.tool.driver.semanticVersion = "2.27.1-not-semver-!"; },
+    (run) => { run.tool.driver.semanticVersion = "2.27"; },
+    (run) => { run.tool.driver.semanticVersion = "02.27.1"; },
+    (run) => { run.tool.driver.semanticVersion = "2.27.1-alpha.01"; },
+    (run) => { run.tool.driver.semanticVersion = "2.27.1+"; },
+    (run) => { run.tool.driver.version = "2.27.1"; },
+    (run) => { delete run.tool.driver.rules; },
+  ];
+  for (const mutate of changes) {
+    const hosted = codeqlHostedCliDocument([]);
+    mutate(hosted.runs[0]);
+    assert.throws(() => evaluateCodeqlSarif([hosted]), /Invalid SARIF/u);
+  }
+  const legacy = codeqlDocument([]);
+  legacy.runs[0].tool.driver.semanticVersion = legacy.runs[0].tool.driver.version;
+  assert.throws(() => evaluateCodeqlSarif([legacy]), /Invalid SARIF/u);
+});
+
+test("hosted CLI results reject ambiguous, missing and inconsistent rule component indexes", () => {
+  const changes = [
+    (run, result) => { delete result.rule.index; },
+    (run, result) => { result.rule.index = "1"; },
+    (run, result) => { result.rule.index = 999; },
+    (run, result) => { result.rule.index = -1; },
+    (run, result) => { result.rule.index = 0; },
+    (run, result) => { result.ruleId = "js/unknown"; },
+    (run, result) => { result.rule.id = "js/unknown"; },
+    (run, result) => { delete result.rule.toolComponent; },
+    (run, result) => { result.rule.toolComponent = { index: -1 }; },
+    (run, result) => { result.rule.toolComponent = { index: 2 }; },
+    (run, result) => { result.rule.toolComponent = { index: 4 }; },
+    (run, result) => { result.ruleIndex = result.rule.index + 1; },
+    (run, result) => { run.tool.extensions[1].rules[result.rule.index].id = "js/unknown"; },
+    (run) => { run.tool.extensions[1].rules.push(run.tool.extensions[1].rules[0]); },
+    (run) => { run.tool.extensions[1].rules = []; }
+  ];
+  for (const mutate of changes) {
+    const hosted = codeqlHostedCliDocument([accepted]);
+    mutate(hosted.runs[0], hosted.runs[0].results[0]);
+    assert.throws(() => evaluateCodeqlSarif([hosted]), /Invalid SARIF/u);
+  }
+  const both = codeqlHostedCliDocument([accepted]);
+  both.runs[0].results[0].ruleIndex = both.runs[0].results[0].rule.index;
+  assert.equal(evaluateCodeqlSarif([both]).ok, true);
 });
 
 test("RED→GREEN: SARIF 2.1 artifactLocation index, rule and invocation consistency fail closed", () => {
