@@ -325,6 +325,25 @@ test('OIDC runner cleanup distinguishes auto-removed containers from denied or u
       assert.equal(run.error, undefined, scenario + ': isolated runner must complete');
       assert.equal(run.status, expected, scenario + ': no false green after uncertain cleanup');
       const calls = readFileSync(log, 'utf8').trim().split(/\r?\n/u).map(JSON.parse);
+      // The Docker CLI receives random disposable PostgreSQL credentials, but
+      // the runner's failure diagnostic must never print them. This protects
+      // against future accidental interpolation of whole Docker argument
+      // arrays into errors. The fake engine includes injected run failures.
+      const secrets = new Set();
+      for (const args of calls) {
+        for (const arg of args) {
+          if (typeof arg !== 'string') continue;
+          const envCredential = /^(?:POSTGRES_PASSWORD|PGPASSWORD)=([a-f0-9]{64})$/u.exec(arg);
+          if (envCredential) secrets.add(envCredential[1]);
+          const roleCredential = /CREATE ROLE\s+\w+\s+LOGIN PASSWORD '([a-f0-9]{64})'/u.exec(arg);
+          if (roleCredential) secrets.add(roleCredential[1]);
+        }
+      }
+      if (scenario !== 'zero-write') assert.ok(secrets.size >= 1, scenario + ': fake engine received a generated credential');
+      for (const secret of secrets) {
+        assert.equal(run.stderr.includes(secret), false, scenario + ': stderr must not disclose disposable DB credentials');
+        assert.equal(run.stdout.includes(secret), false, scenario + ': stdout must not disclose disposable DB credentials');
+      }
       if (scenario === 'zero-write') {
         assert.equal(calls.some((args) => args[0] === 'run'), false,
           'incomplete receipt write must block Docker mutation');

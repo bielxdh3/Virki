@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash, createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { isoCBOR } from "@simplewebauthn/server/helpers";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
 import { approveAccountRecovery, confirmTotpEnrollment, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, startTotpEnrollment, verifyAccountRecoveryEmail } from "./security";
 import { authenticateUser } from "./index";
@@ -19,7 +19,10 @@ import {
   startPasskeyRegistration
 } from "./passkeys";
 
-after(() => prisma.$disconnect());
+// Real lock observations must not consume the same three application pool
+// connections as a lock holder and two concurrently blocked passkey writers.
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 const rpID = "portal.biel.dev.br";
 const origin = "https://portal.biel.dev.br";
@@ -86,17 +89,27 @@ test("ACTIVE TOTP registration succeeds with fresh proof; revoking the factor in
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "PASSKEY_REGISTERED" } }), 1);
 });
 
-async function awaitBlockedOn(blockingPid: number) {
+async function awaitBlockedOn(blockingPid: number, minimumWaiters = 1) {
   const until = Date.now() + 6_000;
   while (Date.now() < until) {
-    const rows = await prisma.$queryRaw<Array<{ blocked: number }>>`
-      SELECT COUNT(*)::int AS blocked FROM pg_stat_activity
-      WHERE wait_event_type = 'Lock' AND ${blockingPid} = ANY(pg_blocking_pids(pid))
+    const rows = await lockObserver.$queryRaw<Array<{ direct: number; userWaiters: number }>>`
+      SELECT
+        COUNT(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND ${blockingPid} = ANY(pg_blocking_pids(pid)))::int AS direct,
+        COUNT(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND query LIKE '%FROM "User"%' AND query LIKE '%FOR UPDATE%')::int AS "userWaiters"
+      FROM pg_stat_activity WHERE pid <> ${blockingPid}
     `;
-    if ((rows[0]?.blocked ?? 0) > 0) return;
+    // Row-lock queues may be holder -> first waiter -> second waiter: only
+    // one pg_blocking_pids() edge can point directly to the holder. For the
+    // two-writer case require both genuine User FOR UPDATE waiters plus at
+    // least one direct edge to our known holder, not two direct PID matches.
+    const state = rows[0];
+    if (minimumWaiters === 1 ? (state?.direct ?? 0) >= 1
+      : (state?.direct ?? 0) >= 1 && (state?.userWaiters ?? 0) >= minimumWaiters) return;
     await new Promise(resolve => setTimeout(resolve, 15));
   }
-  throw new Error("Expected physical PostgreSQL lock contention did not occur");
+  throw new Error(`Expected ${minimumWaiters} physical PostgreSQL lock waiter(s) did not occur`);
 }
 
 function authenticator() {
@@ -186,12 +199,45 @@ test("signed backup eligibility is immutable while synced backup state and zero-
     startPasskeyAuthentication(leftToken, "203.0.113.34"),
     startPasskeyAuthentication(rightToken, "203.0.113.35")
   ]);
-  const outcomes = await Promise.allSettled([
-    finishPasskeyAuthentication(leftToken, assertion(synced, user.id, left.challenge, { flags: 0x1d, counter: 0 })),
-    finishPasskeyAuthentication(rightToken, assertion(synced, user.id, right.challenge, { flags: 0x1d, counter: 0 }))
-  ]);
+  const revisionBeforeRace = (await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } })).revision;
+  const sessionsBeforeRace = await prisma.session.count({ where: { userId: user.id } });
+  const auditsBeforeRace = await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "PASSKEY_AUTHENTICATED" } });
+  // Promise.all alone does not prove both functions read the SAME revision:
+  // a fast request can commit before its peer reaches findUnique, allowing
+  // two legitimate sequential zero-counter authentications. Keep the strict
+  // CAS assertion, but create a *physical* User row barrier and observe BOTH
+  // transactions blocked on that row before releasing it. Both have already
+  // obtained the same pre-transaction credential snapshot at this point.
+  let attempts: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  try {
+    await prisma.$transaction(async (tx) => {
+      const [holder] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+      attempts = Promise.allSettled([
+        finishPasskeyAuthentication(leftToken, assertion(synced, user.id, left.challenge, { flags: 0x1d, counter: 0 })),
+        finishPasskeyAuthentication(rightToken, assertion(synced, user.id, right.challenge, { flags: 0x1d, counter: 0 }))
+      ]);
+      await awaitBlockedOn(holder!.pid, 2);
+    }, { timeout: 20_000 });
+  } finally {
+    // Even if the contention precondition fails, release the holder and wait
+    // for both workers; no background database operations outlive the test.
+    if (attempts) await attempts;
+  }
+  assert.ok(attempts);
+  const outcomes = await attempts;
   assert.equal(outcomes.filter(outcome => outcome.status === "fulfilled").length, 1,
     "two distinct signed zero-counter challenges must serialize via the persistent revision CAS");
+  assert.equal((await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } })).revision,
+    revisionBeforeRace + 1, "one matching stale revision may advance, never both");
+  assert.equal(await prisma.session.count({ where: { userId: user.id } }), sessionsBeforeRace + 1,
+    "losing stale assertion must not create a session");
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "PASSKEY_AUTHENTICATED" } }), auditsBeforeRace + 1,
+    "losing stale assertion must not commit a success audit");
+  for (const challenge of [left.challenge, right.challenge]) {
+    const row = await prisma.passkeyChallenge.findUniqueOrThrow({ where: { challengeHash: hashPasskeyChallenge(challenge) } });
+    assert.ok(row.consumedAt, "each distinct signed challenge must be consumed even if its revision loses CAS");
+  }
   const beforeReverse = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: synced.credentialId } });
   const reverseToken = createPasskeyBrowserToken();
   const reverse = await startPasskeyAuthentication(reverseToken, "203.0.113.36");

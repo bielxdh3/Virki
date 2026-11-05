@@ -45,6 +45,64 @@ const postFixCidOpenReviewed = {
   columnFingerprint: "11"
 };
 
+// Genuine post-merge PUSH CodeQL run 42065751041 (main afcac349): 51 results,
+// compared by exact fingerprint SET with PR105's 46-result hosted SARIF.
+// These are distinct new paths and require a separately reasoned disposition;
+// the original exploitable CID pathname race remains permanently disallowed.
+const postMergePushFindings = [
+  { ruleId: "js/insufficient-password-hash", path: "packages/auth/src/index.ts",
+    lineFingerprint: "eab442f12c97c7a3:1", columnFingerprint: "35" },
+  { ruleId: "js/insufficient-password-hash", path: "packages/auth/src/passkeys.ts",
+    lineFingerprint: "aa299375b7be0290:1", columnFingerprint: "101" },
+  { ruleId: "js/clear-text-logging", path: "scripts/oidc-node-disposable-postgres.mjs",
+    lineFingerprint: "a3ae442c044fad66:1", columnFingerprint: "14" },
+  { ruleId: "js/insecure-temporary-file", path: "infra/offline/trusted-host-entry.mjs",
+    lineFingerprint: "b02a714376336c8a:1", columnFingerprint: "26" }
+];
+
+test("postmerge PUSH findings require four individually documented exact dispositions", () => {
+  assert.equal(postMergePushFindings.length, 4);
+  assert.equal(new Set(postMergePushFindings.map(({ ruleId, path, lineFingerprint, columnFingerprint }) =>
+    JSON.stringify([ruleId, path, lineFingerprint, columnFingerprint]))).size, 4);
+  for (const { ruleId, path, lineFingerprint, columnFingerprint } of postMergePushFindings) {
+    assert.ok(reviewedLedger.includes(`\`${ruleId}|${path}|${lineFingerprint}|${columnFingerprint}\``),
+      `missing independent disposition: ${ruleId} at ${path}`);
+  }
+  const push = evaluateCodeqlSarif([codeqlHostedCliDocument([
+    ...reviewed42, postFixCidOpenReviewed, ...postMergePushFindings
+  ])]);
+  assert.equal(push.ok, true, JSON.stringify(push.violations));
+  assert.equal(push.totalResults, 47);
+  assert.equal(push.acceptedResults, 47);
+  const oldRace = evaluateCodeqlSarif([codeqlHostedCliDocument([
+    ...postMergePushFindings, fixedFdRace
+  ])]);
+  assert.equal(oldRace.ok, false);
+  assert.deepEqual(oldRace.violations, [{
+    ruleId: fixedFdRace.ruleId, path: fixedFdRace.path, reason: "unreviewed-finding"
+  }]);
+});
+
+test("each postmerge PUSH disposition rejects rule, path, hash, column, missing metadata and duplicates", () => {
+  for (const entry of postMergePushFindings) {
+    for (const mutated of [
+      { ...entry, ruleId: entry.ruleId + "-unreviewed" },
+      { ...entry, path: "test/unreviewed/" + entry.path.split("/").at(-1) },
+      { ...entry, lineFingerprint: "0" + entry.lineFingerprint },
+      { ...entry, columnFingerprint: String(Number(entry.columnFingerprint) + 1) },
+      { ...entry, lineFingerprint: undefined },
+      { ...entry, columnFingerprint: undefined }
+    ]) {
+      const result = evaluateCodeqlSarif([codeqlHostedCliDocument([mutated])]);
+      assert.equal(result.ok, false, `mutated postmerge finding unexpectedly accepted: ${entry.path}`);
+      assert.equal(result.violations[0]?.reason, "unreviewed-finding");
+    }
+    const duplicated = evaluateCodeqlSarif([codeqlHostedCliDocument([entry, entry])]);
+    assert.equal(duplicated.ok, false, `duplicate postmerge finding accepted: ${entry.path}`);
+    assert.equal(duplicated.violations[0]?.reason, "accepted-finding-count-exceeded");
+  }
+});
+
 test("post-fix CID FD-open residual is individually reviewed, but original CID path race is still denied", () => {
   const newScanner = evaluateCodeqlSarif([codeqlHostedCliDocument([
     ...reviewed42, postFixCidOpenReviewed
