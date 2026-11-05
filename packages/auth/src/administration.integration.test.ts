@@ -13,6 +13,7 @@ import {
   regenerateAdministrativeRecoveryCodes,
   startAdministrativeCredentialSetup,
   startSecurityElevation,
+  revokeSecurityElevation,
   verifySecurityElevation
 } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
@@ -116,6 +117,38 @@ test("an elevation code cannot be verified after its ten-minute window", integra
     AdministrationMutationError
   );
   assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", new Date(start.getTime() + 11 * MINUTE)), false);
+});
+
+test("revoking a session's pending elevations invalidates the already-sent OTP and remains idempotent", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  const started = await startSecurityElevation({
+    actor: admin.actor, sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD, administrativePassword: ADMIN_PASSWORD,
+    scope: "PROJECT_ACCESS_CHANGE", duration: { kind: "TIMED", minutes: 60 }, locale: LOCALE, now
+  });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  await revokeSecurityElevation(admin.actor, admin.sessionId, undefined, now);
+  await revokeSecurityElevation(admin.actor, admin.sessionId, started.requestKey, now);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: started.requestKey } })).status, "REVOKED");
+  await assert.rejects(verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: started.requestKey, code, now }), AdministrationMutationError);
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", now), false);
+});
+
+test("revoking a verified elevation after activation also cancels its active authorization", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const now = new Date();
+  const started = await startSecurityElevation({
+    actor: admin.actor, sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD, administrativePassword: ADMIN_PASSWORD,
+    scope: "PROJECT_ACCESS_CHANGE", duration: { kind: "TIMED", minutes: 60 }, locale: LOCALE, now
+  });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  await verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: started.requestKey, code, now });
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", now), true);
+  await revokeSecurityElevation(admin.actor, admin.sessionId, started.requestKey, now);
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, "PROJECT_ACCESS_CHANGE", now), false);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: started.requestKey } })).status, "REVOKED");
 });
 
 test("ADMIN proof and elevation-start quotas count both valid and failed operations", integrationOptions, async () => {

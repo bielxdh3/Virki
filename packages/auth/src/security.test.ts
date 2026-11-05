@@ -271,7 +271,7 @@ test("recovery state transitions serialize on the active account row", async () 
   assert.deepEqual(values, ["admin-a", "ADMIN"]);
 });
 
-test("approved password recovery changes the password and revokes access while preserving TOTP and recovery codes", async (context) => {
+test("approved USER password recovery atomically invalidates old passkeys, TOTP and recovery codes", async (context) => {
   type MutationArgs = { data?: Record<string, unknown> };
   const userId = "user-recovery-1";
   const requestId = "recovery-request-1";
@@ -305,7 +305,7 @@ test("approved password recovery changes the password and revokes access while p
     user
   };
   const mfaOperations: string[] = [];
-  const revocations = { sessions: 0, elevations: 0, devices: 0, challenges: 0, oidcArtifacts: 0 };
+  const revocations = { sessions: 0, elevations: 0, devices: 0, challenges: 0, oidcArtifacts: 0, passkeys: 0, passkeyChallenges: 0 };
   let oidcAccountIdHash: unknown;
   let requestStatus = "APPROVED";
   let passwordHash = "old-password-hash";
@@ -348,13 +348,19 @@ test("approved password recovery changes the password and revokes access while p
     oidcArtifact: {
       deleteMany: async ({ where }: { where: { accountIdHash?: unknown } }) => { revocations.oidcArtifacts += 1; oidcAccountIdHash = where.accountIdHash; return { count: 2 }; }
     },
+    passkeyCredential: {
+      updateMany: async () => { revocations.passkeys += 1; return { count: 1 }; }
+    },
+    passkeyChallenge: {
+      updateMany: async () => { revocations.passkeyChallenges += 1; return { count: 1 }; }
+    },
     totpFactor: {
-      updateMany: async () => { mfaOperations.push("totp-update"); return { count: 1 }; },
+      updateMany: async () => { mfaOperations.push("totp-update"); totpFactor.status = "REVOKED"; return { count: 1 }; },
       deleteMany: async () => { mfaOperations.push("totp-delete"); return { count: 1 }; }
     },
     recoveryCode: {
       updateMany: async () => { mfaOperations.push("recovery-code-update"); return { count: 1 }; },
-      deleteMany: async () => { mfaOperations.push("recovery-code-delete"); return { count: 1 }; }
+      deleteMany: async () => { mfaOperations.push("recovery-code-delete"); recoveryCodes.length = 0; return { count: 1 }; }
     },
     auditLog: {
       create: async ({ data }: MutationArgs) => {
@@ -382,17 +388,15 @@ test("approved password recovery changes the password and revokes access while p
 
   assert.equal(requestStatus, "CONSUMED");
   assert.notEqual(passwordHash, "old-password-hash");
-  assert.deepEqual(Object.keys(userUpdateData ?? {}).sort(), ["emailVerifiedAt", "passwordHash"]);
+  assert.deepEqual(Object.keys(userUpdateData ?? {}).sort(), ["emailVerifiedAt", "passwordHash", "secondFactorMethod"]);
   assert.equal(userUpdateData?.emailVerifiedAt, now);
-  assert.deepEqual(revocations, { sessions: 1, elevations: 1, devices: 1, challenges: 1, oidcArtifacts: 1 });
+  assert.equal(userUpdateData?.secondFactorMethod, "EMAIL");
+  assert.deepEqual(revocations, { sessions: 1, elevations: 1, devices: 1, challenges: 1, oidcArtifacts: 1, passkeys: 1, passkeyChallenges: 1 });
   assert.equal(oidcAccountIdHash, createHash("sha256").update(userId, "utf8").digest("hex"));
-  assert.deepEqual(mfaOperations, []);
-  assert.equal(totpFactor.status, "ACTIVE");
-  assert.equal(user.secondFactorMethod, "TOTP");
-  assert.deepEqual(recoveryCodes, [
-    { id: "recovery-code-1", userId, codeHash: "recovery-hash-1", usedAt: null },
-    { id: "recovery-code-2", userId, codeHash: "recovery-hash-2", usedAt: null }
-  ]);
+  assert.deepEqual(mfaOperations, ["totp-update", "recovery-code-delete"]);
+  assert.equal(totpFactor.status, "REVOKED");
+  assert.equal(userUpdateData?.secondFactorMethod, "EMAIL");
+  assert.deepEqual(recoveryCodes, []);
   assert.equal(auditEvent, "ACCOUNT_RECOVERY_CONSUMED");
 });
 
