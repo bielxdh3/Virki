@@ -213,6 +213,25 @@ test("native Linux journal uses exclusive 0600 durable writes in its private 070
   } finally { if (existsSync(directory)) rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("native Linux journal preserves its evidence when an unexpected sibling prevents removal", {
+  skip: process.platform !== "linux" || process.env.VIRKI_ROLE_FIXTURE_LINUX_CI !== "1",
+}, () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "virki-role-owner-"));
+  const owner = "c".repeat(32);
+  const name = `virki-offline-fixture-${owner}`;
+  const request = { directory, name, owner, line: '{"event":"reserved"}' };
+  const filename = path.join(directory, `${name}.jsonl`);
+  const unexpected = path.join(directory, "unexpected-evidence");
+  try {
+    runProtectedLinuxRoleJournal("create", request);
+    writeFileSync(unexpected, "must survive", { mode: 0o600 });
+    assert.throws(() => runProtectedLinuxRoleJournal("remove", request), /unexpected entries/u);
+    assert.equal(readFileSync(filename, "utf8"), '{"event":"reserved"}\n');
+    assert.equal(readFileSync(unexpected, "utf8"), "must survive");
+    assert.equal(existsSync(directory), true);
+  } finally { if (existsSync(directory)) rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("CI endpoint inode/host changes fail before Docker info and raw launch remains inaccessible", () => {
   const contacts = [];
   let drift = false;
