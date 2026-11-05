@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import { provisionInvitedUserAccount } from "./account-invitation";
 import { hashAuditIdentifier } from "./audit";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
@@ -21,7 +21,10 @@ import {
 } from "./security";
 import { hashPassword, lockRateLimitIdentifierInTransaction, verifyPassword } from "./index";
 
-after(() => prisma.$disconnect());
+// Lock probes need an independent connection while production recovery
+// transactions contend for the three connections in the application pool.
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 async function openLatestRecovery(email: string, now: Date, role: "USER" | "ADMIN" = "USER") {
   const emails = (await queuedEmails(email)).filter((message) => message.kind === "ACCOUNT_RECOVERY");
@@ -41,7 +44,7 @@ async function countRecoveryAudit(eventType: string, userId: string): Promise<nu
 async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string, minimumWaiters = 1): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const blocked = await prisma.$queryRaw<Array<{ waiters: number }>>`
+    const blocked = await lockObserver.$queryRaw<Array<{ waiters: number }>>`
       SELECT count(*)::int AS waiters
       FROM pg_stat_activity
       WHERE

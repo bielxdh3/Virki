@@ -2,16 +2,19 @@ import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { encryptOidcClientSecret, encryptOidcPayload, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import { createTestUser, integrationOptions } from "../../../packages/auth/src/integration-fixtures";
 import { PrismaOidcAdapter } from "./adapter";
 
-after(() => prisma.$disconnect());
+// Keep lock diagnostics independent of the application pool: held, revoked and
+// queued token transactions can occupy all three application connections.
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 async function waitForBlockedQuery(blockerPid: number, queryFragment: string): Promise<number> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const blocked = await prisma.$queryRaw<Array<{ pid: number }>>`
+    const blocked = await lockObserver.$queryRaw<Array<{ pid: number }>>`
       SELECT pid
       FROM pg_stat_activity
       WHERE wait_event_type = 'Lock'
