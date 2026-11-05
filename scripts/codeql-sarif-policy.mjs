@@ -56,6 +56,14 @@ const acceptedFindings = new Map([
   // CodeQL run 42059112721, source SHA a6171526, FD-pinned and bounded read.
   // The older vulnerable bc6600c95727700f:1 fingerprint remains UNACCEPTED.
   ["js/file-system-race|infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs|e0fc364b7545cc38:1|11", 1],
+  // Genuine post-merge PUSH CodeQL 42065751041 (main afcac349): four new
+  // peer-scoped dispositions, not changes to actual password KDF or gates.
+  // Each exact trace + attack invariant is documented in the dated security
+  // ledger. Original vulnerable CID path-race remains UNACCEPTED.
+  ["js/insufficient-password-hash|packages/auth/src/index.ts|eab442f12c97c7a3:1|35", 1],
+  ["js/insufficient-password-hash|packages/auth/src/passkeys.ts|aa299375b7be0290:1|101", 1],
+  ["js/clear-text-logging|scripts/oidc-node-disposable-postgres.mjs|a3ae442c044fad66:1|14", 1],
+  ["js/insecure-temporary-file|infra/offline/trusted-host-entry.mjs|b02a714376336c8a:1|26", 1],
 ]);
 
 function invalidSarif(message) {
