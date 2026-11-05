@@ -28,8 +28,15 @@ const nextConfig = {
   async rewrites() {
     const issuer = process.env.VIRKI_OIDC_PROXY_URL ?? "http://oidc-issuer:3003";
     const portalHost = process.env.VIRKI_PORTAL_HOSTNAME ?? "portal.biel.dev.br";
+    if (portalHost.length > 253 ||
+        !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u.test(portalHost)) {
+      throw new Error("Invalid OIDC Portal hostname.");
+    }
+    // Next's has:host value is a regular expression, not a literal string.
+    // Escape DNS dots so an adjacent lookalike hostname cannot match.
+    const exactPortalHost = portalHost.replaceAll(".", String.raw`\.`);
     const paths = ["/.well-known/:path*", "/auth", "/auth/:uid", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/session/end/:path*", "/interaction/:path*", "/resume/:path*"];
-    return paths.map((source) => ({ source, has: [{ type: "host", value: portalHost }], destination: `${issuer}${source}` }));
+    return paths.map((source) => ({ source, has: [{ type: "host", value: exactPortalHost }], destination: `${issuer}${source}` }));
   },
   webpack: (config, { isServer }) => {
     if (isServer) {

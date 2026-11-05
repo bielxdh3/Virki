@@ -19,7 +19,7 @@ const BASE_IMAGE = `node:22-alpine@sha256:${BASE_DIGEST}`;
 // builder. Any future Dockerfile source change requires a conscious re-review
 // and a new fixed pin; arbitrary FROM/COPY/frontend syntax cannot enter via a
 // supposedly pinned source SHA without invalidating this precise content hash.
-const REVIEWED_DOCKERFILE_SHA256 = '9c75a70445f8df7184d6c4e321c95524210504e18760c3ff1d280534a40563ef';
+const REVIEWED_DOCKERFILE_SHA256 = 'bc8d52637046cb517982bae67641c35a9a17b7c6b240498b2dc163736efd45ca';
 const WINDOWS_DOCKER = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe';
 const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const WINDOWS_WSL = 'C:\\Windows\\System32\\wsl.exe';
