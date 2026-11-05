@@ -107,6 +107,8 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+export { isSingleMailboxAddress } from "./email-address";
+
 export async function checkLoginRateLimit(
   identifier: string,
   now = new Date()

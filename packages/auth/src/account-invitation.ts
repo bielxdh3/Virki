@@ -5,6 +5,7 @@ import { hashAuditEmail, hashAuditIdentifier, writeAuditLogInTransaction } from 
 import { hashOidcIdentifier } from "./oidc-secrets";
 import { getRecoveryActionBaseUrl, hashEmailAddress, hashRecoveryRequestKey, hashSecurityCode } from "./security";
 import { requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { isSingleMailboxAddress } from "./email-address";
 
 export const ACCOUNT_INVITATION_TTL_MS = 72 * 60 * 60 * 1000;
 
@@ -29,7 +30,7 @@ export async function provisionInvitedUserAccount(
 ): Promise<{ userId: string }> {
   const email = input.email.trim().toLowerCase();
   const displayName = input.displayName ?? "";
-  if (displayName.length > 80 || containsControlCharacters(displayName)) {
+  if (!isSingleMailboxAddress(email) || displayName.length > 80 || containsControlCharacters(displayName)) {
     throw new Error("Invalid account invitation input.");
   }
   const actionBase = getRecoveryActionBaseUrl("USER");

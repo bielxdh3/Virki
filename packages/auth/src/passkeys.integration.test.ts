@@ -4,8 +4,9 @@ import { createHash, createHmac, generateKeyPairSync, randomBytes, sign } from "
 import { isoCBOR } from "@simplewebauthn/server/helpers";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { prisma } from "@virki/database";
-import { createTestUser, integrationOptions } from "./integration-fixtures";
-import { confirmTotpEnrollment, startTotpEnrollment } from "./security";
+import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
+import { approveAccountRecovery, confirmTotpEnrollment, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, startTotpEnrollment, verifyAccountRecoveryEmail } from "./security";
+import { authenticateUser } from "./index";
 import { getOidcAuthenticationContext } from "../../../apps/issuer/src/authorization-policy";
 import {
   createPasskeyBrowserToken,
@@ -275,6 +276,40 @@ test("passkey cryptography, account binding, replay, UV, RP, origin, revocation 
   const revokedToken = createPasskeyBrowserToken();
   const revokedChallenge = await startPasskeyAuthentication(revokedToken, "203.0.113.17");
   await assert.rejects(finishPasskeyAuthentication(revokedToken, assertion(key, user.id, revokedChallenge.challenge, { counter: 4 })));
+});
+
+test("approved USER recovery rejects an old signed passkey both before and after opening a new login challenge", integrationOptions, async () => {
+  const user = await createTestUser({ label: "passkey-recovery-user" });
+  const admin = await createTestUser({ role: "ADMIN", label: "passkey-recovery-approver" });
+  const now = new Date();
+  const { sessionId: adminSessionId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", now);
+  const session = await prisma.session.create({ data: { userId: user.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(now.getTime() + 3_600_000) } });
+  const key = authenticator();
+  const registrationToken = createPasskeyBrowserToken();
+  const registration = await startPasskeyRegistration(user.id, session.id, user.password, registrationToken);
+  await finishPasskeyRegistration(user.id, session.id, registrationToken, registerResponse(key, registration.challenge), "Old authenticator");
+  const pendingToken = createPasskeyBrowserToken();
+  const pendingAssertion = await startPasskeyAuthentication(pendingToken, "203.0.113.41");
+
+  await requestAccountRecovery(user.email, "pt-BR", now);
+  const firstMail = (await queuedEmails(user.email)).filter((item) => item.kind === "ACCOUNT_RECOVERY").at(-1);
+  assert.ok(firstMail?.code);
+  const pendingKey = requestKeyFromActionUrl(firstMail.actionUrl);
+  const opened = await getAccountRecoveryRequestId(pendingKey, now);
+  assert.ok(opened);
+  await verifyAccountRecoveryEmail(opened.id, pendingKey, firstMail.code, now);
+  await approveAccountRecovery({ id: admin.id, role: "ADMIN" }, adminSessionId, opened.id, now);
+  const approvedMail = (await queuedEmails(user.email)).filter((item) => item.kind === "ACCOUNT_RECOVERY").at(-1);
+  const approvedKey = requestKeyFromActionUrl(approvedMail?.actionUrl);
+  const recoveredPassword = "fresh-user-password-after-recovery-1";
+  await consumeApprovedAccountRecovery(opened.id, approvedKey, recoveredPassword, now);
+
+  await assert.rejects(finishPasskeyAuthentication(pendingToken, assertion(key, user.id, pendingAssertion.challenge)));
+  const freshToken = createPasskeyBrowserToken();
+  const freshChallenge = await startPasskeyAuthentication(freshToken, "203.0.113.42");
+  await assert.rejects(finishPasskeyAuthentication(freshToken, assertion(key, user.id, freshChallenge.challenge)));
+  assert.equal((await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: key.credentialId } })).revokedAt?.getTime(), now.getTime());
+  assert.ok(await authenticateUser(user.email, recoveredPassword), "new password remains usable for protected email-based login");
 });
 
 test("challenge expiry while blocked by a physical PostgreSQL row lock cannot consume stale challenge", integrationOptions, async () => {

@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { prisma, type Prisma } from "@virki/database";
 import { isSmtpEmailTransportConfigured } from "./email-smtp";
+import { isSingleMailboxAddress } from "./email-address";
 
 export type EmailMessageKind =
   | "NEW_DEVICE_VERIFICATION"
@@ -116,7 +117,7 @@ export function enqueueEmailMessage(input: EmailMessageInput) {
 
 function prepareEmailMessage(input: EmailMessageInput) {
   const recipientEmail = normalizeEmail(input.recipientEmail);
-  if (!recipientEmail || !input.idempotencyKey.trim()) {
+  if (!isSingleMailboxAddress(recipientEmail) || !input.idempotencyKey.trim()) {
     throw new Error("Invalid email message.");
   }
 

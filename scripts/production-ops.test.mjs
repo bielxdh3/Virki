@@ -788,11 +788,11 @@ test("Linux first-install shell guard accepts only a pristine Virki target befor
       assert.deepEqual(result.dockerCalls, []);
     });
 
-    await suite.test("any pre-existing release directory blocks as partial state", () => {
+    await suite.test("an unrelated pre-existing release directory blocks before Docker work", () => {
       const target = fixture("release", ({ releases }) => mkdirSync(path.join(releases, revision)));
       const result = runFirstInstall(target);
       assert.equal(result.status, 1);
-      assert.match(result.output, /a release already exists/u);
+      assert.match(result.output, /First install refused because an unrelated release already exists\./u);
       assert.deepEqual(result.dockerCalls, []);
     });
 

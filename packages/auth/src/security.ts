@@ -798,13 +798,24 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     if (!current || current.userId !== request.userId || !safeEqual(current.requestKeyHash, requestKeyHash) || current.emailAddressHash !== hashEmailAddress(current.user.emailNormalized ?? current.user.email) || current.status !== "APPROVED" || current.expiresAt <= now || !isAccountRecoveryEligible(current.user, expectedRole)) throw new SecurityMutationError();
     const claimed = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash, emailAddressHash: request.emailAddressHash, status: "APPROVED", expiresAt: { gt: now } }, data: { status: "CONSUMED", consumedAt: now } });
     if (claimed.count !== 1) throw new SecurityMutationError();
-    await transaction.user.update({ where: { id: request.userId }, data: { passwordHash: newPasswordHash, emailVerifiedAt: now } });
+    await transaction.user.update({ where: { id: request.userId }, data: {
+      passwordHash: newPasswordHash, emailVerifiedAt: now,
+      ...(expectedRole === "USER" ? { secondFactorMethod: "EMAIL" as const } : {})
+    } });
     await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-password-changed:${request.id}`, kind: "PASSWORD_CHANGED", recipientEmail: current.user.email, locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" }, protectedValues: {} } });
     await transaction.session.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: now } });
     await transaction.securityElevation.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
     await transaction.trustedDevice.updateMany({ where: { userId: request.userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
     await revokeLoginChallenges(transaction, request.userId);
     await revokeUserOidcArtifactsInTransaction(transaction, request.userId);
+    if (expectedRole === "USER") {
+      // Approved USER recovery replaces the entire compromised/unknown possession
+      // state. A fresh login with the recovered password may enroll new factors.
+      await transaction.passkeyCredential.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: now } });
+      await transaction.passkeyChallenge.updateMany({ where: { userId: request.userId, consumedAt: null }, data: { consumedAt: now } });
+      await transaction.totpFactor.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED" } });
+      await transaction.recoveryCode.deleteMany({ where: { userId: request.userId } });
+    }
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery consumed.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
   }, { isolationLevel: "ReadCommitted" });
 }

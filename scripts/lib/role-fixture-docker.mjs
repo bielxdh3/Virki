@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdtempSync, openSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runProtectedWindowsJournalOperation, verifyTrustedWindowsDockerCli, LOCAL_ENGINE } from "../../infra/offline/disposable-local-docker.mjs";
@@ -101,9 +101,16 @@ export function runProtectedLinuxRoleJournal(operation, request) {
     const file = lstatSync(filename);
     if (!file.isFile() || file.isSymbolicLink() || file.uid !== process.getuid() ||
       (file.mode & 0o077) !== 0 || file.nlink !== 1) throw Error("Unsafe Linux role fixture journal removal.");
+    // A foreign sibling is evidence of an uncertain owner directory. Never
+    // erase the only journal and then discover that the directory is nonempty.
+    if (!identicalArgs(readdirSync(directory), [`${name}.jsonl`])) {
+      throw Error("Linux role fixture journal directory contains unexpected entries.");
+    }
     rmSync(filename);
     fsyncDirectory(directory);
-    rmSync(directory);
+    // Only the now-empty, private directory may be removed; recursive removal
+    // would permit accidental deletion of independently created evidence.
+    rmdirSync(directory);
     fsyncDirectory(path.dirname(directory));
     return;
   }
@@ -146,7 +153,7 @@ function createDurableLinuxOwnerDirectory() {
     fsyncDirectory(path.dirname(directory));
     return directory;
   } catch {
-    rmSync(directory);
+    rmdirSync(directory);
     throw Error("Linux role fixture could not durably reserve its private journal directory.");
   }
 }

@@ -29,3 +29,24 @@ export function codeqlDocument(findings = []) {
     }]
   };
 }
+
+// Sanitized, synthetic counterpart to the hosted CodeQL 2.27.1 SARIF shape:
+// CodeQL/GitHub/semanticVersion, grouped rules in extensions and result.rule.
+// Observed in Virki hosted run 42033025663; no production SARIF content here.
+export function codeqlHostedCliDocument(findings = []) {
+  const document = codeqlDocument(findings);
+  const run = document.runs[0];
+  const rules = run.tool.driver.rules;
+  run.tool.driver = { name: "CodeQL", organization: "GitHub", semanticVersion: "2.27.1", rules: [] };
+  run.tool.extensions = [
+    { name: "codeql-action/pr-diff-range", rules: [] },
+    { name: "codeql/javascript-queries", rules },
+    { name: "codeql/javascript-all", rules: [] },
+    { name: "codeql/threat-models", rules: [] }
+  ];
+  for (const result of run.results) {
+    result.rule = { id: result.ruleId, index: result.ruleIndex, toolComponent: { index: 1 } };
+    delete result.ruleIndex;
+  }
+  return document;
+}

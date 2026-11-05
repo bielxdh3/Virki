@@ -232,7 +232,7 @@ export async function revokeSecurityElevation(actor: { id: string; role: string 
   if (requestKey && !isRequestKey(requestKey)) throw new AdministrationMutationError();
   await prisma.$transaction(async (transaction) => {
     await lockAdminSessionInTransaction(transaction, actor.id, sessionId, now);
-    await transaction.securityElevation.updateMany({ where: { userId: actor.id, sessionId, status: "ACTIVE", ...(requestKey ? { requestKey } : {}) }, data: { status: "REVOKED", revokedAt: now } });
+    await transaction.securityElevation.updateMany({ where: { userId: actor.id, sessionId, status: { in: ["PENDING", "ACTIVE"] }, ...(requestKey ? { requestKey } : {}) }, data: { status: "REVOKED", revokedAt: now } });
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_REVOKED", result: "SUCCESS", actorUserId: actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(sessionId), resource: "identity.elevation", message: "Administrative elevation revoked.", metadata: { requestRef: requestKey ? hashAuditIdentifier(requestKey) : null } });
   });
 }

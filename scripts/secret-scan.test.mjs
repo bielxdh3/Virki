@@ -39,6 +39,9 @@ test("exact-revision secret scan blocks credential paths and secret assignments 
     writeFileSync(path.join(repository, "settings.json"), JSON.stringify({ access_token: value }));
     for (const [filePath, content] of [
       [".aws/credentials", "fixture only\n"],
+      [".npmrc", "fixture only\n"],
+      ["operations/.ghcr-read-token", "fixture only\n"],
+      [".production.operator.json", "{}\n"],
       ["secrets/id_ed25519", "fixture only\n"],
       ["keys/signing.pem.gz", "fixture only\n"],
       ["keys/signing.pem.gz.gz", "fixture only\n"],
@@ -64,6 +67,9 @@ test("exact-revision secret scan blocks credential paths and secret assignments 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /settings\.json:\d+ generic-secret-assignment/u);
     assert.match(result.stderr, /\.aws\/credentials:1 aws-credentials/u);
+    assert.match(result.stderr, /\.npmrc:1 sensitive-operator-file/u);
+    assert.match(result.stderr, /operations\/\.ghcr-read-token:1 sensitive-operator-file/u);
+    assert.match(result.stderr, /\.production\.operator\.json:1 sensitive-operator-file/u);
     assert.match(result.stderr, /secrets\/id_ed25519:1 private-key-file/u);
     assert.match(result.stderr, /keys\/signing\.pem\.gz:1 private-key-file/u);
     assert.match(result.stderr, /keys\/signing\.pem\.gz\.gz:1 private-key-file/u);
@@ -87,7 +93,8 @@ test("exact-revision secret scan accepts safe tracked files and migration SQL", 
 
   try {
     execFileSync("git", ["init", "--quiet"], { cwd: repository });
-    writeFileSync(path.join(repository, "README.md"), "Safe source fixture.\n");
+    writeFileSync(path.join(repository, "README.md"), "Safe source fixture. Reference .npmrc and .ghcr-read-token by name.\n");
+    writeFileSync(path.join(repository, "example.npmrc"), "registry=https://registry.npmjs.org/\n");
     const backupSentinelPath = path.join(repository, "infra", "backups", ".gitkeep");
     mkdirSync(path.dirname(backupSentinelPath), { recursive: true });
     writeFileSync(backupSentinelPath, "");
@@ -101,6 +108,35 @@ test("exact-revision secret scan accepts safe tracked files and migration SQL", 
     const result = spawnSync(process.execPath, [scannerPath, "--revision", revision], { cwd: repository, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Secret scan passed/u);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("secret scan catches synthetic fine-grained GitHub PATs in worktree and exact revision", () => {
+  const repository = mkdtempSync(path.join(tmpdir(), "virki-secret-github-pat-"));
+  const prefix = ["github", "pat"].join("_") + "_";
+  const syntheticPat = `${prefix}${"A1_b2".repeat(10)}`;
+
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    writeFileSync(path.join(repository, "config.txt"), `Synthetic format example ${syntheticPat}\n`);
+    writeFileSync(path.join(repository, "README.md"), `Format reference: ${prefix}...\n`);
+    execFileSync("git", ["add", "."], { cwd: repository });
+
+    const worktreeResult = spawnSync(process.execPath, [scannerPath], { cwd: repository, encoding: "utf8" });
+    assert.equal(worktreeResult.status, 1);
+    assert.match(worktreeResult.stderr, /config\.txt:1 github-token/u);
+    assert.doesNotMatch(worktreeResult.stderr, /README\.md:/u);
+    assert.equal(`${worktreeResult.stdout}${worktreeResult.stderr}`.includes(syntheticPat), false);
+
+    execFileSync("git", ["-c", "user.name=Secret Scan Test", "-c", "user.email=secret-scan@example.invalid", "commit", "--quiet", "-m", "synthetic fixture"], { cwd: repository });
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
+    const revisionResult = spawnSync(process.execPath, [scannerPath, "--revision", revision], { cwd: repository, encoding: "utf8" });
+    assert.equal(revisionResult.status, 1);
+    assert.match(revisionResult.stderr, /config\.txt:1 github-token/u);
+    assert.doesNotMatch(revisionResult.stderr, /README\.md:/u);
+    assert.equal(`${revisionResult.stdout}${revisionResult.stderr}`.includes(syntheticPat), false);
   } finally {
     rmSync(repository, { recursive: true, force: true });
   }

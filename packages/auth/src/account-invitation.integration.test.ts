@@ -15,7 +15,10 @@ test("invitation helper rejects control characters and overlong display names be
   const { sessionId } = await seedAdminSessionWithElevation(admin.id, "ACCOUNT_STATE_CHANGE", now);
   const inputs = [
     { email: uniqueEmail("invite-control-name"), displayName: "First line\nSecond line" },
-    { email: uniqueEmail("invite-long-name"), displayName: "x".repeat(81) }
+    { email: uniqueEmail("invite-long-name"), displayName: "x".repeat(81) },
+    { email: "alice@example.invalid,attacker@example.invalid", displayName: "Multiple recipients" },
+    { email: "Alice <alice@example.invalid>", displayName: "Display name syntax" },
+    { email: "alice@example.invalid;attacker@example.invalid", displayName: "Separator" }
   ];
 
   for (const input of inputs) {

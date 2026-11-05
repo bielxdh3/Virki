@@ -25,6 +25,29 @@ test("ingress replaces spoofed correlation and records Cloudflare denials withou
   } finally { prisma.auditLog.create = original; }
 });
 
+test("production Hub denies missing and forged Access JWT within the deadline when audit persistence stalls", async () => {
+  const original = prisma.auditLog.create;
+  let finishWrite: (() => void) | undefined;
+  const stalledWrite = new Promise<void>((resolve) => { finishWrite = resolve; });
+  prisma.auditLog.create = (async () => { await stalledWrite; return {}; }) as unknown as typeof original;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const requests = [
+      new NextRequest("https://hub.biel.dev.br/admin/accounts", { headers: { host: "hub.biel.dev.br" } }),
+      new NextRequest("https://hub.biel.dev.br/admin/accounts", { headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged" } })
+    ];
+    const responses = await Promise.race([
+      Promise.all(requests.map((request) => evaluateProxyRequest(request, { ...env, NODE_ENV: "production" }))),
+      new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("Hub denial waited for the unavailable audit database.")), 2_500); })
+    ]);
+    for (const response of responses) assert.equal(response.status, 403);
+  } finally {
+    if (deadline) clearTimeout(deadline);
+    finishWrite?.();
+    prisma.auditLog.create = original;
+  }
+});
+
 test("unknown hosts are denied and the hub requires a valid Access assertion", async () => {
   assert.equal((await evaluateProxyRequest(new NextRequest("https://other.invalid/", { headers: { host: "other.invalid" } }), env)).status, 404);
   assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/admin/accounts", { headers: { host: "hub.biel.dev.br" } }), env)).status, 403);
