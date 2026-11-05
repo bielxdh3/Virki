@@ -80,7 +80,9 @@ test("trusted TOTP recovery email reopenings share the account quota across devi
   const previousPortalUrl = process.env.VIRKI_PORTAL_URL;
   process.env.VIRKI_PORTAL_URL = "https://portal.biel.dev.br";
   try {
-    const { user, deviceToken: firstDeviceToken } = await createTrustedTotpDevice("recovery-account-device-quota");
+    // The fixture helper appends "-" and a UUID (37 bytes); keep the local part at most 64 octets.
+    const { user, deviceToken: firstDeviceToken } = await createTrustedTotpDevice("recovery-account-quota");
+    assert.ok(Buffer.byteLength(user.email.split("@")[0], "utf8") <= 64, "recovery fixture must have a valid SMTP local part");
     const secondDeviceToken = randomBytes(32).toString("base64url");
     await prisma.trustedDevice.create({ data: { userId: user.id, deviceIdHash: hashDeviceToken(secondDeviceToken) } });
     const baselineMails = (await queuedEmails(user.email)).length;
