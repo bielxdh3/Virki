@@ -31,6 +31,10 @@ const forbiddenPathRules = [
     }
   },
   {
+    id: "sensitive-operator-file",
+    test: (filePath) => [".npmrc", ".ghcr-read-token", ".production.operator.json"].includes(path.posix.basename(filePath))
+  },
+  {
     id: "cloudflare-credentials-json",
     test: (filePath) => filePath.startsWith("infra/cloudflare/") && filePath.endsWith(".json")
   },
@@ -81,7 +85,7 @@ const contentRules = [
   },
   {
     id: "github-token",
-    pattern: /\bgh[pousr]_[A-Za-z0-9_]{36,}\b/
+    pattern: /\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{36,}\b/
   },
   {
     id: "slack-token",
