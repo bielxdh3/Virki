@@ -36,6 +36,56 @@ const fixedFdRace = {
   columnFingerprint: "11"
 };
 
+// Independently verified NEW hosted PR #102 post-fix scanner residual.
+// The vulnerable pre-fix fingerprint above remains permanently unaccepted.
+const postFixCidOpenReviewed = {
+  ruleId: "js/file-system-race",
+  path: "infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs",
+  lineFingerprint: "e0fc364b7545cc38:1",
+  columnFingerprint: "11"
+};
+
+test("post-fix CID FD-open residual is individually reviewed, but original CID path race is still denied", () => {
+  const newScanner = evaluateCodeqlSarif([codeqlHostedCliDocument([
+    ...reviewed42, postFixCidOpenReviewed
+  ])]);
+  assert.equal(newScanner.ok, true, JSON.stringify(newScanner.violations));
+  assert.equal(newScanner.totalResults, 43);
+  assert.equal(newScanner.acceptedResults, 43);
+
+  const both = evaluateCodeqlSarif([codeqlHostedCliDocument([
+    postFixCidOpenReviewed, fixedFdRace
+  ])]);
+  assert.equal(both.ok, false);
+  assert.equal(both.acceptedResults, 1);
+  assert.deepEqual(both.violations, [{
+    ruleId: fixedFdRace.ruleId,
+    path: fixedFdRace.path,
+    reason: "unreviewed-finding"
+  }]);
+});
+
+test("new post-fix CID residual cannot accept any changed fingerprint, path, rule or duplicate", () => {
+  const variants = [
+    { ...postFixCidOpenReviewed, ruleId: "js/file-system-race-unreviewed" },
+    { ...postFixCidOpenReviewed, path: "infra/offline/native-supervisor/other.mjs" },
+    { ...postFixCidOpenReviewed, lineFingerprint: "be0fc364b7545cc38:1" },
+    { ...postFixCidOpenReviewed, columnFingerprint: "12" },
+    { ...postFixCidOpenReviewed, lineFingerprint: undefined },
+    { ...postFixCidOpenReviewed, columnFingerprint: undefined }
+  ];
+  for (const modified of variants) {
+    const result = evaluateCodeqlSarif([codeqlHostedCliDocument([modified])]);
+    assert.equal(result.ok, false);
+    assert.equal(result.violations[0]?.reason, "unreviewed-finding");
+  }
+  const duplicated = evaluateCodeqlSarif([codeqlHostedCliDocument([
+    postFixCidOpenReviewed, postFixCidOpenReviewed
+  ])]);
+  assert.equal(duplicated.ok, false);
+  assert.equal(duplicated.violations[0]?.reason, "accepted-finding-count-exceeded");
+});
+
 test("42 CodeQL dispositions are unique, individually documented and all accepted", () => {
   assert.equal(reviewed42.length, 42);
   assert.equal(new Set(reviewed42.map((entry) => entry.index)).size, 42);

@@ -9,7 +9,7 @@ const acceptedFindings = new Map([
   ["js/user-controlled-bypass|scripts/e2e/jwks-server.mjs|ebcb3e6db1dd4911:1|33", 1],
   // 42 independent benign dispositions from original hosted CodeQL 42033025663.
   // Exact 4-part keys, maximum count 1; see docs/security/codeql-reviewed-20261105.md.
-  // Real race #10 intentionally NOT accepted.
+  // Original vulnerable CID pathname-read race #10 intentionally NOT accepted.
   ["js/disabling-certificate-validation|examples/oidc-node-rp/live-issuer.integration.test.mjs|a4a3e085780e0bef:1|0", 1], // SARIF #0
   ["js/incomplete-url-substring-sanitization|apps/hub/src/lib/connection-policy.test.ts|7de8f5c65e802007:1|13", 1], // SARIF #3
   ["js/incomplete-url-substring-sanitization|examples/oidc-node-rp/server.test.mjs|36bfd13774f73533:1|11", 1], // SARIF #4
@@ -52,6 +52,10 @@ const acceptedFindings = new Map([
   ["js/file-system-race|scripts/offline-release-finalize.mjs|9c6b0210cee7a745:1|11", 1], // SARIF #43
   ["js/file-system-race|scripts/offline-release-finalize.test.mjs|b3276e65263e1134:1|49", 1], // SARIF #44
   ["js/file-system-race|scripts/production-migration-pg-failclosed.test.mjs|ff3b02194231a1aa:1|0", 1], // SARIF #45
+  // Separate independently reviewed post-fix PR #102 residual: genuine hosted
+  // CodeQL run 42059112721, source SHA a6171526, FD-pinned and bounded read.
+  // The older vulnerable bc6600c95727700f:1 fingerprint remains UNACCEPTED.
+  ["js/file-system-race|infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs|e0fc364b7545cc38:1|11", 1],
 ]);
 
 function invalidSarif(message) {
