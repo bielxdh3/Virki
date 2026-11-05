@@ -90,6 +90,7 @@
     "@prisma/config": {
       "deepmerge-ts": "8.0.2"
     },
+    "minimatch": "11.0.4",
     "concurrently": {
       "shell-quote": "1.11.0"
     },
