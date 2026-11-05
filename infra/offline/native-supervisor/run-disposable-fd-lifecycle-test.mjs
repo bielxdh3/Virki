@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  closeSync, constants, existsSync, fstatSync, lstatSync,
+  mkdirSync, mkdtempSync, openSync, readSync,
   readdirSync, rmdirSync, unlinkSync,
 } from "node:fs";
 import os from "node:os";
@@ -83,7 +84,14 @@ function runCli(args, env, timeout = 45000, stdio = "pipe") {
   });
 }
 
-export function cleanupOwnedContainer(cidfile, plan, env, { run = runCli } = {}) {
+function sameCidIdentity(before, after) {
+  return ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"]
+    .every((field) => before[field] === after[field]);
+}
+
+export function cleanupOwnedContainer(cidfile, plan, env, {
+  run = runCli, beforeCidOpen,
+} = {}) {
   // A failed or timed-out `docker run` may start its container before Docker
   // can atomically write --cidfile. Missing evidence is NOT a cleanup proof.
   if (!existsSync(cidfile)) return false;
@@ -92,17 +100,47 @@ export function cleanupOwnedContainer(cidfile, plan, env, { run = runCli } = {})
   const ownerRoot = path.dirname(cidfile);
   const original = ownedFixtureDirectories.get(ownerRoot);
   if (!original) return false;
+  let id;
   try {
     const owner = lstatSync(ownerRoot, { bigint: true });
-    const cid = lstatSync(cidfile);
+    const cid = lstatSync(cidfile, { bigint: true });
     if (!owner.isDirectory() || owner.isSymbolicLink() ||
         owner.dev !== original.dev || owner.ino !== original.ino ||
-        !cid.isFile() || cid.isSymbolicLink() || cid.nlink !== 1)
+        !cid.isFile() || cid.isSymbolicLink() || cid.nlink !== 1n ||
+        cid.size < 64n || cid.size > 66n)
       return false;
+    // Deterministic test-only boundary injection. The actual runner cannot
+    // supply a hook, and no hook is allowed with the real Docker CLI.
+    if (beforeCidOpen !== undefined) {
+      if (run === runCli || typeof beforeCidOpen !== "function") return false;
+      beforeCidOpen();
+    }
+    // O_NOFOLLOW is available on native Linux but not Node Windows. The
+    // opened handle's device/inode identity is mandatory on BOTH platforms:
+    // never trust a pathname reopened after the original lstat.
+    const fd = openSync(cidfile, constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      const opened = fstatSync(fd, { bigint: true });
+      if (!opened.isFile() || opened.nlink !== 1n ||
+          !sameCidIdentity(cid, opened)) return false;
+      // Do not use readFileSync(fd): an in-place append after preflight could
+      // otherwise cause an unbounded allocation. Read at most 67 bytes.
+      const bounded = Buffer.alloc(67);
+      const count = readSync(fd, bounded, 0, bounded.length, 0);
+      if (count !== Number(opened.size) || count > 66) return false;
+      if (!sameCidIdentity(opened, fstatSync(fd, { bigint: true })) ||
+          !sameCidIdentity(opened, lstatSync(cidfile, { bigint: true })))
+        return false;
+      const ownerNow = lstatSync(ownerRoot, { bigint: true });
+      if (!ownerNow.isDirectory() || ownerNow.isSymbolicLink() ||
+          ownerNow.dev !== original.dev || ownerNow.ino !== original.ino)
+        return false;
+      id = bounded.toString("utf8", 0, count).trim();
+    } finally {
+      closeSync(fd);
+    }
   } catch { return false; }
-  let id;
-  try { id = readFileSync(cidfile, "utf8").trim(); }
-  catch { return false; }
   if (!/^[a-f0-9]{64}$/u.test(id)) return false;
   // NEVER remove by mutable name, wildcard, label selection or ambient context.
   // The inspect must prove the exact owned label on the immutable full ID.

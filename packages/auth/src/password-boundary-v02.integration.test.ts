@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import { AdministrationMutationError, AdministrativePasswordReuseError, changeAdministrativePassword } from "./administration";
 import {
   approveAccountRecovery,
@@ -14,7 +14,11 @@ import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionU
 import { hashPassword, verifyPassword } from "./index";
 import { hashAuditIdentifier } from "./audit";
 
-after(() => prisma.$disconnect());
+// The real mutations intentionally occupy the application's three-connection
+// pool while their PostgreSQL lock order is observed. Monitoring through the
+// same pool would deadlock the fixture before it can release the lock holder.
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 const NORMAL_INITIAL = "v02-normal-initial-distinct-1";
 const ADMIN_INITIAL = "v02-admin-initial-distinct-1";
@@ -25,7 +29,7 @@ const ADMIN_RETRY = "v02-admin-retry-distinct-3";
 async function waitForWaiter(blockerPid: number, sqlFragment: string): Promise<number> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const rows = await prisma.$queryRaw<Array<{ pid: number }>>`
+    const rows = await lockObserver.$queryRaw<Array<{ pid: number }>>`
       SELECT pid::int AS pid FROM pg_stat_activity
       WHERE wait_event_type = 'Lock'
         AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
