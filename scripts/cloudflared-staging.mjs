@@ -291,9 +291,23 @@ async function containerId(compose, service, env) {
 }
 
 export function latestQuickHostname(logs, previous = null) {
-  const matches = [...logs.matchAll(/https:\/\/([a-z0-9-]+\.trycloudflare\.com)/giu)].map((match) => match[1]);
-  const latest = matches.at(-1);
-  return latest && latest !== previous ? latest : null;
+  // Parse the complete HTTPS token and hostname. A partial regex match would
+  // accept an attacker-controlled suffix such as trycloudflare.com.evil.test.
+  const tokens = logs.split(/\s+/u);
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const raw = tokens[index].replaceAll("|", "");
+    if (!raw.startsWith("https://")) continue;
+    let url;
+    try { url = new URL(raw); }
+    catch { continue; }
+    const parts = url.hostname.split(".");
+    if (url.protocol !== "https:" || url.username || url.password || url.port ||
+        url.pathname !== "/" || url.search || url.hash || parts.length !== 3 ||
+        parts[1] !== "trycloudflare" || parts[2] !== "com" ||
+        !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(parts[0])) continue;
+    return url.hostname === previous ? null : url.hostname;
+  }
+  return null;
 }
 
 async function quickHostname(id, env, previous = null) {

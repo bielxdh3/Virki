@@ -101,6 +101,15 @@ test("Quick Tunnel restart waits for the newest URL and cannot reuse stale log e
   assert.equal(latestQuickHostname(initial, first), null);
   assert.equal(latestQuickHostname(appended, first), second);
   assert.equal(latestQuickHostname(appended, second), null);
+  for (const malicious of [
+    "https://first-example.trycloudflare.com.evil.test",
+    "https://first-example.trycloudflare.com@evil.test",
+    "https://first-example.trycloudflare.com:4443",
+    "https://first-example.trycloudflare.com/private",
+    "https://first-example.trycloudflare.com#admin",
+    "http://first-example.trycloudflare.com",
+  ]) assert.equal(latestQuickHostname(malicious), null, malicious);
+  assert.equal(latestQuickHostname("| https://first-example.trycloudflare.com |"), first);
 });
 
 test("Docker guard refuses remote SSH/TCP contexts, remote host overrides and TLS before daemon operations", () => {
