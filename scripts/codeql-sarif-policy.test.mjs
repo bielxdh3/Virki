@@ -1,9 +1,91 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { evaluateCodeqlSarif } from "./codeql-sarif-policy.mjs";
 import { codeqlDocument, codeqlHostedCliDocument } from "./fixtures/codeql-documented-sarif.mjs";
 
 const sarif = codeqlDocument;
+
+// Source-of-truth test inputs are the 42 independently reviewed dispositions.
+// This synthetic document only exercises fail-closed policy matching: real
+// scanner provenance must still come from an exact-SHA hosted CodeQL run.
+const reviewedLedger = readFileSync(new URL("../docs/security/codeql-reviewed-20261105.md", import.meta.url), "utf8");
+const reviewed42 = reviewedLedger.split(/\r?\n/u)
+  .filter((line) => /^\|\s*\d+\s*\|/u.test(line))
+  .map((line) => {
+    const fields = line.replaceAll("\\|", "/").split("|").map((value) => value.trim());
+    const index = Number(fields[1]);
+    const source = /^(.*):(\d+)$/u.exec(fields[4]);
+    assert.ok(source, `invalid reviewed source for index ${index}`);
+    assert.equal(fields[2], "GO: PEER-REVIEWED BENIGN");
+    return {
+      index,
+      ruleId: fields[3],
+      path: source[1],
+      sourceLine: Number(source[2]),
+      lineFingerprint: fields[5],
+      columnFingerprint: fields[6]
+    };
+  });
+
+const fixedFdRace = {
+  index: 10,
+  ruleId: "js/file-system-race",
+  path: "infra/offline/native-supervisor/run-disposable-fd-lifecycle-test.mjs",
+  lineFingerprint: "bc6600c95727700f:1",
+  columnFingerprint: "11"
+};
+
+test("42 CodeQL dispositions are unique, individually documented and all accepted", () => {
+  assert.equal(reviewed42.length, 42);
+  assert.equal(new Set(reviewed42.map((entry) => entry.index)).size, 42);
+  assert.ok(!reviewed42.some((entry) => entry.index === 10));
+  assert.equal(new Set(reviewed42.map(({ ruleId, path, lineFingerprint, columnFingerprint }) =>
+    JSON.stringify([ruleId, path, lineFingerprint, columnFingerprint]))).size, 42);
+  for (const item of reviewed42) {
+    assert.match(item.ruleId, /^js\/[a-z0-9-]+$/u);
+    assert.match(item.lineFingerprint, /^[a-f0-9]{8,24}:\d+$/u);
+    assert.match(item.columnFingerprint, /^\d+$/u);
+    assert.ok(Number.isInteger(item.sourceLine) && item.sourceLine > 0);
+  }
+  const result = evaluateCodeqlSarif([codeqlHostedCliDocument(reviewed42)]);
+  assert.equal(result.ok, true, JSON.stringify(result.violations));
+  assert.equal(result.totalResults, 42);
+  assert.equal(result.acceptedResults, 42);
+});
+
+test("real CID pathname race finding #10 is NEVER accepted by historical 46-result policy", () => {
+  const result = evaluateCodeqlSarif([codeqlHostedCliDocument([...reviewed42, fixedFdRace])]);
+  assert.equal(result.ok, false);
+  assert.equal(result.totalResults, 43);
+  assert.equal(result.acceptedResults, 42);
+  assert.deepEqual(result.violations, [{
+    ruleId: fixedFdRace.ruleId,
+    path: fixedFdRace.path,
+    reason: "unreviewed-finding"
+  }]);
+});
+
+test("all 42 reviewed CodeQL fingerprints fail closed on altered rule, path, hash, column or duplicate count", () => {
+  for (const entry of reviewed42) {
+    const variants = [
+      { ...entry, ruleId: `${entry.ruleId}-unreviewed` },
+      { ...entry, path: `scripts/unreviewed/${entry.path.split("/").at(-1)}` },
+      { ...entry, lineFingerprint: `f${entry.lineFingerprint}` },
+      { ...entry, columnFingerprint: `${entry.columnFingerprint}1` },
+      { ...entry, lineFingerprint: undefined },
+      { ...entry, columnFingerprint: undefined }
+    ];
+    for (const changed of variants) {
+      const output = evaluateCodeqlSarif([codeqlHostedCliDocument([changed])]);
+      assert.equal(output.ok, false, `mutation accepted for index ${entry.index}`);
+      assert.equal(output.violations[0]?.reason, "unreviewed-finding");
+    }
+    const duplicate = evaluateCodeqlSarif([codeqlHostedCliDocument([entry, entry])]);
+    assert.equal(duplicate.ok, false, `duplicate accepted for index ${entry.index}`);
+    assert.equal(duplicate.violations[0]?.reason, "accepted-finding-count-exceeded");
+  }
+});
 
 test("CodeQL policy accepts only the reviewed test-harness findings", () => {
   const result = evaluateCodeqlSarif([sarif([
