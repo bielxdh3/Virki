@@ -14,9 +14,9 @@ $portalHost = "portal-pr88-temp-20261102.biel.dev.br" # replace with the verifie
 if (-not (Select-String -LiteralPath infra/Dockerfile.prod -Pattern '^ARG VIRKI_PORTAL_HOSTNAME=' -Quiet)) { throw "OIDC build-host support missing: first include PR #109." }
 $image = "virki-manual:$rev"
 docker build --platform linux/amd64 --target production --build-arg "VIRKI_BUILD_REVISION=$rev" --build-arg "VIRKI_PORTAL_HOSTNAME=$portalHost" -t $image -f infra/Dockerfile.prod .
-docker image inspect --format '{{.Id}}' $image
+$localId = (docker image inspect --format '{{.Id}}' $image).Trim()
 docker save -o runtime.tar $image
-(Get-FileHash .\runtime.tar -Algorithm SHA256).Hash.ToLowerInvariant()
+$hash = (Get-FileHash .\runtime.tar -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
 **Build prerequisite:** use a checkout containing PR #109, which validates the compiled OIDC routes. The Portal hostname must match the existing staging HTTPS ingress. A production-host build can start in staging while its authorization endpoints route incorrectly; do not proceed if the guard fails.
@@ -25,12 +25,14 @@ Use a **preconfigured SSH alias with a verified, pinned server host key** (examp
 
 ```powershell
 scp -o StrictHostKeyChecking=yes .\runtime.tar stage-vm:~/runtime.tar
-ssh stage-vm 'sha256sum ~/runtime.tar'
+"$hash  runtime.tar" | ssh stage-vm 'sha256sum -c -'
+if ($LASTEXITCODE -ne 0) { throw "Remote TAR SHA-256 mismatch; image not loaded." }
 ssh stage-vm 'sudo docker load -i ~/runtime.tar'
-ssh stage-vm "sudo docker image inspect --format={{.Id}} $image"
+$remoteId = (ssh stage-vm "sudo docker image inspect --format={{.Id}} $image").Trim()
+if ($remoteId -ne $localId) { throw "Remote Docker image ID mismatch; stop." }
 ```
 
-**Stop** unless the remote TAR SHA-256 equals the local one and the loaded Docker image ID matches the locally inspected ID, with the expected Linux/amd64 revision and non-root runtime user. Never send `.env`, DB dumps, private keys or auth tokens.
+**Stop** unless both commands succeed and the image has the expected Linux/amd64 revision and non-root runtime user. Never send `.env`, DB dumps, private keys or auth tokens.
 
 ## 2. Change only the Hub in isolated staging
 
