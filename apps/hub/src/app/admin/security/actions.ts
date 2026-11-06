@@ -25,7 +25,7 @@ import { recordSecurityDenial } from "../../../lib/audit-denial";
 import { requireAdminMutation, readFormString } from "../../../lib/admin-mutation";
 import { PASSWORD_INPUT_MAX_LENGTH, readBoundedFormString } from "../../../lib/action-input-limits";
 
-export type SecurityFormState = { status: "idle" | "error" | "password-reuse" | "started" | "complete"; requestKey?: string; scope?: string; recoveryCodes?: string[] };
+export type SecurityFormState = { status: "idle" | "error" | "password-reuse" | "password-mismatch" | "started" | "complete"; requestKey?: string; scope?: string; recoveryCodes?: string[] };
 
 export async function startCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   return withHubAuditRequest(async () => {
@@ -45,10 +45,15 @@ export async function startCredentialSetupAction(_state: SecurityFormState, form
 export async function completeCredentialSetupAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
   return withHubAuditRequest(async () => {
   const newPassword = readBoundedFormString(formData, "newPassword", PASSWORD_INPUT_MAX_LENGTH);
+  const confirmPassword = readBoundedFormString(formData, "confirmPassword", PASSWORD_INPUT_MAX_LENGTH);
   const session = await requireAdminMutation(formData, "admin-credential-setup-complete");
-  if (newPassword === null) {
+  if (newPassword === null || confirmPassword === null) {
     await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session);
     return { status: "error" };
+  }
+  if (newPassword !== confirmPassword) {
+    await recordSecurityDenial(await headers(), "admin-security-proof", "rejected", session);
+    return { status: "password-mismatch" };
   }
   try {
     const recoveryCodes = await completeAdministrativeCredentialSetup({ actor: session.user, sessionId: session.id, requestKey: readFormString(formData, "requestKey"), code: readFormString(formData, "code"), newPassword });

@@ -24,6 +24,7 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
   const [complete, completeAction, completing] = useSensitiveFormAction(completeCredentialSetupAction, initialState);
   const [recovery, recoveryAction, recovering] = useSensitiveFormAction(recoverAdminCredentialAction, initialState);
   const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
+  const [recoveryCodesSaved, setRecoveryCodesSaved] = useState(false);
   const acknowledgingRecoveryCodes = useRef(false);
   const showRecoveryCodes = Boolean(complete.recoveryCodes && !recoveryCodesAcknowledged);
   return (
@@ -33,9 +34,11 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
       {showRecoveryCodes && complete.recoveryCodes ? (
         <>
           <RecoveryCodes codes={complete.recoveryCodes} />
+          <label><input type="checkbox" checked={recoveryCodesSaved} onChange={(event) => setRecoveryCodesSaved(event.target.checked)} /> Guardei os dez códigos de recuperação fora do Virki. Sei que não serão exibidos novamente.</label>
           <button
             className="button-secondary"
             type="button"
+            disabled={!recoveryCodesSaved}
             onClick={(event) => {
               event.preventDefault();
               if (acknowledgingRecoveryCodes.current) return;
@@ -81,8 +84,10 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
           <input type="hidden" name="requestKey" value={start.requestKey} />
           <label>Código enviado por e-mail<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required /></label>
           <label>Nova senha administrativa (16 caracteres ou mais)<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
+          <label>Confirme a nova senha administrativa<input name="confirmPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
           <button type="submit" disabled={completing}>{completing ? "Configurando…" : "Configurar credencial"}</button>
           {complete.status === "error" && <><p className="form-error" role="alert">Código inválido ou expirado. Inicie novamente para receber outro código.</p><a className="subtle-link" href="/admin/security?restart=credential#admin-content">Iniciar configuração novamente</a></>}
+          {complete.status === "password-mismatch" && <p className="form-error" role="alert">As duas senhas administrativas precisam ser iguais.</p>}
           {complete.status === "password-reuse" && <p className="form-error" role="alert">{passwordReuseMessage}</p>}
         </form>
       ) : (
@@ -124,14 +129,17 @@ export function ElevationControls({ csrf, credentialReady, active }: { csrf: str
 
 function OneTimeRecoveryCodes({ codes, destination, label }: { codes: string[]; destination: string; label: string }) {
   const [acknowledged, setAcknowledged] = useState(false);
+  const [saved, setSaved] = useState(false);
   const acknowledging = useRef(false);
   if (acknowledged) return null;
   return (
     <>
       <RecoveryCodes codes={codes} />
+      <label><input type="checkbox" checked={saved} onChange={(event) => setSaved(event.target.checked)} /> Guardei os dez códigos de recuperação fora do Virki. Sei que não serão exibidos novamente.</label>
       <button
         className="button-secondary"
         type="button"
+        disabled={!saved}
         onClick={(event) => {
           event.preventDefault();
           if (acknowledging.current) return;
