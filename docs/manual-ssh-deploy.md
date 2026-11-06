@@ -10,7 +10,8 @@ From a clean checkout at the intended revision, with local Docker available:
 
 ```powershell
 $rev = (git rev-parse HEAD).Trim()
-$portalHost = "portal.staging.example.test" # the actual staging Portal hostname
+$portalHost = "portal-pr88-temp-20261102.biel.dev.br" # replace with the verified staging Portal hostname
+if (-not (Select-String -LiteralPath infra/Dockerfile.prod -Pattern '^ARG VIRKI_PORTAL_HOSTNAME=' -Quiet)) { throw "OIDC build-host support missing: first include PR #109." }
 $image = "virki-manual:$rev"
 docker build --platform linux/amd64 --target production --build-arg "VIRKI_BUILD_REVISION=$rev" --build-arg "VIRKI_PORTAL_HOSTNAME=$portalHost" -t $image -f infra/Dockerfile.prod .
 docker image inspect --format '{{.Id}}' $image
@@ -18,7 +19,7 @@ docker save -o runtime.tar $image
 (Get-FileHash .\runtime.tar -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
-**Build prerequisite:** the Dockerfile must support `VIRKI_PORTAL_HOSTNAME` and check the compiled OIDC host-qualified routes (fix in PR #109). The value must equal the existing staging Portal hostname and its trusted HTTPS ingress; otherwise stop. A production-host build can start in staging while its authorization endpoints route incorrectly.
+**Build prerequisite:** use a checkout containing PR #109, which validates the compiled OIDC routes. The Portal hostname must match the existing staging HTTPS ingress. A production-host build can start in staging while its authorization endpoints route incorrectly; do not proceed if the guard fails.
 
 Use a **preconfigured SSH alias with a verified, pinned server host key** (example: `stage-vm`). Do not disable host-key checking. Transfer the TAR only if the remote image ID is missing:
 
@@ -52,3 +53,9 @@ ssh stage-vm 'sudo docker inspect --format={{.Image}}:{{.State.Health.Status}} v
 ```
 
 Require the exact new Hub image ID, Hub health `healthy`, and unchanged identities for PostgreSQL, issuer, public site, cleanup and email workers. Then verify real external HTTPS/OIDC/Access login separately. An interrupted command means **inspect first, never retry blindly**. A DB-changing release needs an independently verified backup/restore and a separate migration procedure; SSH encryption alone does not make migrations safe.
+
+## 4. Authenticated staging acceptance (separately authorized)
+
+First have the owner sign into the existing staging Hub via Cloudflare Access and complete ADMIN e-mail MFA. Without bypassing security elevation, use the **existing** `/admin/accounts` UI to invite a disposable USER (the user accepts the e-mail invitation), `/admin/connections` to register an HTTPS OIDC relying party with an exact callback URL, and `/admin/access` to grant that active USER access to that connection. **Creating any of these three resources requires specific owner approval; this guide does not authorize it.** Store the one-time OIDC client secret only in the relying party's own private configuration, never in logs or Git.
+
+The repository's existing `examples/oidc-node-rp` supplies a tested PKCE client; its `.env.example` documents the HTTPS callback and separate RP database. Once the user, client and grant exist, use that RP to verify the authorization-code+S256 PKCE login, one code-to-token exchange, issuer/JWKS/nonce validation and rejection of an invalid redirect URI. Do not claim staging PKCE passed from CI fixtures alone; authenticated browser evidence is still required.
