@@ -98,7 +98,13 @@ test("ADMIN restarts a failed credential setup challenge with a fresh same-origi
     const firstCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, firstRequestKey);
     const invalidCode = firstCode === "000000" ? "000001" : "000000";
     await firstChallengeForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(invalidCode);
-    await firstChallengeForm.locator('input[name="newPassword"]').fill(randomBytes(32).toString("base64url"));
+    const candidatePassword = randomBytes(32).toString("base64url");
+    await firstChallengeForm.locator('input[name="newPassword"]').fill(candidatePassword);
+    await firstChallengeForm.locator('input[name="confirmPassword"]').fill(candidatePassword + "x");
+    await firstChallengeForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
+    await expect(firstChallengeForm.getByRole("alert")).toContainText("duas senhas administrativas precisam ser iguais");
+    expect((await prisma.securityElevation.findUnique({ where: { requestKey: firstRequestKey }, select: { status: true } }))?.status).toBe("PENDING");
+    await firstChallengeForm.locator('input[name="confirmPassword"]').fill(candidatePassword);
     await firstChallengeForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
     await expect(firstChallengeForm.getByRole("alert")).toContainText("Código inválido ou expirado");
     const restartLink = credentialSection.getByRole("link", { name: "Iniciar configuração novamente", exact: true });
@@ -333,6 +339,7 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const credentialCode = await readLatestAdminVerificationCode(prisma, fixture.admin.email, credentialRequestKey);
     await credentialForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(credentialCode);
     await credentialForm.locator('input[name="newPassword"]').fill(administrativePassword);
+    await credentialForm.locator('input[name="confirmPassword"]').fill(administrativePassword);
     await credentialForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
     try {
       await expect(credentialSection.getByRole("heading", { name: /Códigos de recuperação/u })).toBeVisible();
@@ -373,6 +380,9 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     // document in browser history.
     const acknowledgeRecoveryCodes = credentialSection.getByRole("button", { name: "Continuar para elevação", exact: true });
     await expect(acknowledgeRecoveryCodes).toHaveAttribute("type", "button");
+    await expect(acknowledgeRecoveryCodes).toBeDisabled();
+    await credentialSection.getByRole("checkbox", { name: /Guardei os dez códigos de recuperação fora do Virki/u }).check();
+    await expect(acknowledgeRecoveryCodes).toBeEnabled();
     await expect(credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true })).toHaveCount(0);
     const recoveryCodeInput = credentialSection.getByLabel("Código de recuperação administrativa", { exact: true });
     const recoveryForm = recoveryCodeInput.locator("xpath=ancestor::form");
