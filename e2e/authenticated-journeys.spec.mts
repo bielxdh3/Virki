@@ -104,6 +104,8 @@ test("ADMIN restarts a failed credential setup challenge with a fresh same-origi
     await firstChallengeForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
     await expect(firstChallengeForm.getByRole("alert")).toContainText("duas senhas administrativas precisam ser iguais");
     expect((await prisma.securityElevation.findUnique({ where: { requestKey: firstRequestKey }, select: { status: true } }))?.status).toBe("PENDING");
+    await firstChallengeForm.getByLabel("Código enviado por e-mail", { exact: true }).fill(invalidCode);
+    await firstChallengeForm.locator('input[name="newPassword"]').fill(candidatePassword);
     await firstChallengeForm.locator('input[name="confirmPassword"]').fill(candidatePassword);
     await firstChallengeForm.getByRole("button", { name: "Configurar credencial", exact: true }).click();
     await expect(firstChallengeForm.getByRole("alert")).toContainText("Código inválido ou expirado");
