@@ -10,12 +10,15 @@ From a clean checkout at the intended revision, with local Docker available:
 
 ```powershell
 $rev = (git rev-parse HEAD).Trim()
+$portalHost = "portal.staging.example.test" # the actual staging Portal hostname
 $image = "virki-manual:$rev"
-docker build --platform linux/amd64 --target production --build-arg "VIRKI_BUILD_REVISION=$rev" -t $image -f infra/Dockerfile.prod .
+docker build --platform linux/amd64 --target production --build-arg "VIRKI_BUILD_REVISION=$rev" --build-arg "VIRKI_PORTAL_HOSTNAME=$portalHost" -t $image -f infra/Dockerfile.prod .
 docker image inspect --format '{{.Id}}' $image
 docker save -o runtime.tar $image
 (Get-FileHash .\runtime.tar -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
+
+**Build prerequisite:** the Dockerfile must support `VIRKI_PORTAL_HOSTNAME` and check the compiled OIDC host-qualified routes (fix in PR #109). The value must equal the existing staging Portal hostname and its trusted HTTPS ingress; otherwise stop. A production-host build can start in staging while its authorization endpoints route incorrectly.
 
 Use a **preconfigured SSH alias with a verified, pinned server host key** (example: `stage-vm`). Do not disable host-key checking. Transfer the TAR only if the remote image ID is missing:
 
