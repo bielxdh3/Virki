@@ -12,9 +12,11 @@ export type VirkiClientOptions = {
   redirectUri: string;
   store: TransactionStore;
   transactionTtlMs?: number;
+  /** Optional Cloudflare Access service-token pair for server-to-server OIDC requests only. */
+  cloudflareAccess?: { clientId: string; clientSecret: string };
 };
 
-export type ValidatedClientOptions = Required<Omit<VirkiClientOptions, "transactionTtlMs">> & { transactionTtlMs: number };
+export type ValidatedClientOptions = Required<Omit<VirkiClientOptions, "transactionTtlMs" | "cloudflareAccess">> & { transactionTtlMs: number };
 
 export type IdentityClaims = {
   sub: string;
@@ -49,9 +51,21 @@ export function validateClientOptions(input: VirkiClientOptions): ValidatedClien
   }
   const issuer = requireExactHttpsUrl(input.issuer, true);
   const redirectUri = requireExactHttpsUrl(input.redirectUri, false);
+  if (input.cloudflareAccess !== undefined && !isValidAccessPair(input.cloudflareAccess)) {
+    throw new Error("Invalid confidential OIDC Access configuration.");
+  }
   const transactionTtlMs = input.transactionTtlMs ?? 10 * 60_000;
   if (!Number.isSafeInteger(transactionTtlMs) || transactionTtlMs < 1000 || transactionTtlMs > 15 * 60_000) throw new Error("Invalid OIDC transaction lifetime.");
   return { issuer, redirectUri, clientId: input.clientId, clientSecret: input.clientSecret, store: input.store, transactionTtlMs };
+}
+
+function isValidAccessPair(value: unknown): value is NonNullable<VirkiClientOptions["cloudflareAccess"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const credentials = value as Record<string, unknown>;
+  const keys = Object.keys(credentials);
+  return keys.length === 2 && keys.includes("clientId") && keys.includes("clientSecret")
+    && typeof credentials.clientId === "string" && /^[\x21-\x7e]{1,256}$/u.test(credentials.clientId)
+    && typeof credentials.clientSecret === "string" && /^[\x21-\x7e]{1,1024}$/u.test(credentials.clientSecret);
 }
 
 function requireExactHttpsUrl(input: string, originOnly: boolean): string {
@@ -81,15 +95,45 @@ export function validateIssuerEndpoints(metadata: Record<string, unknown>, pinne
 /** Run only on a Node server, with a RP-owned transaction store. */
 export async function createVirkiOidcClient(options: VirkiClientOptions): Promise<VirkiOidcNodeClient> {
   const validated = validateClientOptions(options);
+  const discoveryOptions: oidc.DiscoveryRequestOptions = { timeout: 10, execute: [oidc.enableNonRepudiationChecks] };
+  if (options.cloudflareAccess) {
+    discoveryOptions[oidc.customFetch] = accessBackchannelFetch(validated.issuer, options.cloudflareAccess);
+  }
   const client = await oidc.discovery(
     new URL(validated.issuer),
     validated.clientId,
     { id_token_signed_response_alg: "ES256", token_endpoint_auth_method: "client_secret_basic" },
     oidc.ClientSecretBasic(validated.clientSecret),
-    { timeout: 10, execute: [oidc.enableNonRepudiationChecks] }
+    discoveryOptions
   );
   validateIssuerEndpoints(client.serverMetadata() as unknown as Record<string, unknown>, validated.issuer);
   return new VirkiOidcNodeClient(validated, createOidcProtocol(client));
+}
+
+/** This fetch is retained by openid-client for discovery, token, JWKS, userinfo and revocation. */
+function accessBackchannelFetch(issuer: string, credentials: NonNullable<VirkiClientOptions["cloudflareAccess"]>): oidc.CustomFetch {
+  return async (url, options) => {
+    let endpoint: URL;
+    try { endpoint = new URL(url); } catch { throw new Error("OIDC Access backchannel destination refused."); }
+    if (endpoint.protocol !== "https:" || endpoint.origin !== issuer || endpoint.username || endpoint.password || endpoint.hash) {
+      throw new Error("OIDC Access backchannel destination refused.");
+    }
+    const headers = new Headers(options.headers);
+    headers.set("CF-Access-Client-Id", credentials.clientId);
+    headers.set("CF-Access-Client-Secret", credentials.clientSecret);
+    try {
+      // Never follow a Cloudflare challenge or an upstream 3xx with the Access identity.
+      // openid-client's FetchBody includes binary views that Node fetch accepts;
+      // its declaration is broader than TypeScript's DOM RequestInit body union.
+      const response = await fetch(endpoint.href, { ...options, body: options.body as RequestInit["body"],
+        headers, redirect: "manual", cache: "no-store" });
+      if (response.status >= 300 && response.status < 400) throw new Error("OIDC Access backchannel redirect refused.");
+      return response;
+    } catch {
+      // The fetcher may include request headers in an error. Never pass its details to callers.
+      throw new Error("OIDC Access backchannel request failed.");
+    }
+  };
 }
 
 /** Internal adapter runs the real openid-client validation and signing-key checks. */
