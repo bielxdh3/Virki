@@ -32,10 +32,14 @@ export function evaluateStageAccessBoundary(observations) {
   const jwksChallenged = isStageAccessChallenge(observations.jwks ?? {}, STAGE_E_TARGETS.jwks);
   // An explicit exception for public OIDC discovery/JWKS would need separate
   // owner approval: the temporary stage's original policy covered BOTH hosts.
+  // A CDN can emit Cloudflare's Server/CF-RAY headers even when an origin
+  // forges a matching redirect, and these four routes cannot prove host-wide
+  // Access coverage. Only a separate Cloudflare Access application/policy and
+  // Tunnel originRequest.access GET can establish the authoritative boundary.
   const verdict = !hubChallenged ? 'NO_GO_HUB_ACCESS_NOT_PROVEN'
     : !portalChallenged ? 'NO_GO_PORTAL_ACCESS_NOT_PROVEN'
       : !metadataChallenged || !jwksChallenged ? 'REVIEW_PUBLIC_OIDC_ACCESS_EXCEPTIONS'
-        : 'OUTER_ACCESS_CHALLENGES_PASS';
+        : 'ADVISORY_CHALLENGES_OBSERVED_AUTHORITY_UNVERIFIED';
   return { verdict, statuses };
 }
 
@@ -62,7 +66,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const report = await probeStageAccessBoundary();
     process.stdout.write(`${report.verdict} ${JSON.stringify(report.statuses)}\n`);
-    if (report.verdict !== 'OUTER_ACCESS_CHALLENGES_PASS') process.exitCode = 2;
+    // Never return CI success based on unauthenticated redirects alone.
+    // Require an independent API-side Access policy + Tunnel ingress audit.
+    process.exitCode = 2;
   } catch {
     process.stderr.write('NO_GO_STAGE_ACCESS_PROBE_FAILED\n');
     process.exitCode = 2;

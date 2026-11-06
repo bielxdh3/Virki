@@ -22,9 +22,9 @@ test('stage policy rejects Portal login exposure even when Hub Access challenges
   assert.doesNotMatch(JSON.stringify(result), /synthetic-private-value/u);
 });
 
-test('staging both-host Access challenge is necessary, but public OIDC exceptions need separate review', () => {
+test('staging both-host challenge is only advisory; public OIDC exceptions need separate review', () => {
   const observations = challenged();
-  assert.equal(evaluateStageAccessBoundary(observations).verdict, 'OUTER_ACCESS_CHALLENGES_PASS');
+  assert.equal(evaluateStageAccessBoundary(observations).verdict, 'ADVISORY_CHALLENGES_OBSERVED_AUTHORITY_UNVERIFIED');
   observations.discovery = { status: 200, server: 'cloudflare' };
   assert.equal(evaluateStageAccessBoundary(observations).verdict, 'REVIEW_PUBLIC_OIDC_ACCESS_EXCEPTIONS');
   observations.hub = { status: 403, server: 'cloudflare' };
@@ -64,6 +64,32 @@ test('probe uses only fresh, credential-free, nonfollowing GETs and strips Acces
     } });
   });
   assert.deepEqual(visited, Object.keys(STAGE_E_TARGETS));
-  assert.equal(result.verdict, 'OUTER_ACCESS_CHALLENGES_PASS');
+  assert.equal(result.verdict, 'ADVISORY_CHALLENGES_OBSERVED_AUTHORITY_UNVERIFIED');
   assert.doesNotMatch(JSON.stringify(result), /very-sensitive|synthetic-private-value|location/u);
+});
+
+test('forged-origin redirects with real-looking CDN headers can never be reported as an authoritative GO', () => {
+  const originForged = challenged();
+  // A proxy/origin can supply these redirects while Cloudflare adds Server
+  // and CF-RAY. They do not prove an Access app/policy or Tunnel JWT guard.
+  const result = evaluateStageAccessBoundary(originForged);
+  assert.equal(result.verdict, 'ADVISORY_CHALLENGES_OBSERVED_AUTHORITY_UNVERIFIED');
+  assert.doesNotMatch(result.verdict, /\bGO\b|\bPASS\b/u);
+});
+
+test('four challenged paths do not prove that other Portal and Hub paths are protected', async () => {
+  const checked = [];
+  const result = await probeStageAccessBoundary(async (url) => {
+    checked.push(url);
+    const target = Object.values(STAGE_E_TARGETS).find((v) => url === `https://${v.host}${v.path}`);
+    // This fixture models a path-scoped Access policy with a public route
+    // outside the small set probed by the observer.
+    if (!target) return new Response('public origin body', { status: 200 });
+    const observed = challenge(target);
+    return new Response(null, { status: observed.status, headers: {
+      server: observed.server, 'cf-ray': observed.cfRay, location: observed.location,
+    } });
+  });
+  assert.equal(checked.length, 4);
+  assert.equal(result.verdict, 'ADVISORY_CHALLENGES_OBSERVED_AUTHORITY_UNVERIFIED');
 });
