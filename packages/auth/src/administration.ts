@@ -19,6 +19,9 @@ const RECOVERY_CODE_COUNT = 10;
 const ELEVATION_CEREMONY_TTL_MS = 10 * 60 * 1000;
 const MANUAL_EXPIRY = new Date("9999-12-31T23:59:59.000Z");
 const ADMIN_CREDENTIAL_SETUP_SCOPE = "ADMIN_CREDENTIAL_SETUP";
+// This ceremony is deliberately NOT an ElevationScope: a recovery OTP must
+// never be exchangeable for an active action-scoped ADMIN elevation.
+const ADMIN_CREDENTIAL_EMAIL_RECOVERY_SCOPE = "ADMIN_CREDENTIAL_EMAIL_RECOVERY";
 
 export class AdministrativePasswordReuseError extends AdministrationMutationError {
   constructor() {
@@ -313,7 +316,138 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
   return recoveryCodes;
 }
 
-async function createEmailElevationCeremony(input: { userId: string; sessionId: string; scope: string; kind: "ADMIN_EMAIL_VERIFICATION"; recipientEmail: string; displayName: string | null; locale: EmailLocale; now: Date; expiresAt?: Date; manualUntilRevoked?: boolean; credentialKeyVersion?: number; audit?: AuditLogInput }): Promise<string> {
+/** Start a distinct ADMIN credential-recovery proof without requiring saved backup codes. */
+export async function startAdministrativeEmailRecovery(input: {
+  actor: { id: string; role: string };
+  sessionId: string;
+  normalPassword: string;
+  locale: EmailLocale;
+  now?: Date;
+}): Promise<string> {
+  const now = input.now ?? new Date();
+  const admin = await requireAdminSession(input.actor, input.sessionId, now);
+  if (!isDatabaseId(input.actor.id)) throw new AdministrationMutationError();
+  const attempt = await prisma.$transaction((transaction) =>
+    consumeRateLimitAttemptInTransaction(transaction, `admin-email-recovery-start:${input.actor.id}`, now)
+  );
+  if (!attempt.allowed || !admin.emailVerifiedAt || !admin.passwordHash ||
+      !await verifyPassword(admin.passwordHash, input.normalPassword)) throw new AdministrationMutationError();
+  const credential = await prisma.administrativeCredential.findUnique({
+    where: { userId: input.actor.id },
+    select: { status: true, revokedAt: true, keyVersion: true }
+  });
+  if (credential?.status !== "ACTIVE" || credential.revokedAt ||
+      !Number.isSafeInteger(credential.keyVersion) || credential.keyVersion < 1) throw new AdministrationMutationError();
+  return createEmailElevationCeremony({
+    userId: input.actor.id,
+    sessionId: input.sessionId,
+    scope: ADMIN_CREDENTIAL_EMAIL_RECOVERY_SCOPE,
+    kind: "ADMIN_EMAIL_VERIFICATION",
+    recipientEmail: admin.email,
+    challengeBinding: admin.email.toLowerCase(),
+    displayName: admin.displayName,
+    locale: input.locale,
+    credentialKeyVersion: credential.keyVersion,
+    now,
+    audit: {
+      eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERY_STARTED", result: "INFO",
+      actorUserId: input.actor.id, actorRole: "ADMIN",
+      sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.admin",
+      message: "Email proof for separate administrative credential recovery started."
+    }
+  });
+}
+
+/** Consume a session-bound, short-lived email proof once and rotate only the ADMIN credential. */
+export async function completeAdministrativeEmailRecovery(input: {
+  actor: { id: string; role: string };
+  sessionId: string;
+  requestKey: string;
+  code: string;
+  normalPassword: string;
+  newPassword: string;
+  now?: Date;
+}): Promise<string[]> {
+  const now = input.now ?? new Date();
+  const admin = await requireAdminSession(input.actor, input.sessionId, now);
+  assertAdminPassword(input.newPassword);
+  await consumeAdministrativeProofAttempts(input.actor.id, input.requestKey, now);
+  if (!admin.emailVerifiedAt || !admin.passwordHash || !await verifyPassword(admin.passwordHash, input.normalPassword)) throw new AdministrationMutationError();
+  await assertNotNormalPassword(admin.passwordHash, input.newPassword);
+  const newHash = await hashPassword(input.newPassword);
+  return prisma.$transaction(async (transaction) => {
+    // All credential mutations lock User -> Session -> Credential -> Ceremony.
+    await lockAdminSessionInTransaction(transaction, input.actor.id, input.sessionId, now);
+    const credential = await lockAdministrativeCredentialInTransaction(transaction, input.actor.id);
+    if (credential?.status !== "ACTIVE" || credential.revokedAt ||
+        !Number.isSafeInteger(credential.keyVersion) || credential.keyVersion < 1) throw new AdministrationMutationError();
+    const currentAdmin = await transaction.user.findUnique({
+      where: { id: input.actor.id }, select: { email: true, emailVerifiedAt: true, passwordHash: true }
+    });
+    if (!currentAdmin?.emailVerifiedAt || !currentAdmin.passwordHash || currentAdmin.passwordHash !== admin.passwordHash) throw new AdministrationMutationError();
+    await assertNotNormalPassword(currentAdmin.passwordHash, input.newPassword);
+    const ceremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_EMAIL_RECOVERY_SCOPE, now);
+    if (ceremony.credentialKeyVersion !== credential.keyVersion || ceremony.manualUntilRevoked) throw new AdministrationMutationError();
+    const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "SecurityElevation" WHERE "id" = ${ceremony.id} FOR UPDATE
+    `;
+    if (locked.length !== 1) throw new AdministrationMutationError();
+    const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, checkedAt);
+    const currentCeremony = await getPendingCeremony(transaction, input.requestKey, input.actor.id, input.sessionId, ADMIN_CREDENTIAL_EMAIL_RECOVERY_SCOPE, checkedAt);
+    if (currentCeremony.id !== ceremony.id || currentCeremony.credentialKeyVersion !== credential.keyVersion ||
+        // The hashed proof binds to the recipient; a changed email cannot use an old inbox code.
+        !verifySecurityCode(`${input.code}:${currentAdmin.email.toLowerCase()}`, currentCeremony.challengeHash)) throw new AdministrationMutationError();
+    const consumed = await transaction.securityElevation.updateMany({
+      where: { id: ceremony.id, status: "PENDING" },
+      data: { status: "CONSUMED", consumedAt: checkedAt }
+    });
+    if (consumed.count !== 1) throw new AdministrationMutationError();
+    const rotated = await transaction.administrativeCredential.updateMany({
+      where: { userId: input.actor.id, status: "ACTIVE", keyVersion: credential.keyVersion, revokedAt: null },
+      data: { passwordHash: newHash, keyVersion: { increment: 1 } }
+    });
+    if (rotated.count !== 1) throw new AdministrationMutationError();
+    const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
+    await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
+    await transaction.administrativeRecoveryCode.createMany({
+      data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) }))
+    });
+    await transaction.securityElevation.updateMany({
+      where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } },
+      data: { status: "REVOKED", revokedAt: checkedAt }
+    });
+    // A stolen older browser session cannot reuse a credential recovery.
+    await transaction.session.updateMany({
+      where: { userId: input.actor.id, id: { not: input.sessionId }, revokedAt: null },
+      data: { revokedAt: checkedAt }
+    });
+    await transaction.trustedDevice.updateMany({
+      where: { userId: input.actor.id, status: "TRUSTED" },
+      data: { status: "REVOKED", revokedAt: checkedAt }
+    });
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, new Date(Math.max(checkedAt.getTime(), Date.now())));
+    await writeAuditLogInTransaction(transaction, {
+      eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS",
+      actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId),
+      resource: "identity.admin", message: "Separate administrative credential recovered with normal password and verified email proof.",
+      metadata: { requestRef: hashAuditIdentifier(input.requestKey) }
+    });
+    await enqueueEmailMessageForClient(transaction, {
+      idempotencyKey: `admin-credential-email-recovered:${input.requestKey}`,
+      kind: "ADMIN_CREDENTIAL_CHANGED",
+      recipientEmail: currentAdmin.email,
+      locale: "pt-BR",
+      payload: { publicValues: {} }
+    });
+    const finalCheckedAt = new Date(Math.max(checkedAt.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, finalCheckedAt);
+    if (!isElevationCeremonyOpen(currentCeremony, finalCheckedAt)) throw new AdministrationMutationError();
+    return recoveryCodes;
+  }, { isolationLevel: "Serializable" });
+}
+
+async function createEmailElevationCeremony(input: { userId: string; sessionId: string; scope: string; kind: "ADMIN_EMAIL_VERIFICATION"; recipientEmail: string; challengeBinding?: string; displayName: string | null; locale: EmailLocale; now: Date; expiresAt?: Date; manualUntilRevoked?: boolean; credentialKeyVersion?: number; audit?: AuditLogInput }): Promise<string> {
   // Initial ADMIN credential setup precedes existence of a credential and
   // legitimately has no version. Every other elevation must bind to the
   // currently locked credential key version, never write a silent null.
@@ -332,7 +466,7 @@ async function createEmailElevationCeremony(input: { userId: string; sessionId: 
     await lockAdminSessionInTransaction(transaction, input.userId, input.sessionId, input.now);
     if (input.credentialKeyVersion !== undefined) await lockActiveAdministrativeCredentialVersion(transaction, input.userId, input.credentialKeyVersion);
     await transaction.securityElevation.updateMany({ where: { userId: input.userId, sessionId: input.sessionId, status: "PENDING" }, data: { status: "REVOKED", revokedAt: input.now } });
-    await transaction.securityElevation.create({ data: { requestKey, userId: input.userId, sessionId: input.sessionId, protocolVersion: ELEVATION_PROTOCOL_VERSION, credentialKeyVersion: input.credentialKeyVersion ?? null, scope: input.scope, challengeHash: hashSecurityCode(code), status: "PENDING", manualUntilRevoked: input.manualUntilRevoked ?? false, expiresAt, createdAt: input.now } });
+    await transaction.securityElevation.create({ data: { requestKey, userId: input.userId, sessionId: input.sessionId, protocolVersion: ELEVATION_PROTOCOL_VERSION, credentialKeyVersion: input.credentialKeyVersion ?? null, scope: input.scope, challengeHash: hashSecurityCode(input.challengeBinding === undefined ? code : `${code}:${input.challengeBinding}`), status: "PENDING", manualUntilRevoked: input.manualUntilRevoked ?? false, expiresAt, createdAt: input.now } });
     await enqueueEmailMessageForClient(transaction, { idempotencyKey: `admin-elevation:${requestKey}`, kind: input.kind, recipientEmail: input.recipientEmail, locale: input.locale, payload: { publicValues: { displayName: input.displayName ?? "" }, protectedValues: { code } } });
     if (input.audit) await writeAuditLogInTransaction(transaction, { ...input.audit, metadata: { ...input.audit.metadata, requestRef: hashAuditIdentifier(requestKey) } });
   });

@@ -6,7 +6,7 @@ import { useActionState, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useSensitiveFormAction } from "../../../lib/use-sensitive-form-action";
 import type { ElevationScope } from "@virki/auth/administration";
-import { changeAdminPasswordAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
+import { changeAdminPasswordAction, completeAdminEmailRecoveryAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startAdminEmailRecoveryAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
 const initialState: SecurityFormState = { status: "idle" };
 const passwordReuseMessage = "A senha administrativa precisa ser diferente da senha de login.";
@@ -23,6 +23,8 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
   const [start, startAction, starting] = useSensitiveFormAction(startCredentialSetupAction, initialState);
   const [complete, completeAction, completing] = useSensitiveFormAction(completeCredentialSetupAction, initialState);
   const [recovery, recoveryAction, recovering] = useSensitiveFormAction(recoverAdminCredentialAction, initialState);
+  const [emailStart, emailStartAction, emailing] = useSensitiveFormAction(startAdminEmailRecoveryAction, initialState);
+  const [emailComplete, emailCompleteAction, emailCompleting] = useSensitiveFormAction(completeAdminEmailRecoveryAction, initialState);
   const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
   const [recoveryCodesSaved, setRecoveryCodesSaved] = useState(false);
   const acknowledgingRecoveryCodes = useRef(false);
@@ -58,8 +60,39 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
         <>
           <p>Ativa · versão {activeCredential.keyVersion} · atualizada em {activeCredential.updatedAt}</p>
           <p><a href="/account/security">Gerenciar MFA, códigos de recuperação e sessões da conta</a></p>
+          <h3>Esqueceu a senha administrativa? Recuperar por e-mail</h3>
+          <p>Use a senha normal da sua conta e um código enviado ao e-mail verificado. Não é necessário ter os códigos administrativos anteriores. O código expira em 10 minutos, e a recuperação revoga elevações, sessões antigas e dispositivos lembrados.</p>
+          {emailComplete.recoveryCodes ? (
+            <OneTimeRecoveryCodes
+              codes={emailComplete.recoveryCodes}
+              destination="/admin/security?status=email-recovered#admin-content"
+              label="Já guardei os novos códigos"
+            />
+          ) : emailStart.requestKey ? (
+            <form action={emailCompleteAction} className="form-stack">
+              <input type="hidden" name="csrfToken" value={csrf} />
+              <input type="hidden" name="requestKey" value={emailStart.requestKey} />
+              <label>Código recebido por e-mail<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required /></label>
+              <label>Confirme a senha normal atual<input name="normalPassword" type="password" autoComplete="current-password" required /></label>
+              <label>Nova senha administrativa (16 caracteres ou mais)<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
+              <label>Confirme a nova senha administrativa<input name="confirmPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
+              <button type="submit" disabled={emailCompleting}>{emailCompleting ? "Recuperando…" : "Confirmar código e trocar senha"}</button>
+              {emailComplete.status === "password-mismatch" && <p className="form-error" role="alert">As duas senhas administrativas precisam ser iguais. Preencha novamente todos os campos.</p>}
+              {emailComplete.status === "password-reuse" && <p className="form-error" role="alert">{passwordReuseMessage}</p>}
+              {emailComplete.status === "error" && <p className="form-error" role="alert">Não foi possível concluir. Confira a senha normal e o código, ou solicite outro código.</p>}
+              <a className="subtle-link" href="/admin/security?restart=email-recovery#admin-content">Solicitar novo código</a>
+            </form>
+          ) : (
+            <form action={emailStartAction} className="form-stack">
+              <input type="hidden" name="csrfToken" value={csrf} />
+              <label>Senha normal atual<input name="normalPassword" type="password" autoComplete="current-password" required /></label>
+              <button type="submit" disabled={emailing}>{emailing ? "Enviando…" : "Enviar código de recuperação por e-mail"}</button>
+              {emailStart.status === "error" && <p className="form-error" role="alert">Não foi possível enviar o código. Verifique a senha normal e se o e-mail está confirmado.</p>}
+            </form>
+          )}
+          {!emailComplete.recoveryCodes && <>
           <h3>Recuperar credencial administrativa</h3>
-          <p>Use sua senha normal e um código administrativo de uso único. A recuperação revoga elevações ativas e emite novos códigos.</p>
+          <p>Alternativa: use sua senha normal e um código administrativo de recuperação que ainda tenha guardado. A recuperação revoga elevações ativas e emite novos códigos.</p>
           {recovery.recoveryCodes ? (
             <OneTimeRecoveryCodes
               codes={recovery.recoveryCodes}
@@ -77,6 +110,7 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
               {recovery.status === "password-reuse" && <p className="form-error" role="alert">{passwordReuseMessage}</p>}
             </form>
           )}
+          </>}
         </>
       ) : start.requestKey ? (
         <form action={completeAction} className="form-stack">
