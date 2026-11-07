@@ -5,7 +5,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 ARG VIRKI_BUILD_REVISION
 ARG TARGETARCH
+ARG VIRKI_PORTAL_HOSTNAME=portal.biel.dev.br
 RUN node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1] ?? "")) process.exit(1)' "$VIRKI_BUILD_REVISION"
+# Next.js compiles host-qualified OIDC rewrites at build time. Runtime Compose
+# environment variables alone cannot change the frozen routes manifest.
+RUN node -e 'const h=process.argv[1]??""; if(h.length>253 || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u.test(h) || h==="hub.biel.dev.br") process.exit(1)' "$VIRKI_PORTAL_HOSTNAME"
 
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
@@ -22,7 +26,10 @@ COPY . .
 RUN npm run prisma:generate
 RUN npm run prisma:validate
 RUN npm run typecheck
-RUN npm run build
+RUN VIRKI_PORTAL_HOSTNAME="$VIRKI_PORTAL_HOSTNAME" npm run build
+# Reject an image whose compiled Next.js OIDC routes are bound to a different
+# host (or unexpectedly proxy to a foreign issuer), before export or deploy.
+RUN node scripts/assert-oidc-build-host.mjs "$VIRKI_PORTAL_HOSTNAME"
 
 RUN set -eux; \
   case "$TARGETARCH" in \
@@ -43,6 +50,7 @@ RUN set -eux; \
   cp -a packages/database/src /runtime-artifacts/database-src
 
 FROM build AS migrator
+ARG VIRKI_BUILD_REVISION
 ENV NODE_ENV=production
 ENV HOME=/tmp/node-home
 ENV NPM_CONFIG_CACHE=/tmp/npm-cache

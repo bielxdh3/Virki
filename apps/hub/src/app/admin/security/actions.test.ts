@@ -5,10 +5,11 @@ import * as ts from "typescript";
 
 const sourceText = readFileSync(new URL("./actions.ts", import.meta.url), "utf8");
 const sourceFile = ts.createSourceFile("actions.ts", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const controlsText = readFileSync(new URL("./security-controls.tsx", import.meta.url), "utf8");
 
 const boundaries = [
   { action: "startCredentialSetupAction", fields: ["normalPassword"], credentialOperation: "startAdministrativeCredentialSetup" },
-  { action: "completeCredentialSetupAction", fields: ["newPassword"], credentialOperation: "completeAdministrativeCredentialSetup" },
+  { action: "completeCredentialSetupAction", fields: ["newPassword", "confirmPassword"], credentialOperation: "completeAdministrativeCredentialSetup" },
   { action: "startElevationAction", fields: ["normalPassword", "administrativePassword"], credentialOperation: "startSecurityElevation" },
   { action: "changeAdminPasswordAction", fields: ["newPassword"], credentialOperation: "changeAdministrativePassword" },
   { action: "recoverAdminCredentialAction", fields: ["normalPassword", "newPassword"], credentialOperation: "recoverAdministrativeCredential" }
@@ -107,4 +108,27 @@ test("all password-bearing ADMIN actions reject bounded-input failures before cr
     assert.ok(rejectionGate.end < credentialOperations[0]!.pos, `${boundary.action} must reject invalid input before the credential service`);
     assert.ok(returnsGenericError(rejectionGate.thenStatement), `${boundary.action} must stop with its generic error result`);
   }
+});
+
+test("ADMIN credential setup refuses mismatched confirmation before consuming the email proof", () => {
+  const action = functionNamed("completeCredentialSetupAction");
+  const operation = callsNamed(action, "completeAdministrativeCredentialSetup")[0];
+  assert.ok(operation);
+  const mismatch = nodesWithin(action, ts.isIfStatement).find((statement) =>
+    ts.isBinaryExpression(statement.expression) &&
+    statement.expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+    statement.expression.left.getText(sourceFile) === "newPassword" &&
+    statement.expression.right.getText(sourceFile) === "confirmPassword"
+  );
+  assert.ok(mismatch, "the two passwords must be compared server-side");
+  assert.ok(mismatch.end < operation.pos, "a mismatch must not consume the one-time verification proof");
+  assert.ok(nodesWithin(mismatch.thenStatement, ts.isStringLiteral).some((node) => node.text === "password-mismatch"));
+});
+
+test("credential setup UI asks for confirmation and gates one-time code dismissal", () => {
+  assert.match(controlsText, /name="confirmPassword" type="password" autoComplete="new-password"/u);
+  assert.match(controlsText, /complete\.status === "password-mismatch"/u);
+  assert.match(controlsText, /disabled=\{!recoveryCodesSaved\}/u);
+  assert.match(controlsText, /disabled=\{!saved\}/u);
+  assert.equal((controlsText.match(/Guardei os dez códigos de recuperação fora do Virki/g) ?? []).length, 2);
 });
