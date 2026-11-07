@@ -12,7 +12,9 @@ const boundaries = [
   { action: "completeCredentialSetupAction", fields: ["newPassword", "confirmPassword"], credentialOperation: "completeAdministrativeCredentialSetup" },
   { action: "startElevationAction", fields: ["normalPassword", "administrativePassword"], credentialOperation: "startSecurityElevation" },
   { action: "changeAdminPasswordAction", fields: ["newPassword"], credentialOperation: "changeAdministrativePassword" },
-  { action: "recoverAdminCredentialAction", fields: ["normalPassword", "newPassword"], credentialOperation: "recoverAdministrativeCredential" }
+  { action: "recoverAdminCredentialAction", fields: ["normalPassword", "newPassword"], credentialOperation: "recoverAdministrativeCredential" },
+  { action: "startAdminEmailRecoveryAction", fields: ["normalPassword"], credentialOperation: "startAdministrativeEmailRecovery" },
+  { action: "completeAdminEmailRecoveryAction", fields: ["normalPassword", "newPassword", "confirmPassword"], credentialOperation: "completeAdministrativeEmailRecovery" }
 ] as const;
 
 function nodesWithin<T extends ts.Node>(root: ts.Node, match: (node: ts.Node) => node is T): T[] {
@@ -123,6 +125,29 @@ test("ADMIN credential setup refuses mismatched confirmation before consuming th
   assert.ok(mismatch, "the two passwords must be compared server-side");
   assert.ok(mismatch.end < operation.pos, "a mismatch must not consume the one-time verification proof");
   assert.ok(nodesWithin(mismatch.thenStatement, ts.isStringLiteral).some((node) => node.text === "password-mismatch"));
+});
+
+test("ADMIN email recovery refuses mismatched confirmation before consuming the email proof", () => {
+  const action = functionNamed("completeAdminEmailRecoveryAction");
+  const operation = callsNamed(action, "completeAdministrativeEmailRecovery")[0];
+  assert.ok(operation);
+  const mismatch = nodesWithin(action, ts.isIfStatement).find((statement) =>
+    ts.isBinaryExpression(statement.expression) &&
+    statement.expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+    statement.expression.left.getText(sourceFile) === "newPassword" &&
+    statement.expression.right.getText(sourceFile) === "confirmPassword"
+  );
+  assert.ok(mismatch, "the new ADMIN password must be confirmed server-side");
+  assert.ok(mismatch.end < operation.pos, "mismatch must never consume the email proof");
+});
+
+test("email credential recovery UI requires fresh normal password, OTP and new password confirmation", () => {
+  assert.match(controlsText, /name="requestKey" value=\{emailStart\.requestKey\}/u);
+  assert.match(controlsText, /name="code" inputMode="numeric" autoComplete="one-time-code"/u);
+  assert.match(controlsText, /name="confirmPassword" type="password" autoComplete="new-password"/u);
+  assert.match(controlsText, /startAdminEmailRecoveryAction/u);
+  assert.match(controlsText, /completeAdminEmailRecoveryAction/u);
+  assert.match(controlsText, /emailComplete\.recoveryCodes/u);
 });
 
 test("credential setup UI asks for confirmation and gates one-time code dismissal", () => {
