@@ -5,10 +5,12 @@ import { withHubAuditRequest } from "../../../lib/audit-request";
 import {
   AdministrativePasswordReuseError,
   completeAdministrativeCredentialSetup,
+  completeAdministrativeEmailRecovery,
   changeAdministrativePassword,
   regenerateAdministrativeRecoveryCodes,
   recoverAdministrativeCredential,
   startAdministrativeCredentialSetup,
+  startAdministrativeEmailRecovery,
   startSecurityElevation,
   verifySecurityElevation,
   assertAdminSessionCurrentInTransaction,
@@ -199,6 +201,56 @@ export async function recoverAdminCredentialAction(_state: SecurityFormState, fo
     await recordSecurityDenial(await headers(), "admin-credential-recovery", "rejected", session);
     return { status: passwordStatus(error) };
   }
+  });
+}
+
+export async function startAdminEmailRecoveryAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
+    const normalPassword = readBoundedFormString(formData, "normalPassword", PASSWORD_INPUT_MAX_LENGTH);
+    const session = await requireAdminMutation(formData, "admin-email-recovery-start");
+    if (normalPassword === null) {
+      await recordSecurityDenial(await headers(), "admin-credential-email-recovery", "rejected", session);
+      return { status: "error" };
+    }
+    try {
+      const requestKey = await startAdministrativeEmailRecovery({ actor: session.user, sessionId: session.id, normalPassword, locale: "pt-BR" });
+      return { status: "started", requestKey };
+    } catch {
+      await recordSecurityDenial(await headers(), "admin-credential-email-recovery", "rejected", session);
+      return { status: "error" };
+    }
+  });
+}
+
+export async function completeAdminEmailRecoveryAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
+    const normalPassword = readBoundedFormString(formData, "normalPassword", PASSWORD_INPUT_MAX_LENGTH);
+    const newPassword = readBoundedFormString(formData, "newPassword", PASSWORD_INPUT_MAX_LENGTH);
+    const confirmPassword = readBoundedFormString(formData, "confirmPassword", PASSWORD_INPUT_MAX_LENGTH);
+    const session = await requireAdminMutation(formData, "admin-email-recovery-complete");
+    if (normalPassword === null || newPassword === null || confirmPassword === null) {
+      await recordSecurityDenial(await headers(), "admin-credential-email-recovery", "rejected", session);
+      return { status: "error" };
+    }
+    if (newPassword !== confirmPassword) {
+      await recordSecurityDenial(await headers(), "admin-credential-email-recovery", "rejected", session);
+      return { status: "password-mismatch" };
+    }
+    try {
+      const recoveryCodes = await completeAdministrativeEmailRecovery({
+        actor: session.user,
+        sessionId: session.id,
+        requestKey: readFormString(formData, "requestKey"),
+        code: readFormString(formData, "code"),
+        normalPassword,
+        newPassword
+      });
+      revalidatePath("/admin/security");
+      return { status: "complete", recoveryCodes };
+    } catch (error) {
+      await recordSecurityDenial(await headers(), "admin-credential-email-recovery", "rejected", session);
+      return { status: passwordStatus(error) };
+    }
   });
 }
 

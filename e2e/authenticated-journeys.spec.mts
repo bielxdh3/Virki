@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { getDeviceCookieName, getSessionCookieName } from "@virki/auth/constants";
-import { hashSessionToken, verifyPassword } from "@virki/auth";
+import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { decryptEmailPayload } from "@virki/auth/email";
 import { getPendingAccountRecoveryQueueWhere } from "@virki/auth/security";
 import { PrismaClient } from "@virki/database";
@@ -70,6 +70,73 @@ test("USER can sign in and sees only the granted enabled project", async ({ brow
     await expect(page.getByText(fixture.disabledProjectName, { exact: true })).toHaveCount(0);
   } finally {
     await context.close();
+  }
+});
+
+test("ADMIN recovers separate credential by email without saved codes", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const context = await browser.newContext();
+  const prisma = createE2ePrismaClient();
+  try {
+    const loginSecret = randomBytes(24).toString("base64url");
+    const oldAdminSecret = randomBytes(24).toString("base64url");
+    const newAdminSecret = randomBytes(24).toString("base64url");
+    const email = `admin-recovery-${randomBytes(12).toString("hex")}@integration.invalid`;
+    const user = await prisma.user.create({ data: {
+      email, emailNormalized: email, displayName: "Email recovery E2E", role: "ADMIN",
+      emailVerifiedAt: new Date(), passwordHash: await hashPassword(loginSecret),
+      administrativeCredential: { create: { passwordHash: await hashPassword(oldAdminSecret), status: "ACTIVE" } }
+    } });
+    const token = randomBytes(32).toString("base64url");
+    const session = await prisma.session.create({ data: {
+      userId: user.id, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 600_000),
+      authenticationMethods: ["pwd", "otp", "mfa"]
+    } });
+    await context.addCookies([{ name: sessionCookieName, value: token, url: hubUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
+    const page = await context.newPage();
+    await addCloudflareAccessHeader(page);
+    await page.goto(`${hubUrl}/admin/security`);
+    const credentialSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Credencial administrativa", exact: true }) });
+    const sendButton = credentialSection.getByRole("button", { name: "Enviar código de recuperação por e-mail" });
+    await expect(sendButton).toBeVisible();
+    await sendButton.locator("xpath=ancestor::form").locator('input[name="normalPassword"]').fill(loginSecret);
+    await sendButton.click();
+    const completeButton = credentialSection.getByRole("button", { name: "Confirmar código e trocar senha" });
+    await expect(completeButton).toBeVisible();
+    const form = completeButton.locator("xpath=ancestor::form");
+    const requestKey = await form.locator('input[name="requestKey"]').inputValue();
+    const emailedCode = await readLatestAdminVerificationCode(prisma, email, requestKey);
+    await form.locator('input[name="code"]').fill(emailedCode);
+    await form.locator('input[name="normalPassword"]').fill(loginSecret);
+    await form.locator('input[name="newPassword"]').fill(newAdminSecret);
+    await form.locator('input[name="confirmPassword"]').fill(`${newAdminSecret}x`);
+    await completeButton.click();
+    await expect(form.getByRole("alert")).toContainText("duas senhas administrativas precisam ser iguais");
+    expect((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status).toBe("PENDING");
+    // Sensitive fields are cleared after a form error. Refill all fields.
+    await form.locator('input[name="code"]').fill(emailedCode);
+    await form.locator('input[name="normalPassword"]').fill(loginSecret);
+    await form.locator('input[name="newPassword"]').fill(newAdminSecret);
+    await form.locator('input[name="confirmPassword"]').fill(newAdminSecret);
+    await completeButton.click();
+    await expect(credentialSection.getByRole("heading", { name: "Códigos de recuperação — exibidos uma vez" })).toBeVisible();
+    await expect(credentialSection.locator("ul li code")).toHaveCount(10);
+    const changedCredential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: user.id } });
+    expect(changedCredential.keyVersion).toBe(2);
+    expect(await verifyPassword(changedCredential.passwordHash, newAdminSecret)).toBe(true);
+    expect((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status).toBe("CONSUMED");
+    expect(await prisma.auditLog.count({ where: { actorUserId: user.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED" } })).toBe(1);
+    expect((await prisma.session.findUniqueOrThrow({ where: { id: session.id } })).revokedAt).toBeNull();
+    const acknowledgement = credentialSection.getByRole("button", { name: "Já guardei os novos códigos" });
+    await expect(acknowledgement).toBeDisabled();
+    await credentialSection.getByRole("checkbox", { name: /Guardei os dez códigos de recuperação fora do Virki/u }).check();
+    await acknowledgement.click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/security?status=email-recovered#admin-content`);
+    await expect(credentialSection.locator("ul li code")).toHaveCount(0);
+  } finally {
+    await context.close();
+    // Retain immutable audit history; the isolated tmpfs test database is removed after the run.
+    await prisma.$disconnect();
   }
 });
 

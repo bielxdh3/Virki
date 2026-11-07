@@ -6,12 +6,14 @@ import {
   AdministrationMutationError,
   AdministrativePasswordReuseError,
   changeAdministrativePassword,
+  completeAdministrativeEmailRecovery,
   completeAdministrativeCredentialSetup,
   hasActiveSecurityElevation,
   requireSecurityElevationInTransaction,
   recoverAdministrativeCredential,
   regenerateAdministrativeRecoveryCodes,
   startAdministrativeCredentialSetup,
+  startAdministrativeEmailRecovery,
   startSecurityElevation,
   revokeSecurityElevation,
   verifySecurityElevation
@@ -389,6 +391,146 @@ test("an administrative password equal to the normal password is rejected when r
   // The rejected attempt must not consume the single-use recovery code.
   const codes = await recoverAdministrativeCredential({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: "integration-recovered-admin-1" });
   assert.equal(codes.length, 10);
+});
+
+test("email recovery rotates only the separate ADMIN credential, replaces backup codes and revokes old access", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const oldCode = randomBytes(9).toString("hex");
+  await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(oldCode) } });
+  await seedActiveElevation(admin, "PROJECT_CONNECTION_MANAGE");
+  const otherSession = await prisma.session.create({
+    data: { userId: admin.actor.id, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(Date.now() + DAY) }
+  });
+  const device = await prisma.trustedDevice.create({ data: { userId: admin.actor.id, deviceIdHash: randomBytes(32).toString("hex") } });
+  const start = new Date();
+  const requestKey = await startAdministrativeEmailRecovery({
+    actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE, now: start
+  });
+  const emailedCode = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  const ceremony = await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey }, select: { scope: true, status: true, credentialKeyVersion: true } });
+  assert.equal(ceremony.scope, "ADMIN_CREDENTIAL_EMAIL_RECOVERY");
+  assert.equal(ceremony.status, "PENDING");
+  await assert.rejects(
+    verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code: emailedCode }),
+    AdministrationMutationError, "a recovery proof must not become an arbitrary elevation"
+  );
+  const replacementCredential = "new-admin-credential-email-2026";
+  const codes = await completeAdministrativeEmailRecovery({
+    actor: admin.actor, sessionId: admin.sessionId, requestKey, code: emailedCode,
+    normalPassword: NORMAL_PASSWORD, newPassword: replacementCredential
+  });
+  assert.equal(codes.length, 10);
+  assert.equal(new Set(codes).size, 10);
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  assert.equal(credential.keyVersion, 2);
+  assert.equal(await verifyPassword(credential.passwordHash, replacementCredential), true);
+  assert.equal(await verifyPassword(credential.passwordHash, ADMIN_PASSWORD), false);
+  const account = await prisma.user.findUniqueOrThrow({ where: { id: admin.actor.id } });
+  assert.equal(await verifyPassword(account.passwordHash!, NORMAL_PASSWORD), true);
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id, usedAt: null } }), 10);
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id, codeHash: hashRecoveryCode(oldCode) } }), 0);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status, "CONSUMED");
+  assert.equal(await prisma.securityElevation.count({ where: { userId: admin.actor.id, status: "ACTIVE" } }), 0);
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: otherSession.id } })).revokedAt !== null, true);
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERY_STARTED", result: "INFO" } }), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS" } }), 1);
+  assert.ok((await queuedEmails(admin.email)).some((mail) => mail.kind === "ADMIN_CREDENTIAL_CHANGED"));
+  await assert.rejects(
+    completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code: emailedCode, normalPassword: NORMAL_PASSWORD, newPassword: "another-admin-email-password-2026" }),
+    AdministrationMutationError,
+    "the email code cannot be replayed"
+  );
+});
+
+test("ADMIN email recovery rejects invalid normal password and missing verified email before sending", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  await assert.rejects(
+    startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: "incorrect-normal-password", locale: LOCALE }),
+    AdministrationMutationError
+  );
+  await prisma.user.update({ where: { id: admin.actor.id }, data: { emailVerifiedAt: null } });
+  await assert.rejects(
+    startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE }),
+    AdministrationMutationError
+  );
+  assert.equal((await queuedEmails(admin.email)).length, 0);
+});
+
+test("ADMIN email recovery fails closed for a changed verified mailbox, wrong session, stale version, wrong password and expiry", integrationOptions, async () => {
+  const cases = ["wrong-session", "changed-email", "rotated-credential", "wrong-password", "expired", "incorrect-code", "same-as-normal"] as const;
+  for (const kind of cases) {
+    const admin = await setupAdmin();
+    const startedAt = new Date();
+    const requestKey = await startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE, now: startedAt });
+    const emailedCode = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+    let sessionId = admin.sessionId;
+    let code = emailedCode;
+    let candidateNormalPassword = NORMAL_PASSWORD;
+    let newPassword = "admin-recovered-with-email-2026";
+    let now = startedAt;
+    if (kind === "wrong-session") {
+      sessionId = (await prisma.session.create({ data: { userId: admin.actor.id, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(Date.now() + DAY) } })).id;
+    } else if (kind === "changed-email") {
+      const updated = `${randomBytes(8).toString("hex")}@integration.invalid`;
+      await prisma.user.update({ where: { id: admin.actor.id }, data: { email: updated, emailNormalized: updated } });
+    } else if (kind === "rotated-credential") {
+      await prisma.administrativeCredential.update({ where: { userId: admin.actor.id }, data: { keyVersion: { increment: 1 } } });
+    } else if (kind === "wrong-password") {
+      candidateNormalPassword = "incorrect-normal-password";
+    } else if (kind === "expired") {
+      now = new Date(startedAt.getTime() + 10 * MINUTE);
+    } else if (kind === "incorrect-code") {
+      code = emailedCode === "000000" ? "000001" : "000000";
+    } else if (kind === "same-as-normal") {
+      newPassword = NORMAL_PASSWORD;
+    }
+    await assert.rejects(
+      completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId, requestKey, code, normalPassword: candidateNormalPassword, newPassword, now }),
+      kind === "same-as-normal" ? AdministrativePasswordReuseError : AdministrationMutationError,
+      `must reject ${kind}`
+    );
+    const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+    assert.equal(await verifyPassword(credential.passwordHash, ADMIN_PASSWORD), true, kind);
+    assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status, "PENDING", kind);
+    assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED" } }), 0, kind);
+  }
+});
+
+test("starting another ADMIN email recovery invalidates the previous email OTP", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const firstKey = await startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE });
+  const firstCode = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  const secondKey = await startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE });
+  assert.notEqual(firstKey, secondKey);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: firstKey } })).status, "REVOKED");
+  await assert.rejects(completeAdministrativeEmailRecovery({
+    actor: admin.actor, sessionId: admin.sessionId, requestKey: firstKey, code: firstCode,
+    normalPassword: NORMAL_PASSWORD, newPassword: "new-admin-old-email-proof"
+  }), AdministrationMutationError);
+  const secondCode = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  const codes = await completeAdministrativeEmailRecovery({
+    actor: admin.actor, sessionId: admin.sessionId, requestKey: secondKey, code: secondCode,
+    normalPassword: NORMAL_PASSWORD, newPassword: "new-admin-latest-email-proof"
+  });
+  assert.equal(codes.length, 10);
+});
+
+test("competing ADMIN email recovery completions cannot rotate the credential twice", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const requestKey = await startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  const attempts = await Promise.allSettled([
+    completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-concurrent-a-2026" }),
+    completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-concurrent-b-2026" })
+  ]);
+  assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(attempts.filter((result) => result.status === "rejected").length, 1);
+  assert.equal((await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } })).keyVersion, 2);
+  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 10);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS" } }), 1);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status, "CONSUMED");
 });
 
 test("administrative password change rejects a normal password committed while it waits for the account lock", integrationOptions, async () => {
