@@ -146,11 +146,11 @@ test("portal host reaches the hub OIDC proxy and Cloudflare tunnel uses no www a
 
 test("production Cloudflared tunnel uses the independently exercised least-privilege sandbox", () => {
   const tunnel = serviceBlock(cloudflareCompose, "cloudflared");
-  assert.match(tunnel, /^    user: "65532:65532"$/mu);
-  assert.match(tunnel, /^    read_only: true$/mu);
-  assert.match(tunnel, /^    cap_drop: \[ALL\]$/mu);
-  assert.match(tunnel, /^    security_opt: \[no-new-privileges:true\]$/mu);
-  assert.doesNotMatch(tunnel, /^    (?:privileged|network_mode|ports|volumes|devices|pid|ipc):/mu);
+  assert.match(tunnel, /^ {4}user: "65532:65532"$/mu);
+  assert.match(tunnel, /^ {4}read_only: true$/mu);
+  assert.match(tunnel, /^ {4}cap_drop: \[ALL\]$/mu);
+  assert.match(tunnel, /^ {4}security_opt: \[no-new-privileges:true\]$/mu);
+  assert.doesNotMatch(tunnel, /^ {4}(?:privileged|network_mode|ports|volumes|devices|pid|ipc):/mu);
   assert.match(tunnel, /TUNNEL_TOKEN:\s*\$\{CLOUDFLARE_TUNNEL_TOKEN:\?/u);
   assert.match(tunnel, /command: tunnel --no-autoupdate run/u);
 });
