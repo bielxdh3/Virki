@@ -15,7 +15,7 @@ import { getCurrentSession } from "../../lib/auth";
 import { expectedPasskeyRP } from "@virki/auth/passkeys";
 import {
   finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, startMultiMethodRecovery, startRecoveryPasskeyAssertion,
-  verifyMultiMethodRecoveryEmail, verifyMultiMethodRecoveryTotp
+  startRecoveryNewMailbox, verifyRecoveryNewMailbox, verifyMultiMethodRecoveryEmail, verifyMultiMethodRecoveryTotp
 } from "@virki/auth/recovery-methods";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin, requestHost } from "../../lib/surface";
@@ -182,6 +182,41 @@ export async function verifySelectedRecoveryTotpAction(_state: RecoveryProofActi
       return { status: "verified" };
     } catch {
       await recordSecurityDenial(requestHeaders, "account-recovery-verify", "rejected");
+      return { status: "error" };
+    }
+  });
+}
+
+export type RecoveryNewMailboxActionState = { status: "idle" | "error" | "sent" | "verified" };
+
+export async function startRecoveryNewMailboxAction(_state: RecoveryNewMailboxActionState, formData: FormData): Promise<RecoveryNewMailboxActionState> {
+  return withHubAuditRequest(async () => {
+    const { expectedRole, requestHeaders } = await requireRecoveryAccess(formData, "recovery-verify");
+    const requestId = read(formData, "requestId");
+    const bound = recoveryBrowserState(await cookies(), requestId);
+    const newEmail = readBoundedFormString(formData, "newEmail", 254);
+    if (!bound || !newEmail) return { status: "error" };
+    try {
+      await startRecoveryNewMailbox(requestId, bound.requestKey, bound.browserToken, expectedRole, newEmail);
+      return { status: "sent" };
+    } catch {
+      await recordSecurityDenial(requestHeaders, "account-recovery-new-mail-start", "rejected");
+      return { status: "error" };
+    }
+  });
+}
+
+export async function verifyRecoveryNewMailboxAction(_state: RecoveryNewMailboxActionState, formData: FormData): Promise<RecoveryNewMailboxActionState> {
+  return withHubAuditRequest(async () => {
+    const { expectedRole, requestHeaders } = await requireRecoveryAccess(formData, "recovery-verify");
+    const requestId = read(formData, "requestId");
+    const bound = recoveryBrowserState(await cookies(), requestId);
+    if (!bound) return { status: "error" };
+    try {
+      await verifyRecoveryNewMailbox(requestId, bound.requestKey, bound.browserToken, expectedRole, read(formData, "code"));
+      return { status: "verified" };
+    } catch {
+      await recordSecurityDenial(requestHeaders, "account-recovery-new-mail-verify", "rejected");
       return { status: "error" };
     }
   });

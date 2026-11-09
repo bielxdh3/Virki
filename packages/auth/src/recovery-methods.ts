@@ -4,7 +4,8 @@ import {
   generateAuthenticationOptions, verifyAuthenticationResponse
 } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
-import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
+import { enqueueEmailMessageForClient, getEmailTransportStatus, type EmailLocale } from "./email";
+import { isSingleMailboxAddress } from "./email-address";
 import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, isTrustedClientAddress, lockRateLimitIdentifierInTransaction, writeAuditLogInTransaction } from "./index";
 import {
   type AccountRecoveryRole, decryptTotpSecret, generateNumericCode, getApprovedAccountRecoveryExpiry,
@@ -78,6 +79,9 @@ function verifiedFactor(row: ProofState, proof: RecoveryProof): boolean {
   return proof === "EMAIL" ? Boolean(row.emailVerifiedAt) : proof === "TOTP" ? Boolean(row.recoveryTotpVerifiedAt) : Boolean(row.recoveryPasskeyVerifiedAt);
 }
 type RequestRow = { id: string; userId: string; recoveryProofs: string[]; recoveryRole: string | null; recoveryAdminReview: boolean; status: string; purpose: string; expiresAt: Date; recoveryBrowserHash: string | null; requestKeyHash: string; emailAddressHash: string; emailVerifiedAt: Date | null; recoveryTotpVerifiedAt: Date | null; recoveryPasskeyVerifiedAt: Date | null; reviewedByUserId: string | null; user: { email: string; emailNormalized: string | null; role: string; isActive: boolean; accountStatus: string } };
+export function needsRecoveryNewMailbox(proofs: readonly string[]): boolean {
+  return proofs.length > 0 && !proofs.includes("EMAIL");
+}
 function validPending(row: RequestRow | null, expectedRole: AccountRecoveryRole, key: string, token: string, now = new Date()) {
   return Boolean(row && row.purpose === "RECOVERY" && row.recoveryRole === expectedRole && row.status === "PENDING" && row.expiresAt > now &&
     isAccountRecoveryEligible(row.user, expectedRole) && row.emailAddressHash === hashEmailAddress(row.user.emailNormalized ?? row.user.email) &&
@@ -89,7 +93,8 @@ const recoverySelect = {
   id: true, userId: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, status: true, purpose: true,
   expiresAt: true, recoveryBrowserHash: true, requestKeyHash: true, emailAddressHash: true,
   emailVerifiedAt: true, recoveryTotpVerifiedAt: true, recoveryPasskeyVerifiedAt: true,
-  reviewedByUserId: true,
+  reviewedByUserId: true, recoveryNewEmail: true, recoveryNewEmailChallengeHash: true,
+  recoveryNewEmailExpiresAt: true, recoveryNewEmailVerifiedAt: true,
   user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } }
 } as const;
 
@@ -344,13 +349,138 @@ export async function hasIndependentAdministratorForRole(expectedRole: AccountRe
   return (await prisma.user.count({ where: { role: "ADMIN", accountStatus: "ACTIVE", isActive: true } })) >= (expectedRole === "ADMIN" ? 2 : 1);
 }
 
+const REPLACEMENT_EMAIL_CODE_MS = 10 * 60_000;
+
+type ApprovedReplacementRow = RequestRow & {
+  recoveryNewEmail: string | null; recoveryNewEmailChallengeHash: string | null;
+  recoveryNewEmailExpiresAt: Date | null; recoveryNewEmailVerifiedAt: Date | null;
+  recoveryTotpBindingHash: string | null; recoveryTotpUsedStep: number | null;
+  recoveryPasskeyCredentialId: string | null; recoveryPasskeyBindingHash: string | null;
+};
+
+function validReplacement(row: ApprovedReplacementRow | null, role: AccountRecoveryRole, key: string, browser: string, now: Date): row is ApprovedReplacementRow {
+  return Boolean(row && row.status === "APPROVED" && row.expiresAt > now &&
+    row.purpose === "RECOVERY" && row.recoveryRole === role &&
+    needsRecoveryNewMailbox(row.recoveryProofs) && isRecoveryProofSatisfied(row.recoveryProofs, row.recoveryAdminReview, row) &&
+    isAccountRecoveryEligible(row.user, role) &&
+    row.emailAddressHash === hashEmailAddress(row.user.emailNormalized ?? row.user.email) &&
+    verifyCapability(row, key, browser));
+}
+
+const replacementSelect = {
+  ...recoverySelect, purpose: true, recoveryTotpBindingHash: true, recoveryTotpUsedStep: true,
+  recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true
+} as const;
+
+async function lockReplacementRequest(tx: Prisma.TransactionClient, requestId: string, role: AccountRecoveryRole) {
+  const initial = await tx.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true } });
+  if (!initial || !await lockActiveRecoveryAccountInTransaction(tx, initial.userId, role)) throw FAILURE;
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "AccountRecoveryRequest" WHERE "id" = ${requestId} FOR UPDATE
+  `;
+  if (locked.length !== 1) throw FAILURE;
+  return tx.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: replacementSelect });
+}
+
+async function rateLimitReplacement(requestId: string, stage: "start" | "verify", subject: string): Promise<void> {
+  const permitted = await prisma.$transaction(async (tx) => {
+    const ceremony = await consumeRateLimitAttemptInTransaction(tx, `recovery-new-mail-${stage}:${requestId}`, new Date());
+    const subjectBudget = await consumeRateLimitAttemptInTransaction(tx, `recovery-new-mail-${stage}-subject:${subject}`, new Date());
+    return ceremony.allowed && subjectBudget.allowed;
+  });
+  if (!permitted) throw FAILURE;
+}
+
+export async function startRecoveryNewMailbox(
+  requestId: string, key: string, browserToken: string, role: AccountRecoveryRole, proposedEmail: string
+): Promise<void> {
+  const newEmail = proposedEmail.trim().toLowerCase();
+  if (!isRequestId(requestId) || !isRequestKey(key) || !isBrowserToken(browserToken) ||
+      !isSingleMailboxAddress(newEmail) || getEmailTransportStatus().state !== "configured") throw FAILURE;
+  await rateLimitReplacement(requestId, "start", hashEmailAddress(newEmail));
+  await prisma.$transaction(async (tx) => {
+    const row = await lockReplacementRequest(tx, requestId, role);
+    const now = new Date();
+    if (!validReplacement(row, role, key, browserToken, now)) throw FAILURE;
+    await requireLiveRecoveryProofsInTransaction(tx, row);
+    if (newEmail === (row.user.emailNormalized ?? row.user.email.trim().toLowerCase()) ||
+        await tx.user.count({ where: { OR: [{ email: newEmail }, { emailNormalized: newEmail }] } }) !== 0) throw FAILURE;
+    const expiry = new Date(Math.min(now.getTime() + REPLACEMENT_EMAIL_CODE_MS, row.expiresAt.getTime()));
+    if (expiry <= now) throw FAILURE;
+    const code = generateNumericCode();
+    const changed = await tx.accountRecoveryRequest.updateMany({
+      where: { id: requestId, status: "APPROVED", requestKeyHash: row.requestKeyHash,
+        emailAddressHash: row.emailAddressHash, expiresAt: { gt: now } },
+      data: { recoveryNewEmail: newEmail, recoveryNewEmailChallengeHash: hashSecurityCode(code),
+        recoveryNewEmailExpiresAt: expiry, recoveryNewEmailVerifiedAt: null }
+    });
+    if (changed.count !== 1) throw FAILURE;
+    await enqueueEmailMessageForClient(tx, {
+      idempotencyKey: `recovery-new-mail:${requestId}:${randomBytes(16).toString("hex")}`,
+      kind: "RECOVERY_EMAIL_REBIND", recipientEmail: newEmail, locale: "pt-BR",
+      payload: { protectedValues: { code } }
+    });
+    await writeAuditLogInTransaction(tx, {
+      eventType: "ACCOUNT_RECOVERY_REQUESTED", result: "SUCCESS",
+      resource: "identity.recovery", message: "Replacement mailbox proof requested.",
+      metadata: { requestRef: hashAuditIdentifier(requestId) }
+    });
+  }, { isolationLevel: "ReadCommitted" });
+}
+
+export async function verifyRecoveryNewMailbox(
+  requestId: string, key: string, browserToken: string, role: AccountRecoveryRole, code: string
+): Promise<void> {
+  if (!isRequestId(requestId) || !/^\d{6}$/u.test(code) || !isRequestKey(key) || !isBrowserToken(browserToken)) throw FAILURE;
+  await rateLimitReplacement(requestId, "verify", hashRecoveryRequestKey(key));
+  await prisma.$transaction(async (tx) => {
+    const row = await lockReplacementRequest(tx, requestId, role);
+    const now = new Date();
+    if (!validReplacement(row, role, key, browserToken, now) ||
+        !row.recoveryNewEmail || !row.recoveryNewEmailChallengeHash || !row.recoveryNewEmailExpiresAt ||
+        row.recoveryNewEmailExpiresAt <= now || row.recoveryNewEmailVerifiedAt ||
+        !verifySecurityCode(code, row.recoveryNewEmailChallengeHash)) throw FAILURE;
+    await requireLiveRecoveryProofsInTransaction(tx, row);
+    if (await tx.user.count({ where: { OR: [{ email: row.recoveryNewEmail }, { emailNormalized: row.recoveryNewEmail }] } }) !== 0) throw FAILURE;
+    // Evaluate the OTP lifetime at the PostgreSQL UPDATE, after acquiring the
+    // User and recovery row locks; never trust a pre-lock JavaScript timestamp.
+    const claimed = await tx.$executeRaw`
+      WITH verification_time AS MATERIALIZED (
+        SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS "at"
+      )
+      UPDATE "AccountRecoveryRequest" AS recovery SET
+        "recoveryNewEmailVerifiedAt" = verification_time."at",
+        "updatedAt" = verification_time."at"
+      FROM verification_time
+      WHERE recovery."id" = ${requestId}
+        AND recovery."requestKeyHash" = ${row.requestKeyHash}
+        AND recovery."recoveryBrowserHash" = ${row.recoveryBrowserHash}
+        AND recovery."emailAddressHash" = ${row.emailAddressHash}
+        AND recovery."recoveryRole" = ${role}::"UserRole"
+        AND recovery."status" = 'APPROVED'::"RecoveryRequestStatus"
+        AND recovery."recoveryNewEmail" = ${row.recoveryNewEmail}
+        AND recovery."recoveryNewEmailChallengeHash" = ${row.recoveryNewEmailChallengeHash}
+        AND recovery."recoveryNewEmailVerifiedAt" IS NULL
+        AND recovery."recoveryNewEmailExpiresAt" > verification_time."at"
+        AND recovery."expiresAt" > verification_time."at"
+    `;
+    if (claimed !== 1) throw FAILURE;
+    await writeAuditLogInTransaction(tx, {
+      eventType: "ACCOUNT_RECOVERY_EMAIL_VERIFIED", result: "SUCCESS",
+      resource: "identity.recovery", message: "Replacement mailbox ownership verified.",
+      metadata: { requestRef: hashAuditIdentifier(requestId) }
+    });
+  }, { isolationLevel: "ReadCommitted" });
+}
+
 export async function getMultiMethodRecoveryState(
   requestId: string, key: string, browserToken: string, expectedRole: AccountRecoveryRole,
   selected: RecoveryPolicy, now = new Date()
 ) {
   const policy = normalizeRecoveryPolicy(selected);
   if (!policy || !isRequestId(requestId) || !isRequestKey(key) || !isBrowserToken(browserToken)) throw FAILURE;
-  const empty = { status: "PENDING" as const, proofs: policy.proofs, adminReview: policy.adminReview, emailVerified: false, passkeyVerified: false, totpVerified: false };
+  const empty = { status: "PENDING" as const, proofs: policy.proofs, adminReview: policy.adminReview, emailVerified: false, passkeyVerified: false, totpVerified: false,
+    newMailboxRequired: needsRecoveryNewMailbox(policy.proofs), newMailboxChallengeSent: false, newMailboxVerified: false };
   if (policy.proofs.includes("PASSKEY") && process.env.VIRKI_PASSKEYS_ENABLED !== "true") return empty;
   const row = await prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: recoverySelect });
   if (!row || row.recoveryRole !== expectedRole || !verifyCapability(row, key, browserToken) ||
@@ -362,6 +492,9 @@ export async function getMultiMethodRecoveryState(
   return {
     status: row.expiresAt > now ? row.status : "EXPIRED" as const,
     proofs: policy.proofs, adminReview: policy.adminReview,
-    emailVerified: Boolean(row.emailVerifiedAt), passkeyVerified: Boolean(row.recoveryPasskeyVerifiedAt), totpVerified: Boolean(row.recoveryTotpVerifiedAt)
+    emailVerified: Boolean(row.emailVerifiedAt), passkeyVerified: Boolean(row.recoveryPasskeyVerifiedAt), totpVerified: Boolean(row.recoveryTotpVerifiedAt),
+    newMailboxRequired: needsRecoveryNewMailbox(row.recoveryProofs),
+    newMailboxChallengeSent: Boolean(row.recoveryNewEmail && row.recoveryNewEmailExpiresAt && row.recoveryNewEmailExpiresAt > now),
+    newMailboxVerified: Boolean(row.recoveryNewEmailVerifiedAt)
   };
 }

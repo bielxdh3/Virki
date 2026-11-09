@@ -13,6 +13,7 @@ import {
   verifySelectedRecoveryTotpAction
 } from "./actions";
 import { RecoveryCompletionForm } from "./recovery-completion-form";
+import { RecoveryNewMailStage } from "./recovery-new-mail-stage";
 import { RecoveryProofStage, type RecoveryProof } from "./recovery-proof-stage";
 import { RecoveryRequestForm, type RecoveryRequestMethod } from "./recovery-request-form";
 import { RecoveryVerificationForm } from "./recovery-verification-form";
@@ -42,7 +43,8 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
   const multiState = params?.requestId && requestKey && browserToken && recoveryPolicy
     ? await getMultiMethodRecoveryState(params.requestId, requestKey, browserToken, expectedRole, recoveryPolicy).catch(() => ({
         status: "PENDING" as const, proofs: recoveryPolicy.proofs, adminReview: recoveryPolicy.adminReview,
-        emailVerified: false, passkeyVerified: false, totpVerified: false
+        emailVerified: false, passkeyVerified: false, totpVerified: false,
+        newMailboxRequired: !recoveryPolicy.proofs.includes("EMAIL"), newMailboxChallengeSent: false, newMailboxVerified: false
       }))
     : null;
   const state = !isMultiMethodRequest && params?.requestId && requestKey
@@ -136,9 +138,13 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
           verifyPasskeyAction={verifySelectedRecoveryPasskeyAction}
         /> : null}
         {multiState?.status === "APPROVED" && params?.requestId ? <>
-          <p role="status">Confirmações concluídas. Defina uma nova senha para finalizar a recuperação.</p>
-          <RecoveryCompletionForm csrf={csrf.complete} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={params.requestId}
-            expectedRole={expectedRole} purpose="RECOVERY" />
+          {multiState.newMailboxRequired && !multiState.newMailboxVerified ? <RecoveryNewMailStage
+            csrf={csrf.verify} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={params.requestId}
+            challengeSent={multiState.newMailboxChallengeSent} /> : <>
+            <p role="status">{multiState.newMailboxRequired ? "Novo e-mail confirmado. " : "Confirmações concluídas. "}Defina uma nova senha para finalizar a recuperação.</p>
+            <RecoveryCompletionForm csrf={csrf.complete} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={params.requestId}
+              expectedRole={expectedRole} purpose="RECOVERY" />
+          </>}
         </> : null}
         {multiState && multiState.status !== "APPROVED" && multiState.status !== "PENDING" ? <p role="status">
           Esta recuperação expirou. <a href="/recover">Solicite uma nova recuperação.</a>

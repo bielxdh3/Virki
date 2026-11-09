@@ -24,7 +24,7 @@ import {
 } from "./index";
 import { prisma, Prisma } from "@virki/database";
 import { lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
-import { isRecoveryCapabilityAuthorized, recoveryReviewReady, requireLiveRecoveryProofsInTransaction } from "./recovery-methods";
+import { isRecoveryCapabilityAuthorized, needsRecoveryNewMailbox, recoveryReviewReady, requireLiveRecoveryProofsInTransaction } from "./recovery-methods";
 
 export { DEVICE_COOKIE_NAME } from "./constants";
 export const SECURITY_CEREMONY_TTL_MS = 10 * 60 * 1000;
@@ -834,11 +834,13 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
 export async function consumeApprovedAccountRecovery(requestId: string, requestKey: string, newPassword: string, now: RecoveryClock = liveRecoveryNow, expectedRole: AccountRecoveryRole = "USER", browserToken = ""): Promise<CreatedLoginSession | void> {
   if (!isDatabaseId(requestId) || !isCeremonyId(requestKey) || !isAcceptableRecoveryPassword(expectedRole, newPassword)) throw new SecurityMutationError();
   const requestKeyHash = hashRecoveryRequestKey(requestKey);
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, emailAddressHash: true, status: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, recoveryBrowserHash: true, emailVerifiedAt: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, reviewedByUserId: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, emailAddressHash: true, status: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, recoveryBrowserHash: true, emailVerifiedAt: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, recoveryNewEmail: true, recoveryNewEmailVerifiedAt: true, reviewedByUserId: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
   if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || !safeEqual(request.requestKeyHash, requestKeyHash) || request.status !== "APPROVED" || request.expiresAt <= recoveryNow(now) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email)) throw new SecurityMutationError();
   if (Boolean(request.recoveryProofs.length) !== Boolean(request.recoveryBrowserHash) ||
     (request.recoveryProofs.length ? request.recoveryRole !== expectedRole || !isRecoveryCapabilityAuthorized(request, requestKey, browserToken) : Boolean(request.recoveryRole))) throw new SecurityMutationError();
   if (request.recoveryProofs.includes("PASSKEY") && process.env.VIRKI_PASSKEYS_ENABLED !== "true") throw new SecurityMutationError();
+  if (needsRecoveryNewMailbox(request.recoveryProofs) &&
+    (!request.recoveryNewEmail || !request.recoveryNewEmailVerifiedAt)) throw new SecurityMutationError();
   const attempts = await prisma.$transaction(async (transaction) => {
     const attemptAt = recoveryNow(now);
     const account = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-completion-user:${request.userId}`, attemptAt);
@@ -865,10 +867,15 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     }
     await lockAndExpireSiblingAccountRecoveriesInTransaction(transaction, request.userId, request.id);
     if (!await lockAccountRecoveryRequestInTransaction(transaction, request.id)) throw new SecurityMutationError();
-    const current = await transaction.accountRecoveryRequest.findUnique({ where: { id: request.id }, select: { userId: true, requestKeyHash: true, emailAddressHash: true, status: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, recoveryBrowserHash: true, recoveryTotpBindingHash: true, recoveryTotpUsedStep: true, recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true, emailVerifiedAt: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, reviewedByUserId: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
+    const current = await transaction.accountRecoveryRequest.findUnique({ where: { id: request.id }, select: { userId: true, requestKeyHash: true, emailAddressHash: true, status: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, recoveryBrowserHash: true, recoveryTotpBindingHash: true, recoveryTotpUsedStep: true, recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true, emailVerifiedAt: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, recoveryNewEmail: true, recoveryNewEmailVerifiedAt: true, recoveryNewEmailChallengeHash: true, recoveryNewEmailExpiresAt: true, reviewedByUserId: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
     if (!current || current.userId !== request.userId || !safeEqual(current.requestKeyHash, requestKeyHash) || current.emailAddressHash !== hashEmailAddress(current.user.emailNormalized ?? current.user.email) || current.status !== "APPROVED" || current.expiresAt <= recoveryNow(now) || !isAccountRecoveryEligible(current.user, expectedRole)) throw new SecurityMutationError();
     if (Boolean(current.recoveryProofs.length) !== Boolean(current.recoveryBrowserHash) || (current.recoveryProofs.length ? current.recoveryRole !== expectedRole : Boolean(current.recoveryRole))) throw new SecurityMutationError();
     if (current.recoveryProofs.includes("PASSKEY") && process.env.VIRKI_PASSKEYS_ENABLED !== "true") throw new SecurityMutationError();
+    const replacementRequired = needsRecoveryNewMailbox(current.recoveryProofs);
+    if (replacementRequired && (!current.recoveryNewEmail || !current.recoveryNewEmailVerifiedAt ||
+      !current.recoveryNewEmailChallengeHash || !current.recoveryNewEmailExpiresAt ||
+      current.recoveryNewEmail === (current.user.emailNormalized ?? current.user.email.trim().toLowerCase()) ||
+      await transaction.user.count({ where: { OR: [{ email: current.recoveryNewEmail }, { emailNormalized: current.recoveryNewEmail }] } }) !== 0)) throw new SecurityMutationError();
     if (current.recoveryProofs.length) {
       if (!isRecoveryCapabilityAuthorized(current, requestKey, browserToken)) throw new SecurityMutationError();
       if (current.recoveryAdminReview && (!reviewerId || current.reviewedByUserId !== reviewerId)) throw new SecurityMutationError();
@@ -887,16 +894,31 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
         AND recovery."requestKeyHash" = ${requestKeyHash}
         AND recovery."emailAddressHash" = ${request.emailAddressHash}
         AND recovery."status" = 'APPROVED'::"RecoveryRequestStatus"
+        AND (${!replacementRequired}::boolean OR
+          (recovery."recoveryNewEmail" = ${current.recoveryNewEmail}
+           AND recovery."recoveryNewEmailChallengeHash" = ${current.recoveryNewEmailChallengeHash}
+           AND recovery."recoveryNewEmailVerifiedAt" IS NOT NULL
+           AND recovery."recoveryNewEmailExpiresAt" IS NOT NULL))
         AND recovery."expiresAt" > recovery_time."at"
     `);
     if (claimedCount !== 1) throw new SecurityMutationError();
     await transaction.user.update({ where: { id: request.userId }, data: {
       passwordHash: newPasswordHash,
+      ...(replacementRequired ? { email: current.recoveryNewEmail!, emailNormalized: current.recoveryNewEmail!, emailVerifiedAt: consumedAt } : {}),
       // Non-email proofs are independent and must never attest mailbox ownership.
-      ...(!current.recoveryProofs.length || current.emailVerifiedAt ? { emailVerifiedAt: consumedAt } : {}),
+      ...(!replacementRequired && (!current.recoveryProofs.length || current.emailVerifiedAt) ? { emailVerifiedAt: consumedAt } : {}),
       ...(expectedRole === "USER" ? { secondFactorMethod: "EMAIL" as const } : {})
     } });
-    await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-password-changed:${request.id}`, kind: "PASSWORD_CHANGED", recipientEmail: current.user.email, locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" }, protectedValues: {} } });
+    await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-password-changed:${request.id}`, kind: "PASSWORD_CHANGED", recipientEmail: replacementRequired ? current.recoveryNewEmail! : current.user.email, locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" }, protectedValues: {} } });
+    if (replacementRequired) {
+      // Notify the original inbox of a mailbox takeover without revealing the
+      // replacement address, reset token or any OTP.
+      await enqueueEmailMessageForClient(transaction, {
+        idempotencyKey: `account-recovery-old-mail-notice:${request.id}`,
+        kind: "RECOVERY_EMAIL_REBIND_NOTICE", recipientEmail: current.user.email,
+        locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" } }
+      });
+    }
     await transaction.session.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: consumedAt } });
     await transaction.securityElevation.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: consumedAt } });
     await transaction.trustedDevice.updateMany({ where: { userId: request.userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: consumedAt, rememberedUntil: null, strongVerifiedAt: null } });

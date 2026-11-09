@@ -417,6 +417,12 @@ model AccountRecoveryRequest {
   recoveryTotpBindingHash String?
   recoveryTotpUsedStep Int?
   recoveryComment    String?
+  // A verified replacement inbox is mandatory before consuming a recovery
+  // that did not prove ownership of the original email address.
+  recoveryNewEmail              String?
+  recoveryNewEmailChallengeHash String?
+  recoveryNewEmailExpiresAt     DateTime?
+  recoveryNewEmailVerifiedAt    DateTime?
   status             RecoveryRequestStatus @default(PENDING)
   purpose            RecoveryRequestPurpose @default(RECOVERY)
   expiresAt          DateTime
