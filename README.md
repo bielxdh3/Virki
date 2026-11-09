@@ -14,7 +14,7 @@ Virki provides identity, authentication and SSO, security, project entry access,
 ## Surfaces
 
 - `biel.dev.br` — minimal public page and portal entry.
-- `portal.biel.dev.br` — authenticated USER portal and OIDC issuer. Users see only projects granted to them.
+- `portal.biel.dev.br` — authenticated USER portal with a **Projetos** landing page and OIDC endpoints. The USER portal is not the ADMIN Hub; the current implementation lists only enabled projects with active grants.
 - `hub.biel.dev.br` — ADMIN control plane behind Cloudflare Access and Virki authentication.
 
 The ADMIN navigation is Contas, Acessos, Segurança, Auditoria, and Conexões. Stored roles are ADMIN and USER. Project access is granted explicitly to users; Virki has no project roles.
@@ -22,38 +22,57 @@ The ADMIN navigation is Contas, Acessos, Segurança, Auditoria, and Conexões. S
 ## Architecture at a glance
 
 ```text
-                      Production routes (conceptual)
+                     Production routes (conceptual)
 
-   Public internet
-         |
-         v
+  Public internet
+        |
+        v
   Cloudflare Tunnel
-         |
-         +-- Public hostname --------> Public site (loopback)
-         |
-         +-- USER portal -----------> Hub: USER portal + account security
-         |                                    |
-         |                                    | private OIDC path proxy
-         |                                    v
-         |                               OIDC issuer
-         |
-         +-- ADMIN hostname --> Cloudflare Access --> Hub: ADMIN controls
+        |
+        +-- Public hostname --------> Public site (loopback)
+        |                                |
+        |                              Entrar
+        |                                |
+        +-- USER hostname  <-------------+
+        |       |
+        |       v
+        |    USER portal (apps/hub, NOT the ADMIN dashboard)
+        |       +-- / : Projetos (currently: enabled + granted only)
+        |       +-- /account/security : user account security
+        |       +-- private OIDC path proxy ---> OIDC issuer
+        |
+        +-- ADMIN hostname --> Cloudflare Access --> ADMIN Hub
                                                      + Virki ADMIN session
 
-       Hub + OIDC issuer + private background workers
+      USER portal + ADMIN Hub share an application service;
+      they are distinct host/access surfaces, not a user redirect.
+
+      Hub application + OIDC issuer + private background workers
                               |
                               v
                        PostgreSQL / Prisma
                 users · sessions · grants · audit
                     protected OIDC artifacts
 
-   External relying projects use OIDC authorization code + PKCE.
-   Project sessions and application permissions stay in each project.
+  External projects use OIDC authorization code + PKCE.
+  Project sessions and app-internal permissions stay in each project.
 ```
 
 The production public site and Hub bind to loopback; the OIDC issuer and database have no host-published ports. The USER portal does **not** require the ADMIN Cloudflare Access assertion. The ADMIN hostname requires **both** Cloudflare Access and a Virki ADMIN session. The issuer is reachable through the portal's internal OIDC proxy, not a directly exposed port.
 
-This is a **diagram of the configured architecture**, not proof that a production deployment has passed acceptance. Details: [architecture](docs/architecture.md), [security](docs/security.md), and [deployment](docs/deployment.md).
+This is a **diagram of the currently configured routing and implemented portal**, not proof that a production deployment has passed acceptance. Details: [architecture](docs/architecture.md), [security](docs/security.md), and [deployment](docs/deployment.md).
+
+### Project visibility — intended behavior (not yet implemented)
+
+After entering from the public site and authenticating on `portal.biel.dev.br`, a USER should land on the **Projetos** section. The intended catalog distinguishes **visibility** (whether a project is listed) from **authorization** (whether entry is granted):
+
+| State | USER portal behavior |
+|---|---|
+| **Visible + authorized** | List the project with **Acessar**; the backend still verifies the active grant before OIDC authorization. |
+| **Visible + unauthorized** | List the project as **Sem acesso**, without an actionable launch link or authorization. |
+| **Hidden** | Do not list the project or disclose its details to the USER, even if the project exists. |
+
+**Implementation status:** `apps/hub/src/app/page.tsx` currently queries only enabled connections with active `UserProjectGrant` records. `ProjectConnection` has an `enabled` flag but no independent public/hidden visibility setting in the Prisma schema. Therefore the visible-but-unauthorized and hidden classifications are **requirements, not shipped UI or database features**. This README change does not implement them or relax authorization. The ADMIN Hub at `hub.biel.dev.br` remains a separate, protected surface.
 
 ## Local development
 
