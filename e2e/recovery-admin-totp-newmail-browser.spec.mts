@@ -133,7 +133,6 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
   const administrativePassword = randomBytes(32).toString("base64url");
   const newPassword = randomBytes(32).toString("base64url");
   const otherPassword = randomBytes(32).toString("base64url");
-  let ownerId: string | undefined;
   try {
     const secret = createTotpSecret();
     const owner = await database.user.create({
@@ -152,7 +151,6 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
       },
       select: { id: true }
     });
-    ownerId = owner.id;
     expect(owner.id).not.toBe(reviewer.id);
     const privilegedBefore = await database.administrativeCredential.findUniqueOrThrow({
       where: { userId: owner.id },
@@ -255,9 +253,18 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     const foreignContext = await newContext();
     const foreignPage = await foreignContext.newPage();
     await addCloudflareAccessHeader(foreignPage);
-    await foreignPage.goto(`${hubUrl}/recover?requestId=${encodeURIComponent(requestId)}`);
+    const foreignUrl = `${hubUrl}/recover?requestId=${encodeURIComponent(requestId)}`;
+    const foreignResponse = await foreignPage.goto(foreignUrl);
+    expect(foreignResponse?.status(), "an unauthorized request ID must render an ordinary Hub page, not a 403/500").toBe(200);
+    await expect(foreignPage).toHaveURL(foreignUrl);
+    await expect(foreignPage.getByRole("heading", {
+      level: 1, name: "Recuperar acesso administrativo", exact: true
+    })).toBeVisible();
+    await expect(foreignPage.getByRole("alert")).toContainText("Este link de recuperação não é mais válido.");
     await expect(foreignPage.locator('[aria-label="Aplicativo autenticador"] input[name="code"]')).toHaveCount(0);
+    await expect(foreignPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
     await expect(foreignPage.getByLabel("Novo endereço de e-mail")).toHaveCount(0);
+    await expect(foreignPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
 
     const reviewRow = reviewerPage.locator("article.list-row").filter({ hasText: ownedEmail });
     await reviewerPage.reload();
@@ -353,6 +360,92 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     })).recoveryNewEmailVerifiedAt).toBeNull();
     await expect(recoveryPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
 
+    // Exercise the *real* completeRecoveryAction before any successful
+    // replacement-inbox code verification. The product correctly hides its
+    // completion form here. On this disposable owned fixture only, briefly
+    // render an authentic completion form, then atomically revoke that
+    // temporary timestamp before submitting. This tests a stale browser's
+    // actual bound Server Action, not a synthetic/CSRF-invalid HTTP POST.
+    const mounted = await database.accountRecoveryRequest.updateMany({
+      where: {
+        id: requestId, userId: owner.id, status: "APPROVED",
+        recoveryNewEmail: replacementEmail, recoveryNewEmailVerifiedAt: null
+      },
+      data: { recoveryNewEmailVerifiedAt: new Date() }
+    });
+    expect(mounted.count).toBe(1);
+    const prematurePage = await recoveryContext.newPage();
+    await addCloudflareAccessHeader(prematurePage);
+    try {
+      const preparedResponse = await prematurePage.goto(recoveryPage.url());
+      expect(preparedResponse?.status()).toBe(200);
+      await expect(prematurePage.getByRole("heading", {
+        level: 1, name: "Recuperar acesso administrativo", exact: true
+      })).toBeVisible();
+      await expect(prematurePage.getByLabel("Nova senha", { exact: true })).toBeVisible();
+      const actualCompletionForm = prematurePage.locator("form").filter({
+        has: prematurePage.getByRole("button", { name: "Concluir recuperação", exact: true })
+      });
+      await expect(actualCompletionForm.locator('input[name="requestId"]')).toHaveValue(requestId);
+      await expect(actualCompletionForm.locator('input[name="csrfToken"]')).toHaveValue(/^v2\./u);
+    } finally {
+      const revoked = await database.accountRecoveryRequest.updateMany({
+        where: {
+          id: requestId, userId: owner.id, status: "APPROVED",
+          recoveryNewEmail: replacementEmail, recoveryNewEmailVerifiedAt: { not: null }
+        },
+        data: { recoveryNewEmailVerifiedAt: null }
+      });
+      expect(revoked.count, "the temporary display-only proof must always be revoked").toBe(1);
+    }
+    const noMailboxProof = await database.accountRecoveryRequest.findUniqueOrThrow({
+      where: { id: requestId },
+      select: { status: true, recoveryNewEmail: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true }
+    });
+    expect(noMailboxProof).toEqual({
+      status: "APPROVED", recoveryNewEmail: replacementEmail,
+      recoveryNewEmailVerifiedAt: null, bootstrapSessionId: null
+    });
+    const prematureCookies = await recoveryContext.cookies(hubUrl);
+    for (const name of cookieNames) {
+      expect(prematureCookies.find((cookie) => cookie.name === name)?.value,
+        "the rejected POST must carry the originally bound recovery capability").toBe(
+          boundCookies.find((cookie) => cookie.name === name)?.value);
+    }
+    const beforePremature = await database.user.findUniqueOrThrow({
+      where: { id: owner.id }, select: { email: true, emailNormalized: true, passwordHash: true }
+    });
+    const sessionsBeforePremature = await database.session.count({
+      where: { userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() } }
+    });
+    const prematurePassword = randomBytes(32).toString("base64url");
+    await prematurePage.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
+    const prematureActionPost = prematurePage.waitForResponse((response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).origin === hubUrl &&
+      new URL(response.url()).pathname === "/recover" &&
+      Boolean(response.request().headers()["next-action"]));
+    await prematurePage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    const prematureResponse = await prematureActionPost;
+    expect(prematureResponse.request().postDataBuffer()?.byteLength ?? 0,
+      "rejected completion must be a genuine Next Server Action POST with form data").toBeGreaterThan(0);
+    expect(prematureResponse.request().headers().origin).toBe(hubUrl);
+    expect(prematureResponse.status(),
+      "a CSRF/Access HTTP403 or server HTTP500 cannot count as a mailbox-proof denial").toBeLessThan(400);
+    await expect(prematurePage).toHaveURL(new RegExp(`/recover\\?requestId=${requestId}&error=1`));
+    expect(await database.user.findUniqueOrThrow({
+      where: { id: owner.id }, select: { email: true, emailNormalized: true, passwordHash: true }
+    })).toEqual(beforePremature);
+    expect(await database.accountRecoveryRequest.findUniqueOrThrow({
+      where: { id: requestId },
+      select: { status: true, recoveryNewEmail: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true }
+    })).toEqual(noMailboxProof);
+    expect(await database.session.count({
+      where: { userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() } }
+    })).toBe(sessionsBeforePremature);
+    expect(await verifyPassword(beforePremature.passwordHash ?? "", prematurePassword)).toBe(false);
+    await expect(mailbox.getByLabel("Código recebido no novo e-mail", { exact: true })).toBeVisible();
+
     await mailbox.getByLabel("Código recebido no novo e-mail", { exact: true }).fill(mailboxCode);
     await mailbox.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
     await expect(recoveryPage.getByRole("status").filter({ hasText: "Novo e-mail confirmado." })).toBeVisible();
@@ -380,7 +473,14 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
       }));
     expect(priorCookies).toHaveLength(3);
     await recoveryPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
+    const bootstrapDocumentPromise = recoveryPage.waitForResponse((response) =>
+      response.request().method() === "GET" &&
+      response.request().resourceType() === "document" &&
+      new URL(response.url()).origin === hubUrl &&
+      new URL(response.url()).pathname === "/admin/accounts");
     await recoveryPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    const bootstrapDocument = await bootstrapDocumentPromise;
+    expect(bootstrapDocument.status(), "the recovered ADMIN must fetch a real protected document").toBe(200);
     await expect(recoveryPage).toHaveURL(`${hubUrl}/admin/accounts`);
     await expect(recoveryPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
     const changedUser = await database.user.findUniqueOrThrow({
@@ -415,10 +515,22 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     expect(await database.session.count({
       where: { userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() } }
     })).toBe(1);
-    expect((await database.session.findUniqueOrThrow({
+    const bootstrapSession = await database.session.findUniqueOrThrow({
       where: { id: consumed.bootstrapSessionId! },
-      select: { userId: true, revokedAt: true }
-    }))).toEqual({ userId: owner.id, revokedAt: null });
+      select: { userId: true, tokenHash: true, revokedAt: true, expiresAt: true }
+    });
+    expect(bootstrapSession.userId).toBe(owner.id);
+    expect(bootstrapSession.revokedAt).toBeNull();
+    expect(bootstrapSession.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    const bootstrapCookies = (await recoveryContext.cookies(hubUrl))
+      .filter((cookie) => cookie.name === sessionCookieName && cookie.value.length > 0);
+    expect(bootstrapCookies, "the recovered browser must receive exactly one host-bound Hub session cookie").toHaveLength(1);
+    expect(bootstrapCookies[0]!.domain).toBe(new URL(hubUrl).hostname);
+    expect(bootstrapCookies[0]!.path).toBe("/");
+    expect(bootstrapCookies[0]!.httpOnly).toBe(true);
+    expect(bootstrapCookies[0]!.secure).toBe(productionMode);
+    expect(hashSessionToken(bootstrapCookies[0]!.value),
+      "the browser session token must match the exact persisted bootstrap session").toBe(bootstrapSession.tokenHash);
     await ownerPage.goto(`${hubUrl}/admin/security`);
     await expect(ownerPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Fsecurity`);
     await expect(recoveryContext.cookies(hubUrl).then((cookies) =>
@@ -449,23 +561,11 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     })).toBe(1);
   } finally {
     // AuditLog is append-only and its actor FK RESTRICTs deletes. Never
-    // UPDATE/DELETE audit rows or use a privileged cleanup role in this spec.
+    // UPDATE/DELETE audit rows or attempt a fragile User FK cleanup. The
+    // dedicated disposable E2E runner drops virki_e2e_test after the suite.
     const closes = await Promise.allSettled(contexts.map((context) => context.close()));
-    try {
-      if (ownerId) {
-        await database.emailOutboxMessage.deleteMany({
-          where: { recipientEmail: { in: [ownedEmail, replacementEmail] } }
-        });
-        // A reviewer session or a protected-page read may have written an
-        // immutable audit event naming this ADMIN. Retain the user in that
-        // case for FK integrity; the harness destroys virki_e2e_test after CI.
-        if (await database.auditLog.count({ where: { actorUserId: ownerId } }) === 0) {
-          await database.user.deleteMany({ where: { id: ownerId } });
-        }
-      }
-    } finally {
-      await database.$disconnect();
-    }
+    // Keep this owner-labelled fixture and its outbox/audit receipts intact.
+    await database.$disconnect();
     expect(closes.every((result) => result.status === "fulfilled"),
       "every browser context must close").toBe(true);
   }
