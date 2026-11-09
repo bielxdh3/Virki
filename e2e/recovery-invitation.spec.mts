@@ -176,7 +176,12 @@ test("public recovery form gives known and unknown addresses the same browser re
     const unboundContext = await browser.newContext();
     contexts.push(unboundContext);
     const unboundPage = await unboundContext.newPage();
-    await unboundPage.goto(`${portalUrl}/recover?requestId=${encodeURIComponent(known.requestId)}`);
+    const unboundUrl = `${portalUrl}/recover?requestId=${encodeURIComponent(known.requestId)}`;
+    const unboundResponse = await unboundPage.goto(unboundUrl);
+    expect(unboundResponse?.status()).toBe(200);
+    await expect(unboundPage).toHaveURL(unboundUrl);
+    await expect(unboundPage.getByRole("heading", { level: 1, name: "Recuperar conta" })).toBeVisible();
+    await expect(unboundPage.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido");
     await expect(unboundPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
 
     const knownRequestCountAfter = await database.accountRecoveryRequest.count({ where: { userId: ownedUserId } });

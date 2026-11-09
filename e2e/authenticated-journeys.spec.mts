@@ -881,7 +881,6 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
   const administrativePassword = randomBytes(32).toString("base64url");
   const newPassword = randomBytes(32).toString("base64url");
   const ownedEmail = `admin-recovery-${randomBytes(12).toString("hex")}@integration.invalid`;
-  let ownerId: string | undefined;
   try {
     // Own this ADMIN account so other serial E2E recovery scenarios cannot
     // trigger its recovery cooldown or change its password beforehand.
@@ -896,7 +895,6 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
       },
       select: { id: true }
     });
-    ownerId = owner.id;
     const privilegedBefore = await prisma.administrativeCredential.findUniqueOrThrow({
       where: { userId: owner.id }, select: { passwordHash: true, status: true, keyVersion: true }
     });
@@ -980,7 +978,12 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
     const unrelatedContext = await createContext();
     const unrelatedPage = await unrelatedContext.newPage();
     await addCloudflareAccessHeader(unrelatedPage);
-    await unrelatedPage.goto(`${hubUrl}/recover?requestId=${encodeURIComponent(requestId)}`);
+    const unboundUrl = `${hubUrl}/recover?requestId=${encodeURIComponent(requestId)}`;
+    const unboundResponse = await unrelatedPage.goto(unboundUrl);
+    expect(unboundResponse?.status()).toBe(200);
+    await expect(unrelatedPage).toHaveURL(unboundUrl);
+    await expect(unrelatedPage.getByRole("heading", { level: 1, name: "Recuperar acesso administrativo" })).toBeVisible();
+    await expect(unrelatedPage.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido");
     await expect(unrelatedPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
     await expect(unrelatedPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
 
@@ -1089,21 +1092,12 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
     await expect(hubPage.getByRole("heading", { level: 1, name: "Contas" })).toBeVisible();
   } finally {
     await Promise.all(contexts.map((context) => context.close().catch(() => undefined)));
-    try {
-      if (ownerId) {
-        // AuditLog uses Restrict, not Cascade, for its actor relation. Retain
-        // those test log rows and clear only this disposable actor reference.
-        await prisma.auditLog.updateMany({
-          where: { actorUserId: ownerId }, data: { actorUserId: null }
-        });
-        // The owned sessions, recovery and privileged credential cascade.
-        // The independent reviewer's identity and audit rows remain intact.
-        await prisma.user.deleteMany({ where: { id: ownerId, emailNormalized: ownedEmail } });
-        await prisma.emailOutboxMessage.deleteMany({ where: { recipientEmail: ownedEmail } });
-      }
-    } finally {
-      await prisma.$disconnect();
-    }
+    // AuditLog is append-only and its actor FK is RESTRICT. The scoped runtime
+    // test role cannot UPDATE/DELETE that audit evidence. Retain this unique
+    // test account and its receipts until the entire confirmed disposable E2E
+    // database is destroyed by the isolated CI harness; never elevate this
+    // test to mutate audit history or clean unrelated/shared fixtures.
+    await prisma.$disconnect();
   }
 });
 
