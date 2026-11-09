@@ -1,6 +1,20 @@
 # Normal-password recovery: source and release gates
 
-Date: 2026-11-09. Status: **implementation in progress, operational NO-GO**.
+Date: 2026-11-09. Status: **local source candidate complete; operational NO-GO pending physical integration gates**.
+
+## Integrated local candidate (2026-11-09)
+
+Local branch: `feat/virki-recovery-multichoice-prime-20261109-1505`, exact checked commit `f72d0808a28fc473dba3e696dc420af21f6244c5`. Base `main` remains at `7c8914ed222f0672ccc87e0331daf6a4c3f0f5a7`; **no push, merge, deploy, production database changes, or real SMTP sends**.
+
+Implementation now provides distinct normal-password recovery choices: any two independent proofs among registered passkey, active TOTP, and verified email OTP, or any one of these plus approval by a **different eligible active ADMIN** and an optional comment capped at 300 characters. Factor selection and proofs are persisted and bound to the exact account, role, request, challenge and browser capability. Synthetic requests are constructed to avoid leaking account existence via request IDs. Changing a factor or letting a proof expire before final consumption fails closed. ADMIN passkeys enroll against the separate hub RP, with current ADMIN session and independent elevation; this does not turn on passwordless ADMIN login.
+
+For a pair/assisted method not proving the old mailbox, a **new mailbox must be independently verified before replacing login password/email or revoking existing authenticators**. The completed recovery revokes old login MFA, sessions and devices; a short-lived bound bootstrap session lets the owner safely continue. The separate **administrative elevation credential** retains its own recovery choices: current normal password plus (a) verified e-mail code, (b) saved administrative recovery code, or (c) currently active one-use TOTP. The TOTP path rotates the independent credential and ten backup codes, revokes old admin passkeys, elevations and sibling sessions, but preserves the normal login password and active login TOTP.
+
+**Local evidence:** official SHA-256-verified Node 22.22.1, clean lockfile installation of Next.js 16.4.5, full production build of OIDC + public Portal + Hub PASS, `npm run test:unit` **496 passed / 0 failed / 8 skipped**, workspace TypeScript PASS, lint PASS, Prisma schema validation PASS, secret scan PASS, and source-only independent reviews for the targeted new recovery and dependency changes. A Next.js `/_global-error` E1068 observed in an earlier contaminated installation no longer reproduces after clean install; do not assume that incident is a production failure.
+
+**Release remains NO-GO** until all additive migrations and transactional races have been exercised on **disposable PostgreSQL 18**, email OTP and outbox delivery have been tested with a disposable SMTP harness, physical/browsers' WebAuthn ceremonies are covered end to end for Portal and Hub RPs, the verified production build and independent security review pass on the exact publishable tree, and Cloudflare Access policy is shown to allow the intended authorized ADMIN lost-mailbox recovery path **without bypassing Access**. ADMIN passkey functionality also requires explicit security-reviewed feature flags. A local green TypeScript/build/unit run is **not** a production release authorization.
+
+## Historical baseline findings retained for traceability
 
 This document records independent read-only review findings against the starting Virki `main` (`7c8914ed222f0672ccc87e0331daf6a4c3f0f5a7`). It is not evidence that a successor fix is complete. No production changes or SMTP sends are authorized here.
 
