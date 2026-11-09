@@ -43,9 +43,9 @@ async function requireBoundRecoverySession(tx: Prisma.TransactionClient, actor: 
     SELECT "id" FROM "Session"
     WHERE "id" = ${actor.id} AND "userId" = ${actor.user.id}
       AND "revokedAt" IS NULL
-      AND "expiresAt" > clock_timestamp()
-      AND "createdAt" <= clock_timestamp()
-      AND "createdAt" > clock_timestamp() - INTERVAL '20 minutes'
+      AND "expiresAt" > (clock_timestamp() AT TIME ZONE 'UTC')
+      AND "createdAt" <= (clock_timestamp() AT TIME ZONE 'UTC')
+      AND "createdAt" > (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '20 minutes'
     FOR UPDATE
   `;
   if (locked.length !== 1) throw ERROR;
@@ -132,17 +132,18 @@ export async function completeRecoveryEmailRebind(actor: RecoveryEmailRebindActo
     if (request.newEmail === (user.emailNormalized ?? user.email.trim().toLowerCase())) throw ERROR;
     if (await tx.user.count({ where: { OR: [{ email: request.newEmail }, { emailNormalized: request.newEmail }] } }) !== 0) throw ERROR;
     const now = new Date();
-    // PostgreSQL clock_timestamp() is evaluated when this UPDATE acquires the
-    // row, so a blocked transaction cannot consume a code after its deadline.
+    // Prisma DateTime columns are TIMESTAMP WITHOUT TIME ZONE (UTC). Normalize
+    // the live PostgreSQL clock explicitly to UTC, rather than relying on the
+    // connection's session timezone for expiry/consumption comparisons.
     const claimed = await tx.$executeRaw`
       UPDATE "RecoveryEmailRebind"
-      SET "consumedAt" = clock_timestamp()
+      SET "consumedAt" = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE "id" = ${request.id} AND "userId" = ${user.id}
         AND "sessionId" = ${actor.id} AND "role" = ${user.role}::"UserRole"
         AND "codeHash" = ${request.codeHash}
         AND "oldEmailHash" = ${request.oldEmailHash}
         AND "consumedAt" IS NULL AND "revokedAt" IS NULL
-        AND "expiresAt" > clock_timestamp()
+        AND "expiresAt" > (clock_timestamp() AT TIME ZONE 'UTC')
     `;
     if (claimed !== 1) throw ERROR;
     const swapped = await tx.user.updateMany({ where: {

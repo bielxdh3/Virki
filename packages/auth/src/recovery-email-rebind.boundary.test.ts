@@ -18,10 +18,12 @@ test("bootstrap recovery provenance is an exact unique FK bound in the consuming
 });
 
 test("session, role and mailbox checks precede atomic one-winner claim with DB-clock expiry", () => {
-  assert.match(service, /SELECT "id" FROM "Session"[\s\S]*"revokedAt" IS NULL[\s\S]*clock_timestamp\(\)[\s\S]*FOR UPDATE/u);
+  assert.match(service, /SELECT "id" FROM "Session"[\s\S]*"revokedAt" IS NULL[\s\S]*clock_timestamp\(\) AT TIME ZONE 'UTC'[\s\S]*FOR UPDATE/u);
   assert.match(service, /user\.email !== actor\.user\.email/u);
   assert.match(service, /request\.oldEmailHash !== hashEmailAddress/u);
-  assert.match(service, /"consumedAt" IS NULL AND "revokedAt" IS NULL[\s\S]*"expiresAt" > clock_timestamp\(\)/u);
+  assert.match(service, /"consumedAt" IS NULL AND "revokedAt" IS NULL[\s\S]*"expiresAt" > \(clock_timestamp\(\) AT TIME ZONE 'UTC'\)/u);
+  assert.match(service, /SET "consumedAt" = \(clock_timestamp\(\) AT TIME ZONE 'UTC'\)/u);
+  assert.doesNotMatch(service, /(?:"expiresAt"\s*>|"createdAt"\s*[<>]=?|"consumedAt"\s*=)\s*clock_timestamp\(\)/u);
   assert.match(service, /if \(claimed !== 1\) throw ERROR/u);
   assert.match(service, /where: \{[\s\S]*email: user\.email, emailNormalized: user\.emailNormalized/u);
 });
