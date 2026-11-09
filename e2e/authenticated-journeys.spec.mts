@@ -1062,8 +1062,31 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
     await hubPage.reload();
     await expect(hubPage.getByRole("status").filter({ hasText: "Confirmações concluídas" })).toBeVisible();
     await hubPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
+    // CI-only bounded transport diagnostics until the post-reset page state is
+    // independently established. Never log cookie values, tokens or user data.
+    const bootstrapResponses: Array<{ path: string; method: string; type: string; status: number; redirectPath: string | null }> = [];
+    hubPage.on("response", (response) => {
+      const url = new URL(response.url());
+      const type = response.request().resourceType();
+      if (url.origin !== hubUrl || (type !== "document" && type !== "fetch")) return;
+      const location = response.headers()["location"];
+      const redirectUrl = location ? new URL(location, hubUrl) : null;
+      bootstrapResponses.push({
+        path: url.pathname, method: response.request().method(), type,
+        status: response.status(),
+        redirectPath: redirectUrl?.origin === hubUrl ? redirectUrl.pathname : null
+      });
+      if (bootstrapResponses.length > 20) bootstrapResponses.shift();
+    });
     await hubPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     await expect(hubPage).toHaveURL(`${hubUrl}/admin/accounts`);
+    console.log("ADMIN recovery bootstrap browser boundary", JSON.stringify({
+      route: new URL(hubPage.url()).pathname,
+      headings: (await hubPage.getByRole("heading").allTextContents()).map((heading) => heading.trim()).slice(0, 5),
+      sessionCookiePresent: (await hubContext.cookies(hubUrl)).some((cookie) => cookie.name === sessionCookieName),
+      documentReadyState: await hubPage.evaluate(() => document.readyState),
+      responses: bootstrapResponses
+    }));
     await expect(hubPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
     const recovered = await prisma.user.findUniqueOrThrow({
       where: { id: owner.id }, select: { passwordHash: true }
