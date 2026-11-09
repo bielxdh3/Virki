@@ -907,7 +907,12 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
       ...(replacementRequired ? { email: current.recoveryNewEmail!, emailNormalized: current.recoveryNewEmail!, emailVerifiedAt: consumedAt } : {}),
       // Non-email proofs are independent and must never attest mailbox ownership.
       ...(!replacementRequired && (!current.recoveryProofs.length || current.emailVerifiedAt) ? { emailVerifiedAt: consumedAt } : {}),
-      ...(expectedRole === "USER" ? { secondFactorMethod: "EMAIL" as const } : {})
+      // Both USER and ADMIN normal-password recovery replace login MFA. An
+      // ADMIN who proved a hub passkey plus another ADMIN (or two independent
+      // factors) may have lost TOTP; retaining that TOTP would permanently
+      // lock them out after the recovery ceremony. The distinct privileged
+      // administrative credential is never changed here.
+      secondFactorMethod: "EMAIL" as const
     } });
     await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-password-changed:${request.id}`, kind: "PASSWORD_CHANGED", recipientEmail: replacementRequired ? current.recoveryNewEmail! : current.user.email, locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" }, protectedValues: {} } });
     if (replacementRequired) {
@@ -924,14 +929,13 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     await transaction.trustedDevice.updateMany({ where: { userId: request.userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: consumedAt, rememberedUntil: null, strongVerifiedAt: null } });
     await revokeLoginChallenges(transaction, request.userId);
     await revokeUserOidcArtifactsInTransaction(transaction, request.userId);
-    if (expectedRole === "USER") {
-      // Approved USER recovery replaces the entire compromised/unknown possession
-      // state. A fresh login with the recovered password may enroll new factors.
-      await transaction.passkeyCredential.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: consumedAt } });
-      await transaction.passkeyChallenge.updateMany({ where: { userId: request.userId, consumedAt: null }, data: { consumedAt: consumedAt } });
-      await transaction.totpFactor.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED" } });
-      await transaction.recoveryCode.deleteMany({ where: { userId: request.userId } });
-    }
+    // Recovery replaces the compromised/unknown possession state for either
+    // login role. ADMIN hub-RP passkeys are also invalidated so the recovered
+    // owner must freshly enroll them with an independent admin elevation.
+    await transaction.passkeyCredential.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: consumedAt } });
+    await transaction.passkeyChallenge.updateMany({ where: { userId: request.userId, consumedAt: null }, data: { consumedAt: consumedAt } });
+    await transaction.totpFactor.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED" } });
+    await transaction.recoveryCode.deleteMany({ where: { userId: request.userId } });
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery consumed.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
     // Recovery with independently verified browser-bound factors may bootstrap a
     // single new session after all previous sessions/devices have been revoked.
