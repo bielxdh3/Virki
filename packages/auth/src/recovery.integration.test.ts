@@ -115,7 +115,7 @@ test("an anonymous request after approval cannot expire the approved recovery", 
   await assert.rejects(consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "integration-replayed-password", attackerTime));
 });
 
-test("ADMIN normal-account recovery preserves its distinct TOTP policy and recovery codes", integrationOptions, async () => {
+test("ADMIN normal-account recovery revokes login TOTP while preserving its distinct administrative credential", integrationOptions, async () => {
   const owner = await createTestUser({ role: "ADMIN", label: "admin-normal-recovery-mfa" });
   const reviewer = await createTestUser({ role: "ADMIN", label: "admin-normal-recovery-reviewer" });
   const now = new Date();
@@ -135,9 +135,10 @@ test("ADMIN normal-account recovery preserves its distinct TOTP policy and recov
   const approved = await openLatestRecovery(owner.email, now, "ADMIN");
   await consumeApprovedAccountRecovery(approved.requestId, approved.requestKey, "new-normal-admin-password-2", now, "ADMIN");
 
-  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { secondFactorMethod: true } })).secondFactorMethod, "TOTP");
-  assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: owner.id }, select: { status: true } })).status, "ACTIVE");
-  assert.equal(await prisma.recoveryCode.count({ where: { userId: owner.id, codeHash: retainedCodeHash } }), 1);
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { secondFactorMethod: true } })).secondFactorMethod, "EMAIL");
+  assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: owner.id }, select: { status: true } })).status, "REVOKED");
+  assert.equal(await prisma.recoveryCode.count({ where: { userId: owner.id, codeHash: retainedCodeHash } }), 0);
+  assert.equal(await prisma.administrativeCredential.count({ where: { userId: owner.id, status: "ACTIVE" } }), 1);
 });
 
 test("concurrent anonymous recovery requests cannot race past a live invitation", integrationOptions, async () => {

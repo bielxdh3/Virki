@@ -5,7 +5,7 @@ import { prisma } from "@virki/database";
 import { AdministrativePasswordReuseError, AdministrationMutationError, recoverAdministrativeCredentialWithTotp } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
 import { hashPassword, verifyPassword } from "./index";
-import { createTotpSecret, encryptTotpSecret, hashRecoveryCode, startLoginCeremony, verifyLoginEmailCode, verifyLoginTotpCode } from "./security";
+import { createTotpSecret, encryptTotpSecret, getLoginCeremonyFailureStage, hashRecoveryCode, startLoginCeremony, verifyLoginEmailCode, verifyLoginTotpCode } from "./security";
 import { hashOidcIdentifier } from "./oidc-secrets";
 
 after(() => prisma.$disconnect());
@@ -113,7 +113,9 @@ test("TOTP recovery rotates only the administrative password, invalidates artifa
   // The ordinary login ceremony still works with the unchanged login password
   // and ACTIVE TOTP. An unused future step is needed because recovery consumed
   // the current step globally, as it should.
-  const login = await startLoginCeremony(admin.userId, undefined, "pt-BR", new Date(), false, "ADMIN");
+  const login = await startLoginCeremony(admin.userId, undefined, "pt-BR", new Date(), false, "ADMIN").catch((error: unknown) => {
+    assert.fail(`ordinary login after TOTP recovery failed at ${getLoginCeremonyFailureStage(error) ?? "unknown stage"}`);
+  });
   assert.equal(login.kind, "CEREMONY");
   if (login.kind !== "CEREMONY") throw new Error("Expected login ceremony");
   const loginCode = (await queuedEmails(admin.email)).find((message) => message.kind === "NEW_DEVICE_VERIFICATION")?.code;
