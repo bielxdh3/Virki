@@ -58,6 +58,23 @@ test("requires confidential HTTPS exact issuer/redirect, rejects malformed endpo
   assert.doesNotThrow(() => validateIssuerEndpoints({ issuer: fixed.issuer, authorization_endpoint: "https://portal.biel.dev.br/auth", token_endpoint: "https://portal.biel.dev.br/token", jwks_uri: "https://portal.biel.dev.br/jwks" }, fixed.issuer));
 });
 
+test("optional server-only Access backchannel refuses partial or malformed credential pairs", () => {
+  assert.doesNotThrow(() => validateClientOptions(fixed));
+  assert.doesNotThrow(() => validateClientOptions({ ...fixed,
+    cloudflareAccess: { clientId: "synthetic-access-id", clientSecret: "synthetic-access-secret" }
+  }));
+  for (const cloudflareAccess of [
+    {}, { clientId: "synthetic-access-id" }, { clientSecret: "synthetic-access-secret" },
+    { clientId: "", clientSecret: "synthetic-access-secret" },
+    { clientId: "synthetic-access-id", clientSecret: "" },
+    { clientId: "synthetic-access-id\r\nInjected: yes", clientSecret: "synthetic-access-secret" },
+    { clientId: "synthetic-access-id", clientSecret: "synthetic-access-secret\nInjected: yes" },
+    { clientId: "synthetic-access-id", clientSecret: "synthetic-access-secret", surprise: "test" }
+  ]) {
+    assert.throws(() => validateClientOptions({ ...fixed, cloudflareAccess } as never), /Invalid.*OIDC.*configuration/u);
+  }
+});
+
 test("two tabs share browser binding without overwriting flows, callback consumes once", async () => {
   const mocked = mockProtocol();
   const client = new VirkiOidcNodeClient(fixed, mocked.protocol);
