@@ -72,7 +72,7 @@ test("new inbox OTP belongs to the current browser/request; reissue invalidates 
   process.env.NODE_ENV = "test";
   process.env.VIRKI_PASSKEYS_ENABLED = "true";
   const factor = { id: "factor-1", secretCiphertext: "encrypted", keyVersion: 1, confirmedAt: approvedAt, lastUsedStep: 42, status: "ACTIVE" };
-  const credential = { id: "passkey-1", credentialId: "credential-1", userId: "target-user", publicKey: Buffer.from("public-key"), revokedAt: null };
+  const credential = { id: "passkey-1", credentialId: "credential-1", userId: "target-user", rpID: "portal.biel.dev.br", publicKey: Buffer.from("public-key"), revokedAt: null };
   const row = {
     id: requestId, userId: "target-user", requestKeyHash: hashRecoveryRequestKey(requestKey),
     emailAddressHash: hashEmailAddress(originalEmail), purpose: "RECOVERY",
