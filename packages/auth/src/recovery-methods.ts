@@ -27,8 +27,11 @@ const FAILURE = new Error("Security mutation rejected.");
 export function normalizeRecoveryPolicy(candidate: { proofs?: unknown; adminReview?: unknown }): RecoveryPolicy | null {
   if (!Array.isArray(candidate?.proofs) || typeof candidate.adminReview !== "boolean") return null;
   const proofs = candidate.proofs;
-  if (proofs.length < 1 || proofs.length > 3 || !proofs.every((proof): proof is RecoveryProof => PROOFS.includes(proof as RecoveryProof)) || new Set(proofs).size !== proofs.length) return null;
-  if (candidate.adminReview ? proofs.length !== 1 : proofs.length < 2) return null;
+  if (!proofs.every((proof): proof is RecoveryProof => PROOFS.includes(proof as RecoveryProof)) || new Set(proofs).size !== proofs.length) return null;
+  // The public contract exposes exactly the three independent pairs, or one
+  // factor with a different eligible ADMIN. Reject undocumented combinations
+  // even when an HTTP caller bypasses the UI method selector.
+  if (proofs.length !== (candidate.adminReview ? 1 : 2)) return null;
   return { proofs: [...proofs].sort(), adminReview: candidate.adminReview };
 }
 

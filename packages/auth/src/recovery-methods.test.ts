@@ -96,7 +96,7 @@ test("explicit recovery methods require two independent factors or one plus diff
   assert.deepEqual(normalizeRecoveryPolicy({ proofs: ["PASSKEY", "TOTP"], adminReview: false }), { proofs: ["PASSKEY", "TOTP"], adminReview: false });
   assert.deepEqual(normalizeRecoveryPolicy({ proofs: ["TOTP", "EMAIL"], adminReview: false }), { proofs: ["EMAIL", "TOTP"], adminReview: false });
   assert.deepEqual(normalizeRecoveryPolicy({ proofs: ["PASSKEY", "EMAIL"], adminReview: false }), { proofs: ["EMAIL", "PASSKEY"], adminReview: false });
-  assert.deepEqual(normalizeRecoveryPolicy({ proofs: ["PASSKEY", "EMAIL", "TOTP"], adminReview: false })?.proofs, ["EMAIL", "PASSKEY", "TOTP"]);
+  assert.equal(normalizeRecoveryPolicy({ proofs: ["PASSKEY", "EMAIL", "TOTP"], adminReview: false }), null, "an undocumented three-factor combination must not be accepted through the backend");
   for (const proof of ["EMAIL", "PASSKEY", "TOTP"]) assert.deepEqual(normalizeRecoveryPolicy({ proofs: [proof], adminReview: true }), { proofs: [proof], adminReview: true });
   for (const policy of [
     { proofs: ["EMAIL"], adminReview: false },
