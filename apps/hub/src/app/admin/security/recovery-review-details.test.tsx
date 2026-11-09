@@ -22,6 +22,8 @@ test("two-factor request must not look like it needs an unrelated reviewer", () 
   assert.doesNotMatch(markup, /aprovação administrativa/u);
   assert.equal(recoveryNeedsAdministrativeReview({ recoveryProofs: ["PASSKEY", "TOTP"], recoveryAdminReview: false }), false);
   assert.equal(recoveryNeedsAdministrativeReview({ recoveryProofs: ["TOTP"], recoveryAdminReview: true }), true);
+  assert.equal(recoveryNeedsAdministrativeReview({ recoveryProofs: ["TOTP", "PASSKEY"], recoveryAdminReview: true }), false);
+  assert.equal(recoveryNeedsAdministrativeReview({ recoveryProofs: ["UNRECOGNIZED"], recoveryAdminReview: true }), false);
 });
 
 test("legacy recovery has a nonconfusing method label and no optional comment", () => {

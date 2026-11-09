@@ -16,6 +16,10 @@ const proofLabels: Record<string, string> = {
 export function recoveryNeedsAdministrativeReview(request: RecoveryReviewDetailsData): boolean {
   // Explicit two/three-factor requests are handled by their own complete-proof path.
   // Empty-policy legacy requests still require the original review.
+  if (request.recoveryProofs?.length) {
+    return request.recoveryAdminReview === true && request.recoveryProofs.length === 1 &&
+      Object.hasOwn(proofLabels, request.recoveryProofs[0]);
+  }
   return request.recoveryAdminReview !== false;
 }
 
@@ -25,7 +29,8 @@ export function RecoveryReviewDetails({ request }: { request: RecoveryReviewDeta
   // Legacy requests have no explicit factor policy, and required e-mail proof.
   const summary = proofs.length > 0
     ? proofs.map((value) => proofLabels[value]).join(" + ")
-    : request.emailVerifiedAt ? "E-mail verificado (fluxo anterior)" : "Solicitação anterior";
+    : request.recoveryProofs?.length ? "Método não reconhecido" :
+      request.emailVerifiedAt ? "E-mail verificado (fluxo anterior)" : "Solicitação anterior";
   const comment = typeof request.recoveryComment === "string" ? request.recoveryComment : "";
 
   return <div className="muted" data-recovery-review-details="true">
