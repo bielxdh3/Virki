@@ -14,7 +14,7 @@ import { recordSecurityDenial, recordSessionCsrfDenial } from "../../lib/audit-d
 import { getCurrentSession } from "../../lib/auth";
 import { expectedPasskeyRP } from "@virki/auth/passkeys";
 import {
-  finishRecoveryPasskeyAssertion, startMultiMethodRecovery, startRecoveryPasskeyAssertion,
+  finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, startMultiMethodRecovery, startRecoveryPasskeyAssertion,
   verifyMultiMethodRecoveryEmail, verifyMultiMethodRecoveryTotp
 } from "@virki/auth/recovery-methods";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
@@ -68,7 +68,9 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   const email = readBoundedFormString(formData, "email", EMAIL_INPUT_MAX_LENGTH);
   const comment = readBoundedFormString(formData, "comment", 300);
   let recovery = {
-    requestId: `c${randomBytes(14).toString("hex")}`,
+    // Use the same opaque format as real and synthetic backend requests. A
+    // validation/error branch must never reveal account existence by ID shape.
+    requestId: generateRecoveryPublicRequestId(),
     requestKey: randomBytes(24).toString("base64url"),
     browserToken: randomBytes(32).toString("base64url")
   };
