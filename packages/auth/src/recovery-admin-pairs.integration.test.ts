@@ -14,8 +14,9 @@ import { confirmTotpEnrollment, consumeApprovedAccountRecovery, startTotpEnrollm
 import { hashPassword, verifyPassword } from "./index";
 import { createPasskeyBrowserToken, finishPasskeyRegistration, startPasskeyRegistration } from "./passkeys";
 
-// This file is discovered by the guarded integration runner. Direct test invocations
-// skip without VIRKI_INTEGRATION_ENABLED, so a shared/production DB is never used.
+// This file is discovered by the guarded integration runner. An explicit,
+// independently named disposable PostgreSQL 18 DB is required even for direct
+// invocations; do not write to another worker's/shared fixture database.
 after(() => prisma.$disconnect());
 
 const HUB_RP = "hub.biel.dev.br";
@@ -33,8 +34,12 @@ async function requireGuardedPg18() {
   assert.equal(process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM, "disposable");
   assert.ok(configured && process.env.DATABASE_URL === configured, "only the explicitly selected disposable target is admitted");
   const parsed = new URL(configured);
+  assert.equal(parsed.protocol, "postgresql:");
   assert.equal(parsed.hostname, "127.0.0.1");
   assert.equal(parsed.username, "virki_runtime_test");
+  const databaseName = decodeURIComponent(parsed.pathname.slice(1));
+  assert.match(databaseName, /^virki_w11_admin_pairs_[A-Za-z0-9_]+$/u,
+    "ADMIN pair tests require their own explicitly named disposable DB");
   assert.notEqual(process.env.NODE_ENV, "production");
   const [observed] = await prisma.$queryRaw<Array<{ version: number; database: string; role: string }>>`
     SELECT current_setting('server_version_num')::int AS "version",
@@ -42,7 +47,7 @@ async function requireGuardedPg18() {
   `;
   assert.ok(observed && observed.version >= 180000 && observed.version < 190000, "the integration server must be PostgreSQL 18");
   assert.equal(observed.role, "virki_runtime_test");
-  assert.equal(observed.database, parsed.pathname.slice(1));
+  assert.equal(observed.database, databaseName);
 }
 
 function sourceAddress() {
@@ -217,6 +222,15 @@ async function oneResetWinner(recovery: Recovery, owner: Admin, label: string, f
   assert.equal(activeSessions, 1, "only the recovered bootstrap session remains live");
 }
 
+async function assertRecoveryRemainsUnconsumed(recovery: Recovery, owner: Admin, originalHash: string) {
+  const current = await prisma.user.findUniqueOrThrow({ where: { id: owner.id } });
+  assert.equal(current.email, owner.email, "a rejected stale proof must not replace the mailbox");
+  assert.equal(current.emailNormalized, owner.email);
+  assert.equal(current.passwordHash, originalHash, "a rejected stale proof must not replace the normal password");
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: recovery.requestId } })).status, "APPROVED",
+    "failed final proof validation must not consume the recovery request");
+}
+
 test("PG18 ADMIN normal-password: independent TOTP_EMAIL, cross-role proof and concurrent one-winner", integrationOptions, async () => {
   await requireGuardedPg18();
   const owner = await eligibleAdmin("admin-pair-totp-email");
@@ -251,7 +265,55 @@ test("PG18 ADMIN normal-password: signed Hub PASSKEY_EMAIL, RP isolation, flag a
   await assert.rejects(consumeApprovedAccountRecovery(recovery.requestId, recovery.requestKey, "only-passkey-password", new Date(), "ADMIN", recovery.browserToken));
   await proveOriginalEmail(recovery, owner.email);
   assert.equal((await getMultiMethodRecoveryState(recovery.requestId, recovery.requestKey, recovery.browserToken, "ADMIN", policy)).status, "APPROVED");
+  const before = (await prisma.user.findUniqueOrThrow({ where: { id: owner.id } })).passwordHash!;
+  // The ADMIN feature flag is a use-time authorization gate, not a flag
+  // captured only when the passkey challenge was minted or verified.
+  process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "false";
+  try {
+    await assert.rejects(consumeApprovedAccountRecovery(recovery.requestId, recovery.requestKey,
+      "flag-off-admin-password-must-fail", new Date(), "ADMIN", recovery.browserToken));
+    await assertRecoveryRemainsUnconsumed(recovery, owner, before);
+  } finally {
+    process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "true";
+  }
   await oneResetWinner(recovery, owner, "admin-passkey-email", ["PASSKEY", "EMAIL"]);
+});
+
+test("PG18 ADMIN normal-password: revoking signed Hub passkey after both proofs invalidates approved reset", integrationOptions, async (t) => {
+  await requireGuardedPg18();
+  enableAdminPasskeys(t);
+  const owner = await eligibleAdmin("admin-pair-stale-passkey");
+  const signer = await enrollHubSigner(owner);
+  const policy = { proofs: ["PASSKEY" as const, "EMAIL" as const], adminReview: false };
+  const recovery = await startMultiMethodRecovery(owner.email, "ADMIN", policy, "pt-BR", new Date(), sourceAddress(), undefined, HUB_RP);
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { id: recovery.requestId, userId: owner.id } }), 1);
+  await proveHubPasskey(recovery, signer, owner.id);
+  await proveOriginalEmail(recovery, owner.email);
+  assert.equal((await getMultiMethodRecoveryState(recovery.requestId, recovery.requestKey, recovery.browserToken, "ADMIN", policy)).status, "APPROVED");
+  const originalHash = (await prisma.user.findUniqueOrThrow({ where: { id: owner.id } })).passwordHash!;
+  await prisma.passkeyCredential.update({ where: { credentialId: signer.id }, data: { revokedAt: new Date() } });
+  await assert.rejects(consumeApprovedAccountRecovery(recovery.requestId, recovery.requestKey,
+    "revoked-passkey-admin-must-fail", new Date(), "ADMIN", recovery.browserToken));
+  await assertRecoveryRemainsUnconsumed(recovery, owner, originalHash);
+});
+
+test("PG18 ADMIN normal-password: TOTP key rotation after approval invalidates stale verified step", integrationOptions, async () => {
+  await requireGuardedPg18();
+  const owner = await eligibleAdmin("admin-pair-stale-totp");
+  const enrollment = await startTotpEnrollment(owner.id, owner.email);
+  const previousStep = new Date(Date.now() - 30_000);
+  await confirmTotpEnrollment(owner.id, totpAt(enrollment.secret, previousStep), previousStep);
+  const policy = { proofs: ["TOTP" as const, "EMAIL" as const], adminReview: false };
+  const recovery = await startMultiMethodRecovery(owner.email, "ADMIN", policy, "pt-BR", new Date(), sourceAddress());
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { id: recovery.requestId, userId: owner.id } }), 1);
+  await proveOriginalEmail(recovery, owner.email);
+  await verifyMultiMethodRecoveryTotp(recovery.requestId, recovery.requestKey, recovery.browserToken, totpAt(enrollment.secret), "ADMIN");
+  assert.equal((await getMultiMethodRecoveryState(recovery.requestId, recovery.requestKey, recovery.browserToken, "ADMIN", policy)).status, "APPROVED");
+  const originalHash = (await prisma.user.findUniqueOrThrow({ where: { id: owner.id } })).passwordHash!;
+  await prisma.totpFactor.update({ where: { userId: owner.id }, data: { keyVersion: { increment: 1 } } });
+  await assert.rejects(consumeApprovedAccountRecovery(recovery.requestId, recovery.requestKey,
+    "rotated-totp-admin-must-fail", new Date(), "ADMIN", recovery.browserToken));
+  await assertRecoveryRemainsUnconsumed(recovery, owner, originalHash);
 });
 
 test("PG18 ADMIN normal-password: Hub PASSKEY_TOTP requires independently verified new mailbox before reset", integrationOptions, async (t) => {

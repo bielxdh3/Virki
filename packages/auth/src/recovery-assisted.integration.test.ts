@@ -140,14 +140,14 @@ test("PG18 TOTP_ADMIN: revoked reviewer cannot consume even after verified repla
   await verifyMultiMethodRecoveryTotp(request.requestId, request.requestKey, request.browserToken, totpAt(secret), "USER");
   await approveAccountRecovery({ id: reviewer.id, role: "ADMIN" }, sessionId, request.requestId);
 
-  const password = "assisted-totp-revoked-admin-must-fail";
-  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, password, new Date(), "USER", request.browserToken),
+  const resetCandidate = "assisted-totp-revoked-admin-must-fail";
+  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, resetCandidate, new Date(), "USER", request.browserToken),
     "lost original mailbox requires verified new mailbox before any reset");
   await unchangedOwner(owner.id, owner.email, originalHash, request.requestId);
 
   const replacement = uniqueEmail("assisted-totp-inbox");
   await startRecoveryNewMailbox(request.requestId, request.requestKey, request.browserToken, "USER", replacement);
-  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, password, new Date(), "USER", request.browserToken),
+  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, resetCandidate, new Date(), "USER", request.browserToken),
     "sending a replacement OTP does not establish inbox ownership");
   await unchangedOwner(owner.id, owner.email, originalHash, request.requestId);
   await verifyRecoveryNewMailbox(request.requestId, request.requestKey, request.browserToken, "USER",
@@ -155,7 +155,7 @@ test("PG18 TOTP_ADMIN: revoked reviewer cannot consume even after verified repla
   await unchangedOwner(owner.id, owner.email, originalHash, request.requestId);
 
   await prisma.user.update({ where: { id: reviewer.id }, data: { isActive: false } });
-  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, password, new Date(), "USER", request.browserToken),
+  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, resetCandidate, new Date(), "USER", request.browserToken),
     "losing reviewer active status must invalidate approved request, even after inbox proof");
   await unchangedOwner(owner.id, owner.email, originalHash, request.requestId);
   assert.equal(await prisma.user.count({ where: { id: reviewer.id, role: "ADMIN", isActive: true, accountStatus: "ACTIVE" } }), 0);
@@ -274,8 +274,8 @@ test("PG18 PASSKEY_ADMIN: signed hub RP assertion, no self-review, independent e
     "the recovering ADMIN cannot approve their own request, even with elevation");
 
   await approveAccountRecovery({ id: reviewer.id, role: "ADMIN" }, reviewerSession, request.requestId);
-  const password = "assisted-passkey-hub-normal-password-reset";
-  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, password,
+  const resetCandidate = "assisted-passkey-hub-normal-password-reset";
+  await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, resetCandidate,
     new Date(), "ADMIN", request.browserToken), "hub passkey proof must not silently attest mailbox control");
   await unchangedOwner(owner.id, owner.email, initial.passwordHash!, request.requestId);
   const mailbox = uniqueEmail("assisted-passkey-new-mail");
@@ -285,14 +285,14 @@ test("PG18 PASSKEY_ADMIN: signed hub RP assertion, no self-review, independent e
     await latestCode(mailbox, "RECOVERY_EMAIL_REBIND"));
   await unchangedOwner(owner.id, owner.email, initial.passwordHash!, request.requestId);
 
-  const bootstrap = await consumeApprovedAccountRecovery(request.requestId, request.requestKey, password,
+  const bootstrap = await consumeApprovedAccountRecovery(request.requestId, request.requestKey, resetCandidate,
     new Date(), "ADMIN", request.browserToken);
   assert.ok(bootstrap, "an independent other ADMIN can authorize signed hub recovery");
   const final = await prisma.user.findUniqueOrThrow({ where: { id: owner.id } });
   assert.equal(final.email, mailbox);
   assert.equal(final.emailNormalized, mailbox);
   assert.ok(final.emailVerifiedAt);
-  assert.equal(await verifyPassword(final.passwordHash ?? "", password), true);
+  assert.equal(await verifyPassword(final.passwordHash ?? "", resetCandidate), true);
   assert.equal((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: registered.id } })).revokedAt !== null, true);
   assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: request.requestId } })).status, "CONSUMED");
   const privileged = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: owner.id } });
