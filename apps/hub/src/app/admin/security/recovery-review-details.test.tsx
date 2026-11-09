@@ -11,7 +11,15 @@ test("assisted recovery details show factor, independent approval, and escaped b
   }} />);
   assert.match(markup, /Aplicativo autenticador \+ aprovação administrativa/u);
   assert.match(markup, /Preciso recuperar &lt;script&gt;nao executar&lt;\/script&gt;/u);
-  assert.doesNotMatch(markup, /<script>/u);
+  // Escaping must also reject mixed-case script opening tags with attributes,
+  // not only the lowercase fixture spelling.
+  assert.doesNotMatch(markup, /<script\b[^>]*>/iu);
+  const mixedCaseMarkup = renderToStaticMarkup(<RecoveryReviewDetails request={{
+    recoveryProofs: ["EMAIL"], recoveryAdminReview: true,
+    recoveryComment: '<ScRiPt data-probe="x">untrusted</ScRiPt>'
+  }} />);
+  assert.match(mixedCaseMarkup, /&lt;ScRiPt data-probe=&quot;x&quot;&gt;untrusted&lt;\/ScRiPt&gt;/u);
+  assert.doesNotMatch(mixedCaseMarkup, /<script\b[^>]*>/iu);
 });
 
 test("two-factor request must not look like it needs an unrelated reviewer", () => {
