@@ -1154,7 +1154,7 @@ test("USER EMAIL_ADMIN recovery requires independent elevated reviewer and revok
   try {
     const owner = await prisma.user.create({
       data: {
-        email: ownedEmail, emailNormalized: ownedEmail, displayName: "Owned USER assisted recovery E2E",
+        email: ownedEmail, emailNormalized: ownedEmail, displayName: ownedEmail,
         role: "USER", isActive: true, accountStatus: "ACTIVE",
         emailVerifiedAt: new Date(), passwordHash: await hashPassword(originalPassword)
       }, select: { id: true }
@@ -1260,9 +1260,16 @@ test("USER EMAIL_ADMIN recovery requires independent elevated reviewer and revok
     await recoveringPage.reload();
     await expect(recoveringPage.getByRole("status").filter({ hasText: "Confirmações concluídas" })).toBeVisible();
     await recoveringPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
+    const protectedDocument = recoveringPage.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.origin === portalUrl && url.pathname === "/account/security" &&
+        response.request().method() === "GET" && response.request().resourceType() === "document";
+    });
     await recoveringPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    expect((await protectedDocument).status()).toBe(200);
     await expect(recoveringPage).toHaveURL(`${portalUrl}/account/security?recovered=password`);
     await expect(recoveringPage.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
+    await expect(recoveringPage.locator("header.page-header p").filter({ hasText: ownedEmail })).toBeVisible();
     const recovered = await prisma.user.findUniqueOrThrow({ where: { id: owner.id } });
     expect(recovered.role).toBe("USER");
     expect(recovered.email).toBe(ownedEmail);
@@ -1273,14 +1280,28 @@ test("USER EMAIL_ADMIN recovery requires independent elevated reviewer and revok
     });
     expect(consumed.status).toBe("CONSUMED");
     expect(consumed.bootstrapSessionId).toBeTruthy();
+    const bootstrapSession = await prisma.session.findUniqueOrThrow({
+      where: { id: consumed.bootstrapSessionId! },
+      select: { userId: true, tokenHash: true, revokedAt: true }
+    });
+    expect(bootstrapSession.userId).toBe(owner.id);
+    expect(bootstrapSession.revokedAt).toBeNull();
+    const sessionCookie = (await recoveringContext.cookies(portalUrl))
+      .find((cookie) => cookie.name === sessionCookieName);
+    expect(sessionCookie).toBeDefined();
+    expect(sessionCookie!.domain).toBe(new URL(portalUrl).hostname);
+    expect(sessionCookie!.httpOnly).toBe(true);
+    expect(bootstrapSession.tokenHash).toBe(hashSessionToken(sessionCookie!.value));
     expect((await prisma.session.findUniqueOrThrow({
       where: { id: oldSession.id }, select: { revokedAt: true }
     })).revokedAt).not.toBeNull();
     expect(await prisma.session.count({
       where: { userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() } }
     })).toBe(1);
-    await previousPage.goto(`${portalUrl}/account/security`);
-    await expect(previousPage).toHaveURL(`${portalUrl}/login?returnTo=%2Faccount%2Fsecurity`);
+    expect((await previousPage.goto(`${portalUrl}/account/security`))?.status()).toBe(200);
+    await expect(previousPage).toHaveURL(`${portalUrl}/login`);
+    await expect(previousPage.getByRole("heading", { level: 1, name: "Entrar", exact: true })).toBeVisible();
+    await expect(previousPage.locator("[data-protected-page-content]")).toHaveCount(0);
   } finally {
     await Promise.all(contexts.map((context) => context.close().catch(() => undefined)));
     // Dedicated disposable database teardown owns the ADMIN review audit and
