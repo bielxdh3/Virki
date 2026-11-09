@@ -83,6 +83,23 @@ test("TOTP recovery of the separate ADMIN credential revokes old passkeys withou
   assert.doesNotMatch(method, /transaction\.totpFactor\.(?:deleteMany|updateMany)\([^\n]*status:\s*"REVOKED"/u);
 });
 
+test("all three separate ADMIN-credential recovery methods revoke old passkey proofs", () => {
+  const source = readFileSync(new URL("./administration.ts", import.meta.url), "utf8");
+  for (const [startName, endName] of [
+    ["recoverAdministrativeCredential", "recoverAdministrativeCredentialWithTotp"],
+    ["recoverAdministrativeCredentialWithTotp", "startAdministrativeEmailRecovery"],
+    ["completeAdministrativeEmailRecovery", "createEmailElevationCeremony"]
+  ]) {
+    const start = source.indexOf(`export async function ${startName}(`);
+    const end = source.indexOf(endName === "createEmailElevationCeremony" ? `async function ${endName}(` : `export async function ${endName}(`, start);
+    assert.ok(start >= 0 && end > start, `${startName} source interval must exist`);
+    const method = source.slice(start, end);
+    assert.match(method, /transaction\.passkeyCredential\.updateMany\(/u, `${startName}: old passkeys must be revoked`);
+    assert.match(method, /revokedAt:\s*null/u, `${startName}: only active passkeys should be affected`);
+    assert.match(method, /transaction\.passkeyChallenge\.deleteMany\(/u, `${startName}: pending assertions must be invalidated`);
+  }
+});
+
 for (const lockTarget of ["session", "elevation"] as const) test(`transactional elevation rechecks ${lockTarget} expiry after a lock wait`, async () => {
   const now = new Date();
   const expiresAt = new Date(Date.now() + 120);

@@ -306,6 +306,11 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
     await transaction.securityElevation.updateMany({ where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
+    // Every way of recovering the privileged credential must invalidate the
+    // old ADMIN passkeys, not only TOTP recovery. They remain eligible proofs
+    // in the separate normal-account recovery flow until revoked.
+    await transaction.passkeyCredential.updateMany({ where: { userId: input.actor.id, revokedAt: null }, data: { revokedAt: now } });
+    await transaction.passkeyChallenge.deleteMany({ where: { userId: input.actor.id, consumedAt: null } });
     // Updating a recovery code (or deleting sibling codes) can wait after the
     // initial User/Session locks. Recheck the live session before success;
     // rejection rolls back the code use, credential change, and recovery data.
@@ -532,6 +537,8 @@ export async function completeAdministrativeEmailRecovery(input: {
       where: { userId: input.actor.id, status: "TRUSTED" },
       data: { status: "REVOKED", revokedAt: checkedAt }
     });
+    await transaction.passkeyCredential.updateMany({ where: { userId: input.actor.id, revokedAt: null }, data: { revokedAt: checkedAt } });
+    await transaction.passkeyChallenge.deleteMany({ where: { userId: input.actor.id, consumedAt: null } });
     await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, new Date(Math.max(checkedAt.getTime(), Date.now())));
     await writeAuditLogInTransaction(transaction, {
       eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS",

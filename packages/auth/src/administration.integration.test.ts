@@ -46,6 +46,22 @@ async function setupAdmin(options: { adminPassword?: string; credential?: boolea
   return { actor: { id: admin.id, role: "ADMIN" }, sessionId: session.id, email: admin.email };
 }
 
+async function createOldHubPasskey(userId: string): Promise<string> {
+  const credential = await prisma.passkeyCredential.create({
+    data: {
+      userId,
+      credentialId: randomBytes(32).toString("base64url"),
+      rpID: "hub.biel.dev.br",
+      publicKey: randomBytes(65),
+      backupEligible: false,
+      backupState: false,
+      name: "Prior administrative recovery passkey"
+    },
+    select: { id: true }
+  });
+  return credential.id;
+}
+
 async function latestEmailCode(email: string, kind: string): Promise<string> {
   const code = (await queuedEmails(email)).filter((message) => message.kind === kind).at(-1)?.code;
   assert.ok(code, "the newest emailed code is available");
@@ -381,6 +397,7 @@ test("an administrative password equal to the normal password is rejected when c
 
 test("an administrative password equal to the normal password is rejected when recovered", integrationOptions, async () => {
   const admin = await setupAdmin();
+  const oldPasskeyId = await createOldHubPasskey(admin.actor.id);
   const recoveryCode = `integration-recovery-${randomBytes(6).toString("hex")}`;
   await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(recoveryCode) } });
 
@@ -391,10 +408,13 @@ test("an administrative password equal to the normal password is rejected when r
   // The rejected attempt must not consume the single-use recovery code.
   const codes = await recoverAdministrativeCredential({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: "integration-recovered-admin-1" });
   assert.equal(codes.length, 10);
+  assert.ok((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskeyId } })).revokedAt,
+    "backup-code recovery must revoke old hub passkeys");
 });
 
 test("email recovery rotates only the separate ADMIN credential, replaces backup codes and revokes old access", integrationOptions, async () => {
   const admin = await setupAdmin();
+  const oldPasskeyId = await createOldHubPasskey(admin.actor.id);
   const oldCode = randomBytes(9).toString("hex");
   await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(oldCode) } });
   await seedActiveElevation(admin, "PROJECT_CONNECTION_MANAGE");
@@ -434,6 +454,8 @@ test("email recovery rotates only the separate ADMIN credential, replaces backup
   assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: otherSession.id } })).revokedAt !== null, true);
   assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
   assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
+  assert.ok((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskeyId } })).revokedAt,
+    "email recovery must revoke old hub passkeys");
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERY_STARTED", result: "INFO" } }), 1);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS" } }), 1);
   assert.ok((await queuedEmails(admin.email)).some((mail) => mail.kind === "ADMIN_CREDENTIAL_CHANGED"));
