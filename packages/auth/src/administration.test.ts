@@ -70,6 +70,19 @@ test("administrative password reuse is a specific mutation rejection", () => {
   assert.equal(error.name, "AdministrativePasswordReuseError");
 });
 
+test("TOTP recovery of the separate ADMIN credential revokes old passkeys without disabling login TOTP", () => {
+  const source = readFileSync(new URL("./administration.ts", import.meta.url), "utf8");
+  const start = source.indexOf("export async function recoverAdministrativeCredentialWithTotp(");
+  const end = source.indexOf("/** Start a distinct ADMIN credential-recovery proof", start);
+  assert.ok(start >= 0 && end > start, "expected isolated administrative TOTP recovery method");
+  const method = source.slice(start, end);
+  assert.match(method, /transaction\.passkeyCredential\.updateMany\(/u);
+  assert.match(method, /where:\s*\{ userId: input\.actor\.id, revokedAt: null \}/u);
+  assert.match(method, /data:\s*\{ revokedAt: checkedAt \}/u);
+  assert.match(method, /transaction\.passkeyChallenge\.deleteMany\(/u);
+  assert.doesNotMatch(method, /transaction\.totpFactor\.(?:deleteMany|updateMany)\([^\n]*status:\s*"REVOKED"/u);
+});
+
 for (const lockTarget of ["session", "elevation"] as const) test(`transactional elevation rechecks ${lockTarget} expiry after a lock wait`, async () => {
   const now = new Date();
   const expiresAt = new Date(Date.now() + 120);

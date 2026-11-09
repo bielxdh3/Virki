@@ -397,6 +397,13 @@ export async function recoverAdministrativeCredentialWithTotp(input: {
       data: { revokedAt: checkedAt }
     });
     await revokeUserAuthenticationProofsInTransaction(transaction, input.actor.id, checkedAt);
+    // A recovered privileged credential must not leave older ADMIN passkeys
+    // usable as future account-recovery proofs. Keep the active TOTP for login,
+    // but require freshly elevated enrollment to restore a hub passkey.
+    await transaction.passkeyCredential.updateMany({
+      where: { userId: input.actor.id, revokedAt: null },
+      data: { revokedAt: checkedAt }
+    });
     await transaction.passkeyChallenge.deleteMany({ where: { userId: input.actor.id, consumedAt: null } });
     await revokeUserOidcArtifactsInTransaction(transaction, input.actor.id);
     await writeAuditLogInTransaction(transaction, {

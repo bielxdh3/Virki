@@ -70,6 +70,17 @@ test("TOTP recovery rotates only the administrative password, invalidates artifa
   const oidc = await prisma.oidcArtifact.create({
     data: { model: "Session", idHash: randomBytes(32).toString("hex"), accountIdHash: hashOidcIdentifier(admin.userId), payloadCiphertext: "disposable-integration-fixture" }
   });
+  const oldPasskey = await prisma.passkeyCredential.create({
+    data: {
+      userId: admin.userId,
+      credentialId: randomBytes(32).toString("base64url"),
+      rpID: "hub.biel.dev.br",
+      publicKey: randomBytes(65),
+      backupEligible: false,
+      backupState: false,
+      name: "Revoked older hub recovery key"
+    }
+  });
   const normalBefore = (await prisma.user.findUniqueOrThrow({ where: { id: admin.userId } })).passwordHash;
   const codes = await recover(admin);
   assert.equal(codes.length, 10);
@@ -92,6 +103,8 @@ test("TOTP recovery rotates only the administrative password, invalidates artifa
   assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
   assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
   assert.equal(await prisma.oidcArtifact.count({ where: { id: oidc.id } }), 0);
+  const revokedPasskey = await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskey.id } });
+  assert.ok(revokedPasskey.revokedAt, "older hub passkeys must not authorize subsequent recovery");
   const audit = await prisma.auditLog.findMany({ where: { actorUserId: admin.userId, eventType: "ADMIN_CREDENTIAL_TOTP_RECOVERED" } });
   assert.equal(audit.length, 1);
   assert.equal(audit[0]?.result, "SUCCESS");
