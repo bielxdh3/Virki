@@ -6,7 +6,7 @@ import { hashPassword, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
 import { createTotpSecret, encryptTotpSecret } from "@virki/auth/security";
-// @ts-expect-error The disposable PostgreSQL guard is an audited JavaScript helper without declarations.
+// @ts-expect-error This reviewed JS guard has no separate type declaration.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
@@ -56,7 +56,19 @@ async function openRecovery(browser: Browser, surface: "portal" | "hub") {
 async function startSelectedTotpEmail(page: Page, email: string): Promise<string> {
   await page.getByLabel("E-mail da conta", { exact: true }).fill(email);
   await page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+  const selectedPost = page.waitForResponse((response) => response.request().method() === "POST" &&
+    new URL(response.url()).pathname === "/recover");
   await page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+  const postResponse = await selectedPost;
+  const setCookieHeaders = (await postResponse.headersArray()).filter((header) => header.name.toLowerCase() === "set-cookie").map((header) => header.value);
+  const cookieNames = productionMode
+    ? ["__Host-virki_recovery", "__Host-virki_recovery_browser", "__Host-virki_recovery_intent"]
+    : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
+  for (const name of cookieNames) {
+    const issued = setCookieHeaders.find((header) => header.startsWith(`${name}=`));
+    expect(issued, `server must issue ${name} in this recovery response`).toBeDefined();
+    expect(/(?:^|;)\s*Domain=/iu.test(issued!), "recovery cookie must be host-only without a Domain attribute").toBe(false);
+  }
   await expect(page).toHaveURL(/\/recover\?requestId=[A-Za-z0-9_-]+$/u);
   const publicRequestId = new URL(page.url()).searchParams.get("requestId") ?? "";
   expect(publicRequestId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
@@ -81,8 +93,8 @@ async function assertBoundCookies(context: BrowserContext, base: string, request
     expect(cookie!.value.length).toBeGreaterThan(0);
   }
   expect(cookies.find((cookie) => cookie.name === names[2])?.value).toBe(`${requestId}.TOTP_EMAIL`);
-  expect(cookies.some((cookie) => cookie.name === "virki_recovery" && cookie.value.length > 0)).toBe(false,
-    "legacy path-scoped recovery cookie must not remain active");
+  expect(cookies.some((cookie) => cookie.name === "virki_recovery" && cookie.value.length > 0),
+    "legacy path-scoped recovery cookie must not remain active").toBe(false);
 }
 
 function totpAt(secret: string, at = new Date()): string {
@@ -143,20 +155,20 @@ test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time 
     const syntheticId = await startSelectedTotpEmail(synthetic.page, absentEmail);
     await assertBoundCookies(synthetic.context, synthetic.base, syntheticId);
     const syntheticPreProof = (await synthetic.page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim();
-    expect(syntheticPreProof).toBe(realPreProof,
-      "known and unknown account requests must show the same pre-proof state and text");
-    expect((await synthetic.page.locator("main").innerText()).trim()).toBe(realVisiblePage,
-      "the complete visible pre-proof page must not enumerate the selected account");
+    expect(syntheticPreProof,
+      "known and unknown account requests must show the same pre-proof state and text").toBe(realPreProof);
+    expect((await synthetic.page.locator("main").innerText()).trim(),
+      "the complete visible pre-proof page must not enumerate the selected account").toBe(realVisiblePage);
     expect(syntheticId).not.toBe(knownId);
     expect((await database.accountRecoveryRequest.count({ where: { userId: ownedUserId } }))).toBe(1);
-    expect(await database.accountRecoveryRequest.count()).toBe(totalBefore + 1,
-      "the nonexistent account must not cause an additional database recovery request");
+    expect(await database.accountRecoveryRequest.count(),
+      "the nonexistent account must not cause an additional database recovery request").toBe(totalBefore + 1);
     const otherContext = await browser.newContext();
     contexts.push(otherContext);
     const stolenPage = await otherContext.newPage();
     await stolenPage.goto(`${portalUrl}/recover?requestId=${encodeURIComponent(knownId)}`);
-    await expect(stolenPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0,
-      "an unbound browser must not see or claim another browser's recovery ceremony");
+    await expect(stolenPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]'),
+      "an unbound browser must not see or claim another browser's recovery ceremony").toHaveCount(0);
 
     const message = await database.emailOutboxMessage.findFirst({
       where: { recipientEmail: ownedEmail, kind: "ACCOUNT_RECOVERY" },
@@ -173,6 +185,13 @@ test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time 
     await totpStage.locator('input[name="code"]').fill(totpAt(totpSecret));
     await totpStage.getByRole("button", { name: "Confirmar", exact: true }).click();
     await expect(real.page.getByText("Defina uma nova senha para finalizar a recuperação.", { exact: false })).toBeVisible();
+    // Preserve an already-rendered second completion form and the original
+    // cookies, then replay its actual Server Action POST after first consume.
+    const stalePage = await real.context.newPage();
+    await stalePage.goto(real.page.url());
+    const staleResetCandidate = `stale-e2e-${randomUUID()}-password`;
+    await stalePage.getByLabel("Nova senha", { exact: true }).fill(staleResetCandidate);
+    const priorRecoveryCookies = (await real.context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"));
     const resetCandidate = `multimethod-e2e-${randomUUID()}-password`;
     await real.page.getByLabel("Nova senha", { exact: true }).fill(resetCandidate);
     await real.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
@@ -184,22 +203,33 @@ test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time 
     expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: knownId } })).status).toBe("CONSUMED");
     expect(await database.session.count({ where: { userId: ownedUserId, revokedAt: null, expiresAt: { gt: new Date() } } })).toBe(1);
     const finalCookies = await real.context.cookies(portalUrl);
-    expect(finalCookies.some((cookie) => cookie.name === getSessionCookieName(process.env) && Boolean(cookie.value))).toBe(true);
+    expect(finalCookies.some((cookie) => cookie.name === getSessionCookieName({ NODE_ENV: productionMode ? "production" : "development" }) && Boolean(cookie.value))).toBe(true);
     expect(finalCookies.some((cookie) => cookie.name.includes("recovery") && Boolean(cookie.value))).toBe(false);
+    await real.context.addCookies(priorRecoveryCookies);
+    await stalePage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    await expect(stalePage).toHaveURL(new RegExp(`/recover\\?requestId=${knownId}&error=1`),
+      { timeout: 15_000 });
+    const afterReplay = await database.user.findUniqueOrThrow({ where: { id: ownedUserId } });
+    expect(await verifyPassword(afterReplay.passwordHash ?? "", resetCandidate)).toBe(true);
+    expect(await verifyPassword(afterReplay.passwordHash ?? "", staleResetCandidate)).toBe(false);
     await real.page.goto(`${portalUrl}/recover?requestId=${encodeURIComponent(knownId)}`);
     await expect(real.page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
   } finally {
-    await Promise.all(contexts.map((context) => context.close()));
-    if (ownedUserId) {
-      // Restrict cleanup to this exact test-created identity and recipient;
-      // never clear shared fixture users, requests or global PostgreSQL rows.
-      await database.session.deleteMany({ where: { userId: ownedUserId } });
-      await database.accountRecoveryRequest.deleteMany({ where: { userId: ownedUserId } });
-      await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: ownedEmail } });
-      await database.totpFactor.deleteMany({ where: { userId: ownedUserId } });
-      await database.user.deleteMany({ where: { id: ownedUserId, email: ownedEmail } });
+    // One browser's close failure cannot skip isolated DB cleanup/disconnect.
+    const contextResults = await Promise.allSettled(contexts.map((context) => context.close()));
+    try {
+      if (ownedUserId) {
+        await database.session.deleteMany({ where: { userId: ownedUserId } });
+        await database.accountRecoveryRequest.deleteMany({ where: { userId: ownedUserId } });
+        await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: ownedEmail } });
+        await database.totpFactor.deleteMany({ where: { userId: ownedUserId } });
+        await database.user.deleteMany({ where: { id: ownedUserId, email: ownedEmail } });
+      }
+    } finally {
+      await database.$disconnect();
     }
-    await database.$disconnect();
+    expect(contextResults.every((result) => result.status === "fulfilled"),
+      "every isolated browser context must close successfully").toBe(true);
   }
 });
 
@@ -258,8 +288,8 @@ test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal AD
       await expect(hub.page.locator(`input[name="method"][value="${method}"]`)).toHaveCount(
         process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" ? 1 : 0);
     }
-    expect((await hub.context.cookies(hubUrl)).filter((cookie) => cookie.name.includes("recovery") && cookie.value.length > 0)).toHaveLength(0,
-      "merely viewing the ADMIN recovery form must not issue an authorizing recovery capability");
+    expect((await hub.context.cookies(hubUrl)).filter((cookie) => cookie.name.includes("recovery") && cookie.value.length > 0),
+      "merely viewing the ADMIN recovery form must not issue an authorizing recovery capability").toHaveLength(0);
   } finally {
     await Promise.all(contexts.map((context) => context.close()));
     await database.$disconnect();
