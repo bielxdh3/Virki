@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { generateRegistrationOptions, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { PrismaClient } from "@virki/database";
-import { hashPassword, verifyPassword } from "@virki/auth";
+import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
 import { createTotpSecret, encryptTotpSecret } from "@virki/auth/security";
@@ -213,7 +213,7 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
     let replacementEmail: string | undefined;
     try {
       const owner = await database.user.create({ data: {
-        email: ownerEmail, emailNormalized: ownerEmail, displayName: "Owned WebAuthn E2E user",
+        email: ownerEmail, emailNormalized: ownerEmail, displayName: ownerEmail,
         passwordHash: await hashPassword(password), role: "USER",
         isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
         secondFactorMethod: totpSecret ? "TOTP" : "EMAIL",
@@ -272,8 +272,17 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         expect(await database.accountRecoveryRequest.count({ where: { id: syntheticId } })).toBe(0);
         const unbound = await openRecovery(browser, "portal");
         contexts.push(unbound.context);
-        await unbound.page.goto(portalUrl + "/recover?requestId=" + encodeURIComponent(requestId));
+        const foreignUrl = portalUrl + "/recover?requestId=" + encodeURIComponent(requestId);
+        const foreignResponse = await unbound.page.goto(foreignUrl);
+        expect(foreignResponse?.status(), "foreign browser must receive the real recovery document, not 403/500").toBe(200);
+        await expect(unbound.page).toHaveURL(foreignUrl);
+        await expect(unbound.page.getByRole("heading", { level: 1, name: "Recuperar conta" })).toBeVisible();
+        await expect(unbound.page.locator('p.form-error[role="alert"]')).toContainText(
+          "Este link de recuperação não é mais válido."
+        );
         await expect(unbound.page.locator('section[aria-label="Confirmação de identidade"]')).toHaveCount(0);
+        await expect(unbound.page.locator('input[name="code"]')).toHaveCount(0);
+        await expect(unbound.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
 
         // Neither assertion nor verification is fabricated in Node. The
         // actual React click calls both Next Server Actions using WebAuthn.get.
@@ -350,7 +359,9 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         const recovered = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
         expect(await verifyPassword(recovered.passwordHash ?? "", winningPassword)).toBe(true);
         expect(recovered.emailNormalized).toBe(replacementEmail ?? ownerEmail);
-        expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).status).toBe("CONSUMED");
+        const consumed = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+        expect(consumed.status).toBe("CONSUMED");
+        expect(consumed.bootstrapSessionId, "the consumed request must identify its unique bootstrap session").toBeTruthy();
         expect(await database.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } })).toBe(0);
         if (totpSecret) expect((await database.totpFactor.findUniqueOrThrow({ where: { userId: owner.id } })).status).toBe("REVOKED");
         const session = (await context.cookies(portalUrl)).find((cookie) =>
@@ -359,6 +370,18 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         expect(session!.domain).toBe("portal.localhost");
         expect(session!.httpOnly).toBe(true);
         expect(session!.secure).toBe(productionMode);
+        const bootstrap = await database.session.findUniqueOrThrow({ where: { id: consumed.bootstrapSessionId! } });
+        expect(bootstrap.userId, "bootstrap session must belong to the recovered owner").toBe(owner.id);
+        expect(bootstrap.revokedAt, "bootstrap session must not be revoked").toBeNull();
+        expect(bootstrap.expiresAt.getTime()).toBeGreaterThan(Date.now());
+        expect(bootstrap.tokenHash, "browser session cookie must be the actual bootstrap session token")
+          .toBe(hashSessionToken(session!.value));
+        const protectedUrl = portalUrl + "/account/security";
+        const protectedDocument = await page.goto(protectedUrl);
+        expect(protectedDocument?.status(), "fresh protected document GET must return HTTP 200").toBe(200);
+        await expect(page).toHaveURL(protectedUrl);
+        await expect(page.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
+        await expect(page.locator("header.page-header")).toContainText(ownerEmail);
         expect((await context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
 
         await context.addCookies(oldCookies);
