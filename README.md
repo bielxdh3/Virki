@@ -72,6 +72,20 @@ After entering from the public site and authenticating on `portal.biel.dev.br`, 
 | **Visible + unauthorized** | List the project as **Sem acesso**, without an actionable launch link or authorization. |
 | **Hidden** | Do not list the project or disclose its details to the USER, even if the project exists. |
 
+```text
+      Intended USER project catalog (NOT IMPLEMENTED)
+                          |
+                    Project hidden?
+                     /          \
+                   Yes          No
+                    |            |
+               Not listed    Active grant?
+                               /       \
+                             Yes       No
+                              |         |
+                           Acessar   Sem acesso
+```
+
 **Implementation status:** `apps/hub/src/app/page.tsx` currently queries only enabled connections with active `UserProjectGrant` records. `ProjectConnection` has an `enabled` flag but no independent public/hidden visibility setting in the Prisma schema. Therefore the visible-but-unauthorized and hidden classifications are **requirements, not shipped UI or database features**. This README change does not implement them or relax authorization. The ADMIN Hub at `hub.biel.dev.br` remains a separate, protected surface.
 
 ## Local development
