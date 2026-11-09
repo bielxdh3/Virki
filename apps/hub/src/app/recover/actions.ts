@@ -268,7 +268,7 @@ export async function verifySelectedRecoveryPasskeyAction(formData: FormData): P
   });
 }
 
-export type RecoveryCompletionActionState = { status: "idle" | "password-error" };
+export type RecoveryCompletionActionState = { status: "idle" | "password-error" | "completed" };
 
 export async function completeRecoveryAction(_previousState: RecoveryCompletionActionState, formData: FormData): Promise<RecoveryCompletionActionState> {
   return withHubAuditRequest(async () => {
@@ -293,7 +293,11 @@ export async function completeRecoveryAction(_previousState: RecoveryCompletionA
   clearRecoveryCandidateCookie(cookieStore);
   if (newSession) {
     cookieStore.set(SESSION_COOKIE_NAME, newSession.token, getSessionCookieOptions(newSession.expiresAt));
-    redirect(expectedRole === "ADMIN" ? "/admin/accounts" : "/account/security?recovered=password");
+    // A Server Action redirect may attempt to render the protected admin route
+    // through this action's RSC request, which does not have the next document's
+    // Cloudflare Access/render provenance. The client must navigate with a
+    // fresh document GET after the new host-only session cookie is committed.
+    return { status: "completed" };
   }
   redirect(recovery?.purpose === "INVITATION" ? "/login?invited=1" : "/login?recovered=1");
   });

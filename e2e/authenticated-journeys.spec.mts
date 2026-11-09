@@ -1088,6 +1088,9 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
       responses: bootstrapResponses
     }));
     await expect(hubPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+    expect(bootstrapResponses.some((response) => response.path === "/admin/accounts" &&
+      response.method === "GET" && response.type === "document" && response.status === 200),
+    "recovered ADMIN must reach the protected Hub with a new document GET, not stale Server Action RSC").toBe(true);
     const recovered = await prisma.user.findUniqueOrThrow({
       where: { id: owner.id }, select: { passwordHash: true }
     });
