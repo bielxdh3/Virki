@@ -400,6 +400,18 @@ model AccountRecoveryRequest {
   userId             String
   emailChallengeHash String
   emailVerifiedAt    DateTime?
+  // NULL capability and empty proofs identify the legacy invitation/recovery policy.
+  recoveryProofs     String[]              @default([])
+  recoveryRole       UserRole?
+  recoveryAdminReview Boolean              @default(true)
+  recoveryBrowserHash String?
+  recoveryPasskeyVerifiedAt DateTime?
+  recoveryPasskeyCredentialId String?
+  recoveryPasskeyBindingHash String?
+  recoveryTotpVerifiedAt DateTime?
+  recoveryTotpBindingHash String?
+  recoveryTotpUsedStep Int?
+  recoveryComment    String?
   status             RecoveryRequestStatus @default(PENDING)
   purpose            RecoveryRequestPurpose @default(RECOVERY)
   expiresAt          DateTime

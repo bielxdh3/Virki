@@ -213,18 +213,18 @@ test("security counts exclude used recovery codes and devices beyond the trust l
 
 test("administrator recovery queue excludes requests at or past expiry", () => {
   const now = new Date("2026-10-02T12:00:00.000Z");
-
-  assert.deepEqual(getPendingAccountRecoveryQueueWhere(now), {
-    status: "PENDING",
-    emailVerifiedAt: { not: null },
-    expiresAt: { gt: now },
-    user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE" }
-  });
-  assert.deepEqual(getPendingAccountRecoveryQueueWhere(now, "admin-1"), {
-    status: "PENDING",
-    emailVerifiedAt: { not: null },
-    expiresAt: { gt: now },
-    user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", id: { not: "admin-1" } }
+  const predicate = getPendingAccountRecoveryQueueWhere(now);
+  assert.equal(predicate.status, "PENDING");
+  assert.deepEqual(predicate.expiresAt, { gt: now });
+  assert.deepEqual(predicate.OR, [
+    { recoveryProofs: { isEmpty: true }, emailVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "EMAIL" }, emailVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "TOTP" }, recoveryTotpVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "PASSKEY" }, recoveryPasskeyVerifiedAt: { not: null } }
+  ]);
+  assert.deepEqual(predicate.user, { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE" });
+  assert.deepEqual(getPendingAccountRecoveryQueueWhere(now, "admin-1").user, {
+    role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", id: { not: "admin-1" }
   });
 });
 
@@ -301,6 +301,10 @@ test("approved USER password recovery atomically invalidates old passkeys, TOTP 
     userId,
     emailAddressHash: createHash("sha256").update(emailNormalized, "utf8").digest("hex"),
     status: "APPROVED",
+    recoveryProofs: [],
+    recoveryBrowserHash: null,
+    recoveryAdminReview: true,
+    emailVerifiedAt: now,
     expiresAt: new Date(now.getTime() + 60_000),
     user
   };
