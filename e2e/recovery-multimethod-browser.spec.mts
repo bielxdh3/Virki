@@ -46,11 +46,18 @@ async function requireFixture(): Promise<{ fixture: Fixture; database: PrismaCli
 
 async function openRecovery(browser: Browser, surface: "portal" | "hub") {
   const context = await browser.newContext();
-  const page = await context.newPage();
-  if (surface === "hub") await addCloudflareAccessHeader(page);
-  const base = surface === "portal" ? portalUrl : hubUrl;
-  await page.goto(`${base}/recover`);
-  return { context, page, base };
+  try {
+    const page = await context.newPage();
+    if (surface === "hub") await addCloudflareAccessHeader(page);
+    const base = surface === "portal" ? portalUrl : hubUrl;
+    await page.goto(`${base}/recover`);
+    return { context, page, base };
+  } catch (error) {
+    // A navigation or synthetic Access setup failure occurs before the caller
+    // can register this context for its own cleanup.
+    await context.close();
+    throw error;
+  }
 }
 
 async function startSelectedTotpEmail(page: Page, email: string): Promise<string> {
@@ -194,7 +201,16 @@ test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time 
     await stalePage.goto(real.page.url());
     const staleResetCandidate = `stale-e2e-${randomUUID()}-password`;
     await stalePage.getByLabel("Nova senha", { exact: true }).fill(staleResetCandidate);
-    const priorRecoveryCookies = (await real.context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"));
+    const priorRecoveryCookies = (await real.context.cookies(portalUrl))
+      .filter((cookie) => cookie.name.includes("recovery"))
+      .map((cookie) => ({
+        // Playwright's `domain` field describes a cookie; supplying it when
+        // restoring __Host- cookies could mint an invalid Domain attribute.
+        // Use the exact original HTTPS origin to restore a host-only cookie.
+        url: `${portalUrl}/`, name: cookie.name, value: cookie.value,
+        httpOnly: cookie.httpOnly, secure: cookie.secure,
+        sameSite: cookie.sameSite, expires: cookie.expires
+      }));
     const resetCandidate = `multimethod-e2e-${randomUUID()}-password`;
     await real.page.getByLabel("Nova senha", { exact: true }).fill(resetCandidate);
     await real.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
@@ -208,13 +224,33 @@ test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time 
     const finalCookies = await real.context.cookies(portalUrl);
     expect(finalCookies.some((cookie) => cookie.name === getSessionCookieName({ NODE_ENV: productionMode ? "production" : "development" }) && Boolean(cookie.value))).toBe(true);
     expect(finalCookies.some((cookie) => cookie.name.includes("recovery") && Boolean(cookie.value))).toBe(false);
-    await real.context.addCookies(priorRecoveryCookies);
+    // Reinject the original browser capability as a host-only cookie. Using
+    // the Cookie object's explicit domain with a __Host- prefix would break
+    // Chromium's host-only prefix restrictions in production-mode rehearsals.
+    await real.context.addCookies(priorRecoveryCookies.map((cookie) => ({
+      name: cookie.name, value: cookie.value, url: `${portalUrl}/`,
+      expires: cookie.expires, httpOnly: cookie.httpOnly,
+      secure: cookie.secure, sameSite: cookie.sameSite
+    })));
+    const restored = await real.context.cookies(portalUrl);
+    for (const cookie of priorRecoveryCookies) {
+      expect(restored.find((candidate) => candidate.name === cookie.name)?.value).toBe(cookie.value);
+    }
+    const rejectedReplay = stalePage.waitForResponse((response) => response.request().method() === "POST" &&
+      new URL(response.url()).origin === portalUrl && new URL(response.url()).pathname === "/recover" &&
+      Boolean(response.request().headers()["next-action"]));
     await stalePage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    const replayResponse = await rejectedReplay;
+    expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0,
+      "the stale password must be submitted through an actual Next Server Action POST").toBeGreaterThan(0);
     await expect(stalePage).toHaveURL(new RegExp(`/recover\\?requestId=${knownId}&error=1`),
       { timeout: 15_000 });
     const afterReplay = await database.user.findUniqueOrThrow({ where: { id: ownedUserId } });
     expect(await verifyPassword(afterReplay.passwordHash ?? "", resetCandidate)).toBe(true);
     expect(await verifyPassword(afterReplay.passwordHash ?? "", staleResetCandidate)).toBe(false);
+    expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: knownId } })).status).toBe("CONSUMED");
+    expect(await database.session.count({ where: { userId: ownedUserId, revokedAt: null, expiresAt: { gt: new Date() } } }),
+      "replaying the same browser capability must not issue a second bootstrap session").toBe(1);
     await real.page.goto(`${portalUrl}/recover?requestId=${encodeURIComponent(knownId)}`);
     await expect(real.page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
   } finally {
