@@ -61,9 +61,9 @@ async function startSelectedTotpEmail(page: Page, email: string): Promise<string
   await page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
   const postResponse = await selectedPost;
   const setCookieHeaders = (await postResponse.headersArray()).filter((header) => header.name.toLowerCase() === "set-cookie").map((header) => header.value);
-  const cookieNames = productionMode
-    ? ["__Host-virki_recovery", "__Host-virki_recovery_browser", "__Host-virki_recovery_intent"]
-    : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
+  // This USER recovery request runs on the Portal dev service. Production-Hub
+  // rehearsals change the Hub worker only, not publicSiteEnv.NODE_ENV.
+  const cookieNames = ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
   for (const name of cookieNames) {
     const issued = setCookieHeaders.find((header) => header.startsWith(`${name}=`));
     expect(issued, `server must issue ${name} in this recovery response`).toBeDefined();
@@ -79,9 +79,7 @@ async function startSelectedTotpEmail(page: Page, email: string): Promise<string
 async function assertBoundCookies(context: BrowserContext, base: string, requestId: string): Promise<void> {
   const cookies = await context.cookies(base);
   const host = new URL(base).hostname;
-  const names = [productionMode ? "__Host-virki_recovery" : "virki_recovery_v2",
-    productionMode ? "__Host-virki_recovery_browser" : "virki_recovery_browser",
-    productionMode ? "__Host-virki_recovery_intent" : "virki_recovery_intent"];
+  const names = ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
   for (const name of names) {
     const cookie = cookies.find((candidate) => candidate.name === name) as RecoveryCookie | undefined;
     expect(cookie, `${name} must be issued only by the selected recovery host`).toBeDefined();
@@ -89,7 +87,7 @@ async function assertBoundCookies(context: BrowserContext, base: string, request
     expect(cookie!.path).toBe("/");
     expect(cookie!.httpOnly).toBe(true);
     expect(cookie!.sameSite).toBe("Lax");
-    expect(cookie!.secure).toBe(productionMode);
+    expect(cookie!.secure).toBe(false);
     expect(cookie!.value.length).toBeGreaterThan(0);
   }
   expect(cookies.find((cookie) => cookie.name === names[2])?.value).toBe(`${requestId}.TOTP_EMAIL`);
@@ -203,7 +201,7 @@ test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time 
     expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: knownId } })).status).toBe("CONSUMED");
     expect(await database.session.count({ where: { userId: ownedUserId, revokedAt: null, expiresAt: { gt: new Date() } } })).toBe(1);
     const finalCookies = await real.context.cookies(portalUrl);
-    expect(finalCookies.some((cookie) => cookie.name === getSessionCookieName({ NODE_ENV: productionMode ? "production" : "development" }) && Boolean(cookie.value))).toBe(true);
+    expect(finalCookies.some((cookie) => cookie.name === getSessionCookieName({ NODE_ENV: "development" }) && Boolean(cookie.value))).toBe(true);
     expect(finalCookies.some((cookie) => cookie.name.includes("recovery") && Boolean(cookie.value))).toBe(false);
     await real.context.addCookies(priorRecoveryCookies);
     await stalePage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
