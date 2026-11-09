@@ -317,7 +317,13 @@ test("approved USER password recovery atomically invalidates old passkeys, TOTP 
   let auditEvent = "";
 
   const transaction = {
-    $queryRaw: async (query: TemplateStringsArray) => query.join("").includes('FROM "User"') ? [{ id: userId }] : [],
+    $queryRaw: async (query: TemplateStringsArray) =>
+      query.join("").includes('FROM "User"') || query.join("").includes('FROM "AccountRecoveryRequest"')
+        ? [{ id: userId }] : [],
+    $executeRaw: async () => {
+      requestStatus = "CONSUMED";
+      return 1;
+    },
     loginRateLimit: {
       findUnique: async () => null,
       create: async () => ({})

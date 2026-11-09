@@ -245,7 +245,7 @@ export async function completeRecoveryAction(_previousState: RecoveryCompletionA
   let newSession: Awaited<ReturnType<typeof consumeApprovedAccountRecovery>>;
   try {
     const browserState = recoveryBrowserState(cookieStore, requestId);
-    newSession = await consumeApprovedAccountRecovery(requestId, requestKey, newPassword, new Date(), expectedRole, browserState?.browserToken ?? "");
+    newSession = await consumeApprovedAccountRecovery(requestId, requestKey, newPassword, undefined, expectedRole, browserState?.browserToken ?? "");
   } catch {
     await recordSecurityDenial(await headers(), "account-recovery-complete", "rejected");
     redirect(`/recover?requestId=${encodeURIComponent(requestId)}&error=1`);
