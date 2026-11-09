@@ -663,6 +663,7 @@ try {
     if ($env:VIRKI_E2E_LOW05_DIAGNOSTICS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_LOW05_DIAGNOSTICS=true') }
     if ($env:VIRKI_E2E_PASSKEYS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_PASSKEYS=true') }
     if ($env:VIRKI_E2E_REQUIRE_RECOVERY -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_REQUIRE_RECOVERY=true') }
+    if ($env:VIRKI_E2E_REQUIRE_ADMIN_PASSKEYS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_REQUIRE_ADMIN_PASSKEYS=true') }
     if ($env:VIRKI_E2E_ADMIN_PASSKEYS -eq 'true') {
       if ($env:VIRKI_E2E_PASSKEYS -ne 'true' -or $env:VIRKI_E2E_HUB_MODE -eq 'production') {
         throw 'ADMIN passkey E2E requires explicit USER passkeys and a non-production Hub.'

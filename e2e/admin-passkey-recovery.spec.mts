@@ -17,12 +17,17 @@ const fixtureFile = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE?.trim();
 const enabled = process.env.VIRKI_E2E_PASSKEYS === "true" &&
   process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" &&
   process.env.VIRKI_E2E_HUB_MODE !== "production";
+// Explicitly enabling privileged passkeys makes this test a mandatory gate:
+// absent browser/DB fixtures must FAIL, not silently count as a SKIP. Operators
+// can also demand the gate without pre-enabling it through REQUIRE_ADMIN_PASSKEYS.
+const mandatory = process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" ||
+  process.env.VIRKI_E2E_REQUIRE_ADMIN_PASSKEYS === "true";
 
 // Running playwright --list must never launch web servers, use an existing DB,
 // install browser trust, or mutate Cloudflare/SMTP. The normal harness owns its
 // per-run TLS trust and private DB only when physical execution is authorized.
-test.skip(!enabled || !dbUrl || !fixtureFile || !existsSync(fixtureFile),
-  "ADMIN passkey E2E requires both explicit flags and an isolated E2E fixture.");
+test.skip(!mandatory && (!enabled || !dbUrl || !fixtureFile || !existsSync(fixtureFile)),
+  "ADMIN passkey browser E2E is opt-in; an explicit ADMIN passkey/required gate may never SKIP.");
 
 type Reviewer = { id: string; email: string; password: string; administrativePassword: string };
 type Owner = { id: string; email: string; password: string; administrativePassword: string };
@@ -235,8 +240,14 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     // second Chromium profile, and an unknown ADMIN receives the same UI.
     const stolen = await newHubContext(browser);
     contexts.push(stolen.context);
-    await stolen.page.goto(`${hub}/recover?requestId=${requestId}`);
+    const foreignUrl = `${hub}/recover?requestId=${requestId}`;
+    const foreignDocument = await stolen.page.goto(foreignUrl);
+    expect(foreignDocument?.status(), "foreign browser must get a real HTTP 200 document, not a forbidden or failed page").toBe(200);
+    await expect(stolen.page).toHaveURL(foreignUrl);
+    await expect(stolen.page.getByRole("heading", { level: 1, name: "Recuperar acesso administrativo", exact: true })).toBeVisible();
+    await expect(stolen.page.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido");
     await expect(stolen.page.locator('[aria-label="Chave de acesso"] button')).toHaveCount(0);
+    await expect(stolen.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
     const synthetic = await newHubContext(browser);
     contexts.push(synthetic.context);
     const unknownId = await startPasskeyAdminRecovery(synthetic.page, `absent-${randomUUID()}@e2e.invalid`);
@@ -275,6 +286,46 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     await expect(target.page.getByLabel("Código recebido no novo e-mail")).toBeVisible();
     await expect(target.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
     const code = await latestCode(db, replacement, "RECOVERY_EMAIL_REBIND");
+
+    // Exercise the actual Next completion Server Action BEFORE mailbox proof,
+    // not merely a hidden input. The isolated owned request is temporarily
+    // marked verified only to render a genuine React completion form; clear
+    // that fixture-only marker BEFORE submitting. This mimics a stale rendered
+    // completion form after factor state changes, without authorizing a reset.
+    const beforeDenied = await db.user.findUniqueOrThrow({ where: { id: owner.id },
+      select: { email: true, emailNormalized: true, emailVerifiedAt: true, passwordHash: true, secondFactorMethod: true } });
+    const newMailBeforeDenied = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId },
+      select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true } });
+    expect(newMailBeforeDenied).toMatchObject({ status: "APPROVED", recoveryNewEmailVerifiedAt: null, bootstrapSessionId: null });
+    await db.accountRecoveryRequest.update({ where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: new Date() } });
+    try {
+      await target.page.reload();
+      await expect(target.page.getByLabel("Nova senha", { exact: true })).toBeVisible();
+    } finally {
+      // Never leave an artificial verified marker behind if rendering fails.
+      await db.accountRecoveryRequest.update({ where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: null } });
+    }
+    expect((await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).recoveryNewEmailVerifiedAt).toBeNull();
+    const prematurePassword = `premature-admin-${randomUUID()}-password`;
+    await target.page.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
+    const deniedAction = target.page.waitForResponse(response => new URL(response.url()).origin === hub &&
+      new URL(response.url()).pathname === "/recover" && response.request().method() === "POST" &&
+      Boolean(response.request().headers()["next-action"]));
+    await target.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    const deniedResponse = await deniedAction;
+    expect(deniedResponse.request().postDataBuffer()?.byteLength ?? 0,
+      "the premature password must reach the real Server Action POST").toBeGreaterThan(0);
+    await expect(target.page).toHaveURL(`${hub}/recover?requestId=${requestId}&error=1`);
+    const afterDenied = await db.user.findUniqueOrThrow({ where: { id: owner.id },
+      select: { email: true, emailNormalized: true, emailVerifiedAt: true, passwordHash: true, secondFactorMethod: true } });
+    expect(afterDenied, "denied Server Action must not change the normal password, email or MFA").toEqual(beforeDenied);
+    expect(await verifyPassword(afterDenied.passwordHash ?? "", prematurePassword)).toBe(false);
+    const rejectedRecovery = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId },
+      select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true } });
+    expect(rejectedRecovery).toEqual(newMailBeforeDenied);
+    await expect(target.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
+    await expect(target.page.getByLabel("Código recebido no novo e-mail")).toBeVisible();
+
     await target.page.getByLabel("Código recebido no novo e-mail").fill(code);
     await target.page.getByRole("button", { name: "Confirmar novo e-mail" }).click();
     await expect(target.page.getByLabel("Nova senha", { exact: true })).toBeVisible();
@@ -282,8 +333,32 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
 
     const changedPassword = `new-normal-admin-${randomUUID()}-password`;
     await target.page.getByLabel("Nova senha", { exact: true }).fill(changedPassword);
+    // A successful Server Action alone is insufficient: require a *new*
+    // protected document GET, not a stale RSC update or a generic heading.
+    const bootstrapDocument = target.page.waitForResponse(response => new URL(response.url()).origin === hub &&
+      new URL(response.url()).pathname === "/admin/accounts" && response.request().method() === "GET" &&
+      response.request().resourceType() === "document");
     await target.page.getByRole("button", { name: "Concluir recuperação" }).click();
     await expect(target.page).toHaveURL(`${hub}/admin/accounts`);
+    expect((await bootstrapDocument).status(), "bootstrap must load the actual protected Hub document over HTTP 200").toBe(200);
+    await expect(target.page.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+    const consumed = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId },
+      select: { status: true, bootstrapSessionId: true } });
+    expect(consumed.status).toBe("CONSUMED");
+    expect(consumed.bootstrapSessionId, "recovery must persist its precise bootstrap session identity").toBeTruthy();
+    const bootstrapSession = await db.session.findUniqueOrThrow({ where: { id: consumed.bootstrapSessionId! },
+      select: { userId: true, tokenHash: true, revokedAt: true, expiresAt: true } });
+    expect(bootstrapSession.userId).toBe(owner.id);
+    expect(bootstrapSession.revokedAt).toBeNull();
+    expect(bootstrapSession.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    const sessionCookie = (await target.context.cookies(hub)).find(cookie => cookie.name === getSessionCookieName({ NODE_ENV: "development" }));
+    expect(sessionCookie, "the browser must receive a protected host-only bootstrap session cookie").toBeDefined();
+    expect(sessionCookie!.domain).toBe("hub.localhost");
+    expect(sessionCookie!.path).toBe("/");
+    expect(sessionCookie!.httpOnly).toBe(true);
+    expect(sessionCookie!.sameSite).toBe("Lax");
+    expect(hashSessionToken(sessionCookie!.value),
+      "the active browser session must match bootstrapSessionId, not a leftover unrelated session").toBe(bootstrapSession.tokenHash);
     const updated = await db.user.findUniqueOrThrow({ where: { id: owner.id } });
     expect(await verifyPassword(updated.passwordHash ?? "", changedPassword)).toBe(true);
     expect(await verifyPassword(updated.passwordHash ?? "", owner.password)).toBe(false);
@@ -294,7 +369,6 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(administrative.status).toBe("ACTIVE");
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
     expect((await db.session.findUniqueOrThrow({ where: { id: ownerSession.id } })).revokedAt).not.toBeNull();
-    expect(await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).toMatchObject({ status: "CONSUMED" });
     expect(await db.emailOutboxMessage.count({ where: { recipientEmail: owner.email, kind: "RECOVERY_EMAIL_REBIND_NOTICE" } })).toBe(1);
 
     // Recovery invalidates the authenticator, and replay cannot resurrect it.
