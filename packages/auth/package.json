@@ -16,6 +16,7 @@
     "./email": "./src/email.ts",
     "./security": "./src/security.ts",
     "./recovery-methods": "./src/recovery-methods.ts",
+    "./recovery-email-rebind": "./src/recovery-email-rebind.ts",
     "./passkeys": "./src/passkeys.ts",
     "./account-invitation": "./src/account-invitation.ts",
     "./oidc-secrets": "./src/oidc-secrets.ts",

@@ -914,7 +914,17 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
     // Recovery with independently verified browser-bound factors may bootstrap a
     // single new session after all previous sessions/devices have been revoked.
     // The caller must set the host-only HttpOnly session cookie from this token.
-    if (current.recoveryProofs.length) return createSessionInTransaction(transaction, request.userId, consumedAt, ["recovery", ...current.recoveryProofs.map((proof) => proof.toLowerCase())]);
+    if (current.recoveryProofs.length) {
+      // Persist the exact session identity in the consumed request. The SQL
+      // consumption clock and this JS session timestamp may differ.
+      const bootstrap = await createSessionInTransaction(transaction, request.userId, consumedAt, ["recovery", ...current.recoveryProofs.map((proof) => proof.toLowerCase())]);
+      const bound = await transaction.accountRecoveryRequest.updateMany({
+        where: { id: request.id, userId: request.userId, status: "CONSUMED", bootstrapSessionId: null },
+        data: { bootstrapSessionId: bootstrap.id }
+      });
+      if (bound.count !== 1) throw new SecurityMutationError();
+      return bootstrap;
+    }
   }, { isolationLevel: "ReadCommitted" });
 }
 
