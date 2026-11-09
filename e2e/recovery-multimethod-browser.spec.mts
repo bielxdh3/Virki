@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { generateRegistrationOptions, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
@@ -18,7 +19,8 @@ const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE?.trim();
 
 // The E2E global-setup creates owner-labelled fixtures on a private disposable
 // database. This suite never provisions identities in shared/production data.
-test.skip((!e2eDatabaseUrl || !fixturePath) && process.env.VIRKI_E2E_REQUIRE_RECOVERY !== "true",
+test.skip((!e2eDatabaseUrl || !fixturePath) && process.env.VIRKI_E2E_REQUIRE_RECOVERY !== "true" &&
+  process.env.VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS !== "true" && process.env.VIRKI_E2E_PASSKEYS !== "true",
   "requires isolated E2E resources; VIRKI_E2E_REQUIRE_RECOVERY=true makes this a mandatory gate");
 
 type Actor = { id: string; email: string };
@@ -60,9 +62,9 @@ async function openRecovery(browser: Browser, surface: "portal" | "hub") {
   }
 }
 
-async function startSelectedTotpEmail(page: Page, email: string): Promise<string> {
+async function startSelectedRecovery(page: Page, email: string, method: "TOTP_EMAIL" | "PASSKEY_EMAIL" | "PASSKEY_TOTP"): Promise<string> {
   await page.getByLabel("E-mail da conta", { exact: true }).fill(email);
-  await page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+  await page.locator(`input[name="method"][value="${method}"]`).check();
   const selectedPost = page.waitForResponse((response) => response.request().method() === "POST" &&
     new URL(response.url()).pathname === "/recover");
   await page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
@@ -82,11 +84,20 @@ async function startSelectedTotpEmail(page: Page, email: string): Promise<string
   await expect(page).toHaveURL(/\/recover\?requestId=[A-Za-z0-9_-]+$/u);
   const publicRequestId = new URL(page.url()).searchParams.get("requestId") ?? "";
   expect(publicRequestId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
-  await expect(page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toBeVisible();
+  if (method === "TOTP_EMAIL" || method === "PASSKEY_EMAIL") {
+    await expect(page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toBeVisible();
+  } else {
+    await expect(page.locator('[aria-label="Aplicativo autenticador"] input[name="code"]')).toBeVisible();
+  }
   return publicRequestId;
 }
 
-async function assertBoundCookies(context: BrowserContext, base: string, requestId: string): Promise<void> {
+async function startSelectedTotpEmail(page: Page, email: string): Promise<string> {
+  return startSelectedRecovery(page, email, "TOTP_EMAIL");
+}
+
+async function assertBoundCookies(context: BrowserContext, base: string, requestId: string,
+  method: "TOTP_EMAIL" | "PASSKEY_EMAIL" | "PASSKEY_TOTP" = "TOTP_EMAIL"): Promise<void> {
   const cookies = await context.cookies(base);
   const host = new URL(base).hostname;
   const names = productionMode
@@ -102,7 +113,7 @@ async function assertBoundCookies(context: BrowserContext, base: string, request
     expect(cookie!.secure).toBe(productionMode);
     expect(cookie!.value.length).toBeGreaterThan(0);
   }
-  expect(cookies.find((cookie) => cookie.name === names[2])?.value).toBe(`${requestId}.TOTP_EMAIL`);
+  expect(cookies.find((cookie) => cookie.name === names[2])?.value).toBe(`${requestId}.${method}`);
   expect(cookies.some((cookie) => cookie.name === "virki_recovery" && cookie.value.length > 0),
     "legacy path-scoped recovery cookie must not remain active").toBe(false);
 }
@@ -127,6 +138,268 @@ function totpAt(secret: string, at = new Date()): string {
   counter.writeBigUInt64BE(BigInt(Math.floor(at.getTime() / 30_000)));
   const digest = createHmac("sha1", Buffer.from(bytes)).update(counter).digest();
   return String((digest.readUInt32BE(digest[digest.length - 1]! & 15) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+
+// Explicit CI opt-in must fail rather than silently skip a missing physical
+// browser/credential run. Playwright uses only isolated Linux TLS/NSS and DB.
+const mandatoryPasskeyRecovery = process.env.VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS === "true";
+const physicalPasskeyEnabled = process.env.VIRKI_E2E_PASSKEYS === "true";
+
+async function enrollVirtualRecoveryCredential(page: Page, database: PrismaClient, owner: Actor): Promise<void> {
+  const options = await generateRegistrationOptions({
+    rpName: "Virki E2E", rpID: "portal.localhost", userID: Buffer.from(owner.id, "utf8"),
+    userName: owner.email, attestationType: "none",
+    authenticatorSelection: { residentKey: "required", userVerification: "required" },
+    supportedAlgorithmIDs: [-7], timeout: 60_000
+  });
+  // A real CDP virtual authenticator creates the non-exportable private key.
+  // Only its public key is persisted to this test-owned disposable PG account.
+  const registration = await page.evaluate(async (input) => {
+    const bytes = (encoded: string) => Uint8Array.from(
+      atob(encoded.replace(/-/gu, "+").replace(/_/gu, "/")), (character) => character.charCodeAt(0));
+    const encode = (buffer: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)))
+      .replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/gu, "");
+    const credential = await navigator.credentials.create({ publicKey: {
+      rp: input.rp,
+      user: { ...input.user, id: bytes(input.user.id) },
+      challenge: bytes(input.challenge), pubKeyCredParams: input.pubKeyCredParams,
+      authenticatorSelection: input.authenticatorSelection, timeout: input.timeout, attestation: "none"
+    } }) as PublicKeyCredential;
+    const attestation = credential.response as AuthenticatorAttestationResponse;
+    return {
+      id: credential.id, rawId: encode(credential.rawId), type: "public-key" as const,
+      response: {
+        clientDataJSON: encode(attestation.clientDataJSON),
+        attestationObject: encode(attestation.attestationObject),
+        transports: attestation.getTransports() as Array<"internal" | "usb" | "nfc" | "ble" | "hybrid">
+      },
+      clientExtensionResults: credential.getClientExtensionResults(),
+      authenticatorAttachment: (credential.authenticatorAttachment ?? undefined) as "platform" | "cross-platform" | undefined
+    };
+  }, options);
+  const verified = await verifyRegistrationResponse({
+    response: registration, expectedChallenge: options.challenge,
+    expectedRPID: "portal.localhost", expectedOrigin: portalUrl, requireUserVerification: true
+  });
+  expect(verified.verified).toBe(true);
+  expect(verified.registrationInfo).toBeDefined();
+  const info = verified.registrationInfo!;
+  await database.passkeyCredential.create({ data: {
+    userId: owner.id, name: "E2E recovery key",
+    credentialId: info.credential.id, publicKey: Buffer.from(info.credential.publicKey),
+    counter: BigInt(info.credential.counter), transports: info.credential.transports ?? [],
+    backupEligible: info.credentialDeviceType === "multiDevice",
+    backupState: info.credentialBackedUp, rpID: "portal.localhost"
+  } });
+  expect(await database.passkeyCredential.count({ where: {
+    userId: owner.id, credentialId: registration.id, revokedAt: null
+  } })).toBe(1);
+}
+
+for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
+  test("USER " + method + ": Chromium CDP assertion + Next recovery actions, CSRF, replay and cookies", async ({ browser }) => {
+    test.skip(!mandatoryPasskeyRecovery && !physicalPasskeyEnabled,
+      "Physical passkey recovery requires the explicit VIRKI_E2E_PASSKEYS opt-in.");
+    test.setTimeout(180_000);
+    if (!physicalPasskeyEnabled || productionMode) {
+      throw new Error("Mandatory WebAuthn recovery requires a non-production E2E Hub with explicit passkey flag.");
+    }
+    const { database } = await requireFixture();
+    const contexts: BrowserContext[] = [];
+    const ownerEmail = randomUUID() + "." + method.toLowerCase() + "@e2e.invalid";
+    const password = randomBytes(32).toString("base64url");
+    const totpSecret = method === "PASSKEY_TOTP" ? createTotpSecret() : undefined;
+    let ownerId: string | undefined;
+    let replacementEmail: string | undefined;
+    try {
+      const owner = await database.user.create({ data: {
+        email: ownerEmail, emailNormalized: ownerEmail, displayName: "Owned WebAuthn E2E user",
+        passwordHash: await hashPassword(password), role: "USER",
+        isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+        secondFactorMethod: totpSecret ? "TOTP" : "EMAIL",
+        ...(totpSecret ? { totpFactor: { create: {
+          secretCiphertext: encryptTotpSecret(totpSecret), keyVersion: 1,
+          status: "ACTIVE", confirmedAt: new Date()
+        } } } : {})
+      }, select: { id: true, email: true } });
+      ownerId = owner.id;
+      const context = await browser.newContext();
+      contexts.push(context);
+      const page = await context.newPage();
+      const cdp = await context.newCDPSession(page);
+      await cdp.send("WebAuthn.enable");
+      const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
+        protocol: "ctap2", transport: "internal", hasResidentKey: true,
+        hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
+      } });
+      try {
+        await page.goto(portalUrl + "/recover");
+        expect(await page.evaluate(() => window.isSecureContext)).toBe(true);
+        await enrollVirtualRecoveryCredential(page, database, owner);
+
+        // A tampered actual form must not mint a new capability even for an
+        // enrolled account. It runs in a separate cookie jar from recovery.
+        const csrf = await openRecovery(browser, "portal");
+        contexts.push(csrf.context);
+        const before = await database.accountRecoveryRequest.count({ where: { userId: owner.id } });
+        await csrf.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+        await csrf.page.locator('input[name="method"][value="' + method + '"]').check();
+        await csrf.page.locator('form input[name="csrfToken"]').first()
+          .evaluate((input) => { (input as HTMLInputElement).value = "invalid-w20-csrf"; });
+        const denied = csrf.page.waitForResponse((response) =>
+          response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
+          new URL(response.url()).pathname === "/recover");
+        await csrf.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+        expect((await denied).status()).toBe(403);
+        expect(await database.accountRecoveryRequest.count({ where: { userId: owner.id } })).toBe(before);
+        expect((await csrf.context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
+
+        const globalBefore = await database.accountRecoveryRequest.count();
+        const requestId = await startSelectedRecovery(page, ownerEmail, method);
+        await assertBoundCookies(context, portalUrl, requestId, method);
+        expect((await context.cookies(hubUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
+        const preProof = (await page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim();
+        const visiblePreProof = (await page.locator("main").innerText()).trim();
+
+        const synthetic = await openRecovery(browser, "portal");
+        contexts.push(synthetic.context);
+        const syntheticId = await startSelectedRecovery(synthetic.page, "absent-" + randomUUID() + "@e2e.invalid", method);
+        await assertBoundCookies(synthetic.context, portalUrl, syntheticId, method);
+        expect(syntheticId).not.toBe(requestId);
+        expect((await synthetic.page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim()).toBe(preProof);
+        expect((await synthetic.page.locator("main").innerText()).trim()).toBe(visiblePreProof);
+        expect(await database.accountRecoveryRequest.count()).toBe(globalBefore + 1);
+        expect(await database.accountRecoveryRequest.count({ where: { id: syntheticId } })).toBe(0);
+        const unbound = await openRecovery(browser, "portal");
+        contexts.push(unbound.context);
+        await unbound.page.goto(portalUrl + "/recover?requestId=" + encodeURIComponent(requestId));
+        await expect(unbound.page.locator('section[aria-label="Confirmação de identidade"]')).toHaveCount(0);
+
+        // Neither assertion nor verification is fabricated in Node. The
+        // actual React click calls both Next Server Actions using WebAuthn.get.
+        const actionCalls: string[] = [];
+        page.on("response", (response) => {
+          if (response.request().method() === "POST" && new URL(response.url()).pathname === "/recover" &&
+              response.request().headers()["next-action"]) actionCalls.push(response.url());
+        });
+        await page.getByRole("button", { name: "Confirmar com passkey" }).click();
+        await expect(page.locator('[aria-label="Chave de acesso"]')).toContainText("Confirmada.", { timeout: 25_000 });
+        expect(actionCalls.length, "start and finish passkey Server Actions must execute").toBeGreaterThanOrEqual(2);
+        const partial = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+        expect(partial.recoveryPasskeyVerifiedAt).not.toBeNull();
+        expect(partial.status).toBe("PENDING");
+        await expect(page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
+        expect((await database.passkeyChallenge.findMany({ where: {
+          userId: owner.id, ceremony: "RECOVERY"
+        } })).some((challenge) => challenge.consumedAt !== null)).toBe(true);
+
+        if (method === "PASSKEY_EMAIL") {
+          const message = await database.emailOutboxMessage.findFirst({
+            where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" },
+            orderBy: { createdAt: "desc" }, select: { payload: true }
+          });
+          const code = message ? decryptEmailPayload(message.payload).code : undefined;
+          expect(code).toMatch(/^\d{6}$/u);
+          const email = page.locator('[aria-label="E-mail cadastrado"]');
+          await email.locator('input[name="code"]').fill(code!);
+          await email.getByRole("button", { name: "Confirmar", exact: true }).click();
+        } else {
+          const otp = page.locator('[aria-label="Aplicativo autenticador"]');
+          await otp.locator('input[name="code"]').fill(totpAt(totpSecret!));
+          await otp.getByRole("button", { name: "Confirmar", exact: true }).click();
+        }
+        await expect.poll(async () => (await database.accountRecoveryRequest.findUniqueOrThrow({
+          where: { id: requestId }, select: { status: true }
+        })).status).toBe("APPROVED");
+
+        if (method === "PASSKEY_TOTP") {
+          const mailbox = page.locator('section[aria-label="Verificação do novo e-mail"]');
+          await expect(mailbox).toBeVisible();
+          await expect(page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
+          replacementEmail = randomUUID() + ".replacement@e2e.invalid";
+          await mailbox.locator('input[name="newEmail"]').fill(replacementEmail);
+          await mailbox.getByRole("button", { name: "Enviar código ao novo e-mail" }).click();
+          await expect(mailbox.locator('input[name="code"]')).toBeVisible();
+          const message = await database.emailOutboxMessage.findFirst({
+            where: { recipientEmail: replacementEmail, kind: "RECOVERY_EMAIL_REBIND" },
+            orderBy: { createdAt: "desc" }, select: { payload: true }
+          });
+          const code = message ? decryptEmailPayload(message.payload).code : undefined;
+          expect(code).toMatch(/^\d{6}$/u);
+          await mailbox.locator('input[name="code"]').fill(code!);
+          await mailbox.getByRole("button", { name: "Confirmar novo e-mail" }).click();
+        }
+        await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible();
+
+        // The stale page is already rendered with the original capability.
+        // Re-inject only host-only recovery cookies after the winning reset.
+        const stale = await context.newPage();
+        await stale.goto(page.url());
+        const rejectedPassword = "replay-" + randomUUID() + "-password";
+        await stale.getByLabel("Nova senha", { exact: true }).fill(rejectedPassword);
+        const oldCookies = (await context.cookies(portalUrl))
+          .filter((cookie) => cookie.name.includes("recovery"))
+          .map((cookie) => ({
+            url: portalUrl + "/", name: cookie.name, value: cookie.value,
+            httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite, expires: cookie.expires
+          }));
+        const winningPassword = "signed-" + randomUUID() + "-password";
+        await page.getByLabel("Nova senha", { exact: true }).fill(winningPassword);
+        await page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+        await expect(page).toHaveURL(portalUrl + "/account/security?recovered=password", { timeout: 25_000 });
+        const recovered = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
+        expect(await verifyPassword(recovered.passwordHash ?? "", winningPassword)).toBe(true);
+        expect(recovered.emailNormalized).toBe(replacementEmail ?? ownerEmail);
+        expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).status).toBe("CONSUMED");
+        expect(await database.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } })).toBe(0);
+        if (totpSecret) expect((await database.totpFactor.findUniqueOrThrow({ where: { userId: owner.id } })).status).toBe("REVOKED");
+        const session = (await context.cookies(portalUrl)).find((cookie) =>
+          cookie.name === getSessionCookieName({ NODE_ENV: "development" }));
+        expect(session).toBeDefined();
+        expect(session!.domain).toBe("portal.localhost");
+        expect(session!.httpOnly).toBe(true);
+        expect(session!.secure).toBe(productionMode);
+        expect((await context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
+
+        await context.addCookies(oldCookies);
+        const replay = stale.waitForResponse((response) =>
+          response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
+          Boolean(response.request().headers()["next-action"]));
+        await stale.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+        expect((await replay).request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
+        await expect(stale).toHaveURL(new RegExp("/recover\\?requestId=" + requestId + "&error=1"), { timeout: 15_000 });
+        const unchanged = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
+        expect(await verifyPassword(unchanged.passwordHash ?? "", winningPassword)).toBe(true);
+        expect(await verifyPassword(unchanged.passwordHash ?? "", rejectedPassword)).toBe(false);
+        expect(await database.session.count({ where: {
+          userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() }
+        } })).toBe(1);
+      } finally {
+        await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId }).catch(() => {});
+      }
+    } finally {
+      const closed = await Promise.allSettled(contexts.map((context) => context.close()));
+      try {
+        if (ownerId) {
+          // Every deletion is limited to this randomized test fixture.
+          await database.session.deleteMany({ where: { userId: ownerId } });
+          await database.accountRecoveryRequest.deleteMany({ where: { userId: ownerId } });
+          await database.passkeyChallenge.deleteMany({ where: { userId: ownerId } });
+          await database.passkeyCredential.deleteMany({ where: { userId: ownerId } });
+          await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: { in: [
+            ownerEmail, ...(replacementEmail ? [replacementEmail] : [])
+          ] } } });
+          await database.totpFactor.deleteMany({ where: { userId: ownerId } });
+          // Leave only the audit-bound owner for the disposable E2E database's
+          // teardown. Runtime tests may not DELETE real AuditLog references.
+        }
+      } finally {
+        await database.$disconnect();
+      }
+      expect(closed.every((result) => result.status === "fulfilled"),
+        "every isolated browser context must close").toBe(true);
+    }
+  });
 }
 
 test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time reset and scoped cookies", async ({ browser }) => {
