@@ -1064,6 +1064,7 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
     await hubPage.getByLabel("Nova senha", { exact: true }).fill(newPassword);
     await hubPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     await expect(hubPage).toHaveURL(`${hubUrl}/admin/accounts`);
+    await expect(hubPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
     const recovered = await prisma.user.findUniqueOrThrow({
       where: { id: owner.id }, select: { passwordHash: true }
     });
@@ -1089,7 +1090,7 @@ test("ADMIN EMAIL_ADMIN recovery requires Hub Access, a distinct reviewer, and i
     }))).toEqual({ userId: owner.id, revokedAt: null });
     await targetPage.goto(`${hubUrl}/admin/accounts`);
     await expect(targetPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
-    await expect(hubPage.getByRole("heading", { level: 1, name: "Contas" })).toBeVisible();
+    await expect(targetPage.getByRole("heading", { level: 1, name: "Entrar", exact: true })).toBeVisible();
   } finally {
     await Promise.all(contexts.map((context) => context.close().catch(() => undefined)));
     // AuditLog is append-only and its actor FK is RESTRICT. The scoped runtime
