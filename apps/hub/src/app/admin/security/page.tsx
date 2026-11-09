@@ -27,7 +27,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
     createSessionCsrfToken("admin-security"),
     prisma.session.count({ where: { userId: session.user.id, revokedAt: null, expiresAt: { gt: new Date() } } }),
     adminPasskeysEnabled ? listUserPasskeys(session.user.id, "ADMIN", requestHost(requestHeaders)) : Promise.resolve([]),
-    adminPasskeysEnabled ? prisma.user.findUnique({ where: { id: session.user.id }, select: { secondFactorMethod: true } }) : Promise.resolve(null)
+    prisma.user.findUnique({ where: { id: session.user.id }, select: { secondFactorMethod: true, totpFactor: { select: { status: true, confirmedAt: true } } } })
   ]);
   return <main className="admin-main" id="admin-content" tabIndex={-1}>
     <header className="page-header"><div><p className="eyebrow">Administração</p><h1>Segurança</h1><p>Credencial separada, elevação por sessão e recuperação administrativa.</p></div></header>
@@ -36,6 +36,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
       : params.status && <p className="form-success" role="status">Alteração concluída.</p>}{params.error && <p className="form-error" role="alert">A ação não foi concluída. Tente novamente.</p>}
     <CredentialSetup
       csrf={csrf}
+      totpActive={factor?.secondFactorMethod === "TOTP" && factor.totpFactor?.status === "ACTIVE" && Boolean(factor.totpFactor.confirmedAt)}
       activeCredential={credential?.status === "ACTIVE" ? {
         keyVersion: credential.keyVersion,
         updatedAt: formatDateTime(credential.updatedAt)

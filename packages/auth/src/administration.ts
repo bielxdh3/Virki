@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { enqueueEmailMessageForClient, type EmailLocale } from "./email";
-import { generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode, verifySecurityCode } from "./security";
+import { decryptTotpSecret, generateRecoveryCode, generateNumericCode, hashRecoveryCode, hashSecurityCode, revokeUserAuthenticationProofsInTransaction, revokeUserOidcArtifactsInTransaction, verifySecurityCode, verifyTotpCode } from "./security";
 import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashAuditSessionReference, hashPassword, verifyPassword, writeAuditLogInTransaction, type AuditLogInput } from "./index";
 import { prisma, type Prisma } from "@virki/database";
 import { hashOidcIdentifier } from "./oidc-secrets";
@@ -314,6 +314,105 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     return recoveryCodes;
   });
   return recoveryCodes;
+}
+
+/** Recover the separate ADMIN credential with a fresh login password and an ACTIVE, one-use TOTP step. */
+export async function recoverAdministrativeCredentialWithTotp(input: {
+  actor: { id: string; role: string };
+  sessionId: string;
+  normalPassword: string;
+  totpCode: string;
+  newPassword: string;
+  now?: Date;
+}): Promise<string[]> {
+  const now = input.now ?? new Date();
+  const admin = await requireAdminSession(input.actor, input.sessionId, now);
+  assertAdminPassword(input.newPassword);
+  if (!isDatabaseId(input.actor.id) || !isDatabaseId(input.sessionId)) throw new AdministrationMutationError();
+  // Consume attempts before password hashing or TOTP validation. A per-session
+  // budget supplements the account-wide budget across multiple browser sessions.
+  const attempts = await prisma.$transaction(async (transaction) => {
+    const user = await consumeRateLimitAttemptInTransaction(transaction, `admin-totp-recovery-user:${input.actor.id}`, now);
+    const session = await consumeRateLimitAttemptInTransaction(transaction, `admin-totp-recovery-session:${input.sessionId}`, now);
+    return user.allowed && session.allowed;
+  });
+  if (!attempts || !/^\d{6}$/.test(input.totpCode) || !admin.passwordHash ||
+      !await verifyPassword(admin.passwordHash, input.normalPassword)) throw new AdministrationMutationError();
+  await assertNotNormalPassword(admin.passwordHash, input.newPassword);
+  const passwordHash = await hashPassword(input.newPassword);
+
+  return prisma.$transaction(async (transaction) => {
+    // Every supported factor enrollment, reset and ADMIN credential mutation
+    // uses the User lock first; also lock the current Session and credential.
+    await lockAdminSessionInTransaction(transaction, input.actor.id, input.sessionId, now);
+    const credential = await lockAdministrativeCredentialInTransaction(transaction, input.actor.id);
+    if (credential?.status !== "ACTIVE" || credential.revokedAt ||
+        !Number.isSafeInteger(credential.keyVersion) || credential.keyVersion < 1) throw new AdministrationMutationError();
+    const currentAdmin = await transaction.user.findUnique({
+      where: { id: input.actor.id },
+      select: { passwordHash: true, secondFactorMethod: true }
+    });
+    // A password changed while Argon2 was running cannot authorize recovery.
+    if (!currentAdmin?.passwordHash || currentAdmin.passwordHash !== admin.passwordHash ||
+        currentAdmin.secondFactorMethod !== "TOTP") throw new AdministrationMutationError();
+    await assertNotNormalPassword(currentAdmin.passwordHash, input.newPassword);
+    const factor = await transaction.totpFactor.findUnique({
+      where: { userId: input.actor.id },
+      select: { id: true, status: true, confirmedAt: true, secretCiphertext: true, keyVersion: true, lastUsedStep: true }
+    });
+    if (factor?.status !== "ACTIVE" || !factor.confirmedAt ||
+        !Number.isSafeInteger(factor.keyVersion) || factor.keyVersion < 1) throw new AdministrationMutationError();
+    // Read the actual clock after acquiring all locks. A code that expires
+    // while waiting must not become valid again through a stale caller time.
+    const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, checkedAt);
+    const secret = decryptTotpSecret(factor.secretCiphertext);
+    const usedStep = verifyTotpCode(secret, input.totpCode, checkedAt, factor.lastUsedStep);
+    if (usedStep === null) throw new AdministrationMutationError();
+    const consumed = await transaction.totpFactor.updateMany({
+      where: {
+        id: factor.id, status: "ACTIVE", confirmedAt: factor.confirmedAt,
+        keyVersion: factor.keyVersion, secretCiphertext: factor.secretCiphertext,
+        lastUsedStep: factor.lastUsedStep
+      },
+      data: { lastUsedStep: usedStep }
+    });
+    if (consumed.count !== 1) throw new AdministrationMutationError();
+    const rotated = await transaction.administrativeCredential.updateMany({
+      where: { userId: input.actor.id, status: "ACTIVE", revokedAt: null, keyVersion: credential.keyVersion },
+      data: { passwordHash, keyVersion: { increment: 1 } }
+    });
+    if (rotated.count !== 1) throw new AdministrationMutationError();
+    const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
+    await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
+    await transaction.administrativeRecoveryCode.createMany({
+      data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) }))
+    });
+    await transaction.securityElevation.updateMany({
+      where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } },
+      data: { status: "REVOKED", revokedAt: checkedAt }
+    });
+    await transaction.session.updateMany({
+      where: { userId: input.actor.id, id: { not: input.sessionId }, revokedAt: null },
+      data: { revokedAt: checkedAt }
+    });
+    await revokeUserAuthenticationProofsInTransaction(transaction, input.actor.id, checkedAt);
+    await transaction.passkeyChallenge.deleteMany({ where: { userId: input.actor.id, consumedAt: null } });
+    await revokeUserOidcArtifactsInTransaction(transaction, input.actor.id);
+    await writeAuditLogInTransaction(transaction, {
+      eventType: "ADMIN_CREDENTIAL_TOTP_RECOVERED", result: "SUCCESS",
+      actorUserId: input.actor.id, actorRole: "ADMIN",
+      sessionRef: hashAuditSessionReference(input.sessionId),
+      resource: "identity.admin",
+      message: "Separate administrative credential recovered with normal password and active TOTP."
+    });
+    const finalCheckedAt = new Date(Math.max(checkedAt.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, finalCheckedAt);
+    // If an unusually slow write crosses the accepted TOTP window, roll back
+    // the code consumption, credential rotation, revocations and audit together.
+    if (verifyTotpCode(secret, input.totpCode, finalCheckedAt, factor.lastUsedStep) !== usedStep) throw new AdministrationMutationError();
+    return recoveryCodes;
+  }, { isolationLevel: "Serializable" });
 }
 
 /** Start a distinct ADMIN credential-recovery proof without requiring saved backup codes. */
