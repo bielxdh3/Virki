@@ -19,6 +19,29 @@ import { createPasskeyBrowserToken, finishPasskeyRegistration, startPasskeyRegis
 // invocations; do not write to another worker's/shared fixture database.
 after(() => prisma.$disconnect());
 
+function dedicatedAdminPairsTargetConfigured(): boolean {
+  const selected = process.env.VIRKI_INTEGRATION_DATABASE_URL;
+  if (process.env.VIRKI_INTEGRATION_ENABLED !== "true" ||
+      process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable" ||
+      !selected || process.env.DATABASE_URL !== selected) return false;
+  try {
+    const url = new URL(selected);
+    return url.protocol === "postgresql:" && url.hostname === "127.0.0.1" &&
+      url.username === "virki_runtime_test" &&
+      /^virki_w11_admin_pairs_[A-Za-z0-9_]+$/u.test(decodeURIComponent(url.pathname.slice(1)));
+  } catch {
+    return false;
+  }
+}
+
+// Generic hosted CI intentionally uses its own PostgreSQL 17 disposable DB.
+// These extra real-PG18 tests need a separate worker-owned PG18 database and
+// must be reported as SKIP, not as false failures or silently repointed tests.
+const adminPairsOptions = {
+  skip: integrationOptions.skip || (dedicatedAdminPairsTargetConfigured()
+    ? false : "requires separately named, confirmed disposable PostgreSQL 18 database virki_w11_admin_pairs_*")
+};
+
 const HUB_RP = "hub.biel.dev.br";
 const HUB_ORIGIN = `https://${HUB_RP}`;
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest();
@@ -231,7 +254,7 @@ async function assertRecoveryRemainsUnconsumed(recovery: Recovery, owner: Admin,
     "failed final proof validation must not consume the recovery request");
 }
 
-test("PG18 ADMIN normal-password: independent TOTP_EMAIL, cross-role proof and concurrent one-winner", integrationOptions, async () => {
+test("PG18 ADMIN normal-password: independent TOTP_EMAIL, cross-role proof and concurrent one-winner", adminPairsOptions, async () => {
   await requireGuardedPg18();
   const owner = await eligibleAdmin("admin-pair-totp-email");
   const enrolled = await startTotpEnrollment(owner.id, owner.email);
@@ -252,7 +275,7 @@ test("PG18 ADMIN normal-password: independent TOTP_EMAIL, cross-role proof and c
   await oneResetWinner(recovery, owner, "admin-totp-email", ["TOTP", "EMAIL"]);
 });
 
-test("PG18 ADMIN normal-password: signed Hub PASSKEY_EMAIL, RP isolation, flag and replay", integrationOptions, async (t) => {
+test("PG18 ADMIN normal-password: signed Hub PASSKEY_EMAIL, RP isolation, flag and replay", adminPairsOptions, async (t) => {
   await requireGuardedPg18();
   enableAdminPasskeys(t);
   const owner = await eligibleAdmin("admin-pair-passkey-email");
@@ -279,7 +302,7 @@ test("PG18 ADMIN normal-password: signed Hub PASSKEY_EMAIL, RP isolation, flag a
   await oneResetWinner(recovery, owner, "admin-passkey-email", ["PASSKEY", "EMAIL"]);
 });
 
-test("PG18 ADMIN normal-password: revoking signed Hub passkey after both proofs invalidates approved reset", integrationOptions, async (t) => {
+test("PG18 ADMIN normal-password: revoking signed Hub passkey after both proofs invalidates approved reset", adminPairsOptions, async (t) => {
   await requireGuardedPg18();
   enableAdminPasskeys(t);
   const owner = await eligibleAdmin("admin-pair-stale-passkey");
@@ -297,7 +320,7 @@ test("PG18 ADMIN normal-password: revoking signed Hub passkey after both proofs 
   await assertRecoveryRemainsUnconsumed(recovery, owner, originalHash);
 });
 
-test("PG18 ADMIN normal-password: TOTP key rotation after approval invalidates stale verified step", integrationOptions, async () => {
+test("PG18 ADMIN normal-password: TOTP key rotation after approval invalidates stale verified step", adminPairsOptions, async () => {
   await requireGuardedPg18();
   const owner = await eligibleAdmin("admin-pair-stale-totp");
   const enrollment = await startTotpEnrollment(owner.id, owner.email);
@@ -316,7 +339,7 @@ test("PG18 ADMIN normal-password: TOTP key rotation after approval invalidates s
   await assertRecoveryRemainsUnconsumed(recovery, owner, originalHash);
 });
 
-test("PG18 ADMIN normal-password: Hub PASSKEY_TOTP requires independently verified new mailbox before reset", integrationOptions, async (t) => {
+test("PG18 ADMIN normal-password: Hub PASSKEY_TOTP requires independently verified new mailbox before reset", adminPairsOptions, async (t) => {
   await requireGuardedPg18();
   enableAdminPasskeys(t);
   const owner = await eligibleAdmin("admin-pair-passkey-totp");
