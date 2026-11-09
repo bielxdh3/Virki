@@ -3,7 +3,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
 import { recoveryPolicyFromMethod } from "./recovery-method-selection";
-import { RecoveryRequestForm, type RecoveryRequestMethod } from "./recovery-request-form";
+import { RecoveryRequestForm, truncateRecoveryComment, type RecoveryRequestMethod } from "./recovery-request-form";
 
 function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdmin: boolean, initialMethod?: RecoveryRequestMethod): string {
   const original = Object.getOwnPropertyDescriptor(globalThis, "React");
@@ -39,9 +39,16 @@ test("an available different ADMIN allows a single-factor request and optional b
   for (const method of ["EMAIL_ADMIN", "PASSKEY_ADMIN", "TOTP_ADMIN"]) {
     assert.match(html, new RegExp(`value="${method}"`, "u"));
   }
-  assert.match(html, /name="comment" maxLength="300"/u);
+  assert.match(html, /name="comment" maxLength="600"/u);
   assert.match(html, /outro administrador ativo/u);
   assert.doesNotMatch(html, /value="PASSKEY_TOTP"/u);
+});
+
+test("review comment counts 300 Unicode characters including emoji, while truncating pasted excess", () => {
+  const accepted = truncateRecoveryComment("🙂".repeat(301));
+  assert.equal([...accepted].length, 300);
+  assert.equal(accepted, "🙂".repeat(300));
+  assert.equal(truncateRecoveryComment("x".repeat(301)), "x".repeat(300));
 });
 
 test("no other active admin never exposes assisted request or comment even if backend lists assisted methods", () => {

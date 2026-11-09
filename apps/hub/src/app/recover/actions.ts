@@ -66,7 +66,10 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   const method = read(formData, "method");
   const policy = recoveryPolicyFromMethod(method);
   const email = readBoundedFormString(formData, "email", EMAIL_INPUT_MAX_LENGTH);
-  const comment = readBoundedFormString(formData, "comment", 300);
+  // The author-facing 300-character cap uses Unicode code points. 600 UTF-16
+  // units is the tightest transport ceiling for up to 300 astral characters;
+  // the server subsequently enforces the actual 300-character policy.
+  const comment = readBoundedFormString(formData, "comment", 600);
   let recovery = {
     // Use the same opaque format as real and synthetic backend requests. A
     // validation/error branch must never reveal account existence by ID shape.

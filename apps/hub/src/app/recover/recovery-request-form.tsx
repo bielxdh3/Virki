@@ -18,6 +18,10 @@ const assistedMethods: readonly RecoveryMethodOption[] = [
   { value: "EMAIL_ADMIN", title: "E-mail + outro administrador", description: "Confirme o e-mail cadastrado; outro administrador ativo deverá aprovar." }
 ];
 
+export function truncateRecoveryComment(value: string): string {
+  return [...value].slice(0, 300).join("");
+}
+
 export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMethods, hasOtherActiveAdmin, initialMethod }: {
   action: (formData: FormData) => void | Promise<void>;
   csrf: string;
@@ -50,8 +54,8 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
       {assisted.map((option) => <RecoveryMethodChoice key={option.value} option={option} selected={method === option.value} onSelect={() => setMethod(option.value)} />)}
     </fieldset> : null}
     {isAssisted ? <label>Comentário para análise (opcional, até 300 caracteres)
-      <textarea name="comment" maxLength={300} value={comment} onChange={(event) => setComment(event.target.value)} rows={3} />
-      <small aria-live="polite">{comment.length}/300</small>
+      <textarea name="comment" maxLength={600} value={comment} onChange={(event) => setComment(truncateRecoveryComment(event.target.value))} rows={3} />
+      <small aria-live="polite">{[...comment].length}/300</small>
     </label> : null}
     <button className="button-primary" type="submit" disabled={!canSubmit}>Solicitar recuperação</button>
     {independent.length + assisted.length === 0 ? <p className="muted" role="status">Nenhum método de recuperação está disponível neste momento.</p> : null}

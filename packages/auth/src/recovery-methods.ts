@@ -34,7 +34,9 @@ export function normalizeRecoveryPolicy(candidate: { proofs?: unknown; adminRevi
 
 export function sanitizeRecoveryComment(value: unknown): string | null {
   if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string" || value.length > 300 || [...value].some((character) => {
+  // Match the UI's visible-character count, not UTF-16 code units. A 300
+  // character comment may contain emoji (two UTF-16 units each).
+  if (typeof value !== "string" || [...value].length > 300 || [...value].some((character) => {
     const code = character.codePointAt(0)!;
     return code <= 31 || (code >= 127 && code <= 159);
   })) throw FAILURE;

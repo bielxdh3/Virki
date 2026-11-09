@@ -121,6 +121,8 @@ test("optional recovery comment rejects oversized and control-laden content", ()
   assert.equal(sanitizeRecoveryComment("  Preciso recuperar minha conta  "), "Preciso recuperar minha conta");
   assert.equal(sanitizeRecoveryComment(" "), null);
   assert.throws(() => sanitizeRecoveryComment("a".repeat(301)));
+  assert.equal(sanitizeRecoveryComment("🙂".repeat(300)), "🙂".repeat(300), "300 emoji are 300 Unicode characters");
+  assert.throws(() => sanitizeRecoveryComment("🙂".repeat(301)), "301 emoji exceed the character limit");
   assert.throws(() => sanitizeRecoveryComment("texto\r\nperigoso"));
 });
 
