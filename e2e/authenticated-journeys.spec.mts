@@ -467,7 +467,18 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await expect(recoveryCodeInput).toBeVisible();
     await page.goBack();
     try {
-      await expect(page).toHaveURL(predecessorUrl);
+      // In Chromium/Next, same-document hash history can coalesce a prior
+      // fragment entry. One Back can legitimately reach the pre-code
+      // #admin-content entry instead of #recovery-code-predecessor. Both are
+      // safe ONLY if the sensitive codes and acknowledgment UI stay absent.
+      // Never accept the code-bearing acknowledgment fragment or arbitrary
+      // routes, and preserve the non-PUSH history-length check above.
+      await expect.poll(() => {
+        const observed = new URL(page.url());
+        return observed.origin === hubUrl && observed.pathname === "/admin/security" &&
+          observed.search === "" &&
+          (observed.hash === "#recovery-code-predecessor" || observed.hash === "#admin-content");
+      }).toBe(true);
     } catch {
       // The general E2E log scrubber masks both query and hash, making
       // distinct protected URLs look identical. Report ONLY a fixed
