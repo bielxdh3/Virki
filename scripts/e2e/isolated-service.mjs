@@ -61,6 +61,21 @@ export function buildServiceEnvironment(service, source = process.env, platform 
   if (service === "hub" && (!result.DATABASE_URL || !result.VIRKI_OIDC_PROXY_URL || !result.VIRKI_E2E_TLS_KEY_PATH || !result.VIRKI_E2E_TLS_CERTIFICATE_PATH || !/^[a-f0-9]{64}$/iu.test(result.VIRKI_CSRF_SIGNING_KEY ?? "") || !result.NODE_EXTRA_CA_CERTS || !isAbsolute(result.NODE_EXTRA_CA_CERTS))) {
     throw new Error("Hub E2E configuration is incomplete.");
   }
+  if (service === "hub") {
+    // Never forward an ambient privileged-passkey flag to the Hub. A narrowly
+    // scoped development-only E2E opt-in is required in addition to the USER
+    // passkey fixture; production-mode tests must not auto-enable this feature.
+    if (source.VIRKI_ADMIN_PASSKEYS_ENABLED === "true") {
+      if (source.VIRKI_E2E_ADMIN_PASSKEYS !== "true" ||
+          source.VIRKI_E2E_PASSKEYS !== "true" ||
+          source.VIRKI_PASSKEYS_ENABLED !== "true" ||
+          source.VIRKI_PASSKEYS_LOCAL_TESTING !== "true" ||
+          source.VIRKI_E2E_HUB_MODE === "production" || result.NODE_ENV === "production") {
+        throw new Error("Privileged passkey E2E configuration is invalid.");
+      }
+      result.VIRKI_ADMIN_PASSKEYS_ENABLED = "true";
+    }
+  }
   if (service === "issuer" && (!result.DATABASE_URL || !result.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE || !result.VIRKI_OIDC_ISSUER || result.VIRKI_OIDC_BIND_ADDRESS !== "127.0.0.1" || !result.OIDC_ISSUER_PORT)) {
     throw new Error("OIDC issuer E2E configuration is incomplete.");
   }

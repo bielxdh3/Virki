@@ -17,6 +17,12 @@ const discoveryOnly = process.argv.includes("--list");
 assertDirectPlaywrightPlatform(process.platform, discoveryOnly);
 
 const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
+// Enrolling ADMIN test passkeys needs a separate explicit opt-in. Do not
+// silently enable the real privileged feature in production-mode rehearsals.
+if (process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" &&
+    (productionHubMode || process.env.VIRKI_E2E_PASSKEYS !== "true")) {
+  throw new Error("ADMIN passkey E2E requires explicit USER passkeys and a non-production Hub.");
+}
 const portalUrl = productionHubMode ? "https://portal.localhost" : "https://portal.localhost:3001";
 const hubUrl = productionHubMode ? "https://hub.localhost" : "https://hub.localhost:3001";
 const hubListenerPort = productionHubMode ? 443 : 3001;
@@ -165,6 +171,9 @@ const hubEnv = {
   VIRKI_E2E_TLS_CERTIFICATE_PATH: tlsCertificatePath,
   ...(process.env.VIRKI_E2E_PASSKEYS === "true" && !productionHubMode
     ? { VIRKI_PASSKEYS_ENABLED: "true", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }
+    : {}),
+  ...(process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" && !productionHubMode
+    ? { VIRKI_E2E_ADMIN_PASSKEYS: "true", VIRKI_ADMIN_PASSKEYS_ENABLED: "true" }
     : {}),
   ...(process.env.VIRKI_E2E_HUB_MODE === "production" ? { NODE_ENV: "production", VIRKI_E2E_HUB_MODE: "production" } : {})
 };
