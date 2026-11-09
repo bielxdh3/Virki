@@ -7,6 +7,7 @@ import { prisma } from "@virki/database";
 import { requireAdminPage } from "../../../lib/admin-page";
 import { approveRecoveryAction } from "../../recover/actions";
 import { CredentialSetup, ElevationControls } from "./security-controls";
+import { RecoveryReviewDetails, recoveryNeedsAdministrativeReview } from "./recovery-review-details";
 
 export const dynamic = "force-dynamic";
 
@@ -33,8 +34,8 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
       } : undefined}
     />
     <ElevationControls csrf={csrf} credentialReady={credential?.status === "ACTIVE"} active={activeElevations.map((item) => ({ ...item, expiresAt: item.expiresAt.toISOString() }))} />
-    <section className="surface"><h2>Recuperação de contas ({recoveryRequests.length})</h2><p className="muted">Pedidos expirados, não verificados ou da sua própria conta não aparecem aqui. Aprovar envia uma autorização de troca de senha ao titular; a aprovação exige elevação ativa.</p>
-      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.role === "ADMIN" ? "Administrador" : "Usuário"} · {request.user.emailNormalized} · E-mail confirmado · expira {formatDateTime(request.expiresAt)}</span></div><form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form></article>)}</div>}
+    <section className="surface"><h2>Recuperação de contas ({recoveryRequests.length})</h2><p className="muted">Pedidos expirados, não verificados ou da sua própria conta não aparecem aqui. Aprovar autoriza a recuperação apenas após a prova exigida; é necessária elevação ativa e a aprovação não pode ser feita pelo titular.</p>
+      {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.role === "ADMIN" ? "Administrador" : "Usuário"} · {request.user.emailNormalized} · expira {formatDateTime(request.expiresAt)}</span><RecoveryReviewDetails request={request} /></div>{recoveryNeedsAdministrativeReview(request) ? <form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form> : null}</article>)}</div>}
     </section>
     <section className="surface"><h2>Sessões deste admin</h2><p>{activeSessions} sessão(ões) ativa(s), incluindo a sessão atual.</p></section>
   </main>;
