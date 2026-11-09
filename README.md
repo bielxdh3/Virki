@@ -4,6 +4,11 @@
 
 # Virki
 
+![Private repository](https://img.shields.io/badge/repository-private-64748B)
+![OIDC](https://img.shields.io/badge/identity-OIDC-7C3AED)
+![Node.js](https://img.shields.io/badge/runtime-Node.js%2022-339933)
+![PostgreSQL](https://img.shields.io/badge/database-PostgreSQL-4169E1)
+
 Virki provides identity, authentication and SSO, security, project entry access, and audit for external projects. It authenticates users and controls entry; each project owns its own experience and permissions.
 
 ## Surfaces
@@ -14,9 +19,41 @@ Virki provides identity, authentication and SSO, security, project entry access,
 
 The ADMIN navigation is Contas, Acessos, Segurança, Auditoria, and Conexões. Stored roles are ADMIN and USER. Project access is granted explicitly to users; Virki has no project roles.
 
-**October 2026 source status:** [PR #51](https://github.com/bielxdh3/Virki/pull/51), [PR #52](https://github.com/bielxdh3/Virki/pull/52), and [PR #53](https://github.com/bielxdh3/Virki/pull/53) are merged into `main`. They add authentication/OIDC and database safeguards, structured audit records and ADMIN investigation filters, and login, invitation, and recovery-flow improvements. Local integrated regression evidence covers these changes, but does not substitute for hosted CI or a verified production deployment.
+## Architecture at a glance
 
-**Validation boundary (2026-10-19):** the recorded `main` CI run following these merges failed. The native Linux production host is still unverified; the operations gate below remains in force. Do not infer a successful deployment from merged PRs.
+```text
+                      Production routes (conceptual)
+
+   Public internet
+         |
+         v
+  Cloudflare Tunnel
+         |
+         +-- Public hostname --------> Public site (loopback)
+         |
+         +-- USER portal -----------> Hub: USER portal + account security
+         |                                    |
+         |                                    | private OIDC path proxy
+         |                                    v
+         |                               OIDC issuer
+         |
+         +-- ADMIN hostname --> Cloudflare Access --> Hub: ADMIN controls
+                                                     + Virki ADMIN session
+
+       Hub + OIDC issuer + private background workers
+                              |
+                              v
+                       PostgreSQL / Prisma
+                users · sessions · grants · audit
+                    protected OIDC artifacts
+
+   External relying projects use OIDC authorization code + PKCE.
+   Project sessions and application permissions stay in each project.
+```
+
+The production public site and Hub bind to loopback; the OIDC issuer and database have no host-published ports. The USER portal does **not** require the ADMIN Cloudflare Access assertion. The ADMIN hostname requires **both** Cloudflare Access and a Virki ADMIN session. The issuer is reachable through the portal's internal OIDC proxy, not a directly exposed port.
+
+This is a **diagram of the configured architecture**, not proof that a production deployment has passed acceptance. Details: [architecture](docs/architecture.md), [security](docs/security.md), and [deployment](docs/deployment.md).
 
 ## Local development
 
@@ -40,22 +77,16 @@ Register each external project through **Hub → Conexões** with its canonical 
 
 ## Production operations
 
-The next canonical production host is native Linux reached over SSH. The previous host is unavailable and the native Linux host has not been verified; do not deploy until its identity and existing Virki data are confirmed. The scripts reject WSL, require a pre-provisioned host marker, and never create that marker during first contact. Operator connection values live in the ignored `.production.operator.json` file or `VIRKI_PRODUCTION_*` environment variables. Run the SSH preflight only when the native Linux host is available.
+Production is a gated **native Linux / SSH** workflow, not a development-server command. Operations require independently verified host identity, an accepted exact source SHA and CI/CodeQL evidence, remote-only protected configuration, and backup/migration safeguards. **Do not deploy just because code has merged or this README describes the architecture.**
 
 | Command | Purpose |
 |---|---|
-| `npm run preflight:prod` | Require eight stable SSH probes, the expected native Linux host, its pre-provisioned identity marker, private remote environment files, and Docker Compose. |
-| `npm run deploy:prod` | Require clean `main` at `origin/main` and green exact-SHA CI, then backup, restore-test migrations, enter maintenance, migrate, start, and health-check. |
-| `npm run backup:prod` | Create a backup outside source releases and validate all committed migrations against a restored copy. |
-| `npm run status:prod` | Show Virki service status. |
-| `npm run revision:prod` | Verify running service image revisions. |
-| `npm run health:prod` | Check public and hub health, portal OIDC discovery, Hub denial without Access, and loopback bindings. |
-| `npm run logs:prod` | Return sanitized log availability only. |
-| `node scripts/production-remote.mjs start-tunnel` | Start the Cloudflare Tunnel connector after application health checks pass. |
-| `node scripts/production-remote.mjs maintenance-on` | Stop routed app, worker, and Tunnel services while preserving PostgreSQL and named data. |
-| `node scripts/production-remote.mjs maintenance-off` | Resume services only when the source and migration status are verified. |
+| `npm run preflight:prod` | Verify accepted source and operator prerequisites before contacting production. |
+| `npm run backup:prod` | Run the guarded backup/restore validation. |
+| `npm run deploy:prod` | Deploy only after all exact-source and host/migration gates pass. |
+| `npm run health:prod` | Verify service health and access boundaries after an accepted release. |
 
-Production secrets stay on the remote Linux host in private `.env`, `.env.oidc`, and `.env.oidc-data` files; deployment transfers the accepted Git archive and the matching images produced by exact-SHA CI, never an environment file. Compose runs those preloaded revision-tagged images without rebuilding or pulling them. The main `.env` is used for interpolation, the issuer signing and cookie keys go only to the issuer, and the OIDC data-encryption key goes only to the Hub and issuer. Each remote operation requires a clean accepted `main` revision with green exact-SHA CI. Never use `prisma db push`, remove production volumes, weaken ADMIN Cloudflare Access, or touch deManage. See [docs/deployment.md](docs/deployment.md) and [docs/operations.md](docs/operations.md).
+The complete command reference, remote configuration, recovery, maintenance, first-install and data-safety requirements are in [Operations](docs/operations.md) and [Deployment](docs/deployment.md). Dated README status notes are preserved in [the October 2026 archive](docs/validation/readme-october-2026-status-snapshot.md).
 
 ## Validation
 
