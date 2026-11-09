@@ -151,6 +151,7 @@ model PasskeyCredential {
   id               String    @id @default(cuid())
   userId           String
   credentialId     String    @unique
+  rpID             String    @default("portal.biel.dev.br")
   publicKey        Bytes
   counter          BigInt    @default(0)
   revision         Int       @default(0)
@@ -164,6 +165,7 @@ model PasskeyCredential {
   user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, revokedAt])
+  @@index([userId, rpID, revokedAt])
 }
 
 model PasskeyChallenge {

@@ -76,10 +76,10 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   };
   try {
     // Enforce the role and method policy on the server; browser radios are never authoritative.
-    if (!policy || !email || (expectedRole === "ADMIN" && policy.proofs.includes("PASSKEY")) ||
+    if (!policy || !email ||
       (policy.adminReview ? formData.has("comment") && comment === null : formData.has("comment"))) throw new Error("Rejected.");
     recovery = await startMultiMethodRecovery(email.trim(), expectedRole, policy, "pt-BR", new Date(),
-      requestHeaders.get("cf-connecting-ip")?.trim(), policy.adminReview ? comment ?? undefined : undefined);
+      requestHeaders.get("cf-connecting-ip")?.trim(), policy.adminReview ? comment ?? undefined : undefined, requestHost(requestHeaders));
   } catch {
     await recordSecurityDenial(requestHeaders, "account-recovery-request", "rejected");
     // A synthetic, capability-less browser session renders the same initial step as a real one.
@@ -227,7 +227,7 @@ export async function startSelectedRecoveryPasskeyAction(formData: FormData): Pr
     const { expectedRole, requestHeaders } = await requireRecoveryAccess(formData, "recovery-verify");
     const requestId = read(formData, "requestId");
     const browserState = recoveryBrowserState(await cookies(), requestId);
-    if (!browserState || expectedRole === "ADMIN") return { status: "error" };
+    if (!browserState) return { status: "error" };
     const host = requestHost(requestHeaders);
     try {
       const options = await startRecoveryPasskeyAssertion(requestId, browserState.requestKey, browserState.browserToken, expectedRole, host);
@@ -237,7 +237,7 @@ export async function startSelectedRecoveryPasskeyAction(formData: FormData): Pr
       // Unknown accounts and expired capabilities receive a non-authorizing challenge, too.
       // This avoids exposing account existence by returning a different action state.
       try {
-        const { rpID } = expectedPasskeyRP(process.env, host);
+        const { rpID } = expectedPasskeyRP(process.env, host, expectedRole);
         return { status: "ready", options: { challenge: randomBytes(32).toString("base64url"), rpId: rpID, timeout: 5 * 60_000, userVerification: "required" } };
       } catch {
         return { status: "error" };
@@ -251,7 +251,7 @@ export async function verifySelectedRecoveryPasskeyAction(formData: FormData): P
     const { expectedRole, requestHeaders } = await requireRecoveryAccess(formData, "recovery-verify");
     const requestId = read(formData, "requestId");
     const browserState = recoveryBrowserState(await cookies(), requestId);
-    if (!browserState || expectedRole === "ADMIN") return { status: "error" };
+    if (!browserState) return { status: "error" };
     const assertion = readBoundedFormString(formData, "assertion", 16384);
     if (!assertion) return { status: "error" };
     try {

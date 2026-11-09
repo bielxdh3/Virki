@@ -64,8 +64,14 @@ function browserHash(value: string): string { return createHash("sha256").update
 export function recoveryTotpBinding(factor: { id: string; secretCiphertext: string; keyVersion: number; confirmedAt: Date | null }): string {
   return hashPasskeyChallenge(JSON.stringify(["recovery-totp-factor-v1", factor.id, factor.secretCiphertext, factor.keyVersion, factor.confirmedAt?.toISOString() ?? null]));
 }
-export function recoveryPasskeyBinding(credential: { id: string; userId: string; credentialId: string; publicKey: Uint8Array }): string {
-  return hashPasskeyChallenge(JSON.stringify(["recovery-passkey-factor-v1", credential.id, credential.userId, credential.credentialId, Buffer.from(credential.publicKey).toString("base64url")]));
+export function recoveryPasskeyBinding(credential: { id: string; userId: string; credentialId: string; publicKey: Uint8Array; rpID?: string }): string {
+  return hashPasskeyChallenge(JSON.stringify(["recovery-passkey-factor-v2", credential.id, credential.userId, credential.credentialId, credential.rpID ?? "portal.biel.dev.br", Buffer.from(credential.publicKey).toString("base64url")]));
+}
+
+function credentialRPMatchesRole(rpID: string, role: AccountRecoveryRole) {
+  if (rpID === (role === "ADMIN" ? "hub.biel.dev.br" : "portal.biel.dev.br")) return true;
+  return process.env.NODE_ENV !== "production" && process.env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" &&
+    (rpID === "localhost" || rpID === (role === "ADMIN" ? "hub.localhost" : "portal.localhost"));
 }
 function matchesHash(value: string, expected: string | null): boolean {
   if (!expected || !/^[a-f0-9]{64}$/.test(expected)) return false;
@@ -118,11 +124,12 @@ async function afterProof(tx: Prisma.TransactionClient, requestId: string, now: 
 
 export async function startMultiMethodRecovery(
   email: string, expectedRole: AccountRecoveryRole, selected: RecoveryPolicy,
-  locale: EmailLocale, now = new Date(), clientAddress?: string, comment?: string
+  locale: EmailLocale, now = new Date(), clientAddress?: string, comment?: string,
+  host = expectedRole === "ADMIN" ? "hub.biel.dev.br" : "portal.biel.dev.br"
 ): Promise<RecoveryBrowserState> {
   const started = Date.now();
   try {
-    return await createMultiMethodRecovery(email, expectedRole, selected, locale, now, clientAddress, comment);
+    return await createMultiMethodRecovery(email, expectedRole, selected, locale, now, clientAddress, comment, host);
   } finally {
     const remaining = started + 500 - Date.now();
     if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
@@ -131,7 +138,7 @@ export async function startMultiMethodRecovery(
 
 async function createMultiMethodRecovery(
   email: string, expectedRole: AccountRecoveryRole, selected: RecoveryPolicy,
-  locale: EmailLocale, now: Date, clientAddress?: string, comment?: string
+  locale: EmailLocale, now: Date, clientAddress?: string, comment?: string, host = expectedRole === "ADMIN" ? "hub.biel.dev.br" : "portal.biel.dev.br"
 ): Promise<RecoveryBrowserState> {
   const policy = normalizeRecoveryPolicy(selected);
   if (!policy || (comment !== undefined && !policy.adminReview)) throw FAILURE;
@@ -151,11 +158,10 @@ async function createMultiMethodRecovery(
     return source.allowed && address.allowed;
   });
   if (!attempts) return publicState;
-  // A forged POST cannot bypass the server's passkey feature disable switch.
-  if (policy.proofs.includes("PASSKEY") && process.env.VIRKI_PASSKEYS_ENABLED !== "true") return publicState;
-  // ADMIN passkeys cannot yet be enrolled by the current USER-only portal
-  // registration ceremony. Never persist an impossible ADMIN passkey path.
-  if (expectedRole === "ADMIN" && policy.proofs.includes("PASSKEY")) return publicState;
+  // A forged POST cannot bypass the current role-specific feature/RP gate.
+  const passkeySurface = host === "localhost" ? "local" : expectedRole === "ADMIN" ? "hub" : "portal";
+  if (policy.proofs.includes("PASSKEY") && !passkeysEnabledForRequest(passkeySurface, host, process.env, expectedRole)) return publicState;
+  const recoveryRpID = policy.proofs.includes("PASSKEY") ? expectedPasskeyRP(process.env, host, expectedRole).rpID : null;
   const account = await prisma.user.findUnique({ where: { emailNormalized: normalizedEmail }, select: { id: true, email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, displayName: true } });
   if (!account || !isAccountRecoveryEligible(account, expectedRole)) return publicState;
   const actionBase = policy.proofs.includes("EMAIL") ? getRecoveryActionBaseUrl(expectedRole) : null;
@@ -163,6 +169,9 @@ async function createMultiMethodRecovery(
   await prisma.$transaction(async (tx) => {
     await lockRateLimitIdentifierInTransaction(tx, `account-recovery:${expectedRole}:${normalizedEmail}`);
     if (!await lockActiveRecoveryAccountInTransaction(tx, account.id, expectedRole)) return null;
+    // No-enrollment and unknown-account requests remain synthetic and identical.
+    // Credentials minted at the USER portal never qualify as ADMIN factors.
+    if (recoveryRpID && await tx.passkeyCredential.count({ where: { userId: account.id, rpID: recoveryRpID, revokedAt: null } }) < 1) return null;
     if (policy.adminReview && await tx.user.count({ where: { role: "ADMIN", isActive: true, accountStatus: "ACTIVE", id: { not: account.id } } }) < 1) return null;
     // Limit repeated anonymous requests; never supersede a recovery after the first owner proof.
     const latest = await tx.accountRecoveryRequest.findFirst({ where: { userId: account.id }, select: { createdAt: true }, orderBy: { createdAt: "desc" } });
@@ -246,12 +255,10 @@ export async function verifyMultiMethodRecoveryTotp(requestId: string, key: stri
 }
 
 export async function startRecoveryPasskeyAssertion(requestId: string, key: string, browserToken: string, expectedRole: AccountRecoveryRole, host = "portal.biel.dev.br") {
-  // The current passkey registration ceremony enrolls USER credentials for the portal RP only.
-  // An ADMIN proof needs a separate, verified hub-RP enrollment path before enabling this.
-  if (!isRequestId(requestId) || expectedRole !== "USER" || !isRequestKey(key) || !isBrowserToken(browserToken) ||
-    !passkeysEnabledForRequest(host === "localhost" ? "local" : "portal", host)) throw FAILURE;
+  if (!isRequestId(requestId) || !isRequestKey(key) || !isBrowserToken(browserToken) ||
+    !passkeysEnabledForRequest(host === "localhost" ? "local" : expectedRole === "ADMIN" ? "hub" : "portal", host, process.env, expectedRole)) throw FAILURE;
   const row = await prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: recoverySelect });
-  const { rpID, origin } = expectedPasskeyRP(process.env, host);
+  const { rpID, origin } = expectedPasskeyRP(process.env, host, expectedRole);
   // Discoverable credential authentication avoids exposing credential IDs for an arbitrary email.
   const options = await generateAuthenticationOptions({ rpID, userVerification: "required", timeout: PASSKEY_TTL_MS });
   // Synthetic attempts get identical public options; without a persisted
@@ -273,11 +280,11 @@ export async function startRecoveryPasskeyAssertion(requestId: string, key: stri
 }
 
 export async function finishRecoveryPasskeyAssertion(requestId: string, key: string, browserToken: string, response: AuthenticationResponseJSON, expectedRole: AccountRecoveryRole, host = "portal.biel.dev.br"): Promise<void> {
-  if (!isRequestId(requestId) || expectedRole !== "USER" || !passkeysEnabledForRequest(host === "localhost" ? "local" : "portal", host) ||
+  if (!isRequestId(requestId) || !passkeysEnabledForRequest(host === "localhost" ? "local" : expectedRole === "ADMIN" ? "hub" : "portal", host, process.env, expectedRole) ||
     !/^[A-Za-z0-9_-]{8,1400}$/u.test(response?.id ?? "")) throw FAILURE;
   const challenge = readClientChallenge(response?.response?.clientDataJSON, "webauthn.get");
   if (!challenge) throw FAILURE;
-  const { rpID, origin } = expectedPasskeyRP(process.env, host);
+  const { rpID, origin } = expectedPasskeyRP(process.env, host, expectedRole);
   const [row, ceremony, credential] = await Promise.all([
     prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: recoverySelect }),
     prisma.passkeyChallenge.findUnique({ where: { challengeHash: hashPasskeyChallenge(challenge) } }),
@@ -287,7 +294,7 @@ export async function finishRecoveryPasskeyAssertion(requestId: string, key: str
     !ceremony || ceremony.ceremony !== "RECOVERY" || ceremony.userId !== row!.userId || ceremony.sessionId !== null ||
     ceremony.browserHash !== browserHash(browserToken) || ceremony.rpID !== rpID || ceremony.origin !== origin ||
     ceremony.proofHash !== hashPasskeyChallenge(`recovery:${requestId}:${row!.requestKeyHash}`) ||
-    ceremony.consumedAt || ceremony.expiresAt <= new Date() || !credential || credential.revokedAt ||
+    ceremony.consumedAt || ceremony.expiresAt <= new Date() || !credential || credential.revokedAt || credential.rpID !== rpID ||
     credential.userId !== row!.userId || credential.counter > BigInt(Number.MAX_SAFE_INTEGER)) throw FAILURE;
   if (response.response.userHandle != null && response.response.userHandle !== Buffer.from(row!.userId).toString("base64url")) throw FAILURE;
   const result = await verifyAuthenticationResponse({
@@ -304,7 +311,7 @@ export async function finishRecoveryPasskeyAssertion(requestId: string, key: str
     const claimed = await tx.passkeyChallenge.updateMany({ where: { id: ceremony.id, consumedAt: null, expiresAt: { gt: new Date() }, ceremony: "RECOVERY", userId: row!.userId, proofHash: ceremony.proofHash, browserHash: ceremony.browserHash }, data: { consumedAt: new Date() } });
     if (claimed.count !== 1 || ceremony.expiresAt <= new Date()) throw FAILURE;
     const used = await tx.passkeyCredential.updateMany({
-      where: { id: credential.id, userId: row!.userId, revokedAt: null, counter: credential.counter, revision: credential.revision },
+      where: { id: credential.id, userId: row!.userId, rpID, revokedAt: null, counter: credential.counter, revision: credential.revision },
       data: { counter: newCounter, revision: { increment: 1 }, lastUsedAt: new Date(), backupState: result.authenticationInfo.credentialBackedUp }
     });
     if (used.count !== 1) throw FAILURE;
@@ -327,7 +334,7 @@ export function recoveryReviewReady(row: { recoveryProofs: string[]; recoveryAdm
 
 export async function requireLiveRecoveryProofsInTransaction(
   tx: Prisma.TransactionClient,
-  row: { userId: string; recoveryProofs: string[]; recoveryTotpBindingHash: string | null; recoveryTotpUsedStep: number | null; recoveryPasskeyCredentialId: string | null; recoveryPasskeyBindingHash: string | null }
+  row: { userId: string; recoveryRole?: string | null; recoveryProofs: string[]; recoveryTotpBindingHash: string | null; recoveryTotpUsedStep: number | null; recoveryPasskeyCredentialId: string | null; recoveryPasskeyBindingHash: string | null }
 ): Promise<void> {
   if (row.recoveryProofs.includes("TOTP")) {
     const [factor, owner] = await Promise.all([
@@ -340,8 +347,9 @@ export async function requireLiveRecoveryProofsInTransaction(
   }
   if (row.recoveryProofs.includes("PASSKEY")) {
     if (!row.recoveryPasskeyCredentialId) throw FAILURE;
-    const credential = await tx.passkeyCredential.findFirst({ where: { id: row.recoveryPasskeyCredentialId, userId: row.userId, revokedAt: null }, select: { id: true, userId: true, credentialId: true, publicKey: true } });
-    if (!credential || !matchesHash(recoveryPasskeyBinding(credential), row.recoveryPasskeyBindingHash)) throw FAILURE;
+    const credential = await tx.passkeyCredential.findFirst({ where: { id: row.recoveryPasskeyCredentialId, userId: row.userId, revokedAt: null }, select: { id: true, userId: true, credentialId: true, rpID: true, publicKey: true } });
+    if (!credential || (row.recoveryRole && !credentialRPMatchesRole(credential.rpID, row.recoveryRole as AccountRecoveryRole)) ||
+      !matchesHash(recoveryPasskeyBinding(credential), row.recoveryPasskeyBindingHash)) throw FAILURE;
   }
 }
 

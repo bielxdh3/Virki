@@ -53,14 +53,17 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
   const hasOtherActiveAdmin = !params?.requestId && !params?.request
     ? await hasIndependentAdministratorForRole(expectedRole).catch(() => false)
     : false;
-  // The ADMIN passkey enrollment/login flow is currently USER-only.
-  const passkeysAvailable = expectedRole === "USER" && passkeysEnabledForRequest(surface, requestHost(requestHeaders));
+  // Method availability is global, never account-specific, to prevent enrollment enumeration.
+  // ADMIN credentials are enrolled separately under the hub relying party.
+  const passkeysAvailable = passkeysEnabledForRequest(surface, requestHost(requestHeaders), process.env, expectedRole);
   const availableMethods: RecoveryRequestMethod[] = expectedRole === "USER"
     ? ["TOTP_EMAIL",
       ...(passkeysAvailable ? ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const : []),
       ...(hasOtherActiveAdmin ? ["TOTP_ADMIN", "EMAIL_ADMIN"] as const : []),
       ...(passkeysAvailable && hasOtherActiveAdmin ? ["PASSKEY_ADMIN"] as const : [])]
-    : ["TOTP_EMAIL", ...(hasOtherActiveAdmin ? ["TOTP_ADMIN", "EMAIL_ADMIN"] as const : [])];
+    : ["TOTP_EMAIL", ...(passkeysAvailable ? ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const : []),
+      ...(hasOtherActiveAdmin ? ["TOTP_ADMIN", "EMAIL_ADMIN"] as const : []),
+      ...(passkeysAvailable && hasOtherActiveAdmin ? ["PASSKEY_ADMIN"] as const : [])];
   const candidateKey = cookieStore.get(RECOVERY_CANDIDATE_COOKIE)?.value;
   const candidate = params?.switch === "1" && params.requestId && candidateKey
     ? await getAccountRecoveryRequestId(candidateKey, new Date(), expectedRole)

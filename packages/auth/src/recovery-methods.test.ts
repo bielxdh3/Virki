@@ -24,6 +24,7 @@ test("existing and nonexistent recovery IDs have identical public formats and un
   let saved: Record<string, unknown> | null = null;
   const transaction = {
     $queryRaw: async (literals: TemplateStringsArray) => literals.join("").includes('FROM "User"') ? [{ id: user.id }] : [],
+    passkeyCredential: { count: async () => 1 },
     loginRateLimit: { findUnique: async () => null, create: async () => ({}) },
     accountRecoveryRequest: {
       findFirst: async () => null,
@@ -128,6 +129,7 @@ test("recovery passkey proof stays bound to exact credential and signing key, in
   const initial = recoveryPasskeyBinding(credential);
   assert.equal(initial, recoveryPasskeyBinding({ ...credential, publicKey: Buffer.from("public-key-v1") }));
   assert.notEqual(initial, recoveryPasskeyBinding({ ...credential, publicKey: Buffer.from("different-key") }));
+  assert.notEqual(initial, recoveryPasskeyBinding({ ...credential, rpID: "hub.biel.dev.br" }));
   assert.notEqual(initial, recoveryPasskeyBinding({ ...credential, userId: "different-user" }));
   assert.notEqual(initial, recoveryPasskeyBinding({ ...credential, id: "new-credential" }));
 });

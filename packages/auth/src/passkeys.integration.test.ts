@@ -123,19 +123,61 @@ function clientData(type: "webauthn.create" | "webauthn.get", challenge: string,
   return Buffer.from(JSON.stringify({ type, challenge, origin: targetOrigin, crossOrigin: false })).toString("base64url");
 }
 
-function registerResponse(key: ReturnType<typeof authenticator>, challenge: string, flags = 0x45): RegistrationResponseJSON {
+function registerResponse(key: ReturnType<typeof authenticator>, challenge: string, flags = 0x45, targetRpID = rpID, targetOrigin = origin): RegistrationResponseJSON {
   const identifier = Buffer.from(key.credentialId, "base64url");
   const data = Buffer.concat([
-    sha(rpID), Buffer.from([flags, 0, 0, 0, 0]), Buffer.alloc(16),
+    sha(targetRpID), Buffer.from([flags, 0, 0, 0, 0]), Buffer.alloc(16),
     Buffer.from([identifier.length >> 8, identifier.length & 255]), identifier, Buffer.from(key.key)
   ]);
   const attestation = isoCBOR.encode(new Map<string, string | Map<string, never> | Uint8Array>([["fmt", "none"], ["attStmt", new Map<string, never>()], ["authData", data]]));
   return {
     id: key.credentialId, rawId: key.credentialId, type: "public-key",
-    response: { clientDataJSON: clientData("webauthn.create", challenge), attestationObject: Buffer.from(attestation).toString("base64url"), transports: ["internal"] },
+    response: { clientDataJSON: clientData("webauthn.create", challenge, targetOrigin), attestationObject: Buffer.from(attestation).toString("base64url"), transports: ["internal"] },
     clientExtensionResults: {}, authenticatorAttachment: "platform"
   };
 }
+
+test("ADMIN hub registration requires a fresh independent elevation and rejects stale role/session", integrationOptions, async (t) => {
+  const previousGlobal = process.env.VIRKI_PASSKEYS_ENABLED;
+  const previousAdmin = process.env.VIRKI_ADMIN_PASSKEYS_ENABLED;
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "true";
+  t.after(() => {
+    if (previousGlobal === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = previousGlobal;
+    if (previousAdmin === undefined) delete process.env.VIRKI_ADMIN_PASSKEYS_ENABLED; else process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = previousAdmin;
+  });
+  const admin = await createTestUser({ label: "admin-passkey-hub", role: "ADMIN" });
+  const bare = await prisma.session.create({ data: { userId: admin.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60_000) } });
+  await assert.rejects(startPasskeyRegistration(admin.id, bare.id, admin.password, createPasskeyBrowserToken(), "hub.biel.dev.br", "", "ADMIN"),
+    "normal password without independent admin elevation cannot enroll");
+
+  const { sessionId, elevationId } = await seedAdminSessionWithElevation(admin.id, "ADMIN_CREDENTIAL_CHANGE");
+  await prisma.securityElevation.update({ where: { id: elevationId }, data: { activatedAt: new Date() } });
+  const firstToken = createPasskeyBrowserToken();
+  const first = await startPasskeyRegistration(admin.id, sessionId, admin.password, firstToken, "hub.biel.dev.br", "", "ADMIN");
+  const key = authenticator();
+  await finishPasskeyRegistration(admin.id, sessionId, firstToken,
+    registerResponse(key, first.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"), "Hub recovery key", "hub.biel.dev.br", "ADMIN");
+  const credential = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: key.credentialId } });
+  assert.equal(credential.rpID, "hub.biel.dev.br");
+  assert.equal((await listUserPasskeys(admin.id, "ADMIN", "hub.biel.dev.br")).length, 1);
+  assert.equal((await listUserPasskeys(admin.id)).length, 0, "hub credential never appears in USER RP inventory");
+
+  const staleToken = createPasskeyBrowserToken();
+  const stale = await startPasskeyRegistration(admin.id, sessionId, admin.password, staleToken, "hub.biel.dev.br", "", "ADMIN");
+  await prisma.securityElevation.update({ where: { id: elevationId }, data: { status: "REVOKED", revokedAt: new Date() } });
+  await assert.rejects(finishPasskeyRegistration(admin.id, sessionId, staleToken,
+    registerResponse(authenticator(), stale.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"), "Stale elevation", "hub.biel.dev.br", "ADMIN"));
+
+  const { sessionId: secondSession, elevationId: secondElevation } = await seedAdminSessionWithElevation(admin.id, "ADMIN_CREDENTIAL_CHANGE");
+  await prisma.securityElevation.update({ where: { id: secondElevation }, data: { activatedAt: new Date() } });
+  const roleToken = createPasskeyBrowserToken();
+  const started = await startPasskeyRegistration(admin.id, secondSession, admin.password, roleToken, "hub.biel.dev.br", "", "ADMIN");
+  await prisma.user.update({ where: { id: admin.id }, data: { role: "USER" } });
+  await assert.rejects(finishPasskeyRegistration(admin.id, secondSession, roleToken,
+    registerResponse(authenticator(), started.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"), "Role changed", "hub.biel.dev.br", "ADMIN"));
+  assert.equal(await prisma.passkeyCredential.count({ where: { userId: admin.id, rpID: "hub.biel.dev.br" } }), 1);
+});
 
 function assertion(key: ReturnType<typeof authenticator>, userId: string, challenge: string, overrides: { targetOrigin?: string; targetRpId?: string; uv?: boolean; counter?: number; userHandle?: string; flags?: number } = {}): AuthenticationResponseJSON {
   const data = Buffer.concat([sha(overrides.targetRpId ?? rpID), Buffer.from([overrides.flags ?? (overrides.uv === false ? 0x01 : 0x05)]), Buffer.from([0, 0, 0, overrides.counter ?? 1])]);
