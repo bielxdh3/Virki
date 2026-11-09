@@ -22,43 +22,44 @@ The ADMIN navigation is Contas, Acessos, Segurança, Auditoria, and Conexões. S
 ## Architecture at a glance
 
 ```text
-                     Production routes (conceptual)
+                Logical host and access flows
+                  (transport not shown)
 
-  Public internet
-        |
-        v
-  Cloudflare Tunnel
-        |
-        +-- Public hostname --------> Public site (loopback)
-        |                                |
-        |                              Entrar
-        |                                |
-        +-- USER hostname  <-------------+
-        |       |
-        |       v
-        |    USER portal (apps/hub, NOT the ADMIN dashboard)
-        |       +-- / : Projetos (currently: enabled + granted only)
-        |       +-- /account/security : user account security
-        |       +-- private OIDC path proxy ---> OIDC issuer
-        |
-        +-- ADMIN hostname --> Cloudflare Access --> ADMIN Hub
-                                                     + Virki ADMIN session
+  USER
+   |
+   +-- biel.dev.br ------------> Public site
+   |                                |
+   |                              Entrar
+   |                                |
+   +-- portal.biel.dev.br <---------+
+   |      |
+   |      +-- Virki USER login/session (NO Cloudflare Access)
+   |      |       |
+   |      |       v
+   |      |    Projetos (currently: enabled + granted only)
+   |      |       +-- authorized --> External project / OIDC
+   |      |
+   |      +-- Account security
+   |      +-- private OIDC path proxy --> OIDC issuer
+   |
+   +-- hub.biel.dev.br --> Cloudflare Access --> ADMIN Hub
+                                               + Virki ADMIN session
 
-      USER portal + ADMIN Hub share an application service;
-      they are distinct host/access surfaces, not a user redirect.
+  Portal and ADMIN Hub are different access surfaces,
+  even though both are served by the apps/hub service.
 
-      Hub application + OIDC issuer + private background workers
-                              |
-                              v
+   Portal + ADMIN Hub + OIDC issuer + private workers
+                             |
+                             v
                        PostgreSQL / Prisma
-                users · sessions · grants · audit
-                    protected OIDC artifacts
+                 users · sessions · grants · audit
+                     protected OIDC artifacts
 
   External projects use OIDC authorization code + PKCE.
   Project sessions and app-internal permissions stay in each project.
 ```
 
-The production public site and Hub bind to loopback; the OIDC issuer and database have no host-published ports. The USER portal does **not** require the ADMIN Cloudflare Access assertion. The ADMIN hostname requires **both** Cloudflare Access and a Virki ADMIN session. The issuer is reachable through the portal's internal OIDC proxy, not a directly exposed port.
+The diagram intentionally shows **logical host routes and access checks, not transport infrastructure**. The production public site and Hub application bind to loopback; the OIDC issuer and database have no host-published ports. **The USER portal does not pass through Cloudflare Access**; its account pages require a Virki USER session. **Only the ADMIN hostname** requires Cloudflare Access, in addition to a Virki ADMIN session. The issuer is reachable through the portal's private OIDC proxy, not a directly exposed port.
 
 This is a **diagram of the currently configured routing and implemented portal**, not proof that a production deployment has passed acceptance. Details: [architecture](docs/architecture.md), [security](docs/security.md), and [deployment](docs/deployment.md).
 
