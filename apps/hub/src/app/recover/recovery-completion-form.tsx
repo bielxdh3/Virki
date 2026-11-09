@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { useRef, useState } from "react";
 import { completeRecoveryAction, type RecoveryCompletionActionState } from "./actions";
 
 const initialState: RecoveryCompletionActionState = { status: "idle" };
@@ -12,14 +12,29 @@ export function RecoveryCompletionForm({ csrf, csrfFieldName, requestId, expecte
   expectedRole: "ADMIN" | "USER";
   purpose: "INVITATION" | "RECOVERY";
 }) {
-  const [state, action, pending] = useActionState(completeRecoveryAction, initialState);
-  useEffect(() => {
-    if (state.status === "completed") {
-      // Full document navigation ensures Access and the newly issued session
-      // are checked together instead of reusing a stale Server Action RSC render.
-      window.location.replace(expectedRole === "ADMIN" ? "/admin/accounts" : "/account/security?recovered=password");
+  const [state, setState] = useState<RecoveryCompletionActionState>(initialState);
+  const [pending, setPending] = useState(false);
+  const submitting = useRef(false);
+  const action = async (formData: FormData) => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setPending(true);
+    try {
+      const result = await completeRecoveryAction(initialState, formData);
+      if (result.status === "completed") {
+        // The Server Action can refresh/unmount this form when it clears the
+        // recovery cookie. Navigate in this pending promise's continuation,
+        // not an effect that might never run after the RSC update.
+        setState(result);
+        window.location.replace(expectedRole === "ADMIN" ? "/admin/accounts" : "/account/security?recovered=password");
+        return;
+      }
+      setState(result);
+    } finally {
+      submitting.current = false;
+      setPending(false);
     }
-  }, [expectedRole, state.status]);
+  };
   const passwordError = purpose === "INVITATION"
     ? "Escolha uma senha de pelo menos 12 caracteres, sem caracteres de controle."
     : expectedRole === "ADMIN"
