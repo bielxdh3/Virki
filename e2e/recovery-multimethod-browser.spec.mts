@@ -1,7 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { PrismaClient } from "@virki/database";
+import { hashPassword, verifyPassword } from "@virki/auth";
+import { getSessionCookieName } from "@virki/auth/constants";
+import { decryptEmailPayload } from "@virki/auth/email";
+import { createTotpSecret, encryptTotpSecret } from "@virki/auth/security";
 // @ts-expect-error The disposable PostgreSQL guard is an audited JavaScript helper without declarations.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
@@ -14,7 +18,8 @@ const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE?.trim();
 
 // The E2E global-setup creates owner-labelled fixtures on a private disposable
 // database. This suite never provisions identities in shared/production data.
-test.skip(!e2eDatabaseUrl || !fixturePath, "requires the isolated E2E database and fixture");
+test.skip((!e2eDatabaseUrl || !fixturePath) && process.env.VIRKI_E2E_REQUIRE_RECOVERY !== "true",
+  "requires isolated E2E resources; VIRKI_E2E_REQUIRE_RECOVERY=true makes this a mandatory gate");
 
 type Actor = { id: string; email: string };
 type Fixture = { user: Actor; admin: Actor; recoveryReviewer: Actor };
@@ -24,7 +29,10 @@ async function requireFixture(): Promise<{ fixture: Fixture; database: PrismaCli
   if (!e2eDatabaseUrl || !fixturePath || process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable") {
     throw new Error("A confirmed owned disposable E2E database is required.");
   }
-  assertDisposableCoreTestDatabase(e2eDatabaseUrl, { ...process.env, NODE_ENV: "test" });
+  assertDisposableCoreTestDatabase(e2eDatabaseUrl, process.env);
+  if (new URL(e2eDatabaseUrl).pathname !== "/virki_e2e_test") {
+    throw new Error("Recovery browser tests require the dedicated E2E database name.");
+  }
   const parsed: unknown = JSON.parse(await readFile(fixturePath, "utf8"));
   if (!parsed || typeof parsed !== "object") throw new Error("Missing E2E account fixture.");
   const value = parsed as Record<string, unknown>;
@@ -77,25 +85,70 @@ async function assertBoundCookies(context: BrowserContext, base: string, request
     "legacy path-scoped recovery cookie must not remain active");
 }
 
-test("real and nonexistent USER TOTP+EMAIL requests expose equivalent pre-proof HTTP state and scoped cookies", async ({ browser }) => {
+function totpAt(secret: string, at = new Date()): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bytes: number[] = [];
+  let bits = 0;
+  let buffer = 0;
+  for (const character of secret) {
+    const index = alphabet.indexOf(character);
+    if (index < 0) throw new Error("Invalid test TOTP secret.");
+    buffer = (buffer << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((buffer >>> (bits - 8)) & 255);
+      bits -= 8;
+      buffer &= (1 << bits) - 1;
+    }
+  }
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(at.getTime() / 30_000)));
+  const digest = createHmac("sha1", Buffer.from(bytes)).update(counter).digest();
+  return String((digest.readUInt32BE(digest[digest.length - 1]! & 15) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+
+test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time reset and scoped cookies", async ({ browser }) => {
   test.setTimeout(120_000);
-  const { fixture, database } = await requireFixture();
+  const { database } = await requireFixture();
   const contexts: BrowserContext[] = [];
+  const ownedEmail = `${randomUUID()}.multimethod@e2e.invalid`;
+  let ownedUserId: string | undefined;
   try {
-    const before = await database.accountRecoveryRequest.count({ where: { userId: fixture.user.id } });
+    const totpSecret = createTotpSecret();
+    // The global E2E fixture is reused by other serial suites. Create a
+    // unique owner-labelled account instead, so an earlier recovery request's
+    // cooldown cannot silently turn the supposedly real case synthetic.
+    const ownedUser = await database.user.create({ data: {
+      email: ownedEmail, emailNormalized: ownedEmail, displayName: "Owned multi-method E2E fixture",
+      passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+      role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+      secondFactorMethod: "TOTP",
+      totpFactor: { create: {
+        secretCiphertext: encryptTotpSecret(totpSecret), keyVersion: 1,
+        status: "ACTIVE", confirmedAt: new Date()
+      } }
+    }, select: { id: true } });
+    ownedUserId = ownedUser.id;
     const totalBefore = await database.accountRecoveryRequest.count();
     const real = await openRecovery(browser, "portal");
     contexts.push(real.context);
-    const knownId = await startSelectedTotpEmail(real.page, fixture.user.email);
+    const knownId = await startSelectedTotpEmail(real.page, ownedEmail);
     await assertBoundCookies(real.context, real.base, knownId);
+    const realPreProof = (await real.page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim();
+    const realVisiblePage = (await real.page.locator("main").innerText()).trim();
 
     const synthetic = await openRecovery(browser, "portal");
     contexts.push(synthetic.context);
     const absentEmail = `absent-${randomUUID()}@e2e.invalid`;
     const syntheticId = await startSelectedTotpEmail(synthetic.page, absentEmail);
     await assertBoundCookies(synthetic.context, synthetic.base, syntheticId);
+    const syntheticPreProof = (await synthetic.page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim();
+    expect(syntheticPreProof).toBe(realPreProof,
+      "known and unknown account requests must show the same pre-proof state and text");
+    expect((await synthetic.page.locator("main").innerText()).trim()).toBe(realVisiblePage,
+      "the complete visible pre-proof page must not enumerate the selected account");
     expect(syntheticId).not.toBe(knownId);
-    expect((await database.accountRecoveryRequest.count({ where: { userId: fixture.user.id } }))).toBe(before + 1);
+    expect((await database.accountRecoveryRequest.count({ where: { userId: ownedUserId } }))).toBe(1);
     expect(await database.accountRecoveryRequest.count()).toBe(totalBefore + 1,
       "the nonexistent account must not cause an additional database recovery request");
     const otherContext = await browser.newContext();
@@ -104,8 +157,48 @@ test("real and nonexistent USER TOTP+EMAIL requests expose equivalent pre-proof 
     await stolenPage.goto(`${portalUrl}/recover?requestId=${encodeURIComponent(knownId)}`);
     await expect(stolenPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0,
       "an unbound browser must not see or claim another browser's recovery ceremony");
+
+    const message = await database.emailOutboxMessage.findFirst({
+      where: { recipientEmail: ownedEmail, kind: "ACCOUNT_RECOVERY" },
+      orderBy: { createdAt: "desc" }, select: { payload: true }
+    });
+    const emailCode = message ? decryptEmailPayload(message.payload).code : undefined;
+    expect(emailCode).toMatch(/^\d{6}$/u);
+    const emailStage = real.page.locator('[aria-label="E-mail cadastrado"]');
+    await emailStage.locator('input[name="code"]').fill(emailCode!);
+    await emailStage.getByRole("button", { name: "Confirmar", exact: true }).click();
+    await expect(real.page.locator('[aria-label="E-mail cadastrado"]')).toContainText("Confirmado.");
+
+    const totpStage = real.page.locator('[aria-label="Aplicativo autenticador"]');
+    await totpStage.locator('input[name="code"]').fill(totpAt(totpSecret));
+    await totpStage.getByRole("button", { name: "Confirmar", exact: true }).click();
+    await expect(real.page.getByText("Defina uma nova senha para finalizar a recuperação.", { exact: false })).toBeVisible();
+    const resetCandidate = `multimethod-e2e-${randomUUID()}-password`;
+    await real.page.getByLabel("Nova senha", { exact: true }).fill(resetCandidate);
+    await real.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    await expect(real.page).toHaveURL(`${portalUrl}/account/security?recovered=password`);
+    const recovered = await database.user.findUniqueOrThrow({ where: { id: ownedUserId } });
+    expect(await verifyPassword(recovered.passwordHash ?? "", resetCandidate)).toBe(true);
+    expect(recovered.secondFactorMethod).toBe("EMAIL");
+    expect((await database.totpFactor.findUniqueOrThrow({ where: { userId: ownedUserId } })).status).toBe("REVOKED");
+    expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: knownId } })).status).toBe("CONSUMED");
+    expect(await database.session.count({ where: { userId: ownedUserId, revokedAt: null, expiresAt: { gt: new Date() } } })).toBe(1);
+    const finalCookies = await real.context.cookies(portalUrl);
+    expect(finalCookies.some((cookie) => cookie.name === getSessionCookieName(process.env) && Boolean(cookie.value))).toBe(true);
+    expect(finalCookies.some((cookie) => cookie.name.includes("recovery") && Boolean(cookie.value))).toBe(false);
+    await real.page.goto(`${portalUrl}/recover?requestId=${encodeURIComponent(knownId)}`);
+    await expect(real.page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
   } finally {
     await Promise.all(contexts.map((context) => context.close()));
+    if (ownedUserId) {
+      // Restrict cleanup to this exact test-created identity and recipient;
+      // never clear shared fixture users, requests or global PostgreSQL rows.
+      await database.session.deleteMany({ where: { userId: ownedUserId } });
+      await database.accountRecoveryRequest.deleteMany({ where: { userId: ownedUserId } });
+      await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: ownedEmail } });
+      await database.totpFactor.deleteMany({ where: { userId: ownedUserId } });
+      await database.user.deleteMany({ where: { id: ownedUserId, email: ownedEmail } });
+    }
     await database.$disconnect();
   }
 });
