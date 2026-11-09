@@ -1,7 +1,95 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { prisma } from "@virki/database";
 import type { Prisma } from "@virki/database";
-import { normalizeRecoveryPolicy, isRecoveryProofSatisfied, sanitizeRecoveryComment, recoveryPasskeyBinding, recoveryTotpBinding, requireLiveRecoveryProofsInTransaction, recoveryReviewReady } from "./recovery-methods";
+import { finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, getMultiMethodRecoveryState, normalizeRecoveryPolicy, isRecoveryProofSatisfied, sanitizeRecoveryComment, recoveryPasskeyBinding, recoveryTotpBinding, requireLiveRecoveryProofsInTransaction, recoveryReviewReady, startMultiMethodRecovery, startRecoveryPasskeyAssertion } from "./recovery-methods";
+import { consumeApprovedAccountRecovery } from "./security";
+
+test("public recovery request IDs use a cryptographic, database-compatible format", () => {
+  const samples = Array.from({ length: 128 }, () => generateRecoveryPublicRequestId());
+  assert.equal(new Set(samples).size, samples.length);
+  for (const id of samples) {
+    // Same pattern accepted by security.ts:isDatabaseId when consuming the request.
+    assert.match(id, /^[A-Za-z0-9_-]{43}$/u);
+    assert.match(id, /^[A-Za-z0-9_-]{8,64}$/u);
+  }
+});
+
+test("existing and nonexistent recovery IDs have identical public formats and unproven GET state", async (context) => {
+  const knownEmail = "known-recovery-id@integration.invalid";
+  const user = { id: "recovery-public-id-user", email: knownEmail, emailNormalized: knownEmail, displayName: "Test", role: "USER", isActive: true, accountStatus: "ACTIVE" };
+  const policy = { proofs: ["PASSKEY", "TOTP"] as ("PASSKEY" | "TOTP")[], adminReview: false };
+  const now = new Date();
+  const captured: Array<Record<string, unknown>> = [];
+  let saved: Record<string, unknown> | null = null;
+  const transaction = {
+    $queryRaw: async (literals: TemplateStringsArray) => literals.join("").includes('FROM "User"') ? [{ id: user.id }] : [],
+    loginRateLimit: { findUnique: async () => null, create: async () => ({}) },
+    accountRecoveryRequest: {
+      findFirst: async () => null,
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        captured.push(data);
+        saved = {
+          ...data, status: "PENDING", reviewedByUserId: null, emailVerifiedAt: null,
+          recoveryTotpVerifiedAt: null, recoveryPasskeyVerifiedAt: null, user
+        };
+        return { id: data.id };
+      }
+    },
+    auditLog: { create: async () => ({}) }
+  } as unknown as Prisma.TransactionClient;
+  const userFind = Object.getOwnPropertyDescriptor(prisma.user, "findUnique");
+  const requestFind = Object.getOwnPropertyDescriptor(prisma.accountRecoveryRequest, "findUnique");
+  const runTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(userFind && requestFind && runTransaction);
+  const oldNodeEnv = process.env.NODE_ENV;
+  const oldPasskeyFlag = process.env.VIRKI_PASSKEYS_ENABLED;
+  process.env.NODE_ENV = "test";
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  Object.defineProperty(prisma.user, "findUnique", {
+    ...userFind, value: async ({ where }: { where: { emailNormalized: string } }) => where.emailNormalized === knownEmail ? user : null
+  });
+  Object.defineProperty(prisma.accountRecoveryRequest, "findUnique", {
+    ...requestFind, value: async ({ where }: { where: { id: string } }) => saved && saved.id === where.id ? saved : null
+  });
+  Object.defineProperty(prisma, "$transaction", {
+    ...runTransaction, value: async (operation: (tx: Prisma.TransactionClient) => Promise<unknown>) => operation(transaction)
+  });
+  context.after(() => {
+    Object.defineProperty(prisma, "$transaction", runTransaction);
+    Object.defineProperty(prisma.accountRecoveryRequest, "findUnique", requestFind);
+    Object.defineProperty(prisma.user, "findUnique", userFind);
+    if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = oldNodeEnv;
+    if (oldPasskeyFlag === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED;
+    else process.env.VIRKI_PASSKEYS_ENABLED = oldPasskeyFlag;
+  });
+  const real = await startMultiMethodRecovery(knownEmail, "USER", policy, "pt-BR", now);
+  const fake = await startMultiMethodRecovery("absent-recovery-id@integration.invalid", "USER", policy, "pt-BR", now);
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0]?.id, real.requestId, "real row MUST persist the public random ID, bypassing Prisma's CUID default");
+  assert.match(real.requestId, /^[A-Za-z0-9_-]{43}$/u);
+  assert.match(fake.requestId, /^[A-Za-z0-9_-]{43}$/u);
+  assert.equal(real.requestId.length, fake.requestId.length);
+  assert.notEqual(real.requestId, fake.requestId);
+  assert.deepEqual(
+    await getMultiMethodRecoveryState(real.requestId, real.requestKey, real.browserToken, "USER", policy, now),
+    await getMultiMethodRecoveryState(fake.requestId, fake.requestKey, fake.browserToken, "USER", policy, now)
+  );
+  process.env.VIRKI_PASSKEYS_ENABLED = "false";
+  const disabled = await startMultiMethodRecovery(knownEmail, "USER", policy, "pt-BR", now);
+  assert.equal(captured.length, 1, "forged disabled PASSKEY method must not persist a request");
+  assert.match(disabled.requestId, /^[A-Za-z0-9_-]{43}$/u);
+  assert.deepEqual(
+    await getMultiMethodRecoveryState(real.requestId, real.requestKey, real.browserToken, "USER", policy, now),
+    await getMultiMethodRecoveryState(disabled.requestId, disabled.requestKey, disabled.browserToken, "USER", policy, now)
+  );
+  await assert.rejects(startRecoveryPasskeyAssertion(real.requestId, real.requestKey, real.browserToken, "USER"));
+  await assert.rejects(finishRecoveryPasskeyAssertion(real.requestId, real.requestKey, real.browserToken, {} as never, "USER"));
+  saved = { ...saved!, status: "APPROVED", recoveryPasskeyVerifiedAt: now, recoveryTotpVerifiedAt: now };
+  await assert.rejects(consumeApprovedAccountRecovery(real.requestId, real.requestKey, "valid-new-recovery-password", now, "USER", real.browserToken),
+    /Security mutation rejected/u, "a flag revoked after proof must prevent password reset");
+});
 
 test("explicit recovery methods require two independent factors or one plus different admin", () => {
   assert.deepEqual(normalizeRecoveryPolicy({ proofs: ["PASSKEY", "TOTP"], adminReview: false }), { proofs: ["PASSKEY", "TOTP"], adminReview: false });
