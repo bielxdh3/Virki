@@ -73,7 +73,7 @@ BEGIN
         '_prisma_migrations', 'AccountRecoveryRequest', 'AdministrativeCredential',
         'AdministrativeRecoveryCode', 'AuditLog', 'DeviceChallenge', 'EmailDeliveryAttempt',
         'EmailOutboxMessage', 'LoginRateLimit', 'OidcArtifact', 'PasskeyChallenge',
-        'PasskeyCredential', 'ProjectConnection', 'RecoveryCode',
+        'PasskeyCredential', 'ProjectConnection', 'RecoveryCode', 'RecoveryEmailRebind',
         'SanitizedAuditReference', 'SecurityElevation', 'Session',
         'TotpFactor', 'TrustedDevice', 'User', 'UserProjectGrant'
       )
