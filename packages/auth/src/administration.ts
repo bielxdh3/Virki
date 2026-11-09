@@ -306,10 +306,19 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
     await transaction.securityElevation.updateMany({ where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
+    const invalidatedAt = new Date(Math.max(now.getTime(), Date.now()));
+    // All privileged credential recovery methods must fence credentials and
+    // sessions from before the reset, not just the TOTP recovery alternative.
+    await transaction.session.updateMany({
+      where: { userId: input.actor.id, id: { not: input.sessionId }, revokedAt: null },
+      data: { revokedAt: invalidatedAt }
+    });
+    await revokeUserAuthenticationProofsInTransaction(transaction, input.actor.id, invalidatedAt);
+    await revokeUserOidcArtifactsInTransaction(transaction, input.actor.id);
     // Every way of recovering the privileged credential must invalidate the
     // old ADMIN passkeys, not only TOTP recovery. They remain eligible proofs
     // in the separate normal-account recovery flow until revoked.
-    await transaction.passkeyCredential.updateMany({ where: { userId: input.actor.id, revokedAt: null }, data: { revokedAt: now } });
+    await transaction.passkeyCredential.updateMany({ where: { userId: input.actor.id, revokedAt: null }, data: { revokedAt: invalidatedAt } });
     await transaction.passkeyChallenge.deleteMany({ where: { userId: input.actor.id, consumedAt: null } });
     // Updating a recovery code (or deleting sibling codes) can wait after the
     // initial User/Session locks. Recheck the live session before success;
@@ -533,10 +542,8 @@ export async function completeAdministrativeEmailRecovery(input: {
       where: { userId: input.actor.id, id: { not: input.sessionId }, revokedAt: null },
       data: { revokedAt: checkedAt }
     });
-    await transaction.trustedDevice.updateMany({
-      where: { userId: input.actor.id, status: "TRUSTED" },
-      data: { status: "REVOKED", revokedAt: checkedAt }
-    });
+    await revokeUserAuthenticationProofsInTransaction(transaction, input.actor.id, checkedAt);
+    await revokeUserOidcArtifactsInTransaction(transaction, input.actor.id);
     await transaction.passkeyCredential.updateMany({ where: { userId: input.actor.id, revokedAt: null }, data: { revokedAt: checkedAt } });
     await transaction.passkeyChallenge.deleteMany({ where: { userId: input.actor.id, consumedAt: null } });
     await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, new Date(Math.max(checkedAt.getTime(), Date.now())));

@@ -97,6 +97,9 @@ test("all three separate ADMIN-credential recovery methods revoke old passkey pr
     assert.match(method, /transaction\.passkeyCredential\.updateMany\(/u, `${startName}: old passkeys must be revoked`);
     assert.match(method, /revokedAt:\s*null/u, `${startName}: only active passkeys should be affected`);
     assert.match(method, /transaction\.passkeyChallenge\.deleteMany\(/u, `${startName}: pending assertions must be invalidated`);
+    assert.match(method, /transaction\.session\.updateMany\(/u, `${startName}: sibling sessions must be revoked`);
+    assert.match(method, /revokeUserAuthenticationProofsInTransaction\(/u, `${startName}: trusted devices and pending challenges must be invalidated`);
+    assert.match(method, /revokeUserOidcArtifactsInTransaction\(/u, `${startName}: OIDC artifacts must be invalidated`);
   }
 });
 
