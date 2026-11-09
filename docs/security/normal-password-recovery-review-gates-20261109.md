@@ -14,6 +14,17 @@ For a pair/assisted method not proving the old mailbox, a **new mailbox must be 
 
 **Release remains NO-GO** until all additive migrations and transactional races have been exercised on **disposable PostgreSQL 18**, email OTP and outbox delivery have been tested with a disposable SMTP harness, physical/browsers' WebAuthn ceremonies are covered end to end for Portal and Hub RPs, the verified production build and independent security review pass on the exact publishable tree, and Cloudflare Access policy is shown to allow the intended authorized ADMIN lost-mailbox recovery path **without bypassing Access**. ADMIN passkey functionality also requires explicit security-reviewed feature flags. A local green TypeScript/build/unit run is **not** a production release authorization.
 
+### Cloudflare Access: live, read-only findings (2026-11-09)
+
+The connected Cloudflare account was inspected using **GET-only** account, Access application, application policy and identity-provider endpoints. No Cloudflare settings or live sessions were changed.
+
+- `hub.biel.dev.br` is an Access-protected self-hosted application named **hub**, with Access session duration **168 hours**.
+- The sole configured application policy is **Owner only**, decision `allow`, with both `include` and `require` constrained to email identity. There is no configured exclusion/fallback policy.
+- The account lists **One-Time PIN (`onetimepin`) as its only Access identity provider**; the hub Access app has no explicitly listed alternative identity providers.
+- `portal.biel.dev.br` has **no Access application** in this account. This is expected and must **not** be treated as authorization to expose ADMIN recovery on the public Portal.
+
+**Concrete release blocker:** an ADMIN without access to the old mailbox may be unable to reauthenticate to Cloudflare Access after the pre-existing Access session expires. Even after Virki verifies a replacement mailbox and changes the ADMIN's own login email, the separate **Owner only** Access policy may not recognize or permit the replacement identity. The source gate correctly refuses hub requests without valid Access; removing/bypassing that gate is **not an acceptable fix**. A reviewed identity-recovery strategy that preserves Cloudflare Access protection, including new-mailbox authorization and cold-browser access tests, is required before claiming end-to-end ADMIN lost-inbox recovery. Changing Cloudflare Access policy, identity provider or user authorization is **outside the scope of this source-only integration task**.
+
 ## Historical baseline findings retained for traceability
 
 This document records independent read-only review findings against the starting Virki `main` (`7c8914ed222f0672ccc87e0331daf6a4c3f0f5a7`). It is not evidence that a successor fix is complete. No production changes or SMTP sends are authorized here.
