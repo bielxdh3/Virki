@@ -312,6 +312,21 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     const unknownId = await startPasskeyAdminRecovery(synthetic.page, `absent-${randomUUID()}@e2e.invalid`);
     expect(unknownId).not.toBe(requestId);
     expect(await db.accountRecoveryRequest.count({ where: { id: unknownId } })).toBe(0);
+    // The Next Server Action can update the address bar to the redirect URL
+    // before the App Router commits the new page. URL-only synchronization is
+    // not proof that the synthetic pre-proof UI rendered. Compare two *real*
+    // canonical document GETs instead, failing on Access/404/500 rather than
+    // treating an error document as synthetic parity.
+    const knownUrl = `${hub}/recover?requestId=${requestId}`;
+    const syntheticUrl = `${hub}/recover?requestId=${unknownId}`;
+    const knownDocument = await target.page.goto(knownUrl);
+    expect(knownDocument?.status(), "known recovery must render a real Hub HTTP 200 document").toBe(200);
+    await expect(target.page).toHaveURL(knownUrl);
+    const syntheticDocument = await synthetic.page.goto(syntheticUrl);
+    expect(syntheticDocument?.status(), "unknown recovery must render a real Hub HTTP 200 document").toBe(200);
+    await expect(synthetic.page).toHaveURL(syntheticUrl);
+    assertRecoveryCookies(await target.context.cookies(hub), requestId);
+    assertRecoveryCookies(await synthetic.context.cookies(hub), unknownId);
     await expect(synthetic.page.getByRole("heading", { level: 1, name: "Recuperar acesso administrativo", exact: true })).toBeVisible();
     await expect(synthetic.page.locator('[aria-label="Chave de acesso"]').getByRole("button", { name: "Confirmar com passkey" })).toBeVisible();
     await expect(target.page.locator('[aria-label="Chave de acesso"]').getByRole("button", { name: "Confirmar com passkey" })).toBeVisible();
