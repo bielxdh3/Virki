@@ -161,7 +161,10 @@ export async function claimNextEmailMessage(now = new Date(), database: typeof p
 
     const interrupted = candidate.status === "PROCESSING";
     const exhausted = candidate.attemptCount >= MAX_EMAIL_ATTEMPTS;
-    const sender = process.env.VIRKI_EMAIL_FROM;
+    // Match the SMTP adapter's normalization exactly. Otherwise a valid,
+    // whitespace-padded configuration can send while skipping durable ID
+    // reservation, losing the header if the worker crashes after SMTP accept.
+    const sender = process.env.VIRKI_EMAIL_FROM?.trim();
     const nextSmtpHeaderMessageId = !exhausted && sender && isSingleMailboxAddress(sender)
       ? stableAttemptMessageId(`${candidate.id}:${candidate.attemptCount + 1}`, sender)
       : undefined;

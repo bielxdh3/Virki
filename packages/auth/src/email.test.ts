@@ -217,7 +217,9 @@ test("SMTP reuses the reserved Message-ID across sender rotation and rejects inj
 test("SMTP handoff before a failed DB finalize remains traceable after lease reclaim", async () => {
   await withTestOutboxKey(async () => {
     const previousFrom = process.env.VIRKI_EMAIL_FROM;
-    process.env.VIRKI_EMAIL_FROM = "no-reply@original.sender.example.invalid";
+    // The SMTP adapter accepts the same sender with surrounding whitespace.
+    // The DB claim must normalize it identically before reserving the header.
+    process.env.VIRKI_EMAIL_FROM = " \t no-reply@original.sender.example.invalid \t ";
     try {
     const now = new Date("2026-11-10T12:00:00.000Z");
     const queued = createMockOutboxDatabase({
