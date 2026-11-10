@@ -145,6 +145,41 @@ test("wrong, expired, replayed and inactive TOTP cannot recover an ADMIN credent
   }
 });
 
+for (const state of ["revoked", "missing"] as const) {
+  test(`TOTP recovery never recreates or reactivates a ${state} administrative credential`, integrationOptions, async () => {
+    const admin = await createAdmin();
+    const beforeFactor = await prisma.totpFactor.findUniqueOrThrow({
+      where: { userId: admin.userId }, select: { lastUsedStep: true }
+    });
+    const initialCredential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.userId } });
+    if (state === "revoked") {
+      await prisma.administrativeCredential.update({
+        where: { userId: admin.userId }, data: { status: "REVOKED", revokedAt: new Date() }
+      });
+    } else {
+      await prisma.administrativeCredential.delete({ where: { userId: admin.userId } });
+    }
+    await assert.rejects(recover(admin), AdministrationMutationError);
+    const credential = await prisma.administrativeCredential.findUnique({ where: { userId: admin.userId } });
+    if (state === "missing") {
+      assert.equal(credential, null, "a missing privileged credential must require the separate setup ceremony");
+    } else {
+      assert.equal(credential?.status, "REVOKED");
+      assert.ok(credential?.revokedAt);
+      assert.equal(credential?.keyVersion, initialCredential.keyVersion);
+      assert.equal(credential?.passwordHash, initialCredential.passwordHash);
+    }
+    assert.equal((await prisma.totpFactor.findUniqueOrThrow({
+      where: { userId: admin.userId }, select: { lastUsedStep: true }
+    })).lastUsedStep, beforeFactor.lastUsedStep, "rejected credential recovery must not consume TOTP");
+    assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.userId } }), 0);
+    assert.equal(await prisma.auditLog.count({
+      where: { actorUserId: admin.userId, eventType: "ADMIN_CREDENTIAL_TOTP_RECOVERED" }
+    }), 0);
+    assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
+  });
+}
+
 test("TOTP recovery rejects wrong/changed login passwords, USER role, expired session and password reuse", integrationOptions, async () => {
   const admin = await createAdmin();
   await assert.rejects(recoverAdministrativeCredentialWithTotp({

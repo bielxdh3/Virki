@@ -601,6 +601,61 @@ test("ADMIN email recovery rejects invalid normal password and missing verified 
   assert.equal((await queuedEmails(admin.email)).length, 0);
 });
 
+for (const state of ["revoked", "missing"] as const) {
+  test(`ADMIN email recovery rejects a ${state} credential both before OTP issuance and after an already-issued OTP`, integrationOptions, async () => {
+    const beforeStart = await setupAdmin({ credential: state !== "missing" });
+    if (state === "revoked") {
+      await prisma.administrativeCredential.update({
+        where: { userId: beforeStart.actor.id }, data: { status: "REVOKED", revokedAt: new Date() }
+      });
+    }
+    await assert.rejects(startAdministrativeEmailRecovery({
+      actor: beforeStart.actor, sessionId: beforeStart.sessionId,
+      normalPassword: NORMAL_PASSWORD, locale: LOCALE
+    }), AdministrationMutationError);
+    assert.equal((await queuedEmails(beforeStart.email)).length, 0, "invalid administrative credential must not mint an OTP");
+    assert.equal(await prisma.administrativeCredential.count({ where: { userId: beforeStart.actor.id, status: "ACTIVE" } }), 0);
+
+    const afterStart = await setupAdmin();
+    const requestKey = await startAdministrativeEmailRecovery({
+      actor: afterStart.actor, sessionId: afterStart.sessionId,
+      normalPassword: NORMAL_PASSWORD, locale: LOCALE
+    });
+    const code = await latestEmailCode(afterStart.email, "ADMIN_EMAIL_VERIFICATION");
+    const previous = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: afterStart.actor.id } });
+    if (state === "revoked") {
+      await prisma.administrativeCredential.update({
+        where: { userId: afterStart.actor.id }, data: { status: "REVOKED", revokedAt: new Date() }
+      });
+    } else {
+      await prisma.administrativeCredential.delete({ where: { userId: afterStart.actor.id } });
+    }
+    await assert.rejects(completeAdministrativeEmailRecovery({
+      actor: afterStart.actor, sessionId: afterStart.sessionId, requestKey, code,
+      normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-must-not-resurrect-2026"
+    }), AdministrationMutationError);
+    const current = await prisma.administrativeCredential.findUnique({ where: { userId: afterStart.actor.id } });
+    if (state === "missing") {
+      assert.equal(current, null, "the old OTP must not recreate an absent credential");
+    } else {
+      assert.equal(current?.status, "REVOKED");
+      assert.ok(current?.revokedAt);
+      assert.equal(current?.passwordHash, previous.passwordHash);
+      assert.equal(current?.keyVersion, previous.keyVersion);
+    }
+    assert.equal((await prisma.securityElevation.findUniqueOrThrow({
+      where: { requestKey }, select: { status: true }
+    })).status, "PENDING", "a rejected OTP must not be marked consumed or authorize an elevation");
+    assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: afterStart.actor.id } }), 0);
+    assert.equal(await prisma.auditLog.count({
+      where: { actorUserId: afterStart.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED" }
+    }), 0);
+    assert.equal((await prisma.session.findUniqueOrThrow({
+      where: { id: afterStart.sessionId }, select: { revokedAt: true }
+    })).revokedAt, null);
+  });
+}
+
 test("ADMIN email recovery fails closed for a changed verified mailbox, wrong session, stale version, wrong password and expiry", integrationOptions, async () => {
   const cases = ["wrong-session", "changed-email", "rotated-credential", "wrong-password", "expired", "incorrect-code", "same-as-normal"] as const;
   for (const kind of cases) {
