@@ -36,6 +36,22 @@ test("production exposes only the public site and loopback application surfaces"
   assert.doesNotMatch(productionCompose, /VIRKI_INTAKE|apps\/intake/iu);
 });
 
+test("the SMTP worker alone receives its configurable provider send interval with unchanged 250ms default", () => {
+  const worker = serviceBlock(productionCompose, "email-worker");
+  assert.match(worker, /VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:\s*\$\{VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:-250\}/u);
+  assert.equal((worker.match(/^\s+VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:/gmu) ?? []).length, 1);
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup", "migrate", "first-admin-bootstrap", "postgres"]) {
+    assert.doesNotMatch(serviceBlock(productionCompose, service), /^\s+VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:/mu,
+      `send spacing belongs only to the worker, never to ${service}`);
+  }
+  assert.match(environmentTemplate, /^VIRKI_EMAIL_MIN_SEND_INTERVAL_MS=250$/mu);
+  const workerLoop = readFileSync(path.join(repositoryRoot, "packages", "auth", "src", "email-worker-loop.ts"), "utf8");
+  assert.match(workerLoop, /EMAIL_WORKER_DEFAULT_SEND_INTERVAL_MS = 250/u,
+    "new Compose default must match the existing worker behavior");
+  assert.match(workerLoop, /MAX_SEND_INTERVAL_MS = 60_000/u,
+    "effective maximum is bounded for staging rate-budget review");
+});
+
 test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared environment", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
