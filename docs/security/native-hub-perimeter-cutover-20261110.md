@@ -56,3 +56,25 @@ forward migration before deployment.
 
 **Decision: draft implementation only. No release, deploy, Cloudflare policy
 change or externally hosted E2E authorized by this document.**
+
+## Owner and recipient evidence received on 2026-11-10
+
+- In the conversation, the owner answered **"Sim"** to the pending authorization
+  to replace production Cloudflare Access with the native Virki perimeter **only
+  after isolated staging and the required security validations pass**. Treat
+  this as conditional owner approval of the intended direction, **not** as
+  permission to cut over now, use real credentials, deploy to production or
+  bypass the external release gates. Exact resources, rollout and rollback must
+  still be approved and documented at execution time.
+- The recipient supplied a Gmail screenshot showing an **Inbox** message from
+  `no-reply@biel.dev.br`, subject
+  `Virki - teste diagnostico de entrega SMTP (672c634dc954)`, body mentioning
+  the same diagnostic marker and an interface timestamp of **1:34 AM**, with a
+  relative label of **8 hours ago**. This supports actual recipient-inbox
+  presence of the **previously sent diagnostic**, not merely SMTP acceptance.
+  Screenshot evidence is user-supplied, not an independently authenticated
+  mailbox API record; absolute timezone and RFC Message-ID are not available.
+- This screenshot is **not** proof that a Virki-generated recovery OTP from
+  the approved PR SHA was received. That separate end-to-end correlation
+  (application/outbox, worker, Brevo and recipient) remains pending, as do
+  isolated staging and external ADMIN/USER recovery acceptance tests.
