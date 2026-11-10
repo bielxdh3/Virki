@@ -137,7 +137,8 @@ test("CI runs production build/start core browser journeys after preserving the 
   assert.match(passkeyStage, /VIRKI_E2E_PASSKEYS: "true"/u);
   assert.match(passkeyStage, /VIRKI_E2E_ADMIN_PASSKEYS: "true"/u);
   assert.match(passkeyStage, /VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"/u);
-  assert.match(passkeyStage, /npm run test:e2e -- --grep 'PASSKEY_'/u);
+  assert.match(passkeyStage, /npm run test:e2e -- --grep 'PASSKEY_\|USER virtual authenticator'/u,
+    "mandatory opt-in must run recovery/passkey E2E and the real USER credential-inventory lifecycle");
   assert.doesNotMatch(stage, /VIRKI_E2E_ADMIN_PASSKEYS: "true"/u,
     "privileged test-only passkey opt-in must never leak into the production-mode browser stage");
   assert.match(stage, /VIRKI_HUB_HOSTNAME: hub\.localhost/u);
