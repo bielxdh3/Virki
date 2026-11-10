@@ -17,6 +17,15 @@ const discoveryOnly = process.argv.includes("--list");
 assertDirectPlaywrightPlatform(process.platform, discoveryOnly);
 
 const productionHubMode = process.env.VIRKI_E2E_HUB_MODE === "production";
+const nativeHubGate = process.env.VIRKI_E2E_NATIVE_HUB === "required";
+if (process.env.VIRKI_E2E_NATIVE_HUB && !nativeHubGate) {
+  throw new Error("Native Hub E2E requires the exact explicit 'required' opt-in.");
+}
+if (nativeHubGate && (productionHubMode || !process.env.VIRKI_E2E_DATABASE_URL ||
+    process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable" ||
+    !process.env.VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL)) {
+  throw new Error("Native Hub E2E requires a non-production, confirmed disposable PostgreSQL fixture.");
+}
 // Enrolling ADMIN test passkeys needs a separate explicit opt-in. Do not
 // silently enable the real privileged feature in production-mode rehearsals.
 if (process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" &&
@@ -164,6 +173,7 @@ const publicSiteEnv = {
 };
 const hubEnv = {
   ...localOnlyEnv,
+  ...(nativeHubGate ? { VIRKI_HUB_PERIMETER_MODE: "native" } : {}),
   VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
   // The isolated Hub launcher extracts only adapterKey and omits this path from its child env.
   VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE: oidcPrivateConfigPath,
@@ -196,6 +206,11 @@ process.env[registrationTokenInitializedEnv] = "true";
 
 export default defineConfig({
   testDir: "./e2e",
+  // Never mix native Hub and Access-JWT test processes: each has its own
+  // webServer lifecycle, isolated TLS material and browser fixture.
+  ...(nativeHubGate
+    ? { testMatch: "**/native-hub-perimeter.spec.mts" }
+    : { testIgnore: "**/native-hub-perimeter.spec.mts" }),
   globalTeardown: "./scripts/e2e/global-teardown.mts",
   globalSetup: e2eDatabaseUrl ? "./scripts/e2e/global-setup.mts" : undefined,
   fullyParallel: false,
@@ -218,21 +233,22 @@ export default defineConfig({
     }
   },
   webServer: [
-    {
+    // No synthetic Access/JWKS service exists during the native-only run.
+    // A hidden dependency on Cloudflare-style assertion verification must
+    // fail this browser gate instead of being satisfied by a test server.
+    ...(!nativeHubGate ? [{
       command: "node scripts/e2e/isolated-service.mjs jwks",
-      // The webServer probe cannot use this run's private CA. Probe the local service directly;
-      // production-mode JWT validation still uses the HTTPS synthetic Access origin.
       url: `${productionHubMode ? "http://127.0.0.1:3010" : accessTeamDomain}/cdn-cgi/access/certs`,
       reuseExistingServer: false,
       timeout: 30_000,
-      stdout: "pipe",
+      stdout: "pipe" as const,
       env: {
         NODE_OPTIONS: "",
         NODE_PATH: "",
         VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: "",
         VIRKI_E2E_JWKS_REGISTRATION_TOKEN: jwksRegistrationToken
       }
-    },
+    }] : []),
     {
       command: "node scripts/e2e/isolated-service.mjs public-site",
       url: "http://127.0.0.1:3000",

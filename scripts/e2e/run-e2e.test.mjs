@@ -44,6 +44,41 @@ test("Windows runs browser E2E in isolated Linux Docker and carries filters as J
   assert.deepEqual(JSON.parse(command.environment.VIRKI_E2E_PLAYWRIGHT_ARGUMENTS_JSON), playwrightArguments);
 });
 
+test("native Hub E2E is explicitly opt-in, Hub-only and a mandatory non-skipping CI gate", () => {
+  const config = readFileSync(resolve(repositoryRoot, "playwright.config.mts"), "utf8");
+  const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const spec = readFileSync(resolve(repositoryRoot, "e2e/native-hub-perimeter.spec.mts"), "utf8");
+  const isolatedService = readFileSync(resolve(scriptDirectory, "isolated-service.mjs"), "utf8");
+  assert.match(config, /process\.env\.VIRKI_E2E_NATIVE_HUB === "required"/u);
+  assert.match(config, /nativeHubGate && \(productionHubMode \|\| !process\.env\.VIRKI_E2E_DATABASE_URL/u);
+  assert.match(config, /nativeHubGate \? \{ VIRKI_HUB_PERIMETER_MODE: "native" \} : \{\}/u);
+  assert.match(config, /testMatch: "\*\*\/native-hub-perimeter\.spec\.mts"/u);
+  assert.match(config, /testIgnore: "\*\*\/native-hub-perimeter\.spec\.mts"/u);
+  assert.match(isolatedService, /hub: \[[\s\S]*?"VIRKI_HUB_PERIMETER_MODE"/u);
+  assert.doesNotMatch(isolatedService.match(/"public-site": \[[^\]]+\]/u)?.[0] ?? "", /VIRKI_HUB_PERIMETER_MODE/u);
+  assert.match(spec, /"NATIVE HUB: unauthenticated/u);
+  assert.match(spec, /"NATIVE HUB: legitimate USER/u);
+  assert.match(spec, /"NATIVE HUB: ADMIN password plus genuine queued MFA/u);
+  assert.doesNotMatch(spec, /addCloudflareAccessHeader/u);
+  const stage = workflow.split("- name: Run mandatory native Hub browser E2E without Cloudflare Access JWT")[1]?.split("- name: Run production Hub core browser E2E")[0];
+  assert.ok(stage, "mandatory native Hub stage must exist before production Hub rehearsal");
+  assert.match(stage, /VIRKI_E2E_NATIVE_HUB: required/u);
+  assert.match(stage, /npm run test:e2e -- e2e\/native-hub-perimeter\.spec\.mts --forbid-only/u);
+  assert.match(stage, /3 passed/u);
+  assert.match(stage, /set -euo pipefail/u);
+  assert.doesNotMatch(stage, /continue-on-error:|if:\s*false/u);
+  for (const mutation of [
+    workflow.replace("VIRKI_E2E_NATIVE_HUB: required", "VIRKI_E2E_NATIVE_HUB: false"),
+    workflow.replace("e2e/native-hub-perimeter.spec.mts --forbid-only", "e2e/public-entry.spec.mts"),
+    workflow.replace("3 passed", "0 passed")
+  ]) {
+    const candidate = mutation.split("- name: Run mandatory native Hub browser E2E without Cloudflare Access JWT")[1]?.split("- name: Run production Hub core browser E2E")[0] ?? "";
+    assert.equal(/VIRKI_E2E_NATIVE_HUB: required/u.test(candidate) &&
+      /e2e\/native-hub-perimeter\.spec\.mts --forbid-only/u.test(candidate) &&
+      /3 passed/u.test(candidate), false, "mutated native Hub CI gate must not look valid");
+  }
+});
+
 test("isolated Windows launcher rejects remote Docker context overrides before creating any fixture", {
   skip: process.platform !== "win32" && "Windows-only PowerShell launch guard",
 }, () => {

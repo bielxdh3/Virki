@@ -124,6 +124,41 @@ storage, ran the dedicated command after applying all migrations: **2 PASS,
 0 FAIL, 0 SKIP**, including the real two-transaction pre-CAS collision. The
 instance, extracted PG binaries and temporary credential files were verified
 removed after the test. Local checks of CI/test-inventory/runner policies,
-auth TypeScript, lint, CI YAML and Bash syntax passed. This is **not** an
-assertion that the hosted GitHub Actions job has passed yet, and does not
+auth TypeScript, lint, CI YAML and Bash syntax passed. This does not
 replace browser E2E or any external email delivery proof.
+
+**Hosted baseline evidence:** GitHub Actions CI run `42858735815` completed
+`success` for exact SHA `90ca06292a5e320bd2502403fe24a8a489e8c9b5`.
+The mandatory exclusive HOL/CAS PostgreSQL job, Validate and the existing
+authenticated browser E2E job were successful. Production images were not
+published by that branch run. These results cover the **previous** SHA and
+must not be attributed to the new native Hub browser coverage.
+
+## Native Hub browser gate — new child candidate, pending hosted execution
+
+`VIRKI_E2E_NATIVE_HUB=required` enables a separate three-case HTTPS Chromium
+Playwright run only when a confirmed disposable E2E PostgreSQL target and its
+audit-cleanup role are supplied. The isolated Hub child receives
+`VIRKI_HUB_PERIMETER_MODE=native`; the Portal does not, and the synthetic
+Cloudflare Access/JWKS test server is not started. Without the exact opt-in,
+the existing Access-required browser suite excludes the native-only spec.
+
+`e2e/native-hub-perimeter.spec.mts` exercises genuine browser and database
+boundaries: native ADMIN login/recovery entry and non-enumerating recovery
+submission without Access JWT; unauthenticated and forged-header denials;
+valid Portal USER session refused by Hub; ADMIN password plus real queued
+second-factor proof; ADMIN recovery Server Action with forged session CSRF
+rejected without side effects, followed by a valid CSRF request that really
+creates a session-bound pending ceremony and exactly one email outbox entry;
+and reversed ADMIN-to-Portal role isolation. No actual SMTP or recipient
+delivery is claimed by the database outbox assertion.
+
+`.github/workflows/ci.yml` runs the native test as a mandatory step within
+the existing authenticated E2E job, requiring the Playwright command to
+succeed with exactly three PASS and zero SKIP/FAIL. Its initial local
+validation consists of TypeScript, ESLint, secret scan, test discovery and
+runner/CI policy contracts. **No physical Chromium PASS or new hosted CI
+SUCCESS should be claimed until the committed SHA's E2E run completes.**
+External segregated staging and genuine Virki OTP inbox correlation remain
+distinct release blockers; the production Cloudflare Access policy and
+`VIRKI_ADMIN_PASSKEYS_ENABLED=false` remain unchanged.

@@ -559,6 +559,24 @@ jobs:
           trap 'unset cleanup_url' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_|USER virtual authenticator'
 
+      - name: Run mandatory native Hub browser E2E without Cloudflare Access JWT
+        env:
+          VIRKI_E2E_NATIVE_HUB: required
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
+          output_file="$(mktemp "$RUNNER_TEMP/virki-native-hub-browser.XXXXXX")"
+          trap 'unset cleanup_url; rm -f -- "$output_file"' EXIT
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- e2e/native-hub-perimeter.spec.mts --forbid-only 2>&1 | tee "$output_file"
+          # In addition to the Playwright exit code, require exactly this
+          # browser spec's three real PASS results; 0 tests/SKIP is NO-GO.
+          grep -Eq '(^|[[:space:]])3 passed \(' "$output_file"
+          if grep -Eq '(^|[[:space:]])[1-9][0-9]* (skipped|failed) \(' "$output_file"; then
+            echo 'Native Hub browser gate cannot skip or fail tests.' >&2
+            exit 1
+          fi
+
       - name: Run production Hub core browser E2E
         env:
           VIRKI_E2E_HUB_MODE: production
