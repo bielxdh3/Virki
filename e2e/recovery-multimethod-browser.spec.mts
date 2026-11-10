@@ -445,7 +445,14 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
             .toBeGreaterThanOrEqual(200);
           expect(rejectedPost.status()).toBeLessThan(400);
           expect(rejectedPost.request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
-          expect(rejectedPost.request().headers().origin).toBe(portalUrl);
+          // Next's browser-bound Server Action may omit Origin. Assert the
+          // exact same-origin endpoint, and validate Origin/Referer if sent.
+          const rejectedRequest = rejectedPost.request();
+          expect(new URL(rejectedRequest.url()).origin).toBe(portalUrl);
+          expect(new URL(rejectedRequest.url()).pathname).toBe("/recover");
+          const { origin, referer } = rejectedRequest.headers();
+          if (origin !== undefined) expect(origin).toBe(portalUrl);
+          if (referer !== undefined) expect(new URL(referer).origin).toBe(portalUrl);
           await expect(prematurePage).toHaveURL(portalUrl + "/recover?requestId=" + requestId + "&error=1", { timeout: 20_000 });
           expect(await database.user.findUniqueOrThrow({
             where: { id: owner.id },
