@@ -335,8 +335,63 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           });
           const code = message ? decryptEmailPayload(message.payload).code : undefined;
           expect(code).toMatch(/^\d{6}$/u);
-          await mailbox.locator('input[name="code"]').fill(code!);
-          await mailbox.getByRole("button", { name: "Confirmar novo e-mail" }).click();
+          // A hidden password form is not an authorization boundary. Capture
+          // a genuine completion form using this disposable test-owned request,
+          // restore the unverified mailbox state BEFORE submitting its Next
+          // Server Action and require a failed, non-mutating HTTP ceremony.
+          const userBeforeDenial = await database.user.findUniqueOrThrow({
+            where: { id: owner.id },
+            select: { email: true, emailNormalized: true, passwordHash: true, secondFactorMethod: true }
+          });
+          const requestBeforeDenial = await database.accountRecoveryRequest.findUniqueOrThrow({
+            where: { id: requestId },
+            select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true }
+          });
+          expect(requestBeforeDenial).toEqual({
+            status: "APPROVED", recoveryNewEmailVerifiedAt: null, bootstrapSessionId: null
+          });
+          await database.accountRecoveryRequest.update({
+            where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: new Date() }
+          });
+          try {
+            await page.reload();
+            await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible();
+          } finally {
+            await database.accountRecoveryRequest.update({
+              where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: null }
+            });
+          }
+          const prematurePassword = "premature-" + randomUUID() + "-password";
+          await page.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
+          const prematurePost = page.waitForResponse((response) =>
+            response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
+            new URL(response.url()).pathname === "/recover" &&
+            Boolean(response.request().headers()["next-action"]));
+          await page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+          const rejectedPost = await prematurePost;
+          expect(rejectedPost.status(), "denial must complete a real HTTP Server Action rather than a 403/500 failure").toBe(200);
+          expect(rejectedPost.request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
+          await expect(page).toHaveURL(portalUrl + "/recover?requestId=" + requestId + "&error=1");
+          expect(await database.user.findUniqueOrThrow({
+            where: { id: owner.id },
+            select: { email: true, emailNormalized: true, passwordHash: true, secondFactorMethod: true }
+          })).toEqual(userBeforeDenial);
+          expect(await database.accountRecoveryRequest.findUniqueOrThrow({
+            where: { id: requestId },
+            select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true }
+          })).toEqual(requestBeforeDenial);
+          expect(await verifyPassword(userBeforeDenial.passwordHash ?? "", prematurePassword)).toBe(false);
+          await expect(page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]')).toBeVisible();
+          const wrongCode = code === "000000" ? "000001" : "000000";
+          await page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]').fill(wrongCode);
+          await page.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
+          await expect(page.locator('section[aria-label="Verificação do novo e-mail"] [role="alert"]'))
+            .toContainText("Código inválido ou expirado");
+          expect((await database.accountRecoveryRequest.findUniqueOrThrow({
+            where: { id: requestId }, select: { recoveryNewEmailVerifiedAt: true }
+          })).recoveryNewEmailVerifiedAt).toBeNull();
+          await page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]').fill(code!);
+          await page.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
         }
         await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible();
 

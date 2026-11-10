@@ -132,6 +132,41 @@ test("ADMIN recovers separate credential by email without saved codes", async ({
     await acknowledgement.click();
     await expect(page).toHaveURL(`${hubUrl}/admin/security?status=email-recovered#admin-content`);
     await expect(credentialSection.locator("ul li code")).toHaveCount(0);
+    // A DB hash change is insufficient: the replacement credential must
+    // authorize a NEW, scoped ADMIN elevation using the unchanged normal
+    // password, while the forgotten previous credential must be denied.
+    const elevationSection = page.locator("section.surface").filter({
+      has: page.getByRole("heading", { name: "Elevação temporária", exact: true })
+    });
+    const elevationForm = elevationSection.locator("form").first();
+    await elevationForm.locator('select[name="scope"]').selectOption("ACCOUNT_STATE_CHANGE");
+    await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(loginSecret);
+    await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(oldAdminSecret);
+    const countBeforeOld = await prisma.securityElevation.count({
+      where: { userId: user.id, scope: "ACCOUNT_STATE_CHANGE" }
+    });
+    await elevationForm.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
+    await expect(elevationForm.getByRole("alert")).toContainText("Não foi possível solicitar");
+    expect(await prisma.securityElevation.count({
+      where: { userId: user.id, scope: "ACCOUNT_STATE_CHANGE" }
+    })).toBe(countBeforeOld);
+
+    await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(loginSecret);
+    await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(newAdminSecret);
+    await elevationForm.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
+    const verificationForm = elevationSection.locator("form").nth(1);
+    await expect(verificationForm.getByLabel("Código", { exact: true })).toBeVisible();
+    const elevationKey = await verificationForm.locator('input[name="requestKey"]').inputValue();
+    const elevationCode = await readLatestAdminVerificationCode(prisma, email, elevationKey);
+    await verificationForm.getByLabel("Código", { exact: true }).fill(elevationCode);
+    await verificationForm.getByRole("button", { name: "Ativar elevação", exact: true }).click();
+    await expect(page).toHaveURL(`${hubUrl}/admin/security?status=elevation#admin-content`);
+    await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
+    expect((await prisma.securityElevation.findUniqueOrThrow({
+      where: { requestKey: elevationKey }, select: { scope: true, status: true, sessionId: true }
+    }))).toEqual({ scope: "ACCOUNT_STATE_CHANGE", status: "ACTIVE", sessionId: session.id });
+    const normalLogin = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { passwordHash: true } });
+    expect(await verifyPassword(normalLogin.passwordHash!, loginSecret)).toBe(true);
   } finally {
     await context.close();
     // Retain immutable audit history; the isolated tmpfs test database is removed after the run.

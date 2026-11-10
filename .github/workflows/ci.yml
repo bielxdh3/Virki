@@ -518,6 +518,18 @@ jobs:
           trap 'unset cleanup_url' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e
 
+      - name: Run isolated passkey recovery browser E2E
+        env:
+          # Explicit, test-only opt-in. Never set privileged passkeys on the
+          # production-mode Hub step or on deployed services.
+          VIRKI_E2E_PASSKEYS: "true"
+          VIRKI_E2E_ADMIN_PASSKEYS: "true"
+          VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"
+        run: |
+          cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
+          trap 'unset cleanup_url' EXIT
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_'
+
       - name: Run production Hub core browser E2E
         env:
           VIRKI_E2E_HUB_MODE: production
