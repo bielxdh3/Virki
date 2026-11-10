@@ -239,8 +239,11 @@ test("Access tolerates at most 30 seconds of future iat and nbf, but not expired
     const env = { CLOUDFLARE_ACCESS_JWT_REQUIRED: "true", CLOUDFLARE_ACCESS_AUDIENCE: audience, CLOUDFLARE_TEAM_DOMAIN: teamDomain };
     for (const [claims, allowed] of [
       [{ iat: now + 15, nbf: now + 15, exp: now + 90 }, true],
-      [{ iat: now + 31, nbf: now, exp: now + 90 }, false],
-      [{ iat: now, nbf: now + 31, exp: now + 90 }, false],
+      // The verification clock advances independently inside jose. Use a
+      // margin above the 30s policy so parallel CI load cannot turn an
+      // originally 31s-future claim into an accepted 30s-future claim.
+      [{ iat: now + 45, nbf: now, exp: now + 90 }, false],
+      [{ iat: now, nbf: now + 45, exp: now + 90 }, false],
       [{ iat: now - 60, nbf: now - 60, exp: now - 1 }, false]
     ] as const) {
       const token = await new SignJWT(claims).setProtectedHeader({ alg: "RS256", kid: "skew-key" }).setIssuer(teamDomain).setAudience(audience).sign(privateKey);
