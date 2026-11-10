@@ -7,8 +7,8 @@ import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, writeS
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAdmittedOidcDockerClient } from "../lib/disposable-docker-session.mjs";
-import { assertPrivateEvidenceFile, ensurePrivateEvidenceDirectory,
-  ownerEvidenceDirectory } from "../lib/disposable-docker-receipt-security.mjs";
+import { assertPrivatePg18ReceiptFile, ensurePrivatePg18ReceiptDirectory,
+  pg18ReceiptDirectory } from "./local-pg18-receipt.mjs";
 import { RECOVERY_PG18_IMAGE, RECOVERY_PG18_SUITES, privateRecoveryDockerAdmissionEnvironment,
   privateRecoveryTestEnvironment, requireExactRecoveryPg18Tap, requireRecoveryPg18ContainerImage,
   requireRecoveryPg18ImagePlatform,
@@ -34,7 +34,7 @@ function runSuite(suite) {
   const name = `virki-recovery-pg18-${owner}`;
   const database = `${suite.databasePrefix}${randomUUID().replaceAll("-", "")}`;
   const passwords = { bootstrap: secret(), runtime: secret(), migrator: secret(), audit: secret(), test: secret() };
-  const receiptDirectory = ownerEvidenceDirectory(root, "recovery");
+  const receiptDirectory = pg18ReceiptDirectory(root);
   const receiptPath = path.join(receiptDirectory, `${owner}.jsonl`);
   let dockerClient;
   let receiptFd = null;
@@ -47,7 +47,7 @@ function runSuite(suite) {
 
   function record(stage, id = null) {
     if (receiptFd === null) {
-      ensurePrivateEvidenceDirectory(receiptDirectory);
+      ensurePrivatePg18ReceiptDirectory(receiptDirectory);
       const parent = path.dirname(receiptDirectory);
       mkdirSync(parent, { recursive: true, mode: 0o700 });
       for (const folder of [parent, receiptDirectory]) {
@@ -61,10 +61,10 @@ function runSuite(suite) {
       }
       receiptFd = openSync(receiptPath, "wx", 0o600);
       receiptIdentity = fstatSync(receiptFd, { bigint: true });
-      assertPrivateEvidenceFile(receiptPath);
+      assertPrivatePg18ReceiptFile(receiptPath);
     }
-    ensurePrivateEvidenceDirectory(receiptDirectory);
-    assertPrivateEvidenceFile(receiptPath);
+    ensurePrivatePg18ReceiptDirectory(receiptDirectory);
+    assertPrivatePg18ReceiptFile(receiptPath);
     const link = lstatSync(receiptPath, { bigint: true });
     const opened = fstatSync(receiptFd, { bigint: true });
     if (!link.isFile() || link.isSymbolicLink() || link.nlink !== 1n ||
@@ -79,7 +79,7 @@ function runSuite(suite) {
       offset += n;
     }
     fsyncSync(receiptFd);
-    assertPrivateEvidenceFile(receiptPath);
+    assertPrivatePg18ReceiptFile(receiptPath);
     if (process.platform !== "win32") {
       for (const folder of [receiptDirectory, path.dirname(receiptDirectory), root]) {
         const fd = openSync(folder, "r");
@@ -106,7 +106,9 @@ function runSuite(suite) {
       return [
         `Error: No such object: ${target}`,
         `Error response from daemon: No such container: ${target}`,
-        `Error response from daemon: No such object: ${target}`
+        `Error response from daemon: No such object: ${target}`,
+        // Docker Desktop 29.x uses this exact lowercase diagnostic after rm.
+        `error: no such object: ${target}`
       ].includes(result.stderr.trim().split(/\r?\n/u).at(-1));
     };
     const fail = (stage) => {

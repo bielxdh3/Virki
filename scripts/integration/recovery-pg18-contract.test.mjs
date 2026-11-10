@@ -9,10 +9,86 @@ import { RECOVERY_PG18_IMAGE, RECOVERY_PG18_IMAGE_DIGEST, RECOVERY_PG18_SUITES,
   privateRecoveryDockerAdmissionEnvironment, privateRecoveryTestEnvironment,
   requireExactRecoveryPg18Tap, requireRecoveryPg18ContainerImage, requireRecoveryPg18ImagePlatform,
   verifiedRecoveryPg18LocalImage } from "./recovery-pg18-contract.mjs";
+import { PG18_WINDOWS_POWERSHELL, pg18WindowsAclProbeScript } from "./local-pg18-receipt.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
 const verifiedImageId = `sha256:${"d".repeat(64)}`;
+
+test("PG18 Windows receipt gate is scoped to a protected fixed PowerShell and never weakens shared ACL", () => {
+  assert.equal(PG18_WINDOWS_POWERSHELL,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  const parent = pg18WindowsAclProbeScript("C:\\Users\\private-owner", { parent: true });
+  const child = pg18WindowsAclProbeScript("C:\\Users\\private-owner\\.virki-private-local-pg18");
+  const leaf = pg18WindowsAclProbeScript("C:\\Users\\private-owner\\.virki-private-local-pg18\\receipt.jsonl", { file: true });
+  for (const script of [parent, child, leaf]) {
+    assert.match(script, /Get-Acl -LiteralPath \$p -ErrorAction Stop/u);
+    assert.match(script, /Get-Item -LiteralPath \$p -Force -ErrorAction Stop/u);
+    assert.match(script, /\$acl\.GetOwner\(\[System\.Security\.Principal\.SecurityIdentifier\]\)/u);
+    assert.match(script, /\[System\.IO\.FileAttributes\]::ReparsePoint/u);
+    assert.match(script, /FileSystemRights\]::DeleteSubdirectoriesAndFiles/u);
+    assert.match(script, /FileSystemRights\]::ChangePermissions/u);
+    assert.match(script, /FileSystemRights\]::TakeOwnership/u);
+    assert.match(script, /PRIVATE_PG18_RECEIPT/u);
+  }
+  assert.match(parent, /foreign writer on parent/u);
+  assert.doesNotMatch(parent, /private child or leaf permits foreign access/u);
+  assert.match(child, /private child or leaf permits foreign access/u);
+  assert.match(leaf, /\$entry\.PSIsContainer -ne \$false/u);
+  assert.throws(() => pg18WindowsAclProbeScript("C:\\x\nspoof"), /Invalid PG18/u);
+  const oldSecurity = readFileSync(path.join(root, "scripts/lib/disposable-docker-receipt-security.mjs"), "utf8");
+  assert.match(oldSecurity, /Foreign access to private Docker receipt/u);
+  const runner = readFileSync(path.join(here, "recovery-pg18-disposable.mjs"), "utf8");
+  assert.match(runner, /pg18ReceiptDirectory\(root\)/u);
+  assert.match(runner, /assertPrivatePg18ReceiptFile/u);
+});
+
+// These are synthetic PowerShell ACL objects, not actual ACL edits. Every case
+// executes the same script as the real verifier, with mocked Get-Acl/Get-Item
+// so the negative cases cannot modify user home permissions.
+test("PG18 PowerShell allows inherited foreign read only on nonwritable parent", {
+  skip: process.platform !== "win32"
+}, () => {
+  const evaluate = ({ rights = "ReadAndExecute", parent = true, owner = "self",
+    foreign = true, reparse = false, file = false, itemFile = file }) => {
+    const prefix = [
+      "$ErrorActionPreference='Stop'",
+      "$script:foreignSid=[System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')",
+      "$script:selfSid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+      `$script:fixtureOwner = ${owner === "self" ? "$script:selfSid" : "$script:foreignSid"}`,
+      `$script:fixtureAces = @(${foreign ? `[pscustomobject]@{ AccessControlType='Allow'; IdentityReference=$script:foreignSid; FileSystemRights=[System.Security.AccessControl.FileSystemRights]::${rights}; IsInherited=$true }` : ""})`,
+      "$script:fixtureAcl=[pscustomobject]@{ Access=$script:fixtureAces }",
+      "$script:fixtureAcl | Add-Member -MemberType ScriptMethod -Name GetOwner -Value { param($kind) return $script:fixtureOwner }",
+      "function Get-Acl { param([string]$LiteralPath) return $script:fixtureAcl }",
+      `$script:fixtureEntry=[pscustomobject]@{ Attributes=[System.IO.FileAttributes]::${reparse ? "ReparsePoint" : "Normal"}; PSIsContainer=${itemFile ? "$false" : "$true"} }`,
+      "function Get-Item { param([string]$LiteralPath,[switch]$Force) return $script:fixtureEntry }"
+    ].join("\n");
+    return spawnSync(PG18_WINDOWS_POWERSHELL, [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+      prefix + "\n" + pg18WindowsAclProbeScript("C:\\synthetic\\pg18", { parent, file })
+    ], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+  };
+  const allowedRead = evaluate({ rights: "ReadAndExecute" });
+  assert.equal(allowedRead.status, 0, allowedRead.stderr);
+  assert.equal(allowedRead.stdout.trim(), "PRIVATE_PG18_RECEIPT");
+  const permittedPrivate = evaluate({ foreign: false, parent: false, file: true });
+  assert.equal(permittedPrivate.status, 0, permittedPrivate.stderr);
+  for (const [kind, options] of [
+    ["foreign-write", { rights: "Write" }],
+    ["foreign-delete", { rights: "Delete" }],
+    ["foreign-permissions", { rights: "ChangePermissions" }],
+    ["foreign-takeowner", { rights: "TakeOwnership" }],
+    ["foreign-owner", { owner: "foreign", foreign: false }],
+    ["private-read", { parent: false, rights: "Read" }],
+    ["leaf-read", { parent: false, file: true, rights: "Read" }],
+    ["reparse", { reparse: true, foreign: false }],
+    ["type-mismatch", { itemFile: true, foreign: false }]
+  ]) {
+    const refused = evaluate(options);
+    assert.notEqual(refused.status, 0, kind);
+    assert.doesNotMatch(refused.stdout ?? "", /PRIVATE_PG18_RECEIPT/u, kind);
+  }
+});
 
 test("PG18 image is digest-pinned and each independent local/container identity must match", () => {
   assert.equal(RECOVERY_PG18_IMAGE, `postgres:18.6-alpine3.24@${RECOVERY_PG18_IMAGE_DIGEST}`);
@@ -171,7 +247,7 @@ function mockRun(scenario) {
     .replace('from "node:child_process";', 'from "./fake-child.mjs";')
     .replace('from "node:fs";', 'from "./fake-fs.mjs";')
     .replace('from "../lib/disposable-docker-session.mjs";', 'from "../lib/fake-docker.mjs";')
-    .replace('from "../lib/disposable-docker-receipt-security.mjs";', 'from "../lib/fake-security.mjs";');
+    .replace('from "./local-pg18-receipt.mjs";', 'from "../lib/fake-security.mjs";');
   writeFileSync(path.join(integration, "recovery-pg18-disposable.mjs"), runner);
   writeFileSync(path.join(integration, "recovery-pg18-contract.mjs"),
     readFileSync(path.join(here, "recovery-pg18-contract.mjs"), "utf8"));
@@ -185,9 +261,9 @@ function mockRun(scenario) {
   `);
   writeFileSync(path.join(lib, "fake-security.mjs"), `
     import { join } from "node:path";
-    export function ownerEvidenceDirectory(root) { return join(root, ".virki-mission-tmp", "recovery-docker-recovery"); }
-    export function ensurePrivateEvidenceDirectory() {}
-    export function assertPrivateEvidenceFile() {}
+    export function pg18ReceiptDirectory(root) { return join(root, ".virki-mission-tmp", "recovery-docker-recovery"); }
+    export function ensurePrivatePg18ReceiptDirectory() {}
+    export function assertPrivatePg18ReceiptFile() {}
   `);
   writeFileSync(path.join(integration, "fake-child.mjs"), `
     import { RECOVERY_PG18_SUITES } from "./recovery-pg18-contract.mjs";
@@ -240,7 +316,12 @@ function mockRun(scenario) {
     let count = 0;
     function log(data) { appendFileSync(process.env.VIRKI_FAKE_LOG, JSON.stringify(data) + "\\n"); }
     const ok = (stdout = "") => ({ status: 0, stdout, stderr: "" });
-    const absent = target => ({ status: 1, stdout: "", stderr: "Error: No such object: " + target + "\\n" });
+    const absent = target => ({ status: 1, stdout: "", stderr:
+      process.env.VIRKI_FAKE_CASE === "docker29-lowercase"
+        ? "error: no such object: " + target + "\\n"
+        : process.env.VIRKI_FAKE_CASE === "unknown-absence"
+          ? "permission denied\\n"
+          : "Error: No such object: " + target + "\\n" });
     export function createAdmittedOidcDockerClient(options) {
       if (Object.keys(options.env).some(key => ["NODE_OPTIONS", "NODE_PATH", "DATABASE_URL",
         "MIGRATION_DATABASE_URL", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY",
@@ -355,6 +436,16 @@ test("mocked runner proves two separate owned containers, databases and exact 5+
     [RECOVERY_PG18_IMAGE, RECOVERY_PG18_IMAGE]);
   assert.equal(calls.filter(x => x.action === "image-inspect").length, 4);
   assert.doesNotMatch(child.stdout + child.stderr, /password|postgresql:\/\//iu);
+});
+
+test("Docker 29 lowercase absent proof still requires immutable ID cleanup and rejects unknown inspect errors", () => {
+  const lowercase = mockRun("docker29-lowercase");
+  assert.equal(lowercase.child.status, 0, lowercase.child.stderr);
+  assert.equal(lowercase.calls.filter((entry) => entry.action === "rm").length, 2);
+  const unknown = mockRun("unknown-absence");
+  assert.equal(unknown.child.status, 1, "permission denied is never confirmed removal");
+  assert.doesNotMatch(unknown.child.stdout, /9 real PASS/u);
+  assert.equal(unknown.calls.filter((entry) => entry.action === "rm").length, 1);
 });
 
 test("mocked runner rejects every missing/false-green summary and safely cleans owned containers", () => {
