@@ -215,6 +215,24 @@ async function startPasskeyAdminRecovery(page: Page, email: string) {
   return requestId;
 }
 
+// Compare user-visible content and controls only. The known and synthetic
+// ceremonies intentionally have different opaque request IDs and CSRF tokens.
+async function publicRecoveryView(page: Page) {
+  const main = page.locator("main.auth-page");
+  await expect(main).toBeVisible();
+  return {
+    text: (await main.innerText()).replace(/\s+/gu, " ").trim(),
+    buttons: (await main.locator("button:visible").allTextContents()).map(value => value.trim()),
+    links: (await main.locator("a:visible").allTextContents()).map(value => value.trim()),
+    inputs: await main.locator('input:not([type="hidden"]):visible').evaluateAll(inputs =>
+      inputs.map(input => ({
+        name: (input as HTMLInputElement).name,
+        type: (input as HTMLInputElement).type,
+        label: input.closest("label")?.textContent?.trim() ?? ""
+      })))
+  };
+}
+
 function assertRecoveryCookies(cookies: Awaited<ReturnType<BrowserContext["cookies"]>>, id: string) {
   for (const name of ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"]) {
     const cookie = cookies.find(item => item.name === name);
@@ -272,7 +290,8 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(await db.accountRecoveryRequest.count({ where: { userId: owner.id } })).toBe(0);
     expect((await target.context.cookies(hub)).some(cookie => cookie.name.includes("recovery") && Boolean(cookie.value))).toBe(false);
     const requestId = await startPasskeyAdminRecovery(target.page, owner.email);
-    assertRecoveryCookies(await target.context.cookies(hub), requestId);
+    const issuedRecoveryCookies = await target.context.cookies(hub);
+    assertRecoveryCookies(issuedRecoveryCookies, requestId);
     const pending = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
     expect(pending).toMatchObject({ userId: owner.id, recoveryRole: "ADMIN", recoveryProofs: ["PASSKEY"], recoveryAdminReview: true, status: "PENDING" });
 
@@ -293,14 +312,13 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     const unknownId = await startPasskeyAdminRecovery(synthetic.page, `absent-${randomUUID()}@e2e.invalid`);
     expect(unknownId).not.toBe(requestId);
     expect(await db.accountRecoveryRequest.count({ where: { id: unknownId } })).toBe(0);
-    expect((await synthetic.page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim())
-      .toBe((await target.page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim());
-
-    const factor = target.page.locator('[aria-label="Chave de acesso"]');
-    await factor.getByRole("button", { name: "Confirmar com passkey" }).click();
-    await expect(factor.getByRole("status")).toContainText("Confirmada.");
-    expect((await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).recoveryPasskeyVerifiedAt).not.toBeNull();
-    await expect(target.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
+    await expect(synthetic.page.getByRole("heading", { level: 1, name: "Recuperar acesso administrativo", exact: true })).toBeVisible();
+    await expect(synthetic.page.locator('[aria-label="Chave de acesso"]').getByRole("button", { name: "Confirmar com passkey" })).toBeVisible();
+    await expect(target.page.locator('[aria-label="Chave de acesso"]').getByRole("button", { name: "Confirmar com passkey" })).toBeVisible();
+    expect(await publicRecoveryView(synthetic.page),
+      "unknown ADMIN and enrolled ADMIN must have the same visible recovery page and actionable controls before proof")
+      .toEqual(await publicRecoveryView(target.page));
+    await expect(synthetic.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
 
     const independent = await newHubContext(browser);
     contexts.push(independent.context);
@@ -308,14 +326,70 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     await independent.page.goto(`${hub}/admin/security`);
     await expect(independent.page.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
     const reviewRow = independent.page.locator("article.list-row").filter({ hasText: owner.email });
+    await expect(reviewRow,
+      "an unverified PASSKEY_ADMIN request must not reach the independent reviewer's approvable queue").toHaveCount(0);
+
+    const factor = target.page.locator('[aria-label="Chave de acesso"]');
+    await factor.getByRole("button", { name: "Confirmar com passkey" }).click();
+    await expect(factor.getByRole("status")).toContainText("Confirmada.");
+    expect((await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).recoveryPasskeyVerifiedAt).not.toBeNull();
+    await expect(target.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
+
+    await independent.page.reload();
     await expect(reviewRow).toBeVisible();
-    await expect(reviewRow.getByRole("button", { name: "Aprovar recuperação" })).toBeVisible();
+    await expect(reviewRow.getByRole("button", { name: "Aprovar recuperação", exact: true })).toBeVisible();
+    const beforeDeniedApproval = await db.accountRecoveryRequest.findUniqueOrThrow({
+      where: { id: requestId },
+      select: { status: true, reviewedByUserId: true, approvedAt: true, recoveryPasskeyVerifiedAt: true,
+        requestKeyHash: true, expiresAt: true }
+    });
+    expect(beforeDeniedApproval.status).toBe("PENDING");
+    expect(beforeDeniedApproval.reviewedByUserId).toBeNull();
+    expect(beforeDeniedApproval.approvedAt).toBeNull();
+    expect(beforeDeniedApproval.recoveryPasskeyVerifiedAt).not.toBeNull();
+    const successfulApprovalAuditBefore = await db.auditLog.count({
+      where: { actorUserId: reviewer.id, eventType: "ACCOUNT_RECOVERY_APPROVED" }
+    });
+    const deniedApprovalPost = independent.page.waitForResponse(response =>
+      new URL(response.url()).origin === hub && new URL(response.url()).pathname === "/admin/security" &&
+      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]),
+    { timeout: 10_000 });
+    await reviewRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click({ timeout: 6_000 });
+    const deniedApproval = await deniedApprovalPost;
+    expect(deniedApproval.status(), "the request must reach the authorization action, not fail at Access/CSRF/HTTP500")
+      .toBeGreaterThanOrEqual(200);
+    expect(deniedApproval.status()).toBeLessThan(400);
+    expect(deniedApproval.request().headers().origin).toBe(hub);
+    expect(deniedApproval.request().postData(), "the reviewer must POST the owned request ID to the Server Action")
+      .toContain(requestId);
+    await expect(independent.page).toHaveURL(`${hub}/admin/security?error=recovery#admin-content`);
+    expect(await db.accountRecoveryRequest.findUniqueOrThrow({
+      where: { id: requestId },
+      select: { status: true, reviewedByUserId: true, approvedAt: true, recoveryPasskeyVerifiedAt: true,
+        requestKeyHash: true, expiresAt: true }
+    }), "a reviewer without ACCOUNT_STATE_CHANGE must leave the request PENDING with original factor proof")
+      .toEqual(beforeDeniedApproval);
+    expect(await db.auditLog.count({ where: { actorUserId: reviewer.id, eventType: "ACCOUNT_RECOVERY_APPROVED" } }),
+      "denied approval must not write a successful account recovery approval audit")
+      .toBe(successfulApprovalAuditBefore);
     await elevateWithUi(independent.page, db, reviewer, "ACCOUNT_STATE_CHANGE");
     const elevatedRow = independent.page.locator("article.list-row").filter({ hasText: owner.email });
-    await elevatedRow.getByRole("button", { name: "Aprovar recuperação" }).click();
+    await expect(elevatedRow.getByRole("button", { name: "Aprovar recuperação", exact: true })).toBeVisible();
+    const approvedActionPost = independent.page.waitForResponse(response =>
+      new URL(response.url()).origin === hub && new URL(response.url()).pathname === "/admin/security" &&
+      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]),
+    { timeout: 10_000 });
+    await elevatedRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click({ timeout: 6_000 });
+    const approvedActionResponse = await approvedActionPost;
+    expect(approvedActionResponse.status(), "elevated approval must reach a successful real Server Action")
+      .toBeGreaterThanOrEqual(200);
+    expect(approvedActionResponse.status()).toBeLessThan(400);
+    expect(approvedActionResponse.request().postData()).toContain(requestId);
     await expect(independent.page).toHaveURL(`${hub}/admin/security?status=recovery#admin-content`);
     expect(await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } }))
       .toMatchObject({ status: "APPROVED", reviewedByUserId: reviewer.id });
+    expect(await db.auditLog.count({ where: { actorUserId: reviewer.id, eventType: "ACCOUNT_RECOVERY_APPROVED" } }))
+      .toBe(successfulApprovalAuditBefore + 1);
 
     await target.page.reload();
     await expect(target.page.getByRole("heading", { name: "Confirme um novo e-mail antes de trocar a senha" })).toBeVisible();
@@ -346,6 +420,14 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
       await db.accountRecoveryRequest.update({ where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: null } });
     }
     expect((await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).recoveryNewEmailVerifiedAt).toBeNull();
+    const unchangedCapabilities = await target.context.cookies(hub);
+    assertRecoveryCookies(unchangedCapabilities, requestId);
+    for (const name of ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"]) {
+      expect(unchangedCapabilities.find(cookie => cookie.name === name)?.value,
+        `premature completion must still carry the original bound ${name} capability`)
+        .toBe(issuedRecoveryCookies.find(cookie => cookie.name === name)?.value);
+    }
+    await expect(target.page.locator('form input[name="requestId"]')).toHaveValue(requestId);
     const prematurePassword = `premature-admin-${randomUUID()}-password`;
     await target.page.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
     const deniedAction = target.page.waitForResponse(response => new URL(response.url()).origin === hub &&
@@ -353,8 +435,13 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
       Boolean(response.request().headers()["next-action"]));
     await target.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     const deniedResponse = await deniedAction;
+    expect(deniedResponse.status(), "a denied mailbox proof must be handled by the real action (not Access/CSRF/HTTP500)")
+      .toBeGreaterThanOrEqual(200);
+    expect(deniedResponse.status()).toBeLessThan(400);
+    expect(deniedResponse.request().headers().origin).toBe(hub);
     expect(deniedResponse.request().postDataBuffer()?.byteLength ?? 0,
       "the premature password must reach the real Server Action POST").toBeGreaterThan(0);
+    expect(deniedResponse.request().postData()).toContain(requestId);
     await expect(target.page).toHaveURL(`${hub}/recover?requestId=${requestId}&error=1`);
     const afterDenied = await db.user.findUniqueOrThrow({ where: { id: owner.id },
       select: { email: true, emailNormalized: true, emailVerifiedAt: true, passwordHash: true, secondFactorMethod: true } });
