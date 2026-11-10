@@ -133,25 +133,65 @@ async function registerOwnedHubPasskey(page: Page, db: PrismaClient, owner: Owne
   await expect(page.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
   const manager = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: /^Passkeys/ }) });
   await expect(manager).toBeVisible();
+  const optionsResponse = () => page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/passkeys" &&
+    response.request().method() === "POST" &&
+    response.request().postDataJSON()?.action === "admin-register-options",
+  { timeout: 10_000 });
+  const add = manager.getByRole("button", { name: "Adicionar passkey", exact: true });
+  await expect(add).toBeDisabled();
+  // This disposable ADMIN deliberately uses EMAIL, so the Hub must not render
+  // a TOTP field. TOTP-backed owners must supply their real current code.
+  expect(await db.user.findUniqueOrThrow({ where: { id: owner.id }, select: { secondFactorMethod: true } }))
+    .toMatchObject({ secondFactorMethod: "EMAIL" });
+  await expect(manager.getByLabel("Código atual do aplicativo autenticador")).toHaveCount(0);
   // Password alone is not enough without a recently activated, separately
   // confirmed administrative elevation. The browser calls the actual API.
-  await manager.getByLabel("Senha atual para autorizar alterações").fill(owner.password);
-  await manager.getByLabel("Nome da passkey").fill("Owned Chromium ADMIN factor");
-  await manager.getByRole("button", { name: "Adicionar passkey" }).click();
+  await fillEnabledEnrollmentForm(manager, owner.password);
+  const deniedOptions = optionsResponse();
+  await add.click({ timeout: 6_000 });
+  expect((await deniedOptions).status(), "an ADMIN without a fresh elevation must be rejected by the API").toBe(403);
   await expect(manager.getByRole("alert")).toContainText("Não foi possível confirmar a alteração");
   expect(await db.passkeyCredential.count({ where: { userId: owner.id } })).toBe(0);
 
   await elevateWithUi(page, db, owner, "ADMIN_CREDENTIAL_CHANGE");
+  // The elevation action navigates back to this page. A full document reload
+  // mounts a fresh controlled form after the rejected registration attempt;
+  // otherwise App Router can preserve stale client state across the action.
+  await page.reload();
+  await expect(page.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
   const renewed = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: /^Passkeys/ }) });
-  await renewed.getByLabel("Senha atual para autorizar alterações").fill(owner.password);
-  await renewed.getByLabel("Nome da passkey").fill("Owned Chromium ADMIN factor");
-  await renewed.getByRole("button", { name: "Adicionar passkey" }).click();
+  const renewedAdd = renewed.getByRole("button", { name: "Adicionar passkey", exact: true });
+  await expect(renewed).toBeVisible();
+  await expect(renewedAdd).toBeDisabled();
+  await expect(renewed.getByLabel("Código atual do aplicativo autenticador")).toHaveCount(0);
+  await fillEnabledEnrollmentForm(renewed, owner.password);
+  const acceptedOptions = optionsResponse();
+  await renewedAdd.click({ timeout: 6_000 });
+  expect((await acceptedOptions).status(), "enrollment must reach the real server and start WebAuthn").toBe(200);
   await expect(page.getByText("Owned Chromium ADMIN factor", { exact: true })).toBeVisible({ timeout: 30_000 });
   const rows = await db.passkeyCredential.findMany({ where: { userId: owner.id, revokedAt: null } });
   expect(rows).toHaveLength(1);
   expect(rows[0]!.rpID).toBe("hub.localhost");
   expect(rows[0]!.credentialId.length).toBeGreaterThan(16);
   return rows[0]!;
+}
+
+async function fillEnabledEnrollmentForm(manager: ReturnType<Page["locator"]>, password: string) {
+  const passwordInput = manager.getByLabel("Senha atual para autorizar alterações");
+  const nameInput = manager.getByLabel("Nome da passkey");
+  const add = manager.getByRole("button", { name: "Adicionar passkey", exact: true });
+  // After the elevation Server Action, the HTML may arrive before React
+  // hydrates. Filling that pre-hydration DOM does not update controlled state.
+  // Retry real form input until React enables its own button, with a short gate.
+  await expect.poll(async () => {
+    await passwordInput.fill(password, { timeout: 3_000 });
+    await nameInput.fill("Owned Chromium ADMIN factor", { timeout: 3_000 });
+    return (await passwordInput.inputValue()) === password &&
+      (await nameInput.inputValue()) === "Owned Chromium ADMIN factor" &&
+      await add.isEnabled();
+  }, { message: "React-controlled ADMIN enrollment fields must enable the real button", timeout: 6_000,
+    intervals: [100, 250, 500] }).toBe(true);
 }
 
 async function startPasskeyAdminRecovery(page: Page, email: string) {
