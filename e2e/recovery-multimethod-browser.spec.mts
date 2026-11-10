@@ -395,18 +395,27 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         }
         await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible();
 
-        // The stale page is already rendered with the original capability.
-        // Re-inject only host-only recovery cookies after the winning reset.
-        const stale = await context.newPage();
-        await stale.goto(page.url());
-        const rejectedPassword = "replay-" + randomUUID() + "-password";
-        await stale.getByLabel("Nova senha", { exact: true }).fill(rejectedPassword);
+        // Keep the already-rendered second completion form in its own cookie
+        // jar. The winning reset clears recovery cookies and installs a session
+        // in `context`; sharing that jar can replace the stale /recover view
+        // before its second Server Action POST is actually submitted.
         const oldCookies = (await context.cookies(portalUrl))
           .filter((cookie) => cookie.name.includes("recovery"))
           .map((cookie) => ({
             url: portalUrl + "/", name: cookie.name, value: cookie.value,
             httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite, expires: cookie.expires
           }));
+        expect(oldCookies, "replay must retain all three original browser-bound recovery cookies").toHaveLength(3);
+        const staleContext = await browser.newContext();
+        contexts.push(staleContext);
+        await staleContext.addCookies(oldCookies);
+        const stale = await staleContext.newPage();
+        const staleDocument = await stale.goto(page.url());
+        expect(staleDocument?.status(), "stale form must come from a real recovery document").toBe(200);
+        await expect(stale.getByLabel("Nova senha", { exact: true })).toBeVisible();
+        await expect(stale.locator('form input[name="requestId"]')).toHaveValue(requestId);
+        const rejectedPassword = "replay-" + randomUUID() + "-password";
+        await stale.getByLabel("Nova senha", { exact: true }).fill(rejectedPassword);
         const winningPassword = "signed-" + randomUUID() + "-password";
         await page.getByLabel("Nova senha", { exact: true }).fill(winningPassword);
         await page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
@@ -439,16 +448,32 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         await expect(page.locator("header.page-header")).toContainText(ownerEmail);
         expect((await context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
 
-        await context.addCookies(oldCookies);
+        // The winner's session must stay separate from the original capability
+        // used by the rejected POST. Verify the stale jar still has that exact
+        // capability before clicking its previously rendered, filled form.
+        const replayCookies = await staleContext.cookies(portalUrl);
+        for (const original of oldCookies) {
+          expect(replayCookies.find((cookie) => cookie.name === original.name)?.value).toBe(original.value);
+        }
+        await expect(stale.getByRole("button", { name: "Concluir recuperação", exact: true })).toBeVisible();
         const replay = stale.waitForResponse((response) =>
           response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
+          new URL(response.url()).pathname === "/recover" &&
           Boolean(response.request().headers()["next-action"]));
         await stale.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
-        expect((await replay).request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
+        const replayResponse = await replay;
+        expect(replayResponse.status(), "Next may return 200 or redirect 303 for a rejected Server Action")
+          .toBeGreaterThanOrEqual(200);
+        expect(replayResponse.status(), "a 403/500 response is not proof of one-time consumption")
+          .toBeLessThan(400);
+        expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
         await expect(stale).toHaveURL(new RegExp("/recover\\?requestId=" + requestId + "&error=1"), { timeout: 15_000 });
         const unchanged = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
         expect(await verifyPassword(unchanged.passwordHash ?? "", winningPassword)).toBe(true);
         expect(await verifyPassword(unchanged.passwordHash ?? "", rejectedPassword)).toBe(false);
+        const replayedRequest = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+        expect(replayedRequest.status).toBe("CONSUMED");
+        expect(replayedRequest.bootstrapSessionId).toBe(consumed.bootstrapSessionId);
         expect(await database.session.count({ where: {
           userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() }
         } })).toBe(1);
