@@ -617,21 +617,39 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     const beforeTamperedRecovery = await prisma.administrativeCredential.findUniqueOrThrow({
       where: { userId: fixture.admin.id }, select: { passwordHash: true, keyVersion: true }
     });
-    await recoveryForm.locator('input[name="csrfToken"]').evaluate((input) => {
-      (input as HTMLInputElement).value = "invalid-admin-backup-completion-csrf";
-    });
-    const deniedBackupAction = page.waitForResponse((response) =>
-      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/security" &&
-      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]));
-    await recoveryForm.getByRole("button", { name: "Recuperar credencial", exact: true }).click();
-    expect((await deniedBackupAction).status(), "the actual administrative backup-code recovery action must enforce session CSRF").toBe(403);
+    // An actual Next Server Action 403 can unmount the React page that
+    // submitted it. Execute the invalid-CSRF action in a separate tab sharing
+    // the SAME authenticated ADMIN session, while preserving the original
+    // hydrated form and SAME unused recovery code in this tab for success.
+    const csrfDenialPage = await context.newPage();
+    try {
+      await addCloudflareAccessHeader(csrfDenialPage);
+      expect((await csrfDenialPage.goto(`${hubUrl}/admin/security`))?.status()).toBe(200);
+      const denialSection = csrfDenialPage.locator("section.surface").filter({
+        has: csrfDenialPage.getByRole("heading", { name: "Credencial administrativa", exact: true })
+      });
+      const denialForm = denialSection.getByLabel("Código de recuperação administrativa", { exact: true })
+        .locator("xpath=ancestor::form");
+      await denialForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+      await denialForm.getByLabel("Código de recuperação administrativa", { exact: true }).fill(initialAdministrativeRecoveryCode);
+      await denialForm.getByLabel("Nova senha administrativa (16 caracteres ou mais)", { exact: true }).fill(recoveredAdministrativePassword);
+      await denialForm.locator('input[name="csrfToken"]').evaluate((input) => {
+        (input as HTMLInputElement).value = "invalid-admin-backup-completion-csrf";
+      });
+      const deniedBackupAction = csrfDenialPage.waitForResponse((response) =>
+        new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/security" &&
+        response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]));
+      await denialForm.getByRole("button", { name: "Recuperar credencial", exact: true }).click();
+      expect((await deniedBackupAction).status(), "the actual administrative backup-code recovery action must enforce session CSRF").toBe(403);
+    } finally {
+      await csrfDenialPage.close();
+    }
     expect(await prisma.administrativeCredential.findUniqueOrThrow({
       where: { userId: fixture.admin.id }, select: { passwordHash: true, keyVersion: true }
     })).toEqual(beforeTamperedRecovery);
     expect(await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id, usedAt: null } })).toBe(10);
-    // Reload after the real 403; a later valid action must still be able to
-    // consume the code, proving the denial did not spend it.
-    await page.goto(acknowledgementUrl);
+    // The original hydrated tab must consume exactly the SAME recovery code,
+    // proving the rejected CSRF action did not spend it or revoke the session.
     await expect(recoveryForm).toBeVisible();
     await recoveryForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await recoveryForm.getByLabel("Código de recuperação administrativa", { exact: true }).fill(initialAdministrativeRecoveryCode);

@@ -547,7 +547,12 @@ test(`${accountRole} TOTP_ADMIN: independent approval, verified replacement mail
       "the browser session token must match the exact persisted bootstrap session").toBe(bootstrapSession.tokenHash);
     const oldProtectedPath = accountRole === "ADMIN" ? "/admin/security" : "/account/security";
     await ownerPage.goto(`${recoveryOrigin}${oldProtectedPath}`);
-    await expect(ownerPage).toHaveURL(`${recoveryOrigin}/login?returnTo=${encodeURIComponent(oldProtectedPath)}`);
+    // The ADMIN protected route preserves an allowlisted returnTo. The USER
+    // account-security page intentionally uses a plain /login redirect when
+    // its old session has been revoked (see account/security/page.tsx).
+    await expect(ownerPage).toHaveURL(accountRole === "ADMIN"
+      ? `${recoveryOrigin}/login?returnTo=${encodeURIComponent(oldProtectedPath)}`
+      : `${recoveryOrigin}/login`);
     await expect(recoveryContext.cookies(recoveryOrigin).then((cookies) =>
       cookies.filter((cookie) => cookieNames.includes(cookie.name)))).resolves.toHaveLength(0);
 
@@ -570,7 +575,12 @@ test(`${accountRole} TOTP_ADMIN: independent approval, verified replacement mail
     await expect(replayPage.getByRole("heading", {
       level: 1, name: accountRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta", exact: true
     })).toBeVisible();
-    await expect(replayPage.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido");
+    // A replay with a still-bound browser cookie follows the generic
+    // error=1 message; the older invalid-link copy is for missing proof
+    // cookies. Security is verified by no completion form, unchanged
+    // CONSUMED DB row, unchanged password, and no extra session or email.
+    await expect(replayPage.locator('p.form-error[role="alert"]'))
+      .toContainText("Não foi possível concluir esta etapa. O link pode ter expirado");
     await expect(replayPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
     const replayed = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
     expect(await verifyPassword(replayed.passwordHash ?? "", newPassword)).toBe(true);
