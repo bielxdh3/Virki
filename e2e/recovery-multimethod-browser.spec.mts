@@ -321,6 +321,7 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           where: { id: requestId }, select: { status: true }
         })).status).toBe("APPROVED");
 
+        let completionPage = page;
         if (method === "PASSKEY_TOTP") {
           const mailbox = page.locator('section[aria-label="Verificação do novo e-mail"]');
           await expect(mailbox).toBeVisible();
@@ -474,19 +475,30 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           expect(await database.session.count({ where: { userId: owner.id } }),
             "a denied completion must not create even a revoked or expired session").toBe(sessionRowsBeforeDenial);
           expect(await verifyPassword(userBeforeDenial.passwordHash ?? "", prematurePassword)).toBe(false);
-          await expect(page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]')).toBeVisible();
+          // The mailbox Server Action reloads its original React page. A
+          // successful denied completion in another tab can race that reload,
+          // leaving a stale/missing input without changing the recovery DB.
+          // Verify the canonical document and resume in a fresh page that
+          // shares the original three bound capability cookies.
+          completionPage = await context.newPage();
+          const mailboxDocument = await completionPage.goto(portalUrl + "/recover?requestId=" + requestId);
+          expect(mailboxDocument?.status(), "new mailbox continuation must be a real HTTP 200 document").toBe(200);
+          await expect(completionPage).toHaveURL(portalUrl + "/recover?requestId=" + requestId);
+          await expect(completionPage.getByRole("heading", { level: 1, name: "Recuperar conta" })).toBeVisible();
+          await assertBoundCookies(context, portalUrl, requestId, method);
+          await expect(completionPage.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]')).toBeVisible();
           const wrongCode = code === "000000" ? "000001" : "000000";
-          await page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]').fill(wrongCode);
-          await page.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
-          await expect(page.locator('section[aria-label="Verificação do novo e-mail"] [role="alert"]'))
+          await completionPage.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]').fill(wrongCode);
+          await completionPage.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
+          await expect(completionPage.locator('section[aria-label="Verificação do novo e-mail"] [role="alert"]'))
             .toContainText("Código inválido ou expirado");
           expect((await database.accountRecoveryRequest.findUniqueOrThrow({
             where: { id: requestId }, select: { recoveryNewEmailVerifiedAt: true }
           })).recoveryNewEmailVerifiedAt).toBeNull();
-          await page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]').fill(code!);
-          await page.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
+          await completionPage.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]').fill(code!);
+          await completionPage.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
         }
-        await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible({ timeout: 20_000 });
+        await expect(completionPage.getByLabel("Nova senha", { exact: true })).toBeVisible({ timeout: 20_000 });
 
         // A separate cookie jar is not sufficient: App Router can revalidate
         // and unmount an idle completion form after the winning reset. Submit
@@ -504,7 +516,7 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         contexts.push(staleContext);
         await staleContext.addCookies(oldCookies);
         const stale = await staleContext.newPage();
-        const staleDocument = await stale.goto(page.url());
+        const staleDocument = await stale.goto(completionPage.url());
         expect(staleDocument?.status(), "stale form must come from a real recovery document").toBe(200);
         await expect(stale.getByLabel("Nova senha", { exact: true })).toBeVisible();
         await expect(stale.locator('form input[name="requestId"]')).toHaveValue(requestId);
@@ -521,6 +533,9 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         });
         let forwardHeldReplay = false;
         let heldPostCount = 0;
+        type ForwardedPost = { status: number; error?: string };
+        let recordForwardedPost!: (result: ForwardedPost) => void;
+        const forwardedPost = new Promise<ForwardedPost>((resolve) => { recordForwardedPost = resolve; });
         await stale.route("**/recover**", async (route) => {
           const request = route.request();
           if (request.method() !== "POST" || new URL(request.url()).origin !== portalUrl ||
@@ -535,8 +550,20 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           observeHeldReplay({ url: request.url(), method: request.method(), body: request.postData() ?? "",
             headers: await request.allHeaders() });
           await replayRelease;
-          if (forwardHeldReplay) await route.continue();
-          else await route.abort();
+          if (!forwardHeldReplay) { await route.abort(); return; }
+          try {
+            // continue() can leave a previously held App Router navigation
+            // without a browser response. Forward the EXACT intercepted,
+            // browser-generated Next action through Playwright's route.fetch,
+            // then fulfill that same browser request with the live response.
+            // No payload, capability cookie or Server Action is fabricated.
+            const upstream = await route.fetch({ maxRedirects: 0, timeout: 20_000 });
+            await route.fulfill({ response: upstream });
+            recordForwardedPost({ status: upstream.status() });
+          } catch (error) {
+            recordForwardedPost({ status: 0, error: error instanceof Error ? error.message : "forwarding failed" });
+            await route.abort().catch(() => undefined);
+          }
         });
         // Do not await a navigation while the real action request is paused.
         const staleClickOutcome = stale.getByRole("button", { name: "Concluir recuperação", exact: true })
@@ -584,9 +611,9 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           }
           const beforeWinner = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
           expect(beforeWinner.status, "the stale browser must dispatch before the winning consume").toBe("APPROVED");
-          await page.getByLabel("Nova senha", { exact: true }).fill(winningPassword);
-          await page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
-          await expect(page).toHaveURL(portalUrl + "/account/security?recovered=password", { timeout: 25_000 });
+          await completionPage.getByLabel("Nova senha", { exact: true }).fill(winningPassword);
+          await completionPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+          await expect(completionPage).toHaveURL(portalUrl + "/account/security?recovered=password", { timeout: 25_000 });
           const recovered = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
           expect(await verifyPassword(recovered.passwordHash ?? "", winningPassword)).toBe(true);
           expect(recovered.emailNormalized).toBe(replacementEmail ?? ownerEmail);
@@ -610,11 +637,11 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
             .toBe(hashSessionToken(session!.value));
           winnerBootstrapTokenHash = bootstrap.tokenHash;
           const protectedUrl = portalUrl + "/account/security";
-          const protectedDocument = await page.goto(protectedUrl);
+          const protectedDocument = await completionPage.goto(protectedUrl);
           expect(protectedDocument?.status(), "fresh protected document GET must return HTTP 200").toBe(200);
-          await expect(page).toHaveURL(protectedUrl);
-          await expect(page.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
-          await expect(page.locator("header.page-header")).toContainText(ownerEmail);
+          await expect(completionPage).toHaveURL(protectedUrl);
+          await expect(completionPage.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
+          await expect(completionPage.locator("header.page-header")).toContainText(ownerEmail);
           expect((await context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
           const replayCookies = await staleContext.cookies(portalUrl);
           for (const original of oldCookies) {
@@ -636,6 +663,10 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           // even a missing POST fails within 15s, not the full E2E timeout.
           releaseHeldReplay();
         }
+        const actualForward = await forwardedPost;
+        expect(actualForward.error, "the original Next POST must reach the server after consumption").toBeUndefined();
+        expect(actualForward.status, "server must handle the browser-originated stale completion").toBeGreaterThanOrEqual(200);
+        expect(actualForward.status, "a 403/500 response cannot prove one-time replay rejection").toBeLessThan(400);
         const replayResponse = await replayResponsePending;
         const staleClickError = await staleClickOutcome;
         if (staleClickError) throw staleClickError;
