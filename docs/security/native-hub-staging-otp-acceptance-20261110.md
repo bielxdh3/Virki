@@ -66,6 +66,78 @@ and provider quota; a syntactically valid value is not evidence of a safe
 provider rate budget. No SMTP retry,
 `Message-ID`, or queue `SENT` flag alone proves inbox receipt.
 
+### Optional offline attestation-consistency preflight (does not unlock staging)
+
+`scripts/staging-otp-preflight.mjs` is **local-only**. It reads only two
+operator-provided JSON documents and two **public** Ed25519 PEM files; it
+never reads `.env`, contacts Docker/SSH, SMTP, Cloudflare or any database,
+starts a worker, performs an inbox probe or authorizes external operations.
+Obtain authorization and independently inspect the target **outside this tool**
+first. Do not put real recipient addresses, passwords, tokens, connection
+strings, OTPs or transport headers in these documents. Recipient IDs must be
+opaque, pre-approved aliases, with mappings held by the authorized operator.
+
+```sh
+node scripts/staging-otp-preflight.mjs \
+  --approval /approved/offline-approval.json \
+  --observation /approved/independent-observation.json \
+  --approver-public-key /approved/owner.pub.pem \
+  --observer-public-key /approved/independent-observer.pub.pem \
+  --expected-source-sha <exact-40-hex-approved-sha>
+```
+
+The approver and independent observer must sign their JSON payloads **out of
+band**, with distinct, separately vetted/pinned Ed25519 public keys. The JSON
+envelopes have exactly `version: 1`, `approval` or `observation`, and a base64
+`signature`; the Ed25519 signature covers UTF-8
+`Virki staging OTP approval v1\n` or
+`Virki staging OTP observation v1\n`, followed by the payload's recursively
+key-sorted compact JSON. The export `canonicalStagingJson` implements this
+encoding; the synthetic, entirely local specimen is in
+`scripts/staging-otp-preflight.test.mjs`. Never pass a private signing key to
+this verifier or treat an arbitrary operator-supplied public key as a
+pre-established trusted anchor.
+
+The signed **approval** binds distinct owner, operator and observer IDs,
+observer public-key SHA-256 fingerprint, UTC approval window, exact source
+SHA, `sha256:<64-hex>` immutable OCI digest, non-production host, database
+host/name and three disjoint DB role IDs, SMTP tenant ID, opaque recipient
+allowlist/policy ID, worker interval, provider per-minute quota and an absolute
+per-run handoff budget. It includes explicit *production comparison IDs* only
+as attestable non-secret identifiers, never production credentials.
+
+The independently signed **observation**, no older than five minutes, must
+match that authorization's source/digest/target and independently attest:
+
+- Worker `stopped`, zero running replicas, restart and autostart disabled,
+  **no outbox drain begun** and a separately documented worker observation;
+  the virgin pre-drain outbox has zero queued, processing, retryable, sent,
+  terminal messages **and zero delivery attempts**.
+- Effective interval `1..60000` ms in the worker **alone**, together with the
+  entire expected Compose service-name inventory, without rendering secrets.
+- Provider/relay **hard-enforced** recipient allowlist and rate/attempt caps,
+  a separately evidenced rejection of an unlisted recipient, remaining quota
+  and exact agreement with the approved opaque recipient IDs. No email is
+  sent by this command; provider observations belong to a separately approved
+  collection window.
+
+Failures return `STAGING_OTP_PREFLIGHT=BLOCK:<reason>` and exit nonzero,
+without echoing document contents. A consistent pair returns only
+`SIGNED_OFFLINE_DECLARATIONS_CONSISTENT`, plus explicit
+`LIVE_WORKER_STATE=NOT_OBSERVED_BY_THIS_TOOL`,
+`STAGING_AUTHORIZATION=NOT_GRANTED_BY_THIS_TOOL` and
+`PRODUCTION_RELEASE=NO_GO`. **Signatures prove provenance of the supplied
+declarations, not that their contents were honestly observed, that the worker
+is still stopped, that the actual OCI digest was loaded, or that external
+provider controls operate.** The real target, trust anchors, effective
+runtime policy and all external acceptance gates still require separately
+authorized, current human/independent verification; a stale observation
+cannot be reused to permit mail draining.
+
+Run the side-effect-free negative/mutation contract locally with
+`node --test scripts/staging-otp-preflight.test.mjs`. This does not run E2E,
+contact a provider or waive **RELEASE NO-GO**.
+
 ## 3. E2E acceptance: separate normal vs administrative passwords
 
 On the **authorized** staging digest only, collect HTTP/browser, PostgreSQL,
