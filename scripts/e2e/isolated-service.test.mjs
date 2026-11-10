@@ -344,6 +344,13 @@ test("service children receive only their E2E allowlist and required OS paths", 
     }
   }
 
+  const nativePerimeterFixture = { ...source, VIRKI_HUB_PERIMETER_MODE: "native" };
+  assert.equal(buildServiceEnvironment("hub", nativePerimeterFixture, process.platform).VIRKI_HUB_PERIMETER_MODE, "native");
+  for (const otherService of ["jwks", "public-site", "issuer"]) {
+    assert.equal(Object.hasOwn(buildServiceEnvironment(otherService, nativePerimeterFixture, process.platform),
+      "VIRKI_HUB_PERIMETER_MODE"), false, `${otherService} must not inherit the Hub-only perimeter flag`);
+  }
+
   // A privileged feature flag may reach the Hub only in an explicitly
   // approved development E2E ceremony. Never inherit it from the caller.
   const adminPasskeyFixture = {

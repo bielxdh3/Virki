@@ -39,6 +39,10 @@ test("production exposes only the public site and loopback application surfaces"
 test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared environment", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
+  assert.match(hub, /VIRKI_HUB_PERIMETER_MODE:\s*\$\{VIRKI_HUB_PERIMETER_MODE:-access\}/u,
+    "Native Hub access must require an explicit opt-in; default stays fail-closed behind Access");
+  assert.doesNotMatch(issuer, /VIRKI_HUB_PERIMETER_MODE/u,
+    "Hub perimeter mode must not be forwarded to the OIDC issuer");
   assert.match(hub, /VIRKI_PASSKEYS_ENABLED:\s*\$\{VIRKI_PASSKEYS_ENABLED:-false\}/u,
     "Production Hub must receive the explicitly enabled passkey rollout flag, defaulting to disabled");
   assert.match(hub, /VIRKI_ADMIN_PASSKEYS_ENABLED:\s*\$\{VIRKI_ADMIN_PASSKEYS_ENABLED:-false\}/u,

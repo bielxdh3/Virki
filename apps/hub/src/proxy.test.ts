@@ -295,3 +295,29 @@ test("root and admin audit attribution replace untrusted route headers", async (
     assert.equal(response.headers.get("x-middleware-request-x-virki-audit-route"), path === "/" ? "/" : "/admin");
   }
 });
+
+test("explicit native Hub mode exposes only login and recovery without granting an ADMIN session", async () => {
+  const native = { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" };
+  for (const route of ["/login", "/login/verify", "/recover", "/recover/open"]) {
+    const response = await evaluateProxyRequest(new NextRequest(`https://hub.biel.dev.br${route}`, {
+      headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged" }
+    }), native);
+    assert.equal(response.status, 200, route);
+    assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate");
+    assert.equal(response.headers.get("x-middleware-request-cf-access-jwt-assertion"), null);
+  }
+  const protectedResponse = await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/admin/accounts", {
+    headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged" }
+  }), native);
+  assert.equal(protectedResponse.status, 307);
+  assert.equal(protectedResponse.headers.get("location"), "https://hub.biel.dev.br/login?returnTo=%2Fadmin%2Faccounts");
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://other.invalid/recover", {
+    headers: { host: "other.invalid" }
+  }), native)).status, 404);
+  for (const value of ["NATIVE", "true", "enabled", "", "access"]) {
+    const response = await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/recover", {
+      headers: { host: "hub.biel.dev.br" }
+    }), { ...native, VIRKI_HUB_PERIMETER_MODE: value });
+    assert.equal(response.status, 403, `invalid or default mode: ${value}`);
+  }
+});

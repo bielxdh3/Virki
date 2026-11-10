@@ -50,6 +50,8 @@ services:
       VIRKI_OIDC_PROXY_URL: http://oidc-issuer:3003
       VIRKI_PASSKEYS_ENABLED: ${VIRKI_PASSKEYS_ENABLED:-false}
       VIRKI_ADMIN_PASSKEYS_ENABLED: ${VIRKI_ADMIN_PASSKEYS_ENABLED:-false}
+      # Explicitly opt in to Virki's own ADMIN perimeter only after staging security acceptance.
+      VIRKI_HUB_PERIMETER_MODE: ${VIRKI_HUB_PERIMETER_MODE:-access}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in local .env}
       VIRKI_RATE_LIMIT_HASH_SECRET: ${VIRKI_RATE_LIMIT_HASH_SECRET:?VIRKI_RATE_LIMIT_HASH_SECRET must be set in local .env}
       VIRKI_AUDIT_HASH_SECRET: ${VIRKI_AUDIT_HASH_SECRET:?VIRKI_AUDIT_HASH_SECRET must be set in local .env}
