@@ -670,9 +670,20 @@ try {
     $virginBootstrapEnvironment = @('--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $virginBootstrapUrl), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable', '--env', 'VIRKI_BOOTSTRAP_TEST_DATABASE_CONFIRM=virgin')
     Invoke-LoggedStage -Name 'bootstrap-virgin-tests' -LogName 'bootstrap-virgin-tests' -CommandText 'npm run test:integration -- packages/auth/src/bootstrap-first-admin.integration.test.ts' -Environment $virginBootstrapEnvironment -EvidenceLogPath $bootstrapVirginTestsEvidencePath -CaptureFullOutput
     $integrationEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('MIGRATION_DATABASE_URL=' + $urls.integrationMigrator), '--env', ('VIRKI_INTEGRATION_DATABASE_URL=' + $urls.integration), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
-    $integrationCommand = 'npm run test:integration' + $(if ($IntegrationTestFile) { ' -- ' + $IntegrationTestFile } else { '' })
+    $smtpWireExclusive = $IntegrationTestFile -ceq 'packages/auth/src/email-smtp-wire.integration.test.ts'
+    if ($smtpWireExclusive) {
+      $integrationEnvironment += @('--env', 'VIRKI_EMAIL_WIRE_DEDICATED_DB=confirmed',
+        '--env', 'VIRKI_EMAIL_WIRE_NETWORK_ISOLATED=confirmed')
+    }
+    $integrationCommand = if ($smtpWireExclusive) { 'npm run test:integration:email-smtp-wire' } else {
+      'npm run test:integration' + $(if ($IntegrationTestFile) { ' -- ' + $IntegrationTestFile } else { '' })
+    }
     Invoke-LoggedStage -Name 'integration-tests' -LogName 'integration-tests' -CommandText $integrationCommand -Environment $integrationEnvironment -EvidenceLogPath $integrationTestsEvidencePath -CaptureFullOutput
     $script:integrationTestFailures = @(Get-TapFailureManifest -Path $integrationTestsEvidencePath)
+    if ($smtpWireExclusive) {
+      Invoke-LoggedStage 'smtp-wire-typecheck' 'smtp-wire-typecheck' 'npm run typecheck --workspace @virki/auth'
+      Invoke-LoggedStage 'smtp-wire-lint' 'smtp-wire-lint' 'npx eslint packages/auth/src/email-smtp-wire.integration.test.ts scripts/integration/loopback-smtp-sink.mjs scripts/integration/email-smtp-wire.mjs scripts/integration/email-smtp-wire.test.mjs'
+    }
   }
   if (-not $IntegrationOnly -and -not $UnitOnly) {
     $playwrightCommand = @('bash', '-lc', 'set -o pipefail; npm run test:e2e -- "$@" 2>&1 | node scripts/e2e/redact-browser-e2e-log.mjs > /tmp/browser-e2e.log; status=$?; cat /tmp/browser-e2e.log; exit $status', 'virki-e2e')
