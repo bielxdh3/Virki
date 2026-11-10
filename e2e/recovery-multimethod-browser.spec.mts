@@ -533,7 +533,7 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         });
         let forwardHeldReplay = false;
         let heldPostCount = 0;
-        type ForwardedPost = { status: number; error?: string };
+        type ForwardedPost = { status: number; redirect?: string; error?: string };
         let recordForwardedPost!: (result: ForwardedPost) => void;
         const forwardedPost = new Promise<ForwardedPost>((resolve) => { recordForwardedPost = resolve; });
         await stale.route("**/recover**", async (route) => {
@@ -559,7 +559,11 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
             // No payload, capability cookie or Server Action is fabricated.
             const upstream = await route.fetch({ maxRedirects: 0, timeout: 20_000 });
             await route.fulfill({ response: upstream });
-            recordForwardedPost({ status: upstream.status() });
+            // Next.js Server Actions express a rejected replay's redirect via
+            // x-action-redirect (or Location for a plain HTTP redirect). This
+            // is the response from the actual held POST, not a synthetic GET.
+            recordForwardedPost({ status: upstream.status(),
+              redirect: upstream.headers()["x-action-redirect"]?.split(";", 1)[0] ?? upstream.headers().location });
           } catch (error) {
             recordForwardedPost({ status: 0, error: error instanceof Error ? error.message : "forwarding failed" });
             await route.abort().catch(() => undefined);
@@ -571,7 +575,6 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         let arrivalTimeout: ReturnType<typeof setTimeout> | undefined;
         const winningPassword = "signed-" + randomUUID() + "-password";
         let consumed: Awaited<ReturnType<typeof database.accountRecoveryRequest.findUniqueOrThrow>>;
-        let replayResponsePending!: ReturnType<typeof stale.waitForResponse>;
         let winnerPasswordHash: string | null = null;
         let winnerBootstrapTokenHash = "";
         let sessionRowsBeforeReplay = -1;
@@ -649,12 +652,6 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           }
           sessionRowsBeforeReplay = await database.session.count({ where: { userId: owner.id } });
           expect(heldPostCount, "only one genuine stale completion POST may be dispatched").toBe(1);
-          // Only arm the response waiter immediately before forwarding. The
-          // winner's real login + Argon2/protected GET cannot exhaust its timer.
-          replayResponsePending = stale.waitForResponse((response) =>
-            response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
-            new URL(response.url()).pathname === "/recover" &&
-            Boolean(response.request().headers()["next-action"]), { timeout: 25_000 });
           forwardHeldReplay = true;
         } finally {
           if (arrivalTimeout) clearTimeout(arrivalTimeout);
@@ -667,15 +664,26 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         expect(actualForward.error, "the original Next POST must reach the server after consumption").toBeUndefined();
         expect(actualForward.status, "server must handle the browser-originated stale completion").toBeGreaterThanOrEqual(200);
         expect(actualForward.status, "a 403/500 response cannot prove one-time replay rejection").toBeLessThan(400);
-        const replayResponse = await replayResponsePending;
+        // Some Chromium/Next combinations do not dispatch a Playwright page
+        // 'response' event for a previously paused fetch after route.fulfill,
+        // despite route.fetch proving that the original Next POST reached the
+        // server. Do not mistake this instrumentation gap for an application
+        // denial. Require its *actual* redirect header, never status alone.
+        expect(actualForward.redirect, "replay Server Action must return the exact handled error redirect").toBeTruthy();
+        const rejectedRedirect = new URL(actualForward.redirect!, portalUrl);
+        const expectedRejectedUrl = portalUrl + "/recover?requestId=" + requestId + "&error=1";
+        expect(rejectedRedirect.href).toBe(expectedRejectedUrl);
         const staleClickError = await staleClickOutcome;
         if (staleClickError) throw staleClickError;
-        expect(replayResponse.status(), "Next may return 200 or redirect 303 for a rejected Server Action")
-          .toBeGreaterThanOrEqual(200);
-        expect(replayResponse.status(), "a 403/500 response is not proof of one-time consumption")
-          .toBeLessThan(400);
-        expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
-        await expect(stale).toHaveURL(portalUrl + "/recover?requestId=" + requestId + "&error=1", { timeout: 15_000 });
+        // The rejected target must itself render as a canonical HTTP 200
+        // document with no revived proof or password input; a 403/500 document
+        // or a bare URL change must never satisfy the replay test.
+        const rejectedDocument = await stale.goto(expectedRejectedUrl);
+        expect(rejectedDocument?.status(), "denied replay target must render HTTP 200").toBe(200);
+        await expect(stale).toHaveURL(expectedRejectedUrl);
+        await expect(stale.getByRole("heading", { level: 1, name: "Recuperar conta" })).toBeVisible();
+        await expect(stale.locator("p.form-error[role='alert']")).toBeVisible();
+        await expect(stale.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
         const unchanged = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
         expect(await verifyPassword(unchanged.passwordHash ?? "", winningPassword)).toBe(true);
         expect(await verifyPassword(unchanged.passwordHash ?? "", rejectedPassword)).toBe(false);
