@@ -176,8 +176,27 @@ test("ADMIN separate credential: normal password + active TOTP rotates codes, de
     })).toEqual(oldCredential);
     expect(await database.administrativeRecoveryCode.count({ where: { userId: admin.id } })).toBe(10);
 
-    // Render a second real form before the success; its stale Server Action
-    // will be used to prove one TOTP step cannot reset the credential twice.
+    const beforeCsrfTotp = await database.totpFactor.findUniqueOrThrow({
+      where: { userId: admin.id }, select: { lastUsedStep: true }
+    });
+    const forgedForm = await fillTotpRecovery(page, normalPassword, totpAt(totpSecret), newAdminPassword);
+    await forgedForm.locator('input[name="csrfToken"]').evaluate((input) => {
+      (input as HTMLInputElement).value = "invalid-admin-totp-completion-csrf";
+    });
+    const csrfAction = page.waitForResponse((response) =>
+      response.request().method() === "POST" && new URL(response.url()).pathname === "/admin/security" &&
+      Boolean(response.request().headers()["next-action"]));
+    await forgedForm.getByRole("button", { name: "Recuperar por TOTP", exact: true }).click();
+    expect((await csrfAction).status(), "the genuine TOTP recovery Server Action must enforce ADMIN session CSRF").toBe(403);
+    expect(await database.administrativeCredential.findUniqueOrThrow({
+      where: { userId: admin.id }, select: { passwordHash: true, status: true, keyVersion: true }
+    })).toEqual(oldCredential);
+    expect(await database.totpFactor.findUniqueOrThrow({
+      where: { userId: admin.id }, select: { lastUsedStep: true }
+    }), "invalid CSRF must not consume even a correct TOTP counter").toEqual(beforeCsrfTotp);
+    await page.goto(`${hubUrl}/admin/security`);
+    // Render a second real form immediately before success; stale and live
+    // submissions must use the SAME current step for a meaningful replay test.
     const stalePage = await context.newPage();
     await addCloudflareAccessHeader(stalePage);
     expect((await stalePage.goto(`${hubUrl}/admin/security`))?.status()).toBe(200);

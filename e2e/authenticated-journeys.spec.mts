@@ -112,6 +112,38 @@ test("ADMIN recovers separate credential by email without saved codes", async ({
     await completeButton.click();
     await expect(form.getByRole("alert")).toContainText("duas senhas administrativas precisam ser iguais");
     expect((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status).toBe("PENDING");
+    // A real valid OTP and normal password may NOT bypass the session-bound
+    // ADMIN action CSRF. Verify the POST reaches the hydrated Next action,
+    // returns 403, and leaves both credential and proof unconsumed.
+    await form.locator('input[name="code"]').fill(emailedCode);
+    await form.locator('input[name="normalPassword"]').fill(loginSecret);
+    await form.locator('input[name="newPassword"]').fill(newAdminSecret);
+    await form.locator('input[name="confirmPassword"]').fill(newAdminSecret);
+    const originalCsrf = await form.locator('input[name="csrfToken"]').inputValue();
+    expect(originalCsrf).toMatch(/^v2\./u);
+    await form.locator('input[name="csrfToken"]').evaluate((input) => {
+      (input as HTMLInputElement).value = "invalid-email-completion-csrf";
+    });
+    const invalidEmailCompletion = page.waitForResponse((response) =>
+      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/security" &&
+      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]));
+    await completeButton.click();
+    expect((await invalidEmailCompletion).status(), "the completed email proof must not bypass ADMIN session CSRF").toBe(403);
+    const credentialBeforeValidEmailCompletion = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: user.id } });
+    expect(credentialBeforeValidEmailCompletion.keyVersion).toBe(1);
+    expect(await verifyPassword(credentialBeforeValidEmailCompletion.passwordHash, oldAdminSecret)).toBe(true);
+    expect((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status).toBe("PENDING");
+
+    // Preserve the SAME issued proof, rather than issuing a new challenge
+    // that could hide corruption of the original after the rejected action.
+    // React must keep this hydrated completion form available after HTTP403;
+    // if not, the test correctly fails and needs a separate authentic replay.
+    await expect(completeButton).toBeVisible();
+    expect(await form.locator('input[name="requestKey"]').inputValue()).toBe(requestKey);
+    await form.locator('input[name="csrfToken"]').evaluate((input, valid) => {
+      (input as HTMLInputElement).value = valid;
+    }, originalCsrf);
+    expect(await form.locator('input[name="csrfToken"]').inputValue()).toBe(originalCsrf);
     // Sensitive fields are cleared after a form error. Refill all fields.
     await form.locator('input[name="code"]').fill(emailedCode);
     await form.locator('input[name="normalPassword"]').fill(loginSecret);
@@ -558,6 +590,28 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await recoveryForm.getByLabel("Nova senha administrativa (16 caracteres ou mais)", { exact: true }).fill(recoveredAdministrativePassword);
     await recoveryForm.getByRole("button", { name: "Recuperar credencial", exact: true }).click();
     await expect(recoveryForm.getByRole("alert")).toContainText("Não foi possível recuperar a credencial");
+    await recoveryForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await recoveryForm.getByLabel("Código de recuperação administrativa", { exact: true }).fill(initialAdministrativeRecoveryCode);
+    await recoveryForm.getByLabel("Nova senha administrativa (16 caracteres ou mais)", { exact: true }).fill(recoveredAdministrativePassword);
+    const beforeTamperedRecovery = await prisma.administrativeCredential.findUniqueOrThrow({
+      where: { userId: fixture.admin.id }, select: { passwordHash: true, keyVersion: true }
+    });
+    await recoveryForm.locator('input[name="csrfToken"]').evaluate((input) => {
+      (input as HTMLInputElement).value = "invalid-admin-backup-completion-csrf";
+    });
+    const deniedBackupAction = page.waitForResponse((response) =>
+      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/security" &&
+      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]));
+    await recoveryForm.getByRole("button", { name: "Recuperar credencial", exact: true }).click();
+    expect((await deniedBackupAction).status(), "the actual administrative backup-code recovery action must enforce session CSRF").toBe(403);
+    expect(await prisma.administrativeCredential.findUniqueOrThrow({
+      where: { userId: fixture.admin.id }, select: { passwordHash: true, keyVersion: true }
+    })).toEqual(beforeTamperedRecovery);
+    expect(await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id, usedAt: null } })).toBe(10);
+    // Reload after the real 403; a later valid action must still be able to
+    // consume the code, proving the denial did not spend it.
+    await page.goto(acknowledgementUrl);
+    await expect(recoveryForm).toBeVisible();
     await recoveryForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await recoveryForm.getByLabel("Código de recuperação administrativa", { exact: true }).fill(initialAdministrativeRecoveryCode);
     await recoveryForm.getByLabel("Nova senha administrativa (16 caracteres ou mais)", { exact: true }).fill(recoveredAdministrativePassword);
