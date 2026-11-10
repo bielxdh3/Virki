@@ -15,8 +15,47 @@ import { getCurrentSession } from "../../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../../lib/surface";
 import { PASSWORD_INPUT_MAX_LENGTH, readBoundedFormString } from "../../../lib/action-input-limits";
+import { completeRecoveryEmailRebind, isRecoveryEmailRebindSession, startRecoveryEmailRebind } from "@virki/auth/recovery-email-rebind";
 
 export type AccountSecurityState = { status: "idle" | "error" | "started" | "complete"; secret?: string; recoveryCodes?: string[] };
+
+export type RecoveryEmailRebindState = { status: "idle" | "error" | "started" };
+
+export async function startRecoveryEmailRebindAction(_previous: RecoveryEmailRebindState, formData: FormData): Promise<RecoveryEmailRebindState> {
+  return withHubAuditRequest(async () => {
+    const session = await requireAccountMutation(formData, "account-recovery-email-rebind-start");
+    const proposed = readBoundedFormString(formData, "newEmail", 254);
+    if (!isRecoveryEmailRebindSession(session) || proposed === null) {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-start", "rejected", session);
+      return { status: "error" };
+    }
+    try {
+      await startRecoveryEmailRebind(session, proposed);
+      return { status: "started" };
+    } catch {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-start", "rejected", session);
+      return { status: "error" };
+    }
+  });
+}
+
+export async function confirmRecoveryEmailRebindAction(_previous: RecoveryEmailRebindState, formData: FormData): Promise<RecoveryEmailRebindState> {
+  return withHubAuditRequest(async () => {
+    const session = await requireAccountMutation(formData, "account-recovery-email-rebind-confirm");
+    if (!isRecoveryEmailRebindSession(session)) {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-confirm", "rejected", session);
+      return { status: "error" };
+    }
+    try {
+      await completeRecoveryEmailRebind(session, read(formData, "code"));
+    } catch {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-confirm", "rejected", session);
+      return { status: "error" };
+    }
+    (await cookies()).delete(SESSION_COOKIE_NAME);
+    redirect("/login?emailRebound=1");
+  });
+}
 
 export async function startTotpAction(_state: AccountSecurityState, formData: FormData): Promise<AccountSecurityState> {
   return withHubAuditRequest(async () => {

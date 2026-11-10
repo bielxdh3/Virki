@@ -4,7 +4,8 @@ import { createSessionCsrfToken } from "../../../lib/session-csrf";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getAccountSecurityData, revokeAccountSessionAction, revokeTrustedDeviceAction } from "./actions";
-import { SessionRevocationControl, TotpControls } from "./security-controls";
+import { RecoveryEmailRebindControl, SessionRevocationControl, TotpControls } from "./security-controls";
+import { isRecoveryEmailRebindSession } from "@virki/auth/recovery-email-rebind";
 import { getSurface, safeReturnTo, requestHost } from "../../../lib/surface";
 import { listUserPasskeys, passkeysEnabledForRequest } from "@virki/auth/passkeys";
 import { PasskeyManager } from "./passkey-manager";
@@ -20,7 +21,7 @@ export default async function AccountSecurityPage({ searchParams }: { searchPara
   const recoveryContinueTo = safeReturnTo(params.returnTo, surface, data.session.user.role);
   const csrf = await createSessionCsrfToken("account-security");
   const passkeysEnabled = data.session.user.role === "USER" && passkeysEnabledForRequest(surface, requestHost(requestHeaders));
-  const passkeys = passkeysEnabled ? await listUserPasskeys(data.session.user.id) : [];
+  const passkeys = passkeysEnabled ? await listUserPasskeys(data.session.user.id, "USER", requestHost(requestHeaders)) : [];
   const logoutCsrf = await createSessionCsrfToken("logout");
   const totpPending = data.state?.totpStatus === "PENDING";
   return <>
@@ -31,6 +32,7 @@ export default async function AccountSecurityPage({ searchParams }: { searchPara
     {params.status === "sessions" ? <p className="form-success" role="status">Outras sessões encerradas. Esta sessão continua ativa.</p> : params.status === "no-sessions" ? <p className="form-success" role="status">Nenhuma outra sessão ativa foi encontrada. Esta sessão continua ativa.</p> : params.status ? <p className="form-success" role="status">Alteração concluída.</p> : null}
     {params.error && <p className="form-error" role="alert">{params.error === "sessions" ? "Não foi possível encerrar as outras sessões. Confira a senha e tente novamente." : "A ação não foi concluída. Confira o código e tente novamente."}</p>}
     {params.recovered === "totp" ? <section className="surface" aria-labelledby="totp-recovered-title"><h2 id="totp-recovered-title">Autenticador anterior revogado</h2><p className="form-success" role="status">Configure o TOTP novamente e guarde os novos códigos de recuperação.</p>{recoveryContinueTo ? <a className="button-primary" href={recoveryContinueTo}>Continuar para o acesso solicitado</a> : null}</section> : null}
+    {isRecoveryEmailRebindSession(data.session) ? <RecoveryEmailRebindControl csrf={csrf} oldEmail={data.session.user.email} /> : null}
     {data.state && !data.state.emailVerified ? <section className="surface"><h2>Confirme seu e-mail</h2><p>O endereço ainda não foi confirmado. Encerre esta sessão e entre novamente para receber um código de verificação.</p><form action="/api/logout" method="post"><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={logoutCsrf} /><button type="submit">Sair e verificar e-mail</button></form></section> : null}
     <TotpControls csrf={csrf} active={data.state?.totpStatus === "ACTIVE"} pending={totpPending} />
     {passkeysEnabled ? <PasskeyManager csrfToken={csrf} requiresTotp={data.state?.totpStatus === "ACTIVE"} initialPasskeys={passkeys.map(({ createdAt, lastUsedAt, ...item }) => ({ ...item, createdAt: createdAt.toISOString(), lastUsedAt: lastUsedAt?.toISOString() ?? null }))} /> : null}

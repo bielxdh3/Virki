@@ -6,7 +6,7 @@ import { useActionState, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useSensitiveFormAction } from "../../../lib/use-sensitive-form-action";
 import type { ElevationScope } from "@virki/auth/administration";
-import { changeAdminPasswordAction, completeAdminEmailRecoveryAction, completeCredentialSetupAction, recoverAdminCredentialAction, regenerateAdminRecoveryCodesAction, startAdminEmailRecoveryAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
+import { changeAdminPasswordAction, completeAdminEmailRecoveryAction, completeCredentialSetupAction, recoverAdminCredentialAction, recoverAdminCredentialWithTotpAction, regenerateAdminRecoveryCodesAction, startAdminEmailRecoveryAction, startCredentialSetupAction, startElevationAction, verifyElevationAction, revokeElevationAction, revokeOtherSessionsAction, type SecurityFormState } from "./actions";
 
 const initialState: SecurityFormState = { status: "idle" };
 const passwordReuseMessage = "A senha administrativa precisa ser diferente da senha de login.";
@@ -19,12 +19,13 @@ const scopes: Array<[ElevationScope, string]> = [
   ["ADMIN_RECOVERY_REGENERATE", "Gerar códigos de recuperação"]
 ];
 
-export function CredentialSetup({ csrf, activeCredential }: { csrf: string; activeCredential?: { keyVersion: number; updatedAt: string } }) {
+export function CredentialSetup({ csrf, activeCredential, totpActive }: { csrf: string; activeCredential?: { keyVersion: number; updatedAt: string }; totpActive: boolean }) {
   const [start, startAction, starting] = useSensitiveFormAction(startCredentialSetupAction, initialState);
   const [complete, completeAction, completing] = useSensitiveFormAction(completeCredentialSetupAction, initialState);
   const [recovery, recoveryAction, recovering] = useSensitiveFormAction(recoverAdminCredentialAction, initialState);
   const [emailStart, emailStartAction, emailing] = useSensitiveFormAction(startAdminEmailRecoveryAction, initialState);
   const [emailComplete, emailCompleteAction, emailCompleting] = useSensitiveFormAction(completeAdminEmailRecoveryAction, initialState);
+  const [totpRecovery, totpRecoveryAction, totpRecovering] = useSensitiveFormAction(recoverAdminCredentialWithTotpAction, initialState);
   const [recoveryCodesAcknowledged, setRecoveryCodesAcknowledged] = useState(false);
   const [recoveryCodesSaved, setRecoveryCodesSaved] = useState(false);
   const acknowledgingRecoveryCodes = useRef(false);
@@ -90,7 +91,32 @@ export function CredentialSetup({ csrf, activeCredential }: { csrf: string; acti
               {emailStart.status === "error" && <p className="form-error" role="alert">Não foi possível enviar o código. Verifique a senha normal e se o e-mail está confirmado.</p>}
             </form>
           )}
-          {!emailComplete.recoveryCodes && <>
+          {totpActive && !emailComplete.recoveryCodes && !recovery.recoveryCodes && (
+            <>
+              <h3>Recuperar credencial por aplicativo autenticador (TOTP)</h3>
+              <p>Use a senha normal atual e o código de seis dígitos do seu TOTP ativo para substituir a senha administrativa. Os códigos administrativos antigos serão invalidados.</p>
+              {totpRecovery.recoveryCodes ? (
+                <OneTimeRecoveryCodes
+                  codes={totpRecovery.recoveryCodes}
+                  destination="/admin/security?status=totp-recovered#admin-content"
+                  label="Já guardei os novos códigos"
+                />
+              ) : (
+                <form action={totpRecoveryAction} className="form-stack">
+                  <input type="hidden" name="csrfToken" value={csrf} />
+                  <label>Senha normal atual<input name="normalPassword" type="password" autoComplete="current-password" required /></label>
+                  <label>Código do aplicativo autenticador<input name="totpCode" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" minLength={6} maxLength={6} required /></label>
+                  <label>Nova senha administrativa (16 caracteres ou mais)<input name="newPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
+                  <label>Confirme a nova senha administrativa<input name="confirmPassword" type="password" autoComplete="new-password" minLength={16} maxLength={256} required /></label>
+                  <button type="submit" disabled={totpRecovering}>{totpRecovering ? "Recuperando…" : "Recuperar por TOTP"}</button>
+                  {totpRecovery.status === "password-mismatch" && <p className="form-error" role="alert">As duas senhas administrativas precisam ser iguais. Preencha novamente todos os campos.</p>}
+                  {totpRecovery.status === "password-reuse" && <p className="form-error" role="alert">{passwordReuseMessage}</p>}
+                  {totpRecovery.status === "error" && <p className="form-error" role="alert">Não foi possível recuperar a credencial. Confira a senha normal e o código atual do aplicativo.</p>}
+                </form>
+              )}
+            </>
+          )}
+          {!emailComplete.recoveryCodes && !totpRecovery.recoveryCodes && <>
           <h3>Recuperar credencial administrativa</h3>
           <p>Alternativa: use sua senha normal e um código administrativo de recuperação que ainda tenha guardado. A recuperação revoga elevações ativas e emite novos códigos.</p>
           {recovery.recoveryCodes ? (

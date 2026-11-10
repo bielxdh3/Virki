@@ -14,7 +14,8 @@ const boundaries = [
   { action: "changeAdminPasswordAction", fields: ["newPassword"], credentialOperation: "changeAdministrativePassword" },
   { action: "recoverAdminCredentialAction", fields: ["normalPassword", "newPassword"], credentialOperation: "recoverAdministrativeCredential" },
   { action: "startAdminEmailRecoveryAction", fields: ["normalPassword"], credentialOperation: "startAdministrativeEmailRecovery" },
-  { action: "completeAdminEmailRecoveryAction", fields: ["normalPassword", "newPassword", "confirmPassword"], credentialOperation: "completeAdministrativeEmailRecovery" }
+  { action: "completeAdminEmailRecoveryAction", fields: ["normalPassword", "newPassword", "confirmPassword"], credentialOperation: "completeAdministrativeEmailRecovery" },
+  { action: "recoverAdminCredentialWithTotpAction", fields: ["normalPassword", "newPassword", "confirmPassword", "totpCode"], credentialOperation: "recoverAdministrativeCredentialWithTotp" }
 ] as const;
 
 function nodesWithin<T extends ts.Node>(root: ts.Node, match: (node: ts.Node) => node is T): T[] {
@@ -93,8 +94,9 @@ test("all password-bearing ADMIN actions reject bounded-input failures before cr
     const formReads = callsNamed(action, "readBoundedFormString");
     const readKeys = formReads.map((call) => {
       assert.equal(call.arguments[0]?.getText(sourceFile), "formData");
-      assert.equal(call.arguments[2]?.getText(sourceFile), "PASSWORD_INPUT_MAX_LENGTH");
-      return call.arguments[1]?.getText(sourceFile).replace(/^"|"$/gu, "");
+      const field = call.arguments[1]?.getText(sourceFile).replace(/^"|"$/gu, "");
+      assert.equal(call.arguments[2]?.getText(sourceFile), field === "totpCode" ? "6" : "PASSWORD_INPUT_MAX_LENGTH");
+      return field;
     });
     assert.deepEqual(readKeys, boundary.fields, `${boundary.action} must bound every raw password field exactly once`);
     const credentialOperations = callsNamed(action, boundary.credentialOperation);
@@ -139,6 +141,39 @@ test("ADMIN email recovery refuses mismatched confirmation before consuming the 
   );
   assert.ok(mismatch, "the new ADMIN password must be confirmed server-side");
   assert.ok(mismatch.end < operation.pos, "mismatch must never consume the email proof");
+});
+
+test("ADMIN TOTP recovery confirms password and uses authenticated hub mutation guard before any credential write", () => {
+  const action = functionNamed("recoverAdminCredentialWithTotpAction");
+  const operation = callsNamed(action, "recoverAdministrativeCredentialWithTotp")[0];
+  const guard = callsNamed(action, "requireAdminMutation")[0];
+  assert.ok(operation && guard);
+  assert.ok(guard.end < operation.pos);
+  assert.equal(guard.arguments[0]?.getText(sourceFile), "formData");
+  assert.equal(guard.arguments[1]?.getText(sourceFile), '"admin-totp-credential-recovery"');
+  const mismatch = nodesWithin(action, ts.isIfStatement).find((statement) =>
+    ts.isBinaryExpression(statement.expression) &&
+    statement.expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+    statement.expression.left.getText(sourceFile) === "newPassword" &&
+    statement.expression.right.getText(sourceFile) === "confirmPassword"
+  );
+  assert.ok(mismatch && mismatch.end < operation.pos);
+  assert.ok(nodesWithin(mismatch.thenStatement, ts.isStringLiteral).some((node) => node.text === "password-mismatch"));
+  const guardSource = readFileSync(new URL("../../../lib/admin-mutation.ts", import.meta.url), "utf8");
+  assert.match(guardSource, /isHubAdminMutationSurface\(surface\)/u);
+  assert.match(guardSource, /validateHubCloudflareAccess\(requestHeaders, source\)/u);
+  assert.match(guardSource, /hasSameOrigin\(requestHeaders\)/u);
+  assert.match(guardSource, /validateSessionCsrfTokenFor\(sessionToken, csrf, getAdminCsrfScope\(source\)\)/u);
+  assert.match(guardSource, /getCurrentSession\(\)/u);
+});
+
+test("TOTP ADMIN credential recovery is only shown for ACTIVE factor and requires one-time-code acknowledgement", () => {
+  assert.match(controlsText, /totpActive && !emailComplete\.recoveryCodes/u);
+  assert.match(controlsText, /action=\{totpRecoveryAction\}/u);
+  assert.match(controlsText, /name="csrfToken" value=\{csrf\}/u);
+  assert.match(controlsText, /name="totpCode" inputMode="numeric"/u);
+  assert.match(controlsText, /totpRecovery\.recoveryCodes/u);
+  assert.match(controlsText, /destination="\/admin\/security\?status=totp-recovered#admin-content"/u);
 });
 
 test("email credential recovery UI requires fresh normal password, OTP and new password confirmation", () => {

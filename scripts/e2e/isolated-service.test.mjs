@@ -344,6 +344,41 @@ test("service children receive only their E2E allowlist and required OS paths", 
     }
   }
 
+  // A privileged feature flag may reach the Hub only in an explicitly
+  // approved development E2E ceremony. Never inherit it from the caller.
+  const adminPasskeyFixture = {
+    ...source,
+    VIRKI_E2E_PASSKEYS: "true",
+    VIRKI_E2E_ADMIN_PASSKEYS: "true",
+    VIRKI_PASSKEYS_ENABLED: "true",
+    VIRKI_PASSKEYS_LOCAL_TESTING: "true",
+    VIRKI_ADMIN_PASSKEYS_ENABLED: "true"
+  };
+  const adminHub = buildServiceEnvironment("hub", adminPasskeyFixture, process.platform);
+  assert.equal(adminHub.VIRKI_ADMIN_PASSKEYS_ENABLED, "true");
+  assert.equal(Object.hasOwn(adminHub, "VIRKI_E2E_ADMIN_PASSKEYS"), false,
+    "the opt-in marker is retained by the test runner, not forwarded to the Hub");
+  for (const otherService of ["jwks", "public-site", "issuer"]) {
+    assert.equal(Object.hasOwn(buildServiceEnvironment(otherService, adminPasskeyFixture, process.platform),
+      "VIRKI_ADMIN_PASSKEYS_ENABLED"), false,
+    `${otherService} cannot inherit Hub's privileged passkey feature flag`);
+  }
+  for (const mutation of [
+    { VIRKI_E2E_ADMIN_PASSKEYS: "false" },
+    { VIRKI_E2E_PASSKEYS: "false" },
+    { VIRKI_PASSKEYS_ENABLED: "false" },
+    { VIRKI_PASSKEYS_LOCAL_TESTING: "false" },
+    { VIRKI_E2E_HUB_MODE: "production" }
+  ]) {
+    assert.throws(() => buildServiceEnvironment("hub", { ...adminPasskeyFixture, ...mutation }, process.platform),
+      /Privileged passkey E2E configuration is invalid/u,
+      "missing E2E opt-in or production mode cannot enable ADMIN passkeys");
+  }
+  assert.equal(Object.hasOwn(buildServiceEnvironment("hub", {
+    ...adminPasskeyFixture, VIRKI_ADMIN_PASSKEYS_ENABLED: "false"
+  }, process.platform), "VIRKI_ADMIN_PASSKEYS_ENABLED"), false,
+  "a disabled privileged feature must stay absent from the child environment");
+
   assert.throws(
     () => buildServiceEnvironment("hub", { ...source, VIRKI_CSRF_SIGNING_KEY: "invalid" }, process.platform),
     /configuration is incomplete/u,

@@ -41,6 +41,8 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
   assert.match(hub, /VIRKI_PASSKEYS_ENABLED:\s*\$\{VIRKI_PASSKEYS_ENABLED:-false\}/u,
     "Production Hub must receive the explicitly enabled passkey rollout flag, defaulting to disabled");
+  assert.match(hub, /VIRKI_ADMIN_PASSKEYS_ENABLED:\s*\$\{VIRKI_ADMIN_PASSKEYS_ENABLED:-false\}/u,
+    "Production Hub must receive the separate ADMIN passkey rollout flag, defaulting to disabled");
   assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
   assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:\?/u);
   assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u);

@@ -22,8 +22,9 @@ import {
   verifyPassword,
   writeAuditLogInTransaction
 } from "./index";
-import { prisma, type Prisma } from "@virki/database";
+import { prisma, Prisma } from "@virki/database";
 import { lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { isRecoveryCapabilityAuthorized, needsRecoveryNewMailbox, recoveryReviewReady, requireLiveRecoveryProofsInTransaction } from "./recovery-methods";
 
 export { DEVICE_COOKIE_NAME } from "./constants";
 export const SECURITY_CEREMONY_TTL_MS = 10 * 60 * 1000;
@@ -690,16 +691,18 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
 
 export async function getAccountRecoveryRequestId(requestKey: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<{ id: string; expiresAt: Date; purpose: "RECOVERY" | "INVITATION" } | null> {
   if (!isCeremonyId(requestKey)) return null;
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { requestKeyHash: hashRecoveryRequestKey(requestKey) }, select: { id: true, status: true, expiresAt: true, purpose: true, user: { select: { role: true, isActive: true, accountStatus: true } } } });
-  if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED" || request.expiresAt <= now) return null;
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { requestKeyHash: hashRecoveryRequestKey(requestKey) }, select: { id: true, status: true, expiresAt: true, purpose: true, recoveryBrowserHash: true, recoveryProofs: true, user: { select: { role: true, isActive: true, accountStatus: true } } } });
+  // The legacy email-link discovery route must not enumerate browser-bound
+  // anonymous attempts. Their status is only read through the generic flow.
+  if (!request || request.recoveryBrowserHash || request.recoveryProofs.length || !isAccountRecoveryEligible(request.user, expectedRole) || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED" || request.expiresAt <= now) return null;
   return { id: request.id, expiresAt: request.expiresAt, purpose: request.purpose };
 }
 
 export async function getAccountRecoveryState(requestId: string, requestKey: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER") {
   if (!isDatabaseId(requestId) || !isCeremonyId(requestKey)) return null;
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, status: true, emailVerifiedAt: true, expiresAt: true, purpose: true, user: { select: { emailNormalized: true, email: true, role: true, isActive: true, accountStatus: true } } } });
-  if (!request || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !isAccountRecoveryEligible(request.user, expectedRole) || request.expiresAt <= now || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED") return null;
-  return { id: request.id, status: request.status, emailVerified: Boolean(request.emailVerifiedAt), expiresAt: request.expiresAt, purpose: request.purpose };
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, status: true, emailVerifiedAt: true, recoveryProofs: true, recoveryAdminReview: true, recoveryBrowserHash: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, expiresAt: true, purpose: true, user: { select: { emailNormalized: true, email: true, role: true, isActive: true, accountStatus: true } } } });
+  if (!request || request.recoveryBrowserHash || request.recoveryProofs.length || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !isAccountRecoveryEligible(request.user, expectedRole) || request.expiresAt <= now || request.status === "CONSUMED" || request.status === "REJECTED" || request.status === "EXPIRED") return null;
+  return { id: request.id, status: request.status, emailVerified: Boolean(request.emailVerifiedAt), passkeyVerified: Boolean(request.recoveryPasskeyVerifiedAt), totpVerified: Boolean(request.recoveryTotpVerifiedAt), proofs: request.recoveryProofs, adminReview: request.recoveryAdminReview, expiresAt: request.expiresAt, purpose: request.purpose };
 }
 
 export async function verifyAccountRecoveryEmail(requestId: string, requestKey: string, code: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<void> {
@@ -708,8 +711,8 @@ export async function verifyAccountRecoveryEmail(requestId: string, requestKey: 
     const result = await prisma.$transaction(async (transaction) => {
       const initial = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true, user: { select: { role: true } } } });
       if (!initial || initial.user.role !== expectedRole || !await lockActiveRecoveryAccountInTransaction(transaction, initial.userId, expectedRole)) throw new SecurityMutationError();
-      const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, userId: true, requestKeyHash: true, emailAddressHash: true, emailChallengeHash: true, emailVerifiedAt: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
-      if (!request || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.status !== "PENDING" || request.emailVerifiedAt || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !isAccountRecoveryEligible(request.user, expectedRole)) throw new SecurityMutationError();
+      const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, userId: true, requestKeyHash: true, recoveryBrowserHash: true, recoveryProofs: true, emailAddressHash: true, emailChallengeHash: true, emailVerifiedAt: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
+      if (!request || request.recoveryBrowserHash || request.recoveryProofs.length || !safeEqual(request.requestKeyHash, hashRecoveryRequestKey(requestKey)) || request.status !== "PENDING" || request.emailVerifiedAt || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !isAccountRecoveryEligible(request.user, expectedRole)) throw new SecurityMutationError();
       const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-verification-user:${request.userId}`, now);
       const requestAttempt = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-verification:${request.id}`, now);
       if (!accountAttempt.allowed || !requestAttempt.allowed) return { kind: "REJECTED" as const };
@@ -733,49 +736,115 @@ export async function listPendingAccountRecoveries(actor: { id: string; role: st
     where: getPendingAccountRecoveryQueueWhere(new Date(), actor.id),
     orderBy: { createdAt: "asc" },
     take: 50,
-    select: { id: true, createdAt: true, expiresAt: true, emailVerifiedAt: true, user: { select: { emailNormalized: true, displayName: true, role: true } } }
+    select: { id: true, createdAt: true, expiresAt: true, emailVerifiedAt: true, recoveryProofs: true, recoveryAdminReview: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, recoveryComment: true, user: { select: { emailNormalized: true, displayName: true, role: true } } }
   });
 }
 
 export function getPendingAccountRecoveryQueueWhere(now: Date, excludeTargetUserId?: string): Prisma.AccountRecoveryRequestWhereInput {
-  return { status: "PENDING", emailVerifiedAt: { not: null }, expiresAt: { gt: now }, user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", ...(excludeTargetUserId ? { id: { not: excludeTargetUserId } } : {}) } };
+  return { status: "PENDING", OR: [
+    { recoveryProofs: { isEmpty: true }, emailVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "EMAIL" }, emailVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "TOTP" }, recoveryTotpVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "PASSKEY" }, recoveryPasskeyVerifiedAt: { not: null } }
+  ], expiresAt: { gt: now }, user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", ...(excludeTargetUserId ? { id: { not: excludeTargetUserId } } : {}) } };
 }
 
 export function getApprovedAccountRecoveryExpiry(now: Date): Date {
   return new Date(now.getTime() + RECOVERY_REQUEST_TTL_MS);
 }
 
-export async function approveAccountRecovery(actor: { id: string; role: string }, sessionId: string, requestId: string, now = new Date()): Promise<void> {
+// An omitted clock is live: it must never be frozen before Argon2 or a row lock.
+// A supplied Date or factory remains deterministic for tests and simulations.
+function liveRecoveryNow(): Date { return new Date(); }
+type RecoveryClock = Date | (() => Date);
+function recoveryNow(clock: RecoveryClock): Date { return clock instanceof Date ? clock : clock(); }
+function recoverySqlNow(clock: RecoveryClock, sampledAt: Date): Prisma.Sql {
+  return clock === liveRecoveryNow
+    ? Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`
+    : Prisma.sql`(${sampledAt} AT TIME ZONE 'UTC')`;
+}
+
+async function lockActiveRecoveryReviewerInTransaction(transaction: Prisma.TransactionClient, reviewerId: string): Promise<boolean> {
+  // SHARE conflicts with concurrent role/active/status changes, but allows
+  // another reader; acquire this before the recovered account's FOR UPDATE.
+  const reviewers = await transaction.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "User"
+    WHERE "id" = ${reviewerId}
+      AND "role" = 'ADMIN'::"UserRole"
+      AND "isActive" = TRUE
+      AND "accountStatus" = 'ACTIVE'::"AccountStatus"
+    FOR SHARE
+  `;
+  return reviewers.length === 1;
+}
+
+async function lockAccountRecoveryRequestInTransaction(transaction: Prisma.TransactionClient, requestId: string): Promise<boolean> {
+  const rows = await transaction.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "AccountRecoveryRequest" WHERE "id" = ${requestId} FOR UPDATE
+  `;
+  return rows.length === 1;
+}
+
+export async function approveAccountRecovery(actor: { id: string; role: string }, sessionId: string, requestId: string, now: RecoveryClock = liveRecoveryNow): Promise<void> {
   await requireAdmin(actor);
   if (!isDatabaseId(requestId)) throw new SecurityMutationError();
   const requestKey = randomBytes(24).toString("base64url");
   const result = await prisma.$transaction(async (transaction) => {
-    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ACCOUNT_STATE_CHANGE", now);
+    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ACCOUNT_STATE_CHANGE", recoveryNow(now));
     const initial = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true, user: { select: { role: true } } } });
-    if (!initial || !isAccountRecoveryRole(initial.user.role) || !await lockActiveRecoveryAccountInTransaction(transaction, initial.userId, initial.user.role)) throw new SecurityMutationError();
-    const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, userId: true, status: true, emailVerifiedAt: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
-    if (!request || request.status !== "PENDING" || !request.emailVerifiedAt || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !canApproveAccountRecovery(actor, { id: request.userId, ...request.user })) throw new SecurityMutationError();
+    if (!initial || !isAccountRecoveryRole(initial.user.role) || !await lockActiveRecoveryAccountInTransaction(transaction, initial.userId, initial.user.role) || !await lockAccountRecoveryRequestInTransaction(transaction, requestId)) throw new SecurityMutationError();
+    const request = await transaction.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, emailAddressHash: true, userId: true, status: true, emailVerifiedAt: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, recoveryBrowserHash: true, recoveryTotpBindingHash: true, recoveryTotpUsedStep: true, recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, reviewedByUserId: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
+    const multiMethod = Boolean(request?.recoveryProofs.length);
+    if (!request || request.status !== "PENDING" || !(multiMethod ? request.recoveryRole === request.user.role && Boolean(request.recoveryBrowserHash) && recoveryReviewReady(request) : !request.recoveryRole && !request.recoveryBrowserHash && Boolean(request.emailVerifiedAt)) || request.expiresAt <= recoveryNow(now) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !canApproveAccountRecovery(actor, { id: request.userId, ...request.user })) throw new SecurityMutationError();
+    if (multiMethod) await requireLiveRecoveryProofsInTransaction(transaction, request);
     const actionBase = getRecoveryActionBaseUrl(request.user.role);
-    if (!actionBase) throw new SecurityMutationError();
-    const approved = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash: request.requestKeyHash, status: "PENDING", emailVerifiedAt: { not: null }, expiresAt: { gt: now } }, data: { status: "APPROVED", requestKeyHash: hashRecoveryRequestKey(requestKey), reviewedByUserId: actor.id, approvedAt: now, expiresAt: getApprovedAccountRecoveryExpiry(now) } });
-    if (approved.count !== 1) return approved;
+    if (!multiMethod && !actionBase) throw new SecurityMutationError();
+    const approvalAt = recoveryNow(now);
+    if (request.expiresAt <= approvalAt) throw new SecurityMutationError();
+    // MATERIALIZED captures a single statement-time DB clock. PostgreSQL now()
+    // would use transaction start time, so it is unsafe after a lock wait.
+    const approvedCount = await transaction.$executeRaw(Prisma.sql`
+      WITH recovery_time AS MATERIALIZED (SELECT ${recoverySqlNow(now, approvalAt)} AS "at")
+      UPDATE "AccountRecoveryRequest" AS recovery SET
+        "status" = 'APPROVED'::"RecoveryRequestStatus",
+        "requestKeyHash" = ${multiMethod ? request.requestKeyHash : hashRecoveryRequestKey(requestKey)},
+        "reviewedByUserId" = ${actor.id},
+        "approvedAt" = recovery_time."at",
+        "expiresAt" = recovery_time."at" + INTERVAL '30 minutes',
+        "updatedAt" = recovery_time."at"
+      FROM recovery_time
+      WHERE recovery."id" = ${request.id}
+        AND recovery."requestKeyHash" = ${request.requestKeyHash}
+        AND recovery."status" = 'PENDING'::"RecoveryRequestStatus"
+        AND (${multiMethod}::boolean OR recovery."emailVerifiedAt" IS NOT NULL)
+        AND recovery."expiresAt" > recovery_time."at"
+    `);
+    if (approvedCount !== 1) throw new SecurityMutationError();
     await transaction.accountRecoveryRequest.updateMany({ where: { userId: request.userId, id: { not: request.id }, status: "PENDING" }, data: { status: "EXPIRED" } });
-    const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase).toString();
-    await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-approved:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: request.user.email, locale: "pt-BR", payload: { publicValues: { displayName: request.user.displayName ?? "" }, protectedValues: { actionUrl } } });
+    if (!multiMethod) {
+      const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase!).toString();
+      await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-approved:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: request.user.email, locale: "pt-BR", payload: { publicValues: { displayName: request.user.displayName ?? "" }, protectedValues: { actionUrl } } });
+    }
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_APPROVED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.recovery", message: "Account recovery approved.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
-    return approved;
+    return approvedCount;
   }, { isolationLevel: "Serializable" });
-  if (result.count !== 1) throw new SecurityMutationError();
+  if (result !== 1) throw new SecurityMutationError();
 }
 
-export async function consumeApprovedAccountRecovery(requestId: string, requestKey: string, newPassword: string, now = new Date(), expectedRole: AccountRecoveryRole = "USER"): Promise<void> {
+export async function consumeApprovedAccountRecovery(requestId: string, requestKey: string, newPassword: string, now: RecoveryClock = liveRecoveryNow, expectedRole: AccountRecoveryRole = "USER", browserToken = ""): Promise<CreatedLoginSession | void> {
   if (!isDatabaseId(requestId) || !isCeremonyId(requestKey) || !isAcceptableRecoveryPassword(expectedRole, newPassword)) throw new SecurityMutationError();
   const requestKeyHash = hashRecoveryRequestKey(requestKey);
-  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
-  if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || !safeEqual(request.requestKeyHash, requestKeyHash) || request.status !== "APPROVED" || request.expiresAt <= now || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email)) throw new SecurityMutationError();
+  const request = await prisma.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { id: true, requestKeyHash: true, userId: true, emailAddressHash: true, status: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, recoveryBrowserHash: true, emailVerifiedAt: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, recoveryNewEmail: true, recoveryNewEmailVerifiedAt: true, reviewedByUserId: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true } } } });
+  if (!request || !isAccountRecoveryEligible(request.user, expectedRole) || !safeEqual(request.requestKeyHash, requestKeyHash) || request.status !== "APPROVED" || request.expiresAt <= recoveryNow(now) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email)) throw new SecurityMutationError();
+  if (Boolean(request.recoveryProofs.length) !== Boolean(request.recoveryBrowserHash) ||
+    (request.recoveryProofs.length ? request.recoveryRole !== expectedRole || !isRecoveryCapabilityAuthorized(request, requestKey, browserToken) : Boolean(request.recoveryRole))) throw new SecurityMutationError();
+  if (request.recoveryProofs.includes("PASSKEY") && (process.env.VIRKI_PASSKEYS_ENABLED !== "true" || (expectedRole === "ADMIN" && process.env.VIRKI_ADMIN_PASSKEYS_ENABLED !== "true"))) throw new SecurityMutationError();
+  if (needsRecoveryNewMailbox(request.recoveryProofs) &&
+    (!request.recoveryNewEmail || !request.recoveryNewEmailVerifiedAt)) throw new SecurityMutationError();
   const attempts = await prisma.$transaction(async (transaction) => {
-    const account = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-completion-user:${request.userId}`, now);
-    const ceremony = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-completion:${request.id}`, now);
+    const attemptAt = recoveryNow(now);
+    const account = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-completion-user:${request.userId}`, attemptAt);
+    const ceremony = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-completion:${request.id}`, attemptAt);
     return account.allowed && ceremony.allowed;
   });
   if (!attempts) throw new SecurityMutationError();
@@ -787,36 +856,101 @@ export async function consumeApprovedAccountRecovery(requestId: string, requestK
   const newPasswordHash = await hashPassword(newPassword);
   // Each post-lock read needs a fresh snapshot: a concurrent credential rotation
   // can commit while this transaction waits for the User row.
-  await prisma.$transaction(async (transaction) => {
+  return prisma.$transaction(async (transaction) => {
+    const reviewerId = request.recoveryProofs.length && request.recoveryAdminReview ? request.reviewedByUserId : null;
+    if (request.recoveryProofs.length && request.recoveryAdminReview &&
+      (!reviewerId || reviewerId === request.userId || !await lockActiveRecoveryReviewerInTransaction(transaction, reviewerId))) throw new SecurityMutationError();
     if (!await lockActiveRecoveryAccountInTransaction(transaction, request.userId, expectedRole)) throw new SecurityMutationError();
     if (expectedRole === "ADMIN") {
       const administrative = await lockAdministrativeCredentialInTransaction(transaction, request.userId);
       if (administrative?.status === "ACTIVE" && await verifyPassword(administrative.passwordHash, newPassword)) throw new SecurityMutationError();
     }
     await lockAndExpireSiblingAccountRecoveriesInTransaction(transaction, request.userId, request.id);
-    const current = await transaction.accountRecoveryRequest.findUnique({ where: { id: request.id }, select: { userId: true, requestKeyHash: true, emailAddressHash: true, status: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
-    if (!current || current.userId !== request.userId || !safeEqual(current.requestKeyHash, requestKeyHash) || current.emailAddressHash !== hashEmailAddress(current.user.emailNormalized ?? current.user.email) || current.status !== "APPROVED" || current.expiresAt <= now || !isAccountRecoveryEligible(current.user, expectedRole)) throw new SecurityMutationError();
-    const claimed = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash, emailAddressHash: request.emailAddressHash, status: "APPROVED", expiresAt: { gt: now } }, data: { status: "CONSUMED", consumedAt: now } });
-    if (claimed.count !== 1) throw new SecurityMutationError();
+    if (!await lockAccountRecoveryRequestInTransaction(transaction, request.id)) throw new SecurityMutationError();
+    const current = await transaction.accountRecoveryRequest.findUnique({ where: { id: request.id }, select: { userId: true, requestKeyHash: true, emailAddressHash: true, status: true, recoveryProofs: true, recoveryRole: true, recoveryAdminReview: true, recoveryBrowserHash: true, recoveryTotpBindingHash: true, recoveryTotpUsedStep: true, recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true, emailVerifiedAt: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true, recoveryNewEmail: true, recoveryNewEmailVerifiedAt: true, recoveryNewEmailChallengeHash: true, recoveryNewEmailExpiresAt: true, reviewedByUserId: true, expiresAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true } } } });
+    if (!current || current.userId !== request.userId || !safeEqual(current.requestKeyHash, requestKeyHash) || current.emailAddressHash !== hashEmailAddress(current.user.emailNormalized ?? current.user.email) || current.status !== "APPROVED" || current.expiresAt <= recoveryNow(now) || !isAccountRecoveryEligible(current.user, expectedRole)) throw new SecurityMutationError();
+    if (Boolean(current.recoveryProofs.length) !== Boolean(current.recoveryBrowserHash) || (current.recoveryProofs.length ? current.recoveryRole !== expectedRole : Boolean(current.recoveryRole))) throw new SecurityMutationError();
+    if (current.recoveryProofs.includes("PASSKEY") && (process.env.VIRKI_PASSKEYS_ENABLED !== "true" || (expectedRole === "ADMIN" && process.env.VIRKI_ADMIN_PASSKEYS_ENABLED !== "true"))) throw new SecurityMutationError();
+    const replacementRequired = needsRecoveryNewMailbox(current.recoveryProofs);
+    if (replacementRequired && (!current.recoveryNewEmail || !current.recoveryNewEmailVerifiedAt ||
+      !current.recoveryNewEmailChallengeHash || !current.recoveryNewEmailExpiresAt ||
+      current.recoveryNewEmail === (current.user.emailNormalized ?? current.user.email.trim().toLowerCase()) ||
+      await transaction.user.count({ where: { OR: [{ email: current.recoveryNewEmail }, { emailNormalized: current.recoveryNewEmail }] } }) !== 0)) throw new SecurityMutationError();
+    if (current.recoveryProofs.length) {
+      if (!isRecoveryCapabilityAuthorized(current, requestKey, browserToken)) throw new SecurityMutationError();
+      if (current.recoveryAdminReview && (!reviewerId || current.reviewedByUserId !== reviewerId)) throw new SecurityMutationError();
+      await requireLiveRecoveryProofsInTransaction(transaction, current);
+    }
+    const consumedAt = recoveryNow(now);
+    if (current.expiresAt <= consumedAt) throw new SecurityMutationError();
+    const claimedCount = await transaction.$executeRaw(Prisma.sql`
+      WITH recovery_time AS MATERIALIZED (SELECT ${recoverySqlNow(now, consumedAt)} AS "at")
+      UPDATE "AccountRecoveryRequest" AS recovery SET
+        "status" = 'CONSUMED'::"RecoveryRequestStatus",
+        "consumedAt" = recovery_time."at",
+        "updatedAt" = recovery_time."at"
+      FROM recovery_time
+      WHERE recovery."id" = ${request.id}
+        AND recovery."requestKeyHash" = ${requestKeyHash}
+        AND recovery."emailAddressHash" = ${request.emailAddressHash}
+        AND recovery."status" = 'APPROVED'::"RecoveryRequestStatus"
+        AND (${!replacementRequired}::boolean OR
+          (recovery."recoveryNewEmail" = ${current.recoveryNewEmail}
+           AND recovery."recoveryNewEmailChallengeHash" = ${current.recoveryNewEmailChallengeHash}
+           AND recovery."recoveryNewEmailVerifiedAt" IS NOT NULL
+           AND recovery."recoveryNewEmailExpiresAt" IS NOT NULL))
+        AND recovery."expiresAt" > recovery_time."at"
+    `);
+    if (claimedCount !== 1) throw new SecurityMutationError();
     await transaction.user.update({ where: { id: request.userId }, data: {
-      passwordHash: newPasswordHash, emailVerifiedAt: now,
-      ...(expectedRole === "USER" ? { secondFactorMethod: "EMAIL" as const } : {})
+      passwordHash: newPasswordHash,
+      ...(replacementRequired ? { email: current.recoveryNewEmail!, emailNormalized: current.recoveryNewEmail!, emailVerifiedAt: consumedAt } : {}),
+      // Non-email proofs are independent and must never attest mailbox ownership.
+      ...(!replacementRequired && (!current.recoveryProofs.length || current.emailVerifiedAt) ? { emailVerifiedAt: consumedAt } : {}),
+      // Both USER and ADMIN normal-password recovery replace login MFA. An
+      // ADMIN who proved a hub passkey plus another ADMIN (or two independent
+      // factors) may have lost TOTP; retaining that TOTP would permanently
+      // lock them out after the recovery ceremony. The distinct privileged
+      // administrative credential is never changed here.
+      secondFactorMethod: "EMAIL" as const
     } });
-    await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-password-changed:${request.id}`, kind: "PASSWORD_CHANGED", recipientEmail: current.user.email, locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" }, protectedValues: {} } });
-    await transaction.session.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: now } });
-    await transaction.securityElevation.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
-    await transaction.trustedDevice.updateMany({ where: { userId: request.userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
+    await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-password-changed:${request.id}`, kind: "PASSWORD_CHANGED", recipientEmail: replacementRequired ? current.recoveryNewEmail! : current.user.email, locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" }, protectedValues: {} } });
+    if (replacementRequired) {
+      // Notify the original inbox of a mailbox takeover without revealing the
+      // replacement address, reset token or any OTP.
+      await enqueueEmailMessageForClient(transaction, {
+        idempotencyKey: `account-recovery-old-mail-notice:${request.id}`,
+        kind: "RECOVERY_EMAIL_REBIND_NOTICE", recipientEmail: current.user.email,
+        locale: "pt-BR", payload: { publicValues: { displayName: current.user.displayName ?? "" } }
+      });
+    }
+    await transaction.session.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: consumedAt } });
+    await transaction.securityElevation.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: consumedAt } });
+    await transaction.trustedDevice.updateMany({ where: { userId: request.userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: consumedAt, rememberedUntil: null, strongVerifiedAt: null } });
     await revokeLoginChallenges(transaction, request.userId);
     await revokeUserOidcArtifactsInTransaction(transaction, request.userId);
-    if (expectedRole === "USER") {
-      // Approved USER recovery replaces the entire compromised/unknown possession
-      // state. A fresh login with the recovered password may enroll new factors.
-      await transaction.passkeyCredential.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: now } });
-      await transaction.passkeyChallenge.updateMany({ where: { userId: request.userId, consumedAt: null }, data: { consumedAt: now } });
-      await transaction.totpFactor.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED" } });
-      await transaction.recoveryCode.deleteMany({ where: { userId: request.userId } });
-    }
+    // Recovery replaces the compromised/unknown possession state for either
+    // login role. ADMIN hub-RP passkeys are also invalidated so the recovered
+    // owner must freshly enroll them with an independent admin elevation.
+    await transaction.passkeyCredential.updateMany({ where: { userId: request.userId, revokedAt: null }, data: { revokedAt: consumedAt } });
+    await transaction.passkeyChallenge.updateMany({ where: { userId: request.userId, consumedAt: null }, data: { consumedAt: consumedAt } });
+    await transaction.totpFactor.updateMany({ where: { userId: request.userId, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED" } });
+    await transaction.recoveryCode.deleteMany({ where: { userId: request.userId } });
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery consumed.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
+    // Recovery with independently verified browser-bound factors may bootstrap a
+    // single new session after all previous sessions/devices have been revoked.
+    // The caller must set the host-only HttpOnly session cookie from this token.
+    if (current.recoveryProofs.length) {
+      // Persist the exact session identity in the consumed request. The SQL
+      // consumption clock and this JS session timestamp may differ.
+      const bootstrap = await createSessionInTransaction(transaction, request.userId, consumedAt, ["recovery", ...current.recoveryProofs.map((proof) => proof.toLowerCase())]);
+      const bound = await transaction.accountRecoveryRequest.updateMany({
+        where: { id: request.id, userId: request.userId, status: "CONSUMED", bootstrapSessionId: null },
+        data: { bootstrapSessionId: bootstrap.id }
+      });
+      if (bound.count !== 1) throw new SecurityMutationError();
+      return bootstrap;
+    }
   }, { isolationLevel: "ReadCommitted" });
 }
 

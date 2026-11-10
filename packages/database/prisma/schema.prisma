@@ -43,6 +43,8 @@ enum EmailMessageKind {
   ADMIN_CREDENTIAL_CHANGED
   ELEVATION_CHANGED
   ACCOUNT_INVITATION
+  RECOVERY_EMAIL_REBIND
+  RECOVERY_EMAIL_REBIND_NOTICE
 }
 
 enum DeliveryAttemptStatus {
@@ -123,6 +125,7 @@ model User {
   securityElevations       SecurityElevation[]
   passkeyCredentials       PasskeyCredential[]
   passkeyChallenges        PasskeyChallenge[]
+  recoveryEmailRebinds     RecoveryEmailRebind[]
 }
 
 model Session {
@@ -137,6 +140,8 @@ model Session {
   revokedAt  DateTime?
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   passkeyChallenges PasskeyChallenge[]
+  recoveryEmailRebinds RecoveryEmailRebind[]
+  bootstrapRecovery AccountRecoveryRequest? @relation("RecoveryBootstrapSession")
 
   @@index([userId])
   @@index([expiresAt])
@@ -146,6 +151,7 @@ model PasskeyCredential {
   id               String    @id @default(cuid())
   userId           String
   credentialId     String    @unique
+  rpID             String    @default("portal.biel.dev.br")
   publicKey        Bytes
   counter          BigInt    @default(0)
   revision         Int       @default(0)
@@ -159,6 +165,7 @@ model PasskeyCredential {
   user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, revokedAt])
+  @@index([userId, rpID, revokedAt])
 }
 
 model PasskeyChallenge {
@@ -400,19 +407,60 @@ model AccountRecoveryRequest {
   userId             String
   emailChallengeHash String
   emailVerifiedAt    DateTime?
+  // NULL capability and empty proofs identify the legacy invitation/recovery policy.
+  recoveryProofs     String[]              @default([])
+  recoveryRole       UserRole?
+  recoveryAdminReview Boolean              @default(true)
+  recoveryBrowserHash String?
+  recoveryPasskeyVerifiedAt DateTime?
+  recoveryPasskeyCredentialId String?
+  recoveryPasskeyBindingHash String?
+  recoveryTotpVerifiedAt DateTime?
+  recoveryTotpBindingHash String?
+  recoveryTotpUsedStep Int?
+  recoveryComment    String?
+  // A verified replacement inbox is mandatory before consuming a recovery
+  // that did not prove ownership of the original email address.
+  recoveryNewEmail              String?
+  recoveryNewEmailChallengeHash String?
+  recoveryNewEmailExpiresAt     DateTime?
+  recoveryNewEmailVerifiedAt    DateTime?
   status             RecoveryRequestStatus @default(PENDING)
   purpose            RecoveryRequestPurpose @default(RECOVERY)
   expiresAt          DateTime
   reviewedByUserId   String?
+  bootstrapSessionId String? @unique
   approvedAt         DateTime?
   consumedAt         DateTime?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
   user               User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   reviewedByUser     User?                 @relation("RecoveryReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  bootstrapSession   Session?              @relation("RecoveryBootstrapSession", fields: [bootstrapSessionId], references: [id], onDelete: SetNull)
 
   @@index([userId, status])
   @@index([expiresAt])
+}
+
+// An OTP addressed solely to the new inbox, scoped to the short recovery
+// bootstrap session. A change to the account's old email invalidates it.
+model RecoveryEmailRebind {
+  id               String    @id @default(cuid())
+  userId           String
+  sessionId        String
+  role             UserRole
+  oldEmailHash     String
+  newEmail         String
+  codeHash         String
+  expiresAt        DateTime
+  consumedAt       DateTime?
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session          Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, consumedAt, revokedAt])
+  @@index([sessionId, expiresAt])
 }
 
 model AdministrativeCredential {

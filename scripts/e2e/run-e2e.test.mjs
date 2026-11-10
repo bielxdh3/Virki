@@ -124,14 +124,23 @@ test("CI runs production build/start core browser journeys after preserving the 
   assert.match(e2eJob, /Verify Node 22 and npm 10 E2E toolchain/u);
   assert.match(e2eJob, /run: npm ci/u);
   const dev = workflow.indexOf("- name: Run browser E2E");
+  const passkey = workflow.indexOf("- name: Run isolated passkey recovery browser E2E");
   const production = workflow.indexOf("- name: Run production Hub core browser E2E");
   const cleanup = workflow.indexOf("- name: Remove disposable PostgreSQL");
-  assert.ok(dev > 0 && production > dev && cleanup > production);
+  assert.ok(dev > 0 && passkey > dev && production > passkey && cleanup > production);
   const stage = workflow.slice(production, cleanup);
+  const passkeyStage = workflow.slice(passkey, production);
   const devStage = workflow.slice(dev, production);
   assert.doesNotMatch(devStage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must be able to read the disposable cleanup fixture");
   assert.match(stage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must remove its temporary credential");
   assert.match(stage, /VIRKI_E2E_HUB_MODE: production/u);
+  assert.match(passkeyStage, /VIRKI_E2E_PASSKEYS: "true"/u);
+  assert.match(passkeyStage, /VIRKI_E2E_ADMIN_PASSKEYS: "true"/u);
+  assert.match(passkeyStage, /VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"/u);
+  assert.match(passkeyStage, /npm run test:e2e -- --grep 'PASSKEY_\|USER virtual authenticator'/u,
+    "mandatory opt-in must run recovery/passkey E2E and the real USER credential-inventory lifecycle");
+  assert.doesNotMatch(stage, /VIRKI_E2E_ADMIN_PASSKEYS: "true"/u,
+    "privileged test-only passkey opt-in must never leak into the production-mode browser stage");
   assert.match(stage, /VIRKI_HUB_HOSTNAME: hub\.localhost/u);
   assert.match(stage, /VIRKI_PORTAL_HOSTNAME: portal\.localhost/u);
   assert.match(stage, /VIRKI_OIDC_PROXY_URL: http:\/\/127\.0\.0\.1:3003/u);

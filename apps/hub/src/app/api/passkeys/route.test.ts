@@ -4,6 +4,28 @@ import { prisma } from "@virki/database";
 import { hashPassword } from "@virki/auth";
 import { POST } from "./route";
 
+test("ADMIN passkey login remains blocked and forged portal-host enrollment cannot reach hub", async (t) => {
+  const oldUser = process.env.VIRKI_PASSKEYS_ENABLED;
+  const oldAdmin = process.env.VIRKI_ADMIN_PASSKEYS_ENABLED;
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "true";
+  t.after(() => {
+    if (oldUser === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = oldUser;
+    if (oldAdmin === undefined) delete process.env.VIRKI_ADMIN_PASSKEYS_ENABLED; else process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = oldAdmin;
+  });
+  async function request(host: string, action: string, origin = `https://${host}`) {
+    return POST(new Request(`https://${host}/api/passkeys`, {
+      method: "POST", headers: { host, origin, "content-type": "application/json" }, body: JSON.stringify({ action })
+    }));
+  }
+  assert.equal((await request("hub.biel.dev.br", "login-options")).status, 404, "portal login action cannot run on hub");
+  assert.equal((await request("hub.biel.dev.br", "login-verify")).status, 404, "hub never issues passkey login sessions");
+  assert.equal((await request("portal.biel.dev.br", "admin-register-options")).status, 404, "portal cannot enroll ADMIN RP");
+  assert.equal((await request("evil.hub.biel.dev.br", "admin-register-options")).status, 404, "spoofed hub host rejected");
+  process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "false";
+  assert.equal((await request("hub.biel.dev.br", "admin-register-options")).status, 404, "ADMIN flag closed before session/database access");
+});
+
 test("rejected passkey login and management ceremonies generate sanitized audit events outside failed transactions", async (t) => {
   const beforeFlag = process.env.VIRKI_PASSKEYS_ENABLED;
   process.env.VIRKI_PASSKEYS_ENABLED = "true";

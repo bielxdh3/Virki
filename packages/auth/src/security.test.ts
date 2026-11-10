@@ -213,18 +213,18 @@ test("security counts exclude used recovery codes and devices beyond the trust l
 
 test("administrator recovery queue excludes requests at or past expiry", () => {
   const now = new Date("2026-10-02T12:00:00.000Z");
-
-  assert.deepEqual(getPendingAccountRecoveryQueueWhere(now), {
-    status: "PENDING",
-    emailVerifiedAt: { not: null },
-    expiresAt: { gt: now },
-    user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE" }
-  });
-  assert.deepEqual(getPendingAccountRecoveryQueueWhere(now, "admin-1"), {
-    status: "PENDING",
-    emailVerifiedAt: { not: null },
-    expiresAt: { gt: now },
-    user: { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", id: { not: "admin-1" } }
+  const predicate = getPendingAccountRecoveryQueueWhere(now);
+  assert.equal(predicate.status, "PENDING");
+  assert.deepEqual(predicate.expiresAt, { gt: now });
+  assert.deepEqual(predicate.OR, [
+    { recoveryProofs: { isEmpty: true }, emailVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "EMAIL" }, emailVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "TOTP" }, recoveryTotpVerifiedAt: { not: null } },
+    { recoveryAdminReview: true, recoveryProofs: { has: "PASSKEY" }, recoveryPasskeyVerifiedAt: { not: null } }
+  ]);
+  assert.deepEqual(predicate.user, { role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE" });
+  assert.deepEqual(getPendingAccountRecoveryQueueWhere(now, "admin-1").user, {
+    role: { in: ["USER", "ADMIN"] }, isActive: true, accountStatus: "ACTIVE", id: { not: "admin-1" }
   });
 });
 
@@ -271,12 +271,13 @@ test("recovery state transitions serialize on the active account row", async () 
   assert.deepEqual(values, ["admin-a", "ADMIN"]);
 });
 
-test("approved USER password recovery atomically invalidates old passkeys, TOTP and recovery codes", async (context) => {
+for (const role of ["USER", "ADMIN"] as const) {
+test(`approved ${role} password recovery atomically invalidates old passkeys, TOTP and recovery codes`, async (context) => {
   type MutationArgs = { data?: Record<string, unknown> };
-  const userId = "user-recovery-1";
+  const userId = `${role.toLowerCase()}-recovery-1`;
   const requestId = "recovery-request-1";
   const requestKey = "R".repeat(32);
-  const email = "recovery-user@example.test";
+  const email = `recovery-${role.toLowerCase()}@example.test`;
   const emailNormalized = email.toLowerCase();
   const now = new Date("2026-10-05T12:00:00.000Z");
   const totpFactor = { id: "totp-factor-1", userId, status: "ACTIVE", secretCiphertext: "encrypted-test-factor", keyVersion: 1, lastUsedStep: 123 };
@@ -288,7 +289,7 @@ test("approved USER password recovery atomically invalidates old passkeys, TOTP 
     email,
     emailNormalized,
     displayName: "Recovery user",
-    role: "USER",
+    role,
     isActive: true,
     accountStatus: "ACTIVE",
     secondFactorMethod: "TOTP",
@@ -301,6 +302,10 @@ test("approved USER password recovery atomically invalidates old passkeys, TOTP 
     userId,
     emailAddressHash: createHash("sha256").update(emailNormalized, "utf8").digest("hex"),
     status: "APPROVED",
+    recoveryProofs: [],
+    recoveryBrowserHash: null,
+    recoveryAdminReview: true,
+    emailVerifiedAt: now,
     expiresAt: new Date(now.getTime() + 60_000),
     user
   };
@@ -313,7 +318,13 @@ test("approved USER password recovery atomically invalidates old passkeys, TOTP 
   let auditEvent = "";
 
   const transaction = {
-    $queryRaw: async (query: TemplateStringsArray) => query.join("").includes('FROM "User"') ? [{ id: userId }] : [],
+    $queryRaw: async (query: TemplateStringsArray) =>
+      query.join("").includes('FROM "User"') || query.join("").includes('FROM "AccountRecoveryRequest"')
+        ? [{ id: userId }] : [],
+    $executeRaw: async () => {
+      requestStatus = "CONSUMED";
+      return 1;
+    },
     loginRateLimit: {
       findUnique: async () => null,
       create: async () => ({})
@@ -371,20 +382,26 @@ test("approved USER password recovery atomically invalidates old passkeys, TOTP 
   };
 
   const recoveryRequestDelegate = prisma.accountRecoveryRequest;
+  const adminCredentialDelegate = prisma.administrativeCredential;
   const originalFindUnique = Object.getOwnPropertyDescriptor(recoveryRequestDelegate, "findUnique");
+  const originalAdminFindUnique = Object.getOwnPropertyDescriptor(adminCredentialDelegate, "findUnique");
   const originalTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
-  assert.ok(originalFindUnique && originalTransaction);
+  assert.ok(originalFindUnique && originalAdminFindUnique && originalTransaction);
   Object.defineProperty(recoveryRequestDelegate, "findUnique", { ...originalFindUnique, value: async () => request });
+  // Normal ADMIN password recovery may not reuse the separately protected
+  // administrative credential; this fixture models no active admin credential.
+  Object.defineProperty(adminCredentialDelegate, "findUnique", { ...originalAdminFindUnique, value: async () => null });
   Object.defineProperty(prisma, "$transaction", {
     ...originalTransaction,
     value: async (operation: (value: never) => Promise<unknown>) => operation(transaction as never)
   });
   context.after(() => {
     Object.defineProperty(recoveryRequestDelegate, "findUnique", originalFindUnique);
+    Object.defineProperty(adminCredentialDelegate, "findUnique", originalAdminFindUnique);
     Object.defineProperty(prisma, "$transaction", originalTransaction);
   });
 
-  await consumeApprovedAccountRecovery(requestId, requestKey, "new password for recovery", now);
+  await consumeApprovedAccountRecovery(requestId, requestKey, "new password for recovery", now, role);
 
   assert.equal(requestStatus, "CONSUMED");
   assert.notEqual(passwordHash, "old-password-hash");
@@ -399,6 +416,7 @@ test("approved USER password recovery atomically invalidates old passkeys, TOTP 
   assert.deepEqual(recoveryCodes, []);
   assert.equal(auditEvent, "ACCOUNT_RECOVERY_CONSUMED");
 });
+}
 
 test("login verification locks the account under the role allowed by its current surface", async () => {
   let query = "";
