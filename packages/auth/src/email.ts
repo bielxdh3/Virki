@@ -142,7 +142,10 @@ export function getEmailProcessingLeaseExpiresAt(now: Date): Date {
   return new Date(now.getTime() + EMAIL_PROCESSING_LEASE_MS);
 }
 
-export async function claimNextEmailMessage(now = new Date(), database: typeof prisma = prisma) {
+// Distinguish an actually empty outbox from a stale item that this worker
+// repaired, or an optimistic claim lost to another worker. Only the first
+// condition warrants the expensive idle poll delay.
+async function claimNextEmailMessageOutcome(now: Date, database: typeof prisma) {
   return database.$transaction(async (transaction) => {
     const candidate = await transaction.emailOutboxMessage.findFirst({
       where: {
@@ -156,7 +159,7 @@ export async function claimNextEmailMessage(now = new Date(), database: typeof p
     });
 
     if (!candidate) {
-      return null;
+      return { kind: "empty" } as const;
     }
 
     const interrupted = candidate.status === "PROCESSING";
@@ -185,7 +188,7 @@ export async function claimNextEmailMessage(now = new Date(), database: typeof p
     });
 
     if (claimed.count !== 1) {
-      return null;
+      return { kind: "contended" } as const;
     }
 
     if (interrupted && candidate.attemptCount > 0) {
@@ -195,24 +198,33 @@ export async function claimNextEmailMessage(now = new Date(), database: typeof p
       });
     }
 
-    if (exhausted) return null;
+    if (exhausted) return { kind: "reconciled" } as const;
 
-    return { ...candidate, status: "PROCESSING" as const, attemptCount: candidate.attemptCount + 1,
+    return { kind: "claimed" as const, message: {
+      ...candidate, status: "PROCESSING" as const, attemptCount: candidate.attemptCount + 1,
       pendingSmtpHeaderMessageId: nextSmtpHeaderMessageId ?? null,
-      processingLeaseExpiresAt: getEmailProcessingLeaseExpiresAt(now) };
+      processingLeaseExpiresAt: getEmailProcessingLeaseExpiresAt(now)
+    } };
   });
+}
+
+// Preserve the public claim API used by callers and existing recovery tests.
+export async function claimNextEmailMessage(now = new Date(), database: typeof prisma = prisma) {
+  const outcome = await claimNextEmailMessageOutcome(now, database);
+  return outcome.kind === "claimed" ? outcome.message : null;
 }
 
 export async function processNextEmailMessage(
   transport: EmailTransport,
   now = new Date(),
   database: typeof prisma = prisma
-): Promise<"idle" | "sent" | "retryable-failure" | "terminal-failure"> {
+): Promise<"idle" | "reconciled" | "contended" | "sent" | "retryable-failure" | "terminal-failure"> {
   const processingStartedAtMs = Date.now();
-  const message = await claimNextEmailMessage(now, database);
-  if (!message) {
-    return "idle";
-  }
+  const claim = await claimNextEmailMessageOutcome(now, database);
+  if (claim.kind === "empty") return "idle";
+  if (claim.kind === "contended") return "contended";
+  if (claim.kind === "reconciled") return "reconciled";
+  const message = claim.message;
 
   let sent = false;
   let smtpHeaderMessageId: string | undefined;

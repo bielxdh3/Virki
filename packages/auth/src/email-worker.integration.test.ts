@@ -45,6 +45,80 @@ test("processing messages with no lease are reclaimed once and stale finalizers 
   assert.equal(current.status, "PROCESSING");
   assert.equal(current.attemptCount, 2);
   assert.ok(current.processingLeaseExpiresAt && current.processingLeaseExpiresAt > now);
+  // This deliberately stale synthetic row must not pollute later, unrelated
+  // benchmark batches. Delete ONLY the fixture created above in this DB.
+  await prisma.$transaction([
+    prisma.emailDeliveryAttempt.deleteMany({ where: { messageId: message.id } }),
+    prisma.emailOutboxMessage.delete({ where: { id: message.id } })
+  ]);
+});
+
+// Global outbox scheduling is intentional in production. This precise-order
+// physical regression needs a freshly created exclusive disposable DB, not
+// the shared multi-file DB used by the generic integration runner.
+const isolatedWorkerOptions = {
+  skip: integrationOptions.skip || (process.env.VIRKI_EMAIL_WORKER_DEDICATED_DB === "confirmed"
+    ? false : "requires an exclusive, newly migrated disposable worker database")
+};
+
+test("exhausted head rows are reconciled without an idle pause before a queued OTP", isolatedWorkerOptions, async () => {
+  const now = new Date();
+  const recipient = uniqueEmail("worker-after-exhausted");
+  const eligibleBefore = await prisma.emailOutboxMessage.count({
+    where: { OR: [
+      { status: { in: ["QUEUED", "RETRYABLE_FAILURE"] }, availableAt: { lte: now } },
+      { status: "PROCESSING", processingLeaseExpiresAt: { lte: now } },
+      { status: "PROCESSING", processingLeaseExpiresAt: null }
+    ] }
+  });
+  assert.equal(eligibleBefore, 0, "this scheduling test requires a new dedicated disposable outbox");
+
+  const exhaustedIds: string[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    const row = await prisma.emailOutboxMessage.create({
+      data: {
+        idempotencyKey: randomUUID(), kind: "EMAIL_TWO_FACTOR",
+        recipientEmail: uniqueEmail(`exhausted-${i}`), locale: "en",
+        payload: { publicValues: {}, protectedValues: {} },
+        status: "PROCESSING", attemptCount: 5, availableAt: new Date(0),
+        processingLeaseExpiresAt: new Date(now.getTime() - 60_000),
+        createdAt: new Date(i), updatedAt: new Date(i)
+      }, select: { id: true }
+    });
+    exhaustedIds.push(row.id);
+  }
+  await enqueueEmailMessage({ idempotencyKey: randomUUID(), kind: "EMAIL_TWO_FACTOR",
+    recipientEmail: recipient, locale: "en",
+    payload: { publicValues: {}, protectedValues: { code: "000123" } } });
+
+  const { sent, transport } = createDeterministicTestTransport();
+  const outcomes: string[] = [];
+  const sleeps: number[] = [];
+  await runEmailWorkerLoop({
+    processNext: async () => {
+      const outcome = await processNextEmailMessage(transport);
+      outcomes.push(outcome);
+      return outcome;
+    },
+    sleep: async (ms) => { sleeps.push(ms); },
+    isStopping: () => sent.some((item) => item.to === recipient) || outcomes.length >= 12,
+    sendIntervalMs: 0
+  });
+
+  assert.deepEqual(outcomes, ["reconciled", "reconciled", "reconciled", "sent"],
+    "three exhausted rows must not cause three false idle polls before the real OTP");
+  assert.deepEqual(sleeps, [], "no idle, retry or failure delay is justified by successful reconciliation");
+  assert.deepEqual(sent.map((item) => item.to), [recipient]);
+  const terminalized = await prisma.emailOutboxMessage.findMany({
+    where: { id: { in: exhaustedIds } }, select: { status: true, attemptCount: true,
+      deliveryAttempts: { select: { attempt: true, status: true, errorCode: true } } }
+  });
+  assert.equal(terminalized.length, 3);
+  for (const row of terminalized) {
+    assert.equal(row.status, "TERMINAL_FAILURE");
+    assert.equal(row.attemptCount, 5);
+    assert.deepEqual(row.deliveryAttempts, [{ attempt: 5, status: "FAILED", errorCode: "worker-interrupted" }]);
+  }
 });
 
 async function drainBatch(count: number) {

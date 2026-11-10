@@ -467,10 +467,31 @@ test("a stale final attempt is terminalized without sending again", async () => 
   });
   const sent = createDeterministicTestTransport();
 
-  assert.equal(await processNextEmailMessage(sent.transport, now, stale.client as never), "idle");
+  assert.equal(await processNextEmailMessage(sent.transport, now, stale.client as never), "reconciled");
   assert.equal(sent.sent.length, 0);
   assert.equal(stale.message().status, "TERMINAL_FAILURE");
   assert.deepEqual(stale.attempts(), [{ messageId: "mail-exhausted", attempt: 5, status: "FAILED", errorCode: "worker-interrupted", attemptedAt: now }]);
+});
+
+test("a lost compare-and-swap claim is contention, not an empty outbox or a send", async () => {
+  await withTestOutboxKey(async () => {
+    const now = new Date("2026-11-10T15:25:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-lost-claim", idempotencyKey: "mail-lost-claim",
+      kind: "EMAIL_TWO_FACTOR", recipientEmail: "owner@example.invalid", locale: "en",
+      payload: encryptedTestEmailPayload(), status: "QUEUED", attemptCount: 0,
+      availableAt: new Date(0), sentAt: null, terminalFailedAt: null,
+      processingLeaseExpiresAt: null, createdAt: new Date(0), updatedAt: new Date(0)
+    }, { loseClaim: true });
+    const sent = createDeterministicTestTransport();
+    assert.equal(await processNextEmailMessage(sent.transport, now, queued.client as never), "contended");
+    assert.equal((await claimNextEmailMessage(now, queued.client as never)), null,
+      "direct claim callers retain their previous null-on-lost-CAS API");
+    assert.equal(sent.sent.length, 0);
+    assert.equal(queued.message().status, "QUEUED");
+    assert.equal(queued.message().attemptCount, 0);
+    assert.deepEqual(queued.attempts(), []);
+  });
 });
 
 test("a fresh processing lease is not reclaimed", async () => {
@@ -626,7 +647,7 @@ test("retry backoff starts after a failed transport attempt completes", async ()
   });
 });
 
-function createMockOutboxDatabase(initialMessage: Record<string, unknown>, options: { failAttemptStatus?: string } = {}) {
+function createMockOutboxDatabase(initialMessage: Record<string, unknown>, options: { failAttemptStatus?: string; loseClaim?: boolean } = {}) {
   let message = structuredClone(initialMessage) as Record<string, unknown>;
   let attemptRows: Array<Record<string, unknown>> = [];
   const transaction = {
@@ -651,6 +672,7 @@ function createMockOutboxDatabase(initialMessage: Record<string, unknown>, optio
         return eligible ? structuredClone(message) : null;
       },
       async updateMany({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) {
+        if (options.loseClaim) return { count: 0 };
         const leaseWhere = where.processingLeaseExpiresAt as { lte?: Date } | undefined;
         const lease = message.processingLeaseExpiresAt as Date | null;
         const leaseMatches = where.processingLeaseExpiresAt === null
