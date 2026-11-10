@@ -9,10 +9,12 @@ import { fileURLToPath } from "node:url";
 import { createAdmittedOidcDockerClient } from "../lib/disposable-docker-session.mjs";
 import { assertPrivateEvidenceFile, ensurePrivateEvidenceDirectory,
   ownerEvidenceDirectory } from "../lib/disposable-docker-receipt-security.mjs";
-import { RECOVERY_PG18_SUITES, requireExactRecoveryPg18Tap } from "./recovery-pg18-contract.mjs";
+import { RECOVERY_PG18_IMAGE, RECOVERY_PG18_SUITES, privateRecoveryDockerAdmissionEnvironment,
+  privateRecoveryTestEnvironment, requireExactRecoveryPg18Tap, requireRecoveryPg18ContainerImage,
+  requireRecoveryPg18ImagePlatform,
+  verifiedRecoveryPg18LocalImage } from "./recovery-pg18-contract.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const image = "postgres:18.6-alpine3.24"; // never modify the existing PG17 CI/production image pin
 const label = "org.virki.recovery-pg18-disposable-owner";
 const hexCid = /^[a-f0-9]{64}$/u;
 const secret = () => randomBytes(32).toString("hex");
@@ -143,9 +145,21 @@ function runSuite(suite) {
         throw new Error("Private PG18 initialization script is missing or aliased.");
       }
     }
-    dockerClient = createAdmittedOidcDockerClient();
+    dockerClient = createAdmittedOidcDockerClient({ env: privateRecoveryDockerAdmissionEnvironment() });
     activeCleanup = cleanup;
-    // Receipt intent is durable BEFORE the first possible Docker mutation.
+    // Pin the OCI index digest, then independently check the locally resolved
+    // image ID and RepoDigests. Never trust the mutable tag or `docker run`
+    // success alone as proof of which image the daemon actually selected.
+    record("IMAGE_PULL_PENDING");
+    docker(["pull", "--quiet", RECOVERY_PG18_IMAGE], 180_000);
+    const verifiedImageId = verifiedRecoveryPg18LocalImage(docker([
+      "image", "inspect", "--format", "{{.Id}}|{{json .RepoDigests}}", RECOVERY_PG18_IMAGE
+    ]));
+    requireRecoveryPg18ImagePlatform(docker([
+      "image", "inspect", "--format", "{{.Os}}|{{.Architecture}}", RECOVERY_PG18_IMAGE
+    ]));
+    record("IMAGE_DIGEST_VERIFIED");
+    // A separate durable RUN_PENDING receipt precedes container creation.
     record("RUN_PENDING");
     started = true;
     uncertainStart = true;
@@ -163,12 +177,15 @@ function runSuite(suite) {
       "--env", `VIRKI_E2E_DATABASE_PASSWORD=${passwords.test}`,
       "--mount", `type=bind,source=${initRoles},target=/docker-entrypoint-initdb.d/10-virki-database-roles.sh,readonly`,
       "--mount", `type=bind,source=${initTestRole},target=/docker-entrypoint-initdb.d/20-virki-e2e-runtime-test-role.sh,readonly`,
-      image
+      RECOVERY_PG18_IMAGE
     ], 120_000);
     if (!hexCid.test(created)) throw new Error("Unverified private PG18 Docker container ID.");
     containerId = created;
     record("RUN_ACKNOWLEDGED", containerId);
     uncertainStart = false;
+    requireRecoveryPg18ContainerImage(docker([
+      "inspect", "--format", "{{.Image}}|{{.Config.Image}}", containerId
+    ]), verifiedImageId);
     let healthy = false;
     for (let i = 0; i < 90; i++) {
       const status = docker(["inspect", "--format", "{{.State.Health.Status}}", containerId]);
@@ -188,16 +205,9 @@ function runSuite(suite) {
     const port = mapped.slice("127.0.0.1:".length);
     const url = (role, password) => `postgresql://${role}:${password}@127.0.0.1:${port}/${database}?schema=public`;
     const testUrl = url("virki_runtime_test", passwords.test);
-    const env = {
-      // Explicitly omit any ambient external SMTP or mail-delivery config.
-      ...Object.fromEntries(Object.entries(dockerClient.subprocessEnv).filter(([key]) =>
-        !/^(?:SMTP_|VIRKI_SMTP_|MAIL_|VIRKI_MAIL_|SENDGRID_|RESEND_|VIRKI_EMAIL_SMTP_|VIRKI_EMAIL_TRANSPORT$)/iu.test(key))),
-      NODE_ENV: "test", VIRKI_INTEGRATION_ENABLED: "true", VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
-      DATABASE_URL: testUrl, VIRKI_INTEGRATION_DATABASE_URL: testUrl,
-      MIGRATION_DATABASE_URL: url("virki_migrator", passwords.migrator),
-      VIRKI_PORTAL_URL: "http://localhost:3000", VIRKI_HUB_URL: "http://localhost:3001",
-      VIRKI_OIDC_ADAPTER_KEY: secret()
-    };
+    const env = privateRecoveryTestEnvironment({
+      databaseUrl: testUrl, migrationUrl: url("virki_migrator", passwords.migrator), secret
+    });
     const migrate = spawnSync(process.execPath,
       [path.join(root, "packages", "database", "scripts", "prisma-migrate.mjs"), "deploy"],
       { cwd: root, env, encoding: "utf8", windowsHide: true, timeout: 180_000, maxBuffer: 2 * 1024 * 1024 });

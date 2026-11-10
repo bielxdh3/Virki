@@ -5,10 +5,89 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RECOVERY_PG18_SUITES, requireExactRecoveryPg18Tap } from "./recovery-pg18-contract.mjs";
+import { RECOVERY_PG18_IMAGE, RECOVERY_PG18_IMAGE_DIGEST, RECOVERY_PG18_SUITES,
+  privateRecoveryDockerAdmissionEnvironment, privateRecoveryTestEnvironment,
+  requireExactRecoveryPg18Tap, requireRecoveryPg18ContainerImage, requireRecoveryPg18ImagePlatform,
+  verifiedRecoveryPg18LocalImage } from "./recovery-pg18-contract.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
+const verifiedImageId = `sha256:${"d".repeat(64)}`;
+
+test("PG18 image is digest-pinned and each independent local/container identity must match", () => {
+  assert.equal(RECOVERY_PG18_IMAGE, `postgres:18.6-alpine3.24@${RECOVERY_PG18_IMAGE_DIGEST}`);
+  assert.equal(RECOVERY_PG18_IMAGE_DIGEST,
+    "sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395");
+  assert.match(RECOVERY_PG18_IMAGE_DIGEST, /^sha256:[a-f0-9]{64}$/u);
+  requireRecoveryPg18ImagePlatform("linux|amd64");
+  for (const invalid of ["linux|arm64", "windows|amd64", "", "linux|amd64\nlinux|arm64"]) {
+    assert.throws(() => requireRecoveryPg18ImagePlatform(invalid), /Private PG18/u);
+  }
+  const observed = `${verifiedImageId}|${JSON.stringify([`postgres@${RECOVERY_PG18_IMAGE_DIGEST}`])}`;
+  assert.equal(verifiedRecoveryPg18LocalImage(observed), verifiedImageId);
+  requireRecoveryPg18ContainerImage(`${verifiedImageId}|${RECOVERY_PG18_IMAGE}`, verifiedImageId);
+  for (const forged of [
+    observed.replace(RECOVERY_PG18_IMAGE_DIGEST, `sha256:${"f".repeat(64)}`),
+    `${verifiedImageId}|[]`, `${verifiedImageId}|not-json`,
+    `${verifiedImageId}|${JSON.stringify([`attacker/postgres@${RECOVERY_PG18_IMAGE_DIGEST}`])}`,
+    `${"d".repeat(64)}|${JSON.stringify([`postgres@${RECOVERY_PG18_IMAGE_DIGEST}`])}`
+  ]) assert.throws(() => verifiedRecoveryPg18LocalImage(forged), /Private PG18/u);
+  for (const forged of [
+    `sha256:${"f".repeat(64)}|${RECOVERY_PG18_IMAGE}`,
+    `${verifiedImageId}|postgres:18.6-alpine3.24`,
+    `${verifiedImageId}|postgres:latest`,
+    `${verifiedImageId}|postgres:18.6-alpine3.24@sha256:${"f".repeat(64)}`
+  ]) assert.throws(() => requireRecoveryPg18ContainerImage(forged, verifiedImageId), /Private PG18/u);
+});
+
+test("test children use strict host allowlist and independent disposable crypto, never ambient secrets or NODE_OPTIONS", () => {
+  const ambient = {
+    PATH: "/temporary/node/bin", HOME: "/fake/home", LANG: "C.UTF-8",
+    NODE_OPTIONS: "--require=/fake/prod-preload.js", NODE_PATH: "/fake/prod-modules",
+    DATABASE_URL: "postgresql://production.invalid/main", MIGRATION_DATABASE_URL: "postgresql://production.invalid/main",
+    VIRKI_TOTP_ENCRYPTION_KEY: "a".repeat(64), VIRKI_EMAIL_OUTBOX_KEY: "b".repeat(64),
+    VIRKI_OIDC_ADAPTER_KEY: "c".repeat(64), VIRKI_PRODUCTION_DB_PASSWORD: "prod-secret",
+    VIRKI_EMAIL_TRANSPORT: "smtp", VIRKI_EMAIL_SMTP_PASSWORD: "smtp-secret",
+    GITHUB_TOKEN: "gh-secret", ACTIONS_RUNTIME_TOKEN: "action-secret",
+    DOCKER_HOST: "tcp://production.invalid:2376", DOCKER_CONTEXT: "production",
+    GITHUB_ACTIONS: "true", CI: "true", RUNNER_OS: "Linux", RUNNER_ENVIRONMENT: "github-hosted",
+    VIRKI_BUILD_REVISION: "e".repeat(40), VIRKI_BUILD_ARCH: "amd64", RUNNER_ARCH: "X64"
+  };
+  const admission = privateRecoveryDockerAdmissionEnvironment(ambient);
+  assert.deepEqual(Object.keys(admission).sort(), ["PATH", "HOME", "LANG",
+    "GITHUB_ACTIONS", "CI", "RUNNER_OS", "RUNNER_ENVIRONMENT",
+    "VIRKI_BUILD_REVISION", "VIRKI_BUILD_ARCH", "RUNNER_ARCH"].sort());
+  const a = privateRecoveryTestEnvironment({
+    source: ambient, databaseUrl: "postgresql://virki_runtime_test@127.0.0.1:15432/virki_w11_admin_pairs_fake",
+    migrationUrl: "postgresql://virki_migrator@127.0.0.1:15432/virki_w11_admin_pairs_fake",
+    secret: () => randomSecretForContract()
+  });
+  const b = privateRecoveryTestEnvironment({
+    source: ambient, databaseUrl: "postgresql://virki_runtime_test@127.0.0.1:15433/virki_w2_assisted_fake",
+    migrationUrl: "postgresql://virki_migrator@127.0.0.1:15433/virki_w2_assisted_fake",
+    secret: () => randomSecretForContract()
+  });
+  for (const env of [a, b]) {
+    assert.deepEqual(Object.keys(env).sort(), ["PATH", "HOME", "LANG", "NODE_ENV", "CI",
+      "VIRKI_INTEGRATION_ENABLED", "VIRKI_CORE_TEST_DATABASE_CONFIRM", "DATABASE_URL",
+      "VIRKI_INTEGRATION_DATABASE_URL", "MIGRATION_DATABASE_URL", "VIRKI_PORTAL_URL",
+      "VIRKI_HUB_URL", "VIRKI_OIDC_ADAPTER_KEY", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY"].sort());
+    for (const key of ["VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY"]) {
+      assert.match(env[key], /^[a-f0-9]{64}$/u);
+      assert.notEqual(env[key], ambient[key]);
+    }
+    assert.notEqual(env.VIRKI_OIDC_ADAPTER_KEY, env.VIRKI_TOTP_ENCRYPTION_KEY);
+    assert.notEqual(env.VIRKI_TOTP_ENCRYPTION_KEY, env.VIRKI_EMAIL_OUTBOX_KEY);
+    assert.equal(env.NODE_ENV, "test");
+  }
+  assert.notEqual(a.VIRKI_TOTP_ENCRYPTION_KEY, b.VIRKI_TOTP_ENCRYPTION_KEY);
+  assert.notEqual(a.VIRKI_EMAIL_OUTBOX_KEY, b.VIRKI_EMAIL_OUTBOX_KEY);
+});
+
+let contractSecretCounter = 0;
+function randomSecretForContract() {
+  return (++contractSecretCounter).toString(16).padStart(64, "0");
+}
 
 function tap(suite) {
   return ["TAP version 13", ...suite.names.map((name, i) => `ok ${i + 1} - ${name}`),
@@ -101,11 +180,26 @@ function mockRun(scenario) {
     import { RECOVERY_PG18_SUITES } from "./recovery-pg18-contract.mjs";
     export function spawnSync(_exec, args, options) {
       const scenario = process.env.VIRKI_FAKE_CASE;
-      if (options.env.VIRKI_EMAIL_TRANSPORT || options.env.VIRKI_EMAIL_SMTP_HOST ||
-          options.env.VIRKI_EMAIL_SMTP_PASSWORD || !options.env.DATABASE_URL?.startsWith("postgresql://virki_runtime_test:") ||
+      const approved = ["PATH", "Path", "SystemRoot", "WINDIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+        "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "NODE_ENV", "CI", "VIRKI_INTEGRATION_ENABLED",
+        "VIRKI_CORE_TEST_DATABASE_CONFIRM", "DATABASE_URL", "VIRKI_INTEGRATION_DATABASE_URL",
+        "MIGRATION_DATABASE_URL", "VIRKI_PORTAL_URL", "VIRKI_HUB_URL", "VIRKI_OIDC_ADAPTER_KEY",
+        "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY"];
+      if (Object.keys(options.env).some(key => !approved.includes(key))) throw Error("Ambient keys crossed child boundary");
+      if (options.env.NODE_OPTIONS || options.env.NODE_PATH || options.env.GITHUB_TOKEN ||
+          options.env.VIRKI_PRODUCTION_DB_PASSWORD || options.env.VIRKI_EMAIL_TRANSPORT ||
+          options.env.VIRKI_EMAIL_SMTP_HOST || options.env.VIRKI_EMAIL_SMTP_PASSWORD ||
+          !options.env.DATABASE_URL?.startsWith("postgresql://virki_runtime_test:") ||
           !options.env.MIGRATION_DATABASE_URL?.startsWith("postgresql://virki_migrator:") ||
           options.env.VIRKI_INTEGRATION_DATABASE_URL !== options.env.DATABASE_URL ||
           options.env.NODE_ENV !== "test") throw Error("DB/SMTP environment not segregated");
+      for (const key of ["VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY"]) {
+        if (!/^[a-f0-9]{64}$/.test(options.env[key]) || options.env[key] === process.env[key]) {
+          throw Error("Production crypto inherited by child");
+        }
+      }
+      if (new Set([options.env.VIRKI_TOTP_ENCRYPTION_KEY, options.env.VIRKI_EMAIL_OUTBOX_KEY,
+        options.env.VIRKI_OIDC_ADAPTER_KEY]).size !== 3) throw Error("Test crypto keys must be distinct");
       if (args[0].endsWith("prisma-migrate.mjs")) return { status: scenario === "migration-fail" ? 1 : 0, stdout: "", stderr: "" };
       if (!args[0].endsWith("integration/run.mjs") && !args[0].endsWith("integration\\\\run.mjs")) throw Error("Unexpected subprocess");
       const suite = RECOVERY_PG18_SUITES.find(s => s.file === args[1]);
@@ -126,20 +220,43 @@ function mockRun(scenario) {
   `);
   writeFileSync(path.join(lib, "fake-docker.mjs"), `
     import { appendFileSync } from "node:fs";
+    import { RECOVERY_PG18_IMAGE, RECOVERY_PG18_IMAGE_DIGEST } from "../integration/recovery-pg18-contract.mjs";
     const containers = new Map();
+    const imageId = "sha256:" + "d".repeat(64);
+    const repoDigest = "postgres@" + RECOVERY_PG18_IMAGE_DIGEST;
     let count = 0;
     function log(data) { appendFileSync(process.env.VIRKI_FAKE_LOG, JSON.stringify(data) + "\\n"); }
     const ok = (stdout = "") => ({ status: 0, stdout, stderr: "" });
     const absent = target => ({ status: 1, stdout: "", stderr: "Error: No such object: " + target + "\\n" });
-    export function createAdmittedOidcDockerClient() {
+    export function createAdmittedOidcDockerClient(options) {
+      if (Object.keys(options.env).some(key => ["NODE_OPTIONS", "NODE_PATH", "DATABASE_URL",
+        "MIGRATION_DATABASE_URL", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY",
+        "GITHUB_TOKEN", "DOCKER_HOST", "DOCKER_CONTEXT"].includes(key))) {
+        throw Error("Docker admission inherited unsafe secret");
+      }
       return { subprocessEnv: {
         VIRKI_EMAIL_TRANSPORT: "smtp",
         VIRKI_EMAIL_SMTP_HOST: "production.example.invalid",
         VIRKI_EMAIL_SMTP_PASSWORD: "untrusted-secret",
+        NODE_OPTIONS: "--throw-deprecation",
+        GITHUB_TOKEN: "untrusted-github-token",
+        VIRKI_TOTP_ENCRYPTION_KEY: "a".repeat(64),
+        VIRKI_EMAIL_OUTBOX_KEY: "b".repeat(64),
         DATABASE_URL: "postgresql://untrusted.example.invalid/other",
         MIGRATION_DATABASE_URL: "postgresql://untrusted.example.invalid/other"
       }, invoke(args) {
         const action = args[0], scenario = process.env.VIRKI_FAKE_CASE;
+        if (action === "pull") {
+          log({ action, image: args.at(-1) });
+          return scenario === "pull-error" ? { status: 1, stderr: "pull rejected" } : ok("immutable digest pulled");
+        }
+        if (action === "image" && args[1] === "inspect") {
+          log({ action: "image-inspect" });
+          if (args.includes("{{.Os}}|{{.Architecture}}")) return ok(scenario === "bad-platform" ? "linux|arm64" : "linux|amd64");
+          const id = scenario === "bad-image-id" ? "invalid-image-id" : imageId;
+          const digest = scenario === "bad-image-digest" ? "postgres@sha256:" + "f".repeat(64) : repoDigest;
+          return ok(id + "|" + JSON.stringify([digest]));
+        }
         if (action === "run") {
           count++;
           const cid = (count === 1 ? "a" : "b").repeat(64);
@@ -157,6 +274,11 @@ function mockRun(scenario) {
             volume: args.some(x => x === "--volume") });
           return scenario === "lost-ack" ? { status: 1, stderr: "lost ACK" } :
             scenario === "bad-cid" ? ok("fake-cid") : ok(cid);
+        }
+        if (action === "inspect" && args.includes("{{.Image}}|{{.Config.Image}}")) {
+          const id = scenario === "bad-container-image" ? "sha256:" + "f".repeat(64) : imageId;
+          const ref = scenario === "bad-container-ref" ? "postgres:18.6-alpine3.24" : RECOVERY_PG18_IMAGE;
+          return ok(id + "|" + ref);
         }
         if (action === "inspect" && args.includes("{{.State.Health.Status}}")) return ok(scenario === "unhealthy" ? "unhealthy" : "healthy");
         if (action === "inspect") {
@@ -186,6 +308,9 @@ function mockRun(scenario) {
     [path.join(integration, "recovery-pg18-disposable.mjs")],
     { cwd: fixture, encoding: "utf8", timeout: 25_000,
       env: { ...process.env, VIRKI_FAKE_CASE: scenario, VIRKI_FAKE_LOG: log,
+        GITHUB_TOKEN: "untrusted-token", VIRKI_PRODUCTION_DB_PASSWORD: "untrusted-production-db",
+        VIRKI_TOTP_ENCRYPTION_KEY: "a".repeat(64), VIRKI_EMAIL_OUTBOX_KEY: "b".repeat(64),
+        NODE_OPTIONS: "--no-warnings", NODE_PATH: "/hostile/node-path",
         DOCKER_HOST: "tcp://foreign-prod:2376", DOCKER_CONTEXT: "production" } });
   const calls = existsSync(log) ? readFileSync(log, "utf8").trim().split(/\r?\n/u).map(JSON.parse) : [];
   rmSync(fixture, { recursive: true, force: true });
@@ -206,27 +331,31 @@ test("mocked runner proves two separate owned containers, databases and exact 5+
   for (const item of started) {
     assert.equal(item.publish, "127.0.0.1::5432");
     assert.match(item.tmpfs, /^\/var\/lib\/postgresql:.*size=512m$/u);
-    assert.equal(item.image, "postgres:18.6-alpine3.24");
+    assert.equal(item.image, RECOVERY_PG18_IMAGE);
     assert.equal(item.mounts.length, 2);
     assert.equal(item.usingMount, 2);
     assert.equal(item.volume, false, "missing bind sources must fail instead of creating host directories");
     assert.ok(item.mounts.every(x => x.endsWith(",readonly")));
   }
   assert.deepEqual(calls.filter(x => x.action === "rm").map(x => x.target), started.map(x => x.cid));
+  assert.deepEqual(calls.filter(x => x.action === "pull").map(x => x.image),
+    [RECOVERY_PG18_IMAGE, RECOVERY_PG18_IMAGE]);
+  assert.equal(calls.filter(x => x.action === "image-inspect").length, 4);
   assert.doesNotMatch(child.stdout + child.stderr, /password|postgresql:\/\//iu);
 });
 
 test("mocked runner rejects every missing/false-green summary and safely cleans owned containers", () => {
   for (const scenario of ["skip", "second-skip", "wrong-name", "zero-tests", "missing-summary", "test-fail",
-    "migration-fail", "bad-port", "bad-version", "unhealthy"]) {
+    "migration-fail", "bad-port", "bad-version", "unhealthy",
+    "pull-error", "bad-image-digest", "bad-image-id", "bad-platform", "bad-container-image", "bad-container-ref"]) {
     const { child, calls } = mockRun(scenario);
     assert.equal(child.error, undefined, scenario);
     assert.equal(child.status, 1, scenario);
     assert.doesNotMatch(child.stdout, /9 real PASS/u, scenario);
     assert.equal(calls.filter(x => x.action === "run").length,
-      scenario === "second-skip" ? 2 : 1, scenario);
+      scenario === "second-skip" ? 2 : ["pull-error", "bad-image-digest", "bad-image-id", "bad-platform"].includes(scenario) ? 0 : 1, scenario);
     assert.equal(calls.filter(x => x.action === "rm").length,
-      scenario === "second-skip" ? 2 : 1, scenario);
+      scenario === "second-skip" ? 2 : ["pull-error", "bad-image-digest", "bad-image-id", "bad-platform"].includes(scenario) ? 0 : 1, scenario);
   }
 });
 
