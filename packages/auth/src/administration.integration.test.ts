@@ -184,20 +184,33 @@ async function assertAdministrativeRecoveryRevocations(
     "pending normal-account recovery cannot survive a privileged credential reset");
 }
 
-async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string, expectedWaiters = 1): Promise<void> {
+  const deadline = Date.now() + (expectedWaiters > 1 ? 15_000 : 5_000);
+  let maxDirectWaiters = 0;
+  let maxUserWaiters = 0;
   while (Date.now() < deadline) {
-    const blocked = await prisma.$queryRaw<Array<{ waiters: number }>>`
-      SELECT count(*)::int AS waiters
-      FROM pg_stat_activity
-      WHERE wait_event_type = 'Lock'
-        AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
-        AND query LIKE ${`%${queryFragment}%`}
+    const blocked = await prisma.$queryRaw<Array<{ directMatches: number; directWaiters: number; userWaiters: number }>>`
+      SELECT
+        count(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND ${blockerPid} = ANY(pg_blocking_pids(pid))
+          AND query LIKE ${`%${queryFragment}%`})::int AS "directMatches",
+        count(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND ${blockerPid} = ANY(pg_blocking_pids(pid)))::int AS "directWaiters",
+        count(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND query LIKE ${`%${queryFragment}%`}
+          AND query LIKE '%FOR UPDATE%')::int AS "userWaiters"
+      FROM pg_stat_activity WHERE pid <> ${blockerPid} AND datname = current_database()
     `;
-    if ((blocked[0]?.waiters ?? 0) >= 1) return;
+    const state = blocked[0];
+    maxDirectWaiters = Math.max(maxDirectWaiters, state?.directWaiters ?? 0);
+    maxUserWaiters = Math.max(maxUserWaiters, state?.userWaiters ?? 0);
+    // PostgreSQL queues row locks as holder -> first waiter -> second waiter;
+    // only one pg_blocking_pids edge can point directly to our original holder.
+    if (expectedWaiters === 1 ? (state?.directMatches ?? 0) >= 1
+      : (state?.directWaiters ?? 0) >= 1 && (state?.userWaiters ?? 0) >= expectedWaiters) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
-  throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment}.`);
+  throw new Error(`Timed out waiting for ${expectedWaiters} PostgreSQL lock waiters on ${queryFragment} (max user=${maxUserWaiters}, max direct=${maxDirectWaiters}).`);
 }
 
 test("a timed elevation lasts its full duration from activation, not from when the code was sent", integrationOptions, async () => {
@@ -778,6 +791,88 @@ test("competing ADMIN email recovery completions cannot rotate the credential tw
   assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 10);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS" } }), 1);
   assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status, "CONSUMED");
+});
+
+test("two sessions racing one unused ADMIN recovery code have exactly one committed winner", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const siblingSession = await prisma.session.create({ data: {
+    userId: admin.actor.id, tokenHash: randomBytes(32).toString("base64url"),
+    expiresAt: new Date(Date.now() + DAY)
+  }, select: { id: true } });
+  const recoveryCode = generateRecoveryCode();
+  const oldHash = hashRecoveryCode(recoveryCode);
+  await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: oldHash } });
+  const beforeNormal = (await prisma.user.findUniqueOrThrow({
+    where: { id: admin.actor.id }, select: { passwordHash: true }
+  })).passwordHash;
+  const beforeCredential = await prisma.administrativeCredential.findUniqueOrThrow({
+    where: { userId: admin.actor.id }, select: { keyVersion: true }
+  });
+  const candidates = ["same-code-recovery-first-2026", "same-code-recovery-second-2026"];
+  const sessions = [admin.sessionId, siblingSession.id];
+
+  // Hold the shared User row so both recovery transactions reach the real
+  // database lock before either can win. Promise.allSettled alone could run
+  // effectively sequentially, leaving the collision unproven.
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${admin.actor.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 30_000 });
+  await ready;
+
+  const attempts = Promise.allSettled(sessions.map((sessionId, index) => recoverAdministrativeCredential({
+    actor: admin.actor, sessionId, normalPassword: NORMAL_PASSWORD,
+    recoveryCode, newPassword: candidates[index]!
+  })));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, 'FROM "User"', 2);
+  } finally {
+    release();
+    await blocker;
+  }
+  const results = await attempts;
+  const winners = results.flatMap((result, index) => result.status === "fulfilled"
+    ? [{ index, codes: result.value }] : []);
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(winners.length, 1, "exactly one session must rotate the credential");
+  assert.equal(failures.length, 1, "the competing recovery must reject, never silently succeed");
+  assert.ok(failures[0]!.reason instanceof AdministrationMutationError,
+    "the losing session must fail the administrative authorization check");
+  const winner = winners[0]!;
+  assert.equal(winner.codes.length, 10);
+  assert.equal(new Set(winner.codes).size, 10);
+
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  assert.equal(credential.keyVersion, beforeCredential.keyVersion + 1);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[winner.index]!), true);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[1 - winner.index]!), false);
+  const persisted = await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id }, select: { codeHash: true, usedAt: true }
+  });
+  assert.equal(persisted.length, 10);
+  assert.ok(persisted.every((item) => item.usedAt === null));
+  assert.deepEqual(persisted.map((item) => item.codeHash).sort(), winner.codes.map(hashRecoveryCode).sort());
+  assert.equal(persisted.some((item) => item.codeHash === oldHash), false, "the spent code must be invalidated");
+  assert.equal(await prisma.auditLog.count({ where: {
+    actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS"
+  } }), 1);
+  const currentNormal = (await prisma.user.findUniqueOrThrow({
+    where: { id: admin.actor.id }, select: { passwordHash: true }
+  })).passwordHash;
+  assert.equal(currentNormal, beforeNormal, "normal login password must not change");
+  assert.equal(await verifyPassword(currentNormal!, NORMAL_PASSWORD), true);
+  for (const [index, sessionId] of sessions.entries()) {
+    const session = await prisma.session.findUniqueOrThrow({ where: { id: sessionId }, select: { revokedAt: true } });
+    assert.equal(session.revokedAt === null, index === winner.index,
+      "only the winning session must remain active");
+  }
 });
 
 test("administrative password change rejects a normal password committed while it waits for the account lock", integrationOptions, async () => {
