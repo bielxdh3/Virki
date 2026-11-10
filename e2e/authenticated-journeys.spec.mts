@@ -467,13 +467,25 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     });
     expect(credentialBeforeAcknowledgment?.status).toBe("ACTIVE");
     expect(await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id, usedAt: null } })).toBe(10);
-    const predecessorUrl = `${hubUrl}/admin/security#recovery-code-predecessor`;
     const acknowledgementUrl = `${hubUrl}/admin/security?status=credential#admin-content`;
-    // Two native fragment entries deliberately keep the document that displayed the codes reachable with Back.
-    await page.evaluate(() => { window.location.hash = "recovery-code-predecessor"; });
-    await expect(page).toHaveURL(predecessorUrl);
-    await expect(credentialSection.locator("ul li code")).toHaveCount(10);
-    await page.evaluate(() => { window.location.hash = "recovery-code-acknowledgment"; });
+    // Create two distinct same-document History API entries atomically. Next
+    // may replace a location.hash assignment while its Server Action RSC state
+    // settles; that race is not evidence of an unsafe browser Back behavior.
+    // Both entries must actually exist so the subsequent Back/Forward test
+    // exercises sensitive history, rather than passing with no history at all.
+    const fragments = await page.evaluate(() => {
+      const before = window.history.length;
+      const state = window.history.state as unknown;
+      window.history.pushState(state, "", "#recovery-code-predecessor");
+      const predecessor = window.location.hash;
+      window.history.pushState(state, "", "#recovery-code-acknowledgment");
+      return { predecessor, last: window.location.hash, added: window.history.length - before };
+    });
+    expect(fragments).toEqual({
+      predecessor: "#recovery-code-predecessor",
+      last: "#recovery-code-acknowledgment",
+      added: 2
+    });
     await expect(page).toHaveURL(`${hubUrl}/admin/security#recovery-code-acknowledgment`);
     await expect(credentialSection.locator("ul li code")).toHaveCount(10);
     // There must be no native href navigation when a sensitive one-time

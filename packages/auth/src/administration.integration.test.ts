@@ -20,7 +20,7 @@ import {
 } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
 import { cleanupInactiveSessions, hashAuditSessionReference, hashPassword, verifyPassword } from "./index";
-import { createTotpSecret, generateNumericCode, hashEmailAddress, hashRecoveryCode, hashSecurityCode, startLoginCeremony, verifyLoginEmailCode } from "./security";
+import { createTotpSecret, generateNumericCode, generateRecoveryCode, hashEmailAddress, hashRecoveryCode, hashSecurityCode, startLoginCeremony, verifyLoginEmailCode } from "./security";
 import { hashOidcIdentifier } from "./oidc-secrets";
 
 after(() => prisma.$disconnect());
@@ -486,7 +486,7 @@ test("an administrative password equal to the normal password is rejected when r
 for (const state of ["revoked", "missing"] as const) {
   test(`saved-code administrative recovery cannot reactivate a ${state} privileged credential`, integrationOptions, async () => {
     const admin = await setupAdmin({ credential: state !== "missing" });
-    const savedCode = `owned-admin-code-${randomBytes(12).toString("hex")}`;
+    const savedCode = generateRecoveryCode();
     const code = await prisma.administrativeRecoveryCode.create({ data: {
       userId: admin.actor.id, codeHash: hashRecoveryCode(savedCode)
     } });
