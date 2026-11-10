@@ -50,16 +50,17 @@ test("hosted passkey recovery requires physical USER Portal PASSKEY_ADMIN PASS a
       stage.includes('VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"') &&
       stage.includes("set -euo pipefail") &&
       stage.includes("--grep 'PASSKEY_|USER virtual authenticator' --forbid-only 2>&1 | tee") &&
-      stage.includes("grep '✓' \"$output_file\" | grep -F 'USER PASSKEY_ADMIN: signed Portal passkey'") &&
-      stage.includes("[1-9][0-9]* (skipped|failed)") &&
+      stage.includes('node scripts/e2e/verify-passkey-browser-gate.mjs "$output_file"') &&
+      source.includes('scripts/production-ci.test.mjs scripts/e2e/verify-passkey-browser-gate.test.mjs') &&
       !/^ {8}(?:continue-on-error:|if:)/mu.test(stage);
   };
   assert.equal(hasRequiredGate(workflow), true);
   for (const mutation of [
     workflow.replace('VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"', 'VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "false"'),
-    workflow.replace("grep '✓' \"$output_file\" | grep -F 'USER PASSKEY_ADMIN: signed Portal passkey'", "true"),
+    workflow.replace('node scripts/e2e/verify-passkey-browser-gate.mjs "$output_file"', "true"),
     workflow.replace("--grep 'PASSKEY_|USER virtual authenticator' --forbid-only", "--grep 'USER virtual authenticator'"),
-    workflow.replace("[1-9][0-9]* (skipped|failed)", "[1-9][0-9]* failed"),
+    workflow.replace("--forbid-only 2>&1 | tee", "2>&1 | tee"),
+    workflow.replace('scripts/production-ci.test.mjs scripts/e2e/verify-passkey-browser-gate.test.mjs', 'scripts/production-ci.test.mjs'),
     workflow.replace("Run isolated passkey recovery browser E2E", "Passkey disabled"),
     workflow.replace("- name: Run isolated passkey recovery browser E2E", "- name: Run isolated passkey recovery browser E2E\n        if: github.ref == 'refs/heads/main'"),
     workflow.replace("- name: Run isolated passkey recovery browser E2E", "- name: Run isolated passkey recovery browser E2E\n        continue-on-error: true")

@@ -170,7 +170,7 @@ jobs:
       - name: Native Linux production operations tests
         run: |
           bash -n scripts/production-server.sh
-          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
+          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/e2e/verify-passkey-browser-gate.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
 
       - name: Verify native machine-id inode race defenses as root
         if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
@@ -562,12 +562,7 @@ jobs:
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_|USER virtual authenticator' --forbid-only 2>&1 | tee "$output_file"
           # The brand-new Portal-RP USER recovery must actually PASS. Existing
           # passkey tests passing cannot silently replace it after a rename or SKIP.
-          grep '✓' "$output_file" | grep -F 'USER PASSKEY_ADMIN: signed Portal passkey' >/dev/null
-          grep -Eq '(^|[[:space:]])[1-9][0-9]* passed \(' "$output_file"
-          if grep -Eq '(^|[[:space:]])[1-9][0-9]* (skipped|failed) \(' "$output_file"; then
-            echo 'Mandatory passkey-assisted recovery cannot skip or fail tests.' >&2
-            exit 1
-          fi
+          node scripts/e2e/verify-passkey-browser-gate.mjs "$output_file"
 
       - name: Run mandatory native Hub browser E2E without Cloudflare Access JWT
         env:
@@ -582,7 +577,7 @@ jobs:
           # In addition to the Playwright exit code, require exactly this
           # browser spec's three real PASS results; 0 tests/SKIP is NO-GO.
           grep -Eq '(^|[[:space:]])3 passed \(' "$output_file"
-          if grep -Eq '(^|[[:space:]])[1-9][0-9]* (skipped|failed) \(' "$output_file"; then
+          if grep -Eq '(^|[[:space:]])[1-9][0-9]* (skipped|failed)($|[^[:alpha:]])' "$output_file"; then
             echo 'Native Hub browser gate cannot skip or fail tests.' >&2
             exit 1
           fi
