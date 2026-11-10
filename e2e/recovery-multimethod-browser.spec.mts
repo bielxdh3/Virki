@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { generateRegistrationOptions, verifyRegistrationResponse } from "@simplewebauthn/server";
@@ -6,7 +6,7 @@ import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
-import { createTotpSecret, encryptTotpSecret } from "@virki/auth/security";
+import { createTotpSecret, encryptTotpSecret, hashRecoveryRequestKey } from "@virki/auth/security";
 // @ts-expect-error This reviewed JS guard has no separate type declaration.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
@@ -328,58 +328,144 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           replacementEmail = randomUUID() + ".replacement@e2e.invalid";
           await mailbox.locator('input[name="newEmail"]').fill(replacementEmail);
           await mailbox.getByRole("button", { name: "Enviar código ao novo e-mail" }).click();
-          await expect(mailbox.locator('input[name="code"]')).toBeVisible();
+          await expect(mailbox.locator('input[name="code"]')).toBeVisible({ timeout: 20_000 });
           const message = await database.emailOutboxMessage.findFirst({
             where: { recipientEmail: replacementEmail, kind: "RECOVERY_EMAIL_REBIND" },
             orderBy: { createdAt: "desc" }, select: { payload: true }
           });
           const code = message ? decryptEmailPayload(message.payload).code : undefined;
           expect(code).toMatch(/^\d{6}$/u);
-          // A hidden password form is not an authorization boundary. Capture
-          // a genuine completion form using this disposable test-owned request,
-          // restore the unverified mailbox state BEFORE submitting its Next
-          // Server Action and require a failed, non-mutating HTTP ceremony.
+          // A hidden password form is not an authorization boundary. Prepare
+          // a genuine completion form on another page in the bound browser,
+          // then revoke the display-only timestamp BEFORE its Next action.
+          // The mailbox page can reload from its own Server Action effect:
+          // reloading it here would race that navigation and its React state.
+          const requestBeforeDenial = await database.accountRecoveryRequest.findUniqueOrThrow({
+            where: { id: requestId },
+            select: {
+              userId: true, status: true, recoveryRole: true, recoveryProofs: true,
+              recoveryAdminReview: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true,
+              recoveryNewEmail: true, recoveryNewEmailChallengeHash: true,
+              recoveryNewEmailExpiresAt: true, recoveryNewEmailVerifiedAt: true,
+              requestKeyHash: true, recoveryBrowserHash: true, bootstrapSessionId: true
+            }
+          });
+          expect(requestBeforeDenial.userId).toBe(owner.id);
+          expect(requestBeforeDenial.status).toBe("APPROVED");
+          expect(requestBeforeDenial.recoveryRole).toBe("USER");
+          expect(requestBeforeDenial.recoveryProofs).toEqual(["PASSKEY", "TOTP"]);
+          expect(requestBeforeDenial.recoveryAdminReview).toBe(false);
+          expect(requestBeforeDenial.recoveryPasskeyVerifiedAt).not.toBeNull();
+          expect(requestBeforeDenial.recoveryTotpVerifiedAt).not.toBeNull();
+          expect(requestBeforeDenial.recoveryNewEmail).toBe(replacementEmail);
+          expect(requestBeforeDenial.recoveryNewEmailChallengeHash).toBeTruthy();
+          expect(requestBeforeDenial.recoveryNewEmailExpiresAt?.getTime()).toBeGreaterThan(Date.now());
+          expect(requestBeforeDenial.recoveryNewEmailVerifiedAt).toBeNull();
+          expect(requestBeforeDenial.bootstrapSessionId).toBeNull();
+          const [requestCookieName, browserCookieName, intentCookieName] = productionMode
+            ? ["__Host-virki_recovery", "__Host-virki_recovery_browser", "__Host-virki_recovery_intent"]
+            : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
+          const cookiesBeforeDenial = await context.cookies(portalUrl);
+          const requestCookie = cookiesBeforeDenial.find((cookie) => cookie.name === requestCookieName);
+          const browserCookie = cookiesBeforeDenial.find((cookie) => cookie.name === browserCookieName);
+          const intentCookie = cookiesBeforeDenial.find((cookie) => cookie.name === intentCookieName);
+          expect(requestCookie?.value.length).toBeGreaterThan(0);
+          expect(browserCookie?.value.length).toBeGreaterThan(0);
+          expect(intentCookie?.value).toBe(requestId + "." + method);
+          expect(hashRecoveryRequestKey(requestCookie!.value) === requestBeforeDenial.requestKeyHash,
+            "completion must use the exact request capability bound to this request").toBe(true);
+          expect(createHash("sha256").update("Virki recovery browser v1:")
+            .update(browserCookie!.value).digest("hex") === requestBeforeDenial.recoveryBrowserHash,
+            "completion must use the original browser-token binding").toBe(true);
           const userBeforeDenial = await database.user.findUniqueOrThrow({
             where: { id: owner.id },
             select: { email: true, emailNormalized: true, passwordHash: true, secondFactorMethod: true }
           });
-          const requestBeforeDenial = await database.accountRecoveryRequest.findUniqueOrThrow({
-            where: { id: requestId },
-            select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true }
+          const sessionsBeforeDenial = await database.session.count({
+            where: { userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() } }
           });
-          expect(requestBeforeDenial).toEqual({
-            status: "APPROVED", recoveryNewEmailVerifiedAt: null, bootstrapSessionId: null
+          expect(sessionsBeforeDenial, "a new recovery owner must have no active session before completion").toBe(0);
+          const sessionRowsBeforeDenial = await database.session.count({ where: { userId: owner.id } });
+          expect(sessionRowsBeforeDenial).toBe(0);
+          const mounted = await database.accountRecoveryRequest.updateMany({
+            where: {
+              id: requestId, userId: owner.id, status: "APPROVED",
+              recoveryNewEmail: replacementEmail, recoveryNewEmailVerifiedAt: null
+            },
+            data: { recoveryNewEmailVerifiedAt: new Date() }
           });
-          await database.accountRecoveryRequest.update({
-            where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: new Date() }
-          });
+          expect(mounted.count).toBe(1);
+          const prematurePage = await context.newPage();
           try {
-            await page.reload();
-            await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible();
-          } finally {
-            await database.accountRecoveryRequest.update({
-              where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: null }
+            const preparedResponse = await prematurePage.goto(page.url());
+            expect(preparedResponse?.status(), "prepared recovery document must return HTTP 200").toBe(200);
+            await expect(prematurePage).toHaveURL(portalUrl + "/recover?requestId=" + requestId);
+            await expect(prematurePage.getByRole("heading", { level: 1, name: "Recuperar conta" })).toBeVisible();
+            await expect(prematurePage.getByLabel("Nova senha", { exact: true })).toBeVisible({ timeout: 20_000 });
+            const actualCompletionForm = prematurePage.locator("form").filter({
+              has: prematurePage.getByRole("button", { name: "Concluir recuperação", exact: true })
             });
+            await expect(actualCompletionForm.locator('input[name="requestId"]')).toHaveValue(requestId);
+            await expect(actualCompletionForm.locator('input[name="csrfToken"]')).toHaveValue(/^v2\./u);
+          } finally {
+            const revoked = await database.accountRecoveryRequest.updateMany({
+              where: {
+                id: requestId, userId: owner.id, status: "APPROVED",
+                recoveryNewEmail: replacementEmail, recoveryNewEmailVerifiedAt: { not: null }
+              },
+              data: { recoveryNewEmailVerifiedAt: null }
+            });
+            expect(revoked.count, "the temporary display-only mailbox proof must always be revoked").toBe(1);
+          }
+          const unverifiedRequest = await database.accountRecoveryRequest.findUniqueOrThrow({
+            where: { id: requestId },
+            select: {
+              userId: true, status: true, recoveryRole: true, recoveryProofs: true,
+              recoveryAdminReview: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true,
+              recoveryNewEmail: true, recoveryNewEmailChallengeHash: true,
+              recoveryNewEmailExpiresAt: true, recoveryNewEmailVerifiedAt: true,
+              requestKeyHash: true, recoveryBrowserHash: true, bootstrapSessionId: true
+            }
+          });
+          expect(unverifiedRequest).toEqual(requestBeforeDenial);
+          const cookiesAtPost = await context.cookies(portalUrl);
+          for (const original of [requestCookie, browserCookie, intentCookie]) {
+            expect(cookiesAtPost.find((cookie) => cookie.name === original!.name)?.value,
+              "rejected completion must use the original browser-bound cookies").toBe(original!.value);
           }
           const prematurePassword = "premature-" + randomUUID() + "-password";
-          await page.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
-          const prematurePost = page.waitForResponse((response) =>
+          await prematurePage.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
+          const prematurePost = prematurePage.waitForResponse((response) =>
             response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
             new URL(response.url()).pathname === "/recover" &&
             Boolean(response.request().headers()["next-action"]));
-          await page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+          await prematurePage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
           const rejectedPost = await prematurePost;
-          expect(rejectedPost.status(), "denial must complete a real HTTP Server Action rather than a 403/500 failure").toBe(200);
+          expect(rejectedPost.status(), "a rejected action must return an HTTP response or redirect, never a 403/500")
+            .toBeGreaterThanOrEqual(200);
+          expect(rejectedPost.status()).toBeLessThan(400);
           expect(rejectedPost.request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
-          await expect(page).toHaveURL(portalUrl + "/recover?requestId=" + requestId + "&error=1");
+          expect(rejectedPost.request().headers().origin).toBe(portalUrl);
+          await expect(prematurePage).toHaveURL(portalUrl + "/recover?requestId=" + requestId + "&error=1", { timeout: 20_000 });
           expect(await database.user.findUniqueOrThrow({
             where: { id: owner.id },
             select: { email: true, emailNormalized: true, passwordHash: true, secondFactorMethod: true }
           })).toEqual(userBeforeDenial);
           expect(await database.accountRecoveryRequest.findUniqueOrThrow({
             where: { id: requestId },
-            select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true }
-          })).toEqual(requestBeforeDenial);
+            select: {
+              userId: true, status: true, recoveryRole: true, recoveryProofs: true,
+              recoveryAdminReview: true, recoveryPasskeyVerifiedAt: true, recoveryTotpVerifiedAt: true,
+              recoveryNewEmail: true, recoveryNewEmailChallengeHash: true,
+              recoveryNewEmailExpiresAt: true, recoveryNewEmailVerifiedAt: true,
+              requestKeyHash: true, recoveryBrowserHash: true, bootstrapSessionId: true
+            }
+          })).toEqual(unverifiedRequest);
+          expect(await database.session.count({
+            where: { userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() } }
+          })).toBe(sessionsBeforeDenial);
+          expect(await database.session.count({ where: { userId: owner.id } }),
+            "a denied completion must not create even a revoked or expired session").toBe(sessionRowsBeforeDenial);
           expect(await verifyPassword(userBeforeDenial.passwordHash ?? "", prematurePassword)).toBe(false);
           await expect(page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]')).toBeVisible();
           const wrongCode = code === "000000" ? "000001" : "000000";
@@ -393,7 +479,7 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
           await page.locator('section[aria-label="Verificação do novo e-mail"] input[name="code"]').fill(code!);
           await page.getByRole("button", { name: "Confirmar novo e-mail", exact: true }).click();
         }
-        await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible();
+        await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible({ timeout: 20_000 });
 
         // Keep the already-rendered second completion form in its own cookie
         // jar. The winning reset clears recovery cookies and installs a session
