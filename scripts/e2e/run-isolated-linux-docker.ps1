@@ -9,6 +9,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# A native-only Windows launch must not silently fall back to the Access suite
+# when the test moves into its disposable Linux Docker runner. Reject unsafe
+# values before any Docker or browser resource can be created.
+if ($env:VIRKI_E2E_NATIVE_HUB -and $env:VIRKI_E2E_NATIVE_HUB -cne 'required') {
+  throw 'Native Hub E2E requires the exact explicit required opt-in.'
+}
+if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required' -and $env:VIRKI_E2E_HUB_MODE -eq 'production') {
+  throw 'Native Hub E2E cannot run under production Hub mode.'
+}
+
 function Get-FileSha256([string]$LiteralPath) {
   $algorithm = [System.Security.Cryptography.SHA256]::Create()
   $stream = [System.IO.File]::OpenRead($LiteralPath)
@@ -659,6 +669,7 @@ try {
     $playwrightCommand = @('bash', '-lc', 'set -o pipefail; npm run test:e2e -- "$@" 2>&1 | node scripts/e2e/redact-browser-e2e-log.mjs > /tmp/browser-e2e.log; status=$?; cat /tmp/browser-e2e.log; exit $status', 'virki-e2e')
     if ($PlaywrightArguments.Count -gt 0) { $playwrightCommand += $PlaywrightArguments }
     $e2eEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('VIRKI_E2E_DATABASE_URL=' + $urls.e2e), '--env', ('VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL=' + $urls.migrator), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
+    if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required') { $e2eEnvironment += @('--env', 'VIRKI_E2E_NATIVE_HUB=required') }
     if ($env:VIRKI_E2E_HUB_MODE -eq 'production') { $e2eEnvironment += @('--env', 'VIRKI_E2E_HUB_MODE=production', '--env', 'VIRKI_E2E_HUB_BUILD_READY=true') }
     if ($env:VIRKI_E2E_LOW05_DIAGNOSTICS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_LOW05_DIAGNOSTICS=true') }
     if ($env:VIRKI_E2E_PASSKEYS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_PASSKEYS=true') }

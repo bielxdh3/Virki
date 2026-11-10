@@ -22,10 +22,14 @@ if (process.env.VIRKI_E2E_NATIVE_HUB && !nativeHubGate) {
   throw new Error("Native Hub E2E requires the exact explicit 'required' opt-in.");
 }
 if (nativeHubGate && (productionHubMode || !process.env.VIRKI_E2E_DATABASE_URL ||
-    process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable" ||
-    !process.env.VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL)) {
+    process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable")) {
   throw new Error("Native Hub E2E requires a non-production, confirmed disposable PostgreSQL fixture.");
 }
+// Playwright imports this config again inside each test worker. The global
+// setup deliberately deletes the privileged audit-cleanup connection string
+// before those imports, after validating and retaining it privately. Enforce
+// the presence of that string in the Linux CLI entrypoint and global setup,
+// not here, or a genuine running browser fails before its first assertion.
 // Enrolling ADMIN test passkeys needs a separate explicit opt-in. Do not
 // silently enable the real privileged feature in production-mode rehearsals.
 if (process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" &&

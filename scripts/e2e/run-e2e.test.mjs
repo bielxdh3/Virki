@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildE2ECommand, shouldBuildProductionHub } from "./run-e2e.mjs";
+import { assertNativeE2eFixture, buildE2ECommand, shouldBuildProductionHub } from "./run-e2e.mjs";
 import { buildServiceEnvironment, getServiceCommand } from "./isolated-service.mjs";
 import { redactBrowserE2ELog } from "./redact-browser-e2e-log.mjs";
 
@@ -51,6 +51,8 @@ test("native Hub E2E is explicitly opt-in, Hub-only and a mandatory non-skipping
   const isolatedService = readFileSync(resolve(scriptDirectory, "isolated-service.mjs"), "utf8");
   assert.match(config, /process\.env\.VIRKI_E2E_NATIVE_HUB === "required"/u);
   assert.match(config, /nativeHubGate && \(productionHubMode \|\| !process\.env\.VIRKI_E2E_DATABASE_URL/u);
+  assert.doesNotMatch(config, /!process\.env\.VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL/u,
+    "Playwright worker imports config after global setup removes privileged cleanup credentials");
   assert.match(config, /nativeHubGate \? \{ VIRKI_HUB_PERIMETER_MODE: "native" \} : \{\}/u);
   assert.match(config, /testMatch: "\*\*\/native-hub-perimeter\.spec\.mts"/u);
   assert.match(config, /testIgnore: "\*\*\/native-hub-perimeter\.spec\.mts"/u);
@@ -77,6 +79,39 @@ test("native Hub E2E is explicitly opt-in, Hub-only and a mandatory non-skipping
       /e2e\/native-hub-perimeter\.spec\.mts --forbid-only/u.test(candidate) &&
       /3 passed/u.test(candidate), false, "mutated native Hub CI gate must not look valid");
   }
+});
+
+test("native Hub disposable cleanup credential is checked before worker startup but not required in browser workers", () => {
+  const fixture = {
+    VIRKI_E2E_NATIVE_HUB: "required",
+    VIRKI_E2E_DATABASE_URL: ["postgresql://", "virki_runtime_test", "@127.0.0.1:5432/virki_e2e_test"].join(""),
+    VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: ["postgresql://", "virki_migrator", "@127.0.0.1:5432/virki_e2e_test"].join(""),
+    VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable"
+  };
+  assert.doesNotThrow(() => assertNativeE2eFixture(fixture, "linux"));
+  assert.doesNotThrow(() => assertNativeE2eFixture({}, "linux"), "non-native E2E remains unchanged");
+  for (const key of ["VIRKI_E2E_DATABASE_URL", "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL", "VIRKI_CORE_TEST_DATABASE_CONFIRM"]) {
+    assert.throws(() => assertNativeE2eFixture({ ...fixture, [key]: "" }, "linux"), /exclusive disposable database/u);
+  }
+  assert.throws(() => assertNativeE2eFixture({ ...fixture, VIRKI_E2E_NATIVE_HUB: "false" }, "linux"), /explicit non-production opt-in/u);
+  assert.throws(() => assertNativeE2eFixture({ ...fixture, VIRKI_E2E_HUB_MODE: "production" }, "linux"), /explicit non-production opt-in/u);
+  assert.throws(() => assertNativeE2eFixture({ ...fixture, VIRKI_E2E_DATABASE_URL: "postgresql://test@remote.invalid/other" }, "linux"), /local or isolated CI host/u);
+  assert.doesNotThrow(() => assertNativeE2eFixture(fixture, "win32"), "the signed Windows Docker runner provisions an exclusive DB itself");
+});
+
+test("Windows native Hub opt-in reaches its isolated Docker browser and cannot become a silent Access-suite green", () => {
+  const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  const firstDockerProbe = runner.indexOf("$dockerProbe = Invoke-PinnedDocker version");
+  const nativeOptInValidation = runner.indexOf("if ($env:VIRKI_E2E_NATIVE_HUB -and $env:VIRKI_E2E_NATIVE_HUB -cne 'required')");
+  const nativeProdDenial = runner.indexOf("if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required' -and $env:VIRKI_E2E_HUB_MODE -eq 'production')");
+  const nativeDockerFlag = runner.indexOf("if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required') { $e2eEnvironment += @('--env', 'VIRKI_E2E_NATIVE_HUB=required') }");
+  const browserInvoke = runner.indexOf("Invoke-Stage -Name 'browser-e2e' -Command $playwrightCommand -Environment $e2eEnvironment");
+  assert.ok(nativeOptInValidation > 0 && nativeOptInValidation < firstDockerProbe, "invalid native opt-in must fail before Docker probing");
+  assert.ok(nativeProdDenial > nativeOptInValidation && nativeProdDenial < firstDockerProbe, "production-mode native E2E must fail before resource creation");
+  assert.ok(nativeDockerFlag > 0 && nativeDockerFlag < browserInvoke, "only the explicitly required native opt-in reaches the Linux browser process");
+  assert.match(runner, /VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL=' \+ \$urls\.migrator/u,
+    "the disposable Linux worker still receives its scoped audit cleanup fixture");
+  assert.ok(!runner.includes("'VIRKI_HUB_PERIMETER_MODE=native'"), "never set native mode in a shared non-browser service");
 });
 
 test("isolated Windows launcher rejects remote Docker context overrides before creating any fixture", {
