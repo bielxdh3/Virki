@@ -288,6 +288,11 @@ test("ADMIN separate credential: normal password + active TOTP rotates codes, de
     await elevationStart.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
     await expect(elevationStart.getByRole("alert")).toContainText("Não foi possível solicitar");
     await expect(elevationSection.getByRole("button", { name: "Ativar elevação" })).toHaveCount(0);
+    // The failed useActionState response may rerender the form with its first
+    // default scope. Re-select the explicit privileged scope on the actual
+    // successful submission instead of accepting ACCOUNT_STATE_CHANGE.
+    await elevationStart.locator('select[name="scope"]').selectOption("ADMIN_CREDENTIAL_CHANGE");
+    await expect(elevationStart.locator('select[name="scope"]')).toHaveValue("ADMIN_CREDENTIAL_CHANGE");
     await elevationStart.locator('input[name="normalPassword"]').fill(normalPassword);
     await elevationStart.locator('input[name="administrativePassword"]').fill(newAdminPassword);
     await elevationStart.getByRole("button", { name: "Solicitar elevação", exact: true }).click();

@@ -260,7 +260,7 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     await expect(foreignPage.getByRole("heading", {
       level: 1, name: "Recuperar acesso administrativo", exact: true
     })).toBeVisible();
-    await expect(foreignPage.getByRole("alert")).toContainText("Este link de recuperação não é mais válido.");
+    await expect(foreignPage.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido.");
     await expect(foreignPage.locator('[aria-label="Aplicativo autenticador"] input[name="code"]')).toHaveCount(0);
     await expect(foreignPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
     await expect(foreignPage.getByLabel("Novo endereço de e-mail")).toHaveCount(0);
@@ -559,6 +559,56 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     expect(await database.emailOutboxMessage.count({
       where: { recipientEmail: replacementEmail, kind: "PASSWORD_CHANGED" }
     })).toBe(1);
+
+    // Bootstrap proves immediate protected access, but the owner must also
+    // authenticate from a NEW browser with the replacement mailbox and new
+    // normal password. This exercises real login + emailed MFA, not a DB hash
+    // comparison or a session that survived the recovery ceremony.
+    const freshContext = await newContext();
+    const freshPage = await freshContext.newPage();
+    await addCloudflareAccessHeader(freshPage);
+    expect((await freshPage.goto(`${hubUrl}/admin/accounts`))?.status()).toBe(200);
+    await expect(freshPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+    await freshPage.getByLabel("E-mail", { exact: true }).fill(replacementEmail);
+    await freshPage.getByLabel("Senha", { exact: true }).fill(newPassword);
+    const loginPost = freshPage.waitForResponse((response) =>
+      response.request().method() === "POST" && new URL(response.url()).origin === hubUrl &&
+      new URL(response.url()).pathname === "/api/login");
+    await freshPage.getByRole("button", { name: "Entrar", exact: true }).click();
+    expect((await loginPost).status()).toBe(303);
+    await freshPage.waitForURL((url) => url.pathname === "/login/verify" &&
+      url.searchParams.get("factor") === "email" && Boolean(url.searchParams.get("ceremony")));
+    const loginCeremony = new URL(freshPage.url()).searchParams.get("ceremony")!;
+    const loginEmail = await database.emailOutboxMessage.findFirst({
+      where: {
+        recipientEmail: replacementEmail, idempotencyKey: `security-ceremony:${loginCeremony}`,
+        kind: { in: ["EMAIL_TWO_FACTOR", "NEW_DEVICE_VERIFICATION"] }
+      }, select: { payload: true }
+    });
+    expect(loginEmail, "fresh ADMIN login must require real, newly emailed MFA").not.toBeNull();
+    const loginCode = decryptEmailPayload(loginEmail!.payload).code;
+    expect(loginCode).toMatch(/^\d{6}$/u);
+    await freshPage.getByLabel("Código", { exact: true }).fill(loginCode!);
+    const freshDocument = freshPage.waitForResponse((response) =>
+      response.request().method() === "GET" && response.request().resourceType() === "document" &&
+      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/accounts");
+    await freshPage.getByRole("button", { name: "Continuar", exact: true }).click();
+    expect((await freshDocument).status()).toBe(200);
+    await expect(freshPage).toHaveURL(`${hubUrl}/admin/accounts`);
+    await expect(freshPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+    const freshCookie = (await freshContext.cookies(hubUrl))
+      .find((cookie) => cookie.name === sessionCookieName && cookie.value.length > 0);
+    expect(freshCookie).toBeDefined();
+    expect(freshCookie!.domain).toBe(new URL(hubUrl).hostname);
+    expect(freshCookie!.httpOnly).toBe(true);
+    const freshSession = await database.session.findFirstOrThrow({
+      where: { tokenHash: hashSessionToken(freshCookie!.value) },
+      select: { id: true, userId: true, revokedAt: true, expiresAt: true }
+    });
+    expect(freshSession.userId).toBe(owner.id);
+    expect(freshSession.id).not.toBe(consumed.bootstrapSessionId);
+    expect(freshSession.revokedAt).toBeNull();
+    expect(freshSession.expiresAt.getTime()).toBeGreaterThan(Date.now());
   } finally {
     // AuditLog is append-only and its actor FK RESTRICTs deletes. Never
     // UPDATE/DELETE audit rows or attempt a fragile User FK cleanup. The
