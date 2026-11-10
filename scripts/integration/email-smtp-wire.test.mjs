@@ -3,13 +3,18 @@ import { test } from "node:test";
 import { assertDedicatedSmtpWireTarget, assertSmtpWireTap } from "./email-smtp-wire.mjs";
 import { assertLoopbackSmtpAddress } from "./loopback-smtp-sink.mjs";
 
+// Construct a fake disposable credential in memory, never store a literal
+// URL containing userinfo in source (including an interpolated password).
+const disposableDatabaseUrl = new URL("postgresql://127.0.0.1:5432/virki_e2e_test?schema=public");
+disposableDatabaseUrl.username = "virki_runtime_test";
+disposableDatabaseUrl.password = "f".repeat(64);
+
 const disposable = {
   NODE_ENV: "test",
   VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
   VIRKI_EMAIL_WIRE_DEDICATED_DB: "confirmed",
   VIRKI_EMAIL_WIRE_NETWORK_ISOLATED: "confirmed",
-  VIRKI_INTEGRATION_DATABASE_URL:
-    `postgresql://virki_runtime_test:${"f".repeat(64)}@127.0.0.1:5432/virki_e2e_test?schema=public`
+  VIRKI_INTEGRATION_DATABASE_URL: disposableDatabaseUrl.href
 };
 
 test("SMTP wire refuses ambient credentials, production and any non-exclusive DB", () => {
