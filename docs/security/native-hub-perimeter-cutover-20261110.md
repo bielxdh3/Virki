@@ -54,6 +54,16 @@ receipt. The Brevo event and the recipient's inbox confirmation still require
 separate authorized evidence. The nullable database column requires a reviewed
 forward migration before deployment.
 
+The SMTP client now derives the header identifier deterministically from the
+persisted opaque outbox ID and claimed attempt number, using the verified
+sender domain. If SMTP accepts a message but the process crashes before the
+delivery-attempt row commits, the first header identifier can be recalculated
+from the durable outbox attempt history, while a reclaimed send uses a new
+identifier. The recovery outbox's migration sentinel projects this optional
+metadata through `to_jsonb(attempt)` so it remains compatible both before and
+after the nullable column is added. This improves correlation only: it cannot
+establish that a recipient received an OTP.
+
 **Decision: draft implementation only. No release, deploy, Cloudflare policy
 change or externally hosted E2E authorized by this document.**
 

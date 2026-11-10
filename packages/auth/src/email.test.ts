@@ -115,6 +115,70 @@ test("SMTP mocked delivery hands Nodemailer one structured recipient and rejects
   assert.equal(recipients.length, 1);
 });
 
+test("SMTP attempts use stable RFC Message-IDs across a worker retry, distinct across attempts", async (context) => {
+  const accepted: Array<{ messageId?: string; to: unknown }> = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (mail: { messageId?: string; to: unknown }) => {
+      accepted.push({ messageId: mail.messageId, to: mail.to });
+      return { messageId: mail.messageId };
+    }
+  }) as never);
+  const transport = createSmtpEmailTransport({
+    VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+    VIRKI_EMAIL_SMTP_USER: "sender@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+    VIRKI_EMAIL_FROM: "no-reply@example.invalid"
+  });
+  const mail = { to: "owner@example.invalid", subject: "fixture", text: "fixture" };
+  const first = await transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:2" });
+  const same = await transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:2" });
+  const next = await transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:3" });
+  assert.deepEqual(first, same);
+  assert.notDeepEqual(first, next);
+  assert.match(first?.smtpHeaderMessageId ?? "", /^<[a-f0-9]{64}@example\.invalid>$/u);
+  assert.deepEqual(accepted.map((entry) => entry.messageId), [
+    first?.smtpHeaderMessageId, first?.smtpHeaderMessageId, next?.smtpHeaderMessageId
+  ]);
+  assert.equal(accepted.every((entry) => JSON.stringify(entry.to).includes("owner@example.invalid")), true);
+  await assert.rejects(transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:2\r\nBcc:other@example.invalid" }));
+  assert.equal(accepted.length, 3);
+});
+
+test("SMTP handoff before a failed DB finalize remains traceable after lease reclaim", async () => {
+  await withTestOutboxKey(async () => {
+    const now = new Date("2026-11-10T12:00:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-crash", idempotencyKey: "mail-crash", kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: "owner@example.invalid", locale: "en", payload: encryptedTestEmailPayload(),
+      status: "QUEUED", attemptCount: 0, availableAt: new Date(0), sentAt: null,
+      terminalFailedAt: null, processingLeaseExpiresAt: null, createdAt: new Date(0), updatedAt: new Date(0)
+    }, { failAttemptStatus: "SENT" });
+    const references: string[] = [];
+    const acceptedTransport = {
+      async send(mail: { deliveryAttemptReference?: string }) {
+        references.push(mail.deliveryAttemptReference ?? "missing");
+        return { smtpHeaderMessageId: "<accepted@example.invalid>" };
+      }
+    };
+
+    await assert.rejects(processNextEmailMessage(acceptedTransport, now, queued.client as never), /attempt history unavailable/u);
+    assert.equal(queued.message().status, "PROCESSING");
+    assert.equal(queued.message().attemptCount, 1);
+    assert.deepEqual(references, ["mail-crash:1"]);
+    assert.equal(queued.attempts().length, 0);
+
+    // A lease reclaim marks the uncertain first handoff interrupted, then
+    // assigns a distinct persisted attempt; no duplicate attempt ID is used.
+    const afterLease = new Date(now.getTime() + 6 * 60 * 1000);
+    await assert.rejects(processNextEmailMessage(acceptedTransport, afterLease, queued.client as never), /attempt history unavailable/u);
+    assert.deepEqual(references, ["mail-crash:1", "mail-crash:2"]);
+    assert.equal(queued.message().attemptCount, 2);
+    assert.deepEqual(queued.attempts().map((item) => [item.attempt, item.status, item.errorCode]), [
+      [1, "FAILED", "worker-interrupted"]
+    ]);
+  });
+});
+
 test("successful SMTP handoff stores a non-secret Message-ID without mistaking it for inbox delivery", async () => {
   await withTestOutboxKey(async () => {
     const now = new Date("2026-11-10T12:00:00.000Z");
@@ -390,6 +454,7 @@ test("a reclaimed stale message can complete delivery", async () => {
 
     assert.equal(await processNextEmailMessage(sent.transport, now, stale.client as never), "sent");
     assert.equal(sent.sent.length, 1);
+    assert.equal(sent.sent[0]?.deliveryAttemptReference, "mail-recovered:3");
     assert.equal(stale.message().status, "SENT");
     assert.equal(stale.message().attemptCount, 3);
     assert.deepEqual(stale.attempts().map(({ attempt, status, errorCode }) => ({ attempt, status, errorCode })), [

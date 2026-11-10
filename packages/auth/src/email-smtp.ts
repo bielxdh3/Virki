@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { domainToASCII } from "node:url";
 import nodemailer from "nodemailer";
 import type { EmailTransport, EmailTransportMessage, EmailTransportReceipt } from "./email";
 import { isSingleMailboxAddress } from "./email-address";
@@ -80,14 +82,16 @@ export function createSmtpEmailTransport(
     async send(message: EmailTransportMessage): Promise<EmailTransportReceipt> {
       try {
         if (!isSingleMailboxAddress(message.to)) throw new Error("Invalid recipient.");
+        const stableId = stableAttemptMessageId(message.deliveryAttemptReference, config.from);
         const info = await transporter.sendMail({
           from: config.from,
           to: [{ name: "", address: message.to }],
           subject: message.subject,
           text: message.text,
+          ...(stableId ? { messageId: stableId } : {}),
           ...(config.replyTo ? { replyTo: config.replyTo } : {})
         });
-        const messageId = info?.messageId;
+        const messageId = info?.messageId ?? stableId;
         // Store only the generated, safe RFC header ID, never SMTP credentials,
         // response text, recipients, codes or message bodies.
         return typeof messageId === "string" && messageId.length <= 255 &&
@@ -98,6 +102,20 @@ export function createSmtpEmailTransport(
       }
     }
   };
+}
+
+function stableAttemptMessageId(reference: string | undefined, from: string): string | undefined {
+  if (reference === undefined) return undefined;
+  // The reference is constructed server-side from an opaque persisted outbox
+  // ID and the attempt already claimed in PostgreSQL. Never interpolate an
+  // unvalidated reference into an RFC header.
+  if (!/^[A-Za-z0-9_-]{1,128}:[1-9][0-9]{0,5}$/u.test(reference)) throw new Error("Invalid attempt reference.");
+  const domain = domainToASCII(from.slice(from.lastIndexOf("@") + 1));
+  if (!domain || !/^[a-z0-9.-]+$/iu.test(domain)) throw new Error("Invalid sender domain.");
+  const digest = createHash("sha256").update(`virki-smtp-attempt-v1:${reference}`).digest("hex");
+  const messageId = `<${digest}@${domain.toLowerCase()}>`;
+  if (messageId.length > 255) throw new Error("Message-ID too long.");
+  return messageId;
 }
 
 function isEmailAddress(value: string | undefined): value is string {

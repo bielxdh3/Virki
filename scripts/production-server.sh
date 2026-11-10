@@ -1060,7 +1060,7 @@ SELECT jsonb_build_object(
     WHERE "kind"::text = 'ACCOUNT_RECOVERY'
   ), '[]'::jsonb),
   'attempts', COALESCE((
-    SELECT jsonb_agg(jsonb_build_array(attempt."id", attempt."messageId", attempt."attempt", attempt."status"::text, attempt."errorCode", attempt."attemptedAt") ORDER BY attempt."id")
+    SELECT jsonb_agg(jsonb_build_array(attempt."id", attempt."messageId", attempt."attempt", attempt."status"::text, attempt."errorCode", attempt."attemptedAt", to_jsonb(attempt)->>'smtpHeaderMessageId') ORDER BY attempt."id")
     FROM "EmailDeliveryAttempt" AS attempt
     JOIN "EmailOutboxMessage" AS message ON message."id" = attempt."messageId"
     WHERE message."kind"::text = 'ACCOUNT_RECOVERY'

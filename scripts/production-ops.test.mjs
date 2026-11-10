@@ -1057,6 +1057,9 @@ test("recovery snapshots account for the intended legacy-key migration and retai
   ]) {
     assert.ok(messageProjection.includes(field), `Recovery snapshots must preserve the ${field} field.`);
   }
+  const attemptProjection = snapshotSql.slice(snapshotSql.indexOf("'attempts'"));
+  assert.match(attemptProjection, /to_jsonb\(attempt\)->>'smtpHeaderMessageId'/u,
+    "Snapshot must preserve SMTP Message-ID when present without referencing a column absent before migration");
 
   assert.match(serverScript, /before_recovery=\$\(recovery_snapshot "\$container" before_migrations\)/u);
   assert.match(serverScript, /after_recovery=\$\(recovery_snapshot "\$container" after_migrations\)/u);
