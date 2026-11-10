@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -86,6 +86,36 @@ test("offline signed declaration result NEVER claims live worker verification, s
     stagingAuthorization: "NOT_GRANTED_BY_THIS_TOOL",
     release: "NO_GO"
   });
+});
+
+test("independently signed approval and observation accept semantically equal staging with different key insertion order", () => {
+  const f = fixture();
+  // Both principals serialize and sign their OWN declarations. Changing only
+  // object key insertion order must not cause a comparison false-red.
+  f.approval.staging = Object.fromEntries(Object.entries(f.approval.staging).reverse());
+  f.observation.staging = Object.fromEntries(
+    Object.entries(f.observation.staging).sort(([a], [b]) => a.localeCompare(b))
+  );
+  assert.notEqual(JSON.stringify(f.approval.staging), JSON.stringify(f.observation.staging));
+  assert.equal(canonicalStagingJson(f.approval.staging), canonicalStagingJson(f.observation.staging));
+  assert.equal(f.invoke().status, "SIGNED_OFFLINE_DECLARATIONS_CONSISTENT");
+});
+
+test("independently signed reordered staging objects still reject a mismatched value", () => {
+  const f = fixture();
+  f.approval.staging = Object.fromEntries(Object.entries(f.approval.staging).reverse());
+  f.observation.staging = Object.fromEntries(Object.entries(f.observation.staging).reverse());
+  f.observation.staging.hostId = "unexpected-stage-host";
+  assert.notEqual(canonicalStagingJson(f.approval.staging), canonicalStagingJson(f.observation.staging));
+  assert.throws(f.invoke, { code: "ATTESTATION_MISMATCH" });
+});
+
+test("signed staging list order remains security-significant and rejects reordered database roles", () => {
+  const f = fixture();
+  f.observation.staging = Object.fromEntries(Object.entries(f.observation.staging).reverse());
+  f.observation.staging.dbRoles.reverse();
+  assert.notEqual(canonicalStagingJson(f.approval.staging), canonicalStagingJson(f.observation.staging));
+  assert.throws(f.invoke, { code: "INVALID_IDENTITIES" });
 });
 
 test("local preflight has no network, SMTP, Docker, SSH or child-process dependency", () => {
@@ -217,12 +247,49 @@ test("CLI reads only explicit JSON/public-key documents, never leaks input field
       return { stdout, stderr, status };
     };
     const pass = capture();
-    assert.equal(pass.status, 0);
+    assert.equal(pass.status, 0, pass.stderr);
     assert.match(pass.stdout, /SIGNED_OFFLINE_DECLARATIONS_CONSISTENT/u);
     assert.match(pass.stdout, /LIVE_WORKER_STATE=NOT_OBSERVED_BY_THIS_TOOL/u);
     assert.match(pass.stdout, /STAGING_AUTHORIZATION=NOT_GRANTED_BY_THIS_TOOL/u);
     assert.match(pass.stdout, /PRODUCTION_RELEASE=NO_GO/u);
     assert.equal(pass.stderr, "");
+    const approvedBytes = JSON.stringify(signed("approval", f.approval, f.approver));
+    const observedBytes = JSON.stringify(signed("observation", f.observation, f.observer));
+    // JSON.parse would silently take the last value, thus preserving the
+    // canonical signed payload while hiding an extra ambiguous earlier key.
+    for (const duplicated of [
+      approvedBytes.replace('"staging":{', '"staging":{"hostId":"shadow-host",'),
+      approvedBytes.replace('"staging":{', '"staging":{"\\u0068ostId":"shadow-host",'),
+      approvedBytes.replace('"version":1,', '"version":2,"version":1,')
+    ]) {
+      writeFileSync(args[1], duplicated);
+      const rejected = capture();
+      assert.equal(rejected.status, 1);
+      assert.match(rejected.stderr, /BLOCK:DUPLICATE_JSON_KEY/u);
+      assert.doesNotMatch(rejected.stderr, /shadow-host|staging-host|shadow|password/u);
+    }
+    writeFileSync(args[1], approvedBytes);
+    writeFileSync(args[3], observedBytes.replace('"worker":{', '"worker":{"state":"running",'));
+    const nestedObservation = capture();
+    assert.equal(nestedObservation.status, 1);
+    assert.match(nestedObservation.stderr, /BLOCK:DUPLICATE_JSON_KEY/u);
+    writeFileSync(args[3], observedBytes);
+    // The command must refuse UNC/SMB before any open, including a missing
+    // share. Aliased parent directories and hardlinks cannot be trusted.
+    args[1] = "\\\\127.0.0.1\\unreachable-share\\approval.json";
+    assert.equal(capture().status, 1);
+    args[1] = path.join(dir, "approval.json");
+    const alias = path.join(dir, "aliased-parent");
+    symlinkSync(dir, alias, process.platform === "win32" ? "junction" : "dir");
+    args[1] = path.join(alias, "approval.json");
+    assert.equal(capture().status, 1);
+    args[1] = path.join(dir, "approval.json");
+    const hardlink = path.join(dir, "hardlink.json");
+    linkSync(args[1], hardlink);
+    args[1] = hardlink;
+    assert.equal(capture().status, 1);
+    args[1] = path.join(dir, "approval.json");
+    rmSync(hardlink);
     const poisoned = structuredClone(f.approval);
     poisoned.VIRKI_EMAIL_SMTP_PASSWORD = "SECRET_SENTINEL_NOT_FOR_OUTPUT";
     writeFileSync(args[1], JSON.stringify(signed("approval", poisoned, f.approver)));

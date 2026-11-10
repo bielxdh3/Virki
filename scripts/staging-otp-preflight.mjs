@@ -2,8 +2,8 @@
 // Offline consistency check of separately signed staging declarations. Never connects to a host,
 // inspects containers, reads .env, enables a worker, or authorizes staging/release operations.
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { dirname, isAbsolute, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SOURCE_SHA = /^[a-f0-9]{40}$/u;
@@ -43,7 +43,9 @@ function requireIds(value, min = 1, max = 20) {
       JSON.stringify(value) !== JSON.stringify([...value].sort())) block("INVALID_IDENTITIES");
 }
 function requireSame(a, b) {
-  if (JSON.stringify(a) !== JSON.stringify(b)) block("ATTESTATION_MISMATCH");
+  // Use the identical canonical form verified by the independent signatures:
+  // object key insertion order is irrelevant, but array order remains exact.
+  if (canonicalStagingJson(a) !== canonicalStagingJson(b)) block("ATTESTATION_MISMATCH");
 }
 function requireTime(value) {
   requireMatch(value, UTC_TIME);
@@ -176,12 +178,129 @@ export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvel
   });
 }
 
+function sameInputFile(a, b) {
+  return ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"]
+    .every((field) => a[field] === b[field]);
+}
+function safeInputPath(filename, suffix) {
+  // Reject UNC/device namespace inputs before ANY filesystem probe. Evidence
+  // must be explicitly staged in a private local directory, not an SMB path.
+  if (typeof filename !== "string" || filename.length > 4096 ||
+      filename.includes("\0") || !filename.toLowerCase().endsWith(suffix) ||
+      !isAbsolute(filename) || normalize(filename) !== filename ||
+      filename.startsWith("\\\\") || filename.startsWith("//")) block("UNSAFE_INPUT_PATH");
+  try {
+    const parent = dirname(filename);
+    for (let cursor = parent;; cursor = dirname(cursor)) {
+      const entry = lstatSync(cursor, { bigint: true });
+      if (!entry.isDirectory() || entry.isSymbolicLink()) block("UNSAFE_INPUT_PATH");
+      if (process.platform !== "win32" &&
+          (entry.mode & 0o022n) !== 0n && (entry.mode & 0o1000n) === 0n) block("UNSAFE_INPUT_PATH");
+      if (cursor === parent && process.platform !== "win32" &&
+          ((entry.mode & 0o077n) !== 0n || entry.uid !== BigInt(process.getuid()))) block("UNSAFE_INPUT_PATH");
+      if (dirname(cursor) === cursor) break;
+    }
+  } catch { block("UNSAFE_INPUT_PATH"); }
+}
 function readUnlinkedText(filename, suffix, maximumBytes) {
-  if (typeof filename !== "string" || !filename.toLowerCase().endsWith(suffix)) block("UNSAFE_INPUT_PATH");
-  let metadata;
-  try { metadata = lstatSync(filename); } catch { block("UNSAFE_INPUT_PATH"); }
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1 || metadata.size > maximumBytes) block("UNSAFE_INPUT_PATH");
-  try { return readFileSync(filename, "utf8"); } catch { block("UNSAFE_INPUT_PATH"); }
+  safeInputPath(filename, suffix);
+  let fd;
+  try {
+    const before = lstatSync(filename, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
+        before.size < 1n || before.size > BigInt(maximumBytes) ||
+        (process.platform !== "win32" && (before.mode & 0o022n) !== 0n)) block("UNSAFE_INPUT_PATH");
+    // Linux/POSIX pins the leaf without following links. Windows Node22 does
+    // not expose these flags: require pre/post lstat plus matching pinned FD,
+    // and document that same-user swaps cannot be excluded on that platform.
+    if (process.platform !== "win32" &&
+        (!Number.isInteger(constants.O_NOFOLLOW) || !Number.isInteger(constants.O_NONBLOCK))) block("UNSAFE_INPUT_PATH");
+    fd = openSync(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    if (!sameInputFile(before, fstatSync(fd, { bigint: true }))) block("UNSAFE_INPUT_PATH");
+    // A file may grow after lstat; read at most maximumBytes + 1 bytes from
+    // the pinned descriptor instead of allocating an unbounded readFileSync.
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(fd, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > maximumBytes || length < 1 ||
+        !sameInputFile(before, fstatSync(fd, { bigint: true })) ||
+        !sameInputFile(before, lstatSync(filename, { bigint: true }))) block("UNSAFE_INPUT_PATH");
+    safeInputPath(filename, suffix); // Detect renamed/aliased parents during read.
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length));
+  } catch { block("UNSAFE_INPUT_PATH"); }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
+function parseUniqueJson(text) {
+  // JSON.parse deliberately accepts duplicate members ("last one wins").
+  // Reject them at EVERY nesting level, including escaped aliases, before
+  // canonicalizing any signed declaration. No external parser dependency.
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { block("INVALID_JSON"); }
+  let index = 0;
+  const space = () => {
+    while (index < text.length && /[ \t\n\r]/u.test(text[index])) index += 1;
+  };
+  const string = () => {
+    const start = index++;
+    while (index < text.length) {
+      if (text[index] === "\\") { index += 2; continue; }
+      if (text[index] === '"') {
+        index += 1;
+        return JSON.parse(text.slice(start, index));
+      }
+      index += 1;
+    }
+    block("INVALID_JSON");
+  };
+  const value = (depth) => {
+    if (depth > 32) block("INVALID_JSON");
+    space();
+    if (text[index] === "{") {
+      index += 1;
+      const keys = new Set();
+      space();
+      if (text[index] === "}") { index += 1; return; }
+      while (index < text.length) {
+        space();
+        const key = string(); // decoded, so "\\u0061" and "a" collide.
+        if (keys.has(key)) block("DUPLICATE_JSON_KEY");
+        keys.add(key);
+        space();
+        if (text[index++] !== ":") block("INVALID_JSON");
+        value(depth + 1);
+        space();
+        if (text[index] === "}") { index += 1; return; }
+        if (text[index++] !== ",") block("INVALID_JSON");
+      }
+    } else if (text[index] === "[") {
+      index += 1;
+      space();
+      if (text[index] === "]") { index += 1; return; }
+      while (index < text.length) {
+        value(depth + 1);
+        space();
+        if (text[index] === "]") { index += 1; return; }
+        if (text[index++] !== ",") block("INVALID_JSON");
+      }
+    } else if (text[index] === '"') {
+      string();
+      return;
+    } else {
+      // The original JSON.parse already checked number/literal grammar.
+      while (index < text.length && !/[ \t\n\r,}\]]/u.test(text[index])) index += 1;
+      return;
+    }
+    block("INVALID_JSON");
+  };
+  value(0);
+  space();
+  if (index !== text.length) block("INVALID_JSON");
+  return parsed;
 }
 
 export function runStagingOtpPreflightCli(argv, { out = process.stdout, err = process.stderr, now = new Date() } = {}) {
@@ -193,8 +312,8 @@ export function runStagingOtpPreflightCli(argv, { out = process.stdout, err = pr
       if (!allowed.includes(argv[i]) || args.has(argv[i]) || !argv[i + 1]) block("INVALID_ARGUMENTS");
       args.set(argv[i], argv[i + 1]);
     }
-    const approvalEnvelope = JSON.parse(readUnlinkedText(args.get("--approval"), ".json", 32_768));
-    const observationEnvelope = JSON.parse(readUnlinkedText(args.get("--observation"), ".json", 32_768));
+    const approvalEnvelope = parseUniqueJson(readUnlinkedText(args.get("--approval"), ".json", 32_768));
+    const observationEnvelope = parseUniqueJson(readUnlinkedText(args.get("--observation"), ".json", 32_768));
     const approverPublicKey = readUnlinkedText(args.get("--approver-public-key"), ".pub.pem", 4096);
     const observerPublicKey = readUnlinkedText(args.get("--observer-public-key"), ".pub.pem", 4096);
     const result = evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvelope, approverPublicKey, observerPublicKey, expectedSourceSha: args.get("--expected-source-sha"), now });

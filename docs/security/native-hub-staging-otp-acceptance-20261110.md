@@ -72,6 +72,17 @@ provider rate budget. No SMTP retry,
 operator-provided JSON documents and two **public** Ed25519 PEM files; it
 never reads `.env`, contacts Docker/SSH, SMTP, Cloudflare or any database,
 starts a worker, performs an inbox probe or authorizes external operations.
+Stage these four input files in a private directory on a **verified local
+filesystem** (0700 directory on POSIX). The CLI rejects UNC paths, symlink
+parents, hardlinked files, unsafe POSIX directory permissions and duplicate
+JSON member names, including escaped and nested duplicates; it reads via a
+bounded, metadata-checked file descriptor instead of re-opening by filename.
+This is an input-integrity check, **not proof of a trusted filesystem**:
+Node.js on Windows does not expose `O_NOFOLLOW`, and mounted or mapped
+network filesystems and races by a process running under the same OS account
+cannot be categorically excluded. An operator must rule out those cases
+outside this tool. On unverified storage, treat the preflight as **NO-GO**,
+even if its signatures and declarations are consistent.
 Obtain authorization and independently inspect the target **outside this tool**
 first. Do not put real recipient addresses, passwords, tokens, connection
 strings, OTPs or transport headers in these documents. Recipient IDs must be
