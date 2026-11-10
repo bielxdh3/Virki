@@ -118,7 +118,8 @@ async function signInReviewer(page: Page, database: PrismaClient, reviewer: Revi
   await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
 }
 
-test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one reset and role/browser isolation", async ({ browser }) => {
+for (const accountRole of ["ADMIN", "USER"] as const) {
+test(`${accountRole} TOTP_ADMIN: independent approval, verified replacement mailbox, one reset and role/browser isolation`, async ({ browser }) => {
   test.setTimeout(180_000);
   const { database, reviewer } = await requireDisposableFixture();
   const contexts: BrowserContext[] = [];
@@ -127,8 +128,11 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     contexts.push(context);
     return context;
   };
-  const ownedEmail = `totp-admin-${randomUUID()}@e2e.invalid`;
-  const replacementEmail = `replacement-admin-${randomUUID()}@e2e.invalid`;
+  const ownedEmail = `totp-${accountRole.toLowerCase()}-${randomUUID()}@e2e.invalid`;
+  const replacementEmail = `replacement-${accountRole.toLowerCase()}-${randomUUID()}@e2e.invalid`;
+  const recoveryOrigin = accountRole === "ADMIN" ? hubUrl : portalUrl;
+  const protectedPath = accountRole === "ADMIN" ? "/admin/accounts" : "/account/security";
+  const protectedHeading = accountRole === "ADMIN" ? "Contas" : "Segurança";
   const normalPassword = randomBytes(32).toString("base64url");
   const administrativePassword = randomBytes(32).toString("base64url");
   const newPassword = randomBytes(32).toString("base64url");
@@ -138,24 +142,24 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     const owner = await database.user.create({
       data: {
         email: ownedEmail, emailNormalized: ownedEmail,
-        displayName: "Owned TOTP ADMIN browser E2E", role: "ADMIN",
+        displayName: `Owned TOTP ${accountRole} browser E2E`, role: accountRole,
         accountStatus: "ACTIVE", isActive: true, emailVerifiedAt: new Date(),
         passwordHash: await hashPassword(normalPassword), secondFactorMethod: "TOTP",
         totpFactor: { create: {
           secretCiphertext: encryptTotpSecret(secret),
           keyVersion: 1, status: "ACTIVE", confirmedAt: new Date()
         } },
-        administrativeCredential: { create: {
-          passwordHash: await hashPassword(administrativePassword), status: "ACTIVE"
-        } }
+        ...(accountRole === "ADMIN" ? { administrativeCredential: { create: {
+          passwordHash: await hashPassword(administrativePassword), status: "ACTIVE" as const
+        } } } : {})
       },
       select: { id: true }
     });
     expect(owner.id).not.toBe(reviewer.id);
-    const privilegedBefore = await database.administrativeCredential.findUniqueOrThrow({
-      where: { userId: owner.id },
-      select: { passwordHash: true, status: true, keyVersion: true }
+    const privilegedBefore = await database.administrativeCredential.findUnique({
+      where: { userId: owner.id }, select: { passwordHash: true, status: true, keyVersion: true }
     });
+    expect(Boolean(privilegedBefore), "only ADMIN has a separate administrative credential").toBe(accountRole === "ADMIN");
     const oldToken = randomBytes(32).toString("base64url");
     const oldSession = await database.session.create({
       data: {
@@ -167,12 +171,12 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
 
     const ownerContext = await newContext();
     await ownerContext.addCookies([{
-      name: sessionCookieName, value: oldToken, url: hubUrl,
+      name: sessionCookieName, value: oldToken, url: recoveryOrigin,
       httpOnly: true, secure: true, sameSite: "Lax"
     }]);
     const ownerPage = await ownerContext.newPage();
-    await addCloudflareAccessHeader(ownerPage);
-    await ownerPage.goto(`${hubUrl}/admin/security`);
+    if (accountRole === "ADMIN") await addCloudflareAccessHeader(ownerPage);
+    await ownerPage.goto(`${recoveryOrigin}/${accountRole === "ADMIN" ? "admin" : "account"}/security`);
     await expect(ownerPage.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
 
     const reviewerContext = await newContext();
@@ -184,15 +188,17 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     await addCloudflareAccessHeader(reviewerPage);
     await signInReviewer(reviewerPage, database, reviewer);
 
-    // A Portal recovery cannot claim an ADMIN identity, even when the method
-    // is displayed there for legitimate USER accounts.
-    const portalContext = await newContext();
-    const portalPage = await portalContext.newPage();
-    await portalPage.goto(`${portalUrl}/recover`);
-    await portalPage.getByLabel("E-mail da conta", { exact: true }).fill(ownedEmail);
-    await portalPage.locator('input[name="method"][value="TOTP_ADMIN"]').check();
-    await portalPage.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
-    await expect(portalPage).toHaveURL(/\/recover\?requestId=[A-Za-z0-9_-]{43}$/u);
+    // A request on the opposite surface must be synthetic, never a cross-role
+    // capability. The USER path proves Hub Access does not turn USER into ADMIN.
+    const oppositeOrigin = accountRole === "ADMIN" ? portalUrl : hubUrl;
+    const oppositeContext = await newContext();
+    const oppositePage = await oppositeContext.newPage();
+    if (accountRole === "USER") await addCloudflareAccessHeader(oppositePage);
+    expect((await oppositePage.goto(`${oppositeOrigin}/recover`))?.status()).toBe(200);
+    await oppositePage.getByLabel("E-mail da conta", { exact: true }).fill(ownedEmail);
+    await oppositePage.locator('input[name="method"][value="TOTP_ADMIN"]').check();
+    await oppositePage.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    await expect(oppositePage).toHaveURL(/\/recover\?requestId=[A-Za-z0-9_-]{43}$/u);
     expect(await database.accountRecoveryRequest.count({ where: { userId: owner.id } })).toBe(0);
 
     const deniedContext = await newContext();
@@ -201,9 +207,9 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
 
     const recoveryContext = await newContext();
     const recoveryPage = await recoveryContext.newPage();
-    await addCloudflareAccessHeader(recoveryPage);
-    await recoveryPage.goto(`${hubUrl}/recover`);
-    await expect(recoveryPage.getByRole("heading", { name: "Recuperar acesso administrativo" })).toBeVisible();
+    if (accountRole === "ADMIN") await addCloudflareAccessHeader(recoveryPage);
+    expect((await recoveryPage.goto(`${recoveryOrigin}/recover`))?.status()).toBe(200);
+    await expect(recoveryPage.getByRole("heading", { name: accountRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta" })).toBeVisible();
     await recoveryPage.getByLabel("E-mail da conta", { exact: true }).fill(ownedEmail);
     await recoveryPage.locator('input[name="method"][value="TOTP_ADMIN"]').check();
     await recoveryPage.locator('textarea[name="comment"]').fill("Revisão TOTP_ADMIN e troca de caixa postal.");
@@ -232,33 +238,33 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
       }
     });
     expect(recovery).toMatchObject({
-      userId: owner.id, status: "PENDING", recoveryRole: "ADMIN",
+      userId: owner.id, status: "PENDING", recoveryRole: accountRole,
       recoveryProofs: ["TOTP"], recoveryAdminReview: true,
       recoveryComment: "Revisão TOTP_ADMIN e troca de caixa postal.",
       recoveryTotpVerifiedAt: null, emailVerifiedAt: null, recoveryNewEmail: null
     });
-    const boundCookies = await recoveryContext.cookies(hubUrl);
+    const boundCookies = await recoveryContext.cookies(recoveryOrigin);
     for (const name of cookieNames) {
       const cookie = boundCookies.find((item) => item.name === name);
       expect(cookie, `No ${name} cookie`).toBeDefined();
-      expect(cookie!.domain).toBe(new URL(hubUrl).hostname);
+      expect(cookie!.domain).toBe(new URL(recoveryOrigin).hostname);
       expect(cookie!.path).toBe("/");
       expect(cookie!.httpOnly).toBe(true);
       expect(cookie!.value.length).toBeGreaterThan(0);
     }
     expect(boundCookies.find((item) => item.name === cookieNames[2])?.value).toBe(`${requestId}.TOTP_ADMIN`);
 
-    // Public request IDs do not authorize another browser, even with its own
-    // valid synthetic Access header.
+    // Public request IDs do not authorize another browser, even if Hub Access
+    // is satisfied independently of the browser-bound recovery capabilities.
     const foreignContext = await newContext();
     const foreignPage = await foreignContext.newPage();
-    await addCloudflareAccessHeader(foreignPage);
-    const foreignUrl = `${hubUrl}/recover?requestId=${encodeURIComponent(requestId)}`;
+    if (accountRole === "ADMIN") await addCloudflareAccessHeader(foreignPage);
+    const foreignUrl = `${recoveryOrigin}/recover?requestId=${encodeURIComponent(requestId)}`;
     const foreignResponse = await foreignPage.goto(foreignUrl);
     expect(foreignResponse?.status(), "an unauthorized request ID must render an ordinary Hub page, not a 403/500").toBe(200);
     await expect(foreignPage).toHaveURL(foreignUrl);
     await expect(foreignPage.getByRole("heading", {
-      level: 1, name: "Recuperar acesso administrativo", exact: true
+      level: 1, name: accountRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta", exact: true
     })).toBeVisible();
     await expect(foreignPage.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido.");
     await expect(foreignPage.locator('[aria-label="Aplicativo autenticador"] input[name="code"]')).toHaveCount(0);
@@ -293,7 +299,7 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     await expect(recoveryPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
     await ownerPage.reload();
     await expect(ownerPage.locator("article.list-row").filter({ hasText: ownedEmail }),
-      "the owner must not review their own recovery").toHaveCount(0);
+      "the owner cannot review their own recovery, regardless of role or surface").toHaveCount(0);
     await reviewerPage.reload();
     const approvable = reviewerPage.locator("article.list-row").filter({ hasText: ownedEmail });
     await expect(approvable).toBeVisible();
@@ -334,6 +340,9 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     // A TOTP proof does not attest ownership of the old mailbox.
     expect(await database.emailOutboxMessage.count({
       where: { recipientEmail: ownedEmail, kind: "ACCOUNT_RECOVERY" }
+    })).toBe(0);
+    expect(await database.emailOutboxMessage.count({
+      where: { recipientEmail: ownedEmail, kind: "RECOVERY_EMAIL_REBIND" }
     })).toBe(0);
     await recoveryPage.reload();
     const mailbox = recoveryPage.locator('[aria-label="Verificação do novo e-mail"]');
@@ -380,7 +389,7 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
       const preparedResponse = await prematurePage.goto(recoveryPage.url());
       expect(preparedResponse?.status()).toBe(200);
       await expect(prematurePage.getByRole("heading", {
-        level: 1, name: "Recuperar acesso administrativo", exact: true
+        level: 1, name: accountRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta", exact: true
       })).toBeVisible();
       await expect(prematurePage.getByLabel("Nova senha", { exact: true })).toBeVisible();
       const actualCompletionForm = prematurePage.locator("form").filter({
@@ -406,7 +415,7 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
       status: "APPROVED", recoveryNewEmail: replacementEmail,
       recoveryNewEmailVerifiedAt: null, bootstrapSessionId: null
     });
-    const prematureCookies = await recoveryContext.cookies(hubUrl);
+    const prematureCookies = await recoveryContext.cookies(recoveryOrigin);
     for (const name of cookieNames) {
       expect(prematureCookies.find((cookie) => cookie.name === name)?.value,
         "the rejected POST must carry the originally bound recovery capability").toBe(
@@ -422,14 +431,17 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     await prematurePage.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
     const prematureActionPost = prematurePage.waitForResponse((response) =>
       response.request().method() === "POST" &&
-      new URL(response.url()).origin === hubUrl &&
+      new URL(response.url()).origin === recoveryOrigin &&
       new URL(response.url()).pathname === "/recover" &&
       Boolean(response.request().headers()["next-action"]));
     await prematurePage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     const prematureResponse = await prematureActionPost;
     expect(prematureResponse.request().postDataBuffer()?.byteLength ?? 0,
       "rejected completion must be a genuine Next Server Action POST with form data").toBeGreaterThan(0);
-    expect(prematureResponse.request().headers().origin).toBe(hubUrl);
+    expect(new URL(prematureResponse.url()).origin).toBe(recoveryOrigin);
+    const prematureHeaders = prematureResponse.request().headers();
+    if (prematureHeaders.origin) expect(prematureHeaders.origin).toBe(recoveryOrigin);
+    if (prematureHeaders.referer) expect(new URL(prematureHeaders.referer).origin).toBe(recoveryOrigin);
     expect(prematureResponse.status(),
       "a CSRF/Access HTTP403 or server HTTP500 cannot count as a mailbox-proof denial").toBeLessThan(400);
     await expect(prematurePage).toHaveURL(new RegExp(`/recover\\?requestId=${requestId}&error=1`));
@@ -464,10 +476,10 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     await replayPage.goto(recoveryPage.url());
     await expect(replayPage.getByLabel("Nova senha", { exact: true })).toBeVisible();
     await replayPage.getByLabel("Nova senha", { exact: true }).fill(otherPassword);
-    const priorCookies = (await recoveryContext.cookies(hubUrl))
+    const priorCookies = (await recoveryContext.cookies(recoveryOrigin))
       .filter((cookie) => cookieNames.includes(cookie.name))
       .map((cookie) => ({
-        url: `${hubUrl}/`, name: cookie.name, value: cookie.value,
+        url: `${recoveryOrigin}/`, name: cookie.name, value: cookie.value,
         expires: cookie.expires, httpOnly: cookie.httpOnly, secure: cookie.secure,
         sameSite: cookie.sameSite
       }));
@@ -476,13 +488,15 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     const bootstrapDocumentPromise = recoveryPage.waitForResponse((response) =>
       response.request().method() === "GET" &&
       response.request().resourceType() === "document" &&
-      new URL(response.url()).origin === hubUrl &&
-      new URL(response.url()).pathname === "/admin/accounts");
+      new URL(response.url()).origin === recoveryOrigin &&
+      new URL(response.url()).pathname === protectedPath);
     await recoveryPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     const bootstrapDocument = await bootstrapDocumentPromise;
-    expect(bootstrapDocument.status(), "the recovered ADMIN must fetch a real protected document").toBe(200);
-    await expect(recoveryPage).toHaveURL(`${hubUrl}/admin/accounts`);
-    await expect(recoveryPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
+    expect(bootstrapDocument.status(), `the recovered ${accountRole} must fetch a real protected document`).toBe(200);
+    await expect(recoveryPage).toHaveURL(accountRole === "ADMIN"
+      ? `${recoveryOrigin}${protectedPath}`
+      : `${recoveryOrigin}${protectedPath}?recovered=password`);
+    await expect(recoveryPage.getByRole("heading", { level: 1, name: protectedHeading, exact: true })).toBeVisible();
     const changedUser = await database.user.findUniqueOrThrow({
       where: { id: owner.id }, select: {
         email: true, emailNormalized: true, emailVerifiedAt: true,
@@ -495,10 +509,10 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     expect(changedUser.secondFactorMethod).toBe("EMAIL");
     expect(await verifyPassword(changedUser.passwordHash ?? "", newPassword)).toBe(true);
     expect(await verifyPassword(changedUser.passwordHash ?? "", normalPassword)).toBe(false);
-    expect(await database.administrativeCredential.findUniqueOrThrow({
+    expect(await database.administrativeCredential.findUnique({
       where: { userId: owner.id }, select: { passwordHash: true, status: true, keyVersion: true }
     })).toEqual(privilegedBefore);
-    expect(await verifyPassword(privilegedBefore.passwordHash, administrativePassword)).toBe(true);
+    if (privilegedBefore) expect(await verifyPassword(privilegedBefore.passwordHash, administrativePassword)).toBe(true);
     expect((await database.totpFactor.findUniqueOrThrow({
       where: { userId: owner.id }, select: { status: true }
     })).status).toBe("REVOKED");
@@ -522,30 +536,42 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     expect(bootstrapSession.userId).toBe(owner.id);
     expect(bootstrapSession.revokedAt).toBeNull();
     expect(bootstrapSession.expiresAt.getTime()).toBeGreaterThan(Date.now());
-    const bootstrapCookies = (await recoveryContext.cookies(hubUrl))
+    const bootstrapCookies = (await recoveryContext.cookies(recoveryOrigin))
       .filter((cookie) => cookie.name === sessionCookieName && cookie.value.length > 0);
     expect(bootstrapCookies, "the recovered browser must receive exactly one host-bound Hub session cookie").toHaveLength(1);
-    expect(bootstrapCookies[0]!.domain).toBe(new URL(hubUrl).hostname);
+    expect(bootstrapCookies[0]!.domain).toBe(new URL(recoveryOrigin).hostname);
     expect(bootstrapCookies[0]!.path).toBe("/");
     expect(bootstrapCookies[0]!.httpOnly).toBe(true);
     expect(bootstrapCookies[0]!.secure).toBe(productionMode);
     expect(hashSessionToken(bootstrapCookies[0]!.value),
       "the browser session token must match the exact persisted bootstrap session").toBe(bootstrapSession.tokenHash);
-    await ownerPage.goto(`${hubUrl}/admin/security`);
-    await expect(ownerPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Fsecurity`);
-    await expect(recoveryContext.cookies(hubUrl).then((cookies) =>
+    const oldProtectedPath = accountRole === "ADMIN" ? "/admin/security" : "/account/security";
+    await ownerPage.goto(`${recoveryOrigin}${oldProtectedPath}`);
+    await expect(ownerPage).toHaveURL(`${recoveryOrigin}/login?returnTo=${encodeURIComponent(oldProtectedPath)}`);
+    await expect(recoveryContext.cookies(recoveryOrigin).then((cookies) =>
       cookies.filter((cookie) => cookieNames.includes(cookie.name)))).resolves.toHaveLength(0);
 
+    const sessionRowsBeforeReplay = await database.session.count({ where: { userId: owner.id } });
     await recoveryContext.addCookies(priorCookies);
     const replayResponsePromise = replayPage.waitForResponse((response) =>
       response.request().method() === "POST" &&
-      new URL(response.url()).origin === hubUrl &&
+      new URL(response.url()).origin === recoveryOrigin &&
       new URL(response.url()).pathname === "/recover" &&
       Boolean(response.request().headers()["next-action"]));
     await replayPage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     const replayResponse = await replayResponsePromise;
     expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
-    await expect(replayPage).toHaveURL(new RegExp(`/recover\\?requestId=${requestId}&error=1`));
+    expect(replayResponse.status(), "a server/CSRF error is not a valid single-use replay denial").toBeGreaterThanOrEqual(200);
+    expect(replayResponse.status()).toBeLessThan(400);
+    const deniedUrl = `${recoveryOrigin}/recover?requestId=${requestId}&error=1`;
+    await expect(replayPage).toHaveURL(deniedUrl);
+    const deniedDocument = await replayPage.goto(deniedUrl);
+    expect(deniedDocument?.status(), "the consumed capability must render a real invalid-link document").toBe(200);
+    await expect(replayPage.getByRole("heading", {
+      level: 1, name: accountRole === "ADMIN" ? "Recuperar acesso administrativo" : "Recuperar conta", exact: true
+    })).toBeVisible();
+    await expect(replayPage.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido");
+    await expect(replayPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
     const replayed = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
     expect(await verifyPassword(replayed.passwordHash ?? "", newPassword)).toBe(true);
     expect(await verifyPassword(replayed.passwordHash ?? "", otherPassword)).toBe(false);
@@ -556,9 +582,14 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     expect(await database.session.count({
       where: { userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() } }
     })).toBe(1);
+    expect(await database.session.count({ where: { userId: owner.id } }),
+      "the replay must not mint another session, even if immediately revoked").toBe(sessionRowsBeforeReplay);
     expect(await database.emailOutboxMessage.count({
       where: { recipientEmail: replacementEmail, kind: "PASSWORD_CHANGED" }
     })).toBe(1);
+    expect(await database.emailOutboxMessage.count({
+      where: { recipientEmail: ownedEmail, kind: "RECOVERY_EMAIL_REBIND_NOTICE" }
+    }), "the unreachable old inbox only receives a nonsecret account-change notice").toBe(1);
 
     // Bootstrap proves immediate protected access, but the owner must also
     // authenticate from a NEW browser with the replacement mailbox and new
@@ -566,13 +597,13 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
     // comparison or a session that survived the recovery ceremony.
     const freshContext = await newContext();
     const freshPage = await freshContext.newPage();
-    await addCloudflareAccessHeader(freshPage);
-    expect((await freshPage.goto(`${hubUrl}/admin/accounts`))?.status()).toBe(200);
-    await expect(freshPage).toHaveURL(`${hubUrl}/login?returnTo=%2Fadmin%2Faccounts`);
+    if (accountRole === "ADMIN") await addCloudflareAccessHeader(freshPage);
+    expect((await freshPage.goto(`${recoveryOrigin}${protectedPath}`))?.status()).toBe(200);
+    await expect(freshPage).toHaveURL(`${recoveryOrigin}/login?returnTo=${encodeURIComponent(protectedPath)}`);
     await freshPage.getByLabel("E-mail", { exact: true }).fill(replacementEmail);
     await freshPage.getByLabel("Senha", { exact: true }).fill(newPassword);
     const loginPost = freshPage.waitForResponse((response) =>
-      response.request().method() === "POST" && new URL(response.url()).origin === hubUrl &&
+      response.request().method() === "POST" && new URL(response.url()).origin === recoveryOrigin &&
       new URL(response.url()).pathname === "/api/login");
     await freshPage.getByRole("button", { name: "Entrar", exact: true }).click();
     expect((await loginPost).status()).toBe(303);
@@ -585,21 +616,21 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
         kind: { in: ["EMAIL_TWO_FACTOR", "NEW_DEVICE_VERIFICATION"] }
       }, select: { payload: true }
     });
-    expect(loginEmail, "fresh ADMIN login must require real, newly emailed MFA").not.toBeNull();
+    expect(loginEmail, `fresh ${accountRole} login must require real, newly emailed MFA`).not.toBeNull();
     const loginCode = decryptEmailPayload(loginEmail!.payload).code;
     expect(loginCode).toMatch(/^\d{6}$/u);
     await freshPage.getByLabel("Código", { exact: true }).fill(loginCode!);
     const freshDocument = freshPage.waitForResponse((response) =>
       response.request().method() === "GET" && response.request().resourceType() === "document" &&
-      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/accounts");
+      new URL(response.url()).origin === recoveryOrigin && new URL(response.url()).pathname === protectedPath);
     await freshPage.getByRole("button", { name: "Continuar", exact: true }).click();
     expect((await freshDocument).status()).toBe(200);
-    await expect(freshPage).toHaveURL(`${hubUrl}/admin/accounts`);
-    await expect(freshPage.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
-    const freshCookie = (await freshContext.cookies(hubUrl))
+    await expect(freshPage).toHaveURL(`${recoveryOrigin}${protectedPath}`);
+    await expect(freshPage.getByRole("heading", { level: 1, name: protectedHeading, exact: true })).toBeVisible();
+    const freshCookie = (await freshContext.cookies(recoveryOrigin))
       .find((cookie) => cookie.name === sessionCookieName && cookie.value.length > 0);
     expect(freshCookie).toBeDefined();
-    expect(freshCookie!.domain).toBe(new URL(hubUrl).hostname);
+    expect(freshCookie!.domain).toBe(new URL(recoveryOrigin).hostname);
     expect(freshCookie!.httpOnly).toBe(true);
     const freshSession = await database.session.findFirstOrThrow({
       where: { tokenHash: hashSessionToken(freshCookie!.value) },
@@ -620,3 +651,4 @@ test("ADMIN TOTP_ADMIN: independent approval, verified replacement mailbox, one 
       "every browser context must close").toBe(true);
   }
 });
+}
