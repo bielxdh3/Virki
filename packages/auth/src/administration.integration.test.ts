@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { after, test } from "node:test";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import {
   AdministrationMutationError,
   AdministrativePasswordReuseError,
@@ -23,7 +23,12 @@ import { cleanupInactiveSessions, hashAuditSessionReference, hashPassword, verif
 import { createTotpSecret, generateNumericCode, generateRecoveryCode, hashEmailAddress, hashRecoveryCode, hashSecurityCode, startLoginCeremony, verifyLoginEmailCode } from "./security";
 import { hashOidcIdentifier } from "./oidc-secrets";
 
-after(() => prisma.$disconnect());
+// The shared application pool has a three-connection limit in CI. In the
+// two-writer collision it is entirely occupied by the row-lock holder and
+// both genuine blocked recovery transactions. A separate observer pool is
+// required to inspect pg_stat_activity without deadlocking on pool checkout.
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 const MINUTE = 60 * 1000;
 const DAY = 24 * 60 * MINUTE;
@@ -189,7 +194,7 @@ async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: st
   let maxDirectWaiters = 0;
   let maxUserWaiters = 0;
   while (Date.now() < deadline) {
-    const blocked = await prisma.$queryRaw<Array<{ directMatches: number; directWaiters: number; userWaiters: number }>>`
+    const blocked = await lockObserver.$queryRaw<Array<{ directMatches: number; directWaiters: number; userWaiters: number }>>`
       SELECT
         count(*) FILTER (WHERE wait_event_type = 'Lock'
           AND ${blockerPid} = ANY(pg_blocking_pids(pid))
