@@ -532,6 +532,15 @@ try {
 
   $runnerCreateArguments = @('create', '--name', $runnerName, '--network', $bootstrapNetworkName,
     '--label', $script:dockerOwnerLabel)
+  if (-not $IntegrationOnly -and -not $UnitOnly) {
+    # Chromium's --host-resolver-rules are private to the browser process.
+    # Playwright route.fetch / APIRequestContext run in Node, so bind the same
+    # exact test hosts to this isolated runner's OWN loopback as well.
+    # Without these Docker-only aliases, genuine intercepted Next POSTs
+    # cannot reach the local app even though Chromium navigation succeeds.
+    $runnerCreateArguments += @('--add-host', 'portal.localhost:127.0.0.1',
+      '--add-host', 'hub.localhost:127.0.0.1')
+  }
   if ($env:VIRKI_E2E_HUB_MODE -eq 'production') {
     $runnerCreateArguments += @('--add-host', 'access.e2e.invalid:127.0.0.1')
   }

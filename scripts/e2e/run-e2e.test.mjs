@@ -751,6 +751,24 @@ test("production E2E runner resolves its synthetic Access host to container loop
   assert.match(playwrightConfig, /subjectAltName=DNS:portal\.localhost,DNS:hub\.localhost,DNS:access\.e2e\.invalid,IP:127\.0\.0\.1/u);
 });
 
+test("isolated Chromium and Node route.fetch agree on runner-local Portal and Hub addresses", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  const normalized = script.replace(/\r\n/gu, "\n");
+  const createStart = normalized.indexOf("$runnerCreateArguments = @('create'");
+  const createEnd = normalized.indexOf("$runnerName = Invoke-CreateOwnedDockerResource 'runner'", createStart);
+  assert.ok(createStart >= 0 && createEnd > createStart,
+    "inspect only the actual owned runner creation arguments, never an earlier unrelated stage guard");
+  const runnerCreation = normalized.slice(createStart, createEnd);
+  assert.match(runnerCreation, /if \(-not \$IntegrationOnly -and -not \$UnitOnly\) \{\n(?:\s*#[^\n]*\n)*\s*\$runnerCreateArguments \+= @\('--add-host', 'portal\.localhost:127\.0\.0\.1',\s*'--add-host', 'hub\.localhost:127\.0\.0\.1'\)\n\s*\}/u,
+    "both Node aliases must be inside the explicit browser-only guard on the disposable runner");
+  assert.equal((runnerCreation.match(/'portal\.localhost:127\.0\.0\.1'/gu) ?? []).length, 1,
+    "a browser-only alias must not also appear unguarded in the runner arguments");
+  assert.equal((runnerCreation.match(/'hub\.localhost:127\.0\.0\.1'/gu) ?? []).length, 1,
+    "the Hub alias must not also appear outside the browser-only guard");
+  const config = readFileSync(new URL("../../playwright.config.mts", import.meta.url), "utf8");
+  assert.match(config, /--host-resolver-rules=MAP portal\.localhost 127\.0\.0\.1,MAP hub\.localhost 127\.0\.0\.1/u);
+});
+
 test("isolated Linux runner clones the current local branch instead of a fixed repository branch", () => {
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
   assert.match(script, /git -C \$repoRoot branch --show-current/u);
