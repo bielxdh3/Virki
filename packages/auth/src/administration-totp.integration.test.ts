@@ -137,6 +137,19 @@ test("TOTP recovery rotates only the administrative password, invalidates artifa
   await assert.rejects(startSecurityElevation({ ...elevationInput, administrativePassword: ADMIN }),
     AdministrationMutationError, "old administrative password cannot regain privileges after TOTP recovery");
   assert.equal(await hasActiveSecurityElevation(admin.userId, admin.sessionId, "ADMIN_RECOVERY_REGENERATE"), false);
+  const priorHashes = (await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.userId }, select: { codeHash: true }
+  })).map((item) => item.codeHash).sort();
+  assert.equal(priorHashes.length, 10);
+  const beforeAudit = await prisma.auditLog.count({ where: {
+    actorUserId: admin.userId, eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS"
+  } });
+  await assert.rejects(regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId),
+    AdministrationMutationError, "the protected mutation must deny missing fresh elevation");
+  assert.deepEqual((await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.userId }, select: { codeHash: true }
+  })).map((item) => item.codeHash).sort(), priorHashes,
+  "denied administrative operation must leave codes unchanged");
   const elevation = await startSecurityElevation({ ...elevationInput, administrativePassword: NEW_ADMIN });
   const elevationCode = (await queuedEmails(admin.email)).filter((mail) => mail.kind === "ADMIN_EMAIL_VERIFICATION").at(-1)?.code;
   assert.ok(elevationCode);
@@ -145,6 +158,14 @@ test("TOTP recovery rotates only the administrative password, invalidates artifa
   const reauthorizedCodes = await regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId);
   assert.equal(reauthorizedCodes.length, 10, "privileged code rotation must require fresh recovered elevation");
   assert.equal(new Set(reauthorizedCodes).size, 10);
+  const persisted = (await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.userId, usedAt: null }, select: { codeHash: true }
+  })).map((item) => item.codeHash).sort();
+  assert.deepEqual(persisted, reauthorizedCodes.map(hashRecoveryCode).sort());
+  assert.equal(priorHashes.some((hash) => persisted.includes(hash)), false);
+  assert.equal(await prisma.auditLog.count({ where: {
+    actorUserId: admin.userId, eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS"
+  } }), beforeAudit + 1);
 });
 
 test("wrong, expired, replayed and inactive TOTP cannot recover an ADMIN credential", integrationOptions, async () => {

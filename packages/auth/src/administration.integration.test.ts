@@ -83,6 +83,18 @@ async function assertRecoveredAdminCredentialCanReElevate(
     AdministrationMutationError, "the previous administrative password must not authorize a new elevation");
   assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, scope), false,
     "a recovered ADMIN must not inherit privileged access");
+  const beforeCodes = (await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id }, select: { codeHash: true }, orderBy: { codeHash: "asc" }
+  })).map((item) => item.codeHash);
+  assert.equal(beforeCodes.length, 10);
+  const beforeAuditCount = await prisma.auditLog.count({ where: {
+    actorUserId: admin.actor.id, eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS"
+  } });
+  await assert.rejects(regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId),
+    AdministrationMutationError, "protected code regeneration must reject an un-elevated session");
+  assert.deepEqual((await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id }, select: { codeHash: true }, orderBy: { codeHash: "asc" }
+  })).map((item) => item.codeHash), beforeCodes, "unauthorized regeneration cannot modify codes");
   const challenge = await startSecurityElevation({ ...input, administrativePassword: replacementPassword });
   const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
   await verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: challenge.requestKey, code });
@@ -92,6 +104,16 @@ async function assertRecoveredAdminCredentialCanReElevate(
   assert.equal(newlyRotatedCodes.length, 10,
     "a real protected ADMIN mutation must be possible only after fresh elevation");
   assert.equal(new Set(newlyRotatedCodes).size, 10);
+  const persistedCodes = (await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id, usedAt: null }, select: { codeHash: true }
+  })).map((item) => item.codeHash).sort();
+  assert.deepEqual(persistedCodes, newlyRotatedCodes.map(hashRecoveryCode).sort(),
+    "all newly issued codes must actually be stored as hashes, not merely returned");
+  assert.equal(beforeCodes.some((codeHash) => persistedCodes.includes(codeHash)), false,
+    "every previously issued administrative recovery code must be invalidated");
+  assert.equal(await prisma.auditLog.count({ where: {
+    actorUserId: admin.actor.id, eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS"
+  } }), beforeAuditCount + 1, "only the authorized regeneration produces a success audit");
 }
 
 async function seedAdministrativeRecoveryProofs(admin: Awaited<ReturnType<typeof setupAdmin>>) {
