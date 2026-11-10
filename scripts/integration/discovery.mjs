@@ -2,7 +2,8 @@ import { readdirSync } from "node:fs";
 import path from "node:path";
 
 const dedicatedSuites = new Map([
-  ["packages/oidc-node/src/postgres-store.integration.test.ts", "npm run test:oidc-node:postgres"]
+  ["packages/oidc-node/src/postgres-store.integration.test.ts", "npm run test:oidc-node:postgres"],
+  ["packages/auth/src/email-worker-hol.integration.test.ts", "npm run test:integration:email-worker:hol"]
 ]);
 
 function dedicatedRunner(file) {

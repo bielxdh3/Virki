@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - "feat/virki-native-admin-perimeter-*"
   pull_request:
     branches:
       - main
@@ -273,7 +274,7 @@ jobs:
     name: Build tested production images (${{ matrix.arch }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # GHCR publication requires every independent audit to succeed.
-    needs: [validate, authenticated-e2e, tooling-policy, production-audit]
+    needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]
     permissions:
       contents: read
       packages: write
@@ -392,6 +393,34 @@ jobs:
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
           printf 'VIRKI_EVIDENCE_DIGEST revision=%s run=%s kind=images platform=linux/%s digest=%s\n' "$ACCEPTED_SHA" "$ACCEPTED_RUN_ID" "$EXPECTED_ARCH" "$digest"
+
+  email-worker-hol:
+    name: Mandatory exclusive email worker HOL/CAS (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Refuse missing, skipped or shared-DB worker regressions
+        run: node --test scripts/integration/worker-hol.test.mjs
+
+      - name: Run required HOL/CAS tests in exclusive PostgreSQL
+        env:
+          VIRKI_HOL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash scripts/integration/worker-hol-ci.sh
 
   authenticated-e2e:
     name: Authenticated browser E2E

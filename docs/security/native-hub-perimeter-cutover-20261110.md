@@ -92,3 +92,38 @@ change or externally hosted E2E authorized by this document.**
   the approved PR SHA was received. That separate end-to-end correlation
   (application/outbox, worker, Brevo and recipient) remains pending, as do
   isolated staging and external ADMIN/USER recovery acceptance tests.
+
+## Mandatory exclusive email-worker PostgreSQL acceptance gate (child candidate)
+
+The head-of-line regression was moved out of generic shared database test
+discovery into `email-worker-hol.integration.test.ts`. Its mandatory command is
+`npm run test:integration:email-worker:hol`: it **fails**, never reports a
+successful SKIP, unless an exclusive freshly provisioned loopback database
+with the dedicated `virki_runtime_test` role and random test-only database
+name is confirmed. It explicitly requires both physical tests to pass:
+
+- Three exhausted stale attempts are terminalized without the 5-second false
+  idle poll, then exactly one queued OTP is processed; inspect final attempt
+  rows and verify zero sleeps.
+- Two PostgreSQL claim transactions are synchronized after SELECT and before
+  CAS; precisely one wins/sends and the other reports contention, with one
+  durable attempt, without an extra OTP send.
+
+`.github/workflows/ci.yml` now declares a mandatory standalone job using
+GitHub-hosted Linux, an independently named and labelled PG17 container on
+tmpfs, a random unique database, loopback-only published port, least-privilege
+test/migrator identities and verified owner-ID cleanup. The job runs the
+dedicated command after applying committed migrations. It is required by the
+`production-images` job; tests reject any missing, conditional, soft-failed or
+skipped mandatory CI step. Lack of Docker or exclusive PostgreSQL must fail
+the job, not silently exclude the regression.
+
+**Local physical evidence, 2026-11-10:** an independent WSL Ubuntu PG18.6
+rootless instance, with database and credentials only in private temporary
+storage, ran the dedicated command after applying all migrations: **2 PASS,
+0 FAIL, 0 SKIP**, including the real two-transaction pre-CAS collision. The
+instance, extracted PG binaries and temporary credential files were verified
+removed after the test. Local checks of CI/test-inventory/runner policies,
+auth TypeScript, lint, CI YAML and Bash syntax passed. This is **not** an
+assertion that the hosted GitHub Actions job has passed yet, and does not
+replace browser E2E or any external email delivery proof.
