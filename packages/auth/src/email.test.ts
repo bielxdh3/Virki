@@ -158,9 +158,13 @@ test("SMTP correlation accepts long valid sender domains without exceeding the R
     ["a".repeat(63), "b".repeat(63), "c".repeat(60)].join("."),
     ["a".repeat(63), "b".repeat(63), "c".repeat(61)].join("."),
     ["a".repeat(63), "b".repeat(63), "c".repeat(63), "example", "invalid"].join("."),
+    // Same final DNS labels after shortening as the previous domain, but a
+    // different full sender domain. The digest must still be unique.
+    ["z".repeat(63), "b".repeat(63), "c".repeat(63), "example", "invalid"].join("."),
     ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(43), "io"].join("."),
     "bücher.example"
   ];
+  const firstIds: string[] = [];
   for (const domain of domains) {
     const from = `a@${domain}`;
     assert.equal(isSingleMailboxAddress(from), true, `fixture ${domain.length} domain must be accepted as SMTP mailbox`);
@@ -178,11 +182,16 @@ test("SMTP correlation accepts long valid sender domains without exceeding the R
     assert.equal(first?.smtpHeaderMessageId, replay?.smtpHeaderMessageId);
     assert.notEqual(first?.smtpHeaderMessageId, next?.smtpHeaderMessageId);
     assert.ok(first?.smtpHeaderMessageId);
+    firstIds.push(first.smtpHeaderMessageId);
     assert.ok(first.smtpHeaderMessageId.length <= 255, `domain length ${domain.length}`);
     assert.match(first.smtpHeaderMessageId, /^<[a-f0-9]{64}@[A-Za-z0-9.-]+>$/u);
     if (domain.length === 188) assert.ok(first.smtpHeaderMessageId.endsWith(`@${domain}>`));
   }
   assert.equal(accepted.length, domains.length * 3);
+  assert.equal(firstIds[2].split("@")[1], firstIds[3].split("@")[1],
+    "the adversarial sender domains must produce exactly the same shortened DNS suffix");
+  assert.notEqual(firstIds[2], firstIds[3],
+    "the digest must bind the full original sender domain, not only its shortened suffix");
   assert.equal(new Set(accepted.filter((_, i) => i % 3 === 0)).size, domains.length,
     "different sender domains must not collide even when they share the same shortened suffix");
 });
