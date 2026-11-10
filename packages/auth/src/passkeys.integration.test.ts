@@ -155,6 +155,7 @@ test("ADMIN hub registration requires a fresh independent elevation and rejects 
   await prisma.securityElevation.update({ where: { id: elevationId }, data: { activatedAt: new Date() } });
   const firstToken = createPasskeyBrowserToken();
   const first = await startPasskeyRegistration(admin.id, sessionId, admin.password, firstToken, "hub.biel.dev.br", "", "ADMIN");
+  assert.equal(first.authenticatorSelection?.residentKey, "required", "ADMIN recovery enrollment must produce discoverable credentials");
   const key = authenticator();
   await finishPasskeyRegistration(admin.id, sessionId, firstToken,
     registerResponse(key, first.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"), "Hub recovery key", "hub.biel.dev.br", "ADMIN");
@@ -311,6 +312,7 @@ test("passkey cryptography, account binding, replay, UV, RP, origin, revocation 
 
   const regToken = createPasskeyBrowserToken();
   const options = await startPasskeyRegistration(user.id, session.id, user.password, regToken);
+  assert.equal(options.authenticatorSelection?.residentKey, "required", "USER recovery enrollment must produce discoverable credentials");
   await finishPasskeyRegistration(user.id, session.id, regToken, registerResponse(key, options.challenge), "Chave A");
   assert.equal((await listUserPasskeys(user.id))[0]?.name, "Chave A");
   assert.equal((await listUserPasskeys(other.id)).length, 0);

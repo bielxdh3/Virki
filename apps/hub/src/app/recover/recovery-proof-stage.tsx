@@ -40,6 +40,7 @@ export function RecoveryProofStage({ csrf, csrfFieldName, requestId, requiredPro
     /> : null}
     {requiredProofs.includes("PASSKEY") ? <RecoveryPasskeyProof
       verified={verifiedProofs.includes("PASSKEY")} csrf={csrf} csrfFieldName={csrfFieldName} requestId={requestId}
+      supportsLegacyKey={requiredProofs.includes("EMAIL") || requiredProofs.includes("TOTP")}
       startAction={startPasskeyAction} finishAction={verifyPasskeyAction}
     /> : null}
     {needsAdminReview ? <p role="status">
@@ -78,8 +79,9 @@ function RecoveryCodeProof({ title, description, verified, action, csrf, csrfFie
   </div>;
 }
 
-function RecoveryPasskeyProof({ verified, csrf, csrfFieldName, requestId, startAction, finishAction }: {
+function RecoveryPasskeyProof({ verified, csrf, csrfFieldName, requestId, supportsLegacyKey, startAction, finishAction }: {
   verified: boolean;
+  supportsLegacyKey: boolean;
   csrf: string;
   csrfFieldName: string;
   requestId: string;
@@ -118,6 +120,7 @@ function RecoveryPasskeyProof({ verified, csrf, csrfFieldName, requestId, startA
     <h2>Passkey</h2>
     {verified ? <p role="status">Confirmada.</p> : <>
       <p className="muted">Use a passkey cadastrada no Virki para confirmar sua identidade.</p>
+      {supportsLegacyKey ? <p className="muted">Se uma chave de segurança antiga não aparecer, confirme primeiro o e-mail ou o autenticador e tente a passkey novamente.</p> : null}
       {error ? <p className="form-error" role="alert">Não foi possível confirmar a passkey. Tente novamente.</p> : null}
       <button className="button-primary" type="button" disabled={pending} onClick={verify}>{pending ? "Validando passkey…" : "Confirmar com passkey"}</button>
     </>}

@@ -52,6 +52,10 @@ test("USER virtual authenticator: register, discoverable login, credential inven
       await expect(page.getByText("Chave virtual E2E", { exact: true })).toBeVisible({ timeout: 25_000 });
       const credentials = await db.passkeyCredential.findMany({ where: { userId: fixture.user.id, revokedAt: null, name: "Chave virtual E2E" } });
       expect(credentials).toHaveLength(1);
+      // A post-enrollment server-rendered reload must list the *local* RP
+      // credential, not silently query the production portal RP instead.
+      await page.reload();
+      await expect(page.getByText("Chave virtual E2E", { exact: true })).toBeVisible();
 
       await context.clearCookies();
       await page.goto(`${url}/login`);

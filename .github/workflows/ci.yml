@@ -528,7 +528,7 @@ jobs:
         run: |
           cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
           trap 'unset cleanup_url' EXIT
-          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_'
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_|USER virtual authenticator'
 
       - name: Run production Hub core browser E2E
         env:

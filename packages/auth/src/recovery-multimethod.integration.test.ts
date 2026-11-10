@@ -160,6 +160,49 @@ async function assertSingleResetWinner(request: { requestId: string; requestKey:
   assert.equal((await Promise.all(candidates.map(password => verifyPassword(saved.passwordHash ?? "", password)))).filter(Boolean).length, 1);
 }
 
+for (const secondProof of ["EMAIL", "TOTP"] as const) {
+  test(`real PostgreSQL: legacy non-discoverable USER passkey IDs require independent ${secondProof} proof`, integrationOptions, async (t) => {
+    const previous = process.env.VIRKI_PASSKEYS_ENABLED;
+    process.env.VIRKI_PASSKEYS_ENABLED = "true";
+    t.after(() => { if (previous === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = previous; });
+
+    const owner = await createTestUser({ label: `recovery-nondiscoverable-${secondProof.toLowerCase()}` });
+    const signer = await enrollSignedRecoveryPasskey(owner);
+    let totpSecret: string | undefined;
+    if (secondProof === "TOTP") {
+      const enrollment = await startTotpEnrollment(owner.id, owner.email);
+      totpSecret = enrollment.secret;
+      const previousWindow = new Date(Date.now() - 30_000);
+      await confirmTotpEnrollment(owner.id, totpAt(totpSecret, previousWindow), previousWindow);
+    }
+    const policy = { proofs: ["PASSKEY" as const, secondProof], adminReview: false };
+    const request = await startMultiMethodRecovery(owner.email, "USER", policy, "pt-BR", new Date(), isolatedSource());
+    const synthetic = await startMultiMethodRecovery(uniqueEmail("recovery-unknown-passkey"), "USER", policy, "pt-BR", new Date(), isolatedSource());
+    assert.equal((await startRecoveryPasskeyAssertion(request.requestId, request.requestKey, request.browserToken, "USER", recoveryRp)).allowCredentials, undefined,
+      "real pending recovery must not enumerate keys before another factor is verified");
+    assert.equal((await startRecoveryPasskeyAssertion(synthetic.requestId, synthetic.requestKey, synthetic.browserToken, "USER", recoveryRp)).allowCredentials, undefined,
+      "synthetic recovery must never expose account-selected credential IDs");
+
+    if (secondProof === "EMAIL") {
+      const code = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY").at(-1)?.code;
+      assert.match(code ?? "", /^\d{6}$/u);
+      await verifyMultiMethodRecoveryEmail(request.requestId, request.requestKey, request.browserToken, code!, "USER");
+    } else {
+      await verifyMultiMethodRecoveryTotp(request.requestId, request.requestKey, request.browserToken, totpAt(totpSecret!), "USER");
+    }
+    const options = await startRecoveryPasskeyAssertion(request.requestId, request.requestKey, request.browserToken, "USER", recoveryRp);
+    assert.deepEqual(options.allowCredentials?.map(credential => credential.id), [signer.id],
+      "only after independent owner proof may legacy non-discoverable passkey IDs be selected");
+    assert.equal((await startRecoveryPasskeyAssertion(request.requestId, request.requestKey, createPasskeyBrowserToken(), "USER", recoveryRp)).allowCredentials, undefined,
+      "another browser capability must not enumerate even after the owner verified a factor");
+    const signed = signedRecoveryAssertion(signer, owner.id, options.challenge);
+    await finishRecoveryPasskeyAssertion(request.requestId, request.requestKey, request.browserToken, signed, "USER", recoveryRp);
+    await assert.rejects(finishRecoveryPasskeyAssertion(request.requestId, request.requestKey, request.browserToken, signed, "USER", recoveryRp),
+      "the selected legacy passkey assertion must remain one-use");
+    assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: request.requestId } })).status, "APPROVED");
+  });
+}
+
 test("real PostgreSQL: signed PASSKEY + independent EMAIL proof gates one-winner USER reset", integrationOptions, async (t) => {
   const previous = process.env.VIRKI_PASSKEYS_ENABLED;
   process.env.VIRKI_PASSKEYS_ENABLED = "true";

@@ -38,7 +38,13 @@ test("PASSKEY + TOTP request offers both proofs without an email verification de
   const html = render(["PASSKEY", "TOTP"], []);
   assert.match(html, /Confirmar com passkey/u);
   assert.match(html, /Aplicativo autenticador/u);
+  assert.match(html, /confirme primeiro o e-mail ou o autenticador/u, "legacy non-discoverable keys require the other verified factor first");
   assert.doesNotMatch(html, /E-mail cadastrado/u);
+});
+
+test("PASSKEY + independent ADMIN review does not promise legacy-key fallback before the reviewer", () => {
+  const html = render(["PASSKEY"], [], true);
+  assert.doesNotMatch(html, /chave de segurança antiga/u);
 });
 
 test("verified proof is never re-requested and assisted request waits for independent admin", () => {

@@ -211,7 +211,11 @@ export async function startPasskeyRegistration(userId: string, sessionId: string
   if (existing.length >= MAX_PASSKEYS) throw FAILURE;
   const options = await generateRegistrationOptions({
     rpName: "Virki", rpID, userID: Buffer.from(userId, "utf8"), userName: user.email,
-    attestationType: "none", authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
+    // Anonymous account recovery cannot enumerate credential IDs before an
+    // independent proof. Every newly enrolled recovery-capable key must be
+    // discoverable; older non-discoverable keys remain usable with the
+    // proof-gated allowCredentials fallback in recovery-methods.ts.
+    attestationType: "none", authenticatorSelection: { residentKey: "required", userVerification: "required" },
     excludeCredentials: existing.map((entry) => ({ id: entry.credentialId, transports: entry.transports as never })),
     supportedAlgorithmIDs: [-7, -257], timeout: CHALLENGE_TTL_MS
   });

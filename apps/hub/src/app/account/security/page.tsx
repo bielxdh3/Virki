@@ -21,7 +21,7 @@ export default async function AccountSecurityPage({ searchParams }: { searchPara
   const recoveryContinueTo = safeReturnTo(params.returnTo, surface, data.session.user.role);
   const csrf = await createSessionCsrfToken("account-security");
   const passkeysEnabled = data.session.user.role === "USER" && passkeysEnabledForRequest(surface, requestHost(requestHeaders));
-  const passkeys = passkeysEnabled ? await listUserPasskeys(data.session.user.id) : [];
+  const passkeys = passkeysEnabled ? await listUserPasskeys(data.session.user.id, "USER", requestHost(requestHeaders)) : [];
   const logoutCsrf = await createSessionCsrfToken("logout");
   const totpPending = data.state?.totpStatus === "PENDING";
   return <>

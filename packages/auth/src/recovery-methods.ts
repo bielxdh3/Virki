@@ -264,8 +264,26 @@ export async function startRecoveryPasskeyAssertion(requestId: string, key: stri
     !passkeysEnabledForRequest(host === "localhost" ? "local" : expectedRole === "ADMIN" ? "hub" : "portal", host, process.env, expectedRole)) throw FAILURE;
   const row = await prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: recoverySelect });
   const { rpID, origin } = expectedPasskeyRP(process.env, host, expectedRole);
-  // Discoverable credential authentication avoids exposing credential IDs for an arbitrary email.
-  const options = await generateAuthenticationOptions({ rpID, userVerification: "required", timeout: PASSKEY_TTL_MS });
+  // Before any independent owner proof, an anonymous caller must not learn
+  // which passkeys are enrolled. Once EMAIL or TOTP is verified for this exact
+  // browser-bound request, list the IDs to support previously enrolled
+  // non-discoverable security keys. The ADMIN reviewer alone does not count
+  // as an owner proof, and invalid/synthetic requests never receive IDs.
+  const ownerProofVerified = validPending(row, expectedRole, key, browserToken) &&
+    row!.recoveryProofs.includes("PASSKEY") && row!.recoveryPasskeyVerifiedAt === null && (
+    (row!.recoveryProofs.includes("EMAIL") && row!.emailVerifiedAt !== null) ||
+    (row!.recoveryProofs.includes("TOTP") && row!.recoveryTotpVerifiedAt !== null)
+  );
+  const credentials = ownerProofVerified ? await prisma.passkeyCredential.findMany({
+    where: { userId: row!.userId, rpID, revokedAt: null },
+    select: { credentialId: true, transports: true }, take: 20
+  }) : [];
+  const options = await generateAuthenticationOptions({
+    rpID, userVerification: "required", timeout: PASSKEY_TTL_MS,
+    ...(ownerProofVerified ? { allowCredentials: credentials.map(credential => ({
+      id: credential.credentialId, transports: credential.transports as never
+    })) } : {})
+  });
   // Synthetic attempts get identical public options; without a persisted
   // challenge no assertion can ever succeed.
   if (!validPending(row, expectedRole, key, browserToken) || !row!.recoveryProofs.includes("PASSKEY") || row!.recoveryPasskeyVerifiedAt) return options;
