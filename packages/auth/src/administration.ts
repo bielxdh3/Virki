@@ -293,7 +293,14 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
   const passwordHash = await hashPassword(input.newPassword);
   const recoveryCodes = await prisma.$transaction(async (transaction) => {
     await lockAdminSessionInTransaction(transaction, input.actor.id, input.sessionId, now);
-    await lockAdministrativeCredentialInTransaction(transaction, input.actor.id);
+    const credential = await lockAdministrativeCredentialInTransaction(transaction, input.actor.id);
+    // A saved backup code recovers a forgotten ACTIVE credential; it is not
+    // authority to undo an explicit administrator credential revocation or to
+    // bypass the separate first-time credential setup ceremony.
+    if (credential?.status !== "ACTIVE" || credential.revokedAt ||
+        !Number.isSafeInteger(credential.keyVersion) || credential.keyVersion < 1) {
+      throw new AdministrationMutationError();
+    }
     const currentAdmin = await transaction.user.findUnique({ where: { id: input.actor.id }, select: { emailVerifiedAt: true, passwordHash: true } });
     if (!currentAdmin?.emailVerifiedAt || currentAdmin.passwordHash !== admin.passwordHash) throw new AdministrationMutationError();
     await assertNotNormalPassword(currentAdmin.passwordHash, input.newPassword);
@@ -302,7 +309,14 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     const used = await transaction.administrativeRecoveryCode.updateMany({ where: { id: code.id, usedAt: null }, data: { usedAt: now } });
     if (used.count !== 1) throw new AdministrationMutationError();
     const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
-    await transaction.administrativeCredential.upsert({ where: { userId: input.actor.id }, update: { passwordHash, status: "ACTIVE", keyVersion: { increment: 1 }, revokedAt: null }, create: { userId: input.actor.id, passwordHash, status: "ACTIVE" } });
+    const rotated = await transaction.administrativeCredential.updateMany({
+      where: {
+        userId: input.actor.id, status: "ACTIVE", revokedAt: null,
+        keyVersion: credential.keyVersion
+      },
+      data: { passwordHash, keyVersion: { increment: 1 } }
+    });
+    if (rotated.count !== 1) throw new AdministrationMutationError();
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: input.actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: input.actor.id, codeHash: hashRecoveryCode(value) })) });
     await transaction.securityElevation.updateMany({ where: { userId: input.actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });

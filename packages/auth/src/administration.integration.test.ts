@@ -483,6 +483,54 @@ test("an administrative password equal to the normal password is rejected when r
   await assertAdministrativeRecoveryRevocations(admin, oldProofs);
 });
 
+for (const state of ["revoked", "missing"] as const) {
+  test(`saved-code administrative recovery cannot reactivate a ${state} privileged credential`, integrationOptions, async () => {
+    const admin = await setupAdmin({ credential: state !== "missing" });
+    const savedCode = `owned-admin-code-${randomBytes(12).toString("hex")}`;
+    const code = await prisma.administrativeRecoveryCode.create({ data: {
+      userId: admin.actor.id, codeHash: hashRecoveryCode(savedCode)
+    } });
+    let previousCredential: { passwordHash: string; keyVersion: number; revokedAt: Date | null } | null = null;
+    if (state === "revoked") {
+      const revokedAt = new Date();
+      const revoked = await prisma.administrativeCredential.update({
+        where: { userId: admin.actor.id }, data: { status: "REVOKED", revokedAt },
+        select: { passwordHash: true, keyVersion: true, revokedAt: true }
+      });
+      previousCredential = revoked;
+    }
+    await assert.rejects(recoverAdministrativeCredential({
+      actor: admin.actor,
+      sessionId: admin.sessionId,
+      normalPassword: NORMAL_PASSWORD,
+      recoveryCode: savedCode,
+      newPassword: "different-privileged-password-2026"
+    }), AdministrationMutationError);
+    const current = await prisma.administrativeCredential.findUnique({
+      where: { userId: admin.actor.id },
+      select: { status: true, passwordHash: true, keyVersion: true, revokedAt: true }
+    });
+    if (state === "revoked") {
+      assert.ok(current);
+      assert.equal(current.status, "REVOKED");
+      assert.deepEqual({
+        passwordHash: current.passwordHash, keyVersion: current.keyVersion, revokedAt: current.revokedAt
+      }, previousCredential);
+    } else {
+      assert.equal(current, null, "a missing credential must use its separate setup ceremony");
+    }
+    assert.equal((await prisma.administrativeRecoveryCode.findUniqueOrThrow({
+      where: { id: code.id }, select: { usedAt: true }
+    })).usedAt, null, "rejected code must stay unused");
+    assert.equal(await prisma.auditLog.count({
+      where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_RECOVERED" }
+    }), 0);
+    assert.equal((await prisma.session.findUniqueOrThrow({
+      where: { id: admin.sessionId }, select: { revokedAt: true }
+    })).revokedAt, null);
+  });
+}
+
 test("email recovery rotates only the separate ADMIN credential, replaces backup codes and revokes old access", integrationOptions, async () => {
   const admin = await setupAdmin({ totpSecret: createTotpSecret() });
   const oldPasskeyId = await createOldHubPasskey(admin.actor.id);
