@@ -431,7 +431,6 @@ jobs:
     env:
       # The existing Docker-admission guard permits only the explicit local
       # GitHub-hosted Linux engine at the exact tested source revision.
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
       VIRKI_BUILD_REVISION: ${{ github.sha }}
       VIRKI_BUILD_ARCH: amd64
 
@@ -452,6 +451,9 @@ jobs:
         run: node --test scripts/integration/recovery-pg18-contract.test.mjs
 
       - name: Physically prove 5 ADMIN pair and 4 assisted recovery tests on separate PG18 databases
+        # The runner context is available to step env, not jobs.<job_id>.env.
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: node scripts/integration/recovery-pg18-disposable.mjs
 
   authenticated-e2e:

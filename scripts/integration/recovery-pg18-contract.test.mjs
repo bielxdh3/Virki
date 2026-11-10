@@ -132,6 +132,19 @@ test("required PG18 CI job does not substitute for or modify the existing PG17 g
   assert.match(yaml, /run: node scripts\/integration\/recovery-pg18-disposable\.mjs/u);
   assert.match(yaml, /VIRKI_BUILD_REVISION: \$\{\{ github\.sha \}\}/u);
   assert.match(yaml, /RUNNER_ENVIRONMENT: \$\{\{ runner\.environment \}\}/u);
+  const pg18Job = yaml.split("  recovery-pg18:\n")[1]?.split("\n  authenticated-e2e:\n")[0];
+  assert.ok(pg18Job, "mandatory PG18 job must exist between the existing CI gates");
+  const [jobHeader, steps] = pg18Job.split("\n    steps:\n");
+  assert.ok(jobHeader && steps, "PG18 job must have executable steps");
+  assert.equal(jobHeader.includes("runner.environment"), false,
+    "runner context in jobs.<job_id>.env invalidates the entire GitHub Actions workflow before any job starts");
+  assert.ok(steps.includes([
+    "      - name: Physically prove 5 ADMIN pair and 4 assisted recovery tests on separate PG18 databases",
+    "        # The runner context is available to step env, not jobs.<job_id>.env.",
+    "        env:",
+    "          RUNNER_ENVIRONMENT: ${{ runner.environment }}",
+    "        run: node scripts/integration/recovery-pg18-disposable.mjs"
+  ].join("\n")), "only the physical PG18 step receives GitHub's real runner environment");
   assert.match(yaml, /VIRKI_BUILD_ARCH: amd64/u);
   assert.match(yaml, /run: bash scripts\/integration\/worker-hol-ci\.sh/u);
   assert.match(yaml, /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
