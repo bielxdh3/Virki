@@ -564,11 +564,31 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await recoveryForm.getByRole("button", { name: "Recuperar credencial", exact: true }).click();
     await expect(credentialSection.getByRole("heading", { name: /Códigos de recuperação/u })).toBeVisible();
     await expect(credentialSection.locator("ul li")).toHaveCount(10);
+    const obsoleteAdministrativePassword = administrativePassword;
     administrativePassword = recoveredAdministrativePassword;
 
     const elevationSection = page.locator("section.surface").filter({ has: page.getByRole("heading", { name: "Elevação temporária", exact: true }) });
     const elevationForm = elevationSection.locator("form").first();
     adminJourneyPhase = "security-elevation";
+    await elevationForm.locator('select[name="scope"]').selectOption("PROJECT_CONNECTION_MANAGE");
+    const pendingBeforeObsolete = await prisma.securityElevation.count({
+      where: { userId: fixture.admin.id, scope: "PROJECT_CONNECTION_MANAGE", status: "PENDING" }
+    });
+    await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
+    await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(obsoleteAdministrativePassword);
+    const rejectedObsolete = page.waitForResponse(response =>
+      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/security" &&
+      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]));
+    await elevationForm.getByRole("button", { name: "Solicitar elevação", exact: true }).click();
+    const obsoleteResponse = await rejectedObsolete;
+    expect(obsoleteResponse.status(), "obsolete privileged password denial must reach a real Next action").toBeGreaterThanOrEqual(200);
+    expect(obsoleteResponse.status(), "a 403/500 is not proof that the old ADMIN credential was rejected").toBeLessThan(400);
+    await expect(elevationForm.getByRole("alert")).toContainText("Não foi possível solicitar");
+    expect(await prisma.securityElevation.count({
+      where: { userId: fixture.admin.id, scope: "PROJECT_CONNECTION_MANAGE", status: "PENDING" }
+    }), "the old ADMIN password must not create an elevation challenge").toBe(pendingBeforeObsolete);
+    // An errored React action can reset the select to its default scope.
+    // Re-select the protected operation before proving the replacement works.
     await elevationForm.locator('select[name="scope"]').selectOption("PROJECT_CONNECTION_MANAGE");
     await elevationForm.getByLabel("Senha normal atual", { exact: true }).fill(fixture.admin.password);
     await elevationForm.getByLabel("Senha administrativa", { exact: true }).fill(administrativePassword);

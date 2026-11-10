@@ -350,9 +350,11 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     const successfulApprovalAuditBefore = await db.auditLog.count({
       where: { actorUserId: reviewer.id, eventType: "ACCOUNT_RECOVERY_APPROVED" }
     });
+    // Server Component forms can submit as native POST before hydration;
+    // identifying the owned request body is safer than requiring next-action.
     const deniedApprovalPost = independent.page.waitForResponse(response =>
       new URL(response.url()).origin === hub && new URL(response.url()).pathname === "/admin/security" &&
-      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]),
+      response.request().method() === "POST" && Boolean(response.request().postData()?.includes(requestId)),
     { timeout: 10_000 });
     await reviewRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click({ timeout: 6_000 });
     const deniedApproval = await deniedApprovalPost;
@@ -377,7 +379,7 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     await expect(elevatedRow.getByRole("button", { name: "Aprovar recuperação", exact: true })).toBeVisible();
     const approvedActionPost = independent.page.waitForResponse(response =>
       new URL(response.url()).origin === hub && new URL(response.url()).pathname === "/admin/security" &&
-      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]),
+      response.request().method() === "POST" && Boolean(response.request().postData()?.includes(requestId)),
     { timeout: 10_000 });
     await elevatedRow.getByRole("button", { name: "Aprovar recuperação", exact: true }).click({ timeout: 6_000 });
     const approvedActionResponse = await approvedActionPost;

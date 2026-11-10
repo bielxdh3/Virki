@@ -553,7 +553,7 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         expect(replayResponse.status(), "a 403/500 response is not proof of one-time consumption")
           .toBeLessThan(400);
         expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0).toBeGreaterThan(0);
-        await expect(stale).toHaveURL(new RegExp("/recover\\?requestId=" + requestId + "&error=1"), { timeout: 15_000 });
+        await expect(stale).toHaveURL(portalUrl + "/recover?requestId=" + requestId + "&error=1", { timeout: 15_000 });
         const unchanged = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
         expect(await verifyPassword(unchanged.passwordHash ?? "", winningPassword)).toBe(true);
         expect(await verifyPassword(unchanged.passwordHash ?? "", rejectedPassword)).toBe(false);
@@ -705,7 +705,7 @@ test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time 
     const replayResponse = await rejectedReplay;
     expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0,
       "the stale password must be submitted through an actual Next Server Action POST").toBeGreaterThan(0);
-    await expect(stalePage).toHaveURL(new RegExp(`/recover\\?requestId=${knownId}&error=1`),
+    await expect(stalePage).toHaveURL(portalUrl + "/recover?requestId=" + knownId + "&error=1",
       { timeout: 15_000 });
     const afterReplay = await database.user.findUniqueOrThrow({ where: { id: ownedUserId } });
     expect(await verifyPassword(afterReplay.passwordHash ?? "", resetCandidate)).toBe(true);
