@@ -115,9 +115,13 @@ async function newHubContext(browser: Browser): Promise<{ context: BrowserContex
   } catch (error) { await context.close(); throw error; }
 }
 
-async function installVirtualAuthenticator(context: BrowserContext, page: Page) {
+async function installVirtualAuthenticator(context: BrowserContext, page: Page,
+  onCredentialAsserted?: () => void) {
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
+  // Chromium fires this only when its virtual authenticator actually signs a
+  // WebAuthn assertion; a Next Server Action or generic UI error cannot fake it.
+  cdp.on("WebAuthn.credentialAsserted", () => { onCredentialAsserted?.(); });
   const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
     protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true,
     isUserVerified: true, automaticPresenceSimulation: true
@@ -706,7 +710,9 @@ test("Chromium ADMIN: a revoked Hub passkey cannot prove an already-bound PASSKE
     const current = await newHubContext(browser);
     context = current.context;
     await attachSession(current.context, db, owner.id);
-    removeAuthenticator = await installVirtualAuthenticator(current.context, current.page);
+    let signedAssertions = 0;
+    removeAuthenticator = await installVirtualAuthenticator(current.context, current.page,
+      () => { signedAssertions += 1; });
     const enrolled = await registerOwnedHubPasskey(current.page, db, owner);
 
     // Establish a REAL browser-bound PENDING request while the Hub credential
@@ -722,6 +728,10 @@ test("Chromium ADMIN: a revoked Hub passkey cannot prove an already-bound PASSKE
     expect(bound).toMatchObject({ userId: owner.id, recoveryRole: "ADMIN", recoveryProofs: ["PASSKEY"],
       recoveryAdminReview: true, status: "PENDING", recoveryPasskeyVerifiedAt: null,
       reviewedByUserId: null, bootstrapSessionId: null });
+    expect(await current.page.evaluate(() => window.isSecureContext), "Hub WebAuthn requires a secure browser context").toBe(true);
+    const proofButton = current.page.locator('[aria-label="Chave de acesso"]')
+      .getByRole("button", { name: "Confirmar com passkey", exact: true });
+    await expect(proofButton).toBeEnabled();
     // Let Chromium sign with the still-active resident credential. Intercept
     // the genuine Next assertion-finish POST only AFTER the browser has signed,
     // revoke the matching persisted credential, then forward that original
@@ -730,20 +740,46 @@ test("Chromium ADMIN: a revoked Hub passkey cannot prove an already-bound PASSKE
     let signedFinishIntercepted = false;
     let revokedBeforeFinish = false;
     let interceptionFailure: string | undefined;
+    const actionIds: string[] = [];
+    const requestDiagnostics: Array<{ ordinal: number; bytes: number; kind: string }> = [];
     await current.page.route("**/recover**", async route => {
       const request = route.request();
-      const signedAssertion = request.method() === "POST" && Boolean(request.headers()["next-action"]) &&
-        (request.postData() ?? "").includes("clientDataJSON") &&
-        (request.postData() ?? "").includes("authenticatorData");
-      if (!signedAssertion) { await route.continue(); return; }
+      const url = new URL(request.url());
+      const actionId = request.headers()["next-action"];
+      if (url.origin !== hub || url.pathname !== "/recover" || request.method() !== "POST" || !actionId) {
+        // The outer context.route injects the signed Cloudflare Access JWT.
+        // continue() bypasses that handler, causing an HTTP 403 at START.
+        await route.fallback();
+        return;
+      }
+      actionIds.push(actionId);
+      const ordinal = actionIds.length;
+      requestDiagnostics.push({ ordinal, bytes: request.postDataBuffer()?.byteLength ?? 0,
+        kind: request.headers()["content-type"]?.split(";", 1)[0] ?? "missing" });
+      // Source RecoveryPasskeyProof.verify has precisely two sequential Next
+      // actions: startAuthentication options, then finish after WebAuthn.get.
+      // Next serializes FormData; looking for literal JSON field names in its
+      // POST payload missed genuine signed requests on hosted Chromium.
+      if (ordinal !== 2) { await route.fallback(); return; }
       signedFinishIntercepted = true;
       try {
+        if (signedAssertions !== 1) throw new Error("Chromium must sign the assertion before the second real Next action");
+        if (actionIds[0] === actionId) throw new Error("WebAuthn START and FINISH must use distinct Next Server Actions");
+        if ((request.postDataBuffer()?.byteLength ?? 0) === 0) throw new Error("WebAuthn FINISH must submit a nonempty browser payload");
+        const challengesAtFinish = await db.passkeyChallenge.findMany({ where: {
+          userId: owner.id, ceremony: "RECOVERY", consumedAt: null, expiresAt: { gt: new Date() }
+        } });
+        if (challengesAtFinish.length !== 1 || challengesAtFinish[0]?.rpID !== "hub.localhost") {
+          throw new Error("a live persisted Hub recovery challenge must precede the signed FINISH action");
+        }
         const claimed = await db.passkeyCredential.updateMany({
           where: { id: enrolled.id, userId: owner.id, revokedAt: null }, data: { revokedAt: new Date() }
         });
         if (claimed.count !== 1) throw new Error("signed WebAuthn credential must be live until its finish POST");
         revokedBeforeFinish = true;
-        await route.continue();
+        // Preserve the real signed Hub Access header while forwarding the
+        // browser's original assertion unchanged after the DB revocation.
+        await route.fallback();
       } catch (error) {
         interceptionFailure = error instanceof Error ? error.message : "interception failed";
         await route.abort().catch(() => undefined);
@@ -756,12 +792,17 @@ test("Chromium ADMIN: a revoked Hub passkey cannot prove an already-bound PASSKE
         actionCalls.push({ status: response.status(), bytes: response.request().postDataBuffer()?.byteLength ?? 0 });
       }
     });
-    await current.page.locator('[aria-label="Chave de acesso"]').getByRole("button", { name: "Confirmar com passkey" }).click();
+    await proofButton.click();
     await expect(current.page.locator('[aria-label="Chave de acesso"] [role="alert"]'))
       .toContainText("Não foi possível confirmar a passkey");
-    expect(interceptionFailure).toBeUndefined();
-    expect(signedFinishIntercepted, "the virtual authenticator must produce an actual signed WebAuthn assertion").toBe(true);
+    const diagnostics = JSON.stringify({ requests: requestDiagnostics, responses: actionCalls, cdPAsserted: signedAssertions });
+    expect(interceptionFailure, `WebAuthn trace: ${diagnostics}`)
+      .toBeUndefined();
+    expect(signedAssertions, `Chromium must emit exactly one credentialAsserted event; trace: ${diagnostics}`).toBe(1);
+    expect(signedFinishIntercepted, `the signed assertion must reach the second Next POST; trace: ${diagnostics}`).toBe(true);
     expect(revokedBeforeFinish, "the credential must be revoked BEFORE its signed assertion reaches the server").toBe(true);
+    expect(actionIds.length, `expected separate WebAuthn START and signed FINISH actions; trace: ${JSON.stringify(requestDiagnostics)}`).toBe(2);
+    expect(actionIds[0]).not.toBe(actionIds[1]);
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
     expect(actionCalls.length, "WebAuthn must run both the real START and assertion-finish actions").toBeGreaterThanOrEqual(2);
     for (const action of actionCalls) {
