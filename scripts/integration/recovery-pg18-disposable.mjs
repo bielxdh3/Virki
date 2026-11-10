@@ -102,14 +102,15 @@ function runSuite(suite) {
     const inspectFormat = `{{.Id}}|{{.Name}}|{{index .Config.Labels "${label}"}}`;
     const inspect = (target) => dockerClient.invoke(["inspect", "--format", inspectFormat, target], 15_000);
     const missing = (result, target) => {
-      if (result?.error || result?.status === 0 || typeof result?.stderr !== "string") return false;
+      if (result?.error || !Number.isInteger(result?.status) || result.status <= 0 ||
+          result.signal != null || result.stdout !== "" || typeof result.stderr !== "string") return false;
       return [
         `Error: No such object: ${target}`,
         `Error response from daemon: No such container: ${target}`,
         `Error response from daemon: No such object: ${target}`,
         // Docker Desktop 29.x uses this exact lowercase diagnostic after rm.
         `error: no such object: ${target}`
-      ].includes(result.stderr.trim().split(/\r?\n/u).at(-1));
+      ].includes(result.stderr.replace(/\r?\n$/u, ""));
     };
     const fail = (stage) => {
       record(`RECONCILIATION_REQUIRED:${stage}`, containerId ?? null);

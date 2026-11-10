@@ -316,12 +316,25 @@ function mockRun(scenario) {
     let count = 0;
     function log(data) { appendFileSync(process.env.VIRKI_FAKE_LOG, JSON.stringify(data) + "\\n"); }
     const ok = (stdout = "") => ({ status: 0, stdout, stderr: "" });
-    const absent = target => ({ status: 1, stdout: "", stderr:
-      process.env.VIRKI_FAKE_CASE === "docker29-lowercase"
+    const absent = target => {
+      const scenario = process.env.VIRKI_FAKE_CASE;
+      const message = scenario === "docker29-lowercase" || scenario === "mixed-previous-diagnostic"
         ? "error: no such object: " + target + "\\n"
-        : process.env.VIRKI_FAKE_CASE === "unknown-absence"
-          ? "permission denied\\n"
-          : "Error: No such object: " + target + "\\n" });
+        : scenario === "legacy-container-absence"
+          ? "Error response from daemon: No such container: " + target + "\\n"
+          : scenario === "legacy-object-absence"
+            ? "Error response from daemon: No such object: " + target + "\\n"
+            : scenario === "unknown-absence"
+              ? "permission denied\\n"
+              : "Error: No such object: " + target + "\\n";
+      if (scenario === "mixed-previous-diagnostic") {
+        return { status: 1, stdout: "", stderr: "permission denied\\n" + message };
+      }
+      if (scenario === "absence-stdout") return { status: 1, stdout: "unexpected output", stderr: message };
+      if (scenario === "absence-null-status") return { status: null, stdout: "", stderr: message };
+      if (scenario === "absence-duplicate-lines") return { status: 1, stdout: "", stderr: message + message };
+      return { status: 1, stdout: "", stderr: message };
+    };
     export function createAdmittedOidcDockerClient(options) {
       if (Object.keys(options.env).some(key => ["NODE_OPTIONS", "NODE_PATH", "DATABASE_URL",
         "MIGRATION_DATABASE_URL", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY",
@@ -446,6 +459,23 @@ test("Docker 29 lowercase absent proof still requires immutable ID cleanup and r
   assert.equal(unknown.child.status, 1, "permission denied is never confirmed removal");
   assert.doesNotMatch(unknown.child.stdout, /9 real PASS/u);
   assert.equal(unknown.calls.filter((entry) => entry.action === "rm").length, 1);
+});
+
+test("Docker cleanup requires one exact absence diagnostic without other output and a real nonzero exit", () => {
+  for (const scenario of ["mixed-previous-diagnostic", "absence-stdout", "absence-null-status", "absence-duplicate-lines"]) {
+    const { child, calls } = mockRun(scenario);
+    assert.equal(child.error, undefined, scenario);
+    assert.equal(child.status, 1, scenario);
+    assert.doesNotMatch(child.stdout, /9 real PASS/u, scenario);
+    assert.match(child.stderr, /Private PG18 cleanup uncertain \(removal-unconfirmed\)/u, scenario);
+    assert.equal(calls.filter((entry) => entry.action === "rm").length, 1, scenario);
+  }
+  for (const scenario of ["legacy-container-absence", "legacy-object-absence"]) {
+    const { child, calls } = mockRun(scenario);
+    assert.equal(child.error, undefined, scenario);
+    assert.equal(child.status, 0, `${scenario}: ${child.stderr}`);
+    assert.equal(calls.filter((entry) => entry.action === "rm").length, 2, scenario);
+  }
 });
 
 test("mocked runner rejects every missing/false-green summary and safely cleans owned containers", () => {
