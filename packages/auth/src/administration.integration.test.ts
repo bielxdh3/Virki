@@ -22,6 +22,7 @@ import { createTestUser, integrationOptions, queuedEmails } from "./integration-
 import { cleanupInactiveSessions, hashAuditSessionReference, hashPassword, verifyPassword } from "./index";
 import { createTotpSecret, generateNumericCode, generateRecoveryCode, hashEmailAddress, hashRecoveryCode, hashSecurityCode, startLoginCeremony, verifyLoginEmailCode } from "./security";
 import { hashOidcIdentifier } from "./oidc-secrets";
+import { boundedRaceWait, holdAdminUserRow, isExpectedRecoveryRaceRejection } from "./admin-credential-recovery-race-fixture";
 
 // The shared application pool has a three-connection limit in CI. In the
 // two-writer collision it is entirely occupied by the row-lock holder and
@@ -784,18 +785,60 @@ test("starting another ADMIN email recovery invalidates the previous email OTP",
 
 test("competing ADMIN email recovery completions cannot rotate the credential twice", integrationOptions, async () => {
   const admin = await setupAdmin();
+  const sibling = await prisma.session.create({ data: {
+    userId: admin.actor.id, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(Date.now() + DAY)
+  } });
+  const device = await prisma.trustedDevice.create({ data: {
+    userId: admin.actor.id, deviceIdHash: randomBytes(32).toString("hex")
+  } });
+  const oldPasskeyId = await createOldHubPasskey(admin.actor.id);
   const requestKey = await startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE });
   const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
-  const attempts = await Promise.allSettled([
-    completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-concurrent-a-2026" }),
-    completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-concurrent-b-2026" })
-  ]);
-  assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
-  assert.equal(attempts.filter((result) => result.status === "rejected").length, 1);
-  assert.equal((await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } })).keyVersion, 2);
-  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 10);
+  const initialCredential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  const originalLoginHash = (await prisma.user.findUniqueOrThrow({ where: { id: admin.actor.id } })).passwordHash;
+  const candidates = ["email-recovery-concurrent-a-2026", "email-recovery-concurrent-b-2026"];
+  const race = holdAdminUserRow(admin.actor.id, lockObserver);
+  let attempts: Promise<PromiseSettledResult<string[]>[]> | undefined;
+  try {
+    const holderPid = await race.acquiredPid();
+    attempts = Promise.allSettled(candidates.map((newPassword) => completeAdministrativeEmailRecovery({
+      actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword
+    })));
+    const blockedPids = await race.observeTwoWaiters(holderPid);
+    assert.ok(new Set(blockedPids).size >= 2, "two distinct PostgreSQL writers must wait before release");
+  } finally {
+    try { await race.release(); }
+    finally { if (attempts) await boundedRaceWait(attempts, "drain both ADMIN email completion writers"); }
+  }
+  assert.ok(attempts, "the PostgreSQL lock holder must be acquired before competing completions");
+  const outcomes = await attempts;
+  const winners = outcomes.flatMap((result, index) => result.status === "fulfilled" ? [{ index, codes: result.value }] : []);
+  const failures = outcomes.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(winners.length, 1);
+  assert.equal(failures.length, 1);
+  assert.ok(failures[0]!.reason instanceof AdministrationMutationError || isExpectedRecoveryRaceRejection(failures[0]!.reason),
+    "the loser must fail authorization or a real PostgreSQL serializable conflict");
+  const winner = winners[0]!;
+  assert.equal(winner.codes.length, 10);
+  assert.equal(new Set(winner.codes).size, 10);
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  assert.equal(credential.keyVersion, initialCredential.keyVersion + 1);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[winner.index]!), true);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[1 - winner.index]!), false);
+  assert.equal(await verifyPassword(credential.passwordHash, ADMIN_PASSWORD), false);
+  const recoveryCodes = await prisma.administrativeRecoveryCode.findMany({ where: { userId: admin.actor.id } });
+  assert.equal(recoveryCodes.length, 10);
+  assert.ok(recoveryCodes.every((entry) => entry.usedAt === null));
+  assert.deepEqual(recoveryCodes.map((entry) => entry.codeHash).sort(), winner.codes.map(hashRecoveryCode).sort());
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: admin.actor.id } })).passwordHash, originalLoginHash);
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
+  assert.ok((await prisma.session.findUniqueOrThrow({ where: { id: sibling.id } })).revokedAt);
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
+  assert.ok((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskeyId } })).revokedAt);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS" } }), 1);
   assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status, "CONSUMED");
+  assert.equal((await queuedEmails(admin.email)).filter((message) => message.kind === "ADMIN_CREDENTIAL_CHANGED").length, 1,
+    "two competing completions must enqueue one notification");
 });
 
 test("two sessions racing one unused ADMIN recovery code have exactly one committed winner", integrationOptions, async () => {

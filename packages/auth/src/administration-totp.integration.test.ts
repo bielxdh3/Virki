@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { createHmac, randomBytes } from "node:crypto";
 import { after, test } from "node:test";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import { AdministrativePasswordReuseError, AdministrationMutationError, hasActiveSecurityElevation, recoverAdministrativeCredentialWithTotp, regenerateAdministrativeRecoveryCodes, startSecurityElevation, verifySecurityElevation } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
 import { hashPassword, verifyPassword } from "./index";
 import { createTotpSecret, encryptTotpSecret, getLoginCeremonyFailureStage, hashRecoveryCode, startLoginCeremony, verifyLoginEmailCode, verifyLoginTotpCode } from "./security";
 import { hashOidcIdentifier } from "./oidc-secrets";
+import { boundedRaceWait, holdAdminUserRow, isExpectedRecoveryRaceRejection } from "./admin-credential-recovery-race-fixture";
 
-after(() => prisma.$disconnect());
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 const NORMAL = "test-login-normal-credential-2026";
 const ADMIN = "test-separate-admin-credential-2026";
@@ -253,10 +255,59 @@ test("rotated TOTP rejects old proof while retaining the new ACTIVE factor", int
 
 test("parallel TOTP recovery attempts have one winner for the same code and ADMIN key version", integrationOptions, async () => {
   const admin = await createAdmin();
-  const code = totpAt(admin.secret);
-  const results = await Promise.allSettled([recover(admin, code, "admin-totp-parallel-winner-a"), recover(admin, code, "admin-totp-parallel-winner-b")]);
-  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
-  assert.equal((await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.userId } })).keyVersion, 2);
-  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.userId, eventType: "ADMIN_CREDENTIAL_TOTP_RECOVERED" } }), 1);
+  const sibling = await prisma.session.create({ data: {
+    userId: admin.userId, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(Date.now() + DAY)
+  } });
+  const device = await prisma.trustedDevice.create({ data: {
+    userId: admin.userId, deviceIdHash: randomBytes(32).toString("hex")
+  } });
+  const originalCredential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.userId } });
+  const originalNormal = (await prisma.user.findUniqueOrThrow({ where: { id: admin.userId } })).passwordHash;
+  const originalFactor = await prisma.totpFactor.findUniqueOrThrow({ where: { userId: admin.userId } });
+  const candidates = ["admin-totp-parallel-winner-a", "admin-totp-parallel-winner-b"];
+  const race = holdAdminUserRow(admin.userId, lockObserver);
+  let attempts: Promise<PromiseSettledResult<string[]>[]> | undefined;
+  try {
+    const holderPid = await race.acquiredPid();
+    const code = totpAt(admin.secret);
+    attempts = Promise.allSettled(candidates.map((newPassword) => recover(admin, code, newPassword)));
+    const blockedPids = await race.observeTwoWaiters(holderPid);
+    assert.ok(new Set(blockedPids).size >= 2, "distinct PostgreSQL TOTP completion transactions must block before release");
+  } finally {
+    try { await race.release(); }
+    finally { if (attempts) await boundedRaceWait(attempts, "drain both ADMIN TOTP recovery writers"); }
+  }
+  assert.ok(attempts, "the PostgreSQL holder must be acquired before competing TOTP attempts");
+  const results = await attempts;
+  const winners = results.flatMap((result, index) => result.status === "fulfilled" ? [{ index, codes: result.value }] : []);
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(winners.length, 1);
+  assert.equal(failures.length, 1);
+  assert.ok(failures[0]!.reason instanceof AdministrationMutationError || isExpectedRecoveryRaceRejection(failures[0]!.reason),
+    "the loser must fail authorization or a real PostgreSQL serializable conflict");
+  const winner = winners[0]!;
+  assert.equal(winner.codes.length, 10);
+  assert.equal(new Set(winner.codes).size, 10);
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.userId } });
+  assert.equal(credential.keyVersion, originalCredential.keyVersion + 1);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[winner.index]!), true);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[1 - winner.index]!), false);
+  assert.equal(await verifyPassword(credential.passwordHash, ADMIN), false);
+  const recoveryCodes = await prisma.administrativeRecoveryCode.findMany({ where: { userId: admin.userId } });
+  assert.equal(recoveryCodes.length, 10);
+  assert.ok(recoveryCodes.every((entry) => entry.usedAt === null));
+  assert.deepEqual(recoveryCodes.map((entry) => entry.codeHash).sort(), winner.codes.map(hashRecoveryCode).sort());
+  const factor = await prisma.totpFactor.findUniqueOrThrow({ where: { userId: admin.userId } });
+  assert.equal(factor.status, "ACTIVE");
+  assert.equal(factor.keyVersion, originalFactor.keyVersion);
+  assert.equal(factor.secretCiphertext, originalFactor.secretCiphertext);
+  assert.ok(factor.lastUsedStep !== null && factor.lastUsedStep > (originalFactor.lastUsedStep ?? -1));
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: admin.userId } })).passwordHash, originalNormal);
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
+  assert.ok((await prisma.session.findUniqueOrThrow({ where: { id: sibling.id } })).revokedAt);
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
+  assert.equal(await prisma.auditLog.count({ where: {
+    actorUserId: admin.userId, eventType: "ADMIN_CREDENTIAL_TOTP_RECOVERED", result: "SUCCESS"
+  } }), 1);
+  assert.equal((await queuedEmails(admin.email)).length, 0, "TOTP recovery must not enqueue an email");
 });
