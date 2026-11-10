@@ -406,15 +406,23 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     // marked verified only to render a genuine React completion form; clear
     // that fixture-only marker BEFORE submitting. This mimics a stale rendered
     // completion form after factor state changes, without authorizing a reset.
+    // Render the stale form in a second page of the original browser context
+    // to leave the actively verifying new-mail form untouched.
     const beforeDenied = await db.user.findUniqueOrThrow({ where: { id: owner.id },
       select: { email: true, emailNormalized: true, emailVerifiedAt: true, passwordHash: true, secondFactorMethod: true } });
     const newMailBeforeDenied = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId },
       select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true } });
     expect(newMailBeforeDenied).toMatchObject({ status: "APPROVED", recoveryNewEmailVerifiedAt: null, bootstrapSessionId: null });
+    const prematurePage = await target.context.newPage();
+    await addCloudflareAccessHeader(prematurePage);
     await db.accountRecoveryRequest.update({ where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: new Date() } });
     try {
-      await target.page.reload();
-      await expect(target.page.getByLabel("Nova senha", { exact: true })).toBeVisible();
+      const preparedDocument = await prematurePage.goto(`${hub}/recover?requestId=${requestId}`);
+      expect(preparedDocument?.status()).toBe(200);
+      await expect(prematurePage.getByRole("heading", { level: 1, name: "Recuperar acesso administrativo" })).toBeVisible();
+      await expect(prematurePage.getByLabel("Nova senha", { exact: true })).toBeVisible();
+      await expect(prematurePage.locator('form input[name="requestId"]')).toHaveValue(requestId);
+      await expect(prematurePage.locator('form input[name="csrfToken"]')).not.toHaveValue("");
     } finally {
       // Never leave an artificial verified marker behind if rendering fails.
       await db.accountRecoveryRequest.update({ where: { id: requestId }, data: { recoveryNewEmailVerifiedAt: null } });
@@ -427,13 +435,13 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
         `premature completion must still carry the original bound ${name} capability`)
         .toBe(issuedRecoveryCookies.find(cookie => cookie.name === name)?.value);
     }
-    await expect(target.page.locator('form input[name="requestId"]')).toHaveValue(requestId);
+    await expect(prematurePage.locator('form input[name="requestId"]')).toHaveValue(requestId);
     const prematurePassword = `premature-admin-${randomUUID()}-password`;
-    await target.page.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
-    const deniedAction = target.page.waitForResponse(response => new URL(response.url()).origin === hub &&
+    await prematurePage.getByLabel("Nova senha", { exact: true }).fill(prematurePassword);
+    const deniedAction = prematurePage.waitForResponse(response => new URL(response.url()).origin === hub &&
       new URL(response.url()).pathname === "/recover" && response.request().method() === "POST" &&
       Boolean(response.request().headers()["next-action"]));
-    await target.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    await prematurePage.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
     const deniedResponse = await deniedAction;
     expect(deniedResponse.status(), "a denied mailbox proof must be handled by the real action (not Access/CSRF/HTTP500)")
       .toBeGreaterThanOrEqual(200);
@@ -442,7 +450,7 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(deniedResponse.request().postDataBuffer()?.byteLength ?? 0,
       "the premature password must reach the real Server Action POST").toBeGreaterThan(0);
     expect(deniedResponse.request().postData()).toContain(requestId);
-    await expect(target.page).toHaveURL(`${hub}/recover?requestId=${requestId}&error=1`);
+    await expect(prematurePage).toHaveURL(`${hub}/recover?requestId=${requestId}&error=1`);
     const afterDenied = await db.user.findUniqueOrThrow({ where: { id: owner.id },
       select: { email: true, emailNormalized: true, emailVerifiedAt: true, passwordHash: true, secondFactorMethod: true } });
     expect(afterDenied, "denied Server Action must not change the normal password, email or MFA").toEqual(beforeDenied);
@@ -450,6 +458,7 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     const rejectedRecovery = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId },
       select: { status: true, recoveryNewEmailVerifiedAt: true, bootstrapSessionId: true } });
     expect(rejectedRecovery).toEqual(newMailBeforeDenied);
+    await expect(target.page).toHaveURL(`${hub}/recover?requestId=${requestId}`);
     await expect(target.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
     await expect(target.page.getByLabel("Código recebido no novo e-mail")).toBeVisible();
 
@@ -457,6 +466,30 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     await target.page.getByRole("button", { name: "Confirmar novo e-mail" }).click();
     await expect(target.page.getByLabel("Nova senha", { exact: true })).toBeVisible();
     expect((await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).recoveryNewEmailVerifiedAt).not.toBeNull();
+
+    // Preserve a fully rendered, authorized completion form and its original
+    // browser capabilities in a separate cookie jar BEFORE the winning reset.
+    // The winner will clear its own recovery cookies and receive a session;
+    // a second tab in that same context would no longer exercise the old proof.
+    const originalCookies = (await target.context.cookies(hub))
+      .filter(cookie => ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"].includes(cookie.name));
+    expect(originalCookies, "replay requires all three original ADMIN recovery capabilities").toHaveLength(3);
+    assertRecoveryCookies(originalCookies, requestId);
+    const stale = await newHubContext(browser);
+    contexts.push(stale.context);
+    await stale.context.addCookies(originalCookies.map(cookie => ({
+      url: `${hub}/`, name: cookie.name, value: cookie.value,
+      httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite, expires: cookie.expires
+    })));
+    const staleUrl = `${hub}/recover?requestId=${requestId}`;
+    const staleDocument = await stale.page.goto(staleUrl);
+    expect(staleDocument?.status(), "the second completion form must come from a real Hub document").toBe(200);
+    await expect(stale.page).toHaveURL(staleUrl);
+    await expect(stale.page.getByRole("heading", { level: 1, name: "Recuperar acesso administrativo" })).toBeVisible();
+    await expect(stale.page.getByLabel("Nova senha", { exact: true })).toBeVisible();
+    await expect(stale.page.locator('form input[name="requestId"]')).toHaveValue(requestId);
+    const replayPassword = `replayed-normal-admin-${randomUUID()}-password`;
+    await stale.page.getByLabel("Nova senha", { exact: true }).fill(replayPassword);
 
     const changedPassword = `new-normal-admin-${randomUUID()}-password`;
     await target.page.getByLabel("Nova senha", { exact: true }).fill(changedPassword);
@@ -500,6 +533,49 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
 
     // Recovery invalidates the authenticator, and replay cannot resurrect it.
     expect(await db.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } })).toBe(0);
+
+    // The stale browser must retain the exact old proof, submit a SECOND real
+    // Next Server Action and be denied without changing either credential or
+    // issuing another bootstrap session. HTTP 403/500 cannot count as a pass.
+    const sessionRowsBeforeReplay = await db.session.count({ where: { userId: owner.id } });
+    const staleCookies = await stale.context.cookies(hub);
+    for (const original of originalCookies) {
+      expect(staleCookies.find(cookie => cookie.name === original.name)?.value).toBe(original.value);
+    }
+    expect(staleCookies.some(cookie => cookie.name === getSessionCookieName({ NODE_ENV: "development" }))).toBe(false);
+    const replay = stale.page.waitForResponse(response => new URL(response.url()).origin === hub &&
+      new URL(response.url()).pathname === "/recover" && response.request().method() === "POST" &&
+      Boolean(response.request().headers()["next-action"]));
+    await stale.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+    const replayResponse = await replay;
+    expect(replayResponse.status(), "rejected ADMIN replay must finish as a handled Next action").toBeGreaterThanOrEqual(200);
+    expect(replayResponse.status(), "403/500 is not a valid proof of one-time denial").toBeLessThan(400);
+    expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0,
+      "the stale browser must submit the actual password completion form").toBeGreaterThan(0);
+    await expect(stale.page).toHaveURL(`${hub}/recover?requestId=${requestId}&error=1`);
+    const afterReplay = await db.user.findUniqueOrThrow({ where: { id: owner.id } });
+    expect(afterReplay.email).toBe(updated.email);
+    expect(afterReplay.emailNormalized).toBe(updated.emailNormalized);
+    expect(afterReplay.emailVerifiedAt).toEqual(updated.emailVerifiedAt);
+    expect(afterReplay.passwordHash).toBe(updated.passwordHash);
+    expect(afterReplay.secondFactorMethod).toBe(updated.secondFactorMethod);
+    expect(afterReplay.accountStatus).toBe(updated.accountStatus);
+    expect(afterReplay.isActive).toBe(updated.isActive);
+    expect(await verifyPassword(afterReplay.passwordHash ?? "", changedPassword)).toBe(true);
+    expect(await verifyPassword(afterReplay.passwordHash ?? "", replayPassword)).toBe(false);
+    const replayedRequest = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+    expect(replayedRequest.status).toBe("CONSUMED");
+    expect(replayedRequest.bootstrapSessionId).toBe(consumed.bootstrapSessionId);
+    expect(replayedRequest.reviewedByUserId).toBe(reviewer.id);
+    expect(await db.session.count({ where: {
+      userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() }
+    } }), "replay must not mint a second active bootstrap session").toBe(1);
+    expect(await db.session.count({ where: { userId: owner.id } }),
+      "replay must not mint any additional session, even a revoked one").toBe(sessionRowsBeforeReplay);
+    const bootstrapAfterReplay = await db.session.findUniqueOrThrow({ where: { id: consumed.bootstrapSessionId! } });
+    expect(bootstrapAfterReplay.revokedAt).toBeNull();
+    expect(bootstrapAfterReplay.tokenHash).toBe(bootstrapSession.tokenHash);
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
   } finally {
     await removeAuthenticator?.().catch(() => undefined);
     await Promise.allSettled(contexts.map(context => context.close()));
@@ -511,7 +587,7 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
   }
 });
 
-test("Chromium ADMIN: a revoked Hub passkey cannot authorize a fresh PASSKEY_ADMIN ceremony", async ({ browser }) => {
+test("Chromium ADMIN: a revoked Hub passkey cannot prove an already-bound PASSKEY_ADMIN recovery", async ({ browser }) => {
   test.setTimeout(90_000);
   const { db } = await requireHarness();
   let removeAuthenticator: (() => Promise<void>) | undefined;
@@ -524,20 +600,73 @@ test("Chromium ADMIN: a revoked Hub passkey cannot authorize a fresh PASSKEY_ADM
     removeAuthenticator = await installVirtualAuthenticator(current.context, current.page);
     const enrolled = await registerOwnedHubPasskey(current.page, db, owner);
 
-    // Model a credential revoked by the security subsystem; no recovery
-    // cooldown exists for this new ADMIN, so the denial is due to revocation.
-    await db.passkeyCredential.update({ where: { id: enrolled.id }, data: { revokedAt: new Date() } });
+    // Establish a REAL browser-bound PENDING request while the Hub credential
+    // is live. If we revoke before requesting, the backend returns a synthetic
+    // request without a DB row; its failure would never test revoked proof.
     expect(await db.accountRecoveryRequest.count({ where: { userId: owner.id } })).toBe(0);
     await current.context.clearCookies();
     const requestId = await startPasskeyAdminRecovery(current.page, owner.email);
+    assertRecoveryCookies(await current.context.cookies(hub), requestId);
     expect(await db.accountRecoveryRequest.count({ where: { userId: owner.id } }),
-      "a revoked RP credential must result in a synthetic, non-authorizing recovery").toBe(0);
-    expect(await db.accountRecoveryRequest.count({ where: { id: requestId } })).toBe(0);
-
+      "the bound request must be persisted before revocation").toBe(1);
+    const bound = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+    expect(bound).toMatchObject({ userId: owner.id, recoveryRole: "ADMIN", recoveryProofs: ["PASSKEY"],
+      recoveryAdminReview: true, status: "PENDING", recoveryPasskeyVerifiedAt: null,
+      reviewedByUserId: null, bootstrapSessionId: null });
+    // Let Chromium sign with the still-active resident credential. Intercept
+    // the genuine Next assertion-finish POST only AFTER the browser has signed,
+    // revoke the matching persisted credential, then forward that original
+    // signed request to the server. This tests the finish-time revocation gate,
+    // not a synthetic request or an authenticator with no usable credential.
+    let signedFinishIntercepted = false;
+    let revokedBeforeFinish = false;
+    let interceptionFailure: string | undefined;
+    await current.page.route("**/recover**", async route => {
+      const request = route.request();
+      const signedAssertion = request.method() === "POST" && Boolean(request.headers()["next-action"]) &&
+        (request.postData() ?? "").includes("clientDataJSON") &&
+        (request.postData() ?? "").includes("authenticatorData");
+      if (!signedAssertion) { await route.continue(); return; }
+      signedFinishIntercepted = true;
+      try {
+        const claimed = await db.passkeyCredential.updateMany({
+          where: { id: enrolled.id, userId: owner.id, revokedAt: null }, data: { revokedAt: new Date() }
+        });
+        if (claimed.count !== 1) throw new Error("signed WebAuthn credential must be live until its finish POST");
+        revokedBeforeFinish = true;
+        await route.continue();
+      } catch (error) {
+        interceptionFailure = error instanceof Error ? error.message : "interception failed";
+        await route.abort().catch(() => undefined);
+      }
+    });
+    const actionCalls: Array<{ status: number; bytes: number }> = [];
+    current.page.on("response", response => {
+      if (new URL(response.url()).origin === hub && new URL(response.url()).pathname === "/recover" &&
+          response.request().method() === "POST" && response.request().headers()["next-action"]) {
+        actionCalls.push({ status: response.status(), bytes: response.request().postDataBuffer()?.byteLength ?? 0 });
+      }
+    });
     await current.page.locator('[aria-label="Chave de acesso"]').getByRole("button", { name: "Confirmar com passkey" }).click();
     await expect(current.page.locator('[aria-label="Chave de acesso"] [role="alert"]'))
       .toContainText("Não foi possível confirmar a passkey");
-    expect(await db.accountRecoveryRequest.count({ where: { userId: owner.id } })).toBe(0);
+    expect(interceptionFailure).toBeUndefined();
+    expect(signedFinishIntercepted, "the virtual authenticator must produce an actual signed WebAuthn assertion").toBe(true);
+    expect(revokedBeforeFinish, "the credential must be revoked BEFORE its signed assertion reaches the server").toBe(true);
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
+    expect(actionCalls.length, "WebAuthn must run both the real START and assertion-finish actions").toBeGreaterThanOrEqual(2);
+    for (const action of actionCalls) {
+      expect(action.status, "failed WebAuthn proof must be handled by the real Server Action").toBeGreaterThanOrEqual(200);
+      expect(action.status, "a 403/500 boundary failure is not an assertion denial").toBeLessThan(400);
+      expect(action.bytes, "the WebAuthn Server Action must receive a nonempty submission").toBeGreaterThan(0);
+    }
+    const challenges = await db.passkeyChallenge.findMany({ where: { userId: owner.id, ceremony: "RECOVERY" } });
+    expect(challenges.length, "START must persist a real recovery WebAuthn challenge").toBeGreaterThan(0);
+    expect(challenges.every(challenge => challenge.consumedAt === null)).toBe(true);
+    expect(await db.accountRecoveryRequest.count({ where: { userId: owner.id } })).toBe(1);
+    const rejected = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+    expect(rejected).toMatchObject({ userId: owner.id, status: "PENDING", recoveryPasskeyVerifiedAt: null,
+      reviewedByUserId: null, bootstrapSessionId: null });
     await expect(current.page.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
   } finally {
     await removeAuthenticator?.().catch(() => undefined);
