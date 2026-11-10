@@ -69,6 +69,31 @@ async function latestEmailCode(email: string, kind: string): Promise<string> {
   return code;
 }
 
+async function assertRecoveredAdminCredentialCanReElevate(
+  admin: Awaited<ReturnType<typeof setupAdmin>>,
+  replacementPassword: string
+): Promise<void> {
+  const scope = "ADMIN_RECOVERY_REGENERATE" as const;
+  const input = {
+    actor: admin.actor, sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD, scope,
+    duration: { kind: "TIMED" as const, minutes: 15 as const }, locale: LOCALE
+  };
+  await assert.rejects(startSecurityElevation({ ...input, administrativePassword: ADMIN_PASSWORD }),
+    AdministrationMutationError, "the previous administrative password must not authorize a new elevation");
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, scope), false,
+    "a recovered ADMIN must not inherit privileged access");
+  const challenge = await startSecurityElevation({ ...input, administrativePassword: replacementPassword });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  await verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: challenge.requestKey, code });
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, scope), true,
+    "freshly verified new ADMIN credential must authorize the named elevation scope");
+  const newlyRotatedCodes = await regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId);
+  assert.equal(newlyRotatedCodes.length, 10,
+    "a real protected ADMIN mutation must be possible only after fresh elevation");
+  assert.equal(new Set(newlyRotatedCodes).size, 10);
+}
+
 async function seedAdministrativeRecoveryProofs(admin: Awaited<ReturnType<typeof setupAdmin>>) {
   const userId = admin.actor.id;
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { passwordHash: true, secondFactorMethod: true } });
@@ -481,6 +506,7 @@ test("an administrative password equal to the normal password is rejected when r
   assert.ok((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskeyId } })).revokedAt,
     "backup-code recovery must revoke old hub passkeys");
   await assertAdministrativeRecoveryRevocations(admin, oldProofs);
+  await assertRecoveredAdminCredentialCanReElevate(admin, "integration-recovered-admin-1");
 });
 
 for (const state of ["revoked", "missing"] as const) {
@@ -585,6 +611,7 @@ test("email recovery rotates only the separate ADMIN credential, replaces backup
     AdministrationMutationError,
     "the email code cannot be replayed"
   );
+  await assertRecoveredAdminCredentialCanReElevate(admin, replacementCredential);
 });
 
 test("ADMIN email recovery rejects invalid normal password and missing verified email before sending", integrationOptions, async () => {

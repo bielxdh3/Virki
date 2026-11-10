@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac, randomBytes } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
-import { AdministrativePasswordReuseError, AdministrationMutationError, recoverAdministrativeCredentialWithTotp } from "./administration";
+import { AdministrativePasswordReuseError, AdministrationMutationError, hasActiveSecurityElevation, recoverAdministrativeCredentialWithTotp, regenerateAdministrativeRecoveryCodes, startSecurityElevation, verifySecurityElevation } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
 import { hashPassword, verifyPassword } from "./index";
 import { createTotpSecret, encryptTotpSecret, getLoginCeremonyFailureStage, hashRecoveryCode, startLoginCeremony, verifyLoginEmailCode, verifyLoginTotpCode } from "./security";
@@ -127,6 +127,24 @@ test("TOTP recovery rotates only the administrative password, invalidates artifa
   assert.ok(renewed.token);
   await assert.rejects(recover(admin), AdministrationMutationError, "the same TOTP step is single use across the login and ADMIN flows");
   assert.equal((await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.userId } })).keyVersion, 2);
+
+  // A hash comparison is not sufficient proof of recovery: old ADMIN credentials
+  // must fail the real elevation entrypoint, and the new credential must pass
+  // fresh email verification before any protected operation can succeed.
+  const elevationInput = { actor: admin.actor, sessionId: admin.sessionId,
+    normalPassword: NORMAL, scope: "ADMIN_RECOVERY_REGENERATE" as const,
+    duration: { kind: "TIMED" as const, minutes: 15 as const }, locale: "pt-BR" as const };
+  await assert.rejects(startSecurityElevation({ ...elevationInput, administrativePassword: ADMIN }),
+    AdministrationMutationError, "old administrative password cannot regain privileges after TOTP recovery");
+  assert.equal(await hasActiveSecurityElevation(admin.userId, admin.sessionId, "ADMIN_RECOVERY_REGENERATE"), false);
+  const elevation = await startSecurityElevation({ ...elevationInput, administrativePassword: NEW_ADMIN });
+  const elevationCode = (await queuedEmails(admin.email)).filter((mail) => mail.kind === "ADMIN_EMAIL_VERIFICATION").at(-1)?.code;
+  assert.ok(elevationCode);
+  await verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: elevation.requestKey, code: elevationCode });
+  assert.equal(await hasActiveSecurityElevation(admin.userId, admin.sessionId, "ADMIN_RECOVERY_REGENERATE"), true);
+  const reauthorizedCodes = await regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId);
+  assert.equal(reauthorizedCodes.length, 10, "privileged code rotation must require fresh recovered elevation");
+  assert.equal(new Set(reauthorizedCodes).size, 10);
 });
 
 test("wrong, expired, replayed and inactive TOTP cannot recover an ADMIN credential", integrationOptions, async () => {
