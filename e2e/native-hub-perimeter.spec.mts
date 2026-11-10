@@ -144,11 +144,28 @@ test("NATIVE HUB: ADMIN password plus genuine queued MFA grants scoped session, 
     await expect(page.getByRole("heading", { level: 1, name: "Contas", exact: true })).toBeVisible();
     expect((await context.cookies(hubUrl)).some((cookie) => cookie.name === sessionCookieName)).toBe(true);
 
-    const invalidCsrf = await page.request.post(`${hubUrl}/api/login`, {
-      headers: { origin: hubUrl },
-      form: { email: fixture.recoveryReviewer.email }
-    });
+    // Playwright's Node APIRequestContext does not inherit Chromium's
+    // private host-resolver-rules for hub.localhost in isolated Docker. Send
+    // this genuine CSRF-negative request from the browser's same-origin
+    // network stack instead; keep both the actual POST and HTTP 403 asserted.
+    const invalidCsrfResponse = page.waitForResponse((response) =>
+      response.url() === `${hubUrl}/api/login` && response.request().method() === "POST");
+    const invalidCsrfStatus = await page.evaluate(async (email) => {
+      const response = await fetch("/api/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ email })
+      });
+      return response.status;
+    }, fixture.recoveryReviewer.email);
+    const invalidCsrf = await invalidCsrfResponse;
+    // Request.headers() deliberately omits some browser-managed headers;
+    // allHeaders() is required to inspect the actual Origin on the wire.
+    const actualRequestHeaders = await invalidCsrf.request().allHeaders();
+    expect(actualRequestHeaders.origin).toBe(hubUrl);
     expect(invalidCsrf.status()).toBe(403);
+    expect(invalidCsrfStatus).toBe(403);
 
     await page.goto(`${hubUrl}/admin/security`);
     await expect(page.getByRole("heading", { level: 1, name: "Segurança", exact: true })).toBeVisible();
