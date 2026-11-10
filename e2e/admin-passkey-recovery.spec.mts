@@ -505,11 +505,76 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     await expect(stale.page.getByRole("heading", { level: 1, name: "Recuperar acesso administrativo" })).toBeVisible();
     await expect(stale.page.getByLabel("Nova senha", { exact: true })).toBeVisible();
     await expect(stale.page.locator('form input[name="requestId"]')).toHaveValue(requestId);
+    const staleCsrf = await stale.page.locator('form input[name="csrfToken"]').inputValue();
+    expect(/^v2\./u.test(staleCsrf), "stale form must have a genuine page-issued recovery CSRF token").toBe(true);
     const replayPassword = `replayed-normal-admin-${randomUUID()}-password`;
     await stale.page.getByLabel("Nova senha", { exact: true }).fill(replayPassword);
 
+    // A separate cookie jar alone does not prevent React/App Router from
+    // unmounting an idle form after the winner consumes the request. Dispatch
+    // the real stale browser's Server Action POST now, hold it before network
+    // delivery, and forward it only after the winner is CONSUMED.
+    let releaseHeldReplay!: () => void;
+    const replayRelease = new Promise<void>(resolve => { releaseHeldReplay = resolve; });
+    type HeldPost = { url: string; method: string; body: string; headers: Record<string, string> };
+    let observeHeldReplay!: (post: HeldPost) => void;
+    const heldReplay = new Promise<HeldPost>(resolve => { observeHeldReplay = resolve; });
+    let forwardHeldReplay = false;
+    let heldPostCount = 0;
+    await stale.page.route("**/recover**", async route => {
+      const request = route.request();
+      if (request.method() !== "POST" || new URL(request.url()).origin !== hub ||
+          new URL(request.url()).pathname !== "/recover") {
+        await route.fallback();
+        return;
+      }
+      heldPostCount += 1;
+      if (heldPostCount !== 1) { await route.abort(); return; }
+      observeHeldReplay({ url: request.url(), method: request.method(),
+        body: request.postData() ?? "", headers: await request.allHeaders() });
+      await replayRelease;
+      // Hub requests MUST traverse the existing context-level route that
+      // attaches a signed, validated Cloudflare Access JWT. Continuing
+      // directly would bypass that route, creating a false-red HTTP403.
+      if (forwardHeldReplay) await route.fallback();
+      else await route.abort();
+    });
+    const staleClickOutcome = stale.page.getByRole("button", { name: "Concluir recuperação", exact: true })
+      .click({ noWaitAfter: true }).then(() => undefined, (error: unknown) => error);
+
     const changedPassword = `new-normal-admin-${randomUUID()}-password`;
-    await target.page.getByLabel("Nova senha", { exact: true }).fill(changedPassword);
+    const replayCheckpoint = await (async () => {
+      try {
+      // A stalled/missing browser dispatch must fail closed promptly, not hold
+      // the stale route until the full 180s E2E timeout.
+      let arrivalTimer: ReturnType<typeof setTimeout> | undefined;
+      const post = await Promise.race([
+        heldReplay,
+        staleClickOutcome.then(error => {
+          if (error) throw error;
+          return heldReplay;
+        }),
+        new Promise<never>((_, reject) => {
+          arrivalTimer = setTimeout(() => reject(new Error("No real ADMIN replay Server Action POST arrived within 12s")), 12_000);
+        })
+      ]).finally(() => { if (arrivalTimer) clearTimeout(arrivalTimer); });
+      expect(post.method).toBe("POST");
+      expect(new URL(post.url).origin).toBe(hub);
+      expect(new URL(post.url).pathname).toBe("/recover");
+      expect(Boolean(post.headers["next-action"]), "the held POST must be the genuine hydrated React Server Action").toBe(true);
+      expect(post.body, "the held form must carry the original recovery request").toContain(requestId);
+      expect(post.body, "the held form must carry its own stale password").toContain(replayPassword);
+      expect(post.body, "the held form must contain page-issued CSRF rather than a fabricated request").toContain(staleCsrf);
+      if (post.headers.origin) expect(post.headers.origin).toBe(hub);
+      if (post.headers.referer) expect(new URL(post.headers.referer).origin).toBe(hub);
+      for (const original of originalCookies) {
+        expect(post.headers.cookie ?? "", `held POST must carry original ${original.name} capability`)
+          .toContain(`${original.name}=${original.value}`);
+      }
+      expect(heldPostCount, "only one browser-generated stale completion action may be dispatched").toBe(1);
+      expect((await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).status,
+        "held replay must dispatch before the winner's recovery is consumed").toBe("APPROVED");
+      await target.page.getByLabel("Nova senha", { exact: true }).fill(changedPassword);
     // A successful Server Action alone is insufficient: require a *new*
     // protected document GET, not a stale RSC update or a generic heading.
     const bootstrapDocument = target.page.waitForResponse(response => new URL(response.url()).origin === hub &&
@@ -555,20 +620,41 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     // Next Server Action and be denied without changing either credential or
     // issuing another bootstrap session. HTTP 403/500 cannot count as a pass.
     const sessionRowsBeforeReplay = await db.session.count({ where: { userId: owner.id } });
+    const successfulConsumptionAudits = await db.auditLog.count({
+      where: { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS" }
+    });
     const staleCookies = await stale.context.cookies(hub);
     for (const original of originalCookies) {
       expect(staleCookies.find(cookie => cookie.name === original.name)?.value).toBe(original.value);
     }
     expect(staleCookies.some(cookie => cookie.name === getSessionCookieName({ NODE_ENV: "development" }))).toBe(false);
-    const replay = stale.page.waitForResponse(response => new URL(response.url()).origin === hub &&
+    const replayResponsePending = stale.page.waitForResponse(response => new URL(response.url()).origin === hub &&
       new URL(response.url()).pathname === "/recover" && response.request().method() === "POST" &&
-      Boolean(response.request().headers()["next-action"]));
-    await stale.page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
-    const replayResponse = await replay;
+      Boolean(response.request().headers()["next-action"]), { timeout: 25_000 });
+    forwardHeldReplay = true;
+    return { updated, consumed, bootstrapSession, administrative,
+      heldAction: post.headers["next-action"], heldBody: post.body,
+      sessionRowsBeforeReplay, successfulConsumptionAudits, replayResponsePending };
+      } finally {
+        // Any failure in dispatch, proof checking or the winning path aborts
+        // the held POST. Never forward a stale password while still APPROVED.
+        releaseHeldReplay();
+      }
+    })();
+    const { updated, consumed, bootstrapSession, administrative, heldAction, heldBody,
+      sessionRowsBeforeReplay, successfulConsumptionAudits, replayResponsePending } = replayCheckpoint;
+    const replayResponse = await replayResponsePending;
+    const staleClickError = await staleClickOutcome;
+    if (staleClickError) throw staleClickError;
     expect(replayResponse.status(), "rejected ADMIN replay must finish as a handled Next action").toBeGreaterThanOrEqual(200);
     expect(replayResponse.status(), "403/500 is not a valid proof of one-time denial").toBeLessThan(400);
     expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0,
       "the stale browser must submit the actual password completion form").toBeGreaterThan(0);
+    expect(replayResponse.request().postData(), "only the originally dispatched stale form may reach the server")
+      .toBe(heldBody);
+    expect(replayResponse.request().headers()["next-action"]).toBe(heldAction);
+    expect(replayResponse.request().postData()).toContain(requestId);
+    expect(replayResponse.request().postData()).toContain(replayPassword);
     await expect(stale.page).toHaveURL(`${hub}/recover?requestId=${requestId}&error=1`);
     const afterReplay = await db.user.findUniqueOrThrow({ where: { id: owner.id } });
     expect(afterReplay.email).toBe(updated.email);
@@ -580,6 +666,10 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(afterReplay.isActive).toBe(updated.isActive);
     expect(await verifyPassword(afterReplay.passwordHash ?? "", changedPassword)).toBe(true);
     expect(await verifyPassword(afterReplay.passwordHash ?? "", replayPassword)).toBe(false);
+    const administrativeAfterReplay = await db.administrativeCredential.findUniqueOrThrow({ where: { userId: owner.id } });
+    expect(administrativeAfterReplay, "stale normal-password recovery must not modify the separate ADMIN credential")
+      .toEqual(administrative);
+    expect(await verifyPassword(administrativeAfterReplay.passwordHash, owner.administrativePassword)).toBe(true);
     const replayedRequest = await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
     expect(replayedRequest.status).toBe("CONSUMED");
     expect(replayedRequest.bootstrapSessionId).toBe(consumed.bootstrapSessionId);
@@ -593,6 +683,8 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(bootstrapAfterReplay.revokedAt).toBeNull();
     expect(bootstrapAfterReplay.tokenHash).toBe(bootstrapSession.tokenHash);
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
+    expect(await db.auditLog.count({ where: { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS" } }),
+      "replay must not record a second successful recovery consumption").toBe(successfulConsumptionAudits);
   } finally {
     await removeAuthenticator?.().catch(() => undefined);
     await Promise.allSettled(contexts.map(context => context.close()));
