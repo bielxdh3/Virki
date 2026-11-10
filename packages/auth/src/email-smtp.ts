@@ -1,5 +1,5 @@
 import nodemailer from "nodemailer";
-import type { EmailTransport, EmailTransportMessage } from "./email";
+import type { EmailTransport, EmailTransportMessage, EmailTransportReceipt } from "./email";
 import { isSingleMailboxAddress } from "./email-address";
 
 const DEFAULT_SMTP_PORT = 587;
@@ -77,16 +77,22 @@ export function createSmtpEmailTransport(
   });
 
   return {
-    async send(message: EmailTransportMessage): Promise<void> {
+    async send(message: EmailTransportMessage): Promise<EmailTransportReceipt> {
       try {
         if (!isSingleMailboxAddress(message.to)) throw new Error("Invalid recipient.");
-        await transporter.sendMail({
+        const info = await transporter.sendMail({
           from: config.from,
           to: [{ name: "", address: message.to }],
           subject: message.subject,
           text: message.text,
           ...(config.replyTo ? { replyTo: config.replyTo } : {})
         });
+        const messageId = info?.messageId;
+        // Store only the generated, safe RFC header ID, never SMTP credentials,
+        // response text, recipients, codes or message bodies.
+        return typeof messageId === "string" && messageId.length <= 255 &&
+          /^<[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+>$/u.test(messageId)
+          ? { smtpHeaderMessageId: messageId } : {};
       } catch {
         throw new Error("SMTP email delivery failed.");
       }

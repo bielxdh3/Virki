@@ -99,7 +99,7 @@ test("SMTP accepts exactly one mailbox and rejects parsed recipient lists", () =
 test("SMTP mocked delivery hands Nodemailer one structured recipient and rejects address lists", async (context) => {
   const recipients: unknown[] = [];
   context.mock.method(nodemailer, "createTransport", () => ({
-    sendMail: async (message: { to: unknown }) => { recipients.push(message.to); }
+    sendMail: async (message: { to: unknown }) => { recipients.push(message.to); return { messageId: "<synthetic-smtp-id@example.invalid>" }; }
   }) as never);
   const transport = createSmtpEmailTransport({
     VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
@@ -107,10 +107,55 @@ test("SMTP mocked delivery hands Nodemailer one structured recipient and rejects
     VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
     VIRKI_EMAIL_FROM: "no-reply@example.invalid"
   });
-  await transport.send({ to: "josé@bücher.example", subject: "fixture", text: "fixture" });
+  assert.deepEqual(await transport.send({ to: "josé@bücher.example", subject: "fixture", text: "fixture" }), {
+    smtpHeaderMessageId: "<synthetic-smtp-id@example.invalid>"
+  });
   assert.deepEqual(recipients, [[{ name: "", address: "josé@bücher.example" }]]);
   await assert.rejects(transport.send({ to: "alice@example.invalid,attacker@example.invalid", subject: "fixture", text: "fixture" }));
   assert.equal(recipients.length, 1);
+});
+
+test("successful SMTP handoff stores a non-secret Message-ID without mistaking it for inbox delivery", async () => {
+  await withTestOutboxKey(async () => {
+    const now = new Date("2026-11-10T12:00:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-correlation",
+      idempotencyKey: "mail-correlation",
+      kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: "owner@example.invalid",
+      locale: "en",
+      payload: encryptedTestEmailPayload(),
+      status: "QUEUED",
+      attemptCount: 0,
+      availableAt: new Date(0),
+      sentAt: null,
+      terminalFailedAt: null,
+      processingLeaseExpiresAt: null,
+      createdAt: new Date(0),
+      updatedAt: new Date(0)
+    });
+    const transport = { async send() { return { smtpHeaderMessageId: "<correlation-123@example.invalid>" }; } };
+    assert.equal(await processNextEmailMessage(transport, now, queued.client as never), "sent");
+    assert.equal(queued.message().status, "SENT");
+    assert.equal(queued.attempts()[0].smtpHeaderMessageId, "<correlation-123@example.invalid>");
+  });
+});
+
+test("SMTP receipt with control characters is never stored in delivery metadata", async () => {
+  await withTestOutboxKey(async () => {
+    const now = new Date("2026-11-10T12:00:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-malformed-receipt", idempotencyKey: "mail-malformed-receipt", kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: "owner@example.invalid", locale: "en", payload: encryptedTestEmailPayload(),
+      status: "QUEUED", attemptCount: 0, availableAt: new Date(0), sentAt: null,
+      terminalFailedAt: null, processingLeaseExpiresAt: null, createdAt: new Date(0), updatedAt: new Date(0)
+    });
+    const result = await processNextEmailMessage({
+      async send() { return { smtpHeaderMessageId: "<valid@example.invalid>\r\nAuthorization: secret" }; }
+    }, now, queued.client as never);
+    assert.equal(result, "sent");
+    assert.equal(queued.attempts()[0].smtpHeaderMessageId, undefined);
+  });
 });
 
 test("SMTP delivery failures are redacted without contacting an external provider", async () => {

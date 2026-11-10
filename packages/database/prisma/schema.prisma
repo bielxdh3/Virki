@@ -329,6 +329,7 @@ model EmailDeliveryAttempt {
   attempt     Int
   status      DeliveryAttemptStatus
   errorCode   String?
+  smtpHeaderMessageId String?         @db.VarChar(255)
   attemptedAt DateTime              @default(now())
   message     EmailOutboxMessage    @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
