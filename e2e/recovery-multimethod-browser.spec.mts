@@ -819,6 +819,13 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
       hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
     } }));
     await enrollVirtualRecoveryCredential(recoveryPage, database, owner);
+    // PASSKEY_ADMIN has no preceding EMAIL/TOTP owner proof, so the server
+    // correctly omits allowCredentials. A discoverable resident credential is
+    // mandatory; do not weaken the anonymous WebAuthn challenge policy.
+    const registered = await cdp.send("WebAuthn.getCredentials", { authenticatorId });
+    expect(registered.credentials, "the real CDP authenticator must contain exactly one credential").toHaveLength(1);
+    expect(registered.credentials[0]?.isResidentCredential,
+      "PASSKEY_ADMIN must use a resident/discoverable Portal-RP credential").toBe(true);
     const credential = await database.passkeyCredential.findFirstOrThrow({ where: {
       userId: owner.id, revokedAt: null
     } });
@@ -852,17 +859,51 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     await expect(reviewerPage.locator("article.list-row").filter({ hasText: ownerEmail }),
       "an unproven passkey must not enter the reviewer queue").toHaveCount(0);
 
-    const passkeyPosts: string[] = [];
+    const passkeyPosts: number[] = [];
+    let dispatchedPasskeyPosts = 0;
+    recoveryPage.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).origin === portalUrl &&
+          new URL(request.url()).pathname === "/recover" && request.headers()["next-action"]) {
+        dispatchedPasskeyPosts += 1;
+      }
+    });
     recoveryPage.on("response", (response) => {
       if (response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
           new URL(response.url()).pathname === "/recover" && response.request().headers()["next-action"]) {
-        passkeyPosts.push(response.url());
+        passkeyPosts.push(response.status());
       }
     });
-    await recoveryPage.locator('[aria-label="Chave de acesso"]').getByRole("button", { name: "Confirmar com passkey" }).click();
-    await expect(recoveryPage.locator('[aria-label="Chave de acesso"]')).toContainText("Confirmada.", { timeout: 25_000 });
+    const passkeyStage = recoveryPage.locator('[aria-label="Chave de acesso"]');
+    const passkeyButton = passkeyStage.getByRole("button", { name: "Confirmar com passkey" });
+    // SSR must not expose a clickable button before the React WebAuthn handler
+    // hydrates. The client enables it only when the handler is installed.
+    await expect(passkeyButton).toBeEnabled();
+    await passkeyButton.click();
+    try {
+      await expect(passkeyStage).toContainText("Confirmada.", { timeout: 25_000 });
+    } catch (error) {
+      const challenges = await database.passkeyChallenge.findMany({
+        where: { userId: owner.id, ceremony: "RECOVERY" },
+        select: { consumedAt: true }
+      });
+      const proof = await database.accountRecoveryRequest.findUniqueOrThrow({
+        where: { id: requestId }, select: { recoveryPasskeyVerifiedAt: true }
+      });
+      // All observations are categorical/count-only. Never log credential IDs,
+      // challenges, assertions, recovery cookies, CSRF values or OTPs.
+      const diagnostic = {
+        nextPostsDispatched: dispatchedPasskeyPosts,
+        nextPostStatusClasses: passkeyPosts.map((status) => Math.floor(status / 100)),
+        signedAssertions, storedChallenges: challenges.length,
+        consumedChallenges: challenges.filter((challenge) => challenge.consumedAt !== null).length,
+        proofPersisted: proof.recoveryPasskeyVerifiedAt !== null,
+        uiErrorVisible: await passkeyStage.getByRole("alert").isVisible().catch(() => false)
+      };
+      throw new Error(`Portal PASSKEY_ADMIN signed proof did not complete: ${JSON.stringify(diagnostic)}`, { cause: error });
+    }
     expect(signedAssertions, "the real Chromium virtual authenticator must sign an assertion").toBeGreaterThan(0);
-    expect(passkeyPosts.length, "browser must submit both Next WebAuthn actions").toBeGreaterThanOrEqual(2);
+    expect(dispatchedPasskeyPosts, "browser must dispatch both Next WebAuthn actions").toBeGreaterThanOrEqual(2);
+    expect(passkeyPosts.length, "browser must complete both Next WebAuthn actions").toBeGreaterThanOrEqual(2);
     expect((await database.passkeyChallenge.findMany({ where: {
       userId: owner.id, ceremony: "RECOVERY"
     } })).some((challenge) => challenge.consumedAt !== null)).toBe(true);

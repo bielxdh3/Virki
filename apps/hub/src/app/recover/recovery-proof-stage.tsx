@@ -90,6 +90,11 @@ function RecoveryPasskeyProof({ verified, csrf, csrfFieldName, requestId, suppor
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  // This button is server-rendered before its WebAuthn onClick handler exists.
+  // Keep it inert until the client effect has run: otherwise a fast browser
+  // click silently does nothing, including on real account recovery pages.
+  useEffect(() => { setHydrated(true); }, []);
 
   async function verify() {
     setError(false);
@@ -122,7 +127,7 @@ function RecoveryPasskeyProof({ verified, csrf, csrfFieldName, requestId, suppor
       <p className="muted">Use a passkey cadastrada no Virki para confirmar sua identidade.</p>
       {supportsLegacyKey ? <p className="muted">Se uma chave de segurança antiga não aparecer, confirme primeiro o e-mail ou o autenticador e tente a passkey novamente.</p> : null}
       {error ? <p className="form-error" role="alert">Não foi possível confirmar a passkey. Tente novamente.</p> : null}
-      <button className="button-primary" type="button" disabled={pending} onClick={verify}>{pending ? "Validando passkey…" : "Confirmar com passkey"}</button>
+      <button className="button-primary" type="button" disabled={pending || !hydrated} onClick={verify}>{pending ? "Validando passkey…" : "Confirmar com passkey"}</button>
     </>}
   </div>;
 }

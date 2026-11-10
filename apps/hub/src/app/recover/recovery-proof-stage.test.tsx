@@ -45,6 +45,8 @@ test("PASSKEY + TOTP request offers both proofs without an email verification de
 test("PASSKEY + independent ADMIN review does not promise legacy-key fallback before the reviewer", () => {
   const html = render(["PASSKEY"], [], true);
   assert.doesNotMatch(html, /chave de segurança antiga/u);
+  assert.match(html, /<button\b(?=[^>]*disabled="")[^>]*>Confirmar com passkey<\/button>/u,
+    "server-rendered passkey controls must remain disabled until the client WebAuthn handler hydrates");
 });
 
 test("verified proof is never re-requested and assisted request waits for independent admin", () => {
