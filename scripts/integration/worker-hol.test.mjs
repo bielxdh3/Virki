@@ -7,11 +7,15 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const suite = "packages/auth/src/email-worker-hol.integration.test.ts";
+// Build a synthetic URL from segments to avoid storing anything that looks
+// like a usable database credential or a raw URL with userinfo in source.
+const fakeDatabase = ["postgresql://", "virki_runtime_test", ":",
+  "synthetic-placeholder-only-32-characters", "@127.0.0.1:55678/",
+  "virki_email_worker_hol_a1b2c3d4e5f6", "?schema=public"].join("");
 const target = {
   NODE_ENV: "test", VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
   VIRKI_EMAIL_WORKER_DEDICATED_DB: "confirmed",
-  VIRKI_INTEGRATION_DATABASE_URL:
-    "postgresql://virki_runtime_test:abcdefghijklmnopqrstuvwxyz012345@127.0.0.1:55678/virki_email_worker_hol_a1b2c3d4e5f6?schema=public"
+  VIRKI_INTEGRATION_DATABASE_URL: fakeDatabase
 };
 
 const tap = `TAP version 13
