@@ -40,6 +40,34 @@ test("A02 hosted CI must execute the first-ADMIN bootstrap against a separately 
   assert.doesNotMatch(workflow.slice(cloned, shared), /continue-on-error:\s*true/u);
 });
 
+test("hosted passkey recovery requires physical USER Portal PASSKEY_ADMIN PASS and rejects silent SKIP", () => {
+  const hasRequiredGate = (source) => {
+    const start = source.indexOf("- name: Run isolated passkey recovery browser E2E");
+    const end = source.indexOf("- name: Run mandatory native Hub browser E2E without Cloudflare Access JWT");
+    if (start < 0 || end <= start) return false;
+    const stage = source.slice(start, end);
+    return stage.includes('VIRKI_E2E_PASSKEYS: "true"') &&
+      stage.includes('VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"') &&
+      stage.includes("set -euo pipefail") &&
+      stage.includes("--grep 'PASSKEY_|USER virtual authenticator' --forbid-only 2>&1 | tee") &&
+      stage.includes("grep '✓' \"$output_file\" | grep -F 'USER PASSKEY_ADMIN: signed Portal passkey'") &&
+      stage.includes("[1-9][0-9]* (skipped|failed)") &&
+      !/^ {8}(?:continue-on-error:|if:)/mu.test(stage);
+  };
+  assert.equal(hasRequiredGate(workflow), true);
+  for (const mutation of [
+    workflow.replace('VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"', 'VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "false"'),
+    workflow.replace("grep '✓' \"$output_file\" | grep -F 'USER PASSKEY_ADMIN: signed Portal passkey'", "true"),
+    workflow.replace("--grep 'PASSKEY_|USER virtual authenticator' --forbid-only", "--grep 'USER virtual authenticator'"),
+    workflow.replace("[1-9][0-9]* (skipped|failed)", "[1-9][0-9]* failed"),
+    workflow.replace("Run isolated passkey recovery browser E2E", "Passkey disabled"),
+    workflow.replace("- name: Run isolated passkey recovery browser E2E", "- name: Run isolated passkey recovery browser E2E\n        if: github.ref == 'refs/heads/main'"),
+    workflow.replace("- name: Run isolated passkey recovery browser E2E", "- name: Run isolated passkey recovery browser E2E\n        continue-on-error: true")
+  ]) {
+    assert.equal(hasRequiredGate(mutation), false, "weakened passkey stage must not satisfy the CI contract");
+  }
+});
+
 function publicationNeedsAreSafe(source) {
   // Parse the job-level portion of this workflow instead of matching a
   // "needs:" substring that might belong to another job or a comment.

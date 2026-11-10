@@ -5,6 +5,7 @@ import { expect, test, type BrowserContext } from "@playwright/test";
 import { getDeviceCookieName, getSessionCookieName } from "@virki/auth/constants";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { decryptEmailPayload } from "@virki/auth/email";
+import { verifySecurityCode } from "@virki/auth/security";
 import { PrismaClient } from "@virki/database";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
@@ -112,39 +113,8 @@ test("ADMIN recovers separate credential by email without saved codes", async ({
     await completeButton.click();
     await expect(form.getByRole("alert")).toContainText("duas senhas administrativas precisam ser iguais");
     expect((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status).toBe("PENDING");
-    // A real valid OTP and normal password may NOT bypass the session-bound
-    // ADMIN action CSRF. Verify the POST reaches the hydrated Next action,
-    // returns 403, and leaves both credential and proof unconsumed.
-    await form.locator('input[name="code"]').fill(emailedCode);
-    await form.locator('input[name="normalPassword"]').fill(loginSecret);
-    await form.locator('input[name="newPassword"]').fill(newAdminSecret);
-    await form.locator('input[name="confirmPassword"]').fill(newAdminSecret);
-    const originalCsrf = await form.locator('input[name="csrfToken"]').inputValue();
-    expect(originalCsrf).toMatch(/^v2\./u);
-    await form.locator('input[name="csrfToken"]').evaluate((input) => {
-      (input as HTMLInputElement).value = "invalid-email-completion-csrf";
-    });
-    const invalidEmailCompletion = page.waitForResponse((response) =>
-      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/security" &&
-      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]));
-    await completeButton.click();
-    expect((await invalidEmailCompletion).status(), "the completed email proof must not bypass ADMIN session CSRF").toBe(403);
-    const credentialBeforeValidEmailCompletion = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: user.id } });
-    expect(credentialBeforeValidEmailCompletion.keyVersion).toBe(1);
-    expect(await verifyPassword(credentialBeforeValidEmailCompletion.passwordHash, oldAdminSecret)).toBe(true);
-    expect((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status).toBe("PENDING");
-
-    // Preserve the SAME issued proof, rather than issuing a new challenge
-    // that could hide corruption of the original after the rejected action.
-    // React must keep this hydrated completion form available after HTTP403;
-    // if not, the test correctly fails and needs a separate authentic replay.
-    await expect(completeButton).toBeVisible();
-    expect(await form.locator('input[name="requestKey"]').inputValue()).toBe(requestKey);
-    await form.locator('input[name="csrfToken"]').evaluate((input, valid) => {
-      (input as HTMLInputElement).value = valid;
-    }, originalCsrf);
-    expect(await form.locator('input[name="csrfToken"]').inputValue()).toBe(originalCsrf);
-    // Sensitive fields are cleared after a form error. Refill all fields.
+    // A valid administrative recovery must consume the original email OTP
+    // through the real browser before testing an independent CSRF denial.
     await form.locator('input[name="code"]').fill(emailedCode);
     await form.locator('input[name="normalPassword"]').fill(loginSecret);
     await form.locator('input[name="newPassword"]').fill(newAdminSecret);
@@ -199,6 +169,57 @@ test("ADMIN recovers separate credential by email without saved codes", async ({
     }))).toEqual({ scope: "ACCOUNT_STATE_CHANGE", status: "ACTIVE", sessionId: session.id });
     const normalLogin = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { passwordHash: true } });
     expect(await verifyPassword(normalLogin.passwordHash!, loginSecret)).toBe(true);
+
+    // Independently exercise CSRF denial on a NEW valid email completion at
+    // the end of this browser journey. A real Next.js 403 may unmount its
+    // form, so do not assume React will keep the same hydrated tree alive.
+    // The earlier browser success already proves a genuine OTP can complete;
+    // this negative proves a valid proof is unchanged by forbidden CSRF.
+    await page.goto(`${hubUrl}/admin/security`);
+    const secondSend = credentialSection.getByRole("button", { name: "Enviar código de recuperação por e-mail" });
+    await expect(secondSend).toBeVisible();
+    await secondSend.locator("xpath=ancestor::form").locator('input[name="normalPassword"]').fill(loginSecret);
+    await secondSend.click();
+    const secondComplete = credentialSection.getByRole("button", { name: "Confirmar código e trocar senha" });
+    await expect(secondComplete).toBeVisible();
+    const negativeForm = secondComplete.locator("xpath=ancestor::form");
+    const negativeRequestKey = await negativeForm.locator('input[name="requestKey"]').inputValue();
+    const negativeCode = await readLatestAdminVerificationCode(prisma, email, negativeRequestKey);
+    const proofBefore = await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: negativeRequestKey },
+      select: { status: true, scope: true, sessionId: true, challengeHash: true, expiresAt: true, credentialKeyVersion: true } });
+    expect(proofBefore).toMatchObject({ status: "PENDING", sessionId: session.id, credentialKeyVersion: 2 });
+    expect(proofBefore.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(verifySecurityCode(`${negativeCode}:${email.toLowerCase()}`, proofBefore.challengeHash)).toBe(true);
+    const credentialBeforeDenial = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: user.id },
+      select: { keyVersion: true, passwordHash: true, status: true } });
+    const successAuditsBefore = await prisma.auditLog.count({ where: {
+      actorUserId: user.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS"
+    } });
+    const codesBeforeDenial = await prisma.administrativeRecoveryCode.findMany({ where: { userId: user.id },
+      select: { codeHash: true, usedAt: true }, orderBy: { codeHash: "asc" } });
+    await negativeForm.locator('input[name="code"]').fill(negativeCode);
+    await negativeForm.locator('input[name="normalPassword"]').fill(loginSecret);
+    const rejectedPassword = randomBytes(24).toString("base64url");
+    await negativeForm.locator('input[name="newPassword"]').fill(rejectedPassword);
+    await negativeForm.locator('input[name="confirmPassword"]').fill(rejectedPassword);
+    await negativeForm.locator('input[name="csrfToken"]').evaluate((input) => {
+      (input as HTMLInputElement).value = "invalid-email-completion-csrf";
+    });
+    const deniedCompletion = page.waitForResponse((response) =>
+      new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/admin/security" &&
+      response.request().method() === "POST" && Boolean(response.request().headers()["next-action"]));
+    await secondComplete.click();
+    expect((await deniedCompletion).status(), "a genuine valid email OTP cannot bypass ADMIN completion CSRF").toBe(403);
+    expect(await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: negativeRequestKey },
+      select: { status: true, scope: true, sessionId: true, challengeHash: true, expiresAt: true, credentialKeyVersion: true } }),
+    "forbidden CSRF must not consume, replace or revoke the original pending OTP proof").toEqual(proofBefore);
+    expect(await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: user.id },
+      select: { keyVersion: true, passwordHash: true, status: true } })).toEqual(credentialBeforeDenial);
+    expect(await prisma.administrativeRecoveryCode.findMany({ where: { userId: user.id },
+      select: { codeHash: true, usedAt: true }, orderBy: { codeHash: "asc" } })).toEqual(codesBeforeDenial);
+    expect(await prisma.auditLog.count({ where: {
+      actorUserId: user.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS"
+    } })).toBe(successAuditsBefore);
   } finally {
     await context.close();
     // Retain immutable audit history; the isolated tmpfs test database is removed after the run.

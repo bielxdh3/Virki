@@ -555,9 +555,19 @@ jobs:
           VIRKI_E2E_ADMIN_PASSKEYS: "true"
           VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"
         run: |
+          set -euo pipefail
           cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
-          trap 'unset cleanup_url' EXIT
-          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_|USER virtual authenticator'
+          output_file="$(mktemp "$RUNNER_TEMP/virki-passkey-recovery.XXXXXX")"
+          trap 'unset cleanup_url; rm -f -- "$output_file"' EXIT
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_|USER virtual authenticator' --forbid-only 2>&1 | tee "$output_file"
+          # The brand-new Portal-RP USER recovery must actually PASS. Existing
+          # passkey tests passing cannot silently replace it after a rename or SKIP.
+          grep '✓' "$output_file" | grep -F 'USER PASSKEY_ADMIN: signed Portal passkey' >/dev/null
+          grep -Eq '(^|[[:space:]])[1-9][0-9]* passed \(' "$output_file"
+          if grep -Eq '(^|[[:space:]])[1-9][0-9]* (skipped|failed) \(' "$output_file"; then
+            echo 'Mandatory passkey-assisted recovery cannot skip or fail tests.' >&2
+            exit 1
+          fi
 
       - name: Run mandatory native Hub browser E2E without Cloudflare Access JWT
         env:
