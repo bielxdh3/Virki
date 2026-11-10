@@ -488,10 +488,11 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         }
         await expect(page.getByLabel("Nova senha", { exact: true })).toBeVisible({ timeout: 20_000 });
 
-        // Keep the already-rendered second completion form in its own cookie
-        // jar. The winning reset clears recovery cookies and installs a session
-        // in `context`; sharing that jar can replace the stale /recover view
-        // before its second Server Action POST is actually submitted.
+        // A separate cookie jar is not sufficient: App Router can revalidate
+        // and unmount an idle completion form after the winning reset. Submit
+        // its real hydrated React Server Action BEFORE the winner, hold that
+        // browser-generated HTTP POST at Playwright's network boundary, and
+        // forward it only AFTER the winner has consumed the request.
         const oldCookies = (await context.cookies(portalUrl))
           .filter((cookie) => cookie.name.includes("recovery"))
           .map((cookie) => ({
@@ -507,54 +508,137 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         expect(staleDocument?.status(), "stale form must come from a real recovery document").toBe(200);
         await expect(stale.getByLabel("Nova senha", { exact: true })).toBeVisible();
         await expect(stale.locator('form input[name="requestId"]')).toHaveValue(requestId);
+        const staleCsrf = await stale.locator('form input[name="csrfToken"]').inputValue();
+        expect(/^v2\./u.test(staleCsrf), "stale form must have a real recovery CSRF token").toBe(true);
         const rejectedPassword = "replay-" + randomUUID() + "-password";
         await stale.getByLabel("Nova senha", { exact: true }).fill(rejectedPassword);
+        let releaseHeldReplay!: () => void;
+        const replayRelease = new Promise<void>((resolve) => { releaseHeldReplay = resolve; });
+        type HeldPost = { url: string; method: string; body: string; headers: Record<string, string> };
+        let observeHeldReplay!: (post: HeldPost) => void;
+        const heldReplay = new Promise<HeldPost>((resolve) => {
+          observeHeldReplay = resolve;
+        });
+        let forwardHeldReplay = false;
+        let heldPostCount = 0;
+        await stale.route("**/recover**", async (route) => {
+          const request = route.request();
+          if (request.method() !== "POST" || new URL(request.url()).origin !== portalUrl ||
+              new URL(request.url()).pathname !== "/recover") {
+            await route.continue();
+            return;
+          }
+          heldPostCount += 1;
+          if (heldPostCount !== 1) { await route.abort(); return; }
+          // The request and all its cookie headers already exist in Chromium;
+          // neither the agent nor Node fabricates a new proof or Server Action.
+          observeHeldReplay({ url: request.url(), method: request.method(), body: request.postData() ?? "",
+            headers: await request.allHeaders() });
+          await replayRelease;
+          if (forwardHeldReplay) await route.continue();
+          else await route.abort();
+        });
+        // Do not await a navigation while the real action request is paused.
+        const staleClickOutcome = stale.getByRole("button", { name: "Concluir recuperação", exact: true })
+          .click({ noWaitAfter: true }).then(() => undefined, (error: unknown) => error);
+        let arrivalTimeout: ReturnType<typeof setTimeout> | undefined;
         const winningPassword = "signed-" + randomUUID() + "-password";
-        await page.getByLabel("Nova senha", { exact: true }).fill(winningPassword);
-        await page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
-        await expect(page).toHaveURL(portalUrl + "/account/security?recovered=password", { timeout: 25_000 });
-        const recovered = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
-        expect(await verifyPassword(recovered.passwordHash ?? "", winningPassword)).toBe(true);
-        expect(recovered.emailNormalized).toBe(replacementEmail ?? ownerEmail);
-        const consumed = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
-        expect(consumed.status).toBe("CONSUMED");
-        expect(consumed.bootstrapSessionId, "the consumed request must identify its unique bootstrap session").toBeTruthy();
-        expect(await database.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } })).toBe(0);
-        if (totpSecret) expect((await database.totpFactor.findUniqueOrThrow({ where: { userId: owner.id } })).status).toBe("REVOKED");
-        const session = (await context.cookies(portalUrl)).find((cookie) =>
-          cookie.name === getSessionCookieName({ NODE_ENV: "development" }));
-        expect(session).toBeDefined();
-        expect(session!.domain).toBe("portal.localhost");
-        expect(session!.httpOnly).toBe(true);
-        expect(session!.secure).toBe(productionMode);
-        const bootstrap = await database.session.findUniqueOrThrow({ where: { id: consumed.bootstrapSessionId! } });
-        expect(bootstrap.userId, "bootstrap session must belong to the recovered owner").toBe(owner.id);
-        expect(bootstrap.revokedAt, "bootstrap session must not be revoked").toBeNull();
-        expect(bootstrap.expiresAt.getTime()).toBeGreaterThan(Date.now());
-        expect(bootstrap.tokenHash, "browser session cookie must be the actual bootstrap session token")
-          .toBe(hashSessionToken(session!.value));
-        const protectedUrl = portalUrl + "/account/security";
-        const protectedDocument = await page.goto(protectedUrl);
-        expect(protectedDocument?.status(), "fresh protected document GET must return HTTP 200").toBe(200);
-        await expect(page).toHaveURL(protectedUrl);
-        await expect(page.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
-        await expect(page.locator("header.page-header")).toContainText(ownerEmail);
-        expect((await context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
-
-        // The winner's session must stay separate from the original capability
-        // used by the rejected POST. Verify the stale jar still has that exact
-        // capability before clicking its previously rendered, filled form.
-        const replayCookies = await staleContext.cookies(portalUrl);
-        for (const original of oldCookies) {
-          expect(replayCookies.find((cookie) => cookie.name === original.name)?.value).toBe(original.value);
+        let consumed: Awaited<ReturnType<typeof database.accountRecoveryRequest.findUniqueOrThrow>>;
+        let replayResponsePending!: ReturnType<typeof stale.waitForResponse>;
+        let winnerPasswordHash: string | null = null;
+        let winnerBootstrapTokenHash = "";
+        let sessionRowsBeforeReplay = -1;
+        try {
+          const post = await Promise.race([
+            heldReplay,
+            staleClickOutcome.then((error) => {
+              if (error) throw error;
+              return heldReplay;
+            }),
+            new Promise<never>((_, reject) => {
+              arrivalTimeout = setTimeout(() => reject(new Error(
+                "Genuine stale React recovery POST was not intercepted within 15s."
+              )), 15_000);
+            })
+          ]);
+          clearTimeout(arrivalTimeout);
+          arrivalTimeout = undefined;
+          expect(post.method).toBe("POST");
+          expect(new URL(post.url).origin, "held action must target the exact issuing Portal origin").toBe(portalUrl);
+          expect(new URL(post.url).pathname).toBe("/recover");
+          expect(Boolean(post.headers["next-action"]), "the stale POST must come from a hydrated React Server Action").toBe(true);
+          expect(post.body.includes(requestId), "the held genuine form must carry this exact recovery request ID").toBe(true);
+          expect(post.body.includes(rejectedPassword), "the held form must carry the stale password, not the winner's").toBe(true);
+          expect(post.body.includes(staleCsrf), "the held action must carry its real page-issued CSRF token").toBe(true);
+          // Chromium/Next may omit Origin even on a legitimate Server Action.
+          // Never turn that valid request into a false-red; validate only when
+          // present, while always checking the actual request target above.
+          if (post.headers.origin) expect(post.headers.origin).toBe(portalUrl);
+          if (post.headers.referer) {
+            // Referrer-Policy may legitimately truncate this to the origin.
+            expect(new URL(post.headers.referer).origin).toBe(portalUrl);
+          }
+          for (const original of oldCookies) {
+            expect((post.headers.cookie ?? "").includes(original.name + "=" + original.value),
+              "the held HTTP POST must carry all three original browser-bound recovery cookies").toBe(true);
+          }
+          const beforeWinner = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+          expect(beforeWinner.status, "the stale browser must dispatch before the winning consume").toBe("APPROVED");
+          await page.getByLabel("Nova senha", { exact: true }).fill(winningPassword);
+          await page.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
+          await expect(page).toHaveURL(portalUrl + "/account/security?recovered=password", { timeout: 25_000 });
+          const recovered = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
+          expect(await verifyPassword(recovered.passwordHash ?? "", winningPassword)).toBe(true);
+          expect(recovered.emailNormalized).toBe(replacementEmail ?? ownerEmail);
+          winnerPasswordHash = recovered.passwordHash;
+          consumed = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
+          expect(consumed.status).toBe("CONSUMED");
+          expect(consumed.bootstrapSessionId, "the consumed request must identify its unique bootstrap session").toBeTruthy();
+          expect(await database.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } })).toBe(0);
+          if (totpSecret) expect((await database.totpFactor.findUniqueOrThrow({ where: { userId: owner.id } })).status).toBe("REVOKED");
+          const session = (await context.cookies(portalUrl)).find((cookie) =>
+            cookie.name === getSessionCookieName({ NODE_ENV: "development" }));
+          expect(session).toBeDefined();
+          expect(session!.domain).toBe("portal.localhost");
+          expect(session!.httpOnly).toBe(true);
+          expect(session!.secure).toBe(productionMode);
+          const bootstrap = await database.session.findUniqueOrThrow({ where: { id: consumed.bootstrapSessionId! } });
+          expect(bootstrap.userId, "bootstrap session must belong to the recovered owner").toBe(owner.id);
+          expect(bootstrap.revokedAt, "bootstrap session must not be revoked").toBeNull();
+          expect(bootstrap.expiresAt.getTime()).toBeGreaterThan(Date.now());
+          expect(bootstrap.tokenHash, "browser session cookie must be the actual bootstrap session token")
+            .toBe(hashSessionToken(session!.value));
+          winnerBootstrapTokenHash = bootstrap.tokenHash;
+          const protectedUrl = portalUrl + "/account/security";
+          const protectedDocument = await page.goto(protectedUrl);
+          expect(protectedDocument?.status(), "fresh protected document GET must return HTTP 200").toBe(200);
+          await expect(page).toHaveURL(protectedUrl);
+          await expect(page.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
+          await expect(page.locator("header.page-header")).toContainText(ownerEmail);
+          expect((await context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery"))).toHaveLength(0);
+          const replayCookies = await staleContext.cookies(portalUrl);
+          for (const original of oldCookies) {
+            expect(replayCookies.find((cookie) => cookie.name === original.name)?.value).toBe(original.value);
+          }
+          sessionRowsBeforeReplay = await database.session.count({ where: { userId: owner.id } });
+          expect(heldPostCount, "only one genuine stale completion POST may be dispatched").toBe(1);
+          // Only arm the response waiter immediately before forwarding. The
+          // winner's real login + Argon2/protected GET cannot exhaust its timer.
+          replayResponsePending = stale.waitForResponse((response) =>
+            response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
+            new URL(response.url()).pathname === "/recover" &&
+            Boolean(response.request().headers()["next-action"]), { timeout: 25_000 });
+          forwardHeldReplay = true;
+        } finally {
+          if (arrivalTimeout) clearTimeout(arrivalTimeout);
+          // A failed winner/precondition aborts the pending POST instead of
+          // accidentally authorizing the stale password on this test owner;
+          // even a missing POST fails within 15s, not the full E2E timeout.
+          releaseHeldReplay();
         }
-        await expect(stale.getByRole("button", { name: "Concluir recuperação", exact: true })).toBeVisible();
-        const replay = stale.waitForResponse((response) =>
-          response.request().method() === "POST" && new URL(response.url()).origin === portalUrl &&
-          new URL(response.url()).pathname === "/recover" &&
-          Boolean(response.request().headers()["next-action"]));
-        await stale.getByRole("button", { name: "Concluir recuperação", exact: true }).click();
-        const replayResponse = await replay;
+        const replayResponse = await replayResponsePending;
+        const staleClickError = await staleClickOutcome;
+        if (staleClickError) throw staleClickError;
         expect(replayResponse.status(), "Next may return 200 or redirect 303 for a rejected Server Action")
           .toBeGreaterThanOrEqual(200);
         expect(replayResponse.status(), "a 403/500 response is not proof of one-time consumption")
@@ -564,12 +648,19 @@ for (const method of ["PASSKEY_EMAIL", "PASSKEY_TOTP"] as const) {
         const unchanged = await database.user.findUniqueOrThrow({ where: { id: owner.id } });
         expect(await verifyPassword(unchanged.passwordHash ?? "", winningPassword)).toBe(true);
         expect(await verifyPassword(unchanged.passwordHash ?? "", rejectedPassword)).toBe(false);
+        expect(unchanged.passwordHash, "replayed completion must not even rehash the winning password").toBe(winnerPasswordHash);
+        expect(unchanged.emailNormalized).toBe(replacementEmail ?? ownerEmail);
         const replayedRequest = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } });
         expect(replayedRequest.status).toBe("CONSUMED");
         expect(replayedRequest.bootstrapSessionId).toBe(consumed.bootstrapSessionId);
         expect(await database.session.count({ where: {
           userId: owner.id, revokedAt: null, expiresAt: { gt: new Date() }
         } })).toBe(1);
+        expect(await database.session.count({ where: { userId: owner.id } }),
+          "denied replay must not create even a revoked or expired session").toBe(sessionRowsBeforeReplay);
+        const bootstrapAfterReplay = await database.session.findUniqueOrThrow({ where: { id: consumed.bootstrapSessionId! } });
+        expect(bootstrapAfterReplay.tokenHash).toBe(winnerBootstrapTokenHash);
+        expect(bootstrapAfterReplay.revokedAt).toBeNull();
       } finally {
         await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId }).catch(() => {});
       }
