@@ -144,8 +144,81 @@ test("SMTP attempts use stable RFC Message-IDs across a worker retry, distinct a
   assert.equal(accepted.length, 3);
 });
 
+test("SMTP correlation accepts long valid sender domains without exceeding the RFC Message-ID limit", async (context) => {
+  const accepted: string[] = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (mail: { messageId?: string }) => {
+      if (!mail.messageId) throw new Error("Missing correlation header");
+      accepted.push(mail.messageId);
+      return { messageId: mail.messageId };
+    }
+  }) as never);
+  const domains = [
+    // The exact boundary: 64 hex chars + <@> (3) + 188-domain = 255.
+    ["a".repeat(63), "b".repeat(63), "c".repeat(60)].join("."),
+    ["a".repeat(63), "b".repeat(63), "c".repeat(61)].join("."),
+    ["a".repeat(63), "b".repeat(63), "c".repeat(63), "example", "invalid"].join("."),
+    ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(43), "io"].join("."),
+    "bücher.example"
+  ];
+  for (const domain of domains) {
+    const from = `a@${domain}`;
+    assert.equal(isSingleMailboxAddress(from), true, `fixture ${domain.length} domain must be accepted as SMTP mailbox`);
+    const transport = createSmtpEmailTransport({
+      VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+      VIRKI_EMAIL_SMTP_USER: "sender@example.invalid",
+      VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+      VIRKI_EMAIL_FROM: from
+    });
+    const message = { to: "recipient@example.invalid", subject: "fixture", text: "fixture",
+      deliveryAttemptReference: "opaque-message:1" };
+    const first = await transport.send(message);
+    const replay = await transport.send(message);
+    const next = await transport.send({ ...message, deliveryAttemptReference: "opaque-message:2" });
+    assert.equal(first?.smtpHeaderMessageId, replay?.smtpHeaderMessageId);
+    assert.notEqual(first?.smtpHeaderMessageId, next?.smtpHeaderMessageId);
+    assert.ok(first?.smtpHeaderMessageId);
+    assert.ok(first.smtpHeaderMessageId.length <= 255, `domain length ${domain.length}`);
+    assert.match(first.smtpHeaderMessageId, /^<[a-f0-9]{64}@[A-Za-z0-9.-]+>$/u);
+    if (domain.length === 188) assert.ok(first.smtpHeaderMessageId.endsWith(`@${domain}>`));
+  }
+  assert.equal(accepted.length, domains.length * 3);
+  assert.equal(new Set(accepted.filter((_, i) => i % 3 === 0)).size, domains.length,
+    "different sender domains must not collide even when they share the same shortened suffix");
+});
+
+test("SMTP reuses the reserved Message-ID across sender rotation and rejects injected IDs", async (context) => {
+  const emitted: string[] = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (mail: { messageId?: string }) => {
+      if (mail.messageId) emitted.push(mail.messageId);
+      return { messageId: mail.messageId };
+    }
+  }) as never);
+  const transport = createSmtpEmailTransport({
+    VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+    VIRKI_EMAIL_SMTP_USER: "sender@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+    VIRKI_EMAIL_FROM: "no-reply@new.sender.example.invalid"
+  });
+  const reserved = `<${"a".repeat(64)}@old.sender.example.invalid>`;
+  const mail = { to: "recipient@example.invalid", subject: "fixture", text: "fixture",
+    deliveryAttemptReference: "mail-prior:2", preparedSmtpHeaderMessageId: reserved };
+  assert.deepEqual(await transport.send(mail), { smtpHeaderMessageId: reserved });
+  assert.deepEqual(emitted, [reserved]);
+  for (const malicious of [
+    `${reserved}\r\nBcc:attacker@example.invalid`,
+    `<${"a".repeat(64)}@${"x".repeat(200)}.invalid>`,
+    "<not-a-valid-hash@example.invalid>"
+  ]) await assert.rejects(transport.send({ ...mail, preparedSmtpHeaderMessageId: malicious }));
+  assert.deepEqual(emitted, [reserved], "no malformed header reaches Nodemailer");
+});
+
 test("SMTP handoff before a failed DB finalize remains traceable after lease reclaim", async () => {
   await withTestOutboxKey(async () => {
+    const previousFrom = process.env.VIRKI_EMAIL_FROM;
+    process.env.VIRKI_EMAIL_FROM = "no-reply@original.sender.example.invalid";
+    try {
     const now = new Date("2026-11-10T12:00:00.000Z");
     const queued = createMockOutboxDatabase({
       id: "mail-crash", idempotencyKey: "mail-crash", kind: "EMAIL_TWO_FACTOR",
@@ -154,10 +227,12 @@ test("SMTP handoff before a failed DB finalize remains traceable after lease rec
       terminalFailedAt: null, processingLeaseExpiresAt: null, createdAt: new Date(0), updatedAt: new Date(0)
     }, { failAttemptStatus: "SENT" });
     const references: string[] = [];
+    const preparedIds: string[] = [];
     const acceptedTransport = {
-      async send(mail: { deliveryAttemptReference?: string }) {
+      async send(mail: { deliveryAttemptReference?: string; preparedSmtpHeaderMessageId?: string }) {
         references.push(mail.deliveryAttemptReference ?? "missing");
-        return { smtpHeaderMessageId: "<accepted@example.invalid>" };
+        preparedIds.push(mail.preparedSmtpHeaderMessageId ?? "missing");
+        return { smtpHeaderMessageId: mail.preparedSmtpHeaderMessageId };
       }
     };
 
@@ -165,17 +240,25 @@ test("SMTP handoff before a failed DB finalize remains traceable after lease rec
     assert.equal(queued.message().status, "PROCESSING");
     assert.equal(queued.message().attemptCount, 1);
     assert.deepEqual(references, ["mail-crash:1"]);
+    assert.match(preparedIds[0], /^<[a-f0-9]{64}@original\.sender\.example\.invalid>$/u);
     assert.equal(queued.attempts().length, 0);
 
     // A lease reclaim marks the uncertain first handoff interrupted, then
-    // assigns a distinct persisted attempt; no duplicate attempt ID is used.
+    // assigns a distinct persisted attempt. Rotating the SMTP sender must NOT
+    // lose the first attempt's exact original Message-ID in the DB history.
+    process.env.VIRKI_EMAIL_FROM = "no-reply@replacement.sender.example.invalid";
     const afterLease = new Date(now.getTime() + 6 * 60 * 1000);
     await assert.rejects(processNextEmailMessage(acceptedTransport, afterLease, queued.client as never), /attempt history unavailable/u);
     assert.deepEqual(references, ["mail-crash:1", "mail-crash:2"]);
     assert.equal(queued.message().attemptCount, 2);
-    assert.deepEqual(queued.attempts().map((item) => [item.attempt, item.status, item.errorCode]), [
-      [1, "FAILED", "worker-interrupted"]
+    assert.deepEqual(queued.attempts().map((item) => [item.attempt, item.status, item.errorCode, item.smtpHeaderMessageId]), [
+      [1, "FAILED", "worker-interrupted", preparedIds[0]]
     ]);
+    assert.notEqual(preparedIds[0], preparedIds[1]);
+    } finally {
+      if (previousFrom === undefined) delete process.env.VIRKI_EMAIL_FROM;
+      else process.env.VIRKI_EMAIL_FROM = previousFrom;
+    }
   });
 });
 

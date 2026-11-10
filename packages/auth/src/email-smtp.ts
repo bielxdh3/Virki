@@ -82,7 +82,12 @@ export function createSmtpEmailTransport(
     async send(message: EmailTransportMessage): Promise<EmailTransportReceipt> {
       try {
         if (!isSingleMailboxAddress(message.to)) throw new Error("Invalid recipient.");
-        const stableId = stableAttemptMessageId(message.deliveryAttemptReference, config.from);
+        const preparedId = message.preparedSmtpHeaderMessageId;
+        if (preparedId !== undefined &&
+            (preparedId.length > 255 || !/^<[a-f0-9]{64}@[a-z0-9.-]+>$/u.test(preparedId))) {
+          throw new Error("Invalid prepared Message-ID.");
+        }
+        const stableId = preparedId ?? stableAttemptMessageId(message.deliveryAttemptReference, config.from);
         const info = await transporter.sendMail({
           from: config.from,
           to: [{ name: "", address: message.to }],
@@ -104,17 +109,29 @@ export function createSmtpEmailTransport(
   };
 }
 
-function stableAttemptMessageId(reference: string | undefined, from: string): string | undefined {
+export function stableAttemptMessageId(reference: string | undefined, from: string): string | undefined {
   if (reference === undefined) return undefined;
   // The reference is constructed server-side from an opaque persisted outbox
   // ID and the attempt already claimed in PostgreSQL. Never interpolate an
   // unvalidated reference into an RFC header.
   if (!/^[A-Za-z0-9_-]{1,128}:[1-9][0-9]{0,5}$/u.test(reference)) throw new Error("Invalid attempt reference.");
-  const domain = domainToASCII(from.slice(from.lastIndexOf("@") + 1));
+  const domain = domainToASCII(from.slice(from.lastIndexOf("@") + 1)).toLowerCase();
   if (!domain || !/^[a-z0-9.-]+$/iu.test(domain)) throw new Error("Invalid sender domain.");
-  const digest = createHash("sha256").update(`virki-smtp-attempt-v1:${reference}`).digest("hex");
-  const messageId = `<${digest}@${domain.toLowerCase()}>`;
-  if (messageId.length > 255) throw new Error("Message-ID too long.");
+  // A valid sender domain can be 253 bytes, while the 64-character digest and
+  // delimiters leave only 188 bytes for the Message-ID RHS. Preserve complete
+  // DNS labels from the right (never truncate a label), and include the FULL
+  // canonical sender domain in the digest so different long subdomains cannot
+  // collide when their shortened suffix is identical.
+  const maxDomainLength = 255 - 64 - 3;
+  const labels = domain.split(".");
+  let headerDomain = domain;
+  while (headerDomain.length > maxDomainLength && labels.length > 2) {
+    labels.shift();
+    headerDomain = labels.join(".");
+  }
+  if (headerDomain.length > maxDomainLength) throw new Error("Invalid sender domain length.");
+  const digest = createHash("sha256").update(`virki-smtp-attempt-v2:${reference}:sender:${domain}`).digest("hex");
+  const messageId = `<${digest}@${headerDomain}>`;
   return messageId;
 }
 

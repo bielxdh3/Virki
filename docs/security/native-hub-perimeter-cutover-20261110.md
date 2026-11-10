@@ -54,15 +54,19 @@ receipt. The Brevo event and the recipient's inbox confirmation still require
 separate authorized evidence. The nullable database column requires a reviewed
 forward migration before deployment.
 
-The SMTP client now derives the header identifier deterministically from the
-persisted opaque outbox ID and claimed attempt number, using the verified
-sender domain. If SMTP accepts a message but the process crashes before the
-delivery-attempt row commits, the first header identifier can be recalculated
-from the durable outbox attempt history, while a reclaimed send uses a new
-identifier. The recovery outbox's migration sentinel projects this optional
-metadata through `to_jsonb(attempt)` so it remains compatible both before and
-after the nullable column is added. This improves correlation only: it cannot
-establish that a recipient received an OTP.
+The SMTP client derives the header identifier deterministically from the
+persisted opaque outbox ID, claimed attempt number and verified sender domain.
+For very long valid sender domains, it uses a shortened whole-label DNS suffix
+in the header while hashing the complete sender domain, preserving uniqueness
+without exceeding 255 characters or blocking administrative OTP delivery.
+The outbox claim transaction reserves that identifier in the nullable
+`pendingSmtpHeaderMessageId` field **before sending**. If SMTP accepts the mail
+but the worker crashes before finalizing, reclaim moves the reserved identifier
+into the interrupted attempt record even if the sender configuration changed.
+The next attempt gets a different identifier. The recovery snapshot sentinel
+uses `to_jsonb` for both optional columns, so comparisons work before and after
+the two forward-only migrations. These identifiers improve correlation only:
+neither an SMTP handoff nor a failed/interrupted attempt proves inbox receipt.
 
 **Decision: draft implementation only. No release, deploy, Cloudflare policy
 change or externally hosted E2E authorized by this document.**

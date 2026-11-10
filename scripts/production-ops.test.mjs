@@ -1051,6 +1051,8 @@ test("recovery snapshots account for the intended legacy-key migration and retai
   assert.match(snapshotSql, /snapshot_phase" != after_migrations/u);
 
   const messageProjection = snapshotSql.slice(snapshotSql.indexOf("'messages'"), snapshotSql.indexOf("'attempts'"));
+  assert.match(messageProjection, /to_jsonb\(message\)->>'pendingSmtpHeaderMessageId'/u,
+    "Snapshot must preserve the in-flight ID across sender rotation and tolerate the pre-migration schema");
   for (const field of [
     '"id"', '"kind"', '"recipientEmail"', '"locale"', '"payload"', '"status"', '"attemptCount"',
     '"availableAt"', '"sentAt"', '"terminalFailedAt"', '"createdAt"', '"updatedAt"',

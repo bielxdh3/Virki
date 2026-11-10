@@ -315,6 +315,7 @@ model EmailOutboxMessage {
   sentAt           DateTime?
   terminalFailedAt DateTime?
   processingLeaseExpiresAt DateTime?
+  pendingSmtpHeaderMessageId String? @db.VarChar(255)
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
   deliveryAttempts EmailDeliveryAttempt[]

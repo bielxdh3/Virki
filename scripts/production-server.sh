@@ -1055,8 +1055,8 @@ recovery_snapshot_sql() {
   cat <<SQL
 SELECT jsonb_build_object(
   'messages', COALESCE((
-    SELECT jsonb_agg(jsonb_build_array("id", $recovery_key_expression, "kind"::text, "recipientEmail", "locale", "payload", "status"::text, "attemptCount", "availableAt", "sentAt", "terminalFailedAt", "createdAt", "updatedAt") ORDER BY "id")
-    FROM "EmailOutboxMessage"
+    SELECT jsonb_agg(jsonb_build_array("id", $recovery_key_expression, "kind"::text, "recipientEmail", "locale", "payload", "status"::text, "attemptCount", "availableAt", "sentAt", "terminalFailedAt", "createdAt", "updatedAt", to_jsonb(message)->>'pendingSmtpHeaderMessageId') ORDER BY "id")
+    FROM "EmailOutboxMessage" AS message
     WHERE "kind"::text = 'ACCOUNT_RECOVERY'
   ), '[]'::jsonb),
   'attempts', COALESCE((
