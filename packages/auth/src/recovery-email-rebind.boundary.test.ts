@@ -17,6 +17,13 @@ test("bootstrap recovery provenance is an exact unique FK bound in the consuming
   assert.doesNotMatch(service, /consumedAt:\s*session\.createdAt/u);
 });
 
+test("post-reset rebind rejects EMAIL-proven recovery and pre-reset replacement mailbox provenance", () => {
+  assert.match(service, /purpose:\s*"RECOVERY"/u);
+  assert.match(service, /NOT:\s*\{\s*recoveryProofs:\s*\{\s*has:\s*"EMAIL"/u);
+  assert.match(service, /recoveryNewEmail:\s*null/u);
+  assert.match(service, /recoveryNewEmailVerifiedAt:\s*null/u);
+});
+
 test("session, role and mailbox checks precede atomic one-winner claim with DB-clock expiry", () => {
   assert.match(service, /SELECT "id" FROM "Session"[\s\S]*"revokedAt" IS NULL[\s\S]*clock_timestamp\(\) AT TIME ZONE 'UTC'[\s\S]*FOR UPDATE/u);
   assert.match(service, /user\.email !== actor\.user\.email/u);

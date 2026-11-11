@@ -65,10 +65,18 @@ async function requireBoundRecoverySession(tx: Prisma.TransactionClient, actor: 
     user.email !== actor.user.email) throw ERROR;
   // Match the explicit one-to-one recovery origin. The database may record
   // the consumption clock separately from the session's creation time.
+  // Proving the original EMAIL mailbox never authorizes replacing that mailbox
+  // from a recovery bootstrap. For lost-mailbox recoveries, the replacement
+  // must already be verified and applied atomically BEFORE password reset.
+  // The old post-reset path remains only for legacy non-EMAIL origins without
+  // any replacement-mailbox attempt; modern consumed recoveries cannot match.
   const provenance = await tx.accountRecoveryRequest.findFirst({ where: {
-    userId: user.id, recoveryRole: user.role, status: "CONSUMED",
+    userId: user.id, recoveryRole: user.role, purpose: "RECOVERY", status: "CONSUMED",
     consumedAt: { not: null }, bootstrapSessionId: actor.id,
-    recoveryProofs: { isEmpty: false }
+    recoveryProofs: { isEmpty: false },
+    NOT: { recoveryProofs: { has: "EMAIL" } },
+    recoveryNewEmail: null, recoveryNewEmailChallengeHash: null,
+    recoveryNewEmailExpiresAt: null, recoveryNewEmailVerifiedAt: null
   }, select: { id: true } });
   if (!provenance) throw ERROR;
   return { user, session };
