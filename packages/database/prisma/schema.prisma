@@ -65,6 +65,12 @@ enum DeviceChallengeStatus {
   REVOKED
 }
 
+enum LoginChallengeFactor {
+  EMAIL
+  TOTP
+  BACKUP
+}
+
 enum TrustedDeviceStatus {
   TRUSTED
   REVOKED
@@ -371,6 +377,7 @@ model DeviceChallenge {
   emailAddressHash  String
   codeHash          String
   requiresTotp      Boolean              @default(false)
+  factorChoice       LoginChallengeFactor?
   emailVerifiedAt   DateTime?
   status            DeviceChallengeStatus @default(PENDING)
   expiresAt         DateTime

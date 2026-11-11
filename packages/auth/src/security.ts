@@ -36,6 +36,9 @@ export const RECOVERY_REQUEST_RESPONSE_FLOOR_MS = 500;
 // Email-sending login ceremonies a password-correct caller may start per 15-minute window.
 export const LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT = 6;
 export const LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT = 20;
+export const LOGIN_TOTP_CEREMONY_ACCOUNT_LIMIT = 12;
+export const LOGIN_TOTP_CEREMONY_SOURCE_LIMIT = 60;
+export const LOGIN_BACKUP_SOURCE_LIMIT = 20;
 // A repeated start for the same browser within this window reuses the pending ceremony instead of mailing a new code.
 export const LOGIN_EMAIL_CEREMONY_REUSE_MS = 60 * 1000;
 
@@ -96,6 +99,7 @@ export function getLoginCeremonyFailureStage(error: unknown): LoginCeremonyFailu
 
 export type AccountRecoveryRole = "USER" | "ADMIN";
 export type RequiredLoginRole = "USER" | "ADMIN";
+export type LoginFactorSelection = "REGISTERED";
 export type AccountRecoveryIdentity = { id: string; role: string; isActive: boolean; accountStatus: string };
 
 export function isAcceptableRecoveryPassword(role: AccountRecoveryRole, password: string): boolean {
@@ -329,7 +333,8 @@ export async function startLoginCeremony(
   now = new Date(),
   forceFreshProof = false,
   expectedRole?: RequiredLoginRole,
-  trustedClientAddress?: string
+  trustedClientAddress?: string,
+  factorSelection?: LoginFactorSelection
 ): Promise<LoginCeremonyStart> {
   const candidateToken = deviceToken && isDeviceToken(deviceToken) ? deviceToken : undefined;
   let stage: LoginCeremonyFailureStage = "transaction-start";
@@ -374,7 +379,7 @@ export async function startLoginCeremony(
         // ADMIN logins always complete a fresh second factor; a remembered browser never yields a password-only ADMIN session.
         const hasRememberedGrant = user.role !== "ADMIN" && Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
 
-        if (hasRememberedGrant && !forceFreshProof) {
+        if (hasRememberedGrant && !forceFreshProof && !factorSelection) {
           stage = "remembered-challenges-revoke";
           await revokeLoginChallenges(transaction, userId, deviceIdHash);
           stage = "remembered-session-create";
@@ -387,10 +392,14 @@ export async function startLoginCeremony(
           };
         }
 
-        const totpOnly = Boolean(user.emailVerifiedAt) && requiresTotp && isTrusted;
+        // Explicit login flows choose the account's enrolled factor after checking the
+        // password. A TOTP code is sufficient possession proof on a new device;
+        // an email message must never become a fallback around active TOTP.
+        const factorChoice = factorSelection === "REGISTERED" ? (requiresTotp ? "TOTP" : "EMAIL") : null;
+        const totpOnly = factorChoice === "TOTP" || (factorChoice === null && Boolean(user.emailVerifiedAt) && requiresTotp && isTrusted);
         stage = "challenge-revoke";
         const recent = await transaction.deviceChallenge.findFirst({
-          where: { userId, deviceIdHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now }, createdAt: { gt: new Date(now.getTime() - LOGIN_EMAIL_CEREMONY_REUSE_MS), lte: now } },
+          where: { userId, deviceIdHash, requiresTotp, factorChoice, status: totpOnly ? "VERIFIED" : "PENDING", emailVerifiedAt: null, consumedAt: null, expiresAt: { gt: now }, createdAt: { gt: new Date(now.getTime() - LOGIN_EMAIL_CEREMONY_REUSE_MS), lte: now } },
           orderBy: { createdAt: "desc" },
           select: { ceremonyId: true }
         });
@@ -399,7 +408,10 @@ export async function startLoginCeremony(
           return { kind: "CEREMONY", ceremonyId: recent.ceremonyId, factor: totpOnly ? "TOTP" : "EMAIL", newDevice: !isTrusted, deviceToken: resolvedDeviceToken };
         }
 
-        if (!totpOnly) {
+        if (factorChoice === "TOTP") {
+          stage = "ceremony-rate-limited";
+          if (!await consumeLoginTotpCeremonyQuota(transaction, userId, now, trustedClientAddress)) throw new SecurityMutationError();
+        } else if (!totpOnly) {
           stage = "ceremony-rate-limited";
           if (!await consumeLoginEmailCeremonyQuota(transaction, userId, isTrusted ? deviceIdHash : null, now, trustedClientAddress)) throw new SecurityMutationError();
         }
@@ -410,7 +422,7 @@ export async function startLoginCeremony(
         stage = "challenge-code-hash";
         const codeHash = hashSecurityCode(code);
         stage = "challenge-create";
-        await transaction.deviceChallenge.create({ data: { userId, ceremonyId, deviceIdHash, emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), codeHash, requiresTotp, status: totpOnly ? "VERIFIED" : "PENDING", expiresAt: new Date(now.getTime() + SECURITY_CEREMONY_TTL_MS), createdAt: now } });
+        await transaction.deviceChallenge.create({ data: { userId, ceremonyId, deviceIdHash, emailAddressHash: hashEmailAddress(user.emailNormalized ?? user.email), codeHash, requiresTotp, factorChoice, status: totpOnly ? "VERIFIED" : "PENDING", expiresAt: new Date(now.getTime() + SECURITY_CEREMONY_TTL_MS), createdAt: now } });
         if (!totpOnly) {
           stage = "outbox-enqueue";
           await enqueueEmailMessageForClient(transaction, {
@@ -440,6 +452,19 @@ function isPrismaSerializationConflict(error: unknown): boolean {
   return "code" in prismaError.meta && (prismaError.meta as { code?: unknown }).code === "40001";
 }
 
+// A correct password must not let a caller mint unlimited TOTP challenges by
+// rotating untrusted device cookies. Charge on creation; same-device reuse is free.
+async function consumeLoginTotpCeremonyQuota(
+  transaction: Prisma.TransactionClient, userId: string, now: Date, trustedClientAddress?: string
+): Promise<boolean> {
+  const account = await consumeRateLimitAttemptInTransaction(transaction, `login-totp-ceremony-account:${userId}`, now, LOGIN_TOTP_CEREMONY_ACCOUNT_LIMIT);
+  if (!account.allowed) return false;
+  if (trustedClientAddress === undefined) return true;
+  if (!isTrustedClientAddress(trustedClientAddress)) return false;
+  const source = await consumeRateLimitAttemptInTransaction(transaction, `login-totp-ceremony-source:${trustedClientAddress}`, now, LOGIN_TOTP_CEREMONY_SOURCE_LIMIT);
+  return source.allowed;
+}
+
 // Persistent budget for login ceremonies that mail a code, charged even after a correct password so a
 // password holder cannot mail unbounded codes. Every device shares the account bucket; trusted devices
 // also have their own bucket, and the per-source bucket applies when the client address is known.
@@ -463,9 +488,9 @@ export async function verifyLoginEmailCode(ceremonyId: string, code: string, dev
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken) || !/^\d{6}$/.test(code)) throw new SecurityMutationError();
   try {
     const result = await prisma.$transaction(async (transaction) => {
-      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, codeHash: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } } } });
+      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, codeHash: true, requiresTotp: true, factorChoice: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } } } });
       const requiresTotpNow = challenge?.user.secondFactorMethod === "TOTP" && challenge.user.totpFactor?.status === "ACTIVE";
-      if (!challenge || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.requiresTotp !== requiresTotpNow || challenge.status !== "PENDING" || challenge.consumedAt || challenge.expiresAt <= now || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
+      if (!challenge || (challenge.factorChoice && challenge.factorChoice !== "EMAIL" && !(challenge.factorChoice === "TOTP" && challenge.status === "PENDING")) || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.requiresTotp !== requiresTotpNow || challenge.status !== "PENDING" || challenge.consumedAt || challenge.expiresAt <= now || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
       const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
       const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
       if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
@@ -501,8 +526,8 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, devi
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken)) throw new SecurityMutationError();
   try {
     const result = await prisma.$transaction(async (transaction) => {
-      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, totpFactor: { select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } } } } } });
-      if (!challenge || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || challenge.user.totpFactor?.status !== "ACTIVE" || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
+      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, factorChoice: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } } } } } });
+      if (!challenge || (challenge.factorChoice && challenge.factorChoice !== "TOTP") || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.user.secondFactorMethod !== "TOTP" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || challenge.user.totpFactor?.status !== "ACTIVE" || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
       const accountAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, now);
       const ceremonyAttempt = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, now);
       if (!accountAttempt.allowed || !ceremonyAttempt.allowed) return { kind: "REJECTED" as const };
@@ -533,13 +558,165 @@ export async function verifyLoginTotpCode(ceremonyId: string, code: string, devi
   }
 }
 
+/** An offered backup code is a second factor, not a request to revoke the user's TOTP. */
+export async function getLoginBackupOption(ceremonyId: string, deviceToken: string, expectedRole?: RequiredLoginRole): Promise<boolean> {
+  if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken)) return false;
+  const now = new Date();
+  const challenge = await prisma.deviceChallenge.findUnique({
+    where: { ceremonyId },
+    select: {
+      deviceIdHash: true, emailAddressHash: true, factorChoice: true, requiresTotp: true,
+      status: true, consumedAt: true, expiresAt: true, emailVerifiedAt: true,
+      user: {
+        select: {
+          id: true, email: true, emailNormalized: true, role: true, isActive: true,
+          accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } },
+          _count: { select: { recoveryCodes: { where: { usedAt: null } } } }
+        }
+      }
+    }
+  });
+  return Boolean(challenge && challenge.factorChoice === "TOTP" && challenge.requiresTotp &&
+    challenge.status === "VERIFIED" && !challenge.consumedAt && !challenge.emailVerifiedAt &&
+    challenge.expiresAt > now && challenge.deviceIdHash === hashDeviceToken(deviceToken) &&
+    challenge.emailAddressHash === hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) &&
+    (!expectedRole || challenge.user.role === expectedRole) && challenge.user.isActive && challenge.user.accountStatus === "ACTIVE" &&
+    challenge.user.secondFactorMethod === "TOTP" && challenge.user.totpFactor?.status === "ACTIVE" &&
+    challenge.user._count.recoveryCodes > 0);
+}
+
+/** The verification page reads the persisted choice, never trusting ?factor= from a URL. */
+export async function getLoginChallengeFactor(
+  ceremonyId: string, deviceToken: string, expectedRole?: RequiredLoginRole
+): Promise<"email" | "totp" | "backup" | null> {
+  if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken)) return null;
+  const challenge = await prisma.deviceChallenge.findUnique({
+    where: { ceremonyId },
+    select: {
+      deviceIdHash: true, factorChoice: true, status: true, consumedAt: true, expiresAt: true,
+      user: { select: { role: true, isActive: true, accountStatus: true } }
+    }
+  });
+  if (!challenge || challenge.deviceIdHash !== hashDeviceToken(deviceToken) ||
+    (expectedRole && challenge.user.role !== expectedRole) || !challenge.user.isActive ||
+    challenge.user.accountStatus !== "ACTIVE" || challenge.consumedAt ||
+    challenge.expiresAt <= new Date() ||
+    (challenge.status !== "PENDING" && challenge.status !== "VERIFIED")) return null;
+  if (challenge.factorChoice === "BACKUP" && challenge.status === "VERIFIED") return "backup";
+  if (challenge.factorChoice === "TOTP") return challenge.status === "VERIFIED" ? "totp" : "email";
+  if (challenge.factorChoice === "EMAIL" && challenge.status === "PENDING") return "email";
+  return null;
+}
+
+/** A password-verified TOTP challenge can switch once to BACKUP while still unconsumed. */
+export async function selectLoginBackupFactor(ceremonyId: string, deviceToken: string, expectedRole?: RequiredLoginRole): Promise<void> {
+  if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken)) throw new SecurityMutationError();
+  try {
+    await prisma.$transaction(async (transaction) => {
+      const initial = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { userId: true } });
+      if (!initial || !await lockActiveLoginAccountInTransaction(transaction, initial.userId, expectedRole)) throw new SecurityMutationError();
+      const now = new Date();
+      const challenge = await transaction.deviceChallenge.findUnique({
+        where: { ceremonyId },
+        select: {
+          id: true, userId: true, deviceIdHash: true, emailAddressHash: true, factorChoice: true,
+          requiresTotp: true, status: true, consumedAt: true, expiresAt: true, emailVerifiedAt: true,
+          user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } }
+        }
+      });
+      if (!challenge || challenge.userId !== initial.userId || challenge.factorChoice !== "TOTP" ||
+        !challenge.requiresTotp || challenge.status !== "VERIFIED" || challenge.emailVerifiedAt ||
+        challenge.consumedAt || challenge.expiresAt <= now ||
+        challenge.deviceIdHash !== hashDeviceToken(deviceToken) ||
+        challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) ||
+        (expectedRole && challenge.user.role !== expectedRole) || !challenge.user.isActive ||
+        challenge.user.accountStatus !== "ACTIVE" || challenge.user.secondFactorMethod !== "TOTP" ||
+        challenge.user.totpFactor?.status !== "ACTIVE" ||
+        await transaction.recoveryCode.count({ where: { userId: challenge.userId, usedAt: null } }) < 1) throw new SecurityMutationError();
+      const switched = await transaction.deviceChallenge.updateMany({
+        where: {
+          id: challenge.id, factorChoice: "TOTP", requiresTotp: true, status: "VERIFIED",
+          consumedAt: null, emailVerifiedAt: null, expiresAt: { gt: now }
+        },
+        data: { factorChoice: "BACKUP" }
+      });
+      if (switched.count !== 1) throw new SecurityMutationError();
+    }, { isolationLevel: "Serializable" });
+  } catch {
+    throw new SecurityMutationError();
+  }
+}
+
+/** Verify one saved code with an atomic claim; no TOTP reset or global session revocation. */
+export async function verifyLoginBackupCode(
+  ceremonyId: string, code: string, deviceToken: string, now = new Date(),
+  expectedRole?: RequiredLoginRole, trustedClientAddress?: string
+): Promise<CreatedLoginSession> {
+  if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken) || !isValidRecoveryCodeInput(code) ||
+    (trustedClientAddress !== undefined && !isTrustedClientAddress(trustedClientAddress))) throw new SecurityMutationError();
+  try {
+    const result = await prisma.$transaction(async (transaction) => {
+      const initial = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { userId: true } });
+      if (!initial || !await lockActiveLoginAccountInTransaction(transaction, initial.userId, expectedRole)) throw new SecurityMutationError();
+      const checkedAt = new Date(Math.max(now.getTime(), Date.now()));
+      const challenge = await transaction.deviceChallenge.findUnique({
+        where: { ceremonyId },
+        select: {
+          id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true,
+          factorChoice: true, requiresTotp: true, status: true, consumedAt: true, expiresAt: true,
+          user: { select: { email: true, emailNormalized: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { status: true } } } }
+        }
+      });
+      if (!challenge || challenge.userId !== initial.userId || challenge.factorChoice !== "BACKUP" ||
+        !challenge.requiresTotp || challenge.status !== "VERIFIED" || challenge.consumedAt ||
+        challenge.emailVerifiedAt || challenge.expiresAt <= checkedAt ||
+        challenge.deviceIdHash !== hashDeviceToken(deviceToken) ||
+        challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) ||
+        (expectedRole && challenge.user.role !== expectedRole) || !challenge.user.isActive ||
+        challenge.user.accountStatus !== "ACTIVE" || challenge.user.secondFactorMethod !== "TOTP" ||
+        challenge.user.totpFactor?.status !== "ACTIVE") throw new SecurityMutationError();
+      const account = await consumeRateLimitAttemptInTransaction(transaction, `login-verification-user:${challenge.userId}`, checkedAt);
+      const ceremony = await consumeRateLimitAttemptInTransaction(transaction, `login-verification:${challenge.id}`, checkedAt);
+      const source = trustedClientAddress
+        ? await consumeRateLimitAttemptInTransaction(transaction, `login-backup-source:${trustedClientAddress}`, checkedAt, LOGIN_BACKUP_SOURCE_LIMIT)
+        : null;
+      if (!account.allowed || !ceremony.allowed || (source && !source.allowed)) return null;
+      const existing = await transaction.recoveryCode.findFirst({
+        where: { userId: challenge.userId, codeHash: hashRecoveryCode(code), usedAt: null },
+        select: { id: true }
+      });
+      if (!existing) return null;
+      const claimed = await transaction.recoveryCode.updateMany({
+        where: { id: existing.id, userId: challenge.userId, usedAt: null },
+        data: { usedAt: checkedAt }
+      });
+      if (claimed.count !== 1) return null;
+      await trustLoginDevice(transaction, challenge.userId, challenge.deviceIdHash, checkedAt);
+      const session = await consumeChallengeAndCreateSession(
+        transaction, challenge.id, challenge.userId, challenge.deviceIdHash, checkedAt,
+        ["pwd", "otp", "mfa", "backup"]
+      );
+      await writeAuditLogInTransaction(transaction, {
+        eventType: "DEVICE_VERIFIED", result: "SUCCESS", actorUserId: challenge.userId,
+        resource: "identity.2fa", message: "One-time backup code accepted for login.",
+        metadata: { source: loginAuditSource(expectedRole), verificationFactor: "backup", ceremonyRef: hashAuditIdentifier(ceremonyId) }
+      });
+      return session;
+    }, { isolationLevel: "Serializable" });
+    if (!result) throw new SecurityMutationError();
+    return result;
+  } catch {
+    throw new SecurityMutationError();
+  }
+}
+
 export async function verifyLoginRecoveryCode(ceremonyId: string, code: string, deviceToken: string, now = new Date(), expectedRole?: RequiredLoginRole, trustedClientAddress?: string): Promise<{ kind: "EMAIL_REQUIRED" } | { kind: "RECOVERED"; session: CreatedLoginSession }> {
   if (!isCeremonyId(ceremonyId) || !isDeviceToken(deviceToken) || code.length > 32) throw new SecurityMutationError();
   const normalizedCode = normalizeRecoveryCodeInput(code);
   try {
     const result = await prisma.$transaction(async (transaction) => {
-      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { id: true, status: true, lastUsedStep: true } } } } } });
-      if (!challenge || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || challenge.user.secondFactorMethod !== "TOTP" || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.user.totpFactor?.status !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
+      const challenge = await transaction.deviceChallenge.findUnique({ where: { ceremonyId }, select: { id: true, userId: true, deviceIdHash: true, emailAddressHash: true, emailVerifiedAt: true, requiresTotp: true, factorChoice: true, status: true, expiresAt: true, consumedAt: true, user: { select: { email: true, emailNormalized: true, displayName: true, role: true, isActive: true, accountStatus: true, secondFactorMethod: true, totpFactor: { select: { id: true, status: true, lastUsedStep: true } } } } } });
+      if (!challenge || (challenge.factorChoice && challenge.factorChoice !== "TOTP") || (expectedRole && challenge.user.role !== expectedRole) || challenge.deviceIdHash !== hashDeviceToken(deviceToken) || challenge.emailAddressHash !== hashEmailAddress(challenge.user.emailNormalized ?? challenge.user.email) || !challenge.requiresTotp || challenge.user.secondFactorMethod !== "TOTP" || !challenge.user.isActive || challenge.user.accountStatus !== "ACTIVE" || challenge.user.totpFactor?.status !== "ACTIVE" || challenge.status !== "VERIFIED" || challenge.consumedAt || challenge.expiresAt <= now || !await lockActiveLoginAccountInTransaction(transaction, challenge.userId, expectedRole)) throw new SecurityMutationError();
 
       if (!challenge.emailVerifiedAt) {
         // No recovery code is checked in this step, so it spends the email-ceremony budget, not verification attempts.

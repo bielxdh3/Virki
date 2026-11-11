@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
 import { createAuditRequestMetadata, hashAuditSessionReference, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@virki/auth";
-import { DEVICE_COOKIE_NAME, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@virki/auth/security";
+import { DEVICE_COOKIE_NAME, verifyLoginBackupCode, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@virki/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../../lib/surface";
 import { createLoginResponseAfterRequiredAudit, createVerifiedLoginAudit, type LoginSurface, type LoginVerificationFactor } from "../../../../lib/login-audit";
@@ -56,6 +56,9 @@ export async function POST(request: Request) {
     }
     if (factor === "totp") {
       return sessionResponse(await verifyLoginTotpCode(ceremony, code, deviceToken, new Date(), requiredRole), baseUrl, returnTo, surface, "totp", auditMetadata);
+    }
+    if (factor === "backup") {
+      return sessionResponse(await verifyLoginBackupCode(ceremony, code, deviceToken, new Date(), requiredRole, request.headers.get("cf-connecting-ip")?.trim()), baseUrl, returnTo, surface, "backup", auditMetadata);
     }
     if (factor === "recovery") {
       const result = await verifyLoginRecoveryCode(ceremony, code, deviceToken, new Date(), requiredRole, request.headers.get("cf-connecting-ip")?.trim());

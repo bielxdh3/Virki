@@ -11,6 +11,7 @@ const PUBLIC_ROUTES = new Set([
   "/login",
   "/api/login",
   "/login/verify",
+  "/api/login/factor",
   "/api/login/verify",
   "/api/passkeys",
   "/api/logout",
@@ -100,7 +101,7 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
     const proof = createHubRenderProof(sessionToken, env as NodeJS.ProcessEnv);
     if (proof) forwardedHeaders.set(HUB_RENDER_PROVENANCE_HEADER, proof);
   }
-  if (/^\/(?:|login(?:\/verify)?|api\/(?:passkeys|login(?:\/verify)?|logout)|admin(?:\/(?:accounts|access|security|audit|connections))?|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
+  if (/^\/(?:|login(?:\/verify)?|api\/(?:passkeys|login(?:\/(?:verify|factor))?|logout)|admin(?:\/(?:accounts|access|security|audit|connections))?|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
   forwardedHeaders.set("x-virki-audit-method", request.method);
   forwardedHeaders.set("x-nonce", nonce);
   forwardedHeaders.set("Content-Security-Policy", csp);

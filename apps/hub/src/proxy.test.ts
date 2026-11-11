@@ -68,6 +68,15 @@ test("portal OIDC endpoints are public to clients while account surfaces still r
   assert.equal(spoofedReturn.headers.get("location"), "https://portal.biel.dev.br/login?returnTo=%2Faccount%2Fsecurity%3Ftab%3Dmfa");
 });
 
+test("password-verified backup factor selection reaches the public route without a login session", async () => {
+  const response = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/api/login/factor", {
+    method: "POST", headers: { host: "portal.biel.dev.br" }
+  }), env);
+  assert.equal(response.status, 200, "the form must reach the challenge-bound route instead of redirecting to login");
+  assert.equal(response.headers.get("x-middleware-request-x-virki-audit-route"), "/api/login/factor");
+  assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate");
+});
+
 test("authenticated portal pages receive the no-store policy from the production Proxy boundary", async () => {
   const response = await evaluateProxyRequest(
     new NextRequest("https://portal.biel.dev.br/account/security", {

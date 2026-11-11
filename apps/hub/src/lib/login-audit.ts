@@ -1,7 +1,7 @@
 import type { AuditMetadata } from "@virki/auth";
 
 export type LoginSurface = "hub" | "portal" | "local";
-export type LoginVerificationFactor = "email" | "totp" | "recovery";
+export type LoginVerificationFactor = "email" | "totp" | "backup" | "recovery";
 
 export class RequiredLoginAuditError extends Error {
   constructor() {
