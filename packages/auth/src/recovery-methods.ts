@@ -178,12 +178,16 @@ async function createMultiMethodRecovery(
     // Credentials minted at the USER portal never qualify as ADMIN factors.
     if (recoveryRpID && await tx.passkeyCredential.count({ where: { userId: account.id, rpID: recoveryRpID, revokedAt: null } }) < 1) return null;
     if (policy.adminReview && await tx.user.count({ where: { role: "ADMIN", isActive: true, accountStatus: "ACTIVE", id: { not: account.id } } }) < 1) return null;
-    // Limit repeated anonymous requests; never supersede a recovery after the first owner proof.
+    // Limit repeated anonymous requests without letting a compromised former
+    // mailbox monopolize the account. EMAIL alone is not an independent owner
+    // proof: it cannot veto a new PASSKEY/TOTP or ADMIN-reviewed recovery.
     const latest = await tx.accountRecoveryRequest.findFirst({ where: { userId: account.id }, select: { createdAt: true }, orderBy: { createdAt: "desc" } });
     if (latest && latest.createdAt.getTime() + 60_000 > now.getTime()) return null;
+    // Protect any completed approval (including invitations and reviewed
+    // EMAIL+ADMIN) and any live independent owner factor, even before its
+    // second proof. These must never be displaced by a new anonymous request.
     const proven = await tx.accountRecoveryRequest.findFirst({ where: { userId: account.id, status: { in: ["PENDING", "APPROVED"] }, expiresAt: { gt: now }, OR: [
-      { emailVerifiedAt: { not: null } }, { recoveryPasskeyVerifiedAt: { not: null } }, { recoveryTotpVerifiedAt: { not: null } },
-      { purpose: "INVITATION", status: "APPROVED" }
+      { status: "APPROVED" }, { recoveryPasskeyVerifiedAt: { not: null } }, { recoveryTotpVerifiedAt: { not: null } }
     ] }, select: { id: true } });
     if (proven) return null;
     const accountLimit = await consumeRateLimitAttemptInTransaction(tx, `account-recovery:${expectedRole}:${normalizedEmail}`, now);

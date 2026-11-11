@@ -191,3 +191,50 @@ test("administrator queue accepts one proven factor only when reviewer is still 
   assert.equal(recoveryReviewReady({ ...pending, recoveryProofs: ["PASSKEY"], recoveryAdminReview: true }), true);
   assert.equal(recoveryReviewReady({ ...pending, recoveryProofs: ["EMAIL"], recoveryAdminReview: true }), false);
 });
+
+test("verified old mailbox alone cannot veto independent recovery; strong or approved rivals remain protected", async (context) => {
+  const email = "email-partial-lockout@integration.invalid";
+  const owner = { id: "email-partial-owner", email, emailNormalized: email, displayName: "Owner", role: "USER", isActive: true, accountStatus: "ACTIVE" };
+  const now = new Date();
+  let rival: "EMAIL_ONLY" | "TOTP_PROVEN" | "PASSKEY_PROVEN" | "APPROVED" = "EMAIL_ONLY";
+  const persisted: string[] = [];
+  const transaction = {
+    $queryRaw: async (literals: TemplateStringsArray) => literals.join("").includes('FROM "User"') ? [{ id: owner.id }] : [],
+    loginRateLimit: { findUnique: async () => null, create: async () => ({}) },
+    user: { count: async () => 1 },
+    accountRecoveryRequest: {
+      findFirst: async ({ where, orderBy }: { where?: { OR?: Record<string, unknown>[] }; orderBy?: { createdAt: string } }) => {
+        if (orderBy) return { createdAt: new Date(now.getTime() - 61_000) };
+        const checks = where?.OR ?? [];
+        const protection = rival === "EMAIL_ONLY" ? "emailVerifiedAt" :
+          rival === "TOTP_PROVEN" ? "recoveryTotpVerifiedAt" :
+          rival === "PASSKEY_PROVEN" ? "recoveryPasskeyVerifiedAt" : "status";
+        return checks.some(clause => protection in clause &&
+          (protection !== "status" || clause.status === "APPROVED")) ? { id: "previous-recovery" } : null;
+      },
+      create: async ({ data }: { data: { id: string } }) => { persisted.push(data.id); return { id: data.id }; }
+    },
+    auditLog: { create: async () => ({}) }
+  } as unknown as Prisma.TransactionClient;
+  const userFind = Object.getOwnPropertyDescriptor(prisma.user, "findUnique");
+  const runTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(userFind && runTransaction);
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "test";
+  Object.defineProperty(prisma.user, "findUnique", { ...userFind, value: async () => owner });
+  Object.defineProperty(prisma, "$transaction", { ...runTransaction, value: async (operation: (tx: Prisma.TransactionClient) => Promise<unknown>) => operation(transaction) });
+  context.after(() => {
+    Object.defineProperty(prisma, "$transaction", runTransaction);
+    Object.defineProperty(prisma.user, "findUnique", userFind);
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  });
+  const policy = { proofs: ["TOTP" as const], adminReview: true };
+  const created = await startMultiMethodRecovery(email, "USER", policy, "pt-BR", now);
+  assert.deepEqual(persisted, [created.requestId], "EMAIL-only proof must not veto new TOTP+independent reviewer recovery");
+  for (const strong of ["TOTP_PROVEN", "PASSKEY_PROVEN", "APPROVED"] as const) {
+    rival = strong;
+    await startMultiMethodRecovery(email, "USER", policy, "pt-BR", now);
+    assert.deepEqual(persisted, [created.requestId], `${strong} recovery MUST block a rival initiation`);
+  }
+});

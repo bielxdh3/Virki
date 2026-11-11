@@ -366,3 +366,69 @@ test("real PostgreSQL: reviewer demotion invalidates prior approval before reset
   assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: request.requestId } })).status, "APPROVED");
   assert.equal(await verifyPassword((await prisma.user.findUniqueOrThrow({ where: { id: owner.id } })).passwordHash ?? "", "demoted-admin-must-not-authorize"), false);
 });
+
+test("real PostgreSQL: verified old EMAIL alone cannot starve concurrent PASSKEY+TOTP recovery", integrationOptions, async (t) => {
+  const previous = process.env.VIRKI_PASSKEYS_ENABLED;
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  t.after(() => { if (previous === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = previous; });
+
+  const totpSecret = createTotpSecret();
+  const owner = await createTestUser({ label: "mailbox-partial-user", totpSecret });
+  const signer = await enrollSignedRecoveryPasskey(owner);
+  const attackerPolicy = { proofs: ["EMAIL" as const, "TOTP" as const], adminReview: false };
+  const attacker = await startMultiMethodRecovery(owner.email, "USER", attackerPolicy, "pt-BR", new Date(), isolatedSource());
+  const attackerCode = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY").at(-1)?.code;
+  assert.match(attackerCode ?? "", /^\d{6}$/u);
+  await verifyMultiMethodRecoveryEmail(attacker.requestId, attacker.requestKey, attacker.browserToken, attackerCode!, "USER");
+  assert.deepEqual((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: attacker.requestId }, select: { status: true, emailVerifiedAt: true, recoveryTotpVerifiedAt: true } })).status, "PENDING");
+  // The ordinary sixty-second initiation cooldown has elapsed, but the
+  // old-mailbox-only partial proof remains live for the entire thirty minutes.
+  await prisma.accountRecoveryRequest.update({ where: { id: attacker.requestId }, data: { createdAt: new Date(Date.now() - 61_000) } });
+
+  const ownerPolicy = { proofs: ["PASSKEY" as const, "TOTP" as const], adminReview: false };
+  const attempted = await Promise.allSettled([
+    startMultiMethodRecovery(owner.email, "USER", ownerPolicy, "pt-BR", new Date(), isolatedSource()),
+    startMultiMethodRecovery(owner.email, "USER", ownerPolicy, "pt-BR", new Date(), isolatedSource())
+  ]);
+  const candidates = attempted.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof startMultiMethodRecovery>>> => result.status === "fulfilled");
+  assert.ok(candidates.length >= 1, "at least one contender must finish a real initiation");
+  const rows = await prisma.accountRecoveryRequest.findMany({ where: { userId: owner.id }, select: { id: true, status: true } });
+  assert.equal(rows.length, 2, "old EMAIL partial may not block a fresh owner recovery, while concurrent starts admit only one");
+  const accepted = candidates.map(result => result.value).find(candidate => rows.some(row => row.id === candidate.requestId));
+  assert.ok(accepted, "one real browser-bound owner request must be persisted");
+  await assert.rejects(consumeApprovedAccountRecovery(attacker.requestId, attacker.requestKey, "attacker-email-alone-must-not-reset", new Date(), "USER", attacker.browserToken));
+
+  await verifyMultiMethodRecoveryTotp(accepted.requestId, accepted.requestKey, accepted.browserToken, totpAt(totpSecret), "USER");
+  await signAndVerifyRecoveryProof(accepted, signer, owner.id);
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: accepted.requestId } })).status, "APPROVED");
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: attacker.requestId } })).status, "EXPIRED",
+    "completed strong owner proof must expire the attacker's partial email recovery");
+  await assert.rejects(verifyMultiMethodRecoveryTotp(attacker.requestId, attacker.requestKey, attacker.browserToken, totpAt(totpSecret), "USER"),
+    "superseded old-mailbox recovery cannot resume with a stolen second factor");
+});
+
+test("real PostgreSQL: old EMAIL alone cannot block independent ADMIN-reviewed TOTP recovery", integrationOptions, async () => {
+  const totpSecret = createTotpSecret();
+  const owner = await createTestUser({ role: "ADMIN", label: "mailbox-partial-admin", totpSecret });
+  const reviewer = await createTestUser({ role: "ADMIN", label: "mailbox-partial-reviewer" });
+  const { sessionId } = await seedAdminSessionWithElevation(reviewer.id, "ACCOUNT_STATE_CHANGE");
+  const attackerPolicy = { proofs: ["EMAIL" as const], adminReview: true };
+  const attacker = await startMultiMethodRecovery(owner.email, "ADMIN", attackerPolicy, "pt-BR", new Date(), isolatedSource());
+  const attackerCode = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY").at(-1)?.code;
+  assert.match(attackerCode ?? "", /^\d{6}$/u);
+  await verifyMultiMethodRecoveryEmail(attacker.requestId, attacker.requestKey, attacker.browserToken, attackerCode!, "ADMIN");
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: attacker.requestId } })).status, "PENDING");
+  await prisma.accountRecoveryRequest.update({ where: { id: attacker.requestId }, data: { createdAt: new Date(Date.now() - 61_000) } });
+
+  const ownerPolicy = { proofs: ["TOTP" as const], adminReview: true };
+  const ownerRequest = await startMultiMethodRecovery(owner.email, "ADMIN", ownerPolicy, "pt-BR", new Date(), isolatedSource());
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { id: ownerRequest.requestId, userId: owner.id } }), 1,
+    "old-mailbox proof must not gate independent reviewer-based recovery");
+  await assert.rejects(consumeApprovedAccountRecovery(ownerRequest.requestId, ownerRequest.requestKey, "before-any-proof-rejected", new Date(), "ADMIN", ownerRequest.browserToken));
+  await verifyMultiMethodRecoveryTotp(ownerRequest.requestId, ownerRequest.requestKey, ownerRequest.browserToken, totpAt(totpSecret), "ADMIN");
+  await approveAccountRecovery({ id: reviewer.id, role: "ADMIN" }, sessionId, ownerRequest.requestId);
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: ownerRequest.requestId } })).status, "APPROVED");
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: attacker.requestId } })).status, "EXPIRED");
+  await assert.rejects(approveAccountRecovery({ id: reviewer.id, role: "ADMIN" }, sessionId, attacker.requestId),
+    "an expired email partial cannot be approved by any reviewer after the owner's strong recovery wins");
+});
