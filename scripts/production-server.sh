@@ -1073,8 +1073,13 @@ identity_snapshot_sql='SELECT count(*) FILTER (WHERE "role"::text = '\''ADMIN'\'
 recovery_snapshot_sql() {
   local snapshot_phase=${1:-after_migrations}
   local recovery_key_expression='"idempotencyKey"'
+  local recovery_lease_expression="to_jsonb(message)->>'processingLeaseExpiresAt'"
   if [[ "$snapshot_phase" == before_migrations ]]; then
-    recovery_key_expression="CASE WHEN \"idempotencyKey\" ~ ('^account-recovery:[A-Za-z0-9_-]{32}' || chr(36)) THEN 'account-recovery-migrated:' || \"id\" ELSE \"idempotencyKey\" END"
+    recovery_key_expression="CASE WHEN \"kind\"::text = 'ACCOUNT_RECOVERY' AND \"idempotencyKey\" ~ ('^account-recovery:[A-Za-z0-9_-]{32}' || chr(36)) THEN 'account-recovery-migrated:' || \"id\" ELSE \"idempotencyKey\" END"
+    # An older source can lack the lease column; its committed migration
+    # initializes PROCESSING leases from updatedAt. Do not fabricate a lease
+    # when the column already exists, including an intentional NULL value.
+    recovery_lease_expression="CASE WHEN to_jsonb(message) ? 'processingLeaseExpiresAt' THEN to_jsonb(message)->>'processingLeaseExpiresAt' WHEN \"status\"::text = 'PROCESSING' THEN to_jsonb(message)->>'updatedAt' ELSE NULL END"
   elif [[ "$snapshot_phase" != after_migrations ]]; then
     fail 'Recovery outbox snapshot phase is invalid.'
   fi
@@ -1082,15 +1087,13 @@ recovery_snapshot_sql() {
   cat <<SQL
 SELECT jsonb_build_object(
   'messages', COALESCE((
-    SELECT jsonb_agg(jsonb_build_array("id", $recovery_key_expression, "kind"::text, "recipientEmail", "locale", "payload", "status"::text, "attemptCount", "availableAt", "sentAt", "terminalFailedAt", "createdAt", "updatedAt", to_jsonb(message)->>'pendingSmtpHeaderMessageId') ORDER BY "id")
+    SELECT jsonb_agg(jsonb_build_array("id", $recovery_key_expression, "kind"::text, "recipientEmail", "locale", "payload", "status"::text, "attemptCount", "availableAt", "sentAt", "terminalFailedAt", "createdAt", "updatedAt", $recovery_lease_expression, to_jsonb(message)->>'pendingSmtpHeaderMessageId') ORDER BY "id")
     FROM "EmailOutboxMessage" AS message
-    WHERE "kind"::text = 'ACCOUNT_RECOVERY'
   ), '[]'::jsonb),
   'attempts', COALESCE((
     SELECT jsonb_agg(jsonb_build_array(attempt."id", attempt."messageId", attempt."attempt", attempt."status"::text, attempt."errorCode", attempt."attemptedAt", to_jsonb(attempt)->>'smtpHeaderMessageId') ORDER BY attempt."id")
     FROM "EmailDeliveryAttempt" AS attempt
     JOIN "EmailOutboxMessage" AS message ON message."id" = attempt."messageId"
-    WHERE message."kind"::text = 'ACCOUNT_RECOVERY'
   ), '[]'::jsonb)
 )::text
 SQL

@@ -231,12 +231,18 @@ resend it or relabel its evidence. Do not access third-party inboxes.
 
 Keep an owner-approved snapshot and tested restore procedure; compare
 test-only user/session/recovery/elevation, outbox, sent-attempt and audit
-counts before and after staging rollback. Existing migration/back-up
-outbox sentinels do not cover every email kind, including ADMIN verification,
-mailbox rebind and notices; the operator must inventory those independently
-before treating a rollback rehearsal as complete. Never restore production
-from a staging snapshot, nor let an old worker resume sending uncertain
-pending messages after a rollback.
+counts before and after staging rollback. The local production migration
+snapshot now hashes **every** outbox message kind and corresponding delivery
+attempt, including lease expiry and SMTP Message-ID; the disposable dump/restore
+fixture exercises recovery, ADMIN verification, mailbox rebind, notices and
+an interrupted in-flight worker lease. These are local integrity checks, **not**
+evidence of an independently provisioned staging host, actual provider
+delivery or an owner-approved staging rollback. The staging operator must
+independently inventory every test-only email kind, attempt and processing
+lease before and after its own restore, keep the mail worker disabled until
+pending/uncertain sends are reconciled, and preserve redacted audit evidence.
+Never restore production from a staging snapshot, nor let an old worker resume
+sending uncertain pending messages after a rollback.
 
 Evidence must be labeled with exact SHA, OCI digest, UTC timestamps, host
 ownership, test DB identity, PASS/FAIL/SKIP counts, scoped redacted audit

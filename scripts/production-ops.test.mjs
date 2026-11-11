@@ -1069,6 +1069,42 @@ test("recovery snapshots account for the intended legacy-key migration and retai
   assert.match(serverScript, /after_recovery=\$\(recovery_snapshot "" after_migrations\)/u);
 });
 
+test("rollback snapshot includes every outbox kind and corresponding delivery attempt", { skip: process.platform === "win32" ? "Requires Bash for the production SQL renderer." : false }, () => {
+  const start = serverScript.indexOf("recovery_snapshot_sql() {");
+  const end = serverScript.indexOf("\nrecovery_snapshot() {", start);
+  assert.ok(start >= 0 && end > start);
+  const renderer = serverScript.slice(start, end);
+  for (const phase of ["before_migrations", "after_migrations"]) {
+    const result = spawnSync("bash", ["-c", `set -euo pipefail\nfail() { exit 81; }\n${renderer}\nrecovery_snapshot_sql "$1"`, "virki-rollback-sql-test", phase], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const sql = result.stdout;
+    assert.match(sql, /FROM "EmailOutboxMessage" AS message/u);
+    assert.match(sql, /FROM "EmailDeliveryAttempt" AS attempt\s+JOIN "EmailOutboxMessage" AS message ON message\."id" = attempt\."messageId"/u);
+    assert.doesNotMatch(sql, /WHERE\s+(?:message\.)?"kind"/u,
+      "Rollback must retain ADMIN verification, mailbox rebind, notifications and all other email kinds, not just recovery email");
+    assert.match(sql, /to_jsonb\(message\)->>'pendingSmtpHeaderMessageId'/u);
+    assert.match(sql, /processingLeaseExpiresAt/u,
+      "Rollback must attest worker ownership leases, not just SMTP header IDs and message status.");
+    assert.match(sql, /to_jsonb\(attempt\)->>'smtpHeaderMessageId'/u);
+    if (phase === "before_migrations") {
+      assert.match(sql, /CASE WHEN "kind"::text = 'ACCOUNT_RECOVERY' AND "idempotencyKey" ~/u,
+        "Legacy idempotency normalization must never rewrite another email kind merely because its key shares the recovery prefix.");
+      assert.match(sql, /to_jsonb\(message\) \? 'processingLeaseExpiresAt'/u,
+        "Only a source schema without lease column may normalize the historical PROCESSING backfill.");
+    }
+  }
+});
+
+test("disposable rollback restore rehearsal includes ADMIN verification and both mailbox rebind message kinds", () => {
+  for (const kind of ["ACCOUNT_RECOVERY", "ADMIN_EMAIL_VERIFICATION", "RECOVERY_EMAIL_REBIND", "RECOVERY_EMAIL_REBIND_NOTICE"]) {
+    assert.ok(backupRestoreScript.includes(`kind: "${kind}"`), `Backup fixture must seed ${kind}.`);
+  }
+  assert.match(backupRestoreScript, /assert\.deepEqual\(restoredOutbox, sourceOutbox/u,
+    "The physical restore rehearsal must compare entire message and attempt inventories.");
+  assert.match(backupRestoreScript, /processingLeaseExpiresAt: new Date\(/u,
+    "Physical backup/restore must include a PROCESSING message with a retained lease expiry.");
+});
+
 test("non-whitespace backup sentinel content blocks preflight and transfer", async () => {
   let archivePath;
   let preflightCalled = false;
