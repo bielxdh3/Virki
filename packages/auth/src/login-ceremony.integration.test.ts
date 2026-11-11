@@ -10,6 +10,7 @@ import {
   createTotpSecret,
   disableTotp,
   DEVICE_TRUST_TTL_MS,
+  generateDeviceToken,
   generateRecoveryCode,
   getAccountRecoveryRequestId,
   hashDeviceToken,
@@ -256,6 +257,66 @@ test("an EMAIL-factor user keeps a remembered browser for 7 days", integrationOp
 
   const remembered = await startLoginCeremony(user.id, deviceToken, "pt-BR", new Date(base.getTime() + DAY));
   assert.equal(remembered.kind, "SESSION");
+});
+
+test("HTTP REGISTERED login preserves a password-only session for a remembered USER TOTP browser", integrationOptions, async () => {
+  const user = await createTestUser({ totpSecret: createTotpSecret(), label: "registered-remembered-user" });
+  const now = new Date();
+  const cookie = generateDeviceToken();
+  await prisma.trustedDevice.create({ data: {
+    userId: user.id, deviceIdHash: hashDeviceToken(cookie),
+    strongVerifiedAt: new Date(now.getTime() - MINUTE),
+    rememberedUntil: new Date(now.getTime() + DAY)
+  } });
+  const issued = await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED");
+  assert.equal(issued.kind, "SESSION", "registered-factor selection must not cancel a valid remembered grant");
+  if (issued.kind !== "SESSION") return;
+  assert.equal(issued.deviceToken, cookie);
+  assert.deepEqual((await prisma.session.findUniqueOrThrow({ where: { id: issued.session.id } })).authenticationMethods, ["pwd"]);
+  assert.equal(await prisma.deviceChallenge.count({ where: { userId: user.id, status: { in: ["PENDING", "VERIFIED"] } } }), 0);
+});
+
+test("HTTP REGISTERED login still requires MFA for forced USER, ADMIN, and untrusted browsers", integrationOptions, async () => {
+  const now = new Date();
+  const totpSecret = createTotpSecret();
+  const user = await createTestUser({ totpSecret, label: "registered-forced-user" });
+  const cookie = generateDeviceToken();
+  await prisma.trustedDevice.create({ data: {
+    userId: user.id, deviceIdHash: hashDeviceToken(cookie),
+    strongVerifiedAt: new Date(now.getTime() - MINUTE),
+    rememberedUntil: new Date(now.getTime() + DAY)
+  } });
+  const forced = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, true, "USER", undefined, "REGISTERED"));
+  assert.equal(forced.factor, "TOTP");
+  const untrusted = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(untrusted.factor, "TOTP");
+  assert.notEqual(untrusted.deviceToken, cookie);
+
+  const deviceWhere = { userId_deviceIdHash: { userId: user.id, deviceIdHash: hashDeviceToken(cookie) } };
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { rememberedUntil: new Date(now.getTime() - 1) } });
+  const expired = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(expired.factor, "TOTP", "an expired remembered grant cannot issue a password-only session");
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { rememberedUntil: new Date(now.getTime() + DAY), strongVerifiedAt: null } });
+  const noProof = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(noProof.factor, "TOTP", "a remembered grant without strong verification cannot bypass MFA");
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { strongVerifiedAt: new Date(now.getTime() + MINUTE) } });
+  const futureProof = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(futureProof.factor, "TOTP", "a future-dated strong verification cannot bypass MFA");
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { status: "REVOKED", revokedAt: now, strongVerifiedAt: new Date(now.getTime() - MINUTE) } });
+  const revoked = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(revoked.factor, "TOTP", "a revoked browser cannot bypass MFA");
+  assert.notEqual(revoked.deviceToken, cookie, "a revoked browser cannot reuse its old device cookie");
+
+  const admin = await createTestUser({ role: "ADMIN", totpSecret, label: "registered-remembered-admin" });
+  const adminCookie = generateDeviceToken();
+  await prisma.trustedDevice.create({ data: {
+    userId: admin.id, deviceIdHash: hashDeviceToken(adminCookie),
+    strongVerifiedAt: new Date(now.getTime() - MINUTE),
+    rememberedUntil: new Date(now.getTime() + DAY)
+  } });
+  const adminChallenge = ceremonyOf(await startLoginCeremony(admin.id, adminCookie, "pt-BR", now, false, "ADMIN", undefined, "REGISTERED"));
+  assert.equal(adminChallenge.factor, "TOTP");
+  assert.equal(await prisma.session.count({ where: { userId: admin.id } }), 0);
 });
 
 test("an ADMIN never receives a remembered password-only session", integrationOptions, async () => {

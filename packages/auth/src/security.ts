@@ -379,7 +379,10 @@ export async function startLoginCeremony(
         // ADMIN logins always complete a fresh second factor; a remembered browser never yields a password-only ADMIN session.
         const hasRememberedGrant = user.role !== "ADMIN" && Boolean(user.emailVerifiedAt) && isTrusted && isRememberedGrantActive(trusted, now);
 
-        if (hasRememberedGrant && !forceFreshProof && !factorSelection) {
+        // Explicit REGISTERED chooses the factor only when a ceremony is needed.
+        // It must not discard an existing USER remembered-browser grant: doing so
+        // silently upgrades the ordinary OIDC password-only session to MFA.
+        if (hasRememberedGrant && !forceFreshProof) {
           stage = "remembered-challenges-revoke";
           await revokeLoginChallenges(transaction, userId, deviceIdHash);
           stage = "remembered-session-create";
