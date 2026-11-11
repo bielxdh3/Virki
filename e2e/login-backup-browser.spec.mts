@@ -2,8 +2,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { hashPassword, hashSessionToken } from "@virki/auth";
-import { getSessionCookieName } from "@virki/auth/constants";
-import { createTotpSecret, encryptTotpSecret, generateRecoveryCode, hashRecoveryCode } from "@virki/auth/security";
+import { getDeviceCookieName, getSessionCookieName } from "@virki/auth/constants";
+import { createTotpSecret, encryptTotpSecret, generateRecoveryCode, hashDeviceToken, hashRecoveryCode } from "@virki/auth/security";
 import { PrismaClient } from "@virki/database";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
 
@@ -14,11 +14,11 @@ const productionHub = process.env.VIRKI_E2E_HUB_MODE === "production";
 const portal = productionHub ? "https://portal.localhost" : "https://portal.localhost:3001";
 const hub = productionHub ? "https://hub.localhost" : "https://hub.localhost:3001";
 const sessionCookie = getSessionCookieName({ NODE_ENV: productionHub ? "production" : "development" });
+const deviceCookie = getDeviceCookieName({ NODE_ENV: productionHub ? "production" : "development" });
 const databaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
 const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE?.trim();
-
-test.skip(!databaseUrl || !fixturePath || !existsSync(fixturePath),
-  "Physical BACKUP login E2E requires the seeded, disposable Linux PostgreSQL fixture.");
+// The dedicated suite is a mandatory gate whenever selected: missing resources
+// fail rather than silently turning these security journeys into SKIPs.
 
 type Role = "USER" | "ADMIN";
 type Owner = { id: string; email: string; password: string; codes: string[]; originalSessionId: string };
@@ -64,9 +64,14 @@ async function createOwnedTotpAccount(database: PrismaClient, role: Role): Promi
 
 async function newPage(browser: Browser, role: Role): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext(); // No trusted-device or session cookie: a genuinely new device.
-  const page = await context.newPage();
-  if (role === "ADMIN") await addCloudflareAccessHeader(page);
-  return { context, page };
+  try {
+    const page = await context.newPage();
+    if (role === "ADMIN") await addCloudflareAccessHeader(page);
+    return { context, page };
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
 }
 
 async function passwordToTotp(page: Page, owner: Owner, role: Role): Promise<string> {
@@ -104,6 +109,26 @@ async function assertRoleIsolation(browser: Browser, database: PrismaClient, own
   }
 }
 
+async function assertHubAccessDenial(browser: Browser, database: PrismaClient, owner: Owner): Promise<void> {
+  // Missing and forged Access assertions must not even render the Hub login,
+  // much less create an ADMIN session or password challenge.
+  for (const assertion of [undefined, "forged-access-assertion"]) {
+    const context = await browser.newContext(assertion
+      ? { extraHTTPHeaders: { "cf-access-jwt-assertion": assertion } }
+      : {});
+    try {
+      const page = await context.newPage();
+      expect((await page.goto(`${hub}/login`))?.status()).toBe(403);
+      await expect(page.getByRole("heading", { level: 1, name: "Entrar" })).toHaveCount(0);
+      expect((await context.cookies(hub)).some((cookie) => cookie.name === sessionCookie)).toBe(false);
+      expect(await database.deviceChallenge.count({ where: { userId: owner.id } })).toBe(0);
+      expect(await database.trustedDevice.count({ where: { userId: owner.id } })).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }
+}
+
 async function verifyBackupJourney(browser: Browser, role: Role): Promise<void> {
   const database = disposableDatabase();
   const contexts: BrowserContext[] = [];
@@ -117,12 +142,20 @@ async function verifyBackupJourney(browser: Browser, role: Role): Promise<void> 
     expect(baselineFactor.status).toBe("ACTIVE");
     const baselineSessions = await database.session.count({ where: { userId: owner.id } });
     const originalMessages = await database.emailOutboxMessage.count({ where: { recipientEmail: owner.email } });
+    expect(await database.trustedDevice.count({ where: { userId: owner.id } })).toBe(0);
+    if (role === "ADMIN") await assertHubAccessDenial(browser, database, owner);
     await assertRoleIsolation(browser, database, owner, role);
 
     const first = await newPage(browser, role);
     contexts.push(first.context);
     expect((await first.context.cookies(origin)).some((cookie) => cookie.name === sessionCookie)).toBe(false);
+    expect((await first.context.cookies(origin)).some((cookie) => cookie.name === deviceCookie)).toBe(false);
     const ceremony = await passwordToTotp(first.page, owner, role);
+    const browserDevice = (await first.context.cookies(origin)).find((cookie) => cookie.name === deviceCookie);
+    expect(browserDevice, "the actual HTTPS password challenge must issue a device cookie").toBeDefined();
+    expect(browserDevice).toMatchObject({ domain: new URL(origin).hostname, httpOnly: true, path: "/" });
+    const browserDeviceHash = hashDeviceToken(browserDevice!.value);
+    expect(await database.trustedDevice.count({ where: { userId: owner.id, deviceIdHash: browserDeviceHash } })).toBe(0);
     const verifyUrl = new URL(first.page.url());
     const initialChallenge = await database.deviceChallenge.findUniqueOrThrow({
       where: { ceremonyId: ceremony },
@@ -187,6 +220,13 @@ async function verifyBackupJourney(browser: Browser, role: Role): Promise<void> 
     const sessionCookies = (await first.context.cookies(origin)).filter((cookie) => cookie.name === sessionCookie);
     expect(sessionCookies).toHaveLength(1);
     expect(sessionCookies[0]).toMatchObject({ domain: new URL(origin).hostname, httpOnly: true, path: "/" });
+    const trusted = await database.trustedDevice.findUniqueOrThrow({
+      where: { userId_deviceIdHash: { userId: owner.id, deviceIdHash: browserDeviceHash } },
+      select: { userId: true, deviceIdHash: true, status: true, revokedAt: true, user: { select: { role: true } } }
+    });
+    expect(trusted).toEqual({ userId: owner.id, deviceIdHash: browserDeviceHash,
+      status: "TRUSTED", revokedAt: null, user: { role } });
+    expect(await database.trustedDevice.count({ where: { userId: owner.id, status: "TRUSTED", revokedAt: null } })).toBe(1);
 
     const activeSessions = await database.session.findMany({
       where: { userId: owner.id, revokedAt: null, id: { not: owner.originalSessionId } },
@@ -228,6 +268,7 @@ async function verifyBackupJourney(browser: Browser, role: Role): Promise<void> 
     expect((await replay.context.cookies(origin)).some((cookie) => cookie.name === sessionCookie)).toBe(false);
     expect(await database.session.count({ where: { userId: owner.id } })).toBe(baselineSessions + 1);
     expect(await database.recoveryCode.count({ where: { userId: owner.id, usedAt: null } })).toBe(2);
+    expect(await database.trustedDevice.count({ where: { userId: owner.id, status: "TRUSTED", revokedAt: null } })).toBe(1);
   } finally {
     const closed = await Promise.allSettled(contexts.map((context) => context.close()));
     await database.$disconnect();
