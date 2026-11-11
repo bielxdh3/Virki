@@ -147,6 +147,57 @@ export async function startMultiMethodRecovery(
   }
 }
 
+// A pending request protects the owner only while at least one independently
+// proven factor is still bound to the enrolled credential. A timestamp alone
+// survives revocation and rotation and must not monopolize recovery.
+async function hasLivePendingRecoveryProof(
+  tx: Prisma.TransactionClient, userId: string, role: AccountRecoveryRole,
+  currentEmailHash: string, secondFactorMethod: string, now: Date
+): Promise<boolean> {
+  const candidates = await tx.accountRecoveryRequest.findMany({ where: {
+    userId, status: "PENDING", expiresAt: { gt: now },
+    OR: [{ recoveryPasskeyVerifiedAt: { not: null } }, { recoveryTotpVerifiedAt: { not: null } }]
+  }, select: {
+    purpose: true, recoveryRole: true, recoveryBrowserHash: true, emailAddressHash: true,
+    recoveryProofs: true, recoveryAdminReview: true, recoveryPasskeyVerifiedAt: true,
+    recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true,
+    recoveryTotpVerifiedAt: true, recoveryTotpUsedStep: true, recoveryTotpBindingHash: true
+  }, take: 65 });
+  // More than sixty-four active partials is outside the normal 60-second
+  // per-account start budget. Treat anomalous volume as protected, not absent.
+  if (candidates.length > 64) return true;
+  const eligible = candidates.filter(row =>
+    row.purpose === "RECOVERY" && row.recoveryRole === role &&
+    Boolean(row.recoveryBrowserHash) && row.emailAddressHash === currentEmailHash &&
+    Boolean(normalizeRecoveryPolicy({ proofs: row.recoveryProofs, adminReview: row.recoveryAdminReview })));
+  if (!eligible.length) return false;
+  const needsTotp = eligible.some(row => row.recoveryProofs.includes("TOTP") && row.recoveryTotpVerifiedAt);
+  const credentialIds = [...new Set(eligible.filter(row =>
+    row.recoveryProofs.includes("PASSKEY") && row.recoveryPasskeyVerifiedAt && row.recoveryPasskeyCredentialId
+  ).map(row => row.recoveryPasskeyCredentialId!))];
+  const [totp, credentials] = await Promise.all([
+    needsTotp ? tx.totpFactor.findUnique({ where: { userId }, select: {
+      id: true, secretCiphertext: true, keyVersion: true, confirmedAt: true, lastUsedStep: true, status: true
+    } }) : Promise.resolve(null),
+    credentialIds.length ? tx.passkeyCredential.findMany({ where: {
+      id: { in: credentialIds }, userId, revokedAt: null
+    }, select: { id: true, userId: true, credentialId: true, rpID: true, publicKey: true } }) : Promise.resolve([])
+  ]);
+  const liveTotpBinding = totp?.status === "ACTIVE" && totp.confirmedAt &&
+    secondFactorMethod === "TOTP" ? recoveryTotpBinding(totp) : null;
+  const byId = new Map(credentials.map(credential => [credential.id, credential]));
+  return eligible.some(row => {
+    if (row.recoveryProofs.includes("TOTP") && row.recoveryTotpVerifiedAt && totp &&
+        liveTotpBinding && row.recoveryTotpUsedStep !== null && totp.lastUsedStep !== null &&
+        totp.lastUsedStep >= row.recoveryTotpUsedStep &&
+        matchesHash(liveTotpBinding, row.recoveryTotpBindingHash)) return true;
+    const credential = row.recoveryProofs.includes("PASSKEY") && row.recoveryPasskeyVerifiedAt &&
+      row.recoveryPasskeyCredentialId ? byId.get(row.recoveryPasskeyCredentialId) : null;
+    return Boolean(credential && credentialRPMatchesRole(credential.rpID, role) &&
+      matchesHash(recoveryPasskeyBinding(credential), row.recoveryPasskeyBindingHash));
+  });
+}
+
 async function createMultiMethodRecovery(
   email: string, expectedRole: AccountRecoveryRole, selected: RecoveryPolicy,
   locale: EmailLocale, now: Date, clientAddress?: string, comment?: string, host = expectedRole === "ADMIN" ? "hub.biel.dev.br" : "portal.biel.dev.br"
@@ -180,6 +231,10 @@ async function createMultiMethodRecovery(
   await prisma.$transaction(async (tx) => {
     await lockRateLimitIdentifierInTransaction(tx, `account-recovery:${expectedRole}:${normalizedEmail}`);
     if (!await lockActiveRecoveryAccountInTransaction(tx, account.id, expectedRole)) return null;
+    const currentOwner = await tx.user.findUnique({ where: { id: account.id }, select: {
+      email: true, emailNormalized: true, secondFactorMethod: true
+    } });
+    if (!currentOwner || (currentOwner.emailNormalized ?? currentOwner.email.trim().toLowerCase()) !== normalizedEmail) return null;
     // No-enrollment and unknown-account requests remain synthetic and identical.
     // Credentials minted at the USER portal never qualify as ADMIN factors.
     if (recoveryRpID && await tx.passkeyCredential.count({ where: { userId: account.id, rpID: recoveryRpID, revokedAt: null } }) < 1) return null;
@@ -196,13 +251,16 @@ async function createMultiMethodRecovery(
     // proof: it cannot veto a new PASSKEY/TOTP or ADMIN-reviewed recovery.
     const latest = await tx.accountRecoveryRequest.findFirst({ where: { userId: account.id }, select: { createdAt: true }, orderBy: { createdAt: "desc" } });
     if (latest && latest.createdAt.getTime() + 60_000 > now.getTime()) return null;
-    // Protect any completed approval (including invitations and reviewed
-    // EMAIL+ADMIN) and any live independent owner factor, even before its
-    // second proof. These must never be displaced by a new anonymous request.
-    const proven = await tx.accountRecoveryRequest.findFirst({ where: { userId: account.id, status: { in: ["PENDING", "APPROVED"] }, expiresAt: { gt: now }, OR: [
-      { status: "APPROVED" }, { recoveryPasskeyVerifiedAt: { not: null } }, { recoveryTotpVerifiedAt: { not: null } }
-    ] }, select: { id: true } });
-    if (proven) return null;
+    // Preserve every completed approval, including owner invitations and
+    // independently reviewed EMAIL recoveries. For unfinished strong proofs,
+    // check that the original factor still exists and matches its binding.
+    const approved = await tx.accountRecoveryRequest.findFirst({ where: {
+      userId: account.id, status: "APPROVED", expiresAt: { gt: now }
+    }, select: { id: true } });
+    if (approved || await hasLivePendingRecoveryProof(
+      tx, account.id, expectedRole, hashEmailAddress(currentOwner.emailNormalized ?? currentOwner.email),
+      currentOwner.secondFactorMethod, now
+    )) return null;
     const accountLimit = await consumeRateLimitAttemptInTransaction(tx, `account-recovery:${expectedRole}:${normalizedEmail}`, now);
     if (!accountLimit.allowed) return null;
     const code = generateNumericCode();
