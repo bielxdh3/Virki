@@ -593,7 +593,7 @@ export async function getLoginChallengeFactor(
   const challenge = await prisma.deviceChallenge.findUnique({
     where: { ceremonyId },
     select: {
-      deviceIdHash: true, factorChoice: true, status: true, consumedAt: true, expiresAt: true,
+      deviceIdHash: true, factorChoice: true, requiresTotp: true, status: true, consumedAt: true, expiresAt: true,
       user: { select: { role: true, isActive: true, accountStatus: true } }
     }
   });
@@ -605,6 +605,14 @@ export async function getLoginChallengeFactor(
   if (challenge.factorChoice === "BACKUP" && challenge.status === "VERIFIED") return "backup";
   if (challenge.factorChoice === "TOTP") return challenge.status === "VERIFIED" ? "totp" : "email";
   if (challenge.factorChoice === "EMAIL" && challenge.status === "PENDING") return "email";
+  // Existing password-validated ceremonies created before factorChoice was added
+  // have NULL here. Retain only their original server-enforced EMAIL→TOTP flow:
+  // pending means email, verified+requiresTotp means the TOTP/recovery screen.
+  // A NULL row can never display the separate nondestructive BACKUP login.
+  if (challenge.factorChoice === null) {
+    if (challenge.status === "PENDING") return "email";
+    if (challenge.status === "VERIFIED" && challenge.requiresTotp) return "totp";
+  }
   return null;
 }
 

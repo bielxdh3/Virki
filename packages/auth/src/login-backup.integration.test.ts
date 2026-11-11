@@ -4,7 +4,7 @@ import { prisma } from "@virki/database";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
 import {
   createTotpSecret, generateRecoveryCode, hashRecoveryCode, hashDeviceToken,
-  getLoginBackupOption, LOGIN_TOTP_CEREMONY_ACCOUNT_LIMIT, selectLoginBackupFactor, startLoginCeremony,
+  getLoginBackupOption, getLoginChallengeFactor, LOGIN_TOTP_CEREMONY_ACCOUNT_LIMIT, selectLoginBackupFactor, startLoginCeremony,
   verifyLoginBackupCode, verifyLoginEmailCode, verifyLoginTotpCode, SecurityMutationError
 } from "./security";
 
@@ -107,6 +107,24 @@ test("PostgreSQL: EMAIL account cannot select backup and an expired TOTP ceremon
   await prisma.deviceChallenge.update({ where: { ceremonyId: challenge.ceremonyId }, data: { expiresAt: new Date(Date.now() - 1_000) } });
   assert.equal(await getLoginBackupOption(challenge.ceremonyId, challenge.deviceToken, "USER"), false);
   await assert.rejects(selectLoginBackupFactor(challenge.ceremonyId, challenge.deviceToken, "USER"), SecurityMutationError);
+});
+
+test("PostgreSQL: legacy NULL factors infer only the verified email or TOTP stage", integrationOptions, async () => {
+  const owner = await createTestUser({ totpSecret: createTotpSecret(), label: "legacy-null-login-factor" });
+  const started = await startLoginCeremony(owner.id, undefined, "pt-BR", new Date(), false, "USER", "203.0.113.208");
+  assert.equal(started.kind, "CEREMONY");
+  assert.equal(started.factor, "EMAIL");
+  const legacy = await prisma.deviceChallenge.findUniqueOrThrow({ where: { ceremonyId: started.ceremonyId } });
+  assert.equal(legacy.factorChoice, null);
+  assert.equal(await getLoginChallengeFactor(started.ceremonyId, started.deviceToken, "USER"), "email");
+  const emailCode = (await queuedEmails(owner.email)).find((mail) => mail.kind === "NEW_DEVICE_VERIFICATION")?.code;
+  assert.ok(emailCode);
+  const verified = await verifyLoginEmailCode(started.ceremonyId, emailCode, started.deviceToken, new Date(), "USER");
+  assert.equal(verified.requiresTotp, true);
+  assert.equal(await getLoginChallengeFactor(started.ceremonyId, started.deviceToken, "USER"), "totp");
+  assert.equal(await getLoginBackupOption(started.ceremonyId, started.deviceToken, "USER"), false);
+  await prisma.deviceChallenge.update({ where: { ceremonyId: started.ceremonyId }, data: { expiresAt: new Date(Date.now() - 1_000) } });
+  assert.equal(await getLoginChallengeFactor(started.ceremonyId, started.deviceToken, "USER"), null);
 });
 
 test("PostgreSQL: correct password cannot flood registered TOTP ceremonies through rotating devices", integrationOptions, async () => {

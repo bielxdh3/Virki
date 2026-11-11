@@ -6,6 +6,7 @@ import { forbidden, redirect } from "next/navigation";
 import { getCurrentSession } from "../../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, safeReturnTo } from "../../../lib/surface";
+import { displayedLoginFactor } from "../../../lib/login-verification-factor";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +33,8 @@ export default async function LoginVerificationPage({ searchParams }: { searchPa
   const deviceToken = (await cookies()).get(DEVICE_COOKIE_NAME)?.value ?? "";
   const requiredRole = surface === "hub" ? "ADMIN" : surface === "portal" ? "USER" : undefined;
   const serverFactor = await getLoginChallengeFactor(ceremony, deviceToken, requiredRole);
-  const factor = requestedFactor === "recovery" && serverFactor === "totp" ? "recovery" : serverFactor ?? requestedFactor;
+  const factor = displayedLoginFactor(serverFactor, requestedFactor);
+  if (!factor) redirect(loginHref);
   const backupAvailable = factor === "totp" && await getLoginBackupOption(ceremony, deviceToken, requiredRole);
   const recoveryParams = new URLSearchParams({ ceremony, factor: "recovery", flow: "recovery" });
   if (returnTo) recoveryParams.set("returnTo", returnTo);
