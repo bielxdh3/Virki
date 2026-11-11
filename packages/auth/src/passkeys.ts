@@ -179,12 +179,26 @@ async function registrationProofBinding(tx: Prisma.TransactionClient, userId: st
   if (!user?.passwordHash || user.role !== role) throw FAILURE;
   const factor = user.totpFactor;
   if (user.secondFactorMethod === "TOTP" && factor?.status !== "ACTIVE") throw FAILURE;
+  // An ADMIN credential rotation must invalidate enrollment challenges minted
+  // with the previous credential generation, even when a new elevation in the
+  // same session is subsequently authorized. The caller holds the User and
+  // AdministrativeCredential locks before reading these fields.
+  const administrative = role === "ADMIN"
+    ? await tx.administrativeCredential.findUnique({
+      where: { userId }, select: { keyVersion: true, passwordHash: true, status: true, revokedAt: true }
+    })
+    : null;
+  if (role === "ADMIN" && (!administrative || administrative.status !== "ACTIVE" ||
+    administrative.revokedAt || !Number.isSafeInteger(administrative.keyVersion) || administrative.keyVersion < 1 ||
+    !administrative.passwordHash)) throw FAILURE;
   return {
     passwordHash: user.passwordHash,
     digest: hashPasskeyChallenge(JSON.stringify([
-      "passkey-registration-factor-policy-v3", role, user.passwordHash, user.updatedAt.toISOString(),
+      role === "ADMIN" ? "passkey-registration-factor-policy-v4-admin" : "passkey-registration-factor-policy-v3",
+      role, user.passwordHash, user.updatedAt.toISOString(),
       user.secondFactorMethod, factor?.id ?? null, factor?.status ?? null,
-      factor?.secretCiphertext ?? null, factor?.confirmedAt?.toISOString() ?? null
+      factor?.secretCiphertext ?? null, factor?.confirmedAt?.toISOString() ?? null,
+      ...(role === "ADMIN" ? [administrative!.keyVersion, administrative!.passwordHash] : [])
     ]))
   };
 }
