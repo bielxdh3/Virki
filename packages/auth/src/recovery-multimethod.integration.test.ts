@@ -4,7 +4,7 @@ import { after, test } from "node:test";
 import { isoCBOR } from "@simplewebauthn/server/helpers";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { prisma } from "@virki/database";
-import { createTestUser, integrationOptions, queuedEmails, seedAdminSessionWithElevation, uniqueEmail } from "./integration-fixtures";
+import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation, uniqueEmail } from "./integration-fixtures";
 import {
   getMultiMethodRecoveryState,
   finishRecoveryPasskeyAssertion,
@@ -15,7 +15,7 @@ import {
   verifyMultiMethodRecoveryTotp,
   verifyRecoveryNewMailbox
 } from "./recovery-methods";
-import { approveAccountRecovery, confirmTotpEnrollment, consumeApprovedAccountRecovery, createTotpSecret, hashEmailAddress, hashRecoveryRequestKey, startTotpEnrollment } from "./security";
+import { approveAccountRecovery, confirmTotpEnrollment, consumeApprovedAccountRecovery, createTotpSecret, getAccountRecoveryRequestId, hashEmailAddress, hashRecoveryRequestKey, requestAccountRecovery, startTotpEnrollment, verifyAccountRecoveryEmail } from "./security";
 import { hashPassword, verifyPassword } from "./index";
 import { createPasskeyBrowserToken, finishPasskeyRegistration, startPasskeyRegistration } from "./passkeys";
 import { createRateLimitIdentifierHash } from "./rate-limit-config";
@@ -446,13 +446,45 @@ test("real PostgreSQL: verified old EMAIL alone cannot starve concurrent PASSKEY
   assert.ok(accepted, "one real browser-bound owner request must be persisted");
   await assert.rejects(consumeApprovedAccountRecovery(attacker.requestId, attacker.requestKey, "attacker-email-alone-must-not-reset", new Date(), "USER", attacker.browserToken));
 
-  await verifyMultiMethodRecoveryTotp(accepted.requestId, accepted.requestKey, accepted.browserToken, totpAt(totpSecret), "USER");
+  await verifyMultiMethodRecoveryTotp(accepted.requestId, accepted.requestKey, accepted.browserToken, totpAt(enrollment.secret), "USER");
   await signAndVerifyRecoveryProof(accepted, signer, owner.id);
   assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: accepted.requestId } })).status, "APPROVED");
   assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: attacker.requestId } })).status, "EXPIRED",
     "completed strong owner proof must expire the attacker's partial email recovery");
-  await assert.rejects(verifyMultiMethodRecoveryTotp(attacker.requestId, attacker.requestKey, attacker.browserToken, totpAt(totpSecret), "USER"),
+  await assert.rejects(verifyMultiMethodRecoveryTotp(attacker.requestId, attacker.requestKey, attacker.browserToken, totpAt(enrollment.secret), "USER"),
     "superseded old-mailbox recovery cannot resume with a stolen second factor");
+});
+
+test("real PostgreSQL: signed PASSKEY proof survives older legacy EMAIL verification and vetoes new legacy starts", integrationOptions, async (t) => {
+  const previous = process.env.VIRKI_PASSKEYS_ENABLED;
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  t.after(() => { if (previous === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = previous; });
+
+  const owner = await createTestUser({ label: "legacy-crossflow-signed-passkey" });
+  const signer = await enrollSignedRecoveryPasskey(owner);
+  await requestAccountRecovery(owner.email, "pt-BR");
+  const legacyMail = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY").at(-1);
+  const legacyKey = requestKeyFromActionUrl(legacyMail?.actionUrl);
+  const legacy = await getAccountRecoveryRequestId(legacyKey);
+  assert.ok(legacy);
+  assert.match(legacyMail?.code ?? "", /^\d{6}$/u);
+  await prisma.accountRecoveryRequest.update({ where: { id: legacy.id }, data: { createdAt: new Date(Date.now() - 61_000) } });
+
+  const strong = await startMultiMethodRecovery(owner.email, "USER", { proofs: ["PASSKEY", "TOTP"], adminReview: false }, "pt-BR", new Date(), isolatedSource());
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { id: strong.requestId, userId: owner.id } }), 1);
+  await signAndVerifyRecoveryProof(strong, signer, owner.id);
+  const strongRow = await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: strong.requestId } });
+  assert.equal(strongRow.status, "PENDING");
+  assert.ok(strongRow.recoveryPasskeyVerifiedAt);
+  await assert.rejects(verifyAccountRecoveryEmail(legacy.id, legacyKey, legacyMail!.code!),
+    "a legacy request started before the cryptographically verified passkey cannot invalidate it");
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: legacy.id } })).emailVerifiedAt, null);
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: strong.requestId } })).status, "PENDING");
+
+  await prisma.accountRecoveryRequest.update({ where: { id: strong.requestId }, data: { createdAt: new Date(Date.now() - 61_000) } });
+  await requestAccountRecovery(owner.email, "pt-BR");
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { userId: owner.id } }), 2,
+    "no fresh legacy recovery may start once a signed passkey proof exists");
 });
 
 test("real PostgreSQL: old EMAIL alone cannot block independent ADMIN-reviewed TOTP recovery", integrationOptions, async () => {

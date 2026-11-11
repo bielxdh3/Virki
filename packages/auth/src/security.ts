@@ -822,6 +822,28 @@ async function withResponseFloor(operation: () => Promise<void>): Promise<void> 
   }
 }
 
+// Legacy mailbox recovery remains available for unproven requests, but cannot
+// start, verify or receive ADMIN approval over an independent owner proof.
+// Call only after locking the User row, including when a legacy request was
+// created before the stronger proof.
+async function hasProtectedSiblingRecoveryInTransaction(
+  transaction: Prisma.TransactionClient, userId: string, now: Date, exceptRequestId?: string
+): Promise<boolean> {
+  return Boolean(await transaction.accountRecoveryRequest.findFirst({
+    where: {
+      userId, ...(exceptRequestId ? { id: { not: exceptRequestId } } : {}),
+      status: { in: ["PENDING", "APPROVED"] }, expiresAt: { gt: now },
+      OR: [
+        { status: "APPROVED" },
+        { emailVerifiedAt: { not: null } },
+        { recoveryPasskeyVerifiedAt: { not: null } },
+        { recoveryTotpVerifiedAt: { not: null } }
+      ]
+    },
+    select: { id: true }
+  }));
+}
+
 async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, email: string, locale: EmailLocale, now: Date, trustedClientAddress?: string): Promise<void> {
   if (process.env.NODE_ENV === "production" && !isTrustedClientAddress(trustedClientAddress)) return;
   if (trustedClientAddress) {
@@ -846,21 +868,9 @@ async function requestAccountRecoveryForRole(expectedRole: AccountRecoveryRole, 
       if (!await lockActiveRecoveryAccountInTransaction(transaction, user.id, expectedRole)) return false;
       const latestRequest = await transaction.accountRecoveryRequest.findFirst({ where: { userId: user.id }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
       if (latestRequest && latestRequest.createdAt.getTime() + RECOVERY_REQUEST_COOLDOWN_MS > now.getTime()) return false;
-      // An anonymous request never expires another request. While the owner holds an email-verified
-      // request (awaiting approval or approved), a new request is not created at all; the owner
-      // continues with the emailed approval link. Unverified requests coexist until one is verified.
-      const ownerProven = await transaction.accountRecoveryRequest.findFirst({
-        where: {
-          userId: user.id,
-          expiresAt: { gt: now },
-          OR: [
-            { emailVerifiedAt: { not: null }, status: { in: ["PENDING", "APPROVED"] } },
-            { purpose: "INVITATION", status: "APPROVED" }
-          ]
-        },
-        select: { id: true }
-      });
-      if (ownerProven) return false;
+      // Invitations, approved requests and verified owner factors cannot be
+      // overridden by an anonymous legacy email challenge.
+      if (await hasProtectedSiblingRecoveryInTransaction(transaction, user.id, now)) return false;
       const attempt = await consumeRateLimitAttemptInTransaction(transaction, rateLimitIdentifier, now);
       if (!attempt.allowed) return false;
       const requestKey = randomBytes(24).toString("base64url");
@@ -905,9 +915,10 @@ export async function verifyAccountRecoveryEmail(requestId: string, requestKey: 
       const requestAttempt = await consumeRateLimitAttemptInTransaction(transaction, `account-recovery-verification:${request.id}`, now);
       if (!accountAttempt.allowed || !requestAttempt.allowed) return { kind: "REJECTED" as const };
       if (!verifySecurityCode(code, request.emailChallengeHash)) return { kind: "INVALID" as const };
+      if (await hasProtectedSiblingRecoveryInTransaction(transaction, request.userId, now, request.id)) throw new SecurityMutationError();
       const verified = await transaction.accountRecoveryRequest.updateMany({ where: { id: request.id, requestKeyHash: request.requestKeyHash, status: "PENDING", emailVerifiedAt: null, expiresAt: { gt: now } }, data: { emailVerifiedAt: now } });
       if (verified.count !== 1) throw new SecurityMutationError();
-      await transaction.accountRecoveryRequest.updateMany({ where: { userId: request.userId, id: { not: request.id }, status: "PENDING", emailVerifiedAt: null }, data: { status: "EXPIRED" } });
+      await transaction.accountRecoveryRequest.updateMany({ where: { userId: request.userId, id: { not: request.id }, status: "PENDING", emailVerifiedAt: null, recoveryPasskeyVerifiedAt: null, recoveryTotpVerifiedAt: null }, data: { status: "EXPIRED" } });
       await transaction.user.update({ where: { id: request.userId }, data: { emailVerifiedAt: now } });
       await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_EMAIL_VERIFIED", result: "SUCCESS", resource: "identity.recovery", message: "Account recovery email verified.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
       return { kind: "SUCCESS" as const };
@@ -985,6 +996,7 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
     const multiMethod = Boolean(request?.recoveryProofs.length);
     if (!request || request.status !== "PENDING" || !(multiMethod ? request.recoveryRole === request.user.role && Boolean(request.recoveryBrowserHash) && recoveryReviewReady(request) : !request.recoveryRole && !request.recoveryBrowserHash && Boolean(request.emailVerifiedAt)) || request.expiresAt <= recoveryNow(now) || request.emailAddressHash !== hashEmailAddress(request.user.emailNormalized ?? request.user.email) || !canApproveAccountRecovery(actor, { id: request.userId, ...request.user })) throw new SecurityMutationError();
     if (multiMethod) await requireLiveRecoveryProofsInTransaction(transaction, request);
+    else if (await hasProtectedSiblingRecoveryInTransaction(transaction, request.userId, recoveryNow(now), request.id)) throw new SecurityMutationError();
     const actionBase = getRecoveryActionBaseUrl(request.user.role);
     if (!multiMethod && !actionBase) throw new SecurityMutationError();
     const approvalAt = recoveryNow(now);
@@ -1008,7 +1020,13 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
         AND recovery."expiresAt" > recovery_time."at"
     `);
     if (approvedCount !== 1) throw new SecurityMutationError();
-    await transaction.accountRecoveryRequest.updateMany({ where: { userId: request.userId, id: { not: request.id }, status: "PENDING" }, data: { status: "EXPIRED" } });
+    await transaction.accountRecoveryRequest.updateMany({
+      where: {
+        userId: request.userId, id: { not: request.id }, status: "PENDING",
+        ...(!multiMethod ? { recoveryPasskeyVerifiedAt: null, recoveryTotpVerifiedAt: null } : {})
+      },
+      data: { status: "EXPIRED" }
+    });
     if (!multiMethod) {
       const actionUrl = new URL(`/recover/open?request=${encodeURIComponent(requestKey)}`, actionBase!).toString();
       await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-approved:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: request.user.email, locale: "pt-BR", payload: { publicValues: { displayName: request.user.displayName ?? "" }, protectedValues: { actionUrl } } });
