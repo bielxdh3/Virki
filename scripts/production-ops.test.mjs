@@ -1617,6 +1617,76 @@ test("production health checks use validated configured hosts and the configured
   assert.doesNotMatch(health, /portal\.biel\.dev\.br|hub\.biel\.dev\.br/u);
 });
 
+test("ADMIN health probes fail closed for the effective native or Access perimeter", { skip: process.platform === "win32" ? "Requires a Bash operator fixture; Linux CI runs it." : false }, () => {
+  const validatorStart = serverScript.indexOf("is_valid_dns_hostname() {");
+  const healthStart = serverScript.indexOf("assert_health() {");
+  assert.ok(validatorStart >= 0 && healthStart >= 0);
+  const validator = serverScript.slice(validatorStart, serverScript.indexOf("\n}\n", validatorStart) + 2);
+  const health = serverScript.slice(healthStart, serverScript.indexOf("\n}\n", healthStart) + 2);
+  const bashFixture = String.raw`
+set -euo pipefail
+fail() { printf 'DENIED:%s\n' "$1" >&2; exit 80; }
+compose() {
+  if [[ "$1" == port ]]; then
+    if [[ "$2" == public-site ]]; then printf '127.0.0.1:13000'; return; fi
+    if [[ "$2" == hub ]]; then printf '127.0.0.1:13001'; return; fi
+  fi
+  if [[ "$1" == exec ]]; then
+    case "$*" in
+      *VIRKI_PORTAL_HOSTNAME*) printf 'portal.example.test'; return ;;
+      *VIRKI_HUB_HOSTNAME*) printf 'hub.example.test'; return ;;
+      *VIRKI_OIDC_ISSUER*) printf 'https://portal.example.test'; return ;;
+      *VIRKI_HUB_PERIMETER_MODE*) printf '%s' "$VIRKI_TEST_MODE"; return ;;
+    esac
+  fi
+  fail 'Unexpected Compose invocation'
+}
+curl() {
+  local args="$*"
+  if [[ "$args" == *'/admin/accounts'* ]]; then
+    [[ "$args" == *'cf-access-jwt-assertion: forged-staging-probe'* ]] || fail 'Missing forged assertion probe'
+    printf 'HTTP/1.1 %s Test\r\nLocation: %s\r\n\r\n\nVIRKI_STATUS:%s' "$VIRKI_TEST_ADMIN_STATUS" "$VIRKI_TEST_REDIRECT" "$VIRKI_TEST_ADMIN_STATUS"
+  elif [[ "$args" == *'/api/health'* ]]; then
+    printf 'HTTP/1.1 200 OK\r\n\r\n\nVIRKI_STATUS:200'
+  elif [[ "$args" == *'/.well-known/openid-configuration'* ]]; then
+    printf 'HTTP/1.1 200 OK\r\n\r\n{"issuer":"https://portal.example.test","code_challenge_methods_supported":["S256"],"response_types_supported":["code"]}\nVIRKI_STATUS:200'
+  else
+    printf 'HTTP/1.1 200 OK\r\n\r\n\nVIRKI_STATUS:200'
+  fi
+}
+assert_production_response_headers() { :; }
+${validator}
+${health}
+assert_health
+`;
+  const expected = "https://hub.example.test/login?returnTo=%2Fadmin%2Faccounts";
+  for (const { mode, status, location, allowed } of [
+    { mode: "access", status: "403", location: "", allowed: true },
+    { mode: "", status: "403", location: "", allowed: true },
+    { mode: "not-native", status: "403", location: "", allowed: true },
+    { mode: "native", status: "307", location: expected, allowed: true },
+    { mode: "native", status: "403", location: "", allowed: false },
+    { mode: "native", status: "302", location: expected, allowed: false },
+    { mode: "native", status: "307", location: "", allowed: false },
+    { mode: "access", status: "307", location: expected, allowed: false },
+    { mode: "native", status: "307", location: "https://attacker.invalid/login?returnTo=%2Fadmin%2Faccounts", allowed: false },
+    { mode: "native", status: "307", location: "https://hub.example.test/login?returnTo=%2Fadmin%2Fsecurity", allowed: false },
+    { mode: "native", status: "307", location: `${expected}\r\nLocation: ${expected}`, allowed: false },
+    { mode: "native", status: "307", location: `${expected}\r\n\r\nHTTP/1.1 403 Forbidden\r\nLocation: https://attacker.invalid`, allowed: false },
+  ]) {
+    const result = spawnSync("bash", ["-c", bashFixture], {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        VIRKI_TEST_MODE: mode,
+        VIRKI_TEST_ADMIN_STATUS: status,
+        VIRKI_TEST_REDIRECT: location,
+      },
+    });
+    assert.equal(result.status === 0, allowed, `mode=${mode} status=${status} location=${location}: ${result.stderr}`);
+  }
+});
+
 test("temporary dual-Codex task notes stay out of source and Docker archives", () => {
   const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
   const dockerignore = readFileSync(new URL("../.dockerignore", import.meta.url), "utf8");

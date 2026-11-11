@@ -646,12 +646,13 @@ is_valid_dns_hostname() {
 assert_health() {
   local public_response hub_response discovery_response access_response
   local public_status hub_status discovery_status access_status
-  local public_binding hub_binding portal_hostname hub_hostname oidc_issuer
+  local public_binding hub_binding portal_hostname hub_hostname oidc_issuer hub_perimeter_mode
   public_binding=$(compose port public-site 3000)
   hub_binding=$(compose port hub 3001)
   [[ "$public_binding" =~ ^127\.0\.0\.1:[0-9]+$ && "$hub_binding" =~ ^127\.0\.0\.1:[0-9]+$ ]] || fail 'Production application port binding is not loopback-only.'
   portal_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_PORTAL_HOSTNAME ?? "")') || fail 'Configured portal host could not be read.'
   hub_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_HOSTNAME ?? "")') || fail 'Configured Hub host could not be read.'
+  hub_perimeter_mode=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_PERIMETER_MODE ?? "")') || fail 'Configured Hub perimeter mode could not be read.'
   oidc_issuer=$(compose exec -T oidc-issuer node -e 'process.stdout.write(process.env.VIRKI_OIDC_ISSUER ?? "")') || fail 'Configured OIDC issuer could not be read.'
   is_valid_dns_hostname "$portal_hostname" && is_valid_dns_hostname "$hub_hostname" && [[ "$oidc_issuer" == "https://$portal_hostname" ]] || fail 'Configured application hosts or OIDC issuer are invalid.'
   public_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' "http://$public_binding") || fail 'Public site health request failed.'
@@ -662,7 +663,33 @@ assert_health() {
   hub_status=${hub_response##*$'\nVIRKI_STATUS:'}
   discovery_status=${discovery_response##*$'\nVIRKI_STATUS:'}
   access_status=${access_response##*$'\nVIRKI_STATUS:'}
-  [[ "$public_status" == 200 && "$hub_status" == 200 && "$access_status" == 403 ]] || fail 'Production health or ADMIN boundary check failed.'
+  [[ "$public_status" == 200 && "$hub_status" == 200 ]] || fail 'Production application health check failed.'
+  if [[ "$hub_perimeter_mode" == native ]]; then
+    [[ "$access_status" == 307 ]] || fail 'Native Hub must redirect unauthenticated ADMIN requests.'
+    # Require precisely one canonical redirect to the configured Hub login.
+    # A redirect to another host, route or an untrusted returnTo is not healthy.
+    printf '%s\n' "$access_response" | awk -v expected="https://$hub_hostname/login?returnTo=%2Fadmin%2Faccounts" '
+      {
+        line = $0
+        sub(/\r$/, "", line)
+        if (NR == 1) {
+          if (line !~ /^HTTP\/[0-9.]+[[:space:]]+307([[:space:]]|$)/) invalid = 1
+          in_headers = 1
+        }
+        if (line ~ /^HTTP\//) status_count++
+        if (line == "") in_headers = 0
+      }
+      in_headers && tolower(line) ~ /^location:[[:space:]]*/ {
+        value = line
+        sub(/^[^:]*:[[:space:]]*/, "", value)
+        count++
+        if (value == expected) valid++
+      }
+      END { exit !(invalid == 0 && status_count == 1 && count == 1 && valid == 1) }
+    ' || fail 'Native Hub unauthenticated redirect target is invalid.'
+  else
+    [[ "$access_status" == 403 ]] || fail 'Hub Access boundary must refuse a forged assertion.'
+  fi
   [[ "$discovery_status" == 200 ]] || fail 'Portal OIDC discovery request returned an unexpected status.'
   [[ "$discovery_response" == *"\"issuer\":\"$oidc_issuer\""* && "$discovery_response" == *'"S256"'* && "$discovery_response" == *'"code"'* ]] || fail 'Portal discovery profile does not match the expected OIDC issuer.'
   assert_production_response_headers "$public_response" 'no-referrer'

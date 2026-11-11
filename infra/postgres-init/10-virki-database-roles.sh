@@ -92,7 +92,7 @@ BEGIN
       AND type.typtype IN ('d', 'e', 'm', 'r')
       AND type.typname NOT IN (
         'AccountStatus', 'AdministrativeCredentialStatus', 'DeliveryAttemptStatus',
-        'DeviceChallengeStatus', 'EmailMessageKind', 'OutboxMessageStatus',
+        'DeviceChallengeStatus', 'EmailMessageKind', 'LoginChallengeFactor', 'OutboxMessageStatus',
         'RecoveryRequestPurpose', 'RecoveryRequestStatus', 'SecondFactorMethod', 'SecurityElevationStatus',
         'SecurityFactorStatus', 'TrustedDeviceStatus', 'UserRole'
       )
