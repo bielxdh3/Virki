@@ -446,12 +446,12 @@ test("real PostgreSQL: verified old EMAIL alone cannot starve concurrent PASSKEY
   assert.ok(accepted, "one real browser-bound owner request must be persisted");
   await assert.rejects(consumeApprovedAccountRecovery(attacker.requestId, attacker.requestKey, "attacker-email-alone-must-not-reset", new Date(), "USER", attacker.browserToken));
 
-  await verifyMultiMethodRecoveryTotp(accepted.requestId, accepted.requestKey, accepted.browserToken, totpAt(enrollment.secret), "USER");
+  await verifyMultiMethodRecoveryTotp(accepted.requestId, accepted.requestKey, accepted.browserToken, totpAt(totpSecret), "USER");
   await signAndVerifyRecoveryProof(accepted, signer, owner.id);
   assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: accepted.requestId } })).status, "APPROVED");
   assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: attacker.requestId } })).status, "EXPIRED",
     "completed strong owner proof must expire the attacker's partial email recovery");
-  await assert.rejects(verifyMultiMethodRecoveryTotp(attacker.requestId, attacker.requestKey, attacker.browserToken, totpAt(enrollment.secret), "USER"),
+  await assert.rejects(verifyMultiMethodRecoveryTotp(attacker.requestId, attacker.requestKey, attacker.browserToken, totpAt(totpSecret), "USER"),
     "superseded old-mailbox recovery cannot resume with a stolen second factor");
 });
 
@@ -462,6 +462,9 @@ test("real PostgreSQL: signed PASSKEY proof survives older legacy EMAIL verifica
 
   const owner = await createTestUser({ label: "legacy-crossflow-signed-passkey" });
   const signer = await enrollSignedRecoveryPasskey(owner);
+  const enrollment = await startTotpEnrollment(owner.id, owner.email);
+  const previousWindow = new Date(Date.now() - 30_000);
+  await confirmTotpEnrollment(owner.id, totpAt(enrollment.secret, previousWindow), previousWindow);
   await requestAccountRecovery(owner.email, "pt-BR");
   const legacyMail = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY").at(-1);
   const legacyKey = requestKeyFromActionUrl(legacyMail?.actionUrl);

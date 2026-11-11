@@ -35,7 +35,10 @@ test("approval refuses an expiry reached while waiting for its account lock", as
       if (statement.includes('FROM "User"') && values[0] === ownerId) expiredAfterLock = true;
       return [{ id: String(values[0] ?? reviewerId) }];
     },
-    accountRecoveryRequest: { findUnique: async () => request },
+    accountRecoveryRequest: {
+      findUnique: async () => request,
+      findFirst: async () => null, // No competing recovery in the expiry-only fixture.
+    },
     $executeRaw: async (statement: { sql: string }) => { casCalls += 1; casSql = statement.sql; return 0; }
   };
   Object.defineProperty(prisma, "$transaction", { ...originalTransaction, value: async (run: (tx: never) => Promise<unknown>) => run(transaction as never) });
