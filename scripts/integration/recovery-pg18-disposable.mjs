@@ -102,8 +102,10 @@ function runSuite(suite) {
     const inspectFormat = `{{.Id}}|{{.Name}}|{{index .Config.Labels "${label}"}}`;
     const inspect = (target) => dockerClient.invoke(["inspect", "--format", inspectFormat, target], 15_000);
     const missing = (result, target) => {
+      // Docker 29.9.2 may emit one empty stdout line alongside its absent-object stderr.
       if (result?.error || !Number.isInteger(result?.status) || result.status <= 0 ||
-          result.signal != null || result.stdout !== "" || typeof result.stderr !== "string") return false;
+          result.signal != null || !["", "\n", "\r\n"].includes(result.stdout) ||
+          typeof result.stderr !== "string") return false;
       return [
         `Error: No such object: ${target}`,
         `Error response from daemon: No such container: ${target}`,

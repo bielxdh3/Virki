@@ -318,7 +318,8 @@ function mockRun(scenario) {
     const ok = (stdout = "") => ({ status: 0, stdout, stderr: "" });
     const absent = target => {
       const scenario = process.env.VIRKI_FAKE_CASE;
-      const message = scenario === "docker29-lowercase" || scenario === "mixed-previous-diagnostic"
+      const message = scenario === "docker29-lowercase" || scenario === "mixed-previous-diagnostic" ||
+        scenario.startsWith("docker29-stdout-")
         ? "error: no such object: " + target + "\\n"
         : scenario === "legacy-container-absence"
           ? "Error response from daemon: No such container: " + target + "\\n"
@@ -333,6 +334,11 @@ function mockRun(scenario) {
       if (scenario === "absence-stdout") return { status: 1, stdout: "unexpected output", stderr: message };
       if (scenario === "absence-null-status") return { status: null, stdout: "", stderr: message };
       if (scenario === "absence-duplicate-lines") return { status: 1, stdout: "", stderr: message + message };
+      if (scenario === "docker29-stdout-lf") return { status: 1, signal: null, stdout: "\\n", stderr: message };
+      if (scenario === "docker29-stdout-crlf") return { status: 1, signal: null, stdout: "\\r\\n", stderr: message };
+      if (scenario === "docker29-stdout-double-lf") return { status: 1, stdout: "\\n\\n", stderr: message };
+      if (scenario === "docker29-stdout-mixed") return { status: 1, stdout: "\\npermission denied\\n", stderr: message };
+      if (scenario === "docker29-stdout-space") return { status: 1, stdout: " \\n", stderr: message };
       return { status: 1, stdout: "", stderr: message };
     };
     export function createAdmittedOidcDockerClient(options) {
@@ -475,6 +481,24 @@ test("Docker cleanup requires one exact absence diagnostic without other output 
     assert.equal(child.error, undefined, scenario);
     assert.equal(child.status, 0, `${scenario}: ${child.stderr}`);
     assert.equal(calls.filter((entry) => entry.action === "rm").length, 2, scenario);
+  }
+});
+
+test("Docker 29 cleanup accepts only one empty stdout newline with canonical missing diagnostic", () => {
+  for (const scenario of ["docker29-stdout-lf", "docker29-stdout-crlf"]) {
+    const { child, calls } = mockRun(scenario);
+    assert.equal(child.error, undefined, scenario);
+    assert.equal(child.status, 0, scenario + ": " + child.stderr);
+    assert.match(child.stdout, /9 real PASS, 0 FAIL, 0 SKIP/u, scenario);
+    assert.equal(calls.filter((entry) => entry.action === "rm").length, 2, scenario);
+  }
+  for (const scenario of ["docker29-stdout-double-lf", "docker29-stdout-mixed", "docker29-stdout-space"]) {
+    const { child, calls } = mockRun(scenario);
+    assert.equal(child.error, undefined, scenario);
+    assert.equal(child.status, 1, scenario + ": contradicted stdout must block cleanup");
+    assert.match(child.stderr, /Private PG18 cleanup uncertain \(removal-unconfirmed\)/u, scenario);
+    assert.doesNotMatch(child.stdout, /9 real PASS/u, scenario);
+    assert.equal(calls.filter((entry) => entry.action === "rm").length, 1, scenario);
   }
 });
 
