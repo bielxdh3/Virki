@@ -15,9 +15,10 @@ import {
   verifyMultiMethodRecoveryTotp,
   verifyRecoveryNewMailbox
 } from "./recovery-methods";
-import { approveAccountRecovery, confirmTotpEnrollment, consumeApprovedAccountRecovery, createTotpSecret, startTotpEnrollment } from "./security";
+import { approveAccountRecovery, confirmTotpEnrollment, consumeApprovedAccountRecovery, createTotpSecret, hashEmailAddress, hashRecoveryRequestKey, startTotpEnrollment } from "./security";
 import { hashPassword, verifyPassword } from "./index";
 import { createPasskeyBrowserToken, finishPasskeyRegistration, startPasskeyRegistration } from "./passkeys";
+import { createRateLimitIdentifierHash } from "./rate-limit-config";
 
 after(() => prisma.$disconnect());
 
@@ -256,6 +257,13 @@ test("real PostgreSQL: signed PASSKEY + independent TOTP requires new mailbox an
 
   await assert.rejects(verifyMultiMethodRecoveryTotp(request.requestId, request.requestKey, createPasskeyBrowserToken(), totpAt(enrollment.secret), "USER"),
     "valid TOTP from another browser capability cannot complete recovery");
+  const totpLimiterHash = createRateLimitIdentifierHash(`account-recovery-totp:${request.requestId}`);
+  assert.equal(await prisma.loginRateLimit.findUnique({ where: { identifierHash: totpLimiterHash } }), null,
+    "another browser must not spend the owner's five TOTP verification attempts");
+  const wrongTotp = totpAt(enrollment.secret) === "000000" ? "999999" : "000000";
+  await assert.rejects(verifyMultiMethodRecoveryTotp(request.requestId, request.requestKey, request.browserToken, wrongTotp, "USER"));
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: totpLimiterHash } })).attempts, 1,
+    "a wrong code from the valid browser still spends an attempt");
   await verifyMultiMethodRecoveryTotp(request.requestId, request.requestKey, request.browserToken, totpAt(enrollment.secret), "USER");
   const approved = await getMultiMethodRecoveryState(request.requestId, request.requestKey, request.browserToken, "USER", selected);
   assert.equal(approved.status, "APPROVED");
@@ -264,9 +272,22 @@ test("real PostgreSQL: signed PASSKEY + independent TOTP requires new mailbox an
   await assert.rejects(consumeApprovedAccountRecovery(request.requestId, request.requestKey, "two-proofs-still-require-new-mail", new Date(), "USER", request.browserToken));
 
   const replacement = uniqueEmail("multimethod-signed-passkey-totp-new-mail");
+  const replacementStartSubject = createRateLimitIdentifierHash(`recovery-new-mail-start-subject:${hashEmailAddress(replacement)}`);
+  await assert.rejects(startRecoveryNewMailbox(request.requestId, request.requestKey, createPasskeyBrowserToken(), "USER", replacement));
+  assert.equal(await prisma.loginRateLimit.findUnique({ where: { identifierHash: replacementStartSubject } }), null,
+    "invalid browser cannot spend the replacement recipient's shared delivery budget");
   await startRecoveryNewMailbox(request.requestId, request.requestKey, request.browserToken, "USER", replacement);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: replacementStartSubject } })).attempts, 1);
   const mailboxCode = (await queuedEmails(replacement)).filter(message => message.kind === "RECOVERY_EMAIL_REBIND").at(-1)?.code;
   assert.match(mailboxCode ?? "", /^\d{6}$/u);
+  const replacementVerifySubject = createRateLimitIdentifierHash(`recovery-new-mail-verify-subject:${hashRecoveryRequestKey(request.requestKey)}`);
+  await assert.rejects(verifyRecoveryNewMailbox(request.requestId, request.requestKey, createPasskeyBrowserToken(), "USER", mailboxCode!));
+  assert.equal(await prisma.loginRateLimit.findUnique({ where: { identifierHash: replacementVerifySubject } }), null,
+    "invalid browser cannot spend replacement OTP attempts");
+  const wrongMailboxCode = mailboxCode === "000000" ? "999999" : "000000";
+  await assert.rejects(verifyRecoveryNewMailbox(request.requestId, request.requestKey, request.browserToken, "USER", wrongMailboxCode));
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: replacementVerifySubject } })).attempts, 1,
+    "a wrong new-mail OTP from the bound browser still spends an attempt");
   await verifyRecoveryNewMailbox(request.requestId, request.requestKey, request.browserToken, "USER", mailboxCode!);
   await assertSingleResetWinner(request, owner, "signed-passkey-totp");
   const stored = await prisma.user.findUniqueOrThrow({ where: { id: owner.id }, select: { emailNormalized: true, secondFactorMethod: true } });
@@ -274,6 +295,30 @@ test("real PostgreSQL: signed PASSKEY + independent TOTP requires new mailbox an
   assert.equal(stored.secondFactorMethod, "EMAIL");
   assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: owner.id } })).status, "REVOKED");
   assert.equal(await prisma.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } }), 0);
+});
+
+test("real PostgreSQL: revoked TOTP cannot approve recovery or expire a viable sibling", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const owner = await createTestUser({ label: "recovery-revoked-before-second-proof", totpSecret: secret });
+  const selected = { proofs: ["EMAIL" as const, "TOTP" as const], adminReview: false };
+  const first = await startMultiMethodRecovery(owner.email, "USER", selected, "pt-BR", new Date(), isolatedSource());
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { id: first.requestId } }), 1);
+  const later = new Date(Date.now() + 61_000);
+  const sibling = await startMultiMethodRecovery(owner.email, "USER", selected, "pt-BR", later, isolatedSource());
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { id: sibling.requestId } }), 1);
+  await verifyMultiMethodRecoveryTotp(first.requestId, first.requestKey, first.browserToken, totpAt(secret), "USER");
+  await prisma.totpFactor.update({ where: { userId: owner.id }, data: { status: "REVOKED" } });
+  const firstCode = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY")[0]?.code;
+  assert.match(firstCode ?? "", /^\d{6}$/u);
+  await assert.rejects(verifyMultiMethodRecoveryEmail(first.requestId, first.requestKey, first.browserToken, firstCode!, "USER"),
+    "a revoked prior factor cannot be elevated into an approved recovery");
+  const [stale, viable] = await Promise.all([
+    prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: first.requestId } }),
+    prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: sibling.requestId } })
+  ]);
+  assert.equal(stale.status, "PENDING");
+  assert.equal(stale.emailVerifiedAt, null, "failed approval must roll back the final email proof");
+  assert.equal(viable.status, "PENDING", "failed approval must preserve independent pending recovery");
 });
 
 test("real PostgreSQL: EMAIL plus TOTP requires both proofs, then concurrent reset has one winner", integrationOptions, async () => {
@@ -372,9 +417,12 @@ test("real PostgreSQL: verified old EMAIL alone cannot starve concurrent PASSKEY
   process.env.VIRKI_PASSKEYS_ENABLED = "true";
   t.after(() => { if (previous === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = previous; });
 
-  const totpSecret = createTotpSecret();
-  const owner = await createTestUser({ label: "mailbox-partial-user", totpSecret });
+  const owner = await createTestUser({ label: "mailbox-partial-user" });
   const signer = await enrollSignedRecoveryPasskey(owner);
+  const enrolled = await startTotpEnrollment(owner.id, owner.email);
+  const totpSecret = enrolled.secret;
+  const previousStep = new Date(Date.now() - 30_000);
+  await confirmTotpEnrollment(owner.id, totpAt(totpSecret, previousStep), previousStep);
   const attackerPolicy = { proofs: ["EMAIL" as const, "TOTP" as const], adminReview: false };
   const attacker = await startMultiMethodRecovery(owner.email, "USER", attackerPolicy, "pt-BR", new Date(), isolatedSource());
   const attackerCode = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY").at(-1)?.code;

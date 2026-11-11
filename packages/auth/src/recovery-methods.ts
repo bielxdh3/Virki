@@ -110,9 +110,15 @@ const recoverySelect = {
 } as const;
 
 async function afterProof(tx: Prisma.TransactionClient, requestId: string, now: Date): Promise<void> {
-  const row = await tx.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: recoverySelect });
+  const row = await tx.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: {
+    ...recoverySelect, recoveryTotpBindingHash: true, recoveryTotpUsedStep: true,
+    recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true
+  } });
   if (!row || row.status !== "PENDING" || row.expiresAt <= new Date()) throw FAILURE;
   if (row.recoveryAdminReview || !isRecoveryProofSatisfied(row.recoveryProofs, false, row)) return;
+  // The earlier proof may have been revoked while its sibling was pending.
+  // Reject stale approval before expiring any other recovery for this owner.
+  await requireLiveRecoveryProofsInTransaction(tx, row);
   const claimed = await tx.accountRecoveryRequest.updateMany({
     where: { id: requestId, status: "PENDING", expiresAt: { gt: new Date() } },
     data: { status: "APPROVED", approvedAt: now, expiresAt: getApprovedAccountRecoveryExpiry(now) }
@@ -177,6 +183,13 @@ async function createMultiMethodRecovery(
     // No-enrollment and unknown-account requests remain synthetic and identical.
     // Credentials minted at the USER portal never qualify as ADMIN factors.
     if (recoveryRpID && await tx.passkeyCredential.count({ where: { userId: account.id, rpID: recoveryRpID, revokedAt: null } }) < 1) return null;
+    if (policy.proofs.includes("TOTP")) {
+      const [factor, owner] = await Promise.all([
+        tx.totpFactor.findUnique({ where: { userId: account.id }, select: { status: true, confirmedAt: true } }),
+        tx.user.findUnique({ where: { id: account.id }, select: { secondFactorMethod: true } })
+      ]);
+      if (factor?.status !== "ACTIVE" || !factor.confirmedAt || owner?.secondFactorMethod !== "TOTP") return null;
+    }
     if (policy.adminReview && await tx.user.count({ where: { role: "ADMIN", isActive: true, accountStatus: "ACTIVE", id: { not: account.id } } }) < 1) return null;
     // Limit repeated anonymous requests without letting a compromised former
     // mailbox monopolize the account. EMAIL alone is not an independent owner
@@ -232,7 +245,12 @@ export async function verifyMultiMethodRecoveryEmail(requestId: string, key: str
 }
 
 export async function verifyMultiMethodRecoveryTotp(requestId: string, key: string, browserToken: string, code: string, expectedRole: AccountRecoveryRole, now = new Date()): Promise<void> {
-  if (!isRequestId(requestId) || !/^\d{6}$/.test(code)) throw FAILURE;
+  if (!isRequestId(requestId) || !/^\d{6}$/.test(code) || !isRequestKey(key) || !isBrowserToken(browserToken)) throw FAILURE;
+  // A public request ID alone cannot exhaust a genuine browser's TOTP budget.
+  // Keep the code check after rate limiting so wrong codes still cost attempts.
+  const preflight = await prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: recoverySelect });
+  if (!validPending(preflight, expectedRole, key, browserToken, now) ||
+      !preflight!.recoveryProofs.includes("TOTP") || preflight!.recoveryTotpVerifiedAt) throw FAILURE;
   const permitted = await prisma.$transaction(async (tx) => {
     const a = await consumeRateLimitAttemptInTransaction(tx, `account-recovery-totp:${requestId}`, now);
     return a.allowed;
@@ -432,6 +450,8 @@ export async function startRecoveryNewMailbox(
   const newEmail = proposedEmail.trim().toLowerCase();
   if (!isRequestId(requestId) || !isRequestKey(key) || !isBrowserToken(browserToken) ||
       !isSingleMailboxAddress(newEmail) || getEmailTransportStatus().state !== "configured") throw FAILURE;
+  const preflight = await prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: replacementSelect });
+  if (!validReplacement(preflight, role, key, browserToken, new Date())) throw FAILURE;
   await rateLimitReplacement(requestId, "start", hashEmailAddress(newEmail));
   await prisma.$transaction(async (tx) => {
     const row = await lockReplacementRequest(tx, requestId, role);
@@ -467,6 +487,11 @@ export async function verifyRecoveryNewMailbox(
   requestId: string, key: string, browserToken: string, role: AccountRecoveryRole, code: string
 ): Promise<void> {
   if (!isRequestId(requestId) || !/^\d{6}$/u.test(code) || !isRequestKey(key) || !isBrowserToken(browserToken)) throw FAILURE;
+  const preflight = await prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: replacementSelect });
+  if (!validReplacement(preflight, role, key, browserToken, new Date()) ||
+      !preflight.recoveryNewEmail || !preflight.recoveryNewEmailChallengeHash ||
+      !preflight.recoveryNewEmailExpiresAt || preflight.recoveryNewEmailExpiresAt <= new Date() ||
+      preflight.recoveryNewEmailVerifiedAt) throw FAILURE;
   await rateLimitReplacement(requestId, "verify", hashRecoveryRequestKey(key));
   await prisma.$transaction(async (tx) => {
     const row = await lockReplacementRequest(tx, requestId, role);

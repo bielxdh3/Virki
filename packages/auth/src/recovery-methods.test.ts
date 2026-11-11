@@ -22,9 +22,13 @@ test("existing and nonexistent recovery IDs have identical public formats and un
   const now = new Date();
   const captured: Array<Record<string, unknown>> = [];
   let saved: Record<string, unknown> | null = null;
+  let secondFactorMethod = "TOTP";
+  const totpFactor: { status: string; confirmedAt: Date | null } = { status: "ACTIVE", confirmedAt: now };
   const transaction = {
     $queryRaw: async (literals: TemplateStringsArray) => literals.join("").includes('FROM "User"') ? [{ id: user.id }] : [],
     passkeyCredential: { count: async () => 1 },
+    user: { findUnique: async () => ({ secondFactorMethod }) },
+    totpFactor: { findUnique: async () => totpFactor },
     loginRateLimit: { findUnique: async () => null, create: async () => ({}) },
     accountRecoveryRequest: {
       findFirst: async () => null,
@@ -90,6 +94,21 @@ test("existing and nonexistent recovery IDs have identical public formats and un
   saved = { ...saved!, status: "APPROVED", recoveryPasskeyVerifiedAt: now, recoveryTotpVerifiedAt: now };
   await assert.rejects(consumeApprovedAccountRecovery(real.requestId, real.requestKey, "valid-new-recovery-password", now, "USER", real.browserToken),
     /Security mutation rejected/u, "a flag revoked after proof must prevent password reset");
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  totpFactor.status = "REVOKED";
+  const revoked = await startMultiMethodRecovery(knownEmail, "USER", policy, "pt-BR", now);
+  assert.equal(captured.length, 1, "revoked TOTP must not mint a real recovery request");
+  totpFactor.status = "ACTIVE";
+  secondFactorMethod = "EMAIL";
+  const unselected = await startMultiMethodRecovery(knownEmail, "USER", policy, "pt-BR", now);
+  assert.equal(captured.length, 1, "an ACTIVE factor not selected for account MFA must be ineligible");
+  secondFactorMethod = "TOTP";
+  totpFactor.confirmedAt = null;
+  const unconfirmed = await startMultiMethodRecovery(knownEmail, "USER", policy, "pt-BR", now);
+  assert.equal(captured.length, 1, "unconfirmed TOTP must not mint a real recovery request");
+  for (const state of [revoked, unselected, unconfirmed]) {
+    assert.match(state.requestId, /^[A-Za-z0-9_-]{43}$/u, "ineligible enrollments retain synthetic request format");
+  }
 });
 
 test("explicit recovery methods require two independent factors or one plus different admin", () => {
@@ -201,7 +220,8 @@ test("verified old mailbox alone cannot veto independent recovery; strong or app
   const transaction = {
     $queryRaw: async (literals: TemplateStringsArray) => literals.join("").includes('FROM "User"') ? [{ id: owner.id }] : [],
     loginRateLimit: { findUnique: async () => null, create: async () => ({}) },
-    user: { count: async () => 1 },
+    user: { count: async () => 1, findUnique: async () => ({ secondFactorMethod: "TOTP" }) },
+    totpFactor: { findUnique: async () => ({ status: "ACTIVE", confirmedAt: now }) },
     accountRecoveryRequest: {
       findFirst: async ({ where, orderBy }: { where?: { OR?: Record<string, unknown>[] }; orderBy?: { createdAt: string } }) => {
         if (orderBy) return { createdAt: new Date(now.getTime() - 61_000) };
