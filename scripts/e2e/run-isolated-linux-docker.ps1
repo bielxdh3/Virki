@@ -686,7 +686,10 @@ try {
     }
   }
   if (-not $IntegrationOnly -and -not $UnitOnly) {
-    $playwrightCommand = @('bash', '-lc', 'set -o pipefail; npm run test:e2e -- "$@" 2>&1 | node scripts/e2e/redact-browser-e2e-log.mjs > /tmp/browser-e2e.log; status=$?; cat /tmp/browser-e2e.log; exit $status', 'virki-e2e')
+    # Run a source-tracked Bash script, not an inline -lc command. Windows
+    # PowerShell 5.1 strips embedded double quotes at the native Docker argv
+    # boundary; the script keeps "$@" intact for a spaced Playwright --grep.
+    $playwrightCommand = @('bash', 'scripts/e2e/run-redacted-browser.sh')
     if ($PlaywrightArguments.Count -gt 0) { $playwrightCommand += $PlaywrightArguments }
     $e2eEnvironment = @('--env', ('DATABASE_URL=' + $urls.runtime), '--env', ('VIRKI_E2E_DATABASE_URL=' + $urls.e2e), '--env', ('VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL=' + $urls.migrator), '--env', 'VIRKI_CORE_TEST_DATABASE_CONFIRM=disposable')
     if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required') { $e2eEnvironment += @('--env', 'VIRKI_E2E_NATIVE_HUB=required') }

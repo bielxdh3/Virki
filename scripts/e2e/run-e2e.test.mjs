@@ -927,10 +927,16 @@ test("browser E2E output redacts URL queries, fragments and credential-bearing h
   }
 });
 
-test("full isolated runner stores complete browser output only after redaction", () => {
+test("full isolated runner preserves spaced Playwright arguments and redacts browser output", () => {
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
-  assert.match(script, /npm run test:e2e -- "\$@" 2>&1 \| node scripts\/e2e\/redact-browser-e2e-log\.mjs > \/tmp\/browser-e2e\.log/u);
-  assert.match(script, /status=\$\?; cat \/tmp\/browser-e2e\.log; exit \$status/u);
+  const launcher = readFileSync(new URL("./run-redacted-browser.sh", import.meta.url), "utf8");
+  assert.match(script, /\$playwrightCommand = @\('bash', 'scripts\/e2e\/run-redacted-browser\.sh'\)/u,
+    "Pass the Bash script as an executable argv item instead of an inline shell command: Windows PowerShell 5.1 strips embedded double quotes.");
+  assert.doesNotMatch(script, /\$playwrightCommand = @\('bash', '-lc'/u);
+  assert.match(launcher, /node scripts\/e2e\/run-e2e\.mjs "\$@" 2>&1 \| node scripts\/e2e\/redact-browser-e2e-log\.mjs > \/tmp\/browser-e2e\.log/u);
+  assert.match(launcher, /set -o pipefail/u);
+  assert.match(launcher, /status=\$\?\s+cat \/tmp\/browser-e2e\.log\s+exit \$status/u);
+  assert.doesNotMatch(launcher, /npm run test:e2e/u);
 });
 
 test("isolated tooling stage redirects the entire compound command, never loses its first failure", () => {
