@@ -1,0 +1,63 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const read = (relative) =>
+  readFileSync(fileURLToPath(new URL("../" + relative, import.meta.url)), "utf8");
+const override = read("infra/docker-compose.staging-email-worker.yml");
+const role = read("infra/postgres-init/11-virki-email-worker-role.sh");
+const prod = read("infra/docker-compose.prod.yml");
+const dev = read("infra/docker-compose.yml");
+const stage = read("scripts/production-server.sh");
+const proof = read("scripts/staging-email-worker-role.disposable.mjs");
+const docs = read("docs/security/staging-email-worker-role-20261112.md");
+
+test("staging override requires worker-only URL and never defaults to Hub runtime", () => {
+  assert.ok(override.includes("services:\n  email-worker:\n    environment:\n"));
+  assert.ok(override.includes("DATABASE_URL: $" + "{VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?"));
+  assert.equal(override.split("\n      DATABASE_URL:").length - 1, 1);
+  assert.equal(override.includes("$" + "{DATABASE_URL"), false);
+  assert.equal(override.includes("VIRKI_RUNTIME_DB_PASSWORD"), false);
+  assert.ok(prod.includes("email-worker:"));
+  assert.ok(prod.includes("DATABASE_URL: $" + "{DATABASE_URL:?"));
+  assert.equal((prod + dev + stage).includes("docker-compose.staging-email-worker.yml"), false,
+    "normal production commands must not load an unapproved staging override");
+  assert.ok(stage.includes("readonly staging_application_services=(public-site hub oidc-issuer session-cleanup)"));
+});
+
+test("postmigration SQL is atomic and limits worker to mail data instead of identity", () => {
+  assert.ok(role.includes("requires the committed, migrated Virki schema"));
+  assert.ok(role.includes("BEGIN;"));
+  assert.ok(role.includes("COMMIT;"));
+  assert.ok(role.includes("NOINHERIT PASSWORD :'worker_password'"));
+  assert.ok(role.includes("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM virki_email_worker"));
+  assert.ok(role.includes('GRANT SELECT ON TABLE public."EmailOutboxMessage" TO virki_email_worker'));
+  assert.ok(role.includes('GRANT UPDATE ("status", "attemptCount", "availableAt"'));
+  assert.ok(role.includes('GRANT SELECT ON TABLE public."EmailDeliveryAttempt" TO virki_email_worker'));
+  assert.ok(role.includes('GRANT INSERT ("id", "messageId", "attempt", "status"'));
+  assert.ok(role.includes("Staging database exposes excess worker privileges"));
+  assert.ok(role.includes("psql --no-psqlrc --no-password --host=/var/run/postgresql --port=5432"),
+    "privileged role provisioning must use the approved container's local Unix socket");
+  assert.ok(role.includes("unset PGHOSTADDR PGHOST PGPORT PGSERVICE"));
+  assert.ok(role.includes("inet_server_addr() IS NOT NULL"));
+  assert.ok(role.includes("pg_attribute"),
+    "role reconciliation must also examine column grants inherited from PUBLIC");
+  assert.ok(role.includes("has_schema_privilege('virki_email_worker', namespace.oid, 'USAGE')"),
+    "protected staging schemas must not be reachable by inherited PUBLIC USAGE");
+  assert.ok(role.includes("has_function_privilege('virki_email_worker', routine.oid, 'EXECUTE')"),
+    "PUBLIC must not grant worker an audit-deleting SECURITY DEFINER capability");
+  assert.equal((prod + dev).includes("11-virki-email-worker-role.sh"), false,
+    "the postmigration helper must never be mounted into Docker initdb");
+});
+
+test("disposable SQL proof is opt-in, network-none and cleans verified owned Docker identity", () => {
+  assert.ok(proof.includes('VIRKI_STAGING_WORKER_ROLE_PROOF !== "local-disposable-only"'));
+  assert.ok(proof.includes("dockerDesktopLinuxEngine"));
+  assert.ok(proof.includes('"--network", "none"'));
+  assert.ok(proof.includes("virki.worker-role-test.owner"));
+  assert.ok(proof.includes("refuse to operate on any container whose ID, image, label or isolation differs"));
+  assert.ok(proof.includes("LOCAL_DISPOSABLE_WORKER_ROLE_CLEANUP=PASS"));
+  assert.ok(docs.includes("STAGING DELIVERY NO-GO"));
+  assert.ok(docs.includes("Brevo provider receipt"));
+});

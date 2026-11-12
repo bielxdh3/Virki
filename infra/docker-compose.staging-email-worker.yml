@@ -1,0 +1,8 @@
+# Manual, operator-approved *isolated staging* override ONLY. Do not include
+# this file in routine production/stage actions. Stage must keep worker OFF.
+# The operator must independently prove the dedicated worker role, SMTP relay
+# restrictions, test allowlist and quota before any standalone worker start.
+services:
+  email-worker:
+    environment:
+      DATABASE_URL: ${VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?isolated staging email-worker URL and role required}
