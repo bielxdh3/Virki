@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page, type Request } from "@playwright/test";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
@@ -594,35 +594,12 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(consumed.bootstrapSessionId, "recovery must persist its precise bootstrap session identity").toBeTruthy();
     const bootstrapSession = await db.session.findUniqueOrThrow({ where: { id: consumed.bootstrapSessionId! },
       select: { userId: true, tokenHash: true, revokedAt: true, expiresAt: true } });
-    expect(bootstrapSession.userId).toBe(owner.id);
-    expect(bootstrapSession.revokedAt).toBeNull();
-    expect(bootstrapSession.expiresAt.getTime()).toBeGreaterThan(Date.now());
-    const sessionCookie = (await target.context.cookies(hub)).find(cookie => cookie.name === getSessionCookieName({ NODE_ENV: "development" }));
-    expect(sessionCookie, "the browser must receive a protected host-only bootstrap session cookie").toBeDefined();
-    expect(sessionCookie!.domain).toBe("hub.localhost");
-    expect(sessionCookie!.path).toBe("/");
-    expect(sessionCookie!.httpOnly).toBe(true);
-    expect(sessionCookie!.sameSite).toBe("Lax");
-    expect(hashSessionToken(sessionCookie!.value),
-      "the active browser session must match bootstrapSessionId, not a leftover unrelated session").toBe(bootstrapSession.tokenHash);
     const updated = await db.user.findUniqueOrThrow({ where: { id: owner.id } });
-    expect(await verifyPassword(updated.passwordHash ?? "", changedPassword)).toBe(true);
-    expect(await verifyPassword(updated.passwordHash ?? "", owner.password)).toBe(false);
-    expect(updated.emailNormalized).toBe(replacement);
-    expect(updated.secondFactorMethod).toBe("EMAIL");
     const administrative = await db.administrativeCredential.findUniqueOrThrow({ where: { userId: owner.id } });
-    expect(await verifyPassword(administrative.passwordHash, owner.administrativePassword)).toBe(true);
-    expect(administrative.status).toBe("ACTIVE");
-    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
-    expect((await db.session.findUniqueOrThrow({ where: { id: ownerSession.id } })).revokedAt).not.toBeNull();
-    expect(await db.emailOutboxMessage.count({ where: { recipientEmail: owner.email, kind: "RECOVERY_EMAIL_REBIND_NOTICE" } })).toBe(1);
-
-    // Recovery invalidates the authenticator, and replay cannot resurrect it.
-    expect(await db.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } })).toBe(0);
-
-    // The stale browser must retain the exact old proof, submit a SECOND real
-    // Next Server Action and be denied without changing either credential or
-    // issuing another bootstrap session. HTTP 403/500 cannot count as a pass.
+    // Capture the winner's durable baseline, then promptly release the held
+    // browser POST. A long string of extra crypto/DB assertions while paused
+    // can cause the real React request to be aborted before Playwright forwards
+    // it, falsely timing out instead of exercising server-side replay denial.
     const sessionRowsBeforeReplay = await db.session.count({ where: { userId: owner.id } });
     const successfulConsumptionAudits = await db.auditLog.count({
       where: { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS" }
@@ -632,9 +609,27 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
       expect(staleCookies.find(cookie => cookie.name === original.name)?.value).toBe(original.value);
     }
     expect(staleCookies.some(cookie => cookie.name === getSessionCookieName({ NODE_ENV: "development" }))).toBe(false);
-    const replayResponsePending = stale.page.waitForResponse(response => new URL(response.url()).origin === hub &&
+    // A canceled in-flight browser POST is a test FAILURE, never a replay
+    // denial. Report it promptly instead of mislabeling ECONNRESET as a
+    // mysterious 25-second missing response; never retry or fabricate a POST.
+    let onReplayRequestFailed!: (request: Request) => void;
+    const failedReplay = new Promise<never>((_, reject) => {
+      onReplayRequestFailed = request => {
+        const target = new URL(request.url());
+        if (target.origin === hub && target.pathname === "/recover" &&
+            request.method() === "POST" &&
+            request.headers()["next-action"] === post.headers["next-action"] &&
+            request.postData() === post.body) {
+          reject(new Error("Actual stale ADMIN Server Action POST failed before a handled denial response."));
+        }
+      };
+    });
+    stale.page.on("requestfailed", onReplayRequestFailed);
+    const responsePending = stale.page.waitForResponse(response => new URL(response.url()).origin === hub &&
       new URL(response.url()).pathname === "/recover" && response.request().method() === "POST" &&
       Boolean(response.request().headers()["next-action"]), { timeout: 25_000 });
+    const replayResponsePending = Promise.race([responsePending, failedReplay])
+      .finally(() => stale.page.off("requestfailed", onReplayRequestFailed));
     forwardHeldReplay = true;
     return { updated, consumed, bootstrapSession, administrative,
       heldAction: post.headers["next-action"], heldBody: post.body,
@@ -648,6 +643,30 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     const { updated, consumed, bootstrapSession, administrative, heldAction, heldBody,
       sessionRowsBeforeReplay, successfulConsumptionAudits, replayResponsePending } = replayCheckpoint;
     const replayResponse = await replayResponsePending;
+    // Re-run all independent positive winner proofs after releasing the stale
+    // POST, without weakening the pre-replay captured snapshots or the strict
+    // replay response/body/authorization/DB invariants below.
+    expect(bootstrapSession.userId).toBe(owner.id);
+    expect(bootstrapSession.revokedAt).toBeNull();
+    expect(bootstrapSession.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    const sessionCookie = (await target.context.cookies(hub)).find(cookie => cookie.name === getSessionCookieName({ NODE_ENV: "development" }));
+    expect(sessionCookie, "the browser must receive a protected host-only bootstrap session cookie").toBeDefined();
+    expect(sessionCookie!.domain).toBe("hub.localhost");
+    expect(sessionCookie!.path).toBe("/");
+    expect(sessionCookie!.httpOnly).toBe(true);
+    expect(sessionCookie!.sameSite).toBe("Lax");
+    expect(hashSessionToken(sessionCookie!.value),
+      "the active browser session must match bootstrapSessionId, not a leftover unrelated session").toBe(bootstrapSession.tokenHash);
+    expect(await verifyPassword(updated.passwordHash ?? "", changedPassword)).toBe(true);
+    expect(await verifyPassword(updated.passwordHash ?? "", owner.password)).toBe(false);
+    expect(updated.emailNormalized).toBe(replacement);
+    expect(updated.secondFactorMethod).toBe("EMAIL");
+    expect(await verifyPassword(administrative.passwordHash, owner.administrativePassword)).toBe(true);
+    expect(administrative.status).toBe("ACTIVE");
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
+    expect((await db.session.findUniqueOrThrow({ where: { id: ownerSession.id } })).revokedAt).not.toBeNull();
+    expect(await db.emailOutboxMessage.count({ where: { recipientEmail: owner.email, kind: "RECOVERY_EMAIL_REBIND_NOTICE" } })).toBe(1);
+    expect(await db.passkeyCredential.count({ where: { userId: owner.id, revokedAt: null } })).toBe(0);
     const staleClickError = await staleClickOutcome;
     if (staleClickError) throw staleClickError;
     expect(replayResponse.status(), "rejected ADMIN replay must finish as a handled Next action").toBeGreaterThanOrEqual(200);
