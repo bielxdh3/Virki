@@ -521,26 +521,6 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     expect(credentialBeforeAcknowledgment?.status).toBe("ACTIVE");
     expect(await prisma.administrativeRecoveryCode.count({ where: { userId: fixture.admin.id, usedAt: null } })).toBe(10);
     const acknowledgementUrl = `${hubUrl}/admin/security?status=credential#admin-content`;
-    // Create two distinct same-document History API entries atomically. Next
-    // may replace a location.hash assignment while its Server Action RSC state
-    // settles; that race is not evidence of an unsafe browser Back behavior.
-    // Both entries must actually exist so the subsequent Back/Forward test
-    // exercises sensitive history, rather than passing with no history at all.
-    const fragments = await page.evaluate(() => {
-      const before = window.history.length;
-      const state = window.history.state as unknown;
-      window.history.pushState(state, "", "#recovery-code-predecessor");
-      const predecessor = window.location.hash;
-      window.history.pushState(state, "", "#recovery-code-acknowledgment");
-      return { predecessor, last: window.location.hash, added: window.history.length - before };
-    });
-    expect(fragments).toEqual({
-      predecessor: "#recovery-code-predecessor",
-      last: "#recovery-code-acknowledgment",
-      added: 2
-    });
-    await expect(page).toHaveURL(`${hubUrl}/admin/security#recovery-code-acknowledgment`);
-    await expect(credentialSection.locator("ul li code")).toHaveCount(10);
     // There must be no native href navigation when a sensitive one-time
     // control is visible before React hydrates. Otherwise the default anchor
     // follows its href with a PUSH (rather than our scrub-and-REPLACE click),
@@ -552,9 +532,28 @@ test("ADMIN can sign in to a protected page, navigate, and have the session revo
     await credentialSection.getByRole("checkbox", { name: /Guardei os dez códigos de recuperação fora do Virki/u }).check();
     await expect(acknowledgeRecoveryCodes).toBeEnabled();
     await expect(credentialSection.getByRole("link", { name: "Continuar para elevação", exact: true })).toHaveCount(0);
+    // Seed history after React has settled the checkbox state. The Next.js
+    // App Router must observe these History API entries: copying history.state
+    // with its private __NA flag bypasses Next's URL synchronization wrapper.
+    // A default null state is external, so Next synchronizes its canonical URL.
+    const fragments = await page.evaluate(() => {
+      const before = window.history.length;
+      window.history.pushState(null, "", "#recovery-code-predecessor");
+      const predecessor = window.location.hash;
+      window.history.pushState(null, "", "#recovery-code-acknowledgment");
+      return { before, predecessor, last: window.location.hash, added: window.history.length - before };
+    });
+    expect(fragments).toMatchObject({
+      predecessor: "#recovery-code-predecessor",
+      last: "#recovery-code-acknowledgment",
+      added: 2
+    });
+    await expect(page).toHaveURL(`${hubUrl}/admin/security#recovery-code-acknowledgment`);
+    await expect(credentialSection.locator("ul li code")).toHaveCount(10);
     const recoveryCodeInput = credentialSection.getByLabel("Código de recuperação administrativa", { exact: true });
     const recoveryForm = recoveryCodeInput.locator("xpath=ancestor::form");
     const historyEntriesBeforeDismissal = await page.evaluate(() => window.history.length);
+    expect(historyEntriesBeforeDismissal).toBe(fragments.before + 2);
     await acknowledgeRecoveryCodes.click();
     await expect(page).toHaveURL(acknowledgementUrl);
     // Native window.location.replace must not add a history entry. If the
