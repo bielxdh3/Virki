@@ -1,11 +1,17 @@
 // Run ONLY inside the one-shot owned PostgreSQL 18 internal-network fixture.
 // No SMTP: message dispatch goes to an in-memory deterministic transport.
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 import { prisma, PrismaClient } from "@virki/database";
 import { assertScopedEmailWorkerRole, requireScopedEmailWorkerRole } from "../packages/auth/src/email-worker-role";
-import { createDeterministicTestTransport, processNextEmailMessage } from "../packages/auth/src/email";
+import { createDeterministicTestTransport, enqueueEmailMessageForClient, processNextEmailMessage } from "../packages/auth/src/email";
+import { createLoopbackSmtpSink } from "./integration/loopback-smtp-sink.mjs";
 
 const workerUrl = new URL(process.env.DATABASE_URL ?? "");
 const runtimeUrl = new URL(process.env.VIRKI_PROOF_RUNTIME_URL ?? "");
@@ -129,4 +135,82 @@ test("real scoped Prisma worker persists a failed delivery without privileged wr
   assert.equal(row.deliveryAttempts.length, 1);
   assert.equal(row.deliveryAttempts[0]?.status, "FAILED");
   assert.equal(row.deliveryAttempts[0]?.errorCode, "transport-failure");
+});
+
+test("actual scoped worker process sends over verified loopback STARTTLS AUTH only", async () => {
+  await assertScopedEmailWorkerRole(prisma);
+  assert.equal(existsSync("/proc/self/ns/net"), true, "SMTP fixture must execute inside the owned Linux network");
+  assert.equal(readFileSync("/proc/net/route", "utf8").split(/\r?\n/u).slice(1)
+    .some((line) => /^\S+\s+00000000\s+/u.test(line)), false,
+  "isolated Docker SMTP fixture must have no default IPv4 route");
+  const sender = "wire-sender@integration.invalid";
+  const recipient = "scope-wire@integration.invalid";
+  const smtpUser = "smtp-wire@integration.invalid";
+  const smtpPassword = randomBytes(32).toString("hex");
+  assert.equal(process.env.VIRKI_SCOPED_SMTP_CERT_DIR, "/app/.virki-scoped-smtp");
+  const ca = path.join(process.env.VIRKI_SCOPED_SMTP_CERT_DIR, "ca.pem");
+  const certificatePath = path.join(process.env.VIRKI_SCOPED_SMTP_CERT_DIR, "server.pem");
+  const privateKeyPath = path.join(process.env.VIRKI_SCOPED_SMTP_CERT_DIR, "server.key");
+  let sink: Awaited<ReturnType<typeof createLoopbackSmtpSink>> | undefined;
+  let worker: ReturnType<typeof spawn> | undefined;
+  try {
+    sink = await createLoopbackSmtpSink({
+      certificate: readFileSync(certificatePath), privateKey: readFileSync(privateKeyPath),
+      username: smtpUser, password: smtpPassword, recipient
+    });
+    const outbox = await enqueueEmailMessageForClient(runtime, {
+      idempotencyKey: randomUUID(), kind: "EMAIL_TWO_FACTOR", recipientEmail: recipient,
+      locale: "en", payload: { publicValues: {}, protectedValues: { code: "987654" } }
+    });
+    assert.equal(outbox.status, "QUEUED");
+    const env = {
+      NODE_ENV: "test", DATABASE_URL: workerUrl.href,
+      VIRKI_EMAIL_WORKER_SCOPED_ROLE: "required",
+      VIRKI_EMAIL_OUTBOX_KEY: process.env.VIRKI_EMAIL_OUTBOX_KEY ?? "",
+      VIRKI_EMAIL_TRANSPORT: "smtp",
+      VIRKI_EMAIL_SMTP_HOST: "127.0.0.1",
+      VIRKI_EMAIL_SMTP_PORT: String(sink.port), VIRKI_EMAIL_SMTP_SECURE: "false",
+      VIRKI_EMAIL_SMTP_USER: smtpUser, VIRKI_EMAIL_SMTP_PASSWORD: smtpPassword,
+      VIRKI_EMAIL_FROM: sender, NODE_EXTRA_CA_CERTS: ca,
+      VIRKI_EMAIL_MIN_SEND_INTERVAL_MS: "250",
+      VIRKI_PORTAL_URL: "http://localhost:3000", VIRKI_HUB_URL: "http://localhost:3001",
+      PATH: "/usr/bin:/bin", LANG: "C"
+    };
+    worker = spawn(process.execPath,
+      ["node_modules/tsx/dist/cli.mjs", "packages/auth/src/email-worker.ts"],
+      { cwd: "/app", env, stdio: "ignore" });
+    const receipt = await sink.received;
+    assert.equal(receipt.code, "987654");
+    assert.deepEqual(sink.observations(), { accepted: 1, authenticated: 1, upgraded: 1 },
+      "real worker must authenticate with STARTTLS before one exact message");
+    let outcome: {
+      status: string;
+      attemptCount: number;
+      deliveryAttempts: Array<{ status: string; smtpHeaderMessageId: string | null }>;
+    } | null = null;
+    for (let retry = 0; retry < 80; retry += 1) {
+      outcome = await runtime.emailOutboxMessage.findUnique({
+        where: { id: outbox.id }, include: { deliveryAttempts: true }
+      });
+      if (outcome?.status === "SENT") break;
+      if (worker.exitCode !== null) throw new Error("Actual scoped worker exited before SMTP persistence.");
+      await delay(100);
+    }
+    assert.equal(outcome?.status, "SENT");
+    assert.equal(outcome?.attemptCount, 1);
+    assert.equal(outcome?.deliveryAttempts.length, 1);
+    assert.equal(outcome?.deliveryAttempts[0]?.status, "SENT");
+    assert.equal(outcome?.deliveryAttempts[0]?.smtpHeaderMessageId, receipt.messageId);
+    await assertScopedEmailWorkerRole(prisma);
+  } finally {
+    if (worker && worker.exitCode === null) {
+      const stopped = once(worker, "exit").then(() => true);
+      worker.kill("SIGTERM");
+      if (!await Promise.race([stopped, delay(2_000).then(() => false)])) {
+        worker.kill("SIGKILL");
+        await Promise.race([stopped, delay(2_000)]);
+      }
+    }
+    if (sink) await sink.close();
+  }
 });

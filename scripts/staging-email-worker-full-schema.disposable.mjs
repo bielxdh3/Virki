@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -14,6 +14,7 @@ import { assertPrivateLocalHolReceiptFile, ensurePrivateLocalHolReceiptDirectory
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dockerCli = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
 const powerShell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+const opensslCli = "C:\\Program Files\\Git\\usr\\bin\\openssl.exe";
 const engine = "npipe:////./pipe/dockerDesktopLinuxEngine";
 const image = "postgres:18.6-alpine3.24";
 const runnerImage = "virki-pr118-stage-migrator:7076276";
@@ -58,6 +59,7 @@ let receiptIdentity;
 let cleanupComplete = false;
 let cleanupActive = false;
 let interrupted = false;
+let smtpCertificateDirectory = null;
 const receiptPath = path.join(privateLocalHolReceiptDirectory(), `email-hol-${ownerUuid}.jsonl`);
 
 function record(stage, id = null) {
@@ -92,7 +94,9 @@ function requireLocalOnly() {
     throw new Error("Explicit local-only Windows staging worker proof is required.");
   }
   const injection = process.env.VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT;
-  if (injection !== undefined && !["before-runner-create", "simulate-runner-ack-loss"].includes(injection)) {
+  if (injection !== undefined && ![
+    "before-runner-create", "simulate-runner-ack-loss", "after-smtp-certificate-create"
+  ].includes(injection)) {
     throw new Error("Unknown local-only failure-injection mode.");
   }
   for (const [key, value] of Object.entries(process.env)) {
@@ -170,14 +174,15 @@ function runInRunner(label, args, env, timeout = 180_000, user = null) {
   }
   // No subprocess credentials or verifier can be printed as raw values.
   if (label === "Prisma scoped worker") {
-    assert.match(result.stdout, /# tests 3(?:\r?\n|$)/u);
-    assert.match(result.stdout, /# pass 3(?:\r?\n|$)/u);
+    assert.match(result.stdout, /# tests 4(?:\r?\n|$)/u);
+    assert.match(result.stdout, /# pass 4(?:\r?\n|$)/u);
     assert.match(result.stdout, /# fail 0(?:\r?\n|$)/u);
     assert.match(result.stdout, /# skipped 0(?:\r?\n|$)/u);
     for (const required of [
       "true SCRAM login and actual Prisma scoped worker process one mail safely",
       "PUBLIC and MAINTAIN drift stop the scoped worker before another dispatch",
-      "real scoped Prisma worker persists a failed delivery without privileged writes"
+      "real scoped Prisma worker persists a failed delivery without privileged writes",
+      "actual scoped worker process sends over verified loopback STARTTLS AUTH only"
     ]) {
       assert.equal(result.stdout.split(/\r?\n/u).filter((line) =>
         /^ok [0-9]+ - /u.test(line) && line.endsWith(required)).length, 1,
@@ -195,6 +200,75 @@ function requireCopiedSource(source, destination) {
   checkRunner();
   const observed = invoke(["exec", runnerId, "sha256sum", destination]).stdout;
   assert.equal(observed.split(" ")[0], expected, "Copied source differs from exact local review bytes");
+}
+function prepareOfflineSmtpCertificates() {
+  assert.ok(existsSync(opensslCli), "Local approved Git OpenSSL binary unavailable; no certificate download.");
+  const parent = privateLocalHolReceiptDirectory();
+  if (!/^[A-Za-z]:\\/u.test(parent) || parent.startsWith("\\\\") || parent.startsWith("//")) {
+    throw new Error("Synthetic SMTP certificates require an owner-private local Windows drive, never UNC.");
+  }
+  ensurePrivateLocalHolReceiptDirectory();
+  const directory = mkdtempSync(path.join(parent, `virki-scoped-smtp-${owner}-`));
+  const state = lstatSync(directory);
+  if (!state.isDirectory() || state.isSymbolicLink()) {
+    throw new Error("Offline SMTP certificate directory changed into an unsafe filesystem object.");
+  }
+  smtpCertificateDirectory = directory;
+  const extensionFile = path.join(directory, "server.ext");
+  const ca = path.join(directory, "ca.pem");
+  const caKey = path.join(directory, "ca.key");
+  const certificate = path.join(directory, "server.pem");
+  const key = path.join(directory, "server.key");
+  const request = path.join(directory, "server.csr");
+  writeFileSync(extensionFile,
+    "basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:127.0.0.1\n" +
+    "keyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n");
+  const openssl = (args) => {
+    const result = spawnSync(opensslCli, args, {
+      cwd: directory, env: systemEnv, encoding: "utf8", windowsHide: true, timeout: 15_000
+    });
+    if (result.status !== 0 || result.error) {
+      throw new Error("Offline synthetic SMTP certificate generation failed.");
+    }
+  };
+  openssl(["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", "1",
+    "-keyout", caKey, "-out", ca, "-subj", "/CN=virki-scoped-smtp-CA",
+    "-addext", "basicConstraints=critical,CA:TRUE",
+    "-addext", "keyUsage=critical,keyCertSign,cRLSign"]);
+  openssl(["req", "-new", "-newkey", "rsa:2048", "-nodes",
+    "-keyout", key, "-out", request, "-subj", "/CN=127.0.0.1"]);
+  openssl(["x509", "-req", "-sha256", "-days", "1", "-in", request,
+    "-CA", ca, "-CAkey", caKey, "-CAcreateserial", "-out", certificate,
+    "-extfile", extensionFile]);
+  for (const [source, name] of [[ca, "ca.pem"], [certificate, "server.pem"], [key, "server.key"]]) {
+    checkRunner();
+    copyToRunner(source, `/app/.virki-scoped-smtp/${name}`);
+    requireCopiedSource(source, `/app/.virki-scoped-smtp/${name}`);
+  }
+  const runnerUid = invoke(["exec", runnerId, "id", "-u"]).stdout;
+  const runnerGid = invoke(["exec", runnerId, "id", "-g"]).stdout;
+  if (!/^[0-9]{1,6}$/u.test(runnerUid) || !/^[0-9]{1,6}$/u.test(runnerGid) ||
+      runnerUid === "0" || runnerGid === "0") {
+    throw new Error("Offline scoped SMTP worker requires a nonroot process UID/GID.");
+  }
+  invoke(["exec", "--user", "root", runnerId, "chown",
+    `${runnerUid}:${runnerGid}`, "/app/.virki-scoped-smtp/server.key"]);
+  invoke(["exec", "--user", "root", runnerId, "chmod", "600",
+    "/app/.virki-scoped-smtp/server.key"]);
+}
+function cleanupOfflineSmtpCertificates() {
+  if (smtpCertificateDirectory === null) return;
+  const parent = privateLocalHolReceiptDirectory();
+  ensurePrivateLocalHolReceiptDirectory();
+  const approvedPrefix = path.join(parent, `virki-scoped-smtp-${owner}-`);
+  if (!/^[A-Za-z]:\\/u.test(parent) || parent.startsWith("\\\\") ||
+      !smtpCertificateDirectory.startsWith(approvedPrefix) ||
+      !lstatSync(smtpCertificateDirectory).isDirectory() ||
+      lstatSync(smtpCertificateDirectory).isSymbolicLink()) {
+    throw new Error("Refusing to delete an unexpected synthetic certificate directory.");
+  }
+  rmSync(smtpCertificateDirectory, { recursive: true, force: false, maxRetries: 2 });
+  smtpCertificateDirectory = null;
 }
 // A failed inspect is NOT evidence of absence. Accept only Docker's known,
 // object-ID-specific missing diagnostics; daemon errors require reconciliation.
@@ -305,6 +379,10 @@ function cleanup() {
       }
     });
   }
+    // Host-side ephemeral CA/server private keys are part of the same owned
+    // fixture cleanup, including SIGINT/SIGTERM. No cleanup PASS before both
+    // Docker identities and local synthetic keys are gone.
+    attempt(() => cleanupOfflineSmtpCertificates());
     if (errors.length > 0) {
       throw new AggregateError(errors, "Owned Docker cleanup incomplete; reconciliation required.");
     }
@@ -409,12 +487,31 @@ async function main() {
     }
     copyToRunner(path.join(root, "scripts", "staging-email-worker-full-schema.proof.ts"),
       "/app/scripts/staging-email-worker-full-schema.proof.ts");
+    invoke(["exec", runnerId, "mkdir", "-p", "/app/scripts/integration"]);
+    copyToRunner(path.join(root, "scripts", "integration", "loopback-smtp-sink.mjs"),
+      "/app/scripts/integration/loopback-smtp-sink.mjs");
     requireCopiedSource(path.join(root, "packages", "auth", "src", "email.ts"),
       "/app/packages/auth/src/email.ts");
     requireCopiedSource(path.join(root, "packages", "auth", "src", "email-worker-role.ts"),
       "/app/packages/auth/src/email-worker-role.ts");
     requireCopiedSource(path.join(root, "scripts", "staging-email-worker-full-schema.proof.ts"),
       "/app/scripts/staging-email-worker-full-schema.proof.ts");
+    requireCopiedSource(path.join(root, "scripts", "integration", "loopback-smtp-sink.mjs"),
+      "/app/scripts/integration/loopback-smtp-sink.mjs");
+    const runnerUid = invoke(["exec", runnerId, "id", "-u"]).stdout;
+    const runnerGid = invoke(["exec", runnerId, "id", "-g"]).stdout;
+    if (!/^[0-9]{1,6}$/u.test(runnerUid) || !/^[0-9]{1,6}$/u.test(runnerGid) ||
+        runnerUid === "0" || runnerGid === "0") {
+      throw new Error("Offline scoped SMTP runner must be nonroot.");
+    }
+    invoke(["exec", "--user", "root", runnerId, "mkdir", "-p", "/app/.virki-scoped-smtp"]);
+    invoke(["exec", "--user", "root", runnerId, "chown",
+      `${runnerUid}:${runnerGid}`, "/app/.virki-scoped-smtp"]);
+    invoke(["exec", "--user", "root", runnerId, "chmod", "700", "/app/.virki-scoped-smtp"]);
+    prepareOfflineSmtpCertificates();
+    if (process.env.VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT === "after-smtp-certificate-create") {
+      throw new Error("Synthetic failure after owner-private SMTP certificate creation.");
+    }
     const url = (role, key) => `postgresql://${role}:${key}@postgres:5432/${dbName}?schema=public`;
     const baseEnv = {
       NODE_ENV: "test", DATABASE_URL: url("virki_runtime", secrets.VIRKI_RUNTIME_DB_PASSWORD),
@@ -456,7 +553,8 @@ async function main() {
       VIRKI_PROOF_WRONG_URL: url("virki_email_worker", password()),
       VIRKI_EMAIL_WORKER_SCOPED_ROLE: "required",
       VIRKI_EMAIL_OUTBOX_KEY: password(),
-      VIRKI_STAGING_WORKER_FULL_SCHEMA_PROOF: "owned-internal-network"
+      VIRKI_STAGING_WORKER_FULL_SCHEMA_PROOF: "owned-internal-network",
+      VIRKI_SCOPED_SMTP_CERT_DIR: "/app/.virki-scoped-smtp"
     });
   } catch (error) {
     primaryError = error;
@@ -478,7 +576,7 @@ async function main() {
   if (primaryError) throw primaryError;
   if (cleanupError) throw cleanupError;
   if (interrupted) throw new Error("Interrupted run cannot claim PASS.");
-  process.stdout.write("LOCAL_FULL_SCHEMA_WORKER_PRISMA=PASS (19 migrations, 3 real Prisma tests, SCRAM and ACL)\n");
+  process.stdout.write("LOCAL_FULL_SCHEMA_WORKER_PRISMA=PASS (19 migrations, 4 real Prisma tests, scoped SMTP STARTTLS AUTH and ACL)\n");
 }
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : "Full-schema proof failed");

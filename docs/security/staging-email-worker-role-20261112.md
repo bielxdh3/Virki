@@ -99,7 +99,17 @@ loads all 19 committed Prisma migrations before provisioning `virki_email_worker
 then runs the actual Prisma Client against that role with a deterministic
 in-memory mail transport. It checks positive send/attempt persistence and
 negative identity data access, wrong SCRAM password, `PUBLIC` and `MAINTAIN`
-drift. It does **not** start the real SMTP worker process or prove Brevo delivery.
+drift. The dedicated fourth offline test also starts the **actual worker
+entrypoint** as `virki_email_worker` over real SCRAM, connected solely to a
+local SMTP sink on `127.0.0.1` with ephemeral CA-verified STARTTLS/AUTH and a
+single synthetic `@integration.invalid` recipient, checking the persisted
+SMTP Message-ID. The runner's Docker network remains internal throughout.
+It does **not** prove Brevo delivery or a production/staging worker start.
+Certificates are generated offline under the owner-ACL-checked local Windows
+receipt directory, never an inherited shared/UNC temp path. The local-only
+`VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT=after-smtp-certificate-create`
+negative fixture must exit nonzero and still remove both the owned Docker
+resources and the synthetic host TLS signing keys before reporting cleanup.
 For a negative cleanup oracle on a synthetic runner-creation failure, the same
 local-only proof accepts `VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT=before-runner-create`.
 It must exit nonzero with the original injected error while still confirming
