@@ -70,6 +70,69 @@ export class SecurityMutationError extends Error {
   }
 }
 
+/** Bound only by authenticated web actions; library fixtures may omit it. */
+export type SecurityMutationSession = { id: string; role: "USER" | "ADMIN" };
+
+async function lockSecurityMutationSession(
+  transaction: Prisma.TransactionClient,
+  userId: string,
+  session: SecurityMutationSession | undefined
+): Promise<void> {
+  if (!session) return;
+  // All callers acquire the User lock before the Session lock. A concurrent
+  // logout or account/session revocation must serialize against this mutation.
+  const rows = await transaction.$queryRaw<Array<{ id: string }>>`
+    SELECT s."id" FROM "Session" s JOIN "User" u ON u."id" = s."userId"
+    WHERE s."id" = ${session.id} AND s."userId" = ${userId}
+      AND u."role" = ${session.role}::"UserRole"
+      AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
+      AND s."revokedAt" IS NULL
+      AND s."expiresAt" > (clock_timestamp() AT TIME ZONE 'UTC')
+    FOR UPDATE OF s
+  `;
+  if (rows.length !== 1) throw new SecurityMutationError();
+}
+
+async function assertSecurityMutationSessionCurrent(
+  transaction: Prisma.TransactionClient,
+  userId: string,
+  session: SecurityMutationSession | undefined
+): Promise<void> {
+  if (!session) return;
+  // A transaction can wait after its initial session lock; recheck DB time
+  // after the last audit write so expiry rolls back the mutation and audit.
+  const rows = await transaction.$queryRaw<Array<{ id: string }>>`
+    SELECT s."id" FROM "Session" s JOIN "User" u ON u."id" = s."userId"
+    WHERE s."id" = ${session.id} AND s."userId" = ${userId}
+      AND u."role" = ${session.role}::"UserRole"
+      AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
+      AND s."revokedAt" IS NULL
+      AND s."expiresAt" > (clock_timestamp() AT TIME ZONE 'UTC')
+  `;
+  if (rows.length !== 1) throw new SecurityMutationError();
+}
+
+async function assertSecurityMutationSessionRevokedByFactorDisable(
+  transaction: Prisma.TransactionClient,
+  userId: string,
+  session: SecurityMutationSession | undefined,
+  revokedAt: Date
+): Promise<void> {
+  if (!session) return;
+  // Disabling TOTP intentionally revokes ALL sessions, including this one.
+  // Validate that this transaction performed that revocation and that the
+  // initiating session had not expired during the final audit write.
+  const rows = await transaction.$queryRaw<Array<{ id: string }>>`
+    SELECT s."id" FROM "Session" s JOIN "User" u ON u."id" = s."userId"
+    WHERE s."id" = ${session.id} AND s."userId" = ${userId}
+      AND u."role" = ${session.role}::"UserRole"
+      AND u."isActive" = TRUE AND u."accountStatus" = 'ACTIVE'::"AccountStatus"
+      AND s."revokedAt" = (${revokedAt} AT TIME ZONE 'UTC')
+      AND s."expiresAt" > (clock_timestamp() AT TIME ZONE 'UTC')
+  `;
+  if (rows.length !== 1) throw new SecurityMutationError();
+}
+
 export type LoginCeremonyFailureStage =
   | "transaction-start"
   | "account-lookup"
@@ -210,10 +273,11 @@ export function verifyTotpCode(secret: string, code: string, now = new Date(), l
   return null;
 }
 
-export async function startTotpEnrollment(userId: string, email: string): Promise<{ secret: string; uri: string }> {
+export async function startTotpEnrollment(userId: string, email: string, session?: SecurityMutationSession): Promise<{ secret: string; uri: string }> {
   const secret = createTotpSecret();
   await prisma.$transaction(async (transaction) => {
     if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
+    await lockSecurityMutationSession(transaction, userId, session);
     const current = await transaction.totpFactor.findUnique({ where: { userId }, select: { status: true } });
     if (current?.status === "ACTIVE") throw new SecurityMutationError();
     await invalidateRememberedLoginGrants(transaction, userId);
@@ -224,15 +288,17 @@ export async function startTotpEnrollment(userId: string, email: string): Promis
       create: { userId, secretCiphertext: encryptTotpSecret(secret), keyVersion: TOTP_KEY_VERSION, status: "PENDING" }
     });
     await writeAuditLogInTransaction(transaction, { eventType: "SECOND_FACTOR_ENROLLMENT_STARTED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP enrollment started." });
+    await assertSecurityMutationSessionCurrent(transaction, userId, session);
   }, { isolationLevel: "Serializable" });
   return { secret, uri: createTotpUri(email, secret) };
 }
 
-export async function confirmTotpEnrollment(userId: string, code: string, now = new Date()): Promise<string[]> {
+export async function confirmTotpEnrollment(userId: string, code: string, now = new Date(), session?: SecurityMutationSession): Promise<string[]> {
   await consumeSecurityProofAttempt(userId, now);
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   const recoveryCodes = await prisma.$transaction(async (transaction) => {
     if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
+    await lockSecurityMutationSession(transaction, userId, session);
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "PENDING") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -246,16 +312,18 @@ export async function confirmTotpEnrollment(userId: string, code: string, now = 
     await invalidateRememberedLoginGrants(transaction, userId);
     await revokeLoginChallenges(transaction, userId);
     await writeAuditLogInTransaction(transaction, { eventType: "SECOND_FACTOR_ENROLLED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP second factor enrolled." });
+    await assertSecurityMutationSessionCurrent(transaction, userId, session);
     return recoveryCodes;
   }, { isolationLevel: "Serializable" });
   return recoveryCodes;
 }
 
-export async function disableTotp(userId: string, code: string, now = new Date()): Promise<void> {
+export async function disableTotp(userId: string, code: string, now = new Date(), session?: SecurityMutationSession): Promise<void> {
   await consumeSecurityProofAttempt(userId, now);
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   await prisma.$transaction(async (transaction) => {
     if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
+    await lockSecurityMutationSession(transaction, userId, session);
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "ACTIVE") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -270,6 +338,7 @@ export async function disableTotp(userId: string, code: string, now = new Date()
     await transaction.session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: now } });
     await revokeUserOidcArtifactsInTransaction(transaction, userId);
     await writeAuditLogInTransaction(transaction, { eventType: "SECOND_FACTOR_DISABLED", result: "SUCCESS", actorUserId: userId, resource: "identity.2fa", message: "TOTP second factor disabled." });
+    await assertSecurityMutationSessionRevokedByFactorDisable(transaction, userId, session, now);
   });
 }
 
@@ -279,12 +348,13 @@ export async function getAccountSecurityState(userId: string, now = new Date()) 
   return user ? { secondFactorMethod: user.secondFactorMethod, emailVerified: Boolean(user.emailVerifiedAt), totpStatus: user.totpFactor?.status ?? "NOT_CONFIGURED", totpConfirmedAt: user.totpFactor?.confirmedAt ?? null, recoveryCodeCount: user._count.recoveryCodes, trustedDeviceCount: user._count.trustedDevices } : null;
 }
 
-export async function regenerateRecoveryCodes(userId: string, code: string, now = new Date()): Promise<string[]> {
+export async function regenerateRecoveryCodes(userId: string, code: string, now = new Date(), session?: SecurityMutationSession): Promise<string[]> {
   await consumeSecurityProofAttempt(userId, now);
   if (!/^\d{6}$/.test(code)) throw new SecurityMutationError();
   const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, generateRecoveryCode);
   await prisma.$transaction(async (transaction) => {
     if (!await lockActiveLoginAccountInTransaction(transaction, userId)) throw new SecurityMutationError();
+    await lockSecurityMutationSession(transaction, userId, session);
     const factor = await transaction.totpFactor.findUnique({ where: { userId }, select: { id: true, secretCiphertext: true, status: true, lastUsedStep: true } });
     if (!factor || factor.status !== "ACTIVE") throw new SecurityMutationError();
     const step = verifyTotpCode(decryptTotpSecret(factor.secretCiphertext), code, now, factor.lastUsedStep);
@@ -294,6 +364,7 @@ export async function regenerateRecoveryCodes(userId: string, code: string, now 
     await transaction.recoveryCode.deleteMany({ where: { userId } });
     await transaction.recoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId, codeHash: hashRecoveryCode(value) })) });
     await writeAuditLogInTransaction(transaction, { eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS", actorUserId: userId, resource: "identity.recovery", message: "Recovery codes regenerated." });
+    await assertSecurityMutationSessionCurrent(transaction, userId, session);
   });
   return recoveryCodes;
 }
@@ -786,20 +857,27 @@ export async function listTrustedDevices(userId: string, now = new Date()) {
   return prisma.trustedDevice.findMany({ where: { userId, status: "TRUSTED", revokedAt: null, createdAt: { gt: new Date(now.getTime() - DEVICE_TRUST_TTL_MS) } }, orderBy: { lastSeenAt: "desc" }, take: 25, select: { deviceKey: true, label: true, lastSeenAt: true, createdAt: true } });
 }
 
-export async function revokeTrustedDevice(userId: string, deviceKey: string): Promise<void> {
+export async function revokeTrustedDevice(userId: string, deviceKey: string, session?: SecurityMutationSession): Promise<void> {
   if (!isCeremonyId(deviceKey)) throw new SecurityMutationError();
   const now = new Date();
   await prisma.$transaction(async (transaction) => {
-    // Take the same parent-before-device lock order as login start. This lets
-    // the serializable login retry against a fresh snapshot if revoke wins.
-    await transaction.$queryRaw<Array<{ id: string }>>`
-      SELECT "id" FROM "User" WHERE "id" = ${userId} FOR KEY SHARE
-    `;
+    // Production account actions require the stronger User -> Session lock to
+    // serialize against deactivation and logout. Legacy internal fixture calls
+    // retain the existing KEY SHARE device/login lock ordering.
+    if (session) {
+      if (!await lockActiveLoginAccountInTransaction(transaction, userId, session.role)) throw new SecurityMutationError();
+    } else {
+      await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "User" WHERE "id" = ${userId} FOR KEY SHARE
+      `;
+    }
+    await lockSecurityMutationSession(transaction, userId, session);
     const device = await transaction.trustedDevice.findFirst({ where: { deviceKey, userId }, select: { deviceIdHash: true } });
     const revoked = await transaction.trustedDevice.updateMany({ where: { deviceKey, userId, status: "TRUSTED" }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
     if (!device || revoked.count !== 1) throw new SecurityMutationError();
     await revokeLoginChallenges(transaction, userId, device.deviceIdHash);
     await writeAuditLogInTransaction(transaction, { eventType: "TRUSTED_DEVICE_REVOKED", result: "SUCCESS", actorUserId: userId, resource: "identity.device", message: "Trusted device revoked.", metadata: { deviceRef: hashAuditIdentifier(deviceKey) } });
+    await assertSecurityMutationSessionCurrent(transaction, userId, session);
   });
 }
 

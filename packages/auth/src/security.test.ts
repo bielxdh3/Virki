@@ -7,6 +7,7 @@ import {
   canApproveAccountRecovery,
   consumeApprovedAccountRecovery,
   decryptTotpSecret,
+  disableTotp,
   encryptTotpSecret,
   getLoginCeremonyFailureStage,
   getApprovedAccountRecoveryExpiry,
@@ -26,7 +27,9 @@ import {
   lockActiveRecoveryAccountInTransaction,
   lockAndExpireSiblingAccountRecoveriesInTransaction,
   revokeUserAuthenticationProofsInTransaction,
+  revokeTrustedDevice,
   resolveLoginDeviceToken,
+  startTotpEnrollment,
   verifySecurityCode,
   verifyLoginRecoveryCode,
   verifyTotpCode
@@ -35,6 +38,168 @@ import {
 test("login ceremony diagnostics expose only fixed failure stages", () => {
   assert.equal(getLoginCeremonyFailureStage(new LoginCeremonyStartError("outbox-enqueue")), "outbox-enqueue");
   assert.equal(getLoginCeremonyFailureStage(new Error("private database detail")), undefined);
+});
+
+test("session-bound TOTP enrollment refuses revoked sessions and rechecks expiry after success audit", async (context) => {
+  const originalTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(originalTransaction);
+  const oldEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "test";
+  context.after(() => {
+    Object.defineProperty(prisma, "$transaction", originalTransaction);
+    if (oldEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = oldEnv;
+  });
+  let mode: "revoked" | "valid" | "expires-after-audit" = "revoked";
+  let sessionChecks = 0;
+  const writes: string[] = [];
+  const transaction = {
+    $queryRaw: async (query: TemplateStringsArray, ...params: unknown[]) => {
+      const statement = query.join("?");
+      if (statement.includes('FROM "Session"')) {
+        sessionChecks += 1;
+        assert.deepEqual(params, ["session-1", "user-1", "USER"]);
+        assert.match(statement, /"revokedAt" IS NULL[\s\S]*clock_timestamp\(\)/u);
+        return mode === "revoked" || (mode === "expires-after-audit" && sessionChecks === 2) ? [] : [{ id: "session-1" }];
+      }
+      assert.match(statement, /FROM "User"[\s\S]*FOR UPDATE/u);
+      return [{ id: "user-1" }];
+    },
+    totpFactor: {
+      findUnique: async () => null,
+      upsert: async () => { writes.push("totp-write"); return {}; }
+    },
+    trustedDevice: { updateMany: async () => { writes.push("device-invalidation"); return { count: 0 }; } },
+    deviceChallenge: { updateMany: async () => { writes.push("challenge-revocation"); return { count: 0 }; } },
+    auditLog: { create: async () => { writes.push("success-audit"); return {}; } }
+  };
+  Object.defineProperty(prisma, "$transaction", {
+    ...originalTransaction,
+    value: async (operation: (tx: never) => Promise<unknown>) => operation(transaction as never)
+  });
+  const bound = { id: "session-1", role: "USER" } as const;
+  await assert.rejects(startTotpEnrollment("user-1", "user@example.invalid", bound), SecurityMutationError);
+  assert.deepEqual(writes, [], "a revoked session cannot stage a factor write or success audit");
+  assert.equal(sessionChecks, 1);
+
+  mode = "valid";
+  sessionChecks = 0;
+  const enrollment = await startTotpEnrollment("user-1", "user@example.invalid", bound);
+  assert.match(enrollment.uri, /^otpauth:\/\/totp\//u);
+  assert.deepEqual(writes, ["device-invalidation", "challenge-revocation", "totp-write", "success-audit"]);
+  assert.equal(sessionChecks, 2, "session must be locked and checked again after audit");
+
+  mode = "expires-after-audit";
+  sessionChecks = 0;
+  writes.length = 0;
+  await assert.rejects(startTotpEnrollment("user-1", "user@example.invalid", bound), SecurityMutationError);
+  assert.deepEqual(writes, ["device-invalidation", "challenge-revocation", "totp-write", "success-audit"],
+    "the final session check must reject even after all writes were staged in the transaction");
+  assert.equal(sessionChecks, 2);
+});
+
+test("session-bound trusted-device revocation checks current actor session before and after audit", async (context) => {
+  const originalTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(originalTransaction);
+  context.after(() => Object.defineProperty(prisma, "$transaction", originalTransaction));
+  let sessionValid = false;
+  let sessionReads = 0;
+  const operations: string[] = [];
+  const transaction = {
+    $queryRaw: async (query: TemplateStringsArray, ...params: unknown[]) => {
+      const statement = query.join("?");
+      if (statement.includes('FROM "Session"')) {
+        sessionReads += 1;
+        assert.deepEqual(params, ["session-2", "user-2", "ADMIN"]);
+        return sessionValid ? [{ id: "session-2" }] : [];
+      }
+      assert.match(statement, /FROM "User"[\s\S]*FOR UPDATE/u);
+      assert.deepEqual(params, ["user-2", "ADMIN"]);
+      return [{ id: "user-2" }];
+    },
+    trustedDevice: {
+      findFirst: async () => ({ deviceIdHash: "device-hash" }),
+      updateMany: async () => { operations.push("revoke-device"); return { count: 1 }; }
+    },
+    deviceChallenge: { updateMany: async () => { operations.push("revoke-challenges"); return { count: 1 }; } },
+    auditLog: { create: async () => { operations.push("success-audit"); return {}; } }
+  };
+  Object.defineProperty(prisma, "$transaction", {
+    ...originalTransaction,
+    value: async (operation: (tx: never) => Promise<unknown>) => operation(transaction as never)
+  });
+  const args = ["user-2", "D".repeat(32), { id: "session-2", role: "ADMIN" }] as const;
+  await assert.rejects(revokeTrustedDevice(...args), SecurityMutationError);
+  assert.deepEqual(operations, []);
+  assert.equal(sessionReads, 1);
+
+  sessionValid = true;
+  sessionReads = 0;
+  await revokeTrustedDevice(...args);
+  assert.deepEqual(operations, ["revoke-device", "revoke-challenges", "success-audit"]);
+  assert.equal(sessionReads, 2);
+});
+
+test("TOTP disable accepts its own atomic session revocation but rejects expiry after the audit", async (context) => {
+  const originalTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(originalTransaction);
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "test";
+  context.after(() => {
+    Object.defineProperty(prisma, "$transaction", originalTransaction);
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  });
+  const now = new Date(0);
+  const factorCiphertext = encryptTotpSecret("JBSWY3DPEHPK3PXP", { NODE_ENV: "test" });
+  const actions: string[] = [];
+  let expireAfterAudit = false;
+  let sessionReads = 0;
+  const transaction = {
+    $queryRaw: async (query: TemplateStringsArray, ...params: unknown[]) => {
+      const statement = query.join("?");
+      if (statement.includes('FROM "Session"')) {
+        sessionReads += 1;
+        assert.deepEqual(params.slice(0, 3), ["session-disable", "user-disable", "USER"]);
+        if (sessionReads === 1) assert.match(statement, /"revokedAt" IS NULL[\s\S]*FOR UPDATE OF s/u);
+        if (sessionReads === 2) {
+          assert.deepEqual(params[3], now, "post-audit check must bind the own revocation timestamp");
+          assert.match(statement, /"revokedAt" = \(\? AT TIME ZONE 'UTC'\)[\s\S]*clock_timestamp\(\)/u);
+        }
+        return expireAfterAudit && sessionReads === 2 ? [] : [{ id: "session-disable" }];
+      }
+      if (statement.includes('FROM "User"')) return [{ id: "user-disable" }];
+      return [{ locked: true }]; // disposable mock for the security-proof limiter
+    },
+    loginRateLimit: { findUnique: async () => null, create: async () => ({}) },
+    totpFactor: {
+      findUnique: async () => ({ id: "totp-1", secretCiphertext: factorCiphertext, status: "ACTIVE", lastUsedStep: null }),
+      updateMany: async () => { actions.push("factor-revoked"); return { count: 1 }; }
+    },
+    user: { update: async () => ({}) },
+    recoveryCode: { deleteMany: async () => ({ count: 0 }) },
+    trustedDevice: { updateMany: async () => ({ count: 0 }) },
+    deviceChallenge: { updateMany: async () => ({ count: 0 }) },
+    securityElevation: { updateMany: async () => ({ count: 0 }) },
+    session: { updateMany: async () => { actions.push("session-self-revoked"); return { count: 1 }; } },
+    oidcArtifact: { deleteMany: async () => ({ count: 0 }) },
+    auditLog: { create: async () => { actions.push("success-audit"); return {}; } }
+  };
+  Object.defineProperty(prisma, "$transaction", {
+    ...originalTransaction,
+    value: async (operation: (tx: never) => Promise<unknown>) => operation(transaction as never)
+  });
+  const session = { id: "session-disable", role: "USER" } as const;
+  await disableTotp("user-disable", "282760", now, session);
+  assert.deepEqual(actions, ["factor-revoked", "session-self-revoked", "success-audit"]);
+  assert.equal(sessionReads, 2);
+
+  expireAfterAudit = true;
+  sessionReads = 0;
+  actions.length = 0;
+  await assert.rejects(disableTotp("user-disable", "282760", now, session), SecurityMutationError);
+  assert.deepEqual(actions, ["factor-revoked", "session-self-revoked", "success-audit"]);
+  assert.equal(sessionReads, 2);
 });
 
 test("TOTP secrets are encrypted and never returned from ciphertext", () => {
