@@ -74,6 +74,14 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
   assert.match(issuer, /VIRKI_RATE_LIMIT_HASH_SECRET:\s*\$\{VIRKI_RATE_LIMIT_HASH_SECRET:\?/u);
   assert.match(hub, /VIRKI_AUDIT_HASH_SECRET:\s*\$\{VIRKI_AUDIT_HASH_SECRET:\?/u);
   assert.match(hub, /VIRKI_CSRF_SIGNING_KEY:\s*\$\{VIRKI_CSRF_SIGNING_KEY:\?/u);
+  assert.match(hub, /VIRKI_EMAIL_TRANSPORT:\s*\$\{VIRKI_EMAIL_TRANSPORT:-\}/u,
+    "Hub needs only the non-secret enqueue transport mode");
+  assert.doesNotMatch(hub, /VIRKI_EMAIL_SMTP_HOST|VIRKI_EMAIL_SMTP_USER|VIRKI_EMAIL_SMTP_PASSWORD|VIRKI_EMAIL_FROM/u,
+    "SMTP provider configuration belongs exclusively to email-worker");
+  const emailWorker = serviceBlock(productionCompose, "email-worker");
+  for (const secret of ["VIRKI_EMAIL_SMTP_HOST", "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_FROM"]) {
+    assert.match(emailWorker, new RegExp(`^\\s+${secret}:`, "mu"));
+  }
   assert.doesNotMatch(productionCompose, /VIRKI_OIDC_SIGNING_JWKS:\s*\$\{/u);
   assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
 });

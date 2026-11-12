@@ -10,6 +10,7 @@ import {
   createSmtpEmailTransport,
   decryptEmailPayload,
   getEmailTransportStatus,
+  getEmailEnqueueStatus,
   isSmtpEmailTransportConfigured,
   getEmailProcessingLeaseExpiresAt,
   processNextEmailMessage,
@@ -50,6 +51,23 @@ test("production email is unavailable without a real transport or outbox key", (
     }),
     { state: "configured" }
   );
+});
+
+test("production Hub may enqueue with a scoped outbox key and SMTP mode, never SMTP credentials", () => {
+  const scopedHub = {
+    NODE_ENV: "production",
+    VIRKI_EMAIL_TRANSPORT: "smtp",
+    VIRKI_EMAIL_OUTBOX_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+  };
+  assert.deepEqual(getEmailEnqueueStatus(scopedHub), { state: "configured" });
+  assert.deepEqual(getEmailTransportStatus(scopedHub), { state: "unavailable", reason: "adapter-unavailable" },
+    "SMTP worker must not start from an enqueue-capable Hub environment");
+  assert.deepEqual(getEmailEnqueueStatus({ ...scopedHub, VIRKI_EMAIL_TRANSPORT: "" }),
+    { state: "unavailable", reason: "transport-missing" });
+  assert.deepEqual(getEmailEnqueueStatus({ ...scopedHub, VIRKI_EMAIL_TRANSPORT: "file" }),
+    { state: "unavailable", reason: "adapter-unavailable" });
+  assert.deepEqual(getEmailEnqueueStatus({ ...scopedHub, VIRKI_EMAIL_OUTBOX_KEY: "" }),
+    { state: "unavailable", reason: "outbox-key-missing" });
 });
 
 test("SMTP configuration is fail-closed without contacting the provider", () => {

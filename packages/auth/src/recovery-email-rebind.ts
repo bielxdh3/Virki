@@ -1,7 +1,7 @@
 import { Prisma, prisma } from "@virki/database";
 import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, writeAuditLogInTransaction } from "./index";
 import { isSingleMailboxAddress } from "./email-address";
-import { enqueueEmailMessageForClient, getEmailTransportStatus } from "./email";
+import { enqueueEmailMessageForClient, getEmailEnqueueStatus } from "./email";
 import {
   generateNumericCode, hashEmailAddress, hashSecurityCode,
   lockActiveRecoveryAccountInTransaction, verifySecurityCode
@@ -94,7 +94,7 @@ async function consumeRebindLimit(actor: RecoveryEmailRebindActor, stage: "start
 
 export async function startRecoveryEmailRebind(actor: RecoveryEmailRebindActor, proposedEmail: string): Promise<void> {
   const newEmail = normalizeNewRecoveryEmail(proposedEmail);
-  if (!newEmail || !isRecoveryEmailRebindSession(actor) || getEmailTransportStatus().state !== "configured") throw ERROR;
+  if (!newEmail || !isRecoveryEmailRebindSession(actor) || getEmailEnqueueStatus().state !== "configured") throw ERROR;
   await consumeRebindLimit(actor, "start", hashEmailAddress(newEmail));
   await prisma.$transaction(async (tx) => {
     const { user, session } = await requireBoundRecoverySession(tx, actor);

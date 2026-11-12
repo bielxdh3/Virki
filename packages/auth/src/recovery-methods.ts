@@ -4,7 +4,7 @@ import {
   generateAuthenticationOptions, verifyAuthenticationResponse
 } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
-import { enqueueEmailMessageForClient, getEmailTransportStatus, type EmailLocale } from "./email";
+import { enqueueEmailMessageForClient, getEmailEnqueueStatus, type EmailLocale } from "./email";
 import { isSingleMailboxAddress } from "./email-address";
 import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, isTrustedClientAddress, lockRateLimitIdentifierInTransaction, writeAuditLogInTransaction } from "./index";
 import {
@@ -507,7 +507,7 @@ export async function startRecoveryNewMailbox(
 ): Promise<void> {
   const newEmail = proposedEmail.trim().toLowerCase();
   if (!isRequestId(requestId) || !isRequestKey(key) || !isBrowserToken(browserToken) ||
-      !isSingleMailboxAddress(newEmail) || getEmailTransportStatus().state !== "configured") throw FAILURE;
+      !isSingleMailboxAddress(newEmail) || getEmailEnqueueStatus().state !== "configured") throw FAILURE;
   const preflight = await prisma.accountRecoveryRequest.findUnique({ where: recoveryWhere(requestId), select: replacementSelect });
   if (!validReplacement(preflight, role, key, browserToken, new Date())) throw FAILURE;
   await rateLimitReplacement(requestId, "start", hashEmailAddress(newEmail));

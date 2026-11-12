@@ -72,7 +72,11 @@ type StoredEmailPayload = {
   };
 };
 
-export function getEmailTransportStatus(
+/**
+ * Enqueue-only readiness for the Hub. SMTP credentials deliberately belong to
+ * the isolated worker, not the web process. This does not prove delivery.
+ */
+export function getEmailEnqueueStatus(
   env: NodeJS.ProcessEnv = process.env
 ): EmailTransportStatus {
   if (env.NODE_ENV === "production") {
@@ -84,10 +88,7 @@ export function getEmailTransportStatus(
       return { state: "unavailable", reason: "outbox-key-missing" };
     }
 
-    if (
-      env.VIRKI_EMAIL_TRANSPORT.trim().toLowerCase() !== "smtp" ||
-      !isSmtpEmailTransportConfigured(env)
-    ) {
+    if (env.VIRKI_EMAIL_TRANSPORT.trim().toLowerCase() !== "smtp") {
       return { state: "unavailable", reason: "adapter-unavailable" };
     }
 
@@ -98,6 +99,18 @@ export function getEmailTransportStatus(
     return { state: "unavailable", reason: "outbox-key-missing" };
   }
 
+  return { state: "configured" };
+}
+
+/** Worker-only readiness: requires the actual scoped SMTP configuration. */
+export function getEmailTransportStatus(
+  env: NodeJS.ProcessEnv = process.env
+): EmailTransportStatus {
+  const producer = getEmailEnqueueStatus(env);
+  if (producer.state !== "configured") return producer;
+  if (env.NODE_ENV === "production" && !isSmtpEmailTransportConfigured(env)) {
+    return { state: "unavailable", reason: "adapter-unavailable" };
+  }
   return { state: "configured" };
 }
 
