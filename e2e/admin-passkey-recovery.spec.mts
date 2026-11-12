@@ -514,71 +514,16 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     const replayPassword = `replayed-normal-admin-${randomUUID()}-password`;
     await stale.page.getByLabel("Nova senha", { exact: true }).fill(replayPassword);
 
-    // A separate cookie jar alone does not prevent React/App Router from
-    // unmounting an idle form after the winner consumes the request. Dispatch
-    // the real stale browser's Server Action POST now, hold it before network
-    // delivery, and forward it only after the winner is CONSUMED.
-    let releaseHeldReplay!: () => void;
-    const replayRelease = new Promise<void>(resolve => { releaseHeldReplay = resolve; });
-    type HeldPost = { url: string; method: string; body: string; headers: Record<string, string> };
-    let observeHeldReplay!: (post: HeldPost) => void;
-    const heldReplay = new Promise<HeldPost>(resolve => { observeHeldReplay = resolve; });
-    let forwardHeldReplay = false;
-    let heldPostCount = 0;
-    await stale.page.route("**/recover**", async route => {
-      const request = route.request();
-      if (request.method() !== "POST" || new URL(request.url()).origin !== hub ||
-          new URL(request.url()).pathname !== "/recover") {
-        await route.fallback();
-        return;
-      }
-      heldPostCount += 1;
-      if (heldPostCount !== 1) { await route.abort(); return; }
-      observeHeldReplay({ url: request.url(), method: request.method(),
-        body: request.postData() ?? "", headers: await request.allHeaders() });
-      await replayRelease;
-      // Hub requests MUST traverse the existing context-level route that
-      // attaches a signed, validated Cloudflare Access JWT. Continuing
-      // directly would bypass that route, creating a false-red HTTP403.
-      if (forwardHeldReplay) await route.fallback();
-      else await route.abort();
-    });
-    const staleClickOutcome = stale.page.getByRole("button", { name: "Concluir recuperação", exact: true })
-      .click({ noWaitAfter: true }).then(() => undefined, (error: unknown) => error);
-
+    // Preserve the genuine, hydrated stale browser form and its pre-existing
+    // capabilities. Do NOT keep a Playwright route or Chromium fetch parked
+    // during the winning action: some CI runs silently cancel that fetch before
+    // it ever reaches the application, making the old fixture intermittently
+    // time out without testing server-side replay rejection.
+    expect((await db.accountRecoveryRequest.findUniqueOrThrow({
+      where: { id: requestId }, select: { status: true }
+    })).status, "stale browser form must exist before winner consumption").toBe("APPROVED");
     const changedPassword = `new-normal-admin-${randomUUID()}-password`;
-    const replayCheckpoint = await (async () => {
-      try {
-      // A stalled/missing browser dispatch must fail closed promptly, not hold
-      // the stale route until the full 180s E2E timeout.
-      let arrivalTimer: ReturnType<typeof setTimeout> | undefined;
-      const post = await Promise.race([
-        heldReplay,
-        staleClickOutcome.then(error => {
-          if (error) throw error;
-          return heldReplay;
-        }),
-        new Promise<never>((_, reject) => {
-          arrivalTimer = setTimeout(() => reject(new Error("No real ADMIN replay Server Action POST arrived within 12s")), 12_000);
-        })
-      ]).finally(() => { if (arrivalTimer) clearTimeout(arrivalTimer); });
-      expect(post.method).toBe("POST");
-      expect(new URL(post.url).origin).toBe(hub);
-      expect(new URL(post.url).pathname).toBe("/recover");
-      expect(Boolean(post.headers["next-action"]), "the held POST must be the genuine hydrated React Server Action").toBe(true);
-      expect(post.body, "the held form must carry the original recovery request").toContain(requestId);
-      expect(post.body, "the held form must carry its own stale password").toContain(replayPassword);
-      expect(post.body, "the held form must contain page-issued CSRF rather than a fabricated request").toContain(staleCsrf);
-      if (post.headers.origin) expect(post.headers.origin).toBe(hub);
-      if (post.headers.referer) expect(new URL(post.headers.referer).origin).toBe(hub);
-      for (const original of originalCookies) {
-        expect(post.headers.cookie ?? "", `held POST must carry original ${original.name} capability`)
-          .toContain(`${original.name}=${original.value}`);
-      }
-      expect(heldPostCount, "only one browser-generated stale completion action may be dispatched").toBe(1);
-      expect((await db.accountRecoveryRequest.findUniqueOrThrow({ where: { id: requestId } })).status,
-        "held replay must dispatch before the winner's recovery is consumed").toBe("APPROVED");
-      await target.page.getByLabel("Nova senha", { exact: true }).fill(changedPassword);
+    await target.page.getByLabel("Nova senha", { exact: true }).fill(changedPassword);
     // A successful Server Action alone is insufficient: require a *new*
     // protected document GET, not a stale RSC update or a generic heading.
     const bootstrapDocument = target.page.waitForResponse(response => new URL(response.url()).origin === hub &&
@@ -596,56 +541,88 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
       select: { userId: true, tokenHash: true, revokedAt: true, expiresAt: true } });
     const updated = await db.user.findUniqueOrThrow({ where: { id: owner.id } });
     const administrative = await db.administrativeCredential.findUniqueOrThrow({ where: { userId: owner.id } });
-    // Capture the winner's durable baseline, then promptly release the held
-    // browser POST. A long string of extra crypto/DB assertions while paused
-    // can cause the real React request to be aborted before Playwright forwards
-    // it, falsely timing out instead of exercising server-side replay denial.
+    // Capture the winner's durable baseline BEFORE the stale browser submits
+    // anything, so that the replay cannot alter credentials or mint extra
+    // sessions/audit successes unnoticed.
     const sessionRowsBeforeReplay = await db.session.count({ where: { userId: owner.id } });
     const successfulConsumptionAudits = await db.auditLog.count({
       where: { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS" }
     });
+    // Next Server Action/RSC response headers are not guaranteed to expose
+    // the same request ID that the ingress forwarded to its action context.
+    // Require one NEW durable denial for the exact recovery-complete source
+    // across the single real browser POST, without accepting an unrelated
+    // pre-existing denial from the same disposable test.
+    const recoveryDenials = async () => (await db.auditLog.findMany({
+      where: {
+        eventType: "SECURITY_PROOF_REJECTED", result: "DENIED",
+        reason: "rejected", resource: "identity.security",
+        route: "/recover", method: "POST"
+      }, select: { id: true, requestId: true, metadata: true }
+    })).filter(row => row.metadata && typeof row.metadata === "object" &&
+      !Array.isArray(row.metadata) &&
+      (row.metadata as { source?: unknown }).source === "account-recovery-complete");
+    const denialBaseline = await recoveryDenials();
     const staleCookies = await stale.context.cookies(hub);
     for (const original of originalCookies) {
       expect(staleCookies.find(cookie => cookie.name === original.name)?.value).toBe(original.value);
     }
     expect(staleCookies.some(cookie => cookie.name === getSessionCookieName({ NODE_ENV: "development" }))).toBe(false);
-    // A canceled in-flight browser POST is a test FAILURE, never a replay
-    // denial. Report it promptly instead of mislabeling ECONNRESET as a
-    // mysterious 25-second missing response; never retry or fabricate a POST.
-    let onReplayRequestFailed!: (request: Request) => void;
+    // Register passive observers BEFORE the one real click; the existing
+    // context-level route injects a signed Cloudflare Access test assertion.
+    // No page.route, route.fetch, synthetic HTTP post, request replay or retry.
+    const isReplayPost = (request: Request) => {
+      const url = new URL(request.url());
+      return url.origin === hub && url.pathname === "/recover" &&
+        request.method() === "POST" && Boolean(request.headers()["next-action"]);
+    };
+    const observedPosts: Request[] = [];
+    const failedPosts: Request[] = [];
+    const onReplayRequest = (request: Request) => {
+      if (isReplayPost(request)) observedPosts.push(request);
+    };
+    let onReplayFailed!: (request: Request) => void;
     const failedReplay = new Promise<never>((_, reject) => {
-      onReplayRequestFailed = request => {
-        const target = new URL(request.url());
-        if (target.origin === hub && target.pathname === "/recover" &&
-            request.method() === "POST" &&
-            request.headers()["next-action"] === post.headers["next-action"] &&
-            request.postData() === post.body) {
-          reject(new Error("Actual stale ADMIN Server Action POST failed before a handled denial response."));
+      onReplayFailed = request => {
+        if (isReplayPost(request)) {
+          failedPosts.push(request);
+          reject(new Error("Real stale ADMIN browser POST failed before a handled denial response."));
         }
       };
     });
-    stale.page.on("requestfailed", onReplayRequestFailed);
-    const responsePending = stale.page.waitForResponse(response => new URL(response.url()).origin === hub &&
-      new URL(response.url()).pathname === "/recover" && response.request().method() === "POST" &&
-      Boolean(response.request().headers()["next-action"]), { timeout: 25_000 });
-    const replayResponsePending = Promise.race([responsePending, failedReplay])
-      .finally(() => stale.page.off("requestfailed", onReplayRequestFailed));
-    forwardHeldReplay = true;
-    return { updated, consumed, bootstrapSession, administrative,
-      heldAction: post.headers["next-action"], heldBody: post.body,
-      sessionRowsBeforeReplay, successfulConsumptionAudits, replayResponsePending };
-      } finally {
-        // Any failure in dispatch, proof checking or the winning path aborts
-        // the held POST. Never forward a stale password while still APPROVED.
-        releaseHeldReplay();
-      }
-    })();
-    const { updated, consumed, bootstrapSession, administrative, heldAction, heldBody,
-      sessionRowsBeforeReplay, successfulConsumptionAudits, replayResponsePending } = replayCheckpoint;
-    const replayResponse = await replayResponsePending;
-    // Re-run all independent positive winner proofs after releasing the stale
-    // POST, without weakening the pre-replay captured snapshots or the strict
-    // replay response/body/authorization/DB invariants below.
+    stale.page.on("request", onReplayRequest);
+    stale.page.on("requestfailed", onReplayFailed);
+    const responsePending = stale.page.waitForResponse(response => isReplayPost(response.request()),
+      { timeout: 25_000 });
+    const staleClickOutcome = stale.page.getByRole("button", { name: "Concluir recuperação", exact: true })
+      .click({ noWaitAfter: true }).then(() => undefined, (error: unknown) => error);
+    let replayResponse: Awaited<typeof responsePending>;
+    try {
+      replayResponse = await Promise.race([
+        responsePending, failedReplay,
+        staleClickOutcome.then(error => {
+          if (error) throw error;
+          return responsePending;
+        })
+      ]);
+    expect(observedPosts, "a genuine hydrated stale browser must issue exactly ONE Next action POST").toHaveLength(1);
+    const originalPost = observedPosts[0]!;
+    expect(replayResponse.request(), "the handled response must belong to the observed browser-issued POST").toBe(originalPost);
+    expect(originalPost.postDataBuffer()?.byteLength ?? 0, "browser-issued stale POST must contain real form data").toBeGreaterThan(0);
+    expect(originalPost.postData(), "replay must carry the original recovery request").toContain(requestId);
+    expect(originalPost.postData(), "replay must carry its own stale password").toContain(replayPassword);
+    expect(originalPost.postData(), "replay must carry the page-issued CSRF").toContain(staleCsrf);
+    const replayHeaders = await originalPost.allHeaders();
+    expect(Boolean(replayHeaders["next-action"]), "replay must invoke a real hydrated Next Server Action").toBe(true);
+    if (replayHeaders.origin) expect(replayHeaders.origin).toBe(hub);
+    if (replayHeaders.referer) expect(new URL(replayHeaders.referer).origin).toBe(hub);
+    for (const original of originalCookies) {
+      expect(replayHeaders.cookie ?? "", `replay must carry original ${original.name} capability`)
+        .toContain(`${original.name}=${original.value}`);
+    }
+    const deniedRequestId = await replayResponse.headerValue("x-virki-request-id");
+    expect(deniedRequestId, "actual Hub ingress must assign an opaque request ID to the browser POST")
+      .toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u);
     expect(bootstrapSession.userId).toBe(owner.id);
     expect(bootstrapSession.revokedAt).toBeNull();
     expect(bootstrapSession.expiresAt.getTime()).toBeGreaterThan(Date.now());
@@ -673,12 +650,18 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(replayResponse.status(), "403/500 is not a valid proof of one-time denial").toBeLessThan(400);
     expect(replayResponse.request().postDataBuffer()?.byteLength ?? 0,
       "the stale browser must submit the actual password completion form").toBeGreaterThan(0);
-    expect(replayResponse.request().postData(), "only the originally dispatched stale form may reach the server")
-      .toBe(heldBody);
-    expect(replayResponse.request().headers()["next-action"]).toBe(heldAction);
+    expect(replayResponse.request().postData(), "only the observed stale browser form may reach the server")
+      .toBe(originalPost.postData());
+    expect(replayResponse.request().headers()["next-action"]).toBe(replayHeaders["next-action"]);
     expect(replayResponse.request().postData()).toContain(requestId);
     expect(replayResponse.request().postData()).toContain(replayPassword);
     await expect(stale.page).toHaveURL(`${hub}/recover?requestId=${requestId}&error=1`);
+    const addedDenials = (await recoveryDenials()).filter(row =>
+      !denialBaseline.some(previous => previous.id === row.id));
+    expect(addedDenials, "this single real browser replay must persist exactly one NEW recovery-complete denial")
+      .toHaveLength(1);
+    expect(addedDenials[0]!.requestId, "durable denial must record an independently generated ingress UUID")
+      .toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u);
     const afterReplay = await db.user.findUniqueOrThrow({ where: { id: owner.id } });
     expect(afterReplay.email).toBe(updated.email);
     expect(afterReplay.emailNormalized).toBe(updated.emailNormalized);
@@ -708,6 +691,12 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: enrolled.id } })).revokedAt).not.toBeNull();
     expect(await db.auditLog.count({ where: { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS" } }),
       "replay must not record a second successful recovery consumption").toBe(successfulConsumptionAudits);
+    expect(observedPosts, "the completed browser flow must not dispatch a second Next action POST").toHaveLength(1);
+    expect(failedPosts, "the completed browser flow cannot hide an aborted Next action POST").toHaveLength(0);
+    } finally {
+      stale.page.off("request", onReplayRequest);
+      stale.page.off("requestfailed", onReplayFailed);
+    }
   } finally {
     await removeAuthenticator?.().catch(() => undefined);
     await Promise.allSettled(contexts.map(context => context.close()));
