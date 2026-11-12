@@ -7,6 +7,7 @@ import {
   confirmTotpEnrollment,
   disableTotp,
   hashDeviceToken,
+  hashRecoveryCode,
   regenerateRecoveryCodes,
   revokeTrustedDevice,
   SecurityMutationError,
@@ -66,20 +67,50 @@ for (const role of ["USER", "ADMIN"] as const) {
     assert.equal(await audits(user.id, "SECOND_FACTOR_ENROLLMENT_STARTED"), 1);
 
     const now = new Date();
+    await assert.rejects(
+      confirmTotpEnrollment(user.id, totpAt(first.secret, now), now, { ...session, role: role === "USER" ? "ADMIN" : "USER" }),
+      SecurityMutationError, "a role mismatch cannot activate TOTP"
+    );
+    assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id } })).status, "PENDING");
+    assert.equal(await prisma.recoveryCode.count({ where: { userId: user.id } }), 0);
+    assert.equal(await audits(user.id, "SECOND_FACTOR_ENROLLED"), 0);
     const recovery = await confirmTotpEnrollment(user.id, totpAt(first.secret, now), now, session);
     assert.equal(recovery.length, 10);
     assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id } })).status, "ACTIVE");
     assert.equal(await audits(user.id, "SECOND_FACTOR_ENROLLED"), 1);
+    const storedInitial = await prisma.recoveryCode.findMany({ where: { userId: user.id }, select: { codeHash: true } });
+    assert.deepEqual(new Set(storedInitial.map((row) => row.codeHash)), new Set(recovery.map(hashRecoveryCode)),
+      "the returned recovery codes must correspond to the actually persisted one-time hashes");
 
     // Future timestamps only advance the offline TOTP fixture, not PostgreSQL's
     // session clock. Both factors are still checked against a live DB session.
     const later = new Date(now.getTime() + 31_000);
+    await assert.rejects(
+      regenerateRecoveryCodes(user.id, totpAt(first.secret, later), later, { ...session, role: role === "USER" ? "ADMIN" : "USER" }),
+      SecurityMutationError, "a role mismatch cannot replace persisted recovery hashes"
+    );
+    assert.equal(await audits(user.id, "RECOVERY_CODES_REGENERATED"), 0);
+    assert.deepEqual(new Set((await prisma.recoveryCode.findMany({ where: { userId: user.id }, select: { codeHash: true } })).map((row) => row.codeHash)),
+      new Set(storedInitial.map((row) => row.codeHash)));
     const replacement = await regenerateRecoveryCodes(user.id, totpAt(first.secret, later), later, session);
     assert.equal(replacement.length, 10);
     assert.equal(replacement.some((code) => recovery.includes(code)), false);
     assert.equal(await audits(user.id, "RECOVERY_CODES_REGENERATED"), 1);
+    const storedRotated = await prisma.recoveryCode.findMany({ where: { userId: user.id }, select: { codeHash: true } });
+    assert.deepEqual(new Set(storedRotated.map((row) => row.codeHash)), new Set(replacement.map(hashRecoveryCode)));
+    assert.equal(storedRotated.some((row) => storedInitial.some((initial) => initial.codeHash === row.codeHash)), false,
+      "rotation must remove every old recovery hash from PostgreSQL");
 
-    const final = new Date(now.getTime() + 62_000);
+    // Three denied/allowed factor mutations consume the five-attempt budget;
+    // simulate the next valid 15-minute limiter window before the final pair.
+    const final = new Date(now.getTime() + 16 * 60_000);
+    await assert.rejects(
+      disableTotp(user.id, totpAt(first.secret, final), final, { ...session, role: role === "USER" ? "ADMIN" : "USER" }),
+      SecurityMutationError, "a role mismatch cannot disable TOTP or revoke live sessions"
+    );
+    assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id } })).status, "ACTIVE");
+    assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: session.id } })).revokedAt, null);
+    assert.equal(await audits(user.id, "SECOND_FACTOR_DISABLED"), 0);
     await disableTotp(user.id, totpAt(first.secret, final), final, session);
     assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id } })).status, "REVOKED");
     assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).secondFactorMethod, "EMAIL");
@@ -110,6 +141,13 @@ for (const role of ["USER", "ADMIN"] as const) {
       data: { revokedAt: null, expiresAt: new Date(Date.now() - 1_000) }
     });
     await assert.rejects(startTotpEnrollment(user.id, user.email, session), SecurityMutationError);
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { revokedAt: null, expiresAt: new Date(Date.now() + 60_000) }
+    });
+    await prisma.user.update({ where: { id: user.id }, data: { isActive: false } });
+    await assert.rejects(startTotpEnrollment(user.id, user.email, session), SecurityMutationError,
+      "a deactivated persisted account cannot mutate its factor through a valid session");
     assert.equal(await prisma.totpFactor.count({ where: { userId: user.id } }), 0);
     assert.equal(await audits(user.id, "SECOND_FACTOR_ENROLLMENT_STARTED"), 0);
   });
@@ -130,6 +168,46 @@ test("real PG: trusted device revoke is session/role scoped and commits one succ
   await revokeTrustedDevice(user.id, deviceKey, session);
   assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
   assert.equal(await audits(user.id, "TRUSTED_DEVICE_REVOKED"), 1);
+});
+
+test("real PG: revoked actor session rejects valid pending TOTP confirmation without factor or recovery writes", integrationOptions, async () => {
+  const { user, session } = await actor("USER");
+  const enrollment = await startTotpEnrollment(user.id, user.email, session);
+  const now = new Date();
+  await prisma.session.update({ where: { id: session.id }, data: { revokedAt: now } });
+  await assert.rejects(confirmTotpEnrollment(user.id, totpAt(enrollment.secret, now), now, session), SecurityMutationError);
+  assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id } })).status, "PENDING");
+  assert.equal(await prisma.recoveryCode.count({ where: { userId: user.id } }), 0);
+  assert.equal(await audits(user.id, "SECOND_FACTOR_ENROLLED"), 0);
+});
+
+test("real PG: expired actor session rejects valid recovery rotation, factor disable and device revoke without success audits", integrationOptions, async () => {
+  const { user, session } = await actor("ADMIN");
+  const enrollment = await startTotpEnrollment(user.id, user.email, session);
+  const initial = new Date();
+  const issued = await confirmTotpEnrollment(user.id, totpAt(enrollment.secret, initial), initial, session);
+  const recoveryHashes = (await prisma.recoveryCode.findMany({ where: { userId: user.id }, select: { codeHash: true } }))
+    .map((code) => code.codeHash).sort();
+  assert.equal(recoveryHashes.length, issued.length);
+  const deviceKey = randomBytes(32).toString("base64url");
+  const device = await prisma.trustedDevice.create({
+    data: { userId: user.id, deviceKey, deviceIdHash: hashDeviceToken(randomBytes(32).toString("base64url")) }
+  });
+  await prisma.session.update({
+    where: { id: session.id }, data: { expiresAt: new Date(Date.now() - 1_000) }
+  });
+  const next = new Date(initial.getTime() + 31_000);
+  await assert.rejects(regenerateRecoveryCodes(user.id, totpAt(enrollment.secret, next), next, session), SecurityMutationError);
+  await assert.rejects(disableTotp(user.id, totpAt(enrollment.secret, next), next, session), SecurityMutationError);
+  await assert.rejects(revokeTrustedDevice(user.id, deviceKey, session), SecurityMutationError);
+  const afterHashes = (await prisma.recoveryCode.findMany({ where: { userId: user.id }, select: { codeHash: true } }))
+    .map((code) => code.codeHash).sort();
+  assert.deepEqual(afterHashes, recoveryHashes);
+  assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: user.id } })).status, "ACTIVE");
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "TRUSTED");
+  assert.equal(await audits(user.id, "RECOVERY_CODES_REGENERATED"), 0);
+  assert.equal(await audits(user.id, "SECOND_FACTOR_DISABLED"), 0);
+  assert.equal(await audits(user.id, "TRUSTED_DEVICE_REVOKED"), 0);
 });
 
 test("real PG: TOTP enrollment rolls back factor and success audit when actor expires during an observed audit lock", integrationOptions, async () => {
