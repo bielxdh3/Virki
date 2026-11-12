@@ -26,7 +26,7 @@
     "test:integration:email-smtp-wire:contract": "node --test scripts/integration/email-smtp-wire.test.mjs",
     "test:integration:local": "node scripts/integration/disposable-postgres.mjs start && node scripts/integration/run.mjs --local",
     "test:e2e": "node scripts/e2e/run-e2e.mjs",
-    "test:e2e:production-hub": "cross-env VIRKI_E2E_HUB_MODE=production npm run test:e2e -- --grep=USER.TOTP.confirmation",
+    "test:e2e:production-hub": "cross-env VIRKI_E2E_HUB_MODE=production npm run test:e2e -- --grep=TOTP.setup.can.restart",
     "test:migration": "node scripts/migration-validation.mjs",
     "test:database:roles": "node --test scripts/lib/role-fixture-docker.test.mjs && node scripts/database-role-isolation.test.mjs",
     "test:backup:restore": "node scripts/backup-restore-validation.mjs",
