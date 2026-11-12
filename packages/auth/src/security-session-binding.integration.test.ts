@@ -142,7 +142,8 @@ test("real PG: TOTP enrollment rolls back factor and success audit when actor ex
   assert.equal(migrator.username, "virki_migrator");
   assert.equal(runtime.hostname, "127.0.0.1");
   assert.equal(runtime.username, "virki_runtime_test");
-  assert.equal(migrator.pathname, "/virki_e2e_test");
+  assert.ok(["/virki_e2e_test", "/virki_integration_test"].includes(migrator.pathname),
+    "the lock test must target a known disposable PostgreSQL fixture");
   assert.equal(runtime.pathname, migrator.pathname);
   assert.equal(runtime.port, migrator.port);
 
