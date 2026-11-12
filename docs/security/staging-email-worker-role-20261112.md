@@ -37,8 +37,12 @@ resulting verifier as `VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER` through the
 approved secret channel; the SQL `ALTER ROLE` receives only this verifier,
 never the plaintext password. **The verifier itself is still sensitive**:
 avoid recording stdout, shell transcripts, pipeline output, PostgreSQL DDL
-logs, or deployment diagnostics. Test the password-to-verifier pairing with
-actual authenticated SCRAM login on the approved isolated staging database.
+logs, or deployment diagnostics. Before provisioning, run the SAME local
+helper with `VIRKI_VERIFY_EMAIL_WORKER_SCRAM=operator-approved`, the intended
+password and verifier in the approved secret environment; it must emit only
+`SCRAM_VERIFIER_PAIR=VALID` or refuse. This preflight is not enforced inside
+the PostgreSQL shell image: a **separate authenticated SCRAM login** with the
+intended password is mandatory before starting the staging worker.
 
 Provisioning is a single PostgreSQL transaction. It creates/reconciles a
 login-only NOINHERIT role without elevated attributes, permits SELECT on
@@ -80,6 +84,17 @@ the independently controlled test inbox. An RFC Message-ID or a database
 SENT flag is not sufficient proof of receipt. Preserve rollback custody.
 
 ## Local evidence versus external acceptance
+
+An additional opt-in local proof at
+`scripts/staging-email-worker-full-schema.disposable.mjs` requires
+`VIRKI_STAGING_WORKER_FULL_SCHEMA_PROOF=local-disposable-only`. It uses cached,
+SHA-verified PG18 and Node22 images on a Docker internal network with **no
+published port and no egress**. The database is disposable/tmpfs; the runner
+loads all 19 committed Prisma migrations before provisioning `virki_email_worker`,
+then runs the actual Prisma Client against that role with a deterministic
+in-memory mail transport. It checks positive send/attempt persistence and
+negative identity data access, wrong SCRAM password, `PUBLIC` and `MAINTAIN`
+drift. It does **not** start the real SMTP worker process or prove Brevo delivery.
 
 The opt-in script scripts/staging-email-worker-role.disposable.mjs requires
 VIRKI_STAGING_WORKER_ROLE_PROOF=local-disposable-only on Windows. It pins

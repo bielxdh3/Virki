@@ -4,7 +4,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const read = (relative) =>
-  readFileSync(fileURLToPath(new URL("../" + relative, import.meta.url)), "utf8");
+  readFileSync(fileURLToPath(new URL("../" + relative, import.meta.url)), "utf8").replaceAll("\r\n", "\n");
 const override = read("infra/docker-compose.staging-email-worker.yml");
 const role = read("infra/postgres-init/11-virki-email-worker-role.sh");
 const prod = read("infra/docker-compose.prod.yml");

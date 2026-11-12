@@ -1,4 +1,4 @@
-import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
+import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 
 // PostgreSQL SCRAM verifier; the plaintext password must NEVER enter SQL.
 // The returned verifier is still sensitive: store it through the authorized
@@ -24,11 +24,31 @@ export function createEmailWorkerScramVerifier(password, salt = randomBytes(16))
   return `SCRAM-SHA-256$${iterations}:${salt.toString("base64")}$${storedKey.toString("base64")}:${serverKey.toString("base64")}`;
 }
 
+// Operator-side preflight: check the EXACT password/verifier pair without
+// exposing either secret to PostgreSQL DDL logs or command-line arguments.
+export function matchesEmailWorkerScramVerifier(password, verifier) {
+  if (typeof verifier !== "string") return false;
+  const match = /^SCRAM-SHA-256\$4096:([A-Za-z0-9+/]{22}==)\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$/u.exec(verifier);
+  if (!match) return false;
+  const salt = Buffer.from(match[1], "base64");
+  if (salt.length !== 16 || salt.toString("base64") !== match[1]) return false;
+  const expected = Buffer.from(createEmailWorkerScramVerifier(password, salt), "utf8");
+  const supplied = Buffer.from(verifier, "utf8");
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
 if (process.argv[1]?.replaceAll("\\", "/").endsWith("/staging-email-worker-scram.mjs")) {
-  if (process.env.VIRKI_GENERATE_EMAIL_WORKER_SCRAM !== "operator-approved") {
-    throw new Error("SCRAM generation requires the explicit operator-approved opt-in.");
-  }
+  const generate = process.env.VIRKI_GENERATE_EMAIL_WORKER_SCRAM === "operator-approved";
+  const verify = process.env.VIRKI_VERIFY_EMAIL_WORKER_SCRAM === "operator-approved";
+  if (generate === verify) throw new Error("Choose exactly one operator-approved SCRAM operation.");
   const operatorCredential = process.env.VIRKI_EMAIL_WORKER_DB_PASSWORD;
   if (!operatorCredential) throw new Error("Worker password must come from a controlled secret environment.");
-  process.stdout.write(createEmailWorkerScramVerifier(operatorCredential) + "\n");
+  if (verify) {
+    if (!matchesEmailWorkerScramVerifier(operatorCredential, process.env.VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER)) {
+      throw new Error("Worker SCRAM password/verifier mismatch; refuse provisioning.");
+    }
+    process.stdout.write("SCRAM_VERIFIER_PAIR=VALID\n");
+  } else {
+    process.stdout.write(createEmailWorkerScramVerifier(operatorCredential) + "\n");
+  }
 }
