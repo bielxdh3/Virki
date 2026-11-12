@@ -120,7 +120,16 @@ one UUID-labelled container, Docker network:none and tmpfs-only PGDATA.
 It tests real SQL grants and denials, transactional refusal before schema
 migrations, refusal of unsafe PUBLIC grants, idempotence, and positive
 worker-only SELECT/UPDATE/INSERT. It verifies exact container identity
-before deletion. No VM, external TCP, SSH, email provider, integration
+before deletion. It writes a private, fsynced UUID-owner receipt before a
+Docker create and demands exact Docker absence confirmation after removal.
+If create was issued without ACK, it only inspects/removes its own verified
+UUID-labelled container and still refuses `CLEANUP=PASS` because delayed
+completion requires operator reconciliation. Test-only
+`VIRKI_STAGING_WORKER_ROLE_FAILURE_MODE=simulate-create-ack-loss` models
+uncertain ACK without actually sending the create command; the mode
+`simulate-post-remove-inspect-error` exercises rejection of an inconclusive
+daemon inspection after removing the owned container. Neither models an
+actual daemon crash or late completion. No VM, external TCP, SSH, email provider, integration
 script or production host is involved.
 
 The minimal fixture and the full-schema/Prisma local fixture are distinct:

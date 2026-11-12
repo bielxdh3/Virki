@@ -4,11 +4,13 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { createEmailWorkerScramVerifier } from "./staging-email-worker-scram.mjs";
+import { assertPrivateLocalHolReceiptFile, ensurePrivateLocalHolReceiptDirectory,
+  privateLocalHolReceiptDirectory } from "./integration/local-worker-hol-receipt.mjs";
 
 if (process.env.VIRKI_STAGING_WORKER_ROLE_PROOF !== "local-disposable-only" ||
     process.platform !== "win32") {
@@ -23,7 +25,8 @@ const engine = "npipe:////./pipe/dockerDesktopLinuxEngine";
 const pgImage = "postgres:18.6-alpine3.24";
 const expectedImageId = "sha256:57b23a0326ee442e83b3d3fa027c5a148be0a392d7c91d1ca4e1e70131ee859a";
 const database = "virki_worker_role_test";
-const owner = randomUUID().replaceAll("-", "");
+const ownerUuid = randomUUID();
+const owner = ownerUuid.replaceAll("-", "");
 const name = `virki-worker-role-local-${owner}`;
 const secrets = {
   POSTGRES_PASSWORD: randomBytes(32).toString("hex"),
@@ -35,6 +38,43 @@ const secrets = {
 secrets.VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER = createEmailWorkerScramVerifier(secrets.VIRKI_EMAIL_WORKER_DB_PASSWORD);
 const processEnv = { ...process.env, ...secrets, DOCKER_HOST: engine };
 let containerId = null;
+let createIssued = false;
+let receiptFd = null;
+let receiptIdentity;
+let cleanupComplete = false;
+let cleanupActive = false;
+let proofSucceeded = false;
+const receiptPath = path.join(privateLocalHolReceiptDirectory(), `email-hol-${ownerUuid}.jsonl`);
+const failureMode = process.env.VIRKI_STAGING_WORKER_ROLE_FAILURE_MODE;
+if (failureMode !== undefined &&
+    !["simulate-create-ack-loss", "simulate-post-remove-inspect-error"].includes(failureMode)) {
+  throw new Error("Unknown local-only worker-role proof failure mode.");
+}
+
+function record(stage, id = null) {
+  if (receiptFd === null) {
+    ensurePrivateLocalHolReceiptDirectory();
+    receiptFd = openSync(receiptPath, "wx", 0o600);
+    receiptIdentity = fstatSync(receiptFd, { bigint: true });
+  }
+  ensurePrivateLocalHolReceiptDirectory();
+  assertPrivateLocalHolReceiptFile(receiptPath);
+  const disk = lstatSync(receiptPath, { bigint: true });
+  const opened = fstatSync(receiptFd, { bigint: true });
+  if (!disk.isFile() || disk.isSymbolicLink() || disk.nlink !== 1n ||
+      ["dev", "ino", "mode", "nlink"].some((key) =>
+        disk[key] !== receiptIdentity[key] || opened[key] !== receiptIdentity[key])) {
+    throw new Error("Worker role proof receipt identity changed.");
+  }
+  const bytes = Buffer.from(JSON.stringify({ stage, owner, name, id }) + "\n");
+  for (let written = 0; written < bytes.length;) {
+    const size = writeSync(receiptFd, bytes, written, bytes.length - written);
+    if (!Number.isSafeInteger(size) || size <= 0) throw new Error("Incomplete owner evidence receipt write.");
+    written += size;
+  }
+  fsyncSync(receiptFd);
+  assertPrivateLocalHolReceiptFile(receiptPath);
+}
 
 if (!existsSync(docker) || !existsSync(setup)) throw new Error("Pinned Docker CLI or reviewed role source absent.");
 
@@ -58,6 +98,81 @@ function inspectOwned() {
     '{{.Id}}|{{.Name}}|{{index .Config.Labels "virki.worker-role-test.owner"}}|{{.HostConfig.NetworkMode}}|{{.Image}}']).stdout;
   assert.equal(actual, `${containerId}|/${name}|${owner}|none|${expectedImageId}`,
     "refuse to operate on any container whose ID, image, label or isolation differs");
+}
+
+function requireExactDockerAbsence(result, target) {
+  assert.ok(target === name || /^[a-f0-9]{64}$/u.test(target), "Missing-resource target must be exact owned ID or name.");
+  // Docker Desktop 29.x may print [] on stdout together with a precise
+  // stderr No-such-object diagnostic for a removed container.
+  if (!Number.isInteger(result.status) || result.status <= 0 ||
+      (result.stdout !== "" && result.stdout !== "[]")) {
+    throw new Error("Docker absence not established; owner reconciliation required.");
+  }
+  const allowed = [
+    `Error: No such object: ${target}`,
+    `Error response from daemon: No such object: ${target}`,
+    `Error response from daemon: No such container: ${target}`,
+    `error: no such object: ${target}`
+  ];
+  if (!allowed.includes(result.stderr)) {
+    throw new Error("Docker inspection failed without exact missing-object proof; owner reconciliation required.");
+  }
+}
+
+function reconcileUnacknowledgedCreate() {
+  const observed = invoke(["inspect", name, "--format",
+    '{{.Id}}|{{.Name}}|{{index .Config.Labels "virki.worker-role-test.owner"}}|{{.HostConfig.NetworkMode}}|{{.Image}}'],
+  { allowFailure: true });
+  if (observed.status === 0) {
+    const [id, observedName, label, mode, image] = observed.stdout.split("|");
+    if (!/^[a-f0-9]{64}$/u.test(id) || observedName !== `/${name}` ||
+        label !== owner || mode !== "none" || image !== expectedImageId) {
+      throw new Error("Unacknowledged create identity does not belong to this proof; do not remove.");
+    }
+    containerId = id;
+    inspectOwned();
+    record("UNACKNOWLEDGED_CREATE_FOUND", containerId);
+    removeOwnedContainer();
+  } else {
+    requireExactDockerAbsence(observed, name);
+    record("UNACKNOWLEDGED_CREATE_NOT_FOUND");
+  }
+  // A command that was issued may complete AFTER this inspection. Even when
+  // cleanup removed a verified container, never publish a cleanup PASS.
+  throw new Error("Docker create was issued without a verified ACK; late completion requires reconciliation.");
+}
+
+function removeOwnedContainer() {
+  inspectOwned();
+  record("REMOVE_PENDING", containerId);
+  const removed = invoke(["rm", "--force", "--volumes", containerId], { timeout: 30_000 });
+  assert.equal(removed.stdout, containerId, "only the exact verified owned container may be removed");
+  const observed = failureMode === "simulate-post-remove-inspect-error"
+    ? { status: 1, stdout: "", stderr: "Error response from daemon: daemon unavailable" }
+    : invoke(["inspect", containerId], { allowFailure: true });
+  requireExactDockerAbsence(observed, containerId);
+  record("REMOVE_CONFIRMED", containerId);
+}
+
+function cleanup() {
+  if (cleanupComplete) return;
+  if (cleanupActive) throw new Error("Concurrent local cleanup; operator reconciliation required.");
+  cleanupActive = true;
+  try {
+    if (containerId) {
+      removeOwnedContainer();
+    } else if (createIssued) {
+      reconcileUnacknowledgedCreate();
+    }
+    record("CLEANUP_CONFIRMED");
+    cleanupComplete = true;
+    process.stdout.write("LOCAL_DISPOSABLE_WORKER_ROLE_CLEANUP=PASS\n");
+  } catch (error) {
+    try { record("RECONCILIATION_REQUIRED", containerId); } catch { /* preserve failure */ }
+    throw error;
+  } finally {
+    cleanupActive = false;
+  }
 }
 
 function psql(sql, options = {}) {
@@ -123,11 +238,18 @@ INSERT INTO public."EmailOutboxMessage"
   VALUES ('mail-1','idempotent-1','EMAIL_TWO_FACTOR','owned@example.invalid','pt-BR','{}'::jsonb);
 `;
 
+let primaryFailure;
+let cleanupFailure;
 try {
   const image = invoke(["image", "inspect", pgImage, "--format", "{{.Id}}"]).stdout;
   assert.equal(image, expectedImageId, "refuse registry pull or unpinned local database image");
   const version = invoke(["version", "--format", "{{.Server.Os}}|{{.Server.Arch}}"]).stdout;
   assert.equal(version, "linux|amd64", "requires pinned local Linux/amd64 Docker endpoint");
+  record("CREATE_PENDING");
+  createIssued = true;
+  if (failureMode === "simulate-create-ack-loss") {
+    throw new Error("Synthetic unacknowledged worker-role container creation (no actual create sent).");
+  }
   const created = invoke(["create", "--name", name, "--network", "none",
     "--label", `virki.worker-role-test.owner=${owner}`,
     "--security-opt", "no-new-privileges:true",
@@ -138,8 +260,12 @@ try {
     "--env", `POSTGRES_DB=${database}`, "--env", "POSTGRES_USER=virki_bootstrap",
     ...Object.keys(secrets).flatMap((key) => ["--env", key]),
     pgImage]);
+  if (!/^[a-f0-9]{64}$/u.test(created.stdout)) {
+    throw new Error("Docker create returned no verified immutable container ID; reconciliation required.");
+  }
   containerId = created.stdout;
   inspectOwned();
+  record("CREATE_ACK", containerId);
   invoke(["start", containerId]);
   let ready = false;
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -399,14 +525,25 @@ try {
   assert.notEqual(invalid.status, 0, "the worker credential cannot reuse the runtime password");
   assert.equal(psql('SELECT has_table_privilege(\'virki_email_worker\',\'public."User"\',\'SELECT\');').stdout, "f",
     "rejected credential rotation cannot broaden grants");
-  process.stdout.write("LOCAL_DISPOSABLE_WORKER_ROLE_PROOF=PASS (scoped grant, negative ACL, idempotence, no external network)\n");
+  proofSucceeded = true;
+} catch (error) {
+  primaryFailure = error;
 } finally {
-  if (containerId) {
-    inspectOwned();
-    const removed = invoke(["rm", "--force", containerId], { timeout: 30_000 });
-    assert.equal(removed.stdout, containerId, "only the exact verified owned container may be removed");
-    const missing = invoke(["inspect", containerId], { allowFailure: true });
-    assert.notEqual(missing.status, 0, "disposable container must be absent after cleanup");
-    process.stdout.write("LOCAL_DISPOSABLE_WORKER_ROLE_CLEANUP=PASS\n");
-  }
+  try { cleanup(); } catch (error) { cleanupFailure = error; }
+  try { if (receiptFd !== null) closeSync(receiptFd); }
+  catch (error) { cleanupFailure = cleanupFailure
+    ? new AggregateError([cleanupFailure, error], "Cleanup and private receipt close failed.")
+    : error; }
+  receiptFd = null;
 }
+if (primaryFailure && cleanupFailure) {
+  throw new AggregateError([primaryFailure, cleanupFailure],
+    `Worker-role proof failed (${primaryFailure instanceof Error ? primaryFailure.message : "unknown"}); cleanup also requires reconciliation.`,
+    { cause: primaryFailure });
+}
+if (primaryFailure) throw primaryFailure;
+if (cleanupFailure) throw cleanupFailure;
+if (!proofSucceeded || !cleanupComplete) {
+  throw new Error("Local worker-role proof cannot claim PASS without completed tests and owned Docker cleanup.");
+}
+process.stdout.write("LOCAL_DISPOSABLE_WORKER_ROLE_PROOF=PASS (scoped grant, negative ACL, idempotence, no external network)\n");

@@ -75,6 +75,16 @@ test("disposable SQL proof is opt-in, network-none and cleans verified owned Doc
   assert.ok(proof.includes("virki.worker-role-test.owner"));
   assert.ok(proof.includes("refuse to operate on any container whose ID, image, label or isolation differs"));
   assert.ok(proof.includes("LOCAL_DISPOSABLE_WORKER_ROLE_CLEANUP=PASS"));
+  assert.ok(proof.includes('record("CREATE_PENDING")'),
+    "record owner intent before an ambiguous Docker create");
+  assert.ok(proof.includes("reconcileUnacknowledgedCreate"),
+    "resolve only exact UUID-owned resources after ambiguous create");
+  assert.ok(proof.includes("requireExactDockerAbsence"),
+    "a nonzero inspect by itself must not prove Docker cleanup");
+  assert.ok(proof.includes("simulate-post-remove-inspect-error"),
+    "prove a daemon inspection error cannot report cleanup PASS");
+  assert.equal(proof.includes("assert.notEqual(missing.status, 0"), false,
+    "ambiguous Docker inspection failure must never be accepted as resource absence");
   assert.ok(docs.includes("STAGING DELIVERY NO-GO"));
   assert.ok(docs.includes("Brevo provider receipt"));
 });
