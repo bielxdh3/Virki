@@ -386,6 +386,47 @@ test("service children receive only their E2E allowlist and required OS paths", 
   }, process.platform), "VIRKI_ADMIN_PASSKEYS_ENABLED"), false,
   "a disabled privileged feature must stay absent from the child environment");
 
+  // No ambient SMTP credential may cross the Hub boundary. Only an explicit
+  // test-owned production-build fixture may enqueue mailbox proof emails.
+  const ambientSmtp = {
+    ...source, VIRKI_EMAIL_TRANSPORT: "smtp",
+    VIRKI_EMAIL_SMTP_HOST: "production.example.invalid",
+    VIRKI_EMAIL_SMTP_USER: "production-secret@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "must-not-be-forwarded",
+    VIRKI_EMAIL_FROM: "production@example.invalid"
+  };
+  for (const mode of [undefined, "production"]) {
+    const child = buildServiceEnvironment("hub", {
+      ...ambientSmtp, ...(mode ? { VIRKI_E2E_HUB_MODE: mode } : {})
+    }, process.platform);
+    for (const key of ["VIRKI_EMAIL_TRANSPORT", "VIRKI_EMAIL_SMTP_HOST", "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_FROM"]) {
+      assert.equal(Object.hasOwn(child, key), false, `ambient ${key} must never reach Hub`);
+    }
+  }
+  const productionOutbox = buildServiceEnvironment("hub", {
+    ...ambientSmtp, VIRKI_E2E_HUB_MODE: "production",
+    VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE: "required"
+  }, process.platform);
+  assert.equal(productionOutbox.NODE_ENV, "production");
+  assert.equal(productionOutbox.VIRKI_EMAIL_TRANSPORT, "smtp");
+  assert.equal(productionOutbox.VIRKI_EMAIL_SMTP_HOST, "127.0.0.1");
+  assert.equal(productionOutbox.VIRKI_EMAIL_SMTP_PORT, "1");
+  assert.equal(productionOutbox.VIRKI_EMAIL_FROM, "browser-only@e2e.invalid");
+  assert.match(productionOutbox.VIRKI_EMAIL_SMTP_PASSWORD, /^[a-f0-9]{64}$/u);
+  assert.notEqual(productionOutbox.VIRKI_EMAIL_SMTP_PASSWORD, ambientSmtp.VIRKI_EMAIL_SMTP_PASSWORD);
+  assert.equal(Object.hasOwn(productionOutbox, "VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE"), false);
+  for (const change of [
+    { VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE: "true" },
+    { VIRKI_E2E_HUB_MODE: "development" },
+    { VIRKI_CORE_TEST_DATABASE_CONFIRM: "" },
+    { VIRKI_HUB_HOSTNAME: "production.example.invalid" }
+  ]) {
+    assert.throws(() => buildServiceEnvironment("hub", {
+      ...ambientSmtp, VIRKI_E2E_HUB_MODE: "production",
+      VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE: "required", ...change
+    }, process.platform), /Outbox-only SMTP fixture requires isolated/u);
+  }
+
   assert.throws(
     () => buildServiceEnvironment("hub", { ...source, VIRKI_CSRF_SIGNING_KEY: "invalid" }, process.platform),
     /configuration is incomplete/u,

@@ -189,7 +189,13 @@ const hubEnv = {
   ...(process.env.VIRKI_E2E_ADMIN_PASSKEYS === "true" && !productionHubMode
     ? { VIRKI_E2E_ADMIN_PASSKEYS: "true", VIRKI_ADMIN_PASSKEYS_ENABLED: "true" }
     : {}),
-  ...(process.env.VIRKI_E2E_HUB_MODE === "production" ? { NODE_ENV: "production", VIRKI_E2E_HUB_MODE: "production" } : {})
+  ...(process.env.VIRKI_E2E_HUB_MODE === "production" ? {
+    NODE_ENV: "production", VIRKI_E2E_HUB_MODE: "production",
+    // Intentionally non-delivering loopback configuration: browser tests prove
+    // the signed recovery->outbox path. The independent SMTP wire gate proves
+    // actual transport; no external staging inbox is asserted here.
+    VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE: "required"
+  } : {})
 };
 process.env.VIRKI_E2E_ACCESS_AUDIENCE = accessAudience;
 process.env.VIRKI_E2E_ACCESS_ISSUER = accessTeamDomain;

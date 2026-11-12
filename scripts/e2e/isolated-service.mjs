@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -62,6 +63,29 @@ export function buildServiceEnvironment(service, source = process.env, platform 
     throw new Error("Hub E2E configuration is incomplete.");
   }
   if (service === "hub") {
+    // The production-build browser test needs the positive approved-recovery
+    // outbox path, without importing any real SMTP credentials or connecting
+    // to an external relay. Port 1 is intentionally non-delivering: a separate
+    // physical SMTP wire gate proves STARTTLS, AUTH and delivery to localhost.
+    // This fixture does NOT attest real mailbox receipt or staging SMTP.
+    if (source.VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE !== undefined) {
+      if (source.VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE !== "required" ||
+          source.VIRKI_E2E_HUB_MODE !== "production" ||
+          source.VIRKI_HUB_HOSTNAME !== "hub.localhost" ||
+          source.VIRKI_PORTAL_HOSTNAME !== "portal.localhost" ||
+          source.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable") {
+        throw new Error("Outbox-only SMTP fixture requires isolated production-mode browser testing.");
+      }
+      Object.assign(result, {
+        VIRKI_EMAIL_TRANSPORT: "smtp",
+        VIRKI_EMAIL_SMTP_HOST: "127.0.0.1",
+        VIRKI_EMAIL_SMTP_PORT: "1",
+        VIRKI_EMAIL_SMTP_SECURE: "false",
+        VIRKI_EMAIL_SMTP_USER: "browser-only@e2e.invalid",
+        VIRKI_EMAIL_SMTP_PASSWORD: randomBytes(32).toString("hex"),
+        VIRKI_EMAIL_FROM: "browser-only@e2e.invalid"
+      });
+    }
     // Never forward an ambient privileged-passkey flag to the Hub. A narrowly
     // scoped development-only E2E opt-in is required in addition to the USER
     // passkey fixture; production-mode tests must not auto-enable this feature.
