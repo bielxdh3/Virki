@@ -8,6 +8,7 @@ set -eu
 : "${POSTGRES_USER:?POSTGRES_USER is required}"
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
 : "${VIRKI_EMAIL_WORKER_DB_PASSWORD:?VIRKI_EMAIL_WORKER_DB_PASSWORD is required}"
+: "${VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER:?Precomputed worker SCRAM verifier is required}"
 : "${VIRKI_RUNTIME_DB_PASSWORD:?VIRKI_RUNTIME_DB_PASSWORD is required}"
 : "${VIRKI_MIGRATOR_DB_PASSWORD:?VIRKI_MIGRATOR_DB_PASSWORD is required}"
 : "${VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD:?VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD is required}"
@@ -30,6 +31,11 @@ for other in "$POSTGRES_PASSWORD" "$VIRKI_RUNTIME_DB_PASSWORD" "$VIRKI_MIGRATOR_
 done
 
 export VIRKI_EMAIL_WORKER_DB_PASSWORD
+if ! printf '%s\n' "$VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER" | LC_ALL=C grep -Eq '^SCRAM-SHA-256\$4096:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$'; then
+  echo 'Invalid worker SCRAM verifier format.' >&2
+  exit 1
+fi
+export VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER
 # libpq PGHOSTADDR can override the destination even when --host specifies a
 # socket, and PGPORT/PGSERVICE/PGOPTIONS can also redirect or alter a session.
 # Start with a clean libpq environment, pin Unix socket + local port and never
@@ -42,7 +48,7 @@ unset PGSSLNEGOTIATION PGREQUIREPEER PGGSSENCMODE PGGSSDELEGATION PGKRBSRVNAME
 unset PGREQUIRESSL PGSSLCOMPRESSION PGLOADBALANCEHOSTS
 psql --no-psqlrc --no-password --host=/var/run/postgresql --port=5432 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 <<'SQL'
 \getenv database_name POSTGRES_DB
-\getenv worker_password VIRKI_EMAIL_WORKER_DB_PASSWORD
+\getenv worker_verifier VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER
 
 DO $$
 BEGIN
@@ -76,7 +82,9 @@ SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLIC
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'virki_email_worker')
 \gexec
 
-ALTER ROLE virki_email_worker LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'worker_password';
+-- Never expose the plaintext operator password to SQL or server DDL logs.
+-- A SCRAM verifier still requires secret-handling discipline.
+ALTER ROLE virki_email_worker LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'worker_verifier';
 
 DO $$
 DECLARE member record;
@@ -146,6 +154,7 @@ BEGIN
      OR has_table_privilege('virki_email_worker', 'public."EmailOutboxMessage"', 'TRUNCATE')
      OR has_table_privilege('virki_email_worker', 'public."EmailOutboxMessage"', 'REFERENCES')
      OR has_table_privilege('virki_email_worker', 'public."EmailOutboxMessage"', 'TRIGGER')
+     OR has_table_privilege('virki_email_worker', 'public."EmailOutboxMessage"', 'MAINTAIN')
      OR has_column_privilege('virki_email_worker', 'public."EmailOutboxMessage"', 'recipientEmail', 'UPDATE')
      OR has_column_privilege('virki_email_worker', 'public."EmailOutboxMessage"', 'payload', 'UPDATE')
      OR has_table_privilege('virki_email_worker', 'public."EmailDeliveryAttempt"', 'INSERT')
@@ -154,6 +163,28 @@ BEGIN
      OR has_table_privilege('virki_email_worker', 'public."EmailDeliveryAttempt"', 'TRUNCATE')
      OR has_table_privilege('virki_email_worker', 'public."EmailDeliveryAttempt"', 'REFERENCES')
      OR has_table_privilege('virki_email_worker', 'public."EmailDeliveryAttempt"', 'TRIGGER')
+     OR has_table_privilege('virki_email_worker', 'public."EmailDeliveryAttempt"', 'MAINTAIN')
+     OR EXISTS (
+       -- A grant on even an authorized worker column to PUBLIC grants other
+       -- database roles that capability. Effective worker-only checks miss it.
+       SELECT 1 FROM pg_class AS relation
+       JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+       CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,
+         acldefault('r', relation.relowner))) AS acl
+       WHERE namespace.nspname = 'public'
+         AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND acl.grantee = 0
+     )
+     OR EXISTS (
+       SELECT 1 FROM pg_class AS relation
+       JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+       JOIN pg_attribute AS attribute ON attribute.attrelid = relation.oid
+       CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
+       WHERE namespace.nspname = 'public'
+         AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND attribute.attnum > 0 AND NOT attribute.attisdropped
+         AND acl.grantee = 0
+     )
      OR EXISTS (
        SELECT 1
        FROM pg_class AS relation
@@ -169,6 +200,7 @@ BEGIN
            OR has_table_privilege('virki_email_worker', relation.oid, 'TRUNCATE')
            OR has_table_privilege('virki_email_worker', relation.oid, 'REFERENCES')
            OR has_table_privilege('virki_email_worker', relation.oid, 'TRIGGER')
+           OR has_table_privilege('virki_email_worker', relation.oid, 'MAINTAIN')
          )
      )
      OR EXISTS (
@@ -254,7 +286,8 @@ BEGIN
              OR has_table_privilege('virki_email_worker', relation.oid, 'DELETE')
              OR has_table_privilege('virki_email_worker', relation.oid, 'TRUNCATE')
              OR has_table_privilege('virki_email_worker', relation.oid, 'REFERENCES')
-             OR has_table_privilege('virki_email_worker', relation.oid, 'TRIGGER')))
+             OR has_table_privilege('virki_email_worker', relation.oid, 'TRIGGER')
+             OR has_table_privilege('virki_email_worker', relation.oid, 'MAINTAIN')))
           OR (relation.relkind = 'S'
            AND (has_sequence_privilege('virki_email_worker', relation.oid, 'USAGE')
              OR has_sequence_privilege('virki_email_worker', relation.oid, 'SELECT')

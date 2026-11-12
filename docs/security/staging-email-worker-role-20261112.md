@@ -29,6 +29,16 @@ It requires a unique 64-hex worker DB password, distinct from the
 bootstrap/runtime/migrator/audit-maintenance secrets. Credentials stay in
 the operator-owned secret mechanism; do not commit integration env files,
 put passwords in command arguments, or work around a blocked VM operation.
+The operator must first derive a fresh SCRAM-SHA-256 verifier on a trusted
+local Node runtime using `scripts/staging-email-worker-scram.mjs`, with
+`VIRKI_GENERATE_EMAIL_WORKER_SCRAM=operator-approved` and the password
+supplied **only through an approved secret environment**. Provide the
+resulting verifier as `VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER` through the
+approved secret channel; the SQL `ALTER ROLE` receives only this verifier,
+never the plaintext password. **The verifier itself is still sensitive**:
+avoid recording stdout, shell transcripts, pipeline output, PostgreSQL DDL
+logs, or deployment diagnostics. Test the password-to-verifier pairing with
+actual authenticated SCRAM login on the approved isolated staging database.
 
 Provisioning is a single PostgreSQL transaction. It creates/reconciles a
 login-only NOINHERIT role without elevated attributes, permits SELECT on
@@ -37,7 +47,8 @@ status/lease updates, and column-scoped attempt INSERT. It cannot enqueue,
 change recipients or ciphertext, rewrite attempt receipts, read User,
 Session or AuditLog, or create database/schema objects. Excess privileges
 inherited from PUBLIC — including TEMP, any other public data relation
-and sequences, column grants and protected security-schema functions — cause
+and sequences, any PUBLIC table/column grants even on allowed worker fields,
+and protected security-schema functions — cause
 rejection and rollback of the role reconciliation. The helper clears ambient
 libpq PG* connection settings, pins the local PostgreSQL Unix socket on port
 5432 and verifies the connected server is not TCP before role mutations.
@@ -50,6 +61,13 @@ It requires the separate variable VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL,
 without fallback to the Hub DATABASE_URL. The operator must independently
 verify the URL authenticates as virki_email_worker, targets the same isolated
 staging database used by Hub and has no production endpoint or identity.
+This manual override additionally requires the application worker's
+`VIRKI_EMAIL_WORKER_SCOPED_ROLE=required` gate. The worker checks the effective
+PostgreSQL privilege matrix at startup and before **each** outbox-processing
+iteration, stopping further sends when later `PUBLIC` grants widen the role.
+The check is not an atomic DDL barrier: a grant racing between a check and
+send still requires independent administrator monitoring and a frozen
+migration/permission-change window during staging acceptance.
 The normal production Compose and role settings deliberately remain
 unchanged until independently accepted and approved.
 

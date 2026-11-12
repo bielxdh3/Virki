@@ -4,10 +4,11 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { createEmailWorkerScramVerifier } from "./staging-email-worker-scram.mjs";
 
 if (process.env.VIRKI_STAGING_WORKER_ROLE_PROOF !== "local-disposable-only" ||
     process.platform !== "win32") {
@@ -31,6 +32,7 @@ const secrets = {
   VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD: randomBytes(32).toString("hex"),
   VIRKI_EMAIL_WORKER_DB_PASSWORD: randomBytes(32).toString("hex")
 };
+secrets.VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER = createEmailWorkerScramVerifier(secrets.VIRKI_EMAIL_WORKER_DB_PASSWORD);
 const processEnv = { ...process.env, ...secrets, DOCKER_HOST: engine };
 let containerId = null;
 
@@ -65,6 +67,20 @@ function psql(sql, options = {}) {
     "--quiet", "--tuples-only", "--no-align"], { ...options, input: sql });
 }
 
+const roleGuardSource = readFileSync(path.join(root, "packages", "auth", "src", "email-worker-role.ts"), "utf8");
+const guardMatch = roleGuardSource.match(/database\.\$queryRaw<Array<\{ allowed: boolean \}>>`([\s\S]+?)`;/u);
+assert.ok(guardMatch && !guardMatch[1].includes("${"), "the staging role guard must be static SQL");
+
+function workerSql(sql = guardMatch[1], operatorCredential = secrets.VIRKI_EMAIL_WORKER_DB_PASSWORD, allowFailure = false) {
+  inspectOwned();
+  return invoke(["exec", "--interactive", "--env", "PGPASSWORD", containerId,
+    "psql", "--no-psqlrc", "--no-password", "--host", "127.0.0.1",
+    "--username", "virki_email_worker", "--dbname", database, "--set", "ON_ERROR_STOP=1",
+    "--quiet", "--tuples-only", "--no-align"], {
+    env: { ...processEnv, PGPASSWORD: operatorCredential }, input: sql, allowFailure
+  });
+}
+
 function assertDenied(statement, message) {
   const outcome = psql(`SET ROLE virki_email_worker; ${statement}\n`, { allowFailure: true });
   assert.notEqual(outcome.status, 0, message);
@@ -97,6 +113,7 @@ CREATE TABLE public."EmailDeliveryAttempt" (
   "attemptedAt" timestamp NOT NULL DEFAULT now()
 );
 CREATE SCHEMA virki_security AUTHORIZATION virki_migrator;
+CREATE TABLE virki_security.role_probe (id text);
 CREATE FUNCTION virki_security.delete_expired_audit_logs() RETURNS integer
   LANGUAGE sql SECURITY DEFINER AS 'SELECT 0';
 REVOKE EXECUTE ON FUNCTION virki_security.delete_expired_audit_logs() FROM PUBLIC;
@@ -182,13 +199,32 @@ try {
   invoke(["exec", containerId, "sh", setupInContainer]);
   // Idempotence must not broaden permissions or break the required worker.
   invoke(["exec", containerId, "sh", setupInContainer]);
+  // initdb can install a local-loopback TRUST rule before the later host
+  // SCRAM rule. Force SCRAM at the FIRST matching rule in this own tmpfs-only
+  // database; a wrong-password rejection is meaningless against TRUST.
+  inspectOwned();
+  invoke(["exec", "--user", "postgres", containerId, "sed", "-i",
+    "1i host all all 127.0.0.1/32 scram-sha-256",
+    "/var/lib/postgresql/data/pgdata/pg_hba.conf"]);
+  assert.equal(psql("SELECT pg_reload_conf();").stdout, "t");
+  assert.equal(psql(`SELECT auth_method FROM pg_hba_file_rules
+    WHERE type='host' AND address='127.0.0.1' ORDER BY line_number LIMIT 1;`).stdout,
+  "scram-sha-256", "the local-loopback HBA must genuinely enforce SCRAM before password oracles");
+  assert.equal(workerSql("SELECT current_user;").stdout, "virki_email_worker",
+    "the generated SCRAM verifier must authenticate as the actual scoped worker using TCP SCRAM");
+  const wrongPassword = workerSql("SELECT 1;", randomBytes(32).toString("hex"), true);
+  assert.notEqual(wrongPassword.status, 0, "an unrelated password cannot authenticate as the worker");
+  assert.equal(workerSql().stdout, "t", "live runtime guard must approve the original scoped role");
   psql('GRANT SELECT ON public."User" TO PUBLIC;');
+  assert.equal(workerSql().stdout, "f", "runtime guard must reject PUBLIC identity access after provisioning");
   const publicDataLeak = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
   assert.notEqual(publicDataLeak.status, 0, "unexpected PUBLIC identity-table grants must stop role reconciliation");
   assert.match(publicDataLeak.stderr, /excess worker privileges/u);
   psql('REVOKE SELECT ON public."User" FROM PUBLIC;');
   invoke(["exec", containerId, "sh", setupInContainer]);
+  assert.equal(workerSql().stdout, "t", "runtime guard must recover once PUBLIC privileges are revoked");
   psql('GRANT USAGE ON SCHEMA virki_security TO PUBLIC; GRANT EXECUTE ON FUNCTION virki_security.delete_expired_audit_logs() TO PUBLIC;');
+  assert.equal(workerSql().stdout, "f", "runtime guard must reject PUBLIC security-schema access added after provisioning");
   assert.equal(psql(`SELECT has_schema_privilege('virki_email_worker','virki_security','USAGE')
     AND has_function_privilege('virki_email_worker','virki_security.delete_expired_audit_logs()','EXECUTE');`).stdout,
   "t", "protected audit deletion inherited-PUBLIC red oracle must be effective");
@@ -197,6 +233,71 @@ try {
   assert.match(publicAuditCapability.stderr, /excess worker privileges/u);
   psql('REVOKE USAGE ON SCHEMA virki_security FROM PUBLIC; REVOKE EXECUTE ON FUNCTION virki_security.delete_expired_audit_logs() FROM PUBLIC;');
   invoke(["exec", containerId, "sh", setupInContainer]);
+  assert.equal(workerSql().stdout, "t", "runtime guard must recover only after revoking dangerous grants");
+  for (const grantCase of [
+    {
+      grant: 'GRANT SELECT ON public."EmailOutboxMessage" TO PUBLIC;',
+      revoke: 'REVOKE SELECT ON public."EmailOutboxMessage" FROM PUBLIC;',
+      privilege: 'SELECT', column: null, relation: 'EmailOutboxMessage'
+    },
+    {
+      grant: 'GRANT UPDATE ("status") ON public."EmailOutboxMessage" TO PUBLIC;',
+      revoke: 'REVOKE UPDATE ("status") ON public."EmailOutboxMessage" FROM PUBLIC;',
+      privilege: 'UPDATE', column: 'status', relation: 'EmailOutboxMessage'
+    },
+    {
+      grant: 'GRANT INSERT ("messageId") ON public."EmailDeliveryAttempt" TO PUBLIC;',
+      revoke: 'REVOKE INSERT ("messageId") ON public."EmailDeliveryAttempt" FROM PUBLIC;',
+      privilege: 'INSERT', column: 'messageId', relation: 'EmailDeliveryAttempt'
+    }
+  ]) {
+    psql(grantCase.grant);
+    const check = grantCase.column === null
+      ? `has_table_privilege('virki_runtime','public."${grantCase.relation}"','${grantCase.privilege}')`
+      : `has_column_privilege('virki_runtime','public."${grantCase.relation}"','${grantCase.column}','${grantCase.privilege}')`;
+    assert.equal(psql(`SELECT ${check};`).stdout, "t",
+      "PUBLIC allowed-object grant must expose capability to an unrelated principal");
+    assert.equal(workerSql().stdout, "f", "runtime guard must reject PUBLIC grants even on worker-allowed objects");
+    const provision = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+    assert.notEqual(provision.status, 0, "role reconciliation must reject PUBLIC grants on allowed objects");
+    assert.match(provision.stderr, /excess worker privileges/u);
+    psql(grantCase.revoke);
+    invoke(["exec", containerId, "sh", setupInContainer]);
+    assert.equal(workerSql().stdout, "t", "worker must recover after the PUBLIC allowed-object grant is revoked");
+  }
+  for (const relation of ["User", "EmailOutboxMessage"]) {
+    psql(`GRANT MAINTAIN ON public."${relation}" TO virki_email_worker;`);
+    assert.equal(psql(`SELECT has_table_privilege('virki_email_worker', 'public."${relation}"', 'MAINTAIN');`).stdout,
+      "t", "PG18 MAINTAIN grant must be effective before testing its denial");
+    assert.equal(workerSql().stdout, "f", "MAINTAIN must not bypass runtime's exclusive privilege matrix");
+    invoke(["exec", containerId, "sh", setupInContainer]);
+    assert.equal(psql(`SELECT has_table_privilege('virki_email_worker', 'public."${relation}"', 'MAINTAIN');`).stdout,
+      "f", "provisioning must revoke direct MAINTAIN grants, including on worker-allowed tables");
+    assert.equal(workerSql().stdout, "t", "role must remain usable after removing stale MAINTAIN grant");
+  }
+  for (const protectedGrant of [
+    {
+      grant: 'GRANT MAINTAIN ON virki_security.role_probe TO virki_email_worker;',
+      revoke: 'REVOKE MAINTAIN ON virki_security.role_probe FROM virki_email_worker;',
+      check: "has_table_privilege('virki_email_worker','virki_security.role_probe','MAINTAIN')"
+    },
+    {
+      grant: 'GRANT SELECT (id) ON virki_security.role_probe TO virki_email_worker;',
+      revoke: 'REVOKE SELECT (id) ON virki_security.role_probe FROM virki_email_worker;',
+      check: "has_column_privilege('virki_email_worker','virki_security.role_probe','id','SELECT')"
+    }
+  ]) {
+    psql(protectedGrant.grant);
+    assert.equal(psql(`SELECT ${protectedGrant.check};`).stdout, "t",
+      "protected-schema grant must exist before attempting to prove its denial");
+    assert.equal(workerSql().stdout, "f", "runtime guard must reject latent protected-schema table or column capability");
+    const reconcile = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+    assert.notEqual(reconcile.status, 0, "provisioning must reject protected-schema direct capabilities");
+    assert.match(reconcile.stderr, /excess worker privileges/u);
+    psql(protectedGrant.revoke);
+    invoke(["exec", containerId, "sh", setupInContainer]);
+    assert.equal(workerSql().stdout, "t", "runtime guard must recover only after protected grant is revoked");
+  }
   psql('GRANT SELECT ("id") ON public."User" TO PUBLIC; GRANT INSERT ("id") ON public."EmailOutboxMessage" TO PUBLIC;');
   assert.equal(psql(`SELECT has_column_privilege('virki_email_worker','public."User"','id','SELECT')
     AND has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','id','INSERT');`).stdout,

@@ -6,3 +6,4 @@ services:
   email-worker:
     environment:
       DATABASE_URL: ${VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?isolated staging email-worker URL and role required}
+      VIRKI_EMAIL_WORKER_SCOPED_ROLE: required

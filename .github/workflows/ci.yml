@@ -172,7 +172,8 @@ jobs:
           bash -n scripts/production-server.sh
           # Static isolated staging worker-role contract; never starts worker or DB.
           bash -n infra/postgres-init/11-virki-email-worker-role.sh
-          node --test scripts/staging-email-worker-role.contract.test.mjs
+          node --test scripts/staging-email-worker-role.contract.test.mjs scripts/staging-email-worker-scram.test.mjs
+          npx --no-install tsx --test packages/auth/src/email-worker-role.test.ts
           node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/e2e/verify-passkey-browser-gate.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
 
       - name: Verify native machine-id inode race defenses as root
