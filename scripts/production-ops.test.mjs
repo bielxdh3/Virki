@@ -831,13 +831,83 @@ test("Virki staging is private, bounded, loopback-only, and does not start Tunne
   const stage = serverScript.slice(serverScript.indexOf("  stage)\n"), serverScript.indexOf("  first-admin-bootstrap)\n"));
   assert.match(stage, /verify_first_install_marker[\s\S]*?verify_first_install_volume[\s\S]*?assert_tunnel_stopped[\s\S]*?assert_staging_ports_available/u);
   assert.match(stage, /export PUBLIC_SITE_PORT=13000[\s\S]*?export HUB_PORT=13001/u);
-  assert.match(stage, /compose up --detach "\$\{application_services\[@\]\}"[\s\S]*?assert_revisions[\s\S]*?assert_loopback_ports[\s\S]*?assert_health/u);
+  assert.match(serverScript, /readonly staging_application_services=\(public-site hub oidc-issuer session-cleanup\)/u);
+  assert.match(stage, /assert_staging_mail_worker_stopped[\s\S]*?compose up --detach "\$\{staging_application_services\[@\]\}"[\s\S]*?assert_revisions "\$\{staging_application_services\[@\]\}"[\s\S]*?assert_loopback_ports[\s\S]*?assert_health[\s\S]*?assert_staging_mail_worker_stopped/u);
+  assert.doesNotMatch(stage, /compose up --detach "\$\{application_services\[@\]\}"/u);
   assert.doesNotMatch(stage, /compose up[^\n]*cloudflared/u);
+  const workerGate = serverScript.slice(serverScript.indexOf("assert_staging_mail_worker_stopped() {"), serverScript.indexOf("stop_stage_after_failure() {"));
+  assert.match(workerGate, /compose ps --all --quiet email-worker/u);
+  assert.match(workerGate, /docker inspect --format [^\n]*\.State\.Status[^\n]*\.State\.Running[^\n]*\.State\.Restarting/u);
+  assert.match(workerGate, /virki-prod\|email-worker\|created\|false\|false/u);
+  assert.match(workerGate, /virki-prod\|email-worker\|exited\|false\|false/u);
+  assert.doesNotMatch(workerGate, /--status running/u,
+    "checking running containers alone would miss a restart-policy worker in a restarting state");
+  assert.doesNotMatch(workerGate, /compose (?:up|start|run|stop) /u,
+    "worker readiness inspection must not mutate the worker");
   assert.ok(serverScript.includes('"127.0.0.1:$expected_port"'));
   const stageCleanup = serverScript.slice(serverScript.indexOf("stop_stage_after_failure() {"), serverScript.indexOf("is_valid_dns_hostname() {"));
-  assert.match(stageCleanup, /compose stop "\$\{application_services\[@\]\}"/u);
+  assert.match(stageCleanup, /compose stop "\$\{staging_application_services\[@\]\}"/u);
+  assert.doesNotMatch(stageCleanup, /compose stop "\$\{application_services\[@\]\}"/u,
+    "failed staging cannot stop a worker it never started or owned");
   assert.doesNotMatch(stageCleanup, /compose stop (?:postgres|cloudflared)/u);
   assert.doesNotMatch(stageCleanup, /cloudflared/u);
+});
+
+test("staging worker guard rejects actual running/restarting/unknown container states without touching Docker", {
+  skip: !existsSync(process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/bash")
+    ? "An isolated Bash parser is required to exercise the worker guard with stubbed commands."
+    : false
+}, () => {
+  const bashExecutable = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/bash";
+  const start = serverScript.indexOf("assert_staging_mail_worker_stopped() {");
+  const end = serverScript.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, "the exact source function must be extracted");
+  const sourceFunction = serverScript.slice(start, end + 3);
+  const fixture = `set -euo pipefail
+compose() {
+  [[ "$*" == 'ps --all --quiet email-worker' ]] || exit 98
+  [[ "\${STUB_COMPOSE_FAIL:-0}" == 0 ]] || return 1
+  printf '%s\\n' "\${STUB_WORKER_IDS:-}"
+}
+docker() {
+  [[ "$1" == inspect && "$2" == --format && "$#" == 4 ]] || exit 98
+  [[ "\${STUB_DOCKER_FAIL:-0}" == 0 ]] || return 1
+  if [[ "$4" == worker-safe ]]; then
+    printf '%s\\n' 'virki-prod|email-worker|exited|false|false'
+  else
+    printf '%s\\n' "\${STUB_DOCKER_IDENTITY:-}"
+  fi
+}
+fail() { printf '%s\\n' 'worker-gate-rejected' >&2; exit 79; }
+${sourceFunction}
+assert_staging_mail_worker_stopped
+`;
+  const check = (env, expectedStatus) => {
+    const child = spawnSync(bashExecutable, ["--noprofile", "--norc", "-s"], {
+      input: fixture,
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+      env: { ...process.env, PATH: "/__virki_no_external_commands__", ...env }
+    });
+    assert.equal(child.error, undefined, String(child.error));
+    assert.equal(child.status, expectedStatus, `unexpected worker-guard result: ${child.stderr}`);
+  };
+  check({}, 0);
+  check({ STUB_WORKER_IDS: "worker-safe" }, 0);
+  check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|created|false|false" }, 0);
+  for (const state of [
+    "virki-prod|email-worker|running|true|false",
+    "virki-prod|email-worker|restarting|true|true",
+    "virki-prod|email-worker|paused|true|false",
+    "virki-prod|email-worker|dead|false|false",
+    "another-project|email-worker|exited|false|false",
+    "virki-prod|hub|exited|false|false",
+    "garbage"
+  ]) check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_IDENTITY: state }, 79);
+  check({ STUB_WORKER_IDS: "worker-safe\nworker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|restarting|false|true" }, 79);
+  check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_FAIL: "1" }, 79);
+  check({ STUB_COMPOSE_FAIL: "1" }, 79);
 });
 
 test("production Compose uses the exact loaded runtime and migration image tags", () => {

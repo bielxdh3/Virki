@@ -49,6 +49,9 @@ readonly migration_directory='packages/database/prisma/migrations'
 readonly transition_migration_name='20260922090000_total_identity_security_rebaseline'
 readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @virki/database)
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
+# Staging cannot drain queued OTPs until an independent operator has approved
+# the SMTP relay, recipients, quota, and worker-specific database credentials.
+readonly staging_application_services=(public-site hub oidc-issuer session-cleanup)
 readonly state_changing_actions=' install-source cleanup-deploy-staging first-install first-install-recovery first-admin-rescue-prepare first-admin-rescue stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
 readonly -a legacy_transition_migrations=(
   20260624190000_initial_schema
@@ -248,7 +251,9 @@ compose_with_override() {
 
 assert_revisions() {
   local service container observed
-  for service in public-site hub oidc-issuer session-cleanup email-worker; do
+  local -a services=("${application_services[@]}")
+  if (($# > 0)); then services=("$@"); fi
+  for service in "${services[@]}"; do
     local -a containers=()
     mapfile -t containers < <(compose ps -q "$service")
     ((${#containers[@]} == 1)) || fail "Production service $service is not running exactly once."
@@ -629,12 +634,28 @@ assert_tunnel_stopped() {
   [[ -z "$running" ]] || fail 'Virki staging requires its Cloudflare Tunnel connector to remain stopped.'
 }
 
+assert_staging_mail_worker_stopped() {
+  local containers container observed
+  # Docker restart:unless-stopped may temporarily report "restarting" rather
+  # than "running". Enumerate ALL project worker containers and inspect each
+  # actual Docker state; none may be active or about to resume delivery.
+  containers=$(compose ps --all --quiet email-worker) || fail 'Could not enumerate staging mail-worker containers.'
+  while IFS= read -r container; do
+    [[ -z "$container" ]] && continue
+    observed=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}' "$container") || fail 'Could not inspect staging mail-worker state.'
+    case "$observed" in
+      'virki-prod|email-worker|created|false|false'|'virki-prod|email-worker|exited|false|false') ;;
+      *) fail 'Staging mail worker must remain stopped, not running, restarting or in an unknown state.' ;;
+    esac
+  done <<< "$containers"
+}
+
 stop_stage_after_failure() {
   local original_status=$1
   trap - EXIT
   set +e
-  compose stop "${application_services[@]}" >/dev/null 2>&1
-  printf '%s\n' 'Virki staging health check failed; only Virki application services were stopped. Database volume and Tunnel state were preserved.' >&2
+  compose stop "${staging_application_services[@]}" >/dev/null 2>&1
+  printf '%s\n' 'Virki staging health check failed; only explicitly staged application services were stopped. Database volume, mail-worker and Tunnel state were preserved.' >&2
   exit "$original_status"
 }
 
@@ -2127,18 +2148,22 @@ case "$action" in
     verify_first_install_volume
     assert_tunnel_stopped
     assert_staging_ports_available
+    # Do not implicitly stop an already-running worker; fail closed without
+    # changing its state so the operator can investigate the unexpected drain.
+    assert_staging_mail_worker_stopped
     export PUBLIC_SITE_PORT=13000
     export HUB_PORT=13001
     trap 'stop_stage_after_failure "$?"' EXIT
     compose up --detach postgres >/dev/null || fail 'Virki staging PostgreSQL could not be started.'
     wait_for_virki_postgres
-    compose up --detach "${application_services[@]}" >/dev/null || fail 'Virki staging application services could not be started.'
-    assert_revisions
+    compose up --detach "${staging_application_services[@]}" >/dev/null || fail 'Virki staging application services could not be started.'
+    assert_revisions "${staging_application_services[@]}"
     assert_loopback_ports
     assert_health
+    assert_staging_mail_worker_stopped
     assert_tunnel_stopped
     trap - EXIT
-    printf 'Virki staging is healthy on private loopback ports 13000 and 13001; Cloudflare Tunnel remains stopped.\n'
+    printf 'Virki staging is healthy on private loopback ports 13000 and 13001; Cloudflare Tunnel and mail-draining worker remain stopped.\n'
     ;;
   first-admin-bootstrap)
     assert_no_maintenance

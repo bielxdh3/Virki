@@ -186,6 +186,15 @@ test("production workers and database retain restart policy without published po
   assert.match(readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8"), /node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402/u);
 });
 
+test("staging application services cannot implicitly activate the email worker as a dependency", () => {
+  // Compose starts depends_on services even when the worker is omitted from
+  // the explicit `stage` list. Fence those accidental dependency edges too.
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup"]) {
+    assert.doesNotMatch(serviceBlock(productionCompose, service), /^\s+(?:email-worker:|- email-worker(?:\s|$))/mu,
+      `${service} must not make staging drain the unapproved mail outbox`);
+  }
+});
+
 test("runtime, migrator, and PostgreSQL bootstrap credentials stay separated", () => {
   const postgres = serviceBlock(productionCompose, "postgres");
   const developmentPostgres = serviceBlock(developmentCompose, "postgres");

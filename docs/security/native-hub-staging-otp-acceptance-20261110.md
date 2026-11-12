@@ -48,15 +48,20 @@ or approval of a production Access cutover.
 | Recovery safety | Old-email loss path tested without using third-party inbox access; independent ADMIN elevation and no self-review | BLOCK |
 | Monitoring | Redacted application security audit, queue status, SMTP attempts and externally observed events; no OTP/secret in logs | BLOCK |
 
-**Important existing limitation:** the normal deployment path starts the
-email worker before its final HTTP health checks. HTTP/port health does not
-prove the worker can deliver through SMTP, and rollback cannot retract an
-OTP already accepted by the relay. For staging, the authorized operator
-must enforce an independent **mail-worker-disabled first** procedure and a
-test-recipient, connectivity, account and rate-budget readiness gate before
-draining any outbox. Do **not** execute the generic production deployment
-script as an unreviewed staging provisioner. Do not send a diagnostic to an
-unapproved address. A non-production read-only preflight is not permission to
+**Mail-worker-disabled staging:** the source's `stage` action starts only
+`public-site`, `hub`, `oidc-issuer`, and `session-cleanup`; it explicitly
+refuses an already-running `email-worker` before and after health checks.
+It does **not** start, stop, or provision the worker, nor authorize SMTP.
+There is no implicit transition from staging health to mail delivery.
+The normal production `deploy`/`start`/`restart` paths still start the
+mail worker before final HTTP checks; those paths are **not** substitute
+staging procedures. HTTP/port health does not prove SMTP delivery, and
+rollback cannot retract an OTP already accepted by the relay. The operator
+must independently prove the worker-specific database role, relay TLS/AUTH,
+test-recipient allowlist, account and provider rate budget **before** any
+separately authorized mail drain. Do **not** execute the generic production
+deployment script as an unreviewed staging provisioner. Do not send a
+diagnostic to an unapproved address. A local preflight is not permission to
 send the first real OTP.
 
 The worker uses `VIRKI_EMAIL_MIN_SEND_INTERVAL_MS`, forwarded only to the
