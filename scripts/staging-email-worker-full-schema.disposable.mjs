@@ -50,6 +50,9 @@ let runnerId;
 let networkCreateStarted = false;
 let containerCreateStarted = false;
 let runnerCreateStarted = false;
+let networkCreateCommandIssued = false;
+let containerCreateCommandIssued = false;
+let runnerCreateCommandIssued = false;
 let receiptFd = null;
 let receiptIdentity;
 let cleanupComplete = false;
@@ -89,7 +92,7 @@ function requireLocalOnly() {
     throw new Error("Explicit local-only Windows staging worker proof is required.");
   }
   const injection = process.env.VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT;
-  if (injection !== undefined && injection !== "before-runner-create") {
+  if (injection !== undefined && !["before-runner-create", "simulate-runner-ack-loss"].includes(injection)) {
     throw new Error("Unknown local-only failure-injection mode.");
   }
   for (const [key, value] of Object.entries(process.env)) {
@@ -235,6 +238,9 @@ function cleanup() {
         runnerId = id;
       } else {
         assertOwnedResourceAbsent(found, "runner", runnerName);
+        if (runnerCreateCommandIssued) {
+          throw new Error("Runner create command was issued without an ACK; delayed creation remains possible, reconciliation required.");
+        }
         record("RUNNER_NOT_CREATED_CONFIRMED");
       }
       }
@@ -258,6 +264,9 @@ function cleanup() {
         containerId = id;
       } else {
         assertOwnedResourceAbsent(found, "database", name);
+        if (containerCreateCommandIssued) {
+          throw new Error("PostgreSQL create command was issued without an ACK; delayed creation remains possible, reconciliation required.");
+        }
         record("DATABASE_NOT_CREATED_CONFIRMED");
       }
       }
@@ -281,6 +290,9 @@ function cleanup() {
         networkId = id;
       } else {
         assertOwnedResourceAbsent(found, "network", networkName);
+        if (networkCreateCommandIssued) {
+          throw new Error("Docker network create command was issued without an ACK; delayed creation remains possible, reconciliation required.");
+        }
         record("NETWORK_NOT_CREATED_CONFIRMED");
       }
       }
@@ -336,12 +348,14 @@ async function main() {
     record("LOCAL_ADMISSION_CONFIRMED");
     record("NETWORK_CREATE_PENDING");
     networkCreateStarted = true;
+    networkCreateCommandIssued = true;
     networkId = invoke(["network", "create", "--internal", "--driver", "bridge",
       "--label", `${ownerLabel}=${owner}`, networkName]).stdout;
     checkNetwork();
     record("NETWORK_CREATE_ACK", networkId);
     record("DATABASE_CREATE_PENDING");
     containerCreateStarted = true;
+    containerCreateCommandIssued = true;
     containerId = invoke(["create", "--name", name, "--network", networkName,
       "--network-alias", "postgres", "--label", `${ownerLabel}=${owner}`,
       "--security-opt", "no-new-privileges:true",
@@ -370,6 +384,11 @@ async function main() {
     if (process.env.VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT === "before-runner-create") {
       throw new Error("Synthetic runner create failure before Docker command.");
     }
+    if (process.env.VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT === "simulate-runner-ack-loss") {
+      runnerCreateCommandIssued = true;
+      throw new Error("Synthetic unacknowledged runner creation; no real runner-create command sent.");
+    }
+    runnerCreateCommandIssued = true;
     runnerId = invoke(["create", "--name", runnerName, "--network", networkName,
       "--label", `${ownerLabel}=${owner}`, "--entrypoint", "/bin/sh",
       runnerImage, "-c", "sleep infinity"]).stdout;

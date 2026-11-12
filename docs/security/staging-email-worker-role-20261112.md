@@ -106,6 +106,12 @@ It must exit nonzero with the original injected error while still confirming
 `LOCAL_FULL_SCHEMA_WORKER_CLEANUP=PASS` for its own database and network;
 an inconclusive Docker inspection must instead require owner reconciliation.
 Do not enable injection for a successful proof or staging.
+The additional diagnostic mode `simulate-runner-ack-loss` models a create
+request with **unknown acknowledgement** (without actually creating a runner).
+It must fail nonzero with `RECONCILIATION_REQUIRED` and must **not** print
+`LOCAL_FULL_SCHEMA_WORKER_CLEANUP=PASS`: even an immediate exact-name
+`No such object` cannot exclude a delayed creation after a real request.
+The runner still attempts removal of its other known owned resources.
 
 The opt-in script scripts/staging-email-worker-role.disposable.mjs requires
 VIRKI_STAGING_WORKER_ROLE_PROOF=local-disposable-only on Windows. It pins
