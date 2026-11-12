@@ -64,6 +64,12 @@ const acceptedFindings = new Map([
   ["js/insufficient-password-hash|packages/auth/src/passkeys.ts|aa299375b7be0290:1|101", 1],
   ["js/clear-text-logging|scripts/oidc-node-disposable-postgres.mjs|a3ae442c044fad66:1|14", 1],
   ["js/insecure-temporary-file|infra/offline/trusted-host-entry.mjs|b02a714376336c8a:1|26", 1],
+  // Public exact-SHA hosted CodeQL 43136441828 attempt 2 (2026-11-12):
+  // two independently reviewed, non-authorizing test/preflight findings.
+  // Exact rule+path+line hash+column, count=1; NOT generic race/auth bypass
+  // suppressions. See docs/security/codeql-reviewed-public-20261112.md.
+  ["js/file-system-race|scripts/staging-otp-preflight.mjs|1a5be53b7e24b39c:1|5", 1],
+  ["js/user-controlled-bypass|scripts/integration/loopback-smtp-sink.mjs|a7bddb165db5ff66:1|4", 1],
 ]);
 
 function invalidSarif(message) {
