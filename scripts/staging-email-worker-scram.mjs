@@ -24,8 +24,9 @@ export function createEmailWorkerScramVerifier(password, salt = randomBytes(16))
   return `SCRAM-SHA-256$${iterations}:${salt.toString("base64")}$${storedKey.toString("base64")}:${serverKey.toString("base64")}`;
 }
 
-// Operator-side preflight: check the EXACT password/verifier pair without
-// exposing either secret to PostgreSQL DDL logs or command-line arguments.
+// Operator-side preflight for ONLY this generator's SCRAM 4096/16-byte format:
+// check the exact password/verifier pair without exposing either secret to
+// PostgreSQL DDL logs or command-line arguments. No arbitrary cost parameters.
 export function matchesEmailWorkerScramVerifier(password, verifier) {
   if (typeof verifier !== "string") return false;
   const match = /^SCRAM-SHA-256\$4096:([A-Za-z0-9+/]{22}==)\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$/u.exec(verifier);

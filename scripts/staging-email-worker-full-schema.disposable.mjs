@@ -88,8 +88,13 @@ function requireLocalOnly() {
       process.env.NODE_ENV === "production" || process.env.CI === "true") {
     throw new Error("Explicit local-only Windows staging worker proof is required.");
   }
+  const injection = process.env.VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT;
+  if (injection !== undefined && injection !== "before-runner-create") {
+    throw new Error("Unknown local-only failure-injection mode.");
+  }
   for (const [key, value] of Object.entries(process.env)) {
-    if (key === "VIRKI_STAGING_WORKER_FULL_SCHEMA_PROOF") continue;
+    if (key === "VIRKI_STAGING_WORKER_FULL_SCHEMA_PROOF" ||
+        key === "VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT") continue;
     if (value && (/^(VIRKI_|DOCKER_|DATABASE_URL$|MIGRATION_DATABASE_URL$|PG(?:HOST|PORT|USER|PASSWORD|SERVICE|DATABASE|OPTIONS)|GH_TOKEN$)/iu).test(key)) {
       throw new Error(`Inherited sensitive or connection setting ${key} is forbidden.`);
     }
@@ -191,7 +196,8 @@ function requireCopiedSource(source, destination) {
 // A failed inspect is NOT evidence of absence. Accept only Docker's known,
 // object-ID-specific missing diagnostics; daemon errors require reconciliation.
 function assertOwnedResourceAbsent(result, kind, id) {
-  assert.ok(hexId.test(id), "Missing-resource proof requires a pinned object ID");
+  const allowedName = kind === "network" ? networkName : kind === "runner" ? runnerName : name;
+  assert.ok(hexId.test(id) || id === allowedName, "Missing-resource proof requires a pinned ID or owned name");
   if (result.status === 0) throw new Error(`${kind} still exists after owned removal.`);
   const lines = `${result.stdout}\n${result.stderr}`.trim().split(/\r?\n/u)
     .map((line) => line.trim()).filter(Boolean);
@@ -212,9 +218,15 @@ function cleanup() {
   if (cleanupComplete) return;
   if (cleanupActive) throw new Error("Concurrent cleanup attempt; owner reconciliation required.");
   cleanupActive = true;
+  const errors = [];
+  const attempt = (operation) => {
+    try { operation(); }
+    catch (error) { errors.push(error); }
+  };
   try {
   if (runnerCreateStarted) {
-    if (!runnerId) {
+    attempt(() => {
+      if (!runnerId) {
       const found = invoke(["inspect", runnerName, "--format",
         `{{.Id}}|{{index .Config.Labels "${ownerLabel}"}}`], { allowFailure: true });
       if (found.status === 0) {
@@ -222,19 +234,22 @@ function cleanup() {
         if (!hexId.test(id) || identity !== owner) throw new Error("Runner ownership uncertain; no unsafe deletion.");
         runnerId = id;
       } else {
-        throw new Error("Unacknowledged runner creation cannot claim verified cleanup.");
+        assertOwnedResourceAbsent(found, "runner", runnerName);
+        record("RUNNER_NOT_CREATED_CONFIRMED");
       }
-    }
-    if (runnerId) {
+      }
+      if (runnerId) {
       checkRunner();
       record("RUNNER_REMOVE_PENDING", runnerId);
       invoke(["rm", "--force", "--volumes", runnerId]);
       assertOwnedResourceAbsent(invoke(["inspect", runnerId], { allowFailure: true }), "runner", runnerId);
       record("RUNNER_REMOVE_CONFIRMED", runnerId);
-    }
+      }
+    });
   }
   if (containerCreateStarted) {
-    if (!containerId) {
+    attempt(() => {
+      if (!containerId) {
       const found = invoke(["inspect", name, "--format",
         `{{.Id}}|{{index .Config.Labels "${ownerLabel}"}}`], { allowFailure: true });
       if (found.status === 0) {
@@ -242,19 +257,22 @@ function cleanup() {
         if (!hexId.test(id) || identity !== owner) throw new Error("Container ownership uncertain; no unsafe deletion.");
         containerId = id;
       } else {
-        throw new Error("Unacknowledged PostgreSQL creation cannot claim verified cleanup.");
+        assertOwnedResourceAbsent(found, "database", name);
+        record("DATABASE_NOT_CREATED_CONFIRMED");
       }
-    }
-    if (containerId) {
+      }
+      if (containerId) {
       checkContainer();
       record("DATABASE_REMOVE_PENDING", containerId);
       invoke(["rm", "--force", "--volumes", containerId]);
       assertOwnedResourceAbsent(invoke(["inspect", containerId], { allowFailure: true }), "database", containerId);
       record("DATABASE_REMOVE_CONFIRMED", containerId);
-    }
+      }
+    });
   }
   if (networkCreateStarted) {
-    if (!networkId) {
+    attempt(() => {
+      if (!networkId) {
       const found = invoke(["network", "inspect", networkName, "--format",
         `{{.Id}}|{{index .Labels "${ownerLabel}"}}`], { allowFailure: true });
       if (found.status === 0) {
@@ -262,17 +280,22 @@ function cleanup() {
         if (!hexId.test(id) || identity !== owner) throw new Error("Network ownership uncertain; no unsafe deletion.");
         networkId = id;
       } else {
-        throw new Error("Unacknowledged network creation cannot claim verified cleanup.");
+        assertOwnedResourceAbsent(found, "network", networkName);
+        record("NETWORK_NOT_CREATED_CONFIRMED");
       }
-    }
-    if (networkId) {
+      }
+      if (networkId) {
       checkNetwork();
       record("NETWORK_REMOVE_PENDING", networkId);
       invoke(["network", "rm", networkId]);
       assertOwnedResourceAbsent(invoke(["network", "inspect", networkId], { allowFailure: true }), "network", networkId);
       record("NETWORK_REMOVE_CONFIRMED", networkId);
-    }
+      }
+    });
   }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "Owned Docker cleanup incomplete; reconciliation required.");
+    }
     record("CLEANUP_CONFIRMED");
     cleanupComplete = true;
     process.stdout.write("LOCAL_FULL_SCHEMA_WORKER_CLEANUP=PASS\n");
@@ -307,6 +330,8 @@ async function main() {
   runnerSourceRevision, "Node runner must have the reviewed base revision");
   assert.equal(invoke(["version", "--format", "{{.Server.Os}}|{{.Server.Arch}}"]).stdout,
     "linux|amd64", "Only local Linux Docker engine accepted");
+  let primaryError;
+  let cleanupError;
   try {
     record("LOCAL_ADMISSION_CONFIRMED");
     record("NETWORK_CREATE_PENDING");
@@ -342,6 +367,9 @@ async function main() {
     checkContainer();
     record("RUNNER_CREATE_PENDING");
     runnerCreateStarted = true;
+    if (process.env.VIRKI_STAGING_WORKER_FULL_SCHEMA_FAIL_AT === "before-runner-create") {
+      throw new Error("Synthetic runner create failure before Docker command.");
+    }
     runnerId = invoke(["create", "--name", runnerName, "--network", networkName,
       "--label", `${ownerLabel}=${owner}`, "--entrypoint", "/bin/sh",
       runnerImage, "-c", "sleep infinity"]).stdout;
@@ -411,10 +439,25 @@ async function main() {
       VIRKI_EMAIL_OUTBOX_KEY: password(),
       VIRKI_STAGING_WORKER_FULL_SCHEMA_PROOF: "owned-internal-network"
     });
+  } catch (error) {
+    primaryError = error;
   } finally {
-    try { cleanup(); }
-    finally { if (receiptFd !== null) { closeSync(receiptFd); receiptFd = null; } }
+    try { cleanup(); } catch (error) { cleanupError = error; }
+    try {
+      if (receiptFd !== null) closeSync(receiptFd);
+    } catch (error) {
+      cleanupError = cleanupError
+        ? new AggregateError([cleanupError, error], "Cleanup and receipt close both failed.")
+        : error;
+    } finally { receiptFd = null; }
   }
+  if (primaryError && cleanupError) {
+    throw new AggregateError([primaryError, cleanupError],
+      `Local proof failed (${sanitize(primaryError instanceof Error ? primaryError.message : "unknown")}); Docker cleanup also requires reconciliation.`,
+      { cause: primaryError });
+  }
+  if (primaryError) throw primaryError;
+  if (cleanupError) throw cleanupError;
   if (interrupted) throw new Error("Interrupted run cannot claim PASS.");
   process.stdout.write("LOCAL_FULL_SCHEMA_WORKER_PRISMA=PASS (19 migrations, 3 real Prisma tests, SCRAM and ACL)\n");
 }
