@@ -174,15 +174,16 @@ function runInRunner(label, args, env, timeout = 180_000, user = null) {
   }
   // No subprocess credentials or verifier can be printed as raw values.
   if (label === "Prisma scoped worker") {
-    assert.match(result.stdout, /# tests 4(?:\r?\n|$)/u);
-    assert.match(result.stdout, /# pass 4(?:\r?\n|$)/u);
+    assert.match(result.stdout, /# tests 5(?:\r?\n|$)/u);
+    assert.match(result.stdout, /# pass 5(?:\r?\n|$)/u);
     assert.match(result.stdout, /# fail 0(?:\r?\n|$)/u);
     assert.match(result.stdout, /# skipped 0(?:\r?\n|$)/u);
     for (const required of [
       "true SCRAM login and actual Prisma scoped worker process one mail safely",
       "PUBLIC and MAINTAIN drift stop the scoped worker before another dispatch",
       "real scoped Prisma worker persists a failed delivery without privileged writes",
-      "actual scoped worker process sends over verified loopback STARTTLS AUTH only"
+      "actual scoped worker process sends over verified loopback STARTTLS AUTH only",
+      "two real scoped workers reconcile exhausted heads and send one OTP over STARTTLS"
     ]) {
       assert.equal(result.stdout.split(/\r?\n/u).filter((line) =>
         /^ok [0-9]+ - /u.test(line) && line.endsWith(required)).length, 1,
@@ -576,7 +577,7 @@ async function main() {
   if (primaryError) throw primaryError;
   if (cleanupError) throw cleanupError;
   if (interrupted) throw new Error("Interrupted run cannot claim PASS.");
-  process.stdout.write("LOCAL_FULL_SCHEMA_WORKER_PRISMA=PASS (19 migrations, 4 real Prisma tests, scoped SMTP STARTTLS AUTH and ACL)\n");
+  process.stdout.write("LOCAL_FULL_SCHEMA_WORKER_PRISMA=PASS (19 migrations, 5 real Prisma tests, two scoped SMTP STARTTLS workers and ACL)\n");
 }
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : "Full-schema proof failed");

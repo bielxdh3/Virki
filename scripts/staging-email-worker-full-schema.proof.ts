@@ -214,3 +214,161 @@ test("actual scoped worker process sends over verified loopback STARTTLS AUTH on
     if (sink) await sink.close();
   }
 });
+
+test("two real scoped workers reconcile exhausted heads and send one OTP over STARTTLS", async () => {
+  await assertScopedEmailWorkerRole(prisma);
+  // The preceding negative-transport test intentionally leaves a retryable
+  // delivery. Keep that owned fixture out of this independent one-OTP wire
+  // assertion, even when the host is slow enough for its retry clock to elapse.
+  const priorRetry = await runtime.emailOutboxMessage.updateMany({
+    where: { recipientEmail: "failed-proof@example.invalid", status: "RETRYABLE_FAILURE" },
+    data: { availableAt: new Date(Date.now() + 60 * 60_000) }
+  });
+  assert.equal(priorRetry.count, 1, "the earlier failed-delivery fixture must be explicitly isolated");
+  const sender = "wire-sender@integration.invalid";
+  const recipient = "dual-wire@integration.invalid";
+  const smtpUser = "smtp-wire@integration.invalid";
+  const smtpPassword = randomBytes(32).toString("hex");
+  const certificateDir = process.env.VIRKI_SCOPED_SMTP_CERT_DIR;
+  assert.equal(certificateDir, "/app/.virki-scoped-smtp");
+  const now = new Date();
+  const exhausted: string[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    const head = await runtime.emailOutboxMessage.create({ data: {
+      idempotencyKey: randomUUID(), kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: `dual-exhausted-${i}@integration.invalid`, locale: "en",
+      payload: { version: 1, publicValues: {} }, status: "PROCESSING",
+      attemptCount: 5, availableAt: new Date(0),
+      processingLeaseExpiresAt: new Date(now.getTime() - 60_000),
+      createdAt: new Date(i), updatedAt: new Date(i)
+    } });
+    exhausted.push(head.id);
+  }
+  const message = await enqueueEmailMessageForClient(runtime, {
+    idempotencyKey: randomUUID(), kind: "EMAIL_TWO_FACTOR", recipientEmail: recipient,
+    locale: "en", payload: { publicValues: {}, protectedValues: { code: "654321" } }
+  });
+  assert.equal(message.status, "QUEUED");
+  let sink: Awaited<ReturnType<typeof createLoopbackSmtpSink>> | undefined;
+  const workers: Array<ReturnType<typeof spawn>> = [];
+  let release!: () => void;
+  let holder: Promise<void> | undefined;
+  try {
+    sink = await createLoopbackSmtpSink({
+      certificate: readFileSync(path.join(certificateDir, "server.pem")),
+      privateKey: readFileSync(path.join(certificateDir, "server.key")),
+      username: smtpUser, password: smtpPassword, recipient
+    });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let lockReady!: () => void;
+    const ready = new Promise<void>((resolve) => { lockReady = resolve; });
+    holder = migrator.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('LOCK TABLE "EmailOutboxMessage" IN ACCESS EXCLUSIVE MODE');
+      lockReady();
+      await gate;
+    }, { timeout: 35_000 });
+    await Promise.race([
+      ready,
+      holder.then(() => { throw new Error("PostgreSQL lock holder ended before workers started"); })
+    ]);
+    const env = {
+      NODE_ENV: "test", DATABASE_URL: workerUrl.href,
+      VIRKI_EMAIL_WORKER_SCOPED_ROLE: "required",
+      VIRKI_EMAIL_OUTBOX_KEY: process.env.VIRKI_EMAIL_OUTBOX_KEY ?? "",
+      VIRKI_EMAIL_TRANSPORT: "smtp", VIRKI_EMAIL_SMTP_HOST: "127.0.0.1",
+      VIRKI_EMAIL_SMTP_PORT: String(sink.port), VIRKI_EMAIL_SMTP_SECURE: "false",
+      VIRKI_EMAIL_SMTP_USER: smtpUser, VIRKI_EMAIL_SMTP_PASSWORD: smtpPassword,
+      VIRKI_EMAIL_FROM: sender, NODE_EXTRA_CA_CERTS: path.join(certificateDir, "ca.pem"),
+      VIRKI_EMAIL_MIN_SEND_INTERVAL_MS: "250",
+      VIRKI_PORTAL_URL: "http://localhost:3000", VIRKI_HUB_URL: "http://localhost:3001",
+      PATH: "/usr/bin:/bin", LANG: "C"
+    };
+    for (let i = 0; i < 2; i += 1) {
+      workers.push(spawn(process.execPath,
+        ["node_modules/tsx/dist/cli.mjs", "packages/auth/src/email-worker.ts"],
+        { cwd: "/app", env, stdio: "ignore" }));
+    }
+    assert.ok(workers.every((worker) => worker.pid && worker.exitCode === null));
+    assert.notEqual(workers[0]?.pid, workers[1]?.pid, "two separate OS processes are required");
+    let blocked = 0;
+    let connected = 0;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const pids = await migrator.$queryRaw<Array<{ pid: number }>>`
+        SELECT DISTINCT locks.pid FROM pg_locks AS locks
+        JOIN pg_stat_activity AS activity ON activity.pid = locks.pid
+        WHERE locks.relation = 'public."EmailOutboxMessage"'::regclass
+          AND locks.mode = 'AccessShareLock' AND NOT locks.granted
+          AND activity.usename = 'virki_email_worker'
+      `;
+      blocked = new Set(pids.map((row) => row.pid)).size;
+      if (blocked >= 2) break;
+      [{ connected }] = await migrator.$queryRaw<Array<{ connected: number }>>`
+        SELECT count(*)::int AS connected FROM pg_stat_activity
+        WHERE usename = 'virki_email_worker'
+      `;
+      if (workers.some((worker) => worker.exitCode !== null)) {
+        throw new Error("A scoped worker exited before PostgreSQL contention");
+      }
+      await delay(40);
+    }
+    // A table lock establishes two real scoped processes attempting outbox
+    // reads at once. It does NOT prove they selected the same row or that
+    // one lost the row-level compare-and-swap; that separate PG oracle lives
+    // in email-worker-hol.integration.test.ts.
+    assert.ok(blocked >= 2,
+      `two real scoped workers must block on the PostgreSQL outbox table; observed=${blocked}; connected=${connected}; exits=${workers.map((worker) => worker.exitCode).join(",")}`);
+    release();
+    await holder;
+    holder = undefined;
+    const receipt = await sink.received;
+    assert.equal(receipt.code, "654321");
+    let sent: { status: string; attemptCount: number;
+      deliveryAttempts: Array<{ status: string; smtpHeaderMessageId: string | null }> } | null = null;
+    for (let retry = 0; retry < 80; retry += 1) {
+      sent = await runtime.emailOutboxMessage.findUnique({
+        where: { id: message.id }, include: { deliveryAttempts: true }
+      });
+      if (sent?.status === "SENT") break;
+      await delay(100);
+    }
+    assert.equal(sent?.status, "SENT");
+    assert.equal(sent?.attemptCount, 1);
+    assert.equal(sent?.deliveryAttempts.length, 1);
+    assert.equal(sent?.deliveryAttempts[0]?.status, "SENT");
+    assert.equal(sent?.deliveryAttempts[0]?.smtpHeaderMessageId, receipt.messageId);
+    const rows = await runtime.emailOutboxMessage.findMany({
+      where: { id: { in: exhausted } }, include: { deliveryAttempts: true }
+    });
+    assert.equal(rows.length, 3);
+    for (const row of rows) {
+      assert.equal(row.status, "TERMINAL_FAILURE");
+      assert.equal(row.attemptCount, 5);
+      assert.equal(row.deliveryAttempts.length, 1);
+      assert.equal(row.deliveryAttempts[0]?.status, "FAILED");
+    }
+    await delay(700);
+    assert.equal(workers.every((worker) => worker.exitCode === null && worker.signalCode === null),
+      true, "both actual scoped OS workers must survive the entire mail-drain cycle");
+    assert.deepEqual(sink.observations(), { accepted: 1, authenticated: 1, upgraded: 1 },
+      "two real processes may contend but must produce exactly one SMTP DATA and AUTH");
+    assert.equal(await runtime.emailDeliveryAttempt.count({ where: { messageId: message.id } }), 1);
+    await assertScopedEmailWorkerRole(prisma);
+  } finally {
+    if (release) release();
+    if (holder) await Promise.allSettled([holder]);
+    let workersReaped = true;
+    for (const worker of workers) {
+      if (worker.exitCode === null) {
+        const stopped = once(worker, "exit").then(() => true);
+        worker.kill("SIGTERM");
+        if (!await Promise.race([stopped, delay(2_000).then(() => false)])) {
+          worker.kill("SIGKILL");
+          if (!await Promise.race([stopped, delay(2_000).then(() => false)])) workersReaped = false;
+        }
+      }
+    }
+    if (sink) await sink.close();
+    assert.equal(workersReaped, true, "all owned child processes must exit after bounded cleanup");
+  }
+});
