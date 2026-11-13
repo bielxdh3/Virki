@@ -22,13 +22,14 @@ export function truncateRecoveryComment(value: string): string {
   return [...value].slice(0, 300).join("");
 }
 
-export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMethods, hasOtherActiveAdmin, initialMethod }: {
+export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMethods, hasOtherActiveAdmin, initialMethod, hasExistingBrowserRecovery = false }: {
   action: (formData: FormData) => void | Promise<void>;
   csrf: string;
   csrfFieldName: string;
   availableMethods: readonly RecoveryRequestMethod[];
   hasOtherActiveAdmin: boolean;
   initialMethod?: RecoveryRequestMethod;
+  hasExistingBrowserRecovery?: boolean;
 }) {
   const independent = independentMethods.filter(({ value }) => availableMethods.includes(value));
   const assisted = hasOtherActiveAdmin
@@ -56,6 +57,10 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
     {isAssisted ? <label>Comentário para análise (opcional, até 300 caracteres)
       <textarea name="comment" maxLength={600} value={comment} onChange={(event) => setComment(truncateRecoveryComment(event.target.value))} rows={3} />
       <small aria-live="polite">{[...comment].length}/300</small>
+    </label> : null}
+    {hasExistingBrowserRecovery ? <label>
+      <input type="checkbox" name="confirmRecoveryRestart" value="yes" />
+      Confirmo que quero substituir a recuperação anterior neste navegador e posso perder o progresso que ainda não foi concluído em outra aba.
     </label> : null}
     <button className="button-primary" type="submit" disabled={!canSubmit}>Solicitar recuperação</button>
     {independent.length + assisted.length === 0 ? <p className="muted" role="status">Nenhum método de recuperação está disponível neste momento.</p> : null}

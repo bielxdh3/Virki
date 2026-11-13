@@ -80,6 +80,11 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   const activeKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "";
   const activeBrowser = cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? "";
   const hasOpaquePair = Boolean(activeKey && activeBrowser);
+  // A second form POST is not consent to abandon another tab's in-flight
+  // recovery. Require a separate visible, affirmative acknowledgement before
+  // replacing ANY existing pair (real or synthetic); treating them alike also
+  // avoids making the pre-proof existence of an account observable.
+  const replaceConfirmed = read(formData, "confirmRecoveryRestart") === "yes";
   const existingPolicy = recoveryPolicyFromMethod(existingIntent?.method);
   const existing = existingIntent ? {
     requestId: existingIntent.requestId,
@@ -121,10 +126,10 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     requestKey: randomBytes(24).toString("base64url"),
     browserToken: randomBytes(32).toString("base64url")
   };
-  // A synthetic or otherwise unproven pair must not prevent a legitimate
-  // retry. Only a live, independently proven capability vetoes replacement;
-  // indeterminate database failures preserve the existing pair fail-closed.
-  if (!canRetain && !retentionUnavailable && !recoveredIntent) try {
+  // Synthetic/unproven requests can be retried only with explicit abandonment
+  // consent. Without it, even an HTTP response delayed across a different
+  // tab's just-committed TOTP proof cannot overwrite the original bearer pair.
+  if (!canRetain && !retentionUnavailable && !recoveredIntent && (!hasOpaquePair || replaceConfirmed)) try {
     // Enforce the role and method policy on the server; browser radios are never authoritative.
     if (!policy || !email ||
       (policy.adminReview ? formData.has("comment") && comment === null : formData.has("comment"))) throw new Error("Rejected.");
@@ -152,6 +157,11 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     restoreMultiMethodRecoveryIntent(cookieStore, recoveredIntent.requestId, recoveredIntent.method, recoveredIntent.expiresAt);
     clearRecoveryCandidateCookie(cookieStore);
     redirect(`/recover?requestId=${encodeURIComponent(recoveredIntent.requestId)}`);
+  }
+  if (hasOpaquePair && !replaceConfirmed) {
+    // This branch is identical for unproven real and synthetic pairs. It
+    // changes no capability cookie and creates no account-specific request.
+    redirect("/recover?restart=1");
   }
   setMultiMethodRecoveryCookies(cookieStore, recovery.requestKey, recovery.browserToken, recovery.requestId, method as RecoveryRequestMethod);
   clearRecoveryCandidateCookie(cookieStore);

@@ -18,6 +18,9 @@ if ($env:VIRKI_E2E_NATIVE_HUB -and $env:VIRKI_E2E_NATIVE_HUB -cne 'required') {
 if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required' -and $env:VIRKI_E2E_HUB_MODE -eq 'production') {
   throw 'Native Hub E2E cannot run under production Hub mode.'
 }
+if ($env:VIRKI_E2E_POSTGRES_MAJOR -and $env:VIRKI_E2E_POSTGRES_MAJOR -cne '18') {
+  throw 'Isolated browser PostgreSQL 18 requires the exact explicit opt-in.'
+}
 
 function Get-FileSha256([string]$LiteralPath) {
   $algorithm = [System.Security.Cryptography.SHA256]::Create()
@@ -142,6 +145,18 @@ $passwords = @{
   audit = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
   test = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
 }
+$requirePg18 = $env:VIRKI_E2E_POSTGRES_MAJOR -ceq '18'
+$postgresImage = if ($requirePg18) {
+  'postgres:18.6-alpine3.24@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395'
+} else {
+  'postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24'
+}
+$postgresTmpfs = if ($requirePg18) {
+  '/var/lib/postgresql:rw,noexec,nosuid,nodev,size=512m'
+} else {
+  '/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m'
+}
+$script:postgresVersionNum = $null
 $databaseUrl = {
   param([string]$User, [string]$Password, [string]$DatabaseHost)
   $builder = [System.UriBuilder]::new('postgresql', $DatabaseHost, 5432, '/virki_e2e_test')
@@ -496,10 +511,26 @@ try {
   $bootstrapNetworkName = Invoke-CreateOwnedDockerResource 'bootstrapNetwork' $bootstrapNetworkName @(
     'network', 'create', '--driver', 'bridge', '--label', $script:dockerOwnerLabel,
     $bootstrapNetworkName)
+  if ($requirePg18) {
+    # The optional PG18 image must already be present from the independently
+    # digest-verified local PG18 recovery runner; never implicitly resolve a
+    # mutable tag or pull an unreviewed database image during browser testing.
+    $imageInspection = @(Invoke-PinnedDocker image inspect --format '{{.Id}}|{{json .RepoDigests}}|{{.Os}}|{{.Architecture}}' $postgresImage 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $imageInspection.Count -ne 1) { throw 'Pinned PostgreSQL 18 image is not locally verified.' }
+    $fields = ([string]$imageInspection[0]).Trim().Split('|')
+    if ($fields.Count -ne 4 -or $fields[0] -cnotmatch '^sha256:[a-f0-9]{64}$' -or
+        $fields[2] -cne 'linux' -or $fields[3] -cne 'amd64') { throw 'Pinned PostgreSQL 18 image identity or platform is invalid.' }
+    try { $repoDigests = @($fields[1] | ConvertFrom-Json -ErrorAction Stop) }
+    catch { throw 'Pinned PostgreSQL 18 image registry digest is unavailable.' }
+    if ($repoDigests -notcontains 'postgres@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395' -and
+        $repoDigests -notcontains 'docker.io/library/postgres@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395') {
+      throw 'Pinned PostgreSQL 18 image registry digest mismatch.'
+    }
+  }
   $databaseName = Invoke-CreateOwnedDockerResource 'database' $databaseName @(
     'create', '--name', $databaseName, '--network', $networkName,
     '--network-alias', 'postgres', '--label', $script:dockerOwnerLabel,
-    '--tmpfs', '/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m',
+    '--tmpfs', $postgresTmpfs,
     '--health-cmd', 'pg_isready -h 127.0.0.1 -U virki_bootstrap -d virki_e2e_test',
     '--health-interval', '1s', '--health-timeout', '3s', '--health-retries', '90',
     '--env', 'POSTGRES_DB=virki_e2e_test', '--env', 'POSTGRES_USER=virki_bootstrap',
@@ -508,7 +539,7 @@ try {
     '--env', ("VIRKI_MIGRATOR_DB_PASSWORD=" + $passwords.migrator),
     '--env', ("VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD=" + $passwords.audit),
     '--env', ("VIRKI_E2E_DATABASE_PASSWORD=" + $passwords.test),
-    'postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24')
+    $postgresImage)
 
   Invoke-PinnedDocker cp (Join-Path $repoRoot 'infra/postgres-init/10-virki-database-roles.sh') ($databaseName + ':/docker-entrypoint-initdb.d/10-virki-database-roles.sh') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not copy the database role initializer.' }
@@ -529,6 +560,11 @@ try {
     Invoke-PinnedDocker logs $databaseName
     throw 'Disposable PostgreSQL did not become healthy within 90 seconds.'
   }
+  $script:postgresVersionNum = ([string](Invoke-PinnedDocker exec $databaseName psql -X --username virki_bootstrap --dbname virki_e2e_test --tuples-only --no-align --command 'SHOW server_version_num')).Trim()
+  if ($LASTEXITCODE -ne 0 -or $script:postgresVersionNum -cnotmatch $(if ($requirePg18) { '^18[0-9]{4}$' } else { '^17[0-9]{4}$' })) {
+    throw 'Disposable PostgreSQL runtime version differs from the pinned image major.'
+  }
+  Write-Output ('VERIFIED_DISPOSABLE_POSTGRES_VERSION_NUM=' + $script:postgresVersionNum)
 
   $runnerCreateArguments = @('create', '--name', $runnerName, '--network', $bootstrapNetworkName,
     '--label', $script:dockerOwnerLabel)
@@ -698,6 +734,7 @@ try {
     if ($env:VIRKI_E2E_PASSKEYS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_PASSKEYS=true') }
     if ($env:VIRKI_E2E_REQUIRE_RECOVERY -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_REQUIRE_RECOVERY=true') }
     if ($env:VIRKI_E2E_REQUIRE_ADMIN_PASSKEYS -eq 'true') { $e2eEnvironment += @('--env', 'VIRKI_E2E_REQUIRE_ADMIN_PASSKEYS=true') }
+    if ($requirePg18) { $e2eEnvironment += @('--env', 'VIRKI_E2E_POSTGRES_MAJOR=18') }
     if ($env:VIRKI_E2E_ADMIN_PASSKEYS -eq 'true') {
       if ($env:VIRKI_E2E_PASSKEYS -ne 'true' -or $env:VIRKI_E2E_HUB_MODE -eq 'production') {
         throw 'ADMIN passkey E2E requires explicit USER passkeys and a non-production Hub.'
@@ -738,6 +775,8 @@ try {
       playwrightVersion = $script:playwrightVersion
       browserRevision = $script:browserRevision
       browserVersion = $script:browserVersion
+      postgresImage = $postgresImage
+      postgresVersionNum = $script:postgresVersionNum
       dockerMutationJournal = [System.IO.Path]::GetFileName($dockerMutationJournalPath)
       dockerMutationUncertain = $script:dockerMutationUncertain
       stagedPatchSha256 = $script:stagedPatchSha256

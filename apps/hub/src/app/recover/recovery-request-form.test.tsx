@@ -5,7 +5,7 @@ import test from "node:test";
 import { recoveryMethodFromPolicy, recoveryPolicyFromMethod } from "./recovery-method-selection";
 import { RecoveryRequestForm, truncateRecoveryComment, type RecoveryRequestMethod } from "./recovery-request-form";
 
-function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdmin: boolean, initialMethod?: RecoveryRequestMethod): string {
+function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdmin: boolean, initialMethod?: RecoveryRequestMethod, hasExistingBrowserRecovery = false): string {
   const original = Object.getOwnPropertyDescriptor(globalThis, "React");
   Object.defineProperty(globalThis, "React", { configurable: true, value: React });
   try {
@@ -16,6 +16,7 @@ function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdm
       availableMethods={availableMethods}
       hasOtherActiveAdmin={hasOtherActiveAdmin}
       initialMethod={initialMethod}
+      hasExistingBrowserRecovery={hasExistingBrowserRecovery}
     />);
   } finally {
     if (original) Object.defineProperty(globalThis, "React", original);
@@ -42,6 +43,17 @@ test("an available different ADMIN allows a single-factor request and optional b
   assert.match(html, /name="comment" maxLength="600"/u);
   assert.match(html, /outro administrador ativo/u);
   assert.doesNotMatch(html, /value="PASSKEY_TOTP"/u);
+});
+
+test("the same explicit replacement acknowledgement appears for synthetic and real browser pairs only", () => {
+  const fresh = renderForm(["TOTP_EMAIL"], false, "TOTP_EMAIL", false);
+  const active = renderForm(["TOTP_EMAIL"], false, "TOTP_EMAIL", true);
+  assert.doesNotMatch(fresh, /confirmRecoveryRestart/u);
+  assert.match(active, /name="confirmRecoveryRestart" value="yes"/u);
+  assert.match(active, /substituir a recuperação anterior/u);
+  assert.match(active, /outra aba/u);
+  assert.match(active, /name="csrfToken" value="csrf-test"/u);
+  assert.match(active, /type="submit"/u);
 });
 
 test("review comment counts 300 Unicode characters including emoji, while truncating pasted excess", () => {

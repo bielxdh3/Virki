@@ -23,7 +23,7 @@ import { recoveryPolicyFromMethod } from "./recovery-method-selection";
 
 export const dynamic = "force-dynamic";
 
-export default async function RecoverPage({ searchParams }: { searchParams?: Promise<{ request?: string; requestId?: string; sent?: string; verified?: string; error?: string; switch?: string }> }) {
+export default async function RecoverPage({ searchParams }: { searchParams?: Promise<{ request?: string; requestId?: string; sent?: string; verified?: string; error?: string; switch?: string; restart?: string }> }) {
   const requestHeaders = await headers();
   const surface = getSurface(requestHeaders);
   if (surface !== "portal" && surface !== "hub" && !(surface === "local" && process.env.NODE_ENV !== "production")) forbidden();
@@ -113,9 +113,13 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
 
         {!legacyRequestKey && !params?.requestId ? <>
           <p>Se sua conta estiver apta à recuperação, confirme os fatores selecionados para definir uma nova senha.</p>
+          {params?.restart === "1" && requestKey && browserToken
+            ? <p role="status">A recuperação anterior foi preservada. Para iniciar outra solicitação, marque a confirmação de substituição abaixo.</p>
+            : null}
           <RecoveryRequestForm action={expectedRole === "ADMIN" ? requestAdministrativeRecoveryAction : requestRecoveryAction}
             csrf={expectedRole === "ADMIN" ? csrf.adminRequest : csrf.request} csrfFieldName={CSRF_FORM_FIELD_NAME}
-            availableMethods={availableMethods} hasOtherActiveAdmin={hasOtherActiveAdmin} />
+            availableMethods={availableMethods} hasOtherActiveAdmin={hasOtherActiveAdmin}
+            hasExistingBrowserRecovery={Boolean(requestKey && browserToken)} />
           {expectedRole === "ADMIN" ? <details>
             <summary>Recuperação administrativa anterior, por e-mail e aprovação</summary>
             <form className="form-stack" action={requestAdministrativeRecoveryAction}>

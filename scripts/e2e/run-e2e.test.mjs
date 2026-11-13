@@ -44,6 +44,43 @@ test("Windows runs browser E2E in isolated Linux Docker and carries filters as J
   assert.deepEqual(JSON.parse(command.environment.VIRKI_E2E_PLAYWRIGHT_ARGUMENTS_JSON), playwrightArguments);
 });
 
+test("optional PG18 Chromium fixture pins version, image digest, local-only identities and cleanup evidence", () => {
+  const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  assert.match(runner, /\$env:VIRKI_E2E_POSTGRES_MAJOR -cne '18'/u);
+  assert.match(runner, /postgres:18\.6-alpine3\.24@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395/u);
+  assert.match(runner, /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
+  assert.match(runner, /\$postgresTmpfs = if \(\$requirePg18\) \{/u);
+  assert.match(runner, /'\/var\/lib\/postgresql:rw,noexec,nosuid,nodev,size=512m'/u);
+  assert.match(runner, /VERIFIED_DISPOSABLE_POSTGRES_VERSION_NUM=/u);
+  assert.match(runner, /\$repoDigests -notcontains 'docker\.io\/library\/postgres@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395'/u);
+  assert.match(runner, /if \(\$requirePg18\) \{ \$e2eEnvironment \+= @\('--env', 'VIRKI_E2E_POSTGRES_MAJOR=18'\) \}/u);
+  assert.match(runner, /postgresVersionNum = \$script:postgresVersionNum/u);
+  assert.match(runner, /Invoke-OwnedDockerCleanup \$resourceKind/u);
+});
+
+test("invalid PG18 browser opt-in is rejected before local Docker observation", {
+  skip: process.platform !== "win32" && "Windows-only PowerShell admission guard",
+}, () => {
+  const script = resolve(scriptDirectory, "run-isolated-linux-docker.ps1");
+  for (const invalid of ["17", "true", "18 ", "18,17"]) {
+    const child = spawnSync("powershell.exe", [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, "-E2EOnly"
+    ], {
+      cwd: repositoryRoot, encoding: "utf8", timeout: 15_000,
+      env: {
+        ...process.env,
+        DOCKER_CONTEXT: "", DOCKER_HOST: "", DOCKER_CONFIG: "",
+        VIRKI_E2E_POSTGRES_MAJOR: invalid
+      }
+    });
+    assert.equal(child.error, undefined);
+    assert.notEqual(child.status, 0, invalid);
+    assert.match(child.stderr, /exact explicit opt-in/u);
+    assert.doesNotMatch(child.stdout, /ISOLATED_RUN_ID|SOURCE_HEAD|\[RESULT\]/u,
+      "invalid PostgreSQL major must fail before any Docker runtime probing");
+  }
+});
+
 test("native Hub E2E is explicitly opt-in, Hub-only and a mandatory non-skipping CI gate", () => {
   const config = readFileSync(resolve(repositoryRoot, "playwright.config.mts"), "utf8");
   const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");

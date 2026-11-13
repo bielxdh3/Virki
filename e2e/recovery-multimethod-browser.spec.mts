@@ -36,6 +36,20 @@ async function requireFixture(): Promise<{ fixture: Fixture; database: PrismaCli
   if (new URL(e2eDatabaseUrl).pathname !== "/virki_e2e_test") {
     throw new Error("Recovery browser tests require the dedicated E2E database name.");
   }
+  // When the local owner-admitted Windows runner requests PG18, verify the
+  // connected database version from the actual test client too; a runner
+  // manifest or environment flag alone must never attest a PG18 browser run.
+  if (process.env.VIRKI_E2E_POSTGRES_MAJOR === "18") {
+    const probe = new PrismaClient({ datasources: { db: { url: e2eDatabaseUrl } } });
+    try {
+      const version = await probe.$queryRaw<Array<{ version_num: number }>>`SELECT current_setting('server_version_num')::integer AS version_num`;
+      expect(version).toHaveLength(1);
+      expect(version[0]?.version_num).toBeGreaterThanOrEqual(180000);
+      expect(version[0]?.version_num).toBeLessThan(190000);
+    } finally {
+      await probe.$disconnect();
+    }
+  }
   const parsed: unknown = JSON.parse(await readFile(fixturePath, "utf8"));
   if (!parsed || typeof parsed !== "object") throw new Error("Missing E2E account fixture.");
   const value = parsed as Record<string, unknown>;
@@ -1188,10 +1202,52 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
       : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
     const originalCookies = (await real.context.cookies(portalUrl)).filter(cookie => names.includes(cookie.name));
     expect(originalCookies).toHaveLength(3);
+    // Deterministic same-browser two-tab race with no application test hook:
+    // finish the second POST on the wire but hold its HTTP response before
+    // the browser can apply Set-Cookie. Confirm TOTP in the first tab while
+    // the later restart response is withheld, then release it out of order.
+    const competingTab = await real.context.newPage();
+    await competingTab.goto(portalUrl + "/recover");
+    await competingTab.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+    await competingTab.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    let restartFetched = false;
+    let releaseRestart = () => {};
+    const heldRestart = new Promise<void>(resolve => { releaseRestart = resolve; });
+    await competingTab.route(/\/recover(?:\?.*)?$/u, async route => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch({ maxRedirects: 0 });
+      restartFetched = true;
+      await heldRestart;
+      await route.fulfill({ response });
+    });
+    const restartClick = competingTab.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
     const totpStage = real.page.locator('[aria-label="Aplicativo autenticador"]');
-    await totpStage.locator('input[name="code"]').fill(totpAt(secret));
-    await totpStage.getByRole("button", { name: "Confirmar", exact: true }).click();
-    await expect(totpStage).toContainText("Confirmado.");
+    try {
+      await expect.poll(() => restartFetched, {
+        timeout: 20_000, message: "second POST must finish server-side before TOTP proof"
+      }).toBe(true);
+      // Playwright's route.fetch() uses this context's cookie jar and applies
+      // the intercepted response's Set-Cookie early. Undo that harness effect
+      // so the browser retains the original cookies UNTIL route.fulfill().
+      // This restores the real-world wire ordering rather than masking the bug.
+      await real.context.addCookies(originalCookies);
+      for (const original of originalCookies) {
+        expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === original.name)?.value)
+          .toBe(original.value);
+      }
+      await totpStage.locator('input[name="code"]').fill(totpAt(secret));
+      await totpStage.getByRole("button", { name: "Confirmar", exact: true }).click();
+      await expect(totpStage).toContainText("Confirmado.");
+    } finally {
+      releaseRestart();
+    }
+    await restartClick;
+    for (const prior of originalCookies) {
+      const current = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+      expect(current?.value, "delayed restart response must not erase newly proven TOTP capability").toBe(prior.value);
+      expect(current?.expires, "no silent expiry extension across raced POSTs").toBe(prior.expires);
+    }
+    await competingTab.close();
     const partial = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: originalId } });
     expect(partial.status).toBe("PENDING");
     expect(partial.recoveryTotpVerifiedAt).not.toBeNull();
@@ -1338,6 +1394,19 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     await independent.page.goto(`${portalUrl}/recover`);
     await independent.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
     await independent.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    await independent.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    await expect(independent.page).toHaveURL(`${portalUrl}/recover?restart=1`);
+    await expect(independent.page.getByText("A recuperação anterior foi preservada.", { exact: false })).toBeVisible();
+    for (const prior of syntheticPair) {
+      expect((await independent.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name)?.value)
+        .toBe(prior.value);
+    }
+    // A legitimate typo correction remains possible after an affirmative
+    // browser-visible acknowledgement, without teaching the browser whether
+    // the previous attempt was synthetic or a real unproven request.
+    await independent.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+    await independent.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    await independent.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
     const syntheticRetry = independent.page.waitForResponse(response => response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/recover");
     await independent.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
@@ -1745,6 +1814,33 @@ test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal AD
     }
     expect((await hub.context.cookies(hubUrl)).filter((cookie) => cookie.name.includes("recovery") && cookie.value.length > 0),
       "merely viewing the ADMIN recovery form must not issue an authorizing recovery capability").toHaveLength(0);
+    // Hub-native/Access-gated ADMIN and public USER recovery must obey the
+    // same explicit-restart contract, including an unknown/synthetic account.
+    const syntheticAdminId = await startSelectedTotpEmail(hub.page, randomUUID() + "@e2e.invalid");
+    const hubOriginalCookies = (await hub.context.cookies(hubUrl)).filter((cookie) =>
+      cookie.name.includes("recovery") && Boolean(cookie.value));
+    expect(hubOriginalCookies).toHaveLength(3);
+    expect((await hub.context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery")))
+      .toHaveLength(0);
+    await hub.page.goto(hubUrl + "/recover");
+    await hub.page.getByLabel("E-mail da conta", { exact: true }).fill(randomUUID() + "@e2e.invalid");
+    await hub.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    await expect(hub.page).toHaveURL(hubUrl + "/recover?restart=1");
+    for (const prior of hubOriginalCookies) {
+      expect((await hub.context.cookies(hubUrl)).find((cookie) => cookie.name === prior.name)?.value)
+        .toBe(prior.value);
+    }
+    await hub.page.getByLabel("E-mail da conta", { exact: true }).fill(randomUUID() + "@e2e.invalid");
+    await hub.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    await hub.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
+    await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    await expect(hub.page).toHaveURL(/\/recover\?requestId=/u);
+    expect(new URL(hub.page.url()).searchParams.get("requestId")).not.toBe(syntheticAdminId);
+    for (const prior of hubOriginalCookies.filter((cookie) => !cookie.name.includes("intent"))) {
+      expect((await hub.context.cookies(hubUrl)).find((cookie) => cookie.name === prior.name)?.value)
+        .not.toBe(prior.value);
+    }
   } finally {
     await Promise.all(contexts.map((context) => context.close()));
     await database.$disconnect();
