@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { expect, test, type Browser, type BrowserContext, type Page, type Route } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page, type Response, type Route } from "@playwright/test";
 import { generateRegistrationOptions, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
@@ -177,6 +177,18 @@ async function submitUnconsentedRecoveryStartWire(page: Page, email: string, exp
         ? "the server must retain the original proven request, not initiate another"
         : "an unproven browser pair must not be replaced without consent by the real start action")
       .toBe(expectedId ? `/recover?requestId=${expectedId}` : "/recover?restart=1");
+    // Playwright exposes Expires but not Max-Age on stored cookies. Require
+    // that the server does not issue a replacement Set-Cookie for either bearer;
+    // even a same-value rewrite could silently renew the capability lifetime.
+    const setCookies = (await response.headersArray())
+      .filter(header => header.name.toLowerCase() === "set-cookie").map(header => header.value);
+    const bearerNames = productionMode
+      ? ["__Host-virki_recovery", "__Host-virki_recovery_browser"]
+      : ["virki_recovery_v2", "virki_recovery_browser"];
+    for (const name of bearerNames) {
+      expect(setCookies.some(header => header.startsWith(`${name}=`)),
+        `no-consent start must not reissue ${name} or reset its Max-Age`).toBe(false);
+    }
   } finally {
     await page.unroute(/\/recover(?:\?.*)?$/u, handler);
   }
@@ -1632,14 +1644,29 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     // the actual Next Server Action POST and require /restart=1, not a new ID.
     // This exercises the explicit no-consent guard, unlike proven TOTP cases
     // that are retained even when abandonment consent was supplied.
+    const originalRowBefore = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: originalId } });
+    expect(originalRowBefore.requestKeyHash).toBe(hashRecoveryRequestKey(originalCookies.find(c => c.name === names[0])!.value));
+    expect(originalRowBefore.recoveryBrowserHash).not.toBeNull();
+    const originalBearersBefore = (await real.context.cookies(portalUrl))
+      .filter(cookie => names.slice(0, 2).includes(cookie.name));
+    const outboxBefore = await database.emailOutboxMessage.count({
+      where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" }
+    });
     await submitUnconsentedRecoveryStartWire(independent.page, ownerEmail, null);
     for (const prior of syntheticPair) {
       const current = (await independent.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
-      expect(current?.value, "unconsented real start must not overwrite unproven bearer").toBe(prior.value);
-      expect(current?.expires, "unconsented real start must not extend bearer TTL").toBe(prior.expires);
+      expect(current, "unconsented real start must preserve the unproven bearer and all cookie attributes").toEqual(prior);
     }
     expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } }),
       "the unconsented start must not create an owner recovery row").toBe(1);
+    expect(await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: originalId } }),
+      "the refused POST must not change the original proof, capability binding or database expiry")
+      .toEqual(originalRowBefore);
+    expect((await real.context.cookies(portalUrl)).filter(cookie => names.slice(0, 2).includes(cookie.name)),
+      "another tab's refused POST must not rewrite the original browser's bearers").toEqual(originalBearersBefore);
+    expect(await database.emailOutboxMessage.count({
+      where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" }
+    }), "the refused POST must not issue an additional recovery message").toBe(outboxBefore);
     // A legitimate typo correction remains possible after an affirmative
     // browser-visible acknowledgement, without teaching the browser whether
     // the previous attempt was synthetic or a real unproven request.
@@ -2217,16 +2244,51 @@ test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal AD
         actualFormDataYes: input?.form ? new FormData(input.form).get("confirmRecoveryRestart") === "yes" : false
       };
     })).toEqual({ checked: true, actualFormDataYes: true });
-    const consentPost = hub.page.waitForResponse((response) => response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/recover", { timeout: 15_000 });
-    await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true })
-      .click({ noWaitAfter: true });
-    const submitted = await consentPost;
+    // The literal method suffix must authorize the acknowledged restart by
+    // itself: React can omit the separate checkbox field in an Action payload.
+    // Strip affirmative multipart consent while preserving method, CSRF and
+    // the real Hub/Access request, then prove the server rotates both bearers.
+    let interceptedConsent = 0;
+    let suffixOnWire = false;
+    let originalAffirmativeField = false;
+    let noConfirmationFieldOnWire = false;
+    const consentHandler = async (route: Route) => {
+      // Let the existing context handler attach the independently signed
+      // Cloudflare Access header after our wire mutation.
+      if (route.request().method() !== "POST") return route.fallback();
+      interceptedConsent += 1;
+      const original = route.request().postData() ?? "";
+      suffixOnWire = /name="(?:_\d+_)?method"\r?\n\r?\nTOTP_EMAIL:confirm-restart(?:\r?\n|$)/u.test(original);
+      originalAffirmativeField = /name="(?:_\d+_)?confirmRecoveryRestart"\r?\n\r?\nyes(?:\r?\n|$)/u.test(original);
+      const stripped = original.replace(/name="(?:_\d+_)?confirmRecoveryRestart"(?=\r?\n)/gu,
+        'name="ignoredConsentProbe"');
+      noConfirmationFieldOnWire = !/name="(?:_\d+_)?confirmRecoveryRestart"(?=\r?\n)/u.test(stripped);
+      await route.fallback({ postData: stripped });
+    };
+    await hub.page.route(/\/recover(?:\?.*)?$/u, consentHandler);
+    let submitted: Response;
+    try {
+      const consentPost = hub.page.waitForResponse((response) => response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/recover", { timeout: 15_000 });
+      await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true })
+        .click({ noWaitAfter: true });
+      submitted = await consentPost;
+    } finally {
+      await hub.page.unroute(/\/recover(?:\?.*)?$/u, consentHandler);
+    }
+    expect(interceptedConsent, "the real ADMIN start POST must be intercepted exactly once").toBe(1);
+    expect(suffixOnWire, "the selected method carries affirmative restart consent").toBe(true);
+    expect(originalAffirmativeField, "the original multipart POST includes the checkbox acknowledgement").toBe(true);
+    expect(noConfirmationFieldOnWire, "the server sees no multipart checkbox field, even by presence").toBe(true);
     expect(submitted.status(), "same-surface ADMIN restart must not be rejected by host/CSRF/Access")
       .toBeLessThan(400);
     const postedBody = submitted.request().postDataBuffer()?.toString("utf8") ?? "";
     expect(/name="(?:_\d+_)?method"\r?\n\r?\nTOTP_EMAIL:confirm-restart(?:\r?\n|$)/u.test(postedBody),
       "real ADMIN Server Action must receive the explicit method consent suffix").toBe(true);
+    const redirectHeader = submitted.headers()["x-action-redirect"] ?? submitted.headers()["location"] ?? "";
+    const redirectTarget = new URL(decodeURIComponent(redirectHeader.split(";")[0] ?? ""), hubUrl);
+    expect({ path: redirectTarget.pathname, queryKeys: [...redirectTarget.searchParams.keys()] },
+      "ADMIN restart must reach the real positive Server Action redirect").toEqual({ path: "/recover", queryKeys: ["requestId"] });
     const afterConsent = await hub.context.cookies(hubUrl);
     const changedByAction = hubOriginalCookies.filter(cookie => !cookie.name.includes("intent"))
       .every(cookie => {
