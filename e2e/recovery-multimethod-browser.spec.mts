@@ -2009,11 +2009,11 @@ test("USER modern proven recovery survives legacy link GET and POST until explic
   }
 });
 
-test("USER two-tab delayed modern start cannot overwrite explicitly adopted legacy recovery", async ({ browser }) => {
+for (const role of ["USER", "ADMIN"] as const) {
+  test(`${role} two-tab delayed modern start cannot overwrite explicitly adopted legacy recovery`, async ({ browser }) => {
     test.setTimeout(150_000);
     const { fixture, database } = await requireFixture();
-    const role = "USER";
-    const base = portalUrl;
+    const base = role === "USER" ? portalUrl : hubUrl;
     const modernEmail = `${randomUUID()}.lock-modern@e2e.invalid`;
     const legacyEmail = `${randomUUID()}.lock-legacy@e2e.invalid`;
     const legacyKey = randomBytes(24).toString("base64url");
@@ -2050,10 +2050,16 @@ test("USER two-tab delayed modern start cannot overwrite explicitly adopted lega
         expiresAt: new Date(Date.now() + 25 * 60_000)
       }, select: { id: true, expiresAt: true, emailVerifiedAt: true, approvedAt: true } });
 
-      const first = await openRecovery(browser, "portal");
-      context = first.context;
-      const startTab = first.page;
+      // Per-page signed and independently validated Access assertions are
+      // present before CDP captures the original browser POST. In particular,
+      // this does not rely on a context.route handler that route.continue()
+      // could bypass while testing the Hub.
+      context = await browser.newContext();
+      const startTab = await context.newPage();
+      if (role === "ADMIN") await addCloudflareAccessHeader(startTab, { hubOnlyBrowserRedirects: true });
+      await startTab.goto(`${base}/recover`);
       const switchTab = await context.newPage();
+      if (role === "ADMIN") await addCloudflareAccessHeader(switchTab, { hubOnlyBrowserRedirects: true });
       await switchTab.goto(`${base}/recover/open?request=${encodeURIComponent(legacyKey)}`);
       await expect(switchTab).toHaveURL(`${base}/recover?requestId=${legacy.id}&switch=1`);
       await expect(switchTab.getByRole("button", { name: "Continuar com este link" })).toBeVisible();
@@ -2087,6 +2093,11 @@ test("USER two-tab delayed modern start cannot overwrite explicitly adopted lega
           const host = upstreamUrl.host;
           upstreamUrl.hostname = "127.0.0.1";
           if (!request.postData) throw new Error("Chromium did not supply the multipart Server Action body at the request boundary");
+          const originalAccess = Object.entries(request.headers)
+            .find(([name]) => name.toLowerCase() === "cf-access-jwt-assertion")?.[1];
+          if (role === "ADMIN" && (!originalAccess || originalAccess.split(".").length !== 3)) {
+            throw new Error("The original Chromium ADMIN Server Action did not carry its signed Access assertion");
+          }
           const response = await isolatedTransport!.post(upstreamUrl.href, {
             data: Buffer.from(request.postData, "utf8"),
             headers: { ...request.headers, host },
@@ -2131,6 +2142,13 @@ test("USER two-tab delayed modern start cannot overwrite explicitly adopted lega
       expect({ status: pausedStatus, redirect: pausedRedirect, persisted: createdModern },
         "backend must have completed a real modern start while Chromium response remains paused")
         .toEqual({ status: 200, redirect: "/recover?requestId", persisted: 1 });
+      const issuedModern = await database.accountRecoveryRequest.findFirstOrThrow({
+        where: { userId: modernUserId },
+        select: { requestKeyHash: true, recoveryRole: true }
+      });
+      expect(issuedModern.recoveryRole, "upstream must persist the recovery under the actual Hub/Portal role").toBe(role);
+      expect(issuedModern.requestKeyHash, "upstream Set-Cookie must match the genuine committed request")
+        .toBe(hashRecoveryRequestKey(upstreamModernKey));
       const duringHold = await context.cookies(base);
       expect(duringHold.find(cookie => cookie.name === primary)?.value ?? "",
         "separate upstream transport must not install cookies in Chromium before fulfillment").toBe("");
@@ -2149,7 +2167,9 @@ test("USER two-tab delayed modern start cannot overwrite explicitly adopted lega
           dispatchHadModernIntent = atDispatch.some(cookie =>
             cookie.name === (productionMode ? "__Host-virki_recovery_intent" : "virki_recovery_intent") && Boolean(cookie.value));
         }
-        await route.continue();
+        // A matching context route, if later introduced by the test harness,
+        // must still get to install Access. route.continue() would skip it.
+        await route.fallback();
       });
       const switchPost = switchTab.waitForResponse(response => response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/recover" && Boolean(response.request().headers()["next-action"]),
@@ -2226,7 +2246,8 @@ test("USER two-tab delayed modern start cannot overwrite explicitly adopted lega
       if (legacyUserId) await database.user.deleteMany({ where: { id: legacyUserId, email: legacyEmail } });
       await database.$disconnect();
     }
-});
+  });
+}
 
 test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time reset and scoped cookies", async ({ browser }) => {
   test.setTimeout(120_000);
