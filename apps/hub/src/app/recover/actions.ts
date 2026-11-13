@@ -83,11 +83,14 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   // replace its only copy of the original capability with synthetic cookies.
   // This does not mint/resend anything or bypass the verification rate limits.
   let canRetain = false;
+  let retentionUnavailable = false;
   if (existing && existingPolicy) {
     try {
       canRetain = await canRetainMultiMethodRecoveryBrowser(existing, expectedRole, existingPolicy);
     } catch {
-      // Failure to validate a capability never grants access.
+      // Indeterminate backend state cannot authorize recovery, but must not
+      // destroy a capability already held by the browser either.
+      retentionUnavailable = true;
     }
   }
   let recovery = {
@@ -97,7 +100,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     requestKey: randomBytes(24).toString("base64url"),
     browserToken: randomBytes(32).toString("base64url")
   };
-  if (!canRetain) try {
+  if (!canRetain && !retentionUnavailable) try {
     // Enforce the role and method policy on the server; browser radios are never authoritative.
     if (!policy || !email ||
       (policy.adminReview ? formData.has("comment") && comment === null : formData.has("comment"))) throw new Error("Rejected.");
@@ -109,6 +112,11 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   }
   const remaining = 500 - (Date.now() - startTime);
   if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  if (retentionUnavailable) {
+    // Do not trust a cookie ID for authorization or navigation. Keep the
+    // original cookies untouched and show the same generic retry message.
+    redirect("/recover?error=1");
+  }
   if (canRetain && existing) {
     // Retain the original bearer pair and its original cookie expiry unchanged.
     clearRecoveryCandidateCookie(cookieStore);

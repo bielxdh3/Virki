@@ -513,8 +513,12 @@ export async function canRetainMultiMethodRecoveryBrowser(
     if (provenStrong.length) {
       try {
         await requireLiveRecoveryProofsInTransaction(tx, { ...row, recoveryProofs: provenStrong });
-      } catch {
-        return false;
+      } catch (error) {
+        // Revoked/rotated factors are an authoritative denial. Database
+        // failures are indeterminate: never collapse them into a denial that
+        // causes the caller to replace a valid browser's only capability.
+        if (error === FAILURE) return false;
+        throw error;
       }
     }
     return true;

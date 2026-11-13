@@ -1,9 +1,57 @@
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 import { prisma } from "@virki/database";
 import type { Prisma } from "@virki/database";
-import { finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, getMultiMethodRecoveryState, normalizeRecoveryPolicy, isRecoveryProofSatisfied, sanitizeRecoveryComment, recoveryPasskeyBinding, recoveryTotpBinding, requireLiveRecoveryProofsInTransaction, recoveryReviewReady, startMultiMethodRecovery, startRecoveryPasskeyAssertion } from "./recovery-methods";
-import { consumeApprovedAccountRecovery } from "./security";
+import { canRetainMultiMethodRecoveryBrowser, finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, getMultiMethodRecoveryState, normalizeRecoveryPolicy, isRecoveryProofSatisfied, sanitizeRecoveryComment, recoveryPasskeyBinding, recoveryTotpBinding, requireLiveRecoveryProofsInTransaction, recoveryReviewReady, startMultiMethodRecovery, startRecoveryPasskeyAssertion } from "./recovery-methods";
+import { consumeApprovedAccountRecovery, hashEmailAddress, hashRecoveryRequestKey } from "./security";
+
+test("recovery retention fails closed on revoked factor, but surfaces an indeterminate database read", async (context) => {
+  const now = new Date();
+  const email = "retention-indeterminate@integration.invalid";
+  const existing = {
+    requestId: generateRecoveryPublicRequestId(),
+    requestKey: randomBytes(24).toString("base64url"),
+    browserToken: randomBytes(32).toString("base64url")
+  };
+  const row = {
+    id: existing.requestId, userId: "retention-indeterminate-user",
+    purpose: "RECOVERY", status: "PENDING", recoveryRole: "USER",
+    recoveryProofs: ["EMAIL", "TOTP"], recoveryAdminReview: false,
+    expiresAt: new Date(now.getTime() + 30 * 60_000),
+    emailAddressHash: hashEmailAddress(email),
+    requestKeyHash: hashRecoveryRequestKey(existing.requestKey),
+    recoveryBrowserHash: createHash("sha256").update("Virki recovery browser v1:")
+      .update(existing.browserToken).digest("hex"),
+    recoveryTotpVerifiedAt: now, recoveryPasskeyVerifiedAt: null,
+    emailVerifiedAt: null, reviewedByUserId: null,
+    recoveryTotpBindingHash: null, recoveryTotpUsedStep: 1,
+    recoveryPasskeyCredentialId: null, recoveryPasskeyBindingHash: null,
+    user: { email, emailNormalized: email, role: "USER", isActive: true, accountStatus: "ACTIVE" }
+  };
+  const outage = new Error("isolated simulated PostgreSQL read failure");
+  let failRead = true;
+  const tx = {
+    accountRecoveryRequest: { findUnique: async () => row },
+    totpFactor: { findUnique: async () => {
+      if (failRead) throw outage;
+      return null; // A definitively revoked factor must be denied, not retried.
+    } },
+    user: { findUnique: async () => ({ secondFactorMethod: "TOTP" }) }
+  } as unknown as Prisma.TransactionClient;
+  const original = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(original);
+  Object.defineProperty(prisma, "$transaction", {
+    ...original, value: async (operation: (client: Prisma.TransactionClient) => Promise<unknown>) => operation(tx)
+  });
+  context.after(() => Object.defineProperty(prisma, "$transaction", original));
+  const policy = { proofs: ["EMAIL" as const, "TOTP" as const], adminReview: false };
+  await assert.rejects(canRetainMultiMethodRecoveryBrowser(existing, "USER", policy), (error: unknown) =>
+    error === outage, "query failure must be indeterminate, not mistaken for invalid recovery");
+  failRead = false;
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(existing, "USER", policy), false,
+    "a definitively missing factor must fail closed");
+});
 
 test("public recovery request IDs use a cryptographic, database-compatible format", () => {
   const samples = Array.from({ length: 128 }, () => generateRecoveryPublicRequestId());
