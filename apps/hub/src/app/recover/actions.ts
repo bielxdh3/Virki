@@ -230,7 +230,12 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     redirect("/recover?restart=1");
   }
   setMultiMethodRecoveryCookies(cookieStore, recovery.requestKey, recovery.browserToken, recovery.requestId, method as RecoveryRequestMethod);
-  clearRecoveryCandidateCookie(cookieStore);
+  // Another tab may already show an explicit, CSRF-bound switch for this
+  // independent legacy candidate. Preserve its original host-only cookie and
+  // expiry so a switch queued behind the start Web Lock can still validate
+  // that exact link. The candidate cannot authorize anything without another
+  // explicit user action and the server's role/status/expiry checks.
+  if (!cookieStore.get(RECOVERY_CANDIDATE_COOKIE)?.value) clearRecoveryCandidateCookie(cookieStore);
   redirect(`/recover?requestId=${encodeURIComponent(recovery.requestId)}`);
 }
 

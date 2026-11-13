@@ -6,7 +6,18 @@ import { switchRecoveryAction, type RecoverySwitchActionState } from "./actions"
 const initialState: RecoverySwitchActionState = { status: "idle" };
 
 export function RecoverySwitchForm({ csrf, csrfFieldName, requestId }: { csrf: string; csrfFieldName: string; requestId: string }) {
-  const [state, action, pending] = useActionState(switchRecoveryAction, initialState);
+  const [state, action, pending] = useActionState(async (previous: RecoverySwitchActionState, formData: FormData): Promise<RecoverySwitchActionState> => {
+    // A delayed modern start may still set its bearer cookies after this
+    // explicit legacy adoption. Hold the same per-origin browser lock across
+    // the entire Server Action response, including its Set-Cookie processing.
+    if (!navigator.locks?.request) return { status: "error" };
+    try {
+      return await navigator.locks.request("virki-recovery-start-v1", () => switchRecoveryAction(previous, formData));
+    } catch {
+      // If the lock cannot be acquired, leave the existing bearer untouched.
+      return { status: "error" };
+    }
+  }, initialState);
 
   useEffect(() => {
     if (state.status === "complete" && state.requestId) {

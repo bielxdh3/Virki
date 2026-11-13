@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { expect, test, type Browser, type BrowserContext, type Page, type Response, type Route } from "@playwright/test";
+import { expect, request as playwrightRequest, test, type APIRequestContext, type Browser, type BrowserContext, type Page, type Response, type Route } from "@playwright/test";
 import { generateRegistrationOptions, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
@@ -2007,6 +2007,225 @@ test("USER modern proven recovery survives legacy link GET and POST until explic
     }
     expect(closed.every(result => result.status === "fulfilled")).toBe(true);
   }
+});
+
+test("USER two-tab delayed modern start cannot overwrite explicitly adopted legacy recovery", async ({ browser }) => {
+    test.setTimeout(150_000);
+    const { fixture, database } = await requireFixture();
+    const role = "USER";
+    const base = portalUrl;
+    const modernEmail = `${randomUUID()}.lock-modern@e2e.invalid`;
+    const legacyEmail = `${randomUUID()}.lock-legacy@e2e.invalid`;
+    const legacyKey = randomBytes(24).toString("base64url");
+    const primary = productionMode ? "__Host-virki_recovery" : "virki_recovery_v2";
+    const candidateName = productionMode ? "__Host-virki_recovery_candidate" : "virki_recovery_candidate";
+    let context: BrowserContext | undefined;
+    let isolatedTransport: APIRequestContext | undefined;
+    let modernUserId: string | undefined;
+    let legacyUserId: string | undefined;
+    let releaseStart = () => {};
+    const heldStart = new Promise<void>(resolve => { releaseStart = resolve; });
+    try {
+      const [modern, legacyUser] = await Promise.all([
+        database.user.create({ data: {
+          email: modernEmail, emailNormalized: modernEmail, displayName: "Concurrent modern recovery fixture",
+          passwordHash: await hashPassword(randomBytes(24).toString("base64url")), role,
+          isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(), secondFactorMethod: "TOTP",
+          totpFactor: { create: { secretCiphertext: encryptTotpSecret(createTotpSecret()), keyVersion: 1,
+            status: "ACTIVE", confirmedAt: new Date() } }
+        }, select: { id: true } }),
+        database.user.create({ data: {
+          email: legacyEmail, emailNormalized: legacyEmail, displayName: "Concurrent approved legacy fixture",
+          passwordHash: await hashPassword(randomBytes(24).toString("base64url")), role,
+          isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date()
+        }, select: { id: true } })
+      ]);
+      modernUserId = modern.id;
+      legacyUserId = legacyUser.id;
+      const legacy = await database.accountRecoveryRequest.create({ data: {
+        userId: legacyUserId, purpose: "RECOVERY", status: "APPROVED",
+        requestKeyHash: hashRecoveryRequestKey(legacyKey), emailAddressHash: hashEmailAddress(legacyEmail),
+        emailChallengeHash: hashSecurityCode("123456"), emailVerifiedAt: new Date(),
+        approvedAt: new Date(), reviewedByUserId: fixture.recoveryReviewer.id,
+        expiresAt: new Date(Date.now() + 25 * 60_000)
+      }, select: { id: true, expiresAt: true, emailVerifiedAt: true, approvedAt: true } });
+
+      const first = await openRecovery(browser, "portal");
+      context = first.context;
+      const startTab = first.page;
+      const switchTab = await context.newPage();
+      await switchTab.goto(`${base}/recover/open?request=${encodeURIComponent(legacyKey)}`);
+      await expect(switchTab).toHaveURL(`${base}/recover?requestId=${legacy.id}&switch=1`);
+      await expect(switchTab.getByRole("button", { name: "Continuar com este link" })).toBeVisible();
+      const before = await context.cookies(base);
+      const candidate = before.find(cookie => cookie.name === candidateName);
+      expect(candidate?.value).toBe(legacyKey);
+      expect(before.some(cookie => cookie.name === primary && Boolean(cookie.value))).toBe(false);
+
+      // A separate Playwright APIRequestContext holds server response bytes
+      // without installing Set-Cookie in the shared two-tab browser context.
+      // The browser itself still verifies TLS on every normal page navigation.
+      isolatedTransport = await playwrightRequest.newContext({ ignoreHTTPSErrors: true });
+      const cdp = await context.newCDPSession(startTab);
+      let startInterceptions = 0;
+      let backendStartReady = false;
+      let pausedStatus = -1;
+      let pausedRedirect = "none";
+      let upstreamIssuedCookie = false;
+      let upstreamModernKey = "";
+      let interceptionFailure: string | undefined;
+      await cdp.send("Fetch.enable", { patterns: [{ urlPattern: `${base}/recover*`, requestStage: "Request" }] });
+      cdp.on("Fetch.requestPaused", async ({ requestId, request }) => {
+        const actionHeader = Object.entries(request.headers).some(([name]) => name.toLowerCase() === "next-action");
+        if (request.method !== "POST" || new URL(request.url).pathname !== "/recover" || !actionHeader) {
+          await cdp.send("Fetch.continueRequest", { requestId });
+          return;
+        }
+        startInterceptions += 1;
+        try {
+          const upstreamUrl = new URL(request.url);
+          const host = upstreamUrl.host;
+          upstreamUrl.hostname = "127.0.0.1";
+          if (!request.postData) throw new Error("Chromium did not supply the multipart Server Action body at the request boundary");
+          const response = await isolatedTransport!.post(upstreamUrl.href, {
+            data: Buffer.from(request.postData, "utf8"),
+            headers: { ...request.headers, host },
+            maxRedirects: 0
+          });
+          pausedStatus = response.status();
+          const responseHeaders = await response.headersArray();
+          const issuedKey = responseHeaders.find(header => header.name.toLowerCase() === "set-cookie" &&
+            header.value.startsWith(primary + "="));
+          upstreamIssuedCookie = Boolean(issuedKey);
+          upstreamModernKey = issuedKey?.value.slice(primary.length + 1).split(";")[0] ?? "";
+          const redirect = response.headers()["x-action-redirect"];
+          if (redirect) {
+            const target = new URL(decodeURIComponent(redirect.split(";")[0] ?? ""), base);
+            pausedRedirect = `${target.pathname}?${[...target.searchParams.keys()].join(",")}`;
+          }
+          const body = (await response.body()).toString("base64");
+          backendStartReady = true;
+          await heldStart;
+          await cdp.send("Fetch.fulfillRequest", {
+            requestId,
+            responseCode: response.status(),
+            responseHeaders: responseHeaders.filter(header => !["content-length", "content-encoding", "transfer-encoding", "connection"].includes(header.name.toLowerCase())),
+            body
+          });
+        } catch (error) {
+          interceptionFailure = error instanceof Error ? error.message : "unknown transport error";
+          backendStartReady = true;
+          await cdp.send("Fetch.failRequest", { requestId, errorReason: "Failed" }).catch(() => {});
+        }
+      });
+      await startTab.getByLabel("E-mail da conta", { exact: true }).fill(modernEmail);
+      await startTab.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+      const modernPost = startTab.waitForResponse(response => response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/recover" && Boolean(response.request().headers()["next-action"]),
+      { timeout: 25_000 });
+      await startTab.getByRole("button", { name: "Solicitar recuperação", exact: true }).click({ noWaitAfter: true });
+      await expect.poll(() => backendStartReady, { timeout: 20_000 }).toBe(true);
+      expect(interceptionFailure, "real upstream transport must complete without a request/body or TLS error").toBeUndefined();
+      expect(startInterceptions, "the genuine modern Server Action must be delayed exactly once").toBe(1);
+      const createdModern = await database.accountRecoveryRequest.count({ where: { userId: modernUserId } });
+      expect({ status: pausedStatus, redirect: pausedRedirect, persisted: createdModern },
+        "backend must have completed a real modern start while Chromium response remains paused")
+        .toEqual({ status: 200, redirect: "/recover?requestId", persisted: 1 });
+      const duringHold = await context.cookies(base);
+      expect(duringHold.find(cookie => cookie.name === primary)?.value ?? "",
+        "separate upstream transport must not install cookies in Chromium before fulfillment").toBe("");
+      expect(duringHold.find(cookie => cookie.name === candidateName)?.value).toBe(legacyKey);
+
+      let dispatchHadModernCookie = false;
+      let dispatchHadModernBrowser = false;
+      let dispatchHadModernIntent = false;
+      await switchTab.route(/\/recover(?:\?.*)?$/u, async route => {
+        if (route.request().method() === "POST" && route.request().headers()["next-action"]) {
+          const atDispatch = await context!.cookies(base);
+          const currentKey = atDispatch.find(cookie => cookie.name === primary)?.value;
+          dispatchHadModernCookie = Boolean(currentKey && currentKey !== legacyKey);
+          dispatchHadModernBrowser = atDispatch.some(cookie =>
+            cookie.name === (productionMode ? "__Host-virki_recovery_browser" : "virki_recovery_browser") && Boolean(cookie.value));
+          dispatchHadModernIntent = atDispatch.some(cookie =>
+            cookie.name === (productionMode ? "__Host-virki_recovery_intent" : "virki_recovery_intent") && Boolean(cookie.value));
+        }
+        await route.continue();
+      });
+      const switchPost = switchTab.waitForResponse(response => response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/recover" && Boolean(response.request().headers()["next-action"]),
+      { timeout: 25_000 });
+      let prematureSwitchPosts = 0;
+      const observeSwitchPost = (request: import("@playwright/test").Request) => {
+        if (request.method() === "POST" && new URL(request.url()).pathname === "/recover" &&
+          Boolean(request.headers()["next-action"])) prematureSwitchPosts += 1;
+      };
+      switchTab.on("request", observeSwitchPost);
+      await switchTab.getByRole("button", { name: "Continuar com este link" }).click({ noWaitAfter: true });
+      let switchWasQueued = false;
+      try {
+        await expect.poll(() => switchTab.evaluate(async () =>
+          (await navigator.locks.query()).pending?.filter(lock => lock.name === "virki-recovery-start-v1").length ?? 0),
+        { timeout: 3_000 }).toBe(1);
+        switchWasQueued = true;
+      } catch {
+        // The unpatched ancestor executes the switch immediately. Observe the
+        // final cookie too so the RED demonstrates the real overwrite race.
+      }
+      const premature = prematureSwitchPosts;
+      switchTab.off("request", observeSwitchPost);
+      releaseStart();
+      const [modernResponse, adoptedResponse] = await Promise.all([modernPost, switchPost]);
+      expect(modernResponse.status()).toBeLessThan(400);
+      expect(adoptedResponse.status()).toBeLessThan(400);
+      expect(upstreamIssuedCookie, "the held real server response must issue a modern bearer").toBe(true);
+      const finalCookies = await context.cookies(base);
+      const adopted = finalCookies.find(cookie => cookie.name === primary);
+      const lastCookieKind = adopted?.value === legacyKey ? "legacy" :
+        adopted?.value && adopted.value === upstreamModernKey ? "late-modern-overwrite" :
+        adopted?.value ? "unexpected-key" : "missing";
+      expect(lastCookieKind,
+        "the last Set-Cookie must be the explicitly adopted legacy key even after the modern response arrives")
+        .toBe("legacy");
+      expect({ primary: dispatchHadModernCookie, browser: dispatchHadModernBrowser, intent: dispatchHadModernIntent },
+        "the modern bearer pair and intent must reach Chromium before the queued legacy switch POST")
+        .toEqual({ primary: true, browser: true, intent: true });
+      await expect.poll(async () => {
+        const current = await context!.cookies(base);
+        return current.find(cookie => cookie.name === primary)?.value === legacyKey;
+      }, { timeout: 15_000 }).toBe(true);
+      expect(switchWasQueued, "explicit switch must wait behind the in-flight modern start Web Lock").toBe(true);
+      expect(premature, "no switch Server Action may run while the modern response is withheld").toBe(0);
+      expect(adopted?.value).toBe(legacyKey);
+      // The candidate is intentionally short-lived (at most ten minutes).
+      // Explicit adoption restores the original approved DB expiry, never
+      // extends it and never truncates it to the candidate's preview TTL.
+      expect(Math.abs((adopted?.expires ?? 0) - legacy.expiresAt.getTime() / 1000),
+        "adopted legacy bearer must retain the approved request's original expiry").toBeLessThan(2);
+      expect(adopted!.expires).toBeGreaterThan(candidate!.expires);
+      expect(finalCookies.find(cookie => cookie.name === candidateName)?.value ?? "").toBe("");
+      const preserved = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: legacy.id } });
+      expect(preserved.status).toBe("APPROVED");
+      expect(preserved.emailVerifiedAt?.getTime()).toBe(legacy.emailVerifiedAt?.getTime());
+      expect(preserved.approvedAt?.getTime()).toBe(legacy.approvedAt?.getTime());
+      expect(preserved.expiresAt.getTime()).toBe(legacy.expiresAt.getTime());
+      expect(await database.accountRecoveryRequest.count({ where: { userId: modernUserId } })).toBe(1);
+      await expect(switchTab.getByLabel("Nova senha", { exact: true }),
+        "the adopted APPROVED legacy key must still show the authentic password-reset step").toBeVisible();
+    } finally {
+      releaseStart();
+      if (context) await context.close();
+      if (isolatedTransport) await isolatedTransport.dispose();
+      for (const id of [modernUserId, legacyUserId]) {
+        if (id) {
+          await database.accountRecoveryRequest.deleteMany({ where: { userId: id } });
+          await database.totpFactor.deleteMany({ where: { userId: id } });
+        }
+      }
+      await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: { in: [modernEmail, legacyEmail] } } });
+      if (modernUserId) await database.user.deleteMany({ where: { id: modernUserId, email: modernEmail } });
+      if (legacyUserId) await database.user.deleteMany({ where: { id: legacyUserId, email: legacyEmail } });
+      await database.$disconnect();
+    }
 });
 
 test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time reset and scoped cookies", async ({ browser }) => {
