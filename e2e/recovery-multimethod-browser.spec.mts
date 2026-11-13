@@ -1560,6 +1560,98 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
   }
 });
 
+test("USER legacy GET delayed across modern TOTP proof must never replace the browser-bound pair", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const { database } = await requireFixture();
+  const modernEmail = `${randomUUID()}.legacy-race-modern@e2e.invalid`;
+  const legacyEmail = `${randomUUID()}.legacy-race-old@e2e.invalid`;
+  const contexts: BrowserContext[] = [];
+  let modernUserId: string | undefined;
+  let legacyUserId: string | undefined;
+  let releaseLegacy = () => {};
+  try {
+    const secret = createTotpSecret();
+    const [modern, legacyUser] = await Promise.all([
+      database.user.create({ data: {
+        email: modernEmail, emailNormalized: modernEmail, displayName: "Late legacy GET modern test",
+        passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+        role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+        secondFactorMethod: "TOTP", totpFactor: { create: {
+          secretCiphertext: encryptTotpSecret(secret), keyVersion: 1, status: "ACTIVE", confirmedAt: new Date()
+        } }
+      }, select: { id: true } }),
+      database.user.create({ data: {
+        email: legacyEmail, emailNormalized: legacyEmail, displayName: "Late legacy GET old test",
+        passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+        role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date()
+      }, select: { id: true } })
+    ]);
+    modernUserId = modern.id;
+    legacyUserId = legacyUser.id;
+    const legacyKey = randomBytes(24).toString("base64url");
+    const legacy = await database.accountRecoveryRequest.create({ data: {
+      userId: legacyUser.id, requestKeyHash: hashRecoveryRequestKey(legacyKey),
+      emailAddressHash: hashEmailAddress(legacyEmail), emailChallengeHash: hashSecurityCode("123456"),
+      purpose: "RECOVERY", expiresAt: new Date(Date.now() + 30 * 60_000)
+    }, select: { id: true } });
+
+    const oldTab = await openRecovery(browser, "portal");
+    contexts.push(oldTab.context);
+    const currentTab = await oldTab.context.newPage();
+    await currentTab.goto(portalUrl + "/recover");
+    const names = productionMode
+      ? ["__Host-virki_recovery", "__Host-virki_recovery_browser", "__Host-virki_recovery_intent"]
+      : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
+    expect((await oldTab.context.cookies(portalUrl)).filter(c => names.includes(c.name))).toHaveLength(0);
+    const heldLegacy = new Promise<void>(resolve => { releaseLegacy = resolve; });
+    let legacyFetched = false;
+    await oldTab.page.route(/\/recover\/open(?:\?.*)?$/u, async route => {
+      const response = await route.fetch({ maxRedirects: 0 });
+      legacyFetched = true;
+      await heldLegacy;
+      await route.fulfill({ response });
+    });
+    const oldNavigation = oldTab.page.goto(`${portalUrl}/recover/open?request=${encodeURIComponent(legacyKey)}`);
+    try {
+      await expect.poll(() => legacyFetched, { timeout: 15_000 }).toBe(true);
+      // Playwright's route.fetch may apply held Set-Cookie prematurely.
+      // Restore the browser to the authentic pre-response, empty state.
+      for (const name of names) await oldTab.context.clearCookies({ name });
+      const modernId = await startSelectedTotpEmail(currentTab, modernEmail);
+      const stage = currentTab.locator('[aria-label="Aplicativo autenticador"]');
+      await stage.locator('input[name="code"]').fill(totpAt(secret));
+      await stage.getByRole("button", { name: "Confirmar", exact: true }).click();
+      await expect(stage).toContainText("Confirmado.");
+      const row = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: modernId } });
+      expect(row.recoveryTotpVerifiedAt).not.toBeNull();
+      const before = (await oldTab.context.cookies(portalUrl)).filter(c => names.includes(c.name));
+      expect(before).toHaveLength(3);
+      releaseLegacy();
+      await oldNavigation;
+      await expect(oldTab.page).toHaveURL(new RegExp(`/recover\\?requestId=${legacy.id}(?:&switch=1)?$`));
+      const after = await oldTab.context.cookies(portalUrl);
+      for (const cookie of before) {
+        expect(after.find(c => c.name === cookie.name)?.value === cookie.value,
+          "late legacy GET response must not overwrite the proven modern bearer pair").toBe(true);
+        expect(after.find(c => c.name === cookie.name)?.expires).toBe(cookie.expires);
+      }
+    } finally { releaseLegacy(); }
+  } finally {
+    const closed = await Promise.allSettled(contexts.map(c => c.close()));
+    for (const id of [modernUserId, legacyUserId]) {
+      if (id) {
+        await database.accountRecoveryRequest.deleteMany({ where: { userId: id } });
+        await database.totpFactor.deleteMany({ where: { userId: id } });
+      }
+    }
+    await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: { in: [modernEmail, legacyEmail] } } });
+    if (modernUserId) await database.user.deleteMany({ where: { id: modernUserId, email: modernEmail } });
+    if (legacyUserId) await database.user.deleteMany({ where: { id: legacyUserId, email: legacyEmail } });
+    await database.$disconnect();
+    expect(closed.every(r => r.status === "fulfilled")).toBe(true);
+  }
+});
+
 test("USER modern proven recovery survives legacy link GET and POST until explicit switch", async ({ browser }) => {
   test.setTimeout(120_000);
   const { database } = await requireFixture();
@@ -1656,7 +1748,12 @@ test("USER modern proven recovery survives legacy link GET and POST until explic
     const fresh = await openRecovery(browser, "portal");
     contexts.push(fresh.context);
     await fresh.page.goto(`${portalUrl}/recover/open?request=${encodeURIComponent(legacyKey)}`);
-    await expect(fresh.page).toHaveURL(`${portalUrl}/recover?requestId=${legacy.id}`);
+    await expect(fresh.page).toHaveURL(`${portalUrl}/recover?requestId=${legacy.id}&switch=1`);
+    await expect(fresh.page.getByRole("button", { name: "Continuar com este link" })).toBeVisible();
+    expect((await fresh.context.cookies(portalUrl)).find(cookie => cookie.name === names[0])?.value ?? "").toBe("");
+    await fresh.page.getByRole("button", { name: "Continuar com este link" }).click();
+    await expect.poll(async () => (await fresh.context.cookies(portalUrl)).find(cookie => cookie.name === names[0])?.value)
+      .toBe(legacyKey);
     const adopted = await fresh.context.cookies(portalUrl);
     expect(adopted.find(cookie => cookie.name === names[0])?.value).toBe(legacyKey);
     expect(adopted.find(cookie => cookie.name === names[1])?.value ?? "").toBe("");

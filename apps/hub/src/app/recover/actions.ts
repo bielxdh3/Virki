@@ -29,7 +29,6 @@ import {
 } from "./recovery-cookie";
 import { EMAIL_INPUT_MAX_LENGTH, readBoundedFormString } from "../../lib/action-input-limits";
 import { recoveryMethodFromPolicy, recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
-import { requiresRecoveryLinkSwitch } from "./recovery-switch";
 import { hasRecoveryRestartConsent } from "./recovery-restart-consent";
 import type { RecoveryPasskeyStartState, RecoveryProofActionState } from "./recovery-proof-stage";
 
@@ -176,21 +175,11 @@ export async function openRecoveryAction(formData: FormData) {
   const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
   if (!recovery) redirect("/recover?error=1");
   const cookieStore = await cookies();
-  let mustSwitch: boolean;
-  try {
-    mustSwitch = await requiresRecoveryLinkSwitch(cookieStore, recovery.id, expectedRole);
-  } catch {
-    // Never overwrite a possibly live modern capability on a DB outage.
-    redirect("/recover?error=1");
-  }
-  if (mustSwitch) {
-    setRecoveryCandidateCookie(cookieStore, requestKey, recovery.expiresAt);
-    redirect(`/recover?switch=1&requestId=${encodeURIComponent(recovery.id)}`);
-  }
-  clearRecoveryCandidateCookie(cookieStore);
-  setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
-  clearMultiMethodRecoveryCookies(cookieStore);
-  redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
+  // The first click in a legacy recovery link only discovers the candidate.
+  // Its delayed Set-Cookie must never overwrite a newer modern bearer pair.
+  // The second, explicit switch action revalidates the candidate/role/CSRF.
+  setRecoveryCandidateCookie(cookieStore, requestKey, recovery.expiresAt);
+  redirect(`/recover?switch=1&requestId=${encodeURIComponent(recovery.id)}`);
   });
 }
 

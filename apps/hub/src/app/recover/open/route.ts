@@ -1,10 +1,8 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { getAccountRecoveryRequestId } from "@virki/auth/security";
 import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { clearMultiMethodRecoveryCookies, setRecoveryCandidateCookie, setRecoveryCookie } from "../recovery-cookie";
-import { requiresRecoveryLinkSwitch } from "../recovery-switch";
+import { setRecoveryCandidateCookie } from "../recovery-cookie";
 
 export const dynamic = "force-dynamic";
 
@@ -23,25 +21,15 @@ export async function GET(request: Request) {
     return NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
   }
   destination.searchParams.set("requestId", recovery.id);
-  const response = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
-  let mustSwitch: boolean;
-  try {
-    mustSwitch = await requiresRecoveryLinkSwitch(await cookies(), recovery.id, expectedRole);
-  } catch {
-    // Fail closed on indeterminate database state; never replace the old key.
-    return new NextResponse("Service Unavailable", { status: 503, headers: privateHeaders() });
-  }
-  if (mustSwitch) {
-    destination.searchParams.set("switch", "1");
-    const confirmation = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
-    setRecoveryCandidateCookie(confirmation.cookies, requestKey, recovery.expiresAt);
-    return confirmation;
-  }
-  setRecoveryCookie(response.cookies, requestKey, recovery.expiresAt);
-  // Adopting a legacy link must not leave stale modern browser/intent hints
-  // attached to the new, unrelated request key.
-  clearMultiMethodRecoveryCookies(response.cookies);
-  return response;
+  // Merely opening a legacy GET must NEVER adopt/clear an authorizing bearer:
+  // the HTTP 303 could be held until another tab finishes a modern TOTP proof.
+  // The later Set-Cookie would silently destroy its only browser-bound pair.
+  // Candidate-only discovery is non-authorizing; an explicit CSRF-guarded POST
+  // must subsequently adopt the link, even when the browser had no old key.
+  destination.searchParams.set("switch", "1");
+  const confirmation = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
+  setRecoveryCandidateCookie(confirmation.cookies, requestKey, recovery.expiresAt);
+  return confirmation;
 }
 
 function privateHeaders(): HeadersInit {

@@ -128,6 +128,36 @@ GREEN rerun; a matching raw POST alone is not a success attestation.
 
 ## Outstanding independent and operational gates
 
+### Follow-up: legacy GET/POST response-order race (local patch after fa214e3)
+
+The independent reviewer correctly identified an additional late-response
+failure: a legacy `GET /recover/open` or initial `openRecoveryAction` could
+adopt a recovery link *before* the modern recovery had a cookie, then its
+response could arrive after the modern TOTP proof had committed and overwrite
+the bearer pair. The exact concurrent GET was physically RED in disposable
+PG17/Chromium 153, run `806b4860fb334e0faf6c227d6924b730`, after
+confirming the original proof. This was an availability P2, not an MFA bypass.
+
+The local remediation makes **both initial legacy link entrypoints
+candidate-only**, even for a fresh browser: `/recover/open` emits only a
+non-authorizing candidate cookie, and `openRecoveryAction` does the same
+after normal host/CSRF/role checks. Neither writes the primary recovery key
+nor expires the multi-method browser/intent cookies. The user must explicitly
+confirm through `switchRecoveryAction`, which revalidates the exact
+candidate's live role and request ID under the normal recovery-open CSRF gate.
+Opening the same link again also requires this explicit adoption.
+
+GREEN physical run `b03924a06978477fa278ce88c072be00`:
+**2/2 Chromium E2E PASS**, including delayed GET while TOTP is already
+verified, no bearer/TTL replacement, legacy GET and POST after a proven
+modern session, and explicit adoption of a fresh legacy link.
+PostgreSQL 17.11 disposable, clean Docker ID-based teardown,
+`dockerMutationUncertain=false`. The focused run used the exact clean
+base `fa214e3` plus a working-tree snapshot of the patch, not yet a
+published/hosted CI commit. An independently reviewed final SHA and
+additional ADMIN/PG18 tests are still required; the older NO-GO section
+below describes the **prior** `ebcab0e` code and is not a new GO.
+
 ### Independent SOURCE NO-GO and PostgreSQL 18 browser blocker (13 Nov)
 
 An independent read-only reviewer inspected the exact code commit

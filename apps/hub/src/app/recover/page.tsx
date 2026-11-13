@@ -132,7 +132,9 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
         </> : null}
 
         {confirmRecoverySwitch ? <>
-          <p role="status">Outro link está aberto nesta sessão. Continuar com este link vai encerrar o progresso atual de recuperação neste navegador.</p>
+          <p role="status">{requestKey
+            ? "Outro link está aberto nesta sessão. Continuar com este link vai encerrar o progresso atual de recuperação neste navegador."
+            : "Confirme a abertura deste link para continuar a recuperação. Nenhuma recuperação foi substituída ao visualizar o link."}</p>
           <RecoverySwitchForm csrf={csrf.open} csrfFieldName={CSRF_FORM_FIELD_NAME} requestId={candidate!.id} />
         </> : null}
         {params?.requestId && !state && !multiState && !confirmRecoverySwitch ? <p className="form-error" role="alert">Este link de recuperação não é mais válido. Se a sua solicitação já foi aprovada, use o link mais recente enviado por e-mail. Caso contrário, <a href="/recover">solicite novas instruções.</a></p> : null}
