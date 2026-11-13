@@ -12,6 +12,7 @@ import {
   DEVICE_TRUST_TTL_MS,
   generateDeviceToken,
   generateRecoveryCode,
+  getLoginCeremonyFailureStage,
   getAccountRecoveryRequestId,
   hashDeviceToken,
   hashRecoveryCode,
@@ -346,13 +347,23 @@ test("login email ceremonies are capped per account even after a correct passwor
 });
 
 test("login email ceremonies are capped per trusted client source", integrationOptions, async () => {
-  // A random host in TEST-NET-3 keeps the rate-limit window private to this run.
-  const address = `203.0.113.${randomInt(10, 250)}`;
+  // The old TEST-NET-3 host used only 240 possible values and could collide
+  // with a prior fixture's source quota in this shared disposable database.
+  // Use a distinct, randomly generated documentation IPv6 address instead.
+  const sourceId = randomUUID().replaceAll("-", "");
+  const address = `2001:db8:${sourceId.slice(0, 4)}:${sourceId.slice(4, 8)}:${sourceId.slice(8, 12)}:${sourceId.slice(12, 16)}:${sourceId.slice(16, 20)}:${sourceId.slice(20, 24)}`;
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  const sourceHash = createRateLimitIdentifierHash(`login-email-ceremony-source:${address}`);
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: sourceHash } }), 0,
+    "the source-limiter oracle requires an unused test-only address");
   const base = new Date();
   let successes = 0;
+  let quotaDenials = 0;
   let step = 0;
+  const recipients: string[] = [];
   for (let index = 0; index < 5; index += 1) {
     const user = await createTestUser({ label: `login-source-${index}` });
+    recipients.push(user.email);
     for (let attempt = 0; attempt < LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT; attempt += 1) {
       step += 1;
       try {
@@ -360,10 +371,24 @@ test("login email ceremonies are capped per trusted client source", integrationO
         successes += 1;
       } catch (error) {
         assert.ok(error instanceof SecurityMutationError);
+        assert.equal(getLoginCeremonyFailureStage(error), "ceremony-rate-limited",
+          "an unexpected failure must not masquerade as a source quota denial");
+        quotaDenials += 1;
       }
     }
   }
   assert.equal(successes, LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
+  assert.equal(quotaDenials, 5 * LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT - LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: sourceHash } })).attempts,
+    LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT, "the shared source counter must spend exactly its cap");
+  assert.equal((await Promise.all(recipients.map(countLoginMails))).reduce((sum, count) => sum + count, 0),
+    successes, "the capped source may not enqueue additional login challenges");
+  const extraUser = await createTestUser({ label: "login-source-post-cap" });
+  await assert.rejects(startLoginCeremony(extraUser.id, undefined, "pt-BR",
+    new Date(base.getTime() + (step + 1) * 1_000), false, undefined, address),
+  (error: unknown) => getLoginCeremonyFailureStage(error) === "ceremony-rate-limited",
+  "the next account cannot bypass the shared source quota");
+  assert.equal(await countLoginMails(extraUser.email), 0);
 });
 
 test("an untrusted browser reuses its issued ceremony for 60 seconds and replaces it afterward", integrationOptions, async () => {
