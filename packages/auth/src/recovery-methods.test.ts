@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 import { prisma } from "@virki/database";
 import type { Prisma } from "@virki/database";
-import { canRetainMultiMethodRecoveryBrowser, finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, getMultiMethodRecoveryState, normalizeRecoveryPolicy, isRecoveryProofSatisfied, sanitizeRecoveryComment, recoveryPasskeyBinding, recoveryTotpBinding, requireLiveRecoveryProofsInTransaction, recoveryReviewReady, startMultiMethodRecovery, startRecoveryPasskeyAssertion } from "./recovery-methods";
+import { canRetainMultiMethodRecoveryBrowser, finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, getMultiMethodRecoveryState, normalizeRecoveryPolicy, isRecoveryProofSatisfied, sanitizeRecoveryComment, recoveryPasskeyBinding, recoveryTotpBinding, requireLiveRecoveryProofsInTransaction, recoveryReviewReady, restoreProvenMultiMethodRecoveryBrowser, startMultiMethodRecovery, startRecoveryPasskeyAssertion } from "./recovery-methods";
 import { consumeApprovedAccountRecovery, hashEmailAddress, hashRecoveryRequestKey } from "./security";
 
 test("recovery retention fails closed on revoked factor, but surfaces an indeterminate database read", async (context) => {
@@ -51,6 +51,83 @@ test("recovery retention fails closed on revoked factor, but surfaces an indeter
   failRead = false;
   assert.equal(await canRetainMultiMethodRecoveryBrowser(existing, "USER", policy), false,
     "a definitively missing factor must fail closed");
+});
+
+test("damaged intent is reconstructed only from the original browser pair and live enrolled proof", async (context) => {
+  const now = new Date();
+  const email = "restore-intent@integration.invalid";
+  const requestId = generateRecoveryPublicRequestId();
+  const requestKey = randomBytes(24).toString("base64url");
+  const browserToken = randomBytes(32).toString("base64url");
+  const expiry = new Date(now.getTime() + 20 * 60_000);
+  const factor = {
+    id: "restore-intent-factor", status: "ACTIVE", secretCiphertext: "encrypted-test-secret",
+    keyVersion: 1, confirmedAt: now, lastUsedStep: 100
+  };
+  const row = {
+    id: requestId, userId: "restore-intent-owner", purpose: "RECOVERY", status: "PENDING",
+    recoveryRole: "USER", recoveryProofs: ["EMAIL", "TOTP"], recoveryAdminReview: false,
+    expiresAt: expiry, emailAddressHash: hashEmailAddress(email),
+    requestKeyHash: hashRecoveryRequestKey(requestKey),
+    recoveryBrowserHash: createHash("sha256").update("Virki recovery browser v1:").update(browserToken).digest("hex"),
+    recoveryTotpVerifiedAt: now as Date | null, recoveryTotpBindingHash: recoveryTotpBinding(factor),
+    recoveryTotpUsedStep: 100, recoveryPasskeyVerifiedAt: null, recoveryPasskeyCredentialId: null,
+    recoveryPasskeyBindingHash: null, emailVerifiedAt: null, reviewedByUserId: null,
+    user: { email, emailNormalized: email, role: "USER", isActive: true, accountStatus: "ACTIVE" }
+  };
+  const originalFind = Object.getOwnPropertyDescriptor(prisma.accountRecoveryRequest, "findFirst");
+  const originalTransaction = Object.getOwnPropertyDescriptor(prisma, "$transaction");
+  assert.ok(originalFind && originalTransaction);
+  let readFailure: Error | null = null;
+  Object.defineProperty(prisma.accountRecoveryRequest, "findFirst", {
+    ...originalFind,
+    value: async ({ where }: { where: {
+      requestKeyHash: string; recoveryBrowserHash: string; recoveryRole: string;
+      purpose: string; status: { in: string[] }; expiresAt: { gt: Date };
+    } }) => {
+      if (readFailure) throw readFailure;
+      return where.requestKeyHash === row.requestKeyHash &&
+        where.recoveryBrowserHash === row.recoveryBrowserHash && where.recoveryRole === row.recoveryRole &&
+        where.purpose === row.purpose && where.status.in.includes(row.status) &&
+        row.expiresAt > where.expiresAt.gt ? row : null;
+    }
+  });
+  const tx = {
+    accountRecoveryRequest: { findUnique: async ({ where }: { where: { id: string } }) =>
+      where.id === row.id ? row : null },
+    totpFactor: { findUnique: async () => factor },
+    user: { findUnique: async () => ({ secondFactorMethod: "TOTP" }) }
+  } as unknown as Prisma.TransactionClient;
+  Object.defineProperty(prisma, "$transaction", {
+    ...originalTransaction, value: async (operation: (client: Prisma.TransactionClient) => Promise<unknown>) => operation(tx)
+  });
+  context.after(() => {
+    Object.defineProperty(prisma, "$transaction", originalTransaction);
+    Object.defineProperty(prisma.accountRecoveryRequest, "findFirst", originalFind);
+  });
+  assert.deepEqual(await restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, "USER", now), {
+    requestId, policy: { proofs: ["EMAIL", "TOTP"], adminReview: false }, expiresAt: expiry
+  });
+  assert.equal(await restoreProvenMultiMethodRecoveryBrowser(randomBytes(24).toString("base64url"), browserToken, "USER", now), null);
+  assert.equal(await restoreProvenMultiMethodRecoveryBrowser(requestKey, randomBytes(32).toString("base64url"), "USER", now), null);
+  assert.equal(await restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, "ADMIN", now), null);
+  assert.equal(await restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, "USER", new Date(expiry.getTime() + 1)), null);
+  row.recoveryTotpVerifiedAt = null;
+  assert.equal(await restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, "USER", now), null,
+    "an unproven bearer pair must not disclose an account recovery ID");
+  row.recoveryTotpVerifiedAt = now;
+  factor.status = "REVOKED";
+  assert.equal(await restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, "USER", now), null,
+    "a revoked independent factor must not restore a live recovery hint");
+  factor.status = "ACTIVE";
+  row.user.isActive = false;
+  assert.equal(await restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, "USER", now), null,
+    "a suspended owner must not retain the old recovery");
+  row.user.isActive = true;
+  const outage = new Error("simulated PostgreSQL failure during capability lookup");
+  readFailure = outage;
+  await assert.rejects(restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, "USER", now),
+    (error: unknown) => error === outage, "indeterminate backend failure must remain an error");
 });
 
 test("public recovery request IDs use a cryptographic, database-compatible format", () => {
