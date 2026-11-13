@@ -1254,6 +1254,43 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
       expect(current?.value, `restart must not replace ${prior.name}`).toBe(prior.value);
       expect(current?.expires, "restart must not extend a recovery capability's TTL").toBe(prior.expires);
     }
+    // Intent is a UI hint, not the authority for the already-proven bearer pair.
+    // Corrupt only that hint while leaving both real capability cookies intact.
+    const originalIntent = originalCookies.find(cookie => cookie.name === names[2]);
+    expect(originalIntent).toBeDefined();
+    for (const intentDamage of ["missing", "corrupted"] as const) {
+      if (intentDamage === "missing") {
+        await real.context.clearCookies({ name: names[2] });
+      } else {
+        await real.context.addCookies([{
+          name: names[2], value: "corrupted-intent", url: portalUrl,
+          httpOnly: true, secure: productionMode, sameSite: "Lax"
+        }]);
+      }
+      await real.page.goto(`${portalUrl}/recover`);
+      await real.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+      await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+      const corruptPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/recover");
+      await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+      const corruptAction = await corruptPost;
+      expect(corruptAction.status()).toBeGreaterThanOrEqual(200);
+      expect(corruptAction.status()).toBeLessThan(400);
+      await expect(real.page).toHaveURL(`${portalUrl}/recover?error=1`);
+      for (const prior of originalCookies.filter(cookie => cookie.name !== names[2])) {
+        const current = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+        expect(current?.value, `${intentDamage} non-authoritative intent must not erase ${prior.name}`).toBe(prior.value);
+        expect(current?.expires).toBe(prior.expires);
+      }
+      // Restore only the original non-authorizing hint; never mint a new
+      // backend capability or infer authority from the requestId URL.
+      await real.context.addCookies([{
+        name: names[2], value: originalIntent!.value, url: portalUrl,
+        httpOnly: true, secure: productionMode, sameSite: "Lax"
+      }]);
+    }
+    await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
+    await expect(real.page.locator('[aria-label="Aplicativo autenticador"]')).toContainText("Confirmado.");
     expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } })).toBe(1);
     expect(await database.emailOutboxMessage.count({ where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" } }))
       .toBe(originalMessages);

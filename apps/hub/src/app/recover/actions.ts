@@ -73,6 +73,11 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   const comment = readBoundedFormString(formData, "comment", 600);
   const cookieStore = await cookies();
   const existingIntent = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
+  // The intent cookie is only a UI hint. A missing/damaged hint must not
+  // authorize replacing a real, independently proven key+browserToken pair
+  // with synthetic credentials on a rejected anonymous restart.
+  const hasOpaquePairWithoutIntent = !existingIntent &&
+    Boolean(cookieStore.get(RECOVERY_COOKIE_NAME)?.value && cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value);
   const existingPolicy = recoveryPolicyFromMethod(existingIntent?.method);
   const existing = existingIntent ? {
     requestId: existingIntent.requestId,
@@ -101,7 +106,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     requestKey: randomBytes(24).toString("base64url"),
     browserToken: randomBytes(32).toString("base64url")
   };
-  if (!canRetain && !retentionUnavailable) try {
+  if (!canRetain && !retentionUnavailable && !hasOpaquePairWithoutIntent) try {
     // Enforce the role and method policy on the server; browser radios are never authoritative.
     if (!policy || !email ||
       (policy.adminReview ? formData.has("comment") && comment === null : formData.has("comment"))) throw new Error("Rejected.");
@@ -113,7 +118,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   }
   const remaining = 500 - (Date.now() - startTime);
   if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
-  if (retentionUnavailable) {
+  if (retentionUnavailable || hasOpaquePairWithoutIntent) {
     // Do not trust a cookie ID for authorization or navigation. Keep the
     // original cookies untouched and show the same generic retry message.
     redirect("/recover?error=1");
