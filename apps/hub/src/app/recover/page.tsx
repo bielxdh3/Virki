@@ -2,7 +2,7 @@ import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { cookies, headers } from "next/headers";
 import { forbidden } from "next/navigation";
 import { getAccountRecoveryRequestId, getAccountRecoveryState } from "@virki/auth/security";
-import { getMultiMethodRecoveryState, hasIndependentAdministratorForRole } from "@virki/auth/recovery-methods";
+import { getMultiMethodRecoveryState, hasIndependentAdministratorForRole, restoreProvenMultiMethodRecoveryBrowser } from "@virki/auth/recovery-methods";
 import { passkeysEnabledForRequest } from "@virki/auth/passkeys";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, requestHost } from "../../lib/surface";
@@ -34,10 +34,16 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
   const requestKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value;
   const browserToken = cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value;
   const recoveryIntent = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
-  const isMultiMethodRequest = Boolean(
-    params?.requestId && recoveryIntent?.requestId === params.requestId && requestKey && browserToken
-  );
-  const recoveryPolicy = isMultiMethodRequest ? recoveryPolicyFromMethod(recoveryIntent?.method) : null;
+  // A proven browser-bound recovery must survive a missing, malformed, foreign,
+  // or wrong-method UI hint. The backend independently validates BOTH bearer
+  // secrets, the owner, live proof, role and expiry before identifying a request.
+  const proven = params?.requestId && requestKey && browserToken
+    ? await restoreProvenMultiMethodRecoveryBrowser(requestKey, browserToken, expectedRole).catch(() => null)
+    : null;
+  const recoveryPolicy = proven && params?.requestId && proven.requestId === params.requestId ? proven.policy
+    : recoveryIntent && params?.requestId && recoveryIntent.requestId === params.requestId
+      ? recoveryPolicyFromMethod(recoveryIntent.method) : null;
+  const isMultiMethodRequest = Boolean(params?.requestId && requestKey && browserToken && recoveryPolicy);
   // Unknown accounts receive the same pre-proof screen as legitimate requests.
   // Never fall back to the legacy "invalid link" branch for synthetic requests.
   const multiState = params?.requestId && requestKey && browserToken && recoveryPolicy

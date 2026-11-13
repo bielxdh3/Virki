@@ -224,8 +224,11 @@ export async function verifyRecoveryAction(_state: RecoveryVerificationActionSta
 function recoveryBrowserState(cookieStore: Awaited<ReturnType<typeof cookies>>, requestId: string) {
   const requestKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "";
   const browserToken = cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? "";
-  const intent = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
-  return intent?.requestId === requestId && requestKey && browserToken ? { requestKey, browserToken } : null;
+  // The intent cookie is display-only and may be missing or corrupted.
+  // Each backend action independently binds these two bearer secrets to its
+  // exact requestId, role, status, expiry and enrolled proof; a forged URL or
+  // a foreign intent cookie cannot authorize any recovery transition.
+  return requestId && requestKey && browserToken ? { requestKey, browserToken } : null;
 }
 
 export async function verifySelectedRecoveryEmailAction(_state: RecoveryProofActionState, formData: FormData): Promise<RecoveryProofActionState> {

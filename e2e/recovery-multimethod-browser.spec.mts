@@ -1196,6 +1196,34 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     expect(partial.status).toBe("PENDING");
     expect(partial.recoveryTotpVerifiedAt).not.toBeNull();
     expect(partial.emailVerifiedAt).toBeNull();
+    // A normal browser refresh or bookmarked recovery URL must remain usable
+    // after losing the non-authorizing intent hint. Re-submitting the original
+    // email/method form must not be a prerequisite for resuming a proven factor.
+    const savedIntent = originalCookies.find(cookie => cookie.name === names[2]);
+    expect(savedIntent).toBeDefined();
+    for (const damage of ["missing", "malformed", "foreign-request", "wrong-method"] as const) {
+      if (damage === "missing") {
+        await real.context.clearCookies({ name: names[2] });
+      } else {
+        await real.context.addCookies([{
+          name: names[2], url: portalUrl,
+          value: damage === "malformed" ? "bad-intent"
+            : damage === "wrong-method" ? `${originalId}.EMAIL_ADMIN`
+              : `${randomBytes(32).toString("base64url")}.TOTP_EMAIL`,
+          httpOnly: true, secure: productionMode, sameSite: "Lax"
+        }]);
+      }
+      await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
+      await expect(real.page.locator('[aria-label="Aplicativo autenticador"]'))
+        .toContainText("Confirmado.");
+      await expect(real.page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toBeVisible();
+      for (const prior of originalCookies.filter(cookie => cookie.name !== names[2])) {
+        const after = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+        expect(after?.value, `${damage} direct GET must preserve ${prior.name}`).toBe(prior.value);
+        expect(after?.expires).toBe(prior.expires);
+      }
+      await real.context.addCookies([savedIntent!]);
+    }
     const originalMessages = await database.emailOutboxMessage.count({
       where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" }
     });
@@ -1332,6 +1360,10 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     });
     const emailCode = message ? decryptEmailPayload(message.payload).code : undefined;
     expect(emailCode).toMatch(/^\d{6}$/u);
+    // Even when a later proof POST races the missing hint, only the original
+    // cryptographically bound pair (not UI intent) authorizes that transition.
+    await real.context.clearCookies({ name: names[2] });
+    await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
     const emailStage = real.page.locator('[aria-label="E-mail cadastrado"]');
     await emailStage.locator('input[name="code"]').fill(emailCode!);
     await emailStage.getByRole("button", { name: "Confirmar", exact: true }).click();
