@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { expect, test, type Browser, type BrowserContext, type Page, type Request } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page, type Request, type Response } from "@playwright/test";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
@@ -578,19 +578,32 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     };
     const observedPosts: Request[] = [];
     const failedPosts: Request[] = [];
+    const responseSeen = new Set<Request>();
+    const lateFailedPosts: Request[] = [];
     const onReplayRequest = (request: Request) => {
       if (isReplayPost(request)) observedPosts.push(request);
+    };
+    const onReplayResponse = (response: Response) => {
+      if (isReplayPost(response.request())) responseSeen.add(response.request());
     };
     let onReplayFailed!: (request: Request) => void;
     const failedReplay = new Promise<never>((_, reject) => {
       onReplayFailed = request => {
         if (isReplayPost(request)) {
-          failedPosts.push(request);
-          reject(new Error("Real stale ADMIN browser POST failed before a handled denial response."));
+          // An RSC redirect can abandon the response stream AFTER HTTP headers
+          // and the server's durable denial have been delivered. Such a late
+          // network event is not evidence that the server missed this POST.
+          // Fail closed for any abort BEFORE the first browser response event.
+          if (responseSeen.has(request)) lateFailedPosts.push(request);
+          else {
+            failedPosts.push(request);
+            reject(new Error("Real stale ADMIN browser POST failed before a handled denial response."));
+          }
         }
       };
     });
     stale.page.on("request", onReplayRequest);
+    stale.page.on("response", onReplayResponse);
     stale.page.on("requestfailed", onReplayFailed);
     const responsePending = stale.page.waitForResponse(response => isReplayPost(response.request()),
       { timeout: 25_000 });
@@ -692,9 +705,14 @@ test("Chromium ADMIN: actual Hub RP passkey enrollment and PASSKEY_ADMIN recover
     expect(await db.auditLog.count({ where: { eventType: "ACCOUNT_RECOVERY_CONSUMED", result: "SUCCESS" } }),
       "replay must not record a second successful recovery consumption").toBe(successfulConsumptionAudits);
     expect(observedPosts, "the completed browser flow must not dispatch a second Next action POST").toHaveLength(1);
-    expect(failedPosts, "the completed browser flow cannot hide an aborted Next action POST").toHaveLength(0);
+    expect(responseSeen.has(originalPost), "the real browser POST must have received HTTP response headers").toBe(true);
+    expect(failedPosts, "a canceled POST before its HTTP response is NOT a valid replay denial").toHaveLength(0);
+    expect(lateFailedPosts.every(request => request === originalPost),
+      "only the same server-confirmed POST may report a late RSC/navigation abort").toBe(true);
+    expect(lateFailedPosts.length, "a duplicate late transport failure is forbidden").toBeLessThanOrEqual(1);
     } finally {
       stale.page.off("request", onReplayRequest);
+      stale.page.off("response", onReplayResponse);
       stale.page.off("requestfailed", onReplayFailed);
     }
   } finally {
