@@ -1,11 +1,13 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { useActionState, useEffect, useState } from "react";
 import { switchRecoveryAction, type RecoverySwitchActionState } from "./actions";
 
 const initialState: RecoverySwitchActionState = { status: "idle" };
 
 export function RecoverySwitchForm({ csrf, csrfFieldName, requestId }: { csrf: string; csrfFieldName: string; requestId: string }) {
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => { setHydrated(true); }, []);
   const [state, action, pending] = useActionState(async (previous: RecoverySwitchActionState, formData: FormData): Promise<RecoverySwitchActionState> => {
     // A delayed modern start may still set its bearer cookies after this
     // explicit legacy adoption. Hold the same per-origin browser lock across
@@ -29,6 +31,6 @@ export function RecoverySwitchForm({ csrf, csrfFieldName, requestId }: { csrf: s
     <input type="hidden" name={csrfFieldName} value={csrf} />
     <input type="hidden" name="requestId" value={requestId} />
     {state.status === "error" ? <p className="form-error" role="alert">Não foi possível usar este link. Abra o link mais recente enviado por e-mail ou solicite novas instruções.</p> : null}
-    <button className="button-primary" type="submit" disabled={pending}>{pending ? "Trocando link…" : "Continuar com este link"}</button>
+    <button className="button-primary" type="submit" disabled={!hydrated || pending}>{pending ? "Trocando link…" : "Continuar com este link"}</button>
   </form>;
 }
