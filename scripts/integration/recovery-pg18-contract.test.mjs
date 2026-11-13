@@ -116,6 +116,17 @@ test("PG18 image is digest-pinned and each independent local/container identity 
   ]) assert.throws(() => requireRecoveryPg18ContainerImage(forged, verifiedImageId), /Private PG18/u);
 });
 
+test("private PG18 integration requires exact TAP rather than Node22's spec reporter", () => {
+  const env = privateRecoveryTestEnvironment({
+    source: {}, databaseUrl: "postgresql://virki_runtime_test@127.0.0.1:5432/virki_w11_admin_pairs_test",
+    migrationUrl: "postgresql://virki_migrator@127.0.0.1:5432/virki_w11_admin_pairs_test",
+    secret: () => "test-only-secret"
+  });
+  assert.equal(env.VIRKI_INTEGRATION_EXACT_TAP, "required");
+  const runner = readFileSync(path.join(here, "run.mjs"), "utf8");
+  assert.match(runner, /process\.env\.VIRKI_INTEGRATION_EXACT_TAP === "required" \? \["--test-reporter=tap"\] : \[\]/u);
+});
+
 test("test children use strict host allowlist and independent disposable crypto, never ambient secrets or NODE_OPTIONS", () => {
   const ambient = {
     PATH: "/temporary/node/bin", HOME: "/fake/home", LANG: "C.UTF-8",
@@ -145,7 +156,7 @@ test("test children use strict host allowlist and independent disposable crypto,
   });
   for (const env of [a, b]) {
     assert.deepEqual(Object.keys(env).sort(), ["PATH", "HOME", "LANG", "NODE_ENV", "CI",
-      "VIRKI_INTEGRATION_ENABLED", "VIRKI_CORE_TEST_DATABASE_CONFIRM", "DATABASE_URL",
+      "VIRKI_INTEGRATION_ENABLED", "VIRKI_INTEGRATION_EXACT_TAP", "VIRKI_CORE_TEST_DATABASE_CONFIRM", "DATABASE_URL",
       "VIRKI_INTEGRATION_DATABASE_URL", "MIGRATION_DATABASE_URL", "VIRKI_PORTAL_URL",
       "VIRKI_HUB_URL", "VIRKI_OIDC_ADAPTER_KEY", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY"].sort());
     for (const key of ["VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY"]) {
@@ -270,7 +281,7 @@ function mockRun(scenario) {
     export function spawnSync(_exec, args, options) {
       const scenario = process.env.VIRKI_FAKE_CASE;
       const approved = ["PATH", "Path", "SystemRoot", "WINDIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-        "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "NODE_ENV", "CI", "VIRKI_INTEGRATION_ENABLED",
+        "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "NODE_ENV", "CI", "VIRKI_INTEGRATION_ENABLED", "VIRKI_INTEGRATION_EXACT_TAP",
         "VIRKI_CORE_TEST_DATABASE_CONFIRM", "DATABASE_URL", "VIRKI_INTEGRATION_DATABASE_URL",
         "MIGRATION_DATABASE_URL", "VIRKI_PORTAL_URL", "VIRKI_HUB_URL", "VIRKI_OIDC_ADAPTER_KEY",
         "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY"];
@@ -281,7 +292,7 @@ function mockRun(scenario) {
           !options.env.DATABASE_URL?.startsWith("postgresql://virki_runtime_test:") ||
           !options.env.MIGRATION_DATABASE_URL?.startsWith("postgresql://virki_migrator:") ||
           options.env.VIRKI_INTEGRATION_DATABASE_URL !== options.env.DATABASE_URL ||
-          options.env.NODE_ENV !== "test") throw Error("DB/SMTP environment not segregated");
+          options.env.NODE_ENV !== "test" || options.env.VIRKI_INTEGRATION_EXACT_TAP !== "required") throw Error("DB/SMTP environment not segregated");
       for (const key of ["VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY"]) {
         if (!/^[a-f0-9]{64}$/.test(options.env[key]) || options.env[key] === process.env[key]) {
           throw Error("Production crypto inherited by child");

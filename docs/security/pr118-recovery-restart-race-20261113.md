@@ -50,6 +50,25 @@ surface checks. Separate physical PostgreSQL 18 integration suites cover
 strong-factor revocation/rotation, cross-role and reviewer authorization,
 mailbox rebind, and one-winner replay.
 
+### Follow-up: physical PostgreSQL 18 on Windows/Node 22
+
+The private PG18 runner initially returned NO-GO despite integration suites
+running because its exact-name gate requires TAP output but Node 22's Windows
+test reporter defaulted to the human-readable spec format. The explicitly
+admitted PG18 test environment now selects `--test-reporter=tap`; ordinary
+integration runs remain unchanged. Focused runner contracts passed 13/13,
+including negative checks for fake PASS/skip, child environment isolation,
+owner identities and cleanup.
+
+The follow-up local run of
+`node scripts/integration/recovery-pg18-disposable.mjs` executed **5/5 named
+ADMIN normal-password tests** and **4/4 named assisted-recovery tests** against
+separate physically provisioned PostgreSQL 18 disposable databases. Output:
+`PG18 RECOVERY REQUIRED GATE: 9 real PASS, 0 FAIL, 0 SKIP, both disposable
+containers removed.` Log:
+`.virki-mission-tmp/pr118-pg18-61f591c-tap-fixed.log`. This is a local
+physical integration result, not hosted CI or external staging evidence.
+
 ## Outstanding independent and operational gates
 
 Independent SOURCE review of the **exact final commit** and its callers is

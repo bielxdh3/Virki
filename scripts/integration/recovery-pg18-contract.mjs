@@ -39,6 +39,7 @@ export function privateRecoveryTestEnvironment({ source = process.env, databaseU
     ...pickSystemEnvironment(source),
     NODE_ENV: "test", CI: "true",
     VIRKI_INTEGRATION_ENABLED: "true", VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable",
+    VIRKI_INTEGRATION_EXACT_TAP: "required",
     DATABASE_URL: databaseUrl, VIRKI_INTEGRATION_DATABASE_URL: databaseUrl,
     MIGRATION_DATABASE_URL: migrationUrl,
     VIRKI_PORTAL_URL: "http://localhost:3000", VIRKI_HUB_URL: "http://localhost:3001",
