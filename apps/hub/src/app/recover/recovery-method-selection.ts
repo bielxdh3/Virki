@@ -7,6 +7,22 @@ export type RecoveryRequestMethod =
   | "TOTP_ADMIN"
   | "EMAIL_ADMIN";
 
+// React can omit a separate checkbox field when encoding the FormData
+// argument of a nested Client -> Server Action call. The method field itself
+// is transmitted reliably; a suffix on one of the six fixed method values
+// represents only an explicit browser-restart acknowledgement, never proof.
+export const RECOVERY_RESTART_METHOD_SUFFIX = ":confirm-restart";
+
+export function parseRecoveryStartMethod(value: unknown): {
+  method: RecoveryRequestMethod; confirmedRestart: boolean
+} | null {
+  if (typeof value !== "string") return null;
+  const confirmedRestart = value.endsWith(RECOVERY_RESTART_METHOD_SUFFIX);
+  const method = confirmedRestart ? value.slice(0, -RECOVERY_RESTART_METHOD_SUFFIX.length) : value;
+  if (!recoveryPolicyFromMethod(method)) return null;
+  return { method: method as RecoveryRequestMethod, confirmedRestart };
+}
+
 type RecoveryPolicy = { proofs: RecoveryProof[]; adminReview: boolean };
 
 const POLICIES: Record<RecoveryRequestMethod, RecoveryPolicy> = {

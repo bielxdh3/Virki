@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { RECOVERY_RESTART_METHOD_SUFFIX, recoveryPolicyFromMethod } from "./recovery-method-selection";
 import type { RecoveryRequestMethod } from "./recovery-method-selection";
 export type { RecoveryRequestMethod } from "./recovery-method-selection";
 
@@ -22,8 +23,9 @@ export function truncateRecoveryComment(value: string): string {
   return [...value].slice(0, 300).join("");
 }
 
-export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMethods, hasOtherActiveAdmin, initialMethod, hasExistingBrowserRecovery = false }: {
+export function RecoveryRequestForm({ action, resumeAction, csrf, csrfFieldName, availableMethods, hasOtherActiveAdmin, initialMethod, hasExistingBrowserRecovery = false }: {
   action: (formData: FormData) => void | Promise<void>;
+  resumeAction: (formData: FormData) => Promise<{ requestId: string | null }>;
   csrf: string;
   csrfFieldName: string;
   availableMethods: readonly RecoveryRequestMethod[];
@@ -38,10 +40,30 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
   const [method, setMethod] = useState<RecoveryRequestMethod | "">(() =>
     initialMethod && [...independent, ...assisted].some(({ value }) => value === initialMethod) ? initialMethod : "");
   const [comment, setComment] = useState("");
-  const [restartConfirmed, setRestartConfirmed] = useState(false);
   const [browserLockUnavailable, setBrowserLockUnavailable] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => { setHydrated(true); }, []);
   const isAssisted = assisted.some(({ value }) => value === method);
   const canSubmit = independent.some(({ value }) => value === method) || isAssisted;
+
+  async function resumeWithBrowserLock(formData: FormData): Promise<void> {
+    if (!navigator.locks?.request) {
+      setBrowserLockUnavailable(true);
+      return;
+    }
+    const result = await navigator.locks.request("virki-recovery-start-v1", () => resumeAction(formData));
+    // A full same-origin document request keeps Hub vs Portal identity and
+    // Access provenance intact, unlike an internal action-RSC navigation.
+    window.location.replace(result.requestId
+      ? "/recover?requestId=" + encodeURIComponent(result.requestId)
+      : "/recover?restart=1");
+  }
+
+  async function resumeFromButton(): Promise<void> {
+    const formData = new FormData();
+    formData.set(csrfFieldName, csrf);
+    await resumeWithBrowserLock(formData);
+  }
 
   async function submitWithBrowserLock(formData: FormData): Promise<void> {
     // The first two tabs may submit before EITHER has a recovery cookie.
@@ -55,13 +77,23 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
       setBrowserLockUnavailable(true);
       return;
     }
-    // Snapshot the visible acknowledgement before awaiting another tab's
-    // lock. React may re-encode a nested FormData argument for Server Actions;
-    // explicitly supply the canonical, server-validated field name rather
-    // than trusting any transport-prefixed alias.
-    formData.delete("confirmRecoveryRestart");
-    if (hasExistingBrowserRecovery && restartConfirmed) {
-      formData.set("confirmRecoveryRestart", "yes");
+    // The submitted FormData, not an asynchronously hydrated React state,
+    // is the only reliable source for the checkbox value. Preserve the
+    // browser's exact acknowledgement while the cross-tab lock is pending;
+    // the server validates the field and checks role, origin and CSRF.
+    const confirmed = hasExistingBrowserRecovery && formData.get("confirmRecoveryRestart") === "yes";
+    if (hasExistingBrowserRecovery && !confirmed) {
+      // A missing URL or damaged intent must not strand a previously proven
+      // browser. Neither this lookup nor its navigation alters capabilities.
+      await resumeWithBrowserLock(formData);
+      return;
+    }
+    const selected = formData.get("method");
+    if (confirmed && typeof selected === "string" && recoveryPolicyFromMethod(selected)) {
+      // Use the existing host/CSRF-validated Server Action rather than a
+      // second RPC with different Access provenance. The backend only admits
+      // the literal six-method whitelist plus this exact consent suffix.
+      formData.set("method", selected + RECOVERY_RESTART_METHOD_SUFFIX);
     }
     await navigator.locks.request("virki-recovery-start-v1", async () => {
       await action(formData);
@@ -74,23 +106,24 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
     <p className="muted">Escolha como deseja confirmar sua identidade. As opções disponíveis não indicam quais fatores estão cadastrados em uma conta.</p>
     {independent.length > 0 ? <fieldset>
       <legend>Confirmar com dois fatores</legend>
-      {independent.map((option) => <RecoveryMethodChoice key={option.value} option={option} selected={method === option.value} onSelect={() => { setMethod(option.value); setComment(""); }} />)}
+      {independent.map((option) => <RecoveryMethodChoice key={option.value} option={option} selected={method === option.value} disabled={!hydrated} onSelect={() => { setMethod(option.value); setComment(""); }} />)}
     </fieldset> : null}
     {assisted.length > 0 ? <fieldset>
       <legend>Um fator e aprovação de outro administrador</legend>
       <p className="muted">O administrador que aprovar deverá ser outra pessoa com conta ativa. A aprovação só é válida após a confirmação do fator escolhido.</p>
-      {assisted.map((option) => <RecoveryMethodChoice key={option.value} option={option} selected={method === option.value} onSelect={() => setMethod(option.value)} />)}
+      {assisted.map((option) => <RecoveryMethodChoice key={option.value} option={option} selected={method === option.value} disabled={!hydrated} onSelect={() => setMethod(option.value)} />)}
     </fieldset> : null}
     {isAssisted ? <label>Comentário para análise (opcional, até 300 caracteres)
       <textarea name="comment" maxLength={600} value={comment} onChange={(event) => setComment(truncateRecoveryComment(event.target.value))} rows={3} />
       <small aria-live="polite">{[...comment].length}/300</small>
     </label> : null}
     {hasExistingBrowserRecovery ? <label>
-      <input type="checkbox" name="confirmRecoveryRestart" value="yes"
-        checked={restartConfirmed} onChange={event => setRestartConfirmed(event.target.checked)} />
+      <input type="checkbox" name="confirmRecoveryRestart" value="yes" disabled={!hydrated} />
       Confirmo que quero substituir a recuperação anterior neste navegador e posso perder o progresso que ainda não foi concluído em outra aba.
     </label> : null}
-    <button className="button-primary" type="submit" disabled={!canSubmit}>Solicitar recuperação</button>
+    {hasExistingBrowserRecovery ? <button type="button" className="button-secondary"
+      disabled={!hydrated} onClick={resumeFromButton}>Retomar recuperação anterior</button> : null}
+    <button className="button-primary" type="submit" disabled={!canSubmit || !hydrated}>Solicitar recuperação</button>
     {browserLockUnavailable ? <p role="alert" className="form-error">
       Não foi possível iniciar a recuperação neste navegador. Use uma versão atualizada com acesso seguro (HTTPS).
     </p> : null}
@@ -98,9 +131,9 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
   </form>;
 }
 
-function RecoveryMethodChoice({ option, selected, onSelect }: { option: RecoveryMethodOption; selected: boolean; onSelect: () => void }) {
+function RecoveryMethodChoice({ option, selected, disabled, onSelect }: { option: RecoveryMethodOption; selected: boolean; disabled: boolean; onSelect: () => void }) {
   return <label style={{ display: "flex", alignItems: "flex-start", gap: "0.65rem", marginTop: "0.7rem", cursor: "pointer" }}>
-    <input type="radio" name="method" value={option.value} checked={selected} onChange={onSelect} style={{ width: "1.15rem", minHeight: "1.15rem", height: "1.15rem", padding: 0, marginTop: "0.2rem", flexShrink: 0 }} />
+    <input type="radio" name="method" value={option.value} checked={selected} disabled={disabled} onChange={onSelect} style={{ width: "1.15rem", minHeight: "1.15rem", height: "1.15rem", padding: 0, marginTop: "0.2rem", flexShrink: 0 }} />
     <span><strong style={{ display: "block", color: "var(--text)" }}>{option.title}</strong><small>{option.description}</small></span>
   </label>;
 }

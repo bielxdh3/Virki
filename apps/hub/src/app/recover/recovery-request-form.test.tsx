@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
-import { recoveryMethodFromPolicy, recoveryPolicyFromMethod } from "./recovery-method-selection";
+import { parseRecoveryStartMethod, recoveryMethodFromPolicy, recoveryPolicyFromMethod, RECOVERY_RESTART_METHOD_SUFFIX } from "./recovery-method-selection";
 import { RecoveryRequestForm, truncateRecoveryComment, type RecoveryRequestMethod } from "./recovery-request-form";
 
 function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdmin: boolean, initialMethod?: RecoveryRequestMethod, hasExistingBrowserRecovery = false): string {
@@ -11,6 +11,7 @@ function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdm
   try {
     return renderToStaticMarkup(<RecoveryRequestForm
       action={async () => {}}
+      resumeAction={async () => ({ requestId: null })}
       csrf="csrf-test"
       csrfFieldName="csrfToken"
       availableMethods={availableMethods}
@@ -53,7 +54,34 @@ test("the same explicit replacement acknowledgement appears for synthetic and re
   assert.match(active, /substituir a recuperação anterior/u);
   assert.match(active, /outra aba/u);
   assert.match(active, /name="csrfToken" value="csrf-test"/u);
+  assert.match(active, /Retomar recuperação anterior/u);
+  assert.doesNotMatch(fresh, /Retomar recuperação anterior/u);
   assert.match(active, /type="submit"/u);
+});
+
+test("recovery method radios stay disabled until hydration can register their state change handlers", () => {
+  const html = renderForm(["TOTP_EMAIL", "EMAIL_ADMIN"], true, undefined, true);
+  const radios = [...html.matchAll(/<input type="radio"[^>]*>/gu)].map(match => match[0]);
+  for (const method of ["TOTP_EMAIL", "EMAIL_ADMIN"]) {
+    const radio = radios.find(tag => tag.includes(`value="${method}"`));
+    assert.ok(radio, `the ${method} radio must exist`);
+    assert.match(radio, /disabled=""/u, `the ${method} radio must await hydration`);
+  }
+  // Without this gate a pre-hydration click can check a visible radio without
+  // setting React's `method` state, leaving a valid ADMIN restart button disabled.
+});
+
+test("only fixed recovery methods accept the explicit restart suffix; malformed variants never authorize replacing a pair", () => {
+  for (const method of ["TOTP_EMAIL", "PASSKEY_EMAIL", "PASSKEY_TOTP", "EMAIL_ADMIN", "TOTP_ADMIN", "PASSKEY_ADMIN"] as const) {
+    assert.deepEqual(parseRecoveryStartMethod(method), { method, confirmedRestart: false });
+    assert.deepEqual(parseRecoveryStartMethod(method + RECOVERY_RESTART_METHOD_SUFFIX),
+      { method, confirmedRestart: true });
+  }
+  for (const candidate of [null, "", "EMAIL_ONLY:confirm-restart", "TOTP_EMAIL:confirm-restart:confirm-restart",
+    "TOTP_EMAIL:confirm-restart-extra", "TOTP_EMAIL:confirm-restart ", "__proto__:confirm-restart",
+    "TOTP_EMAIL+ADMIN:confirm-restart", " TOTP_EMAIL:confirm-restart"]) {
+    assert.equal(parseRecoveryStartMethod(candidate), null);
+  }
 });
 
 test("review comment counts 300 Unicode characters including emoji, while truncating pasted excess", () => {

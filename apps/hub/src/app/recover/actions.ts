@@ -28,7 +28,7 @@ import {
   setMultiMethodRecoveryCookies, setRecoveryCandidateCookie, setRecoveryCookie
 } from "./recovery-cookie";
 import { EMAIL_INPUT_MAX_LENGTH, readBoundedFormString } from "../../lib/action-input-limits";
-import { recoveryMethodFromPolicy, recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
+import { parseRecoveryStartMethod, recoveryMethodFromPolicy, recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
 import { hasRecoveryRestartConsent } from "./recovery-restart-consent";
 import type { RecoveryPasskeyStartState, RecoveryProofActionState } from "./recovery-proof-stage";
 
@@ -64,9 +64,46 @@ export async function requestAdministrativeRecoveryAction(formData: FormData) {
   });
 }
 
+// A verified in-progress browser may lose the requestId URL while retaining
+// its two opaque, host-only cookies. Resume never creates a new request or
+// changes a bearer. Only the non-authorizing intent hint may be repaired
+// after revalidating both tokens and the original live proof.
+// This public request ID is returned only after BOTH bearer tokens and a
+// currently live, independently completed proof have been verified.
+export async function resumeProvenRecoveryAction(formData: FormData): Promise<{ requestId: string | null }> {
+  return withHubAuditRequest(async () => {
+    const requestSurface = getSurface(await headers());
+    const scope = requestSurface === "hub" ? "recovery-admin-request" : "recovery-request";
+    const { expectedRole } = await requireRecoveryAccess(formData, scope);
+    const cookieStore = await cookies();
+    const key = cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "";
+    const browserToken = cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? "";
+    if (!key || !browserToken) return { requestId: null };
+    try {
+      const proven = await restoreProvenMultiMethodRecoveryBrowser(key, browserToken, expectedRole);
+      if (!proven) return { requestId: null };
+      const method = recoveryMethodFromPolicy(proven.policy);
+      const hint = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
+      if (method && (!hint || hint.requestId !== proven.requestId || hint.method !== method)) {
+        // This cookie is display-only, not a recovery capability. Neither
+        // opaque bearer nor its original TTL is rewritten.
+        restoreMultiMethodRecoveryIntent(cookieStore, proven.requestId, method, proven.expiresAt);
+      }
+      return { requestId: proven.requestId };
+    } catch {
+      // Indeterminate DB/liveness states must never cause cookie mutation or
+      // disclose an unverified requestId; the user can retry when healthy.
+      return { requestId: null };
+    }
+  });
+}
+
 async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | "ADMIN", requestHeaders: Headers): Promise<never> {
   const startTime = Date.now();
-  const method = read(formData, "method");
+  // Do not trim the consent-bearing method: "TOTP_EMAIL:confirm-restart "
+  // must not become the exact accepted abandonment acknowledgement.
+  const selected = parseRecoveryStartMethod(readRaw(formData, "method"));
+  const method = selected?.method ?? "";
   const policy = recoveryPolicyFromMethod(method);
   const email = readBoundedFormString(formData, "email", EMAIL_INPUT_MAX_LENGTH);
   // The author-facing 300-character cap uses Unicode code points. 600 UTF-16
@@ -84,7 +121,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   // recovery. Require a separate visible, affirmative acknowledgement before
   // replacing ANY existing pair (real or synthetic); treating them alike also
   // avoids making the pre-proof existence of an account observable.
-  const replaceConfirmed = hasRecoveryRestartConsent(formData);
+  const replaceConfirmed = Boolean(selected?.confirmedRestart) || hasRecoveryRestartConsent(formData);
   const existingPolicy = recoveryPolicyFromMethod(existingIntent?.method);
   const existing = existingIntent ? {
     requestId: existingIntent.requestId,

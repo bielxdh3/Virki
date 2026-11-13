@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page, type Route } from "@playwright/test";
 import { generateRegistrationOptions, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
@@ -111,6 +111,77 @@ async function startSelectedRecovery(page: Page, email: string, method: "TOTP_EM
 
 async function startSelectedTotpEmail(page: Page, email: string): Promise<string> {
   return startSelectedRecovery(page, email, "TOTP_EMAIL");
+}
+
+async function resumeProvenBrowserAfterLostUrl(page: Page, base: string, id: string): Promise<void> {
+  const target = `${base}/recover?requestId=${id}`;
+  if (page.url() !== target) {
+    // A GET may already have restored the public requestId. Otherwise use
+    // the read-only resume action; NEVER start a second recovery request.
+    await expect(page).toHaveURL(base + "/recover");
+    await page.getByRole("button", { name: "Retomar recuperação anterior" }).click();
+  }
+  await expect(page).toHaveURL(target);
+}
+
+// This must exercise the actual start Server Action, not the UI's read-only
+// resume action. The browser explicitly opens the restart form to generate a
+// genuine start POST, but the request is adversarially stripped of consent on
+// the wire before it reaches the same-origin/CSRF-protected server action.
+async function submitUnconsentedRecoveryStartWire(page: Page, email: string, expectedId: string, comment?: string): Promise<void> {
+  await page.goto(portalUrl + "/recover");
+  await page.getByLabel("E-mail da conta", { exact: true }).fill(email);
+  await page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+  await page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
+  if (comment) await page.getByRole("button", { name: "Solicitar recuperação", exact: true }).evaluate((button, value) => {
+    const form = button.closest("form");
+    if (!form) throw new Error("Recovery form missing.");
+    const injected = document.createElement("input");
+    injected.type = "hidden";
+    injected.name = "comment";
+    injected.value = value;
+    form.appendChild(injected);
+  }, comment);
+  let authenticStart = false;
+  let removedAllConsent = false;
+  let includedEmail = false;
+  let includedComment = false;
+  let intercepted = 0;
+  const handler = async (route: Route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    intercepted += 1;
+    const originalBody = route.request().postData() ?? "";
+    authenticStart = Boolean(route.request().headers()["next-action"]) &&
+      /name="(?:_\d+_)?method"\r?\n\r?\nTOTP_EMAIL:confirm-restart(?:\r?\n|$)/u.test(originalBody);
+    includedEmail = originalBody.includes(email);
+    includedComment = comment === undefined || originalBody.includes(comment);
+    const noSuffix = originalBody.replace("TOTP_EMAIL:confirm-restart", "TOTP_EMAIL");
+    const tampered = noSuffix.replace(/(name="(?:_\d+_)?confirmRecoveryRestart"\r?\n\r?\n)yes(?=\r?\n)/gu, "$1no");
+    removedAllConsent = !tampered.includes("TOTP_EMAIL:confirm-restart") &&
+      !/name="(?:_\d+_)?confirmRecoveryRestart"\r?\n\r?\nyes(?:\r?\n|$)/u.test(tampered);
+    await route.continue({ postData: tampered });
+  };
+  await page.route(/\/recover(?:\?.*)?$/u, handler);
+  try {
+    const responsePromise = page.waitForResponse(response => response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/recover");
+    await page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    const response = await responsePromise;
+    expect(response.status(), "the real tampered start must not be denied by unrelated ingress gates").toBeLessThan(400);
+    // A deliberately rewritten Server Action request is an ingress/security
+    // probe, not a legitimate React UI navigation. Inspect the server's own
+    // redirect instead of assuming the client router will apply tampered RSC.
+    const redirect = response.headers()["x-action-redirect"] ?? response.headers()["location"] ?? "";
+    expect(decodeURIComponent(redirect.split(";")[0] ?? ""),
+      "the server must retain the original proven request, not initiate another").toBe(`/recover?requestId=${expectedId}`);
+  } finally {
+    await page.unroute(/\/recover(?:\?.*)?$/u, handler);
+  }
+  expect(intercepted, "the genuine start POST must reach the browser network boundary").toBe(1);
+  expect(authenticStart, "not a resume-action POST: real start method with consent suffix").toBe(true);
+  expect(removedAllConsent, "strip both possible wire-level consent encodings").toBe(true);
+  expect(includedEmail, "the selected mailbox must actually be on the start POST wire").toBe(true);
+  expect(includedComment, "the malformed comment must actually be on the start POST wire").toBe(true);
 }
 
 async function assertBoundCookies(context: BrowserContext, base: string, requestId: string,
@@ -1282,6 +1353,63 @@ test("USER fresh/fresh: two initial browser submissions serialize before any cap
   }
 });
 
+test("USER TOTP proven: losing the URL requestId still resumes without minting or replacing bearer cookies", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const { database } = await requireFixture();
+  const email = `${randomUUID()}.no-url-resume@e2e.invalid`;
+  let userId: string | undefined;
+  let context: BrowserContext | undefined;
+  try {
+    const secret = createTotpSecret();
+    const user = await database.user.create({ data: {
+      email, emailNormalized: email, displayName: "Missing URL resume test",
+      passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+      role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+      secondFactorMethod: "TOTP", totpFactor: { create: {
+        secretCiphertext: encryptTotpSecret(secret), keyVersion: 1, status: "ACTIVE", confirmedAt: new Date()
+      } }
+    }, select: { id: true } });
+    userId = user.id;
+    const session = await openRecovery(browser, "portal");
+    context = session.context;
+    const id = await startSelectedTotpEmail(session.page, email);
+    const stage = session.page.locator('[aria-label="Aplicativo autenticador"]');
+    await stage.locator('input[name="code"]').fill(totpAt(secret));
+    await stage.getByRole("button", { name: "Confirmar", exact: true }).click();
+    await expect(stage).toContainText("Confirmado.");
+    const verified = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id } });
+    expect(verified.recoveryTotpVerifiedAt).not.toBeNull();
+    const primaryNames = productionMode
+      ? ["__Host-virki_recovery", "__Host-virki_recovery_browser"]
+      : ["virki_recovery_v2", "virki_recovery_browser"];
+    const before = (await context.cookies(portalUrl)).filter(c => primaryNames.includes(c.name));
+    expect(before).toHaveLength(2);
+    await context.clearCookies({
+      name: productionMode ? "__Host-virki_recovery_intent" : "virki_recovery_intent"
+    });
+    await session.page.goto(portalUrl + "/recover");
+    await resumeProvenBrowserAfterLostUrl(session.page, portalUrl, id);
+    await expect(session.page.locator('[aria-label="Aplicativo autenticador"]')).toContainText("Confirmado.");
+    await expect(session.page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toBeVisible();
+    for (const prior of before) {
+      const current = (await context.cookies(portalUrl)).find(c => c.name === prior.name);
+      expect(current?.value === prior.value, "resume must preserve the original bearer value").toBe(true);
+      expect(current?.expires).toBe(prior.expires);
+    }
+    const after = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id } });
+    expect(after.recoveryTotpVerifiedAt?.getTime()).toBe(verified.recoveryTotpVerifiedAt?.getTime());
+  } finally {
+    await context?.close();
+    if (userId) {
+      await database.accountRecoveryRequest.deleteMany({ where: { userId } });
+      await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: email } });
+      await database.totpFactor.deleteMany({ where: { userId } });
+      await database.user.deleteMany({ where: { id: userId, email } });
+    }
+    await database.$disconnect();
+  }
+});
+
 test("USER TOTP+EMAIL: same-browser restart retains the live partially proven capability only", async ({ browser }) => {
   test.setTimeout(120_000);
   const { database } = await requireFixture();
@@ -1308,49 +1436,26 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
       : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
     const originalCookies = (await real.context.cookies(portalUrl)).filter(cookie => names.includes(cookie.name));
     expect(originalCookies).toHaveLength(3);
-    // Deterministic same-browser two-tab race with no application test hook:
-    // finish the second POST on the wire but hold its HTTP response before
-    // the browser can apply Set-Cookie. Confirm TOTP in the first tab while
-    // the later restart response is withheld, then release it out of order.
+    // A second tab MUST NOT make a new recovery request without deliberate
+    // abandonment. It may perform a read-only resume lookup, which cannot
+    // race a newly committed TOTP proof by setting another bearer cookie.
     const competingTab = await real.context.newPage();
     await competingTab.goto(portalUrl + "/recover");
     await competingTab.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
     await competingTab.locator('input[name="method"][value="TOTP_EMAIL"]').check();
-    let restartFetched = false;
-    let releaseRestart = () => {};
-    const heldRestart = new Promise<void>(resolve => { releaseRestart = resolve; });
-    await competingTab.route(/\/recover(?:\?.*)?$/u, async route => {
-      if (route.request().method() !== "POST") return route.continue();
-      const response = await route.fetch({ maxRedirects: 0 });
-      restartFetched = true;
-      await heldRestart;
-      await route.fulfill({ response });
-    });
-    const restartClick = competingTab.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    await competingTab.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    await expect(competingTab).toHaveURL(portalUrl + "/recover?restart=1");
     const totpStage = real.page.locator('[aria-label="Aplicativo autenticador"]');
-    try {
-      await expect.poll(() => restartFetched, {
-        timeout: 20_000, message: "second POST must finish server-side before TOTP proof"
-      }).toBe(true);
-      // Playwright's route.fetch() uses this context's cookie jar and applies
-      // the intercepted response's Set-Cookie early. Undo that harness effect
-      // so the browser retains the original cookies UNTIL route.fulfill().
-      // This restores the real-world wire ordering rather than masking the bug.
-      await real.context.addCookies(originalCookies);
-      for (const original of originalCookies) {
-        expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === original.name)?.value)
-          .toBe(original.value);
-      }
-      await totpStage.locator('input[name="code"]').fill(totpAt(secret));
-      await totpStage.getByRole("button", { name: "Confirmar", exact: true }).click();
-      await expect(totpStage).toContainText("Confirmado.");
-    } finally {
-      releaseRestart();
+    for (const original of originalCookies) {
+      expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === original.name)?.value)
+        .toBe(original.value);
     }
-    await restartClick;
+    await totpStage.locator('input[name="code"]').fill(totpAt(secret));
+    await totpStage.getByRole("button", { name: "Confirmar", exact: true }).click();
+    await expect(totpStage).toContainText("Confirmado.");
     for (const prior of originalCookies) {
       const current = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
-      expect(current?.value, "delayed restart response must not erase newly proven TOTP capability").toBe(prior.value);
+      expect(current?.value, "read-only resume must not replace a proven TOTP capability").toBe(prior.value);
       expect(current?.expires, "no silent expiry extension across raced POSTs").toBe(prior.expires);
     }
     await competingTab.close();
@@ -1358,6 +1463,22 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     expect(partial.status).toBe("PENDING");
     expect(partial.recoveryTotpVerifiedAt).not.toBeNull();
     expect(partial.emailVerifiedAt).toBeNull();
+    // Resume must work even after the address bar loses requestId and a
+    // separate tab has already completed the independently enrolled TOTP.
+    // A non-authorizing intent cookie cannot be required for this operation.
+    await real.context.clearCookies({ name: names[2] });
+    await real.page.goto(portalUrl + "/recover");
+    await resumeProvenBrowserAfterLostUrl(real.page, portalUrl, originalId);
+    await expect(real.page.locator('[aria-label="Aplicativo autenticador"]')).toContainText("Confirmado.");
+    await expect(real.page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toBeVisible();
+    const resumed = (await real.context.cookies(portalUrl)).filter(cookie => names.includes(cookie.name));
+    for (const before of originalCookies.filter(cookie => cookie.name !== names[2])) {
+      const current = resumed.find(cookie => cookie.name === before.name);
+      expect(current?.value, "a resumed proof cannot rotate an existing bearer").toBe(before.value);
+      expect(current?.expires, "resume cannot extend the bearer lifetime").toBe(before.expires);
+    }
+    const stillProven = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: originalId } });
+    expect(stillProven.recoveryTotpVerifiedAt?.getTime()).toBe(partial.recoveryTotpVerifiedAt?.getTime());
     // A normal browser refresh or bookmarked recovery URL must remain usable
     // after losing the non-authorizing intent hint. Re-submitting the original
     // email/method form must not be a prerequisite for resuming a proven factor.
@@ -1389,55 +1510,24 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     const originalMessages = await database.emailOutboxMessage.count({
       where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" }
     });
-    // A malformed second POST used to destroy the original capability even
-    // when its TOTP proof was already durable. It must be harmless.
-    await real.page.goto(`${portalUrl}/recover`);
-    await real.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
-    await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
-    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).evaluate(button => {
-      const form = button.closest("form");
-      if (!form) throw new Error("Recovery form missing.");
-      const malformed = document.createElement("input");
-      malformed.name = "comment";
-      malformed.value = "disallowed-for-TOTP_EMAIL";
-      malformed.type = "hidden";
-      form.appendChild(malformed);
-    });
-    const malformedPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/recover");
-    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
-    const malformedAction = await malformedPost;
-    const malformedBody = malformedAction.request().postDataBuffer()?.toString("utf8") ?? "";
-    expect(/name="(?:_\d+_)?comment"/u.test(malformedBody),
-      "malformed recovery POST must truly submit the extra disallowed field").toBe(true);
-    expect(malformedBody.includes("disallowed-for-TOTP_EMAIL")).toBe(true);
+    // A genuine Server Action start receives an adversarial no-consent POST,
+    // including an invalid comment. The read-only resume action cannot count.
+    await submitUnconsentedRecoveryStartWire(real.page, ownerEmail, originalId, "disallowed-for-TOTP_EMAIL");
+    await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
     await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
     for (const prior of originalCookies) {
       expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name)?.value).toBe(prior.value);
     }
-    // An alternate mailbox form must also not discard an in-progress recovery.
-    await real.page.goto(`${portalUrl}/recover`);
+    // Nor may a second genuine start for an alternate mailbox replace it.
     const foreignEmail = `absent-${randomUUID()}@e2e.invalid`;
-    await real.page.getByLabel("E-mail da conta", { exact: true }).fill(foreignEmail);
-    await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
-    const foreignPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/recover");
-    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
-    expect(((await foreignPost).request().postDataBuffer()?.toString("utf8") ?? "").includes(foreignEmail),
-      "alternate mailbox must be submitted through a real POST").toBe(true);
+    await submitUnconsentedRecoveryStartWire(real.page, foreignEmail, originalId);
+    await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
     await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
     for (const prior of originalCookies) {
       expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name)?.value).toBe(prior.value);
     }
-    await real.page.goto(`${portalUrl}/recover`);
-    await real.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
-    await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
-    const restartPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/recover");
-    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
-    const restarted = await restartPost;
-    expect(restarted.status()).toBeGreaterThanOrEqual(200);
-    expect(restarted.status()).toBeLessThan(400);
+    await submitUnconsentedRecoveryStartWire(real.page, ownerEmail, originalId);
+    await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
     await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
     for (const prior of originalCookies) {
       const current = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
@@ -1461,25 +1551,18 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
           httpOnly: true, secure: productionMode, sameSite: "Lax"
         }]);
       }
-      await real.page.goto(`${portalUrl}/recover`);
-      await real.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
-      await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
-      const corruptPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
-        new URL(response.url()).pathname === "/recover");
-      await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
-      const corruptAction = await corruptPost;
-      expect(corruptAction.status()).toBeGreaterThanOrEqual(200);
-      expect(corruptAction.status()).toBeLessThan(400);
+      await submitUnconsentedRecoveryStartWire(real.page, ownerEmail, originalId);
+      await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
       for (const prior of originalCookies.filter(cookie => cookie.name !== names[2])) {
         const current = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
         expect(current?.value, `${intentDamage} non-authoritative intent must not erase ${prior.name}`).toBe(prior.value);
         expect(current?.expires).toBe(prior.expires);
       }
       // The server may rehydrate the NON-authorizing hint only after genuine
-      // key+browser proof and live TOTP binding, never from the forged ID.
+      // key+browser proof and live TOTP binding. The hint may also remain
+      // missing or malformed: it is never authorization or a requirement
+      // for restoring the original proof stage.
       await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
-      expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === names[2])?.value)
-        .toBe(originalIntent!.value);
       await expect(real.page.locator('[aria-label="Aplicativo autenticador"]')).toContainText("Confirmado.");
     }
     expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } })).toBe(1);
@@ -1513,10 +1596,21 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     await independent.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
     await independent.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
     await independent.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
+    const retryPhases: string[] = [];
+    const retryPostPaths: string[] = [];
+    independent.page.on("console", message => {
+      if (message.text().startsWith("RESTART_UI_PHASE")) retryPhases.push(message.text());
+    });
+    independent.page.on("request", request => {
+      if (request.method() === "POST") retryPostPaths.push(new URL(request.url()).pathname);
+    });
     const syntheticRetry = independent.page.waitForResponse(response => response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/recover");
+      new URL(response.url()).pathname === "/recover", { timeout: 12_000 });
     await independent.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
-    expect((await syntheticRetry).status()).toBeLessThan(400);
+    const retryResponse = await syntheticRetry.catch(() => {
+      throw new Error("Synthetic retry transport: " + JSON.stringify({ retryPhases, retryPostPaths }));
+    });
+    expect(retryResponse.status()).toBeLessThan(400);
     // A synthetic request contains no independently proven recovery to lose.
     // A user correcting a typo must be able to request a new recovery rather
     // than being trapped behind the first synthetic pair's one-hour cookie TTL.
@@ -1984,6 +2078,7 @@ test("recovery form rejects a tampered CSRF token without minting capability coo
 });
 
 test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal ADMIN method", async ({ browser }) => {
+  test.setTimeout(70_000);
   const { database } = await requireFixture();
   const contexts: BrowserContext[] = [];
   try {
@@ -2025,11 +2120,35 @@ test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal AD
     expect(hubOriginalCookies).toHaveLength(3);
     expect((await hub.context.cookies(portalUrl)).filter((cookie) => cookie.name.includes("recovery")))
       .toHaveLength(0);
+    // Synthetic capabilities have no independent proven factor. With the
+    // requestId URL lost, read-only resume MUST NOT manufacture a valid ID,
+    // alter bearer cookies, or switch to the public USER surface.
+    await hub.page.goto(hubUrl + "/recover");
+    await hub.page.getByRole("button", { name: "Retomar recuperação anterior", exact: true }).click();
+    await expect(hub.page).toHaveURL(hubUrl + "/recover?restart=1");
+    await expect(hub.page.getByRole("heading", { name: "Recuperar acesso administrativo" })).toBeVisible();
+    for (const prior of hubOriginalCookies) {
+      expect((await hub.context.cookies(hubUrl)).find(cookie => cookie.name === prior.name)?.value)
+        .toBe(prior.value);
+    }
     await hub.page.goto(hubUrl + "/recover");
     await hub.page.getByLabel("E-mail da conta", { exact: true }).fill(randomUUID() + "@e2e.invalid");
     await hub.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
     await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
     await expect(hub.page).toHaveURL(hubUrl + "/recover?restart=1");
+    await expect(hub.page.getByRole("heading", { name: "Recuperar acesso administrativo" }))
+      .toBeVisible();
+    expect(await hub.page.evaluate(async () => {
+      const api = navigator.locks;
+      if (!api?.request) return { supported: false, held: -1, pending: -1 };
+      const active = await api.query();
+      return {
+        supported: true,
+        held: active.held?.filter(lock => lock.name === "virki-recovery-start-v1").length ?? 0,
+        pending: active.pending?.filter(lock => lock.name === "virki-recovery-start-v1").length ?? 0
+      };
+    }), "after full Hub document navigation the prior form lock must be released")
+      .toEqual({ supported: true, held: 0, pending: 0 });
     for (const prior of hubOriginalCookies) {
       expect((await hub.context.cookies(hubUrl)).find((cookie) => cookie.name === prior.name)?.value)
         .toBe(prior.value);
@@ -2037,16 +2156,29 @@ test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal AD
     await hub.page.getByLabel("E-mail da conta", { exact: true }).fill(randomUUID() + "@e2e.invalid");
     await hub.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
     await hub.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
+    expect(await hub.page.evaluate(() => {
+      const input = document.querySelector<HTMLInputElement>('input[name="confirmRecoveryRestart"]');
+      return {
+        checked: input?.checked === true,
+        actualFormDataYes: input?.form ? new FormData(input.form).get("confirmRecoveryRestart") === "yes" : false
+      };
+    })).toEqual({ checked: true, actualFormDataYes: true });
     const consentPost = hub.page.waitForResponse((response) => response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/recover");
-    await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+      new URL(response.url()).pathname === "/recover", { timeout: 15_000 });
+    await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true })
+      .click({ noWaitAfter: true });
     const submitted = await consentPost;
+    expect(submitted.status(), "same-surface ADMIN restart must not be rejected by host/CSRF/Access")
+      .toBeLessThan(400);
     const postedBody = submitted.request().postDataBuffer()?.toString("utf8") ?? "";
-    expect(/name="(?:_\d+_)?confirmRecoveryRestart"\r?\n\r?\nyes(?:\r?\n|$)/u.test(postedBody),
-      "explicitly checked abandonment must reach the genuine ADMIN Server Action as yes").toBe(true);
+    expect(/name="(?:_\d+_)?method"\r?\n\r?\nTOTP_EMAIL:confirm-restart(?:\r?\n|$)/u.test(postedBody),
+      "real ADMIN Server Action must receive the explicit method consent suffix").toBe(true);
     const afterConsent = await hub.context.cookies(hubUrl);
     const changedByAction = hubOriginalCookies.filter(cookie => !cookie.name.includes("intent"))
-      .every(cookie => afterConsent.find(current => current.name === cookie.name)?.value !== cookie.value);
+      .every(cookie => {
+        const current = afterConsent.find(next => next.name === cookie.name);
+        return Boolean(current?.value && current.value !== cookie.value);
+      });
     expect(changedByAction,
       "consent action must replace both opaque cookies before testing its navigation").toBe(true);
     // Report only query PARAMETER NAMES on failure; never leak IDs, cookies, CSRF

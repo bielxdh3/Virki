@@ -8,7 +8,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../li
 import { getSurface, requestHost } from "../../lib/surface";
 import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
 import {
-  openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction,
+  openRecoveryAction, requestAdministrativeRecoveryAction, requestRecoveryAction, resumeProvenRecoveryAction,
   startSelectedRecoveryPasskeyAction, verifySelectedRecoveryEmailAction, verifySelectedRecoveryPasskeyAction,
   verifySelectedRecoveryTotpAction
 } from "./actions";
@@ -117,6 +117,7 @@ export default async function RecoverPage({ searchParams }: { searchParams?: Pro
             ? <p role="status">A recuperação anterior foi preservada. Para iniciar outra solicitação, marque a confirmação de substituição abaixo.</p>
             : null}
           <RecoveryRequestForm action={expectedRole === "ADMIN" ? requestAdministrativeRecoveryAction : requestRecoveryAction}
+            resumeAction={resumeProvenRecoveryAction}
             csrf={expectedRole === "ADMIN" ? csrf.adminRequest : csrf.request} csrfFieldName={CSRF_FORM_FIELD_NAME}
             availableMethods={availableMethods} hasOtherActiveAdmin={hasOtherActiveAdmin}
             hasExistingBrowserRecovery={Boolean(requestKey && browserToken)} />
