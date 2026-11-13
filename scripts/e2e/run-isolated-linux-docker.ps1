@@ -520,7 +520,10 @@ try {
     $fields = ([string]$imageInspection[0]).Trim().Split('|')
     if ($fields.Count -ne 4 -or $fields[0] -cnotmatch '^sha256:[a-f0-9]{64}$' -or
         $fields[2] -cne 'linux' -or $fields[3] -cne 'amd64') { throw 'Pinned PostgreSQL 18 image identity or platform is invalid.' }
-    try { $repoDigests = @($fields[1] | ConvertFrom-Json -ErrorAction Stop) }
+    # Windows PowerShell 5.1 wraps a JSON array as one nested Object[] when
+    # placed inside @(...). Convert to a flat string array; otherwise even the
+    # exact pinned RepoDigest fails -contains and causes a false NO-GO.
+    try { $repoDigests = [string[]]($fields[1] | ConvertFrom-Json -ErrorAction Stop) }
     catch { throw 'Pinned PostgreSQL 18 image registry digest is unavailable.' }
     if ($repoDigests -notcontains 'postgres@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395' -and
         $repoDigests -notcontains 'docker.io/library/postgres@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395') {

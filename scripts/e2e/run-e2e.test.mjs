@@ -58,6 +58,27 @@ test("optional PG18 Chromium fixture pins version, image digest, local-only iden
   assert.match(runner, /Invoke-OwnedDockerCleanup \$resourceKind/u);
 });
 
+test("Windows PG18 image inspection flattens genuine RepoDigests without accepting forged repos", {
+  skip: process.platform !== "win32" && "Windows PowerShell 5.1 array semantics"
+}, () => {
+  const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  assert.match(runner, /\$repoDigests = \[string\[\]\]\(\$fields\[1\] \| ConvertFrom-Json -ErrorAction Stop\)/u);
+  const digest = "sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395";
+  const script = [
+    `$fields = @('image', '["postgres@${digest}"]', 'linux', 'amd64')`,
+    "$repoDigests = [string[]]($fields[1] | ConvertFrom-Json -ErrorAction Stop)",
+    `if ($repoDigests.Count -ne 1 -or $repoDigests -notcontains 'postgres@${digest}') { exit 1 }`,
+    `$fields[1] = '["attacker/postgres@${digest}"]'`,
+    "$repoDigests = [string[]]($fields[1] | ConvertFrom-Json -ErrorAction Stop)",
+    `if ($repoDigests -contains 'postgres@${digest}') { exit 2 }`
+  ].join("; ");
+  const checked = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    cwd: repositoryRoot, encoding: "utf8", timeout: 15_000, windowsHide: true
+  });
+  assert.equal(checked.error, undefined);
+  assert.equal(checked.status, 0, checked.stderr);
+});
+
 test("invalid PG18 browser opt-in is rejected before local Docker observation", {
   skip: process.platform !== "win32" && "Windows-only PowerShell admission guard",
 }, () => {
