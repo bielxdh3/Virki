@@ -19,7 +19,7 @@ import {
 } from "@virki/auth/recovery-methods";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin, requestHost } from "../../lib/surface";
-import { RECOVERY_COOKIE_NAME, requiresRecoveryRequestSwitch } from "../../lib/recovery";
+import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
 import {
   clearMultiMethodRecoveryCookies, clearRecoveryCandidateCookie, clearRecoveryCookie,
   parseRecoveryIntent, RECOVERY_BROWSER_COOKIE, RECOVERY_CANDIDATE_COOKIE, RECOVERY_INTENT_COOKIE,
@@ -27,6 +27,7 @@ import {
 } from "./recovery-cookie";
 import { EMAIL_INPUT_MAX_LENGTH, readBoundedFormString } from "../../lib/action-input-limits";
 import { recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
+import { requiresRecoveryLinkSwitch } from "./recovery-switch";
 import type { RecoveryPasskeyStartState, RecoveryProofActionState } from "./recovery-proof-stage";
 
 export async function requestRecoveryAction(formData: FormData) {
@@ -134,14 +135,20 @@ export async function openRecoveryAction(formData: FormData) {
   const recovery = await getAccountRecoveryRequestId(requestKey, new Date(), expectedRole);
   if (!recovery) redirect("/recover?error=1");
   const cookieStore = await cookies();
-  const activeKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value;
-  const activeRecovery = activeKey ? await getAccountRecoveryRequestId(activeKey, new Date(), expectedRole) : null;
-  if (requiresRecoveryRequestSwitch(activeRecovery?.id, recovery.id)) {
+  let mustSwitch: boolean;
+  try {
+    mustSwitch = await requiresRecoveryLinkSwitch(cookieStore, recovery.id, expectedRole);
+  } catch {
+    // Never overwrite a possibly live modern capability on a DB outage.
+    redirect("/recover?error=1");
+  }
+  if (mustSwitch) {
     setRecoveryCandidateCookie(cookieStore, requestKey, recovery.expiresAt);
     redirect(`/recover?switch=1&requestId=${encodeURIComponent(recovery.id)}`);
   }
   clearRecoveryCandidateCookie(cookieStore);
   setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
+  clearMultiMethodRecoveryCookies(cookieStore);
   redirect(`/recover?requestId=${encodeURIComponent(recovery.id)}`);
   });
 }
@@ -160,6 +167,7 @@ export async function switchRecoveryAction(_previousState: RecoverySwitchActionS
       return { status: "error" };
     }
     setRecoveryCookie(cookieStore, requestKey, recovery.expiresAt);
+    clearMultiMethodRecoveryCookies(cookieStore);
     clearRecoveryCandidateCookie(cookieStore);
     return { status: "complete", requestId: recovery.id };
   });

@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { getAccountRecoveryRequestId } from "@virki/auth/security";
 import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
-import { RECOVERY_COOKIE_NAME, requiresRecoveryRequestSwitch } from "../../../lib/recovery";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { setRecoveryCandidateCookie, setRecoveryCookie } from "../recovery-cookie";
+import { clearMultiMethodRecoveryCookies, setRecoveryCandidateCookie, setRecoveryCookie } from "../recovery-cookie";
+import { requiresRecoveryLinkSwitch } from "../recovery-switch";
 
 export const dynamic = "force-dynamic";
 
@@ -24,15 +24,23 @@ export async function GET(request: Request) {
   }
   destination.searchParams.set("requestId", recovery.id);
   const response = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
-  const activeKey = (await cookies()).get(RECOVERY_COOKIE_NAME)?.value;
-  const activeRecovery = activeKey ? await getAccountRecoveryRequestId(activeKey, new Date(), expectedRole) : null;
-  if (requiresRecoveryRequestSwitch(activeRecovery?.id, recovery.id)) {
+  let mustSwitch: boolean;
+  try {
+    mustSwitch = await requiresRecoveryLinkSwitch(await cookies(), recovery.id, expectedRole);
+  } catch {
+    // Fail closed on indeterminate database state; never replace the old key.
+    return new NextResponse("Service Unavailable", { status: 503, headers: privateHeaders() });
+  }
+  if (mustSwitch) {
     destination.searchParams.set("switch", "1");
     const confirmation = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
     setRecoveryCandidateCookie(confirmation.cookies, requestKey, recovery.expiresAt);
     return confirmation;
   }
   setRecoveryCookie(response.cookies, requestKey, recovery.expiresAt);
+  // Adopting a legacy link must not leave stale modern browser/intent hints
+  // attached to the new, unrelated request key.
+  clearMultiMethodRecoveryCookies(response.cookies);
   return response;
 }
 
