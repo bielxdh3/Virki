@@ -7,7 +7,7 @@ import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { hashAuditIdentifier } from "@virki/auth/audit";
 import { getSessionCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
-import { createTotpSecret, encryptTotpSecret, hashEmailAddress, hashRecoveryRequestKey, hashSecurityCode, DEVICE_COOKIE_NAME, getLoginChallengeFactor } from "@virki/auth/security";
+import { createTotpSecret, encryptTotpSecret, hashEmailAddress, hashRecoveryRequestKey, hashSecurityCode, DEVICE_COOKIE_NAME } from "@virki/auth/security";
 // @ts-expect-error This reviewed JS guard has no separate type declaration.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
@@ -865,6 +865,15 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     await page.getByLabel("Senha", { exact: true }).fill(password);
     const loginPost = page.waitForResponse(response => response.request().method() === "POST" &&
       new URL(response.url()).origin === origin && new URL(response.url()).pathname === "/api/login");
+    // Observe the FIRST GET in Chromium's actual POST -> 303 -> GET chain.
+    // Register before the click so a fast native redirect cannot be missed.
+    const nativeVerifyGet = page.waitForResponse(response => {
+      const request = response.request();
+      const predecessor = request.redirectedFrom();
+      const target = new URL(response.url());
+      return request.method() === "GET" && target.origin === origin && target.pathname === "/login/verify" &&
+        predecessor?.method() === "POST" && new URL(predecessor.url()).pathname === "/api/login";
+    }, { timeout: 10_000 }).catch(() => null);
     await page.getByRole("button", { name: "Entrar", exact: true }).click({ noWaitAfter: true });
     const post = await loginPost;
     expect(post.status(), "real password login must start an MFA challenge").toBe(303);
@@ -873,26 +882,15 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     expect(location.pathname).toBe("/login/verify");
     expect(location.searchParams.get("factor")).toBe("email");
     expect(location.searchParams.get("ceremony")).toBeTruthy();
-    try {
-      await page.waitForURL(url => url.origin === origin && url.pathname === "/login/verify" &&
-        url.searchParams.get("factor") === "email" && Boolean(url.searchParams.get("ceremony")), { timeout: 4_000 });
-    } catch (navigationError) {
-      if (origin !== hubUrl) throw navigationError;
-      // The synthetic Access test ingress can redirect a cold Chromium POST
-      // before its device cookie is attached to the next GET. This explicitly
-      // follows the *server-issued* 303 only AFTER confirming both the browser
-      // cookie and the ADMIN-scoped, DB-persisted MFA challenge. Do not count
-      // this as proof of automatic HTTP redirect handling by the test harness.
-      const device = (await page.context().cookies(origin)).find(cookie => cookie.name === DEVICE_COOKIE_NAME);
-      const issued = (await post.headersArray()).some(header => header.name.toLowerCase() === "set-cookie" &&
-        header.value.startsWith(DEVICE_COOKIE_NAME + "="));
-      expect(issued && Boolean(device?.value), "the browser must hold the real issued device cookie").toBe(true);
-      expect(await getLoginChallengeFactor(location.searchParams.get("ceremony")!, device!.value, "ADMIN"))
-        .toBe("email");
-      const document = await page.goto(location.href);
-      expect(document?.status(), "fresh Hub MFA GET must still validate Access").toBe(200);
-      console.info("E2E_HUB_REDIRECT_FOLLOWED_EXPLICITLY");
-    }
+    const issued = (await post.headersArray()).some(header => header.name.toLowerCase() === "set-cookie" &&
+      header.value.startsWith(DEVICE_COOKIE_NAME + "="));
+    expect(issued, "the real password login must issue the bound device cookie").toBe(true);
+    const firstGet = await nativeVerifyGet;
+    expect(firstGet, `Chromium must complete the original 303 GET without reloading /login (currently ${new URL(page.url()).pathname})`).not.toBeNull();
+    expect(firstGet!.request().redirectedFrom(), "MFA GET must be the browser's original POST redirect").toBe(post.request());
+    expect(firstGet!.url(), "MFA GET must follow the server's exact redirect URL").toBe(location.href);
+    expect(firstGet!.status(), "the native MFA page must load successfully").toBe(200);
+    await expect(page).toHaveURL(location.href);
     await expect(page.getByLabel("Código", { exact: true })).toBeVisible();
     const ceremony = new URL(page.url()).searchParams.get("ceremony")!;
     const emailProof = await database.emailOutboxMessage.findFirst({ where: {
@@ -977,7 +975,26 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     await expect(wrongPage.locator('[aria-label="Chave de acesso"] button')).toHaveCount(0);
     await expect(wrongPage.getByLabel("Nova senha", { exact: true })).toHaveCount(0);
 
+    // Next development mode compiles routes lazily and may reload an open login
+    // page while compiling /login/verify, canceling Chromium's real 303 GET.
+    // Prime compilation with a separate anonymous context, then discard it;
+    // the reviewer must still begin with no device cookie or login session.
+    const warmContext = await browser.newContext();
+    try {
+      const warmPage = await warmContext.newPage();
+      await addCloudflareAccessHeader(warmPage, { hubOnlyBrowserRedirects: true });
+      const warmVerify = warmPage.waitForResponse(response =>
+        new URL(response.url()).origin === hubUrl && new URL(response.url()).pathname === "/login/verify");
+      const warmLogin = await warmPage.goto(hubUrl + "/login/verify");
+      expect((await warmVerify).status(), "anonymous MFA route must compile and reject absent ceremony").toBe(307);
+      expect(warmLogin?.status()).toBe(200);
+      expect((await warmContext.cookies(hubUrl)).some(cookie => cookie.name === DEVICE_COOKIE_NAME)).toBe(false);
+    } finally {
+      await warmContext.close();
+    }
+
     const reviewerContext = await newContext();
+    expect(await reviewerContext.cookies(hubUrl), "reviewer must start in a genuinely new browser context").toEqual([]);
     const reviewerPage = await reviewerContext.newPage();
     await addCloudflareAccessHeader(reviewerPage, { hubOnlyBrowserRedirects: true });
     await signInWithEmailMfa(reviewerPage, hubUrl, "/admin/security", reviewer.email, reviewer.password!);
