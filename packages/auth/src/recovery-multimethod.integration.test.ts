@@ -6,6 +6,7 @@ import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simp
 import { prisma } from "@virki/database";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation, uniqueEmail } from "./integration-fixtures";
 import {
+  canRetainMultiMethodRecoveryBrowser,
   getMultiMethodRecoveryState,
   finishRecoveryPasskeyAssertion,
   startMultiMethodRecovery,
@@ -359,6 +360,43 @@ test("real PostgreSQL: EMAIL plus TOTP requires both proofs, then concurrent res
   assert.equal((await Promise.all(candidates.map((password) => verifyPassword(user.passwordHash ?? "", password)))).filter(Boolean).length, 1);
   assert.equal(user.secondFactorMethod, "EMAIL");
   assert.equal((await prisma.totpFactor.findUniqueOrThrow({ where: { userId: owner.id } })).status, "REVOKED");
+});
+
+test("real PostgreSQL: an existing TOTP+EMAIL browser may resume only its own live partially-proven recovery", integrationOptions, async () => {
+  const secret = createTotpSecret();
+  const owner = await createTestUser({ label: "multimethod-same-browser-resume", totpSecret: secret });
+  const policy = { proofs: ["EMAIL" as const, "TOTP" as const], adminReview: false };
+  const original = await startMultiMethodRecovery(owner.email, "USER", policy, "pt-BR", new Date(), isolatedSource());
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { id: original.requestId, userId: owner.id } }), 1);
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(original, "USER", policy), false,
+    "anonymous pre-proof recovery cannot be retained as proof of identity");
+  await verifyMultiMethodRecoveryTotp(original.requestId, original.requestKey, original.browserToken, totpAt(secret), "USER");
+  const partial = await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: original.requestId } });
+  assert.equal(partial.status, "PENDING");
+  assert.ok(partial.recoveryTotpVerifiedAt);
+  assert.equal(partial.emailVerifiedAt, null);
+  const retry = await startMultiMethodRecovery(owner.email, "USER", policy, "pt-BR", new Date(), isolatedSource());
+  assert.notEqual(retry.requestId, original.requestId, "backend retry is non-authorizing synthetic state");
+  assert.equal(await prisma.accountRecoveryRequest.count({ where: { userId: owner.id } }), 1,
+    "retry may not mint a sibling request");
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(original, "USER", policy), true);
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(retry, "USER", policy), false);
+  assert.equal(await canRetainMultiMethodRecoveryBrowser({ ...original, requestKey: retry.requestKey }, "USER", policy), false);
+  assert.equal(await canRetainMultiMethodRecoveryBrowser({ ...original, browserToken: retry.browserToken }, "USER", policy), false);
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(original, "ADMIN", policy), false);
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(original, "USER", { proofs: ["EMAIL", "PASSKEY"], adminReview: false }), false);
+  const code = (await queuedEmails(owner.email)).filter(message => message.kind === "ACCOUNT_RECOVERY").at(-1)?.code;
+  assert.match(code ?? "", /^\d{6}$/u);
+  await verifyMultiMethodRecoveryEmail(original.requestId, original.requestKey, original.browserToken, code!, "USER");
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(original, "USER", policy), true,
+    "fully approved unconsumed same-browser request remains usable");
+  await prisma.totpFactor.update({ where: { userId: owner.id }, data: { status: "REVOKED" } });
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(original, "USER", policy), false,
+    "proof revoked after verification is no longer live");
+  await prisma.totpFactor.update({ where: { userId: owner.id }, data: { status: "ACTIVE" } });
+  await consumeApprovedAccountRecovery(original.requestId, original.requestKey, "recovered-password-change-v1", new Date(), "USER", original.browserToken);
+  assert.equal(await canRetainMultiMethodRecoveryBrowser(original, "USER", policy), false,
+    "consumed recovery never resumes");
 });
 
 test("real PostgreSQL: independent ADMIN review plus TOTP requires verified replacement inbox before reset", integrationOptions, async () => {

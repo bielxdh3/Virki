@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
 import { createTestUser, integrationOptions, uniqueEmail } from "./integration-fixtures";
-import { completeRecoveryEmailRebind, startRecoveryEmailRebind, type RecoveryEmailRebindActor } from "./recovery-email-rebind";
+import { canOfferRecoveryEmailRebind, completeRecoveryEmailRebind, isRecoveryEmailRebindSession, startRecoveryEmailRebind, type RecoveryEmailRebindActor } from "./recovery-email-rebind";
 import { hashEmailAddress, hashSecurityCode } from "./security";
 
 after(() => prisma.$disconnect());
@@ -29,6 +29,8 @@ async function consumedRecoveryFixture(input: { provenEmail: boolean; reboundBef
     purpose: "RECOVERY", recoveryRole: "USER", status: "CONSUMED",
     recoveryProofs: input.provenEmail ? ["EMAIL", "TOTP"] : ["PASSKEY", "TOTP"],
     emailVerifiedAt: input.provenEmail ? now : null,
+    recoveryPasskeyVerifiedAt: input.provenEmail ? null : now,
+    recoveryTotpVerifiedAt: now,
     recoveryNewEmail: reboundEmail,
     recoveryNewEmailChallengeHash: reboundEmail ? hashSecurityCode("654321") : null,
     recoveryNewEmailExpiresAt: reboundEmail ? new Date(now.getTime() + 10 * 60_000) : null,
@@ -50,6 +52,8 @@ for (const scenario of [
 ]) {
   test(`post-reset rebind START rejects ${scenario.label} bootstrap provenance`, integrationOptions, async () => {
     const { actor, account, currentEmail } = await consumedRecoveryFixture(scenario);
+    assert.equal(isRecoveryEmailRebindSession(actor), true, "session-only UI previously offered an impossible action");
+    assert.equal(await canOfferRecoveryEmailRebind(actor), false, "modern recovery cannot offer legacy rebind UI");
     const proposed = uniqueEmail("post-reset-unauthorized");
     await assert.rejects(startRecoveryEmailRebind(actor, proposed));
     assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: account.id } })).email, currentEmail);
@@ -72,3 +76,20 @@ for (const scenario of [
       "the forged stale rebind cannot spend its one-winner claim");
   });
 }
+
+test("legacy non-EMAIL consumed recovery alone may show rebind; revoked and expired sessions may not", integrationOptions, async () => {
+  const { actor, account } = await consumedRecoveryFixture({ provenEmail: false, reboundBeforeReset: false });
+  assert.equal(await canOfferRecoveryEmailRebind(actor), true);
+  await startRecoveryEmailRebind(actor, uniqueEmail("legacy-new-mailbox"));
+  assert.equal(await prisma.recoveryEmailRebind.count({ where: { userId: account.id, sessionId: actor.id } }), 1,
+    "the positive legacy path must create a real bound verification attempt, not only show the form");
+  assert.equal(await canOfferRecoveryEmailRebind({
+    ...actor, createdAt: new Date(actor.createdAt.getTime() + 1000)
+  }), false, "a stale session snapshot must not offer a mutation that requires the original creation timestamp");
+  await prisma.session.update({ where: { id: actor.id }, data: { revokedAt: new Date() } });
+  assert.equal(await canOfferRecoveryEmailRebind(actor), false, "revoked session must not show the form");
+  await prisma.session.update({ where: { id: actor.id }, data: { revokedAt: null, expiresAt: new Date(0) } });
+  assert.equal(await canOfferRecoveryEmailRebind(actor), false, "expired session must not show the form");
+  assert.equal(await canOfferRecoveryEmailRebind({ ...actor, user: { ...actor.user, id: "foreign-user" } }), false);
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: account.id } })).email, actor.user.email);
+});

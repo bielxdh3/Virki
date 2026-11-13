@@ -14,7 +14,7 @@ import { recordSecurityDenial, recordSessionCsrfDenial } from "../../lib/audit-d
 import { getCurrentSession } from "../../lib/auth";
 import { expectedPasskeyRP } from "@virki/auth/passkeys";
 import {
-  finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, startMultiMethodRecovery, startRecoveryPasskeyAssertion,
+  canRetainMultiMethodRecoveryBrowser, finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, startMultiMethodRecovery, startRecoveryPasskeyAssertion,
   startRecoveryNewMailbox, verifyRecoveryNewMailbox, verifyMultiMethodRecoveryEmail, verifyMultiMethodRecoveryTotp
 } from "@virki/auth/recovery-methods";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
@@ -70,6 +70,26 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   // units is the tightest transport ceiling for up to 300 astral characters;
   // the server subsequently enforces the actual 300-character policy.
   const comment = readBoundedFormString(formData, "comment", 600);
+  const cookieStore = await cookies();
+  const existingIntent = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
+  const existingPolicy = recoveryPolicyFromMethod(existingIntent?.method);
+  const existing = existingIntent ? {
+    requestId: existingIntent.requestId,
+    requestKey: cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "",
+    browserToken: cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? ""
+  } : null;
+  // Before handling a new anonymous request, protect this browser's existing,
+  // independently proven recovery. A malformed or throttled restart must not
+  // replace its only copy of the original capability with synthetic cookies.
+  // This does not mint/resend anything or bypass the verification rate limits.
+  let canRetain = false;
+  if (existing && existingPolicy) {
+    try {
+      canRetain = await canRetainMultiMethodRecoveryBrowser(existing, expectedRole, existingPolicy);
+    } catch {
+      // Failure to validate a capability never grants access.
+    }
+  }
   let recovery = {
     // Use the same opaque format as real and synthetic backend requests. A
     // validation/error branch must never reveal account existence by ID shape.
@@ -77,7 +97,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     requestKey: randomBytes(24).toString("base64url"),
     browserToken: randomBytes(32).toString("base64url")
   };
-  try {
+  if (!canRetain) try {
     // Enforce the role and method policy on the server; browser radios are never authoritative.
     if (!policy || !email ||
       (policy.adminReview ? formData.has("comment") && comment === null : formData.has("comment"))) throw new Error("Rejected.");
@@ -89,7 +109,11 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   }
   const remaining = 500 - (Date.now() - startTime);
   if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
-  const cookieStore = await cookies();
+  if (canRetain && existing) {
+    // Retain the original bearer pair and its original cookie expiry unchanged.
+    clearRecoveryCandidateCookie(cookieStore);
+    redirect(`/recover?requestId=${encodeURIComponent(existing.requestId)}`);
+  }
   setMultiMethodRecoveryCookies(cookieStore, recovery.requestKey, recovery.browserToken, recovery.requestId, method as RecoveryRequestMethod);
   clearRecoveryCandidateCookie(cookieStore);
   redirect(`/recover?requestId=${encodeURIComponent(recovery.requestId)}`);

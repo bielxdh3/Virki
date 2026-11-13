@@ -7,13 +7,15 @@ import test from "node:test";
 const service = readFileSync(new URL("./recovery-email-rebind.ts", import.meta.url), "utf8");
 const security = readFileSync(new URL("./security.ts", import.meta.url), "utf8");
 const hub = readFileSync(new URL("../../../apps/hub/src/app/account/security/actions.ts", import.meta.url), "utf8");
+const page = readFileSync(new URL("../../../apps/hub/src/app/account/security/page.tsx", import.meta.url), "utf8");
 const sql = readFileSync(new URL("../../database/prisma/migrations/20261109163000_recovery_email_rebind/migration.sql", import.meta.url), "utf8");
 
 test("bootstrap recovery provenance is an exact unique FK bound in the consuming transaction", () => {
   assert.match(sql, /AccountRecoveryRequest_bootstrapSessionId_key/u);
   assert.match(sql, /FOREIGN KEY \("bootstrapSessionId"\) REFERENCES "Session"/u);
   assert.match(security, /bootstrapSessionId: null[\s\S]*bootstrapSessionId: bootstrap\.id/u);
-  assert.match(service, /bootstrapSessionId: actor\.id/u);
+  assert.match(service, /bootstrapSessionId: sessionId/u);
+  assert.match(service, /eligibleRecoveryOriginWhere\(user\.id, user\.role as "USER" \| "ADMIN", actor\.id\)/u);
   assert.doesNotMatch(service, /consumedAt:\s*session\.createdAt/u);
 });
 
@@ -22,6 +24,15 @@ test("post-reset rebind rejects EMAIL-proven recovery and pre-reset replacement 
   assert.match(service, /NOT:\s*\{\s*recoveryProofs:\s*\{\s*has:\s*"EMAIL"/u);
   assert.match(service, /recoveryNewEmail:\s*null/u);
   assert.match(service, /recoveryNewEmailVerifiedAt:\s*null/u);
+});
+
+test("security UI only offers post-reset mailbox rebind for matching consumed recovery origin", () => {
+  assert.match(page, /await canOfferRecoveryEmailRebind\(data\.session\)/u);
+  assert.doesNotMatch(page, /isRecoveryEmailRebindSession\(data\.session\)/u);
+  assert.match(service, /export async function canOfferRecoveryEmailRebind/u);
+  assert.match(service, /eligibleRecoveryOriginWhere\(actor\.user\.id/u);
+  assert.match(service, /bootstrapSession: \{ is: \{/u);
+  assert.match(service, /revokedAt: null/u);
 });
 
 test("session, role and mailbox checks precede atomic one-winner claim with DB-clock expiry", () => {

@@ -1162,6 +1162,133 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
   }
 });
 
+test("USER TOTP+EMAIL: same-browser restart retains the live partially proven capability only", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const { database } = await requireFixture();
+  const contexts: BrowserContext[] = [];
+  const ownerEmail = `${randomUUID()}.resume@e2e.invalid`;
+  let ownerId: string | undefined;
+  try {
+    const secret = createTotpSecret();
+    const owner = await database.user.create({ data: {
+      email: ownerEmail, emailNormalized: ownerEmail, displayName: "Owned resume E2E fixture",
+      passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+      role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+      secondFactorMethod: "TOTP",
+      totpFactor: { create: {
+        secretCiphertext: encryptTotpSecret(secret), keyVersion: 1, status: "ACTIVE", confirmedAt: new Date()
+      } }
+    }, select: { id: true } });
+    ownerId = owner.id;
+    const real = await openRecovery(browser, "portal");
+    contexts.push(real.context);
+    const originalId = await startSelectedTotpEmail(real.page, ownerEmail);
+    const names = productionMode
+      ? ["__Host-virki_recovery", "__Host-virki_recovery_browser", "__Host-virki_recovery_intent"]
+      : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
+    const originalCookies = (await real.context.cookies(portalUrl)).filter(cookie => names.includes(cookie.name));
+    expect(originalCookies).toHaveLength(3);
+    const totpStage = real.page.locator('[aria-label="Aplicativo autenticador"]');
+    await totpStage.locator('input[name="code"]').fill(totpAt(secret));
+    await totpStage.getByRole("button", { name: "Confirmar", exact: true }).click();
+    await expect(totpStage).toContainText("Confirmado.");
+    const partial = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: originalId } });
+    expect(partial.status).toBe("PENDING");
+    expect(partial.recoveryTotpVerifiedAt).not.toBeNull();
+    expect(partial.emailVerifiedAt).toBeNull();
+    const originalMessages = await database.emailOutboxMessage.count({
+      where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" }
+    });
+    // A malformed second POST used to destroy the original capability even
+    // when its TOTP proof was already durable. It must be harmless.
+    await real.page.goto(`${portalUrl}/recover`);
+    await real.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+    await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).evaluate(button => {
+      const form = button.closest("form");
+      if (!form) throw new Error("Recovery form missing.");
+      const malformed = document.createElement("input");
+      malformed.name = "comment";
+      malformed.value = "disallowed-for-TOTP_EMAIL";
+      malformed.type = "hidden";
+      form.appendChild(malformed);
+    });
+    const malformedPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/recover");
+    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    const malformedAction = await malformedPost;
+    const malformedBody = malformedAction.request().postDataBuffer()?.toString("utf8") ?? "";
+    expect(/name="(?:_\d+_)?comment"/u.test(malformedBody),
+      "malformed recovery POST must truly submit the extra disallowed field").toBe(true);
+    expect(malformedBody.includes("disallowed-for-TOTP_EMAIL")).toBe(true);
+    await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
+    for (const prior of originalCookies) {
+      expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name)?.value).toBe(prior.value);
+    }
+    // An alternate mailbox form must also not discard an in-progress recovery.
+    await real.page.goto(`${portalUrl}/recover`);
+    const foreignEmail = `absent-${randomUUID()}@e2e.invalid`;
+    await real.page.getByLabel("E-mail da conta", { exact: true }).fill(foreignEmail);
+    await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    const foreignPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/recover");
+    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    expect(((await foreignPost).request().postDataBuffer()?.toString("utf8") ?? "").includes(foreignEmail),
+      "alternate mailbox must be submitted through a real POST").toBe(true);
+    await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
+    for (const prior of originalCookies) {
+      expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name)?.value).toBe(prior.value);
+    }
+    await real.page.goto(`${portalUrl}/recover`);
+    await real.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+    await real.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    const restartPost = real.page.waitForResponse(response => response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/recover");
+    await real.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    const restarted = await restartPost;
+    expect(restarted.status()).toBeGreaterThanOrEqual(200);
+    expect(restarted.status()).toBeLessThan(400);
+    await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
+    for (const prior of originalCookies) {
+      const current = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+      expect(current?.value, `restart must not replace ${prior.name}`).toBe(prior.value);
+      expect(current?.expires, "restart must not extend a recovery capability's TTL").toBe(prior.expires);
+    }
+    expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } })).toBe(1);
+    expect(await database.emailOutboxMessage.count({ where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" } }))
+      .toBe(originalMessages);
+    const independent = await openRecovery(browser, "portal");
+    contexts.push(independent.context);
+    const syntheticId = await startSelectedTotpEmail(independent.page, ownerEmail);
+    expect(syntheticId).not.toBe(originalId);
+    expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } })).toBe(1);
+    const message = await database.emailOutboxMessage.findFirst({
+      where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" },
+      orderBy: { createdAt: "desc" }, select: { payload: true }
+    });
+    const emailCode = message ? decryptEmailPayload(message.payload).code : undefined;
+    expect(emailCode).toMatch(/^\d{6}$/u);
+    const emailStage = real.page.locator('[aria-label="E-mail cadastrado"]');
+    await emailStage.locator('input[name="code"]').fill(emailCode!);
+    await emailStage.getByRole("button", { name: "Confirmar", exact: true }).click();
+    await expect(real.page.getByText("Confirmações concluídas.", { exact: false })).toBeVisible();
+    expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: originalId } })).status).toBe("APPROVED");
+  } finally {
+    const closed = await Promise.allSettled(contexts.map(context => context.close()));
+    try {
+      if (ownerId) {
+        await database.accountRecoveryRequest.deleteMany({ where: { userId: ownerId } });
+        await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: ownerEmail } });
+        await database.totpFactor.deleteMany({ where: { userId: ownerId } });
+        await database.user.deleteMany({ where: { id: ownerId, email: ownerEmail } });
+      }
+    } finally {
+      await database.$disconnect();
+    }
+    expect(closed.every(result => result.status === "fulfilled")).toBe(true);
+  }
+});
+
 test("USER TOTP+EMAIL: real/synthetic parity, independent HTTP proofs, one-time reset and scoped cookies", async ({ browser }) => {
   test.setTimeout(120_000);
   const { database } = await requireFixture();

@@ -483,6 +483,44 @@ const replacementSelect = {
   recoveryPasskeyCredentialId: true, recoveryPasskeyBindingHash: true
 } as const;
 
+// An anonymous restart may only retain capabilities already present in this
+// browser. Never return secrets or a request identifier from the database.
+// Revalidate enrolled strong proofs rather than trusting a stored proof timestamp.
+export async function canRetainMultiMethodRecoveryBrowser(
+  existing: RecoveryBrowserState, expectedRole: AccountRecoveryRole,
+  selected: RecoveryPolicy, now = new Date()
+): Promise<boolean> {
+  const policy = normalizeRecoveryPolicy(selected);
+  if (!policy || !isRequestId(existing.requestId) || !isRequestKey(existing.requestKey) ||
+      !isBrowserToken(existing.browserToken)) return false;
+  return prisma.$transaction(async (tx) => {
+    const row = await tx.accountRecoveryRequest.findUnique({
+      where: recoveryWhere(existing.requestId), select: replacementSelect
+    });
+    if (!row || row.purpose !== "RECOVERY" || row.recoveryRole !== expectedRole ||
+        (row.status !== "PENDING" && row.status !== "APPROVED") || row.expiresAt <= now ||
+        !isAccountRecoveryEligible(row.user, expectedRole) ||
+        row.emailAddressHash !== hashEmailAddress(row.user.emailNormalized ?? row.user.email) ||
+        row.recoveryAdminReview !== policy.adminReview ||
+        row.recoveryProofs.length !== policy.proofs.length ||
+        !row.recoveryProofs.every((proof) => policy.proofs.includes(proof as RecoveryProof)) ||
+        !verifyCapability(row, existing.requestKey, existing.browserToken)) return false;
+    const provenStrong = row.recoveryProofs.filter((proof) =>
+      (proof === "TOTP" && row.recoveryTotpVerifiedAt !== null) ||
+      (proof === "PASSKEY" && row.recoveryPasskeyVerifiedAt !== null));
+    if (row.status === "PENDING" && provenStrong.length === 0) return false;
+    if (row.status === "APPROVED" && !isRecoveryProofSatisfied(row.recoveryProofs, row.recoveryAdminReview, row)) return false;
+    if (provenStrong.length) {
+      try {
+        await requireLiveRecoveryProofsInTransaction(tx, { ...row, recoveryProofs: provenStrong });
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }, { isolationLevel: "ReadCommitted" });
+}
+
 async function lockReplacementRequest(tx: Prisma.TransactionClient, requestId: string, role: AccountRecoveryRole) {
   const initial = await tx.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true } });
   if (!initial || !await lockActiveRecoveryAccountInTransaction(tx, initial.userId, role)) throw FAILURE;

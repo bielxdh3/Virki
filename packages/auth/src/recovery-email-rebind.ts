@@ -30,6 +30,39 @@ export function isRecoveryEmailRebindSession(session: RecoveryEmailRebindActor, 
     session.createdAt.getTime() + RECOVERY_EMAIL_REBIND_WINDOW_MS > now.getTime();
 }
 
+function eligibleRecoveryOriginWhere(userId: string, role: "USER" | "ADMIN", sessionId: string): Prisma.AccountRecoveryRequestWhereInput {
+  return {
+    userId, recoveryRole: role, purpose: "RECOVERY", status: "CONSUMED",
+    consumedAt: { not: null }, bootstrapSessionId: sessionId,
+    recoveryProofs: { isEmpty: false },
+    NOT: { recoveryProofs: { has: "EMAIL" } },
+    recoveryNewEmail: null, recoveryNewEmailChallengeHash: null,
+    recoveryNewEmailExpiresAt: null, recoveryNewEmailVerifiedAt: null
+  };
+}
+
+// Display-only hint. The mutation still takes User -> Session locks and checks
+// the origin again, so a race between rendering and submission cannot grant access.
+export async function canOfferRecoveryEmailRebind(actor: RecoveryEmailRebindActor, now = new Date()): Promise<boolean> {
+  if (!isRecoveryEmailRebindSession(actor, now)) return false;
+  const origin = await prisma.accountRecoveryRequest.findFirst({
+    where: {
+      ...eligibleRecoveryOriginWhere(actor.user.id, actor.user.role as "USER" | "ADMIN", actor.id),
+      bootstrapSession: { is: {
+        userId: actor.user.id, revokedAt: null, expiresAt: { gt: now },
+        createdAt: actor.createdAt,
+        authenticationMethods: { has: "recovery" }
+      } },
+      user: { is: {
+        role: actor.user.role as "USER" | "ADMIN", email: actor.user.email,
+        isActive: true, accountStatus: "ACTIVE"
+      } }
+    },
+    select: { id: true }
+  });
+  return Boolean(origin);
+}
+
 export function normalizeNewRecoveryEmail(value: string): string | null {
   const normalized = value.trim().toLowerCase();
   return isSingleMailboxAddress(normalized) ? normalized : null;
@@ -70,14 +103,10 @@ async function requireBoundRecoverySession(tx: Prisma.TransactionClient, actor: 
   // must already be verified and applied atomically BEFORE password reset.
   // The old post-reset path remains only for legacy non-EMAIL origins without
   // any replacement-mailbox attempt; modern consumed recoveries cannot match.
-  const provenance = await tx.accountRecoveryRequest.findFirst({ where: {
-    userId: user.id, recoveryRole: user.role, purpose: "RECOVERY", status: "CONSUMED",
-    consumedAt: { not: null }, bootstrapSessionId: actor.id,
-    recoveryProofs: { isEmpty: false },
-    NOT: { recoveryProofs: { has: "EMAIL" } },
-    recoveryNewEmail: null, recoveryNewEmailChallengeHash: null,
-    recoveryNewEmailExpiresAt: null, recoveryNewEmailVerifiedAt: null
-  }, select: { id: true } });
+  const provenance = await tx.accountRecoveryRequest.findFirst({
+    where: eligibleRecoveryOriginWhere(user.id, user.role as "USER" | "ADMIN", actor.id),
+    select: { id: true }
+  });
   if (!provenance) throw ERROR;
   return { user, session };
 }
