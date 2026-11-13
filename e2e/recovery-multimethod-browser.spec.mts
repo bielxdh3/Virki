@@ -2510,3 +2510,98 @@ for (const role of ["USER", "ADMIN"] as const) {
     }
   });
 }
+
+// Explicit restart consent must not discard a legacy link whose email proof
+// or independent approval is already complete. Unlike a no-consent test, this
+// enters the retainedLegacyId branch; deleting that guard MUST make it RED.
+for (const role of ["USER", "ADMIN"] as const) {
+  for (const legacyStatus of ["APPROVED", "PENDING"] as const) {
+    test(`${role} ${legacyStatus} verified legacy key-only survives explicit modern restart consent`, async ({ browser }) => {
+      test.setTimeout(120_000);
+      const { fixture, database } = await requireFixture();
+      const email = `legacy-consent-${role.toLowerCase()}-${randomUUID()}@e2e.invalid`;
+      const origin = role === "ADMIN" ? hubUrl : portalUrl;
+      const cookieName = productionMode ? "__Host-virki_recovery" : "virki_recovery_v2";
+      const key = randomBytes(24).toString("base64url");
+      let userId: string | undefined;
+      let context: BrowserContext | undefined;
+      try {
+        const totp = createTotpSecret();
+        const owner = await database.user.create({ data: {
+          email, emailNormalized: email, displayName: "Verified legacy consent retention fixture",
+          role, passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+          isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+          secondFactorMethod: "TOTP",
+          totpFactor: { create: {
+            secretCiphertext: encryptTotpSecret(totp), keyVersion: 1,
+            status: "ACTIVE", confirmedAt: new Date()
+          } }
+        }, select: { id: true } });
+        userId = owner.id;
+        const original = await database.accountRecoveryRequest.create({ data: {
+          userId, status: legacyStatus, purpose: "RECOVERY",
+          requestKeyHash: hashRecoveryRequestKey(key), emailAddressHash: hashEmailAddress(email),
+          emailChallengeHash: hashSecurityCode("123456"), emailVerifiedAt: new Date(),
+          ...(legacyStatus === "APPROVED" ? {
+            approvedAt: new Date(), reviewedByUserId: fixture.recoveryReviewer.id
+          } : {}),
+          expiresAt: new Date(Date.now() + 25 * 60_000)
+        }, select: { id: true, status: true, requestKeyHash: true, expiresAt: true, emailVerifiedAt: true } });
+        const active = await openRecovery(browser, role === "ADMIN" ? "hub" : "portal");
+        context = active.context;
+        await active.page.goto(`${origin}/recover/open?request=${encodeURIComponent(key)}`);
+        await active.page.getByRole("button", { name: "Continuar com este link" }).click();
+        await expect.poll(async () => (await context!.cookies(origin))
+          .find(cookie => cookie.name === cookieName)?.value === key).toBe(true);
+        const before = (await context.cookies(origin)).find(cookie => cookie.name === cookieName)!;
+        expect((await context.cookies(origin)).some(cookie => cookie.name.includes("recovery_browser"))).toBe(false);
+        await active.page.goto(`${origin}/recover`);
+        await expect(active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u })).toBeVisible();
+        await active.page.getByLabel("E-mail da conta", { exact: true }).fill(email);
+        await active.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+        await active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
+        if (role === "ADMIN") await addCloudflareAccessHeader(active.page, { hubOnlyBrowserRedirects: true });
+
+        const postPromise = active.page.waitForResponse(response =>
+          response.request().method() === "POST" && new URL(response.url()).pathname === "/recover");
+        await active.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click({ noWaitAfter: true });
+        const response = await postPromise;
+        const postedBody = response.request().postData() ?? "";
+        expect(response.status(), "real Next action passed CSRF/role/Access").toBeLessThan(400);
+        expect(Boolean(response.request().headers()["next-action"]), "must be a genuine Next action").toBe(true);
+        expect(/name="(?:_\d+_)?method"\r?\n\r?\nTOTP_EMAIL:confirm-restart(?:\r?\n|$)/u.test(postedBody),
+          "the real start action must receive explicit method-suffix consent").toBe(true);
+        const redirected = decodeURIComponent((response.headers()["x-action-redirect"] ??
+          response.headers().location ?? "").split(";")[0] ?? "");
+        expect(redirected === `/recover?requestId=${original.id}`,
+          "affirmative consent must redirect to the verified legacy request").toBe(true);
+        const issued = (await response.headersArray()).filter(header =>
+          header.name.toLowerCase() === "set-cookie" &&
+          /^(?:__Host-virki_recovery(?:_browser|_intent)?|virki_recovery_(?:v2|browser|intent))=/u.test(header.value));
+        expect(issued, "retention must not rewrite primary/browser/intent cookies").toHaveLength(0);
+        await expect.poll(() => active.page.url() === `${origin}/recover?requestId=${original.id}`).toBe(true);
+        const after = (await context.cookies(origin)).find(cookie => cookie.name === cookieName);
+        expect(after?.value === before.value, "retention must preserve the original legacy bearer").toBe(true);
+        expect(after?.expires, "retention must preserve the original cookie expiry").toBe(before.expires);
+        expect((await context.cookies(origin)).some(cookie => cookie.name.includes("recovery_browser")),
+          "retention must not mint a modern browser bearer").toBe(false);
+        expect(await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: original.id },
+          select: { id: true, status: true, requestKeyHash: true, expiresAt: true, emailVerifiedAt: true } })).toEqual(original);
+        expect(await database.accountRecoveryRequest.count({ where: { userId } }),
+          "verified legacy recovery must not create another owner request").toBe(1);
+        expect(await database.emailOutboxMessage.count({ where: { recipientEmail: email } }),
+          "verified legacy recovery must not enqueue another owner email").toBe(0);
+      } finally {
+        await context?.close();
+        if (userId) {
+          await database.session.deleteMany({ where: { userId } });
+          await database.accountRecoveryRequest.deleteMany({ where: { userId } });
+          await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: email } });
+          await database.totpFactor.deleteMany({ where: { userId } });
+          await database.user.deleteMany({ where: { id: userId, email } });
+        }
+        await database.$disconnect();
+      }
+    });
+  }
+}
