@@ -59,6 +59,12 @@ export function setMultiMethodRecoveryCookies(cookieStore: RecoveryCookieStore, 
   cookieStore.set(RECOVERY_INTENT_COOKIE, `${requestId}.${method}`, getRecoveryCookieOptions(expiresAt));
 }
 
+export function restoreMultiMethodRecoveryIntent(cookieStore: RecoveryCookieStore, requestId: string, method: RecoveryRequestMethod, expiresAt: Date): void {
+  // This is a rendering hint only. Do not rewrite/extend the original bearer
+  // key or browser-token cookies when recovering the UI state.
+  cookieStore.set(RECOVERY_INTENT_COOKIE, `${requestId}.${method}`, getRecoveryCookieOptions(expiresAt));
+}
+
 export function clearMultiMethodRecoveryCookies(cookieStore: RecoveryCookieStore): void {
   const expired = getRecoveryCookieOptions(new Date(0));
   cookieStore.set(RECOVERY_BROWSER_COOKIE, "", expired);

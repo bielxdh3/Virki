@@ -1258,12 +1258,16 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     // Corrupt only that hint while leaving both real capability cookies intact.
     const originalIntent = originalCookies.find(cookie => cookie.name === names[2]);
     expect(originalIntent).toBeDefined();
-    for (const intentDamage of ["missing", "corrupted"] as const) {
+    for (const intentDamage of ["missing", "corrupted", "valid-but-foreign-id"] as const) {
       if (intentDamage === "missing") {
         await real.context.clearCookies({ name: names[2] });
       } else {
         await real.context.addCookies([{
-          name: names[2], value: "corrupted-intent", url: portalUrl,
+          name: names[2],
+          value: intentDamage === "corrupted"
+            ? "corrupted-intent"
+            : `${randomBytes(32).toString("base64url")}.TOTP_EMAIL`,
+          url: portalUrl,
           httpOnly: true, secure: productionMode, sameSite: "Lax"
         }]);
       }
@@ -1276,21 +1280,18 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
       const corruptAction = await corruptPost;
       expect(corruptAction.status()).toBeGreaterThanOrEqual(200);
       expect(corruptAction.status()).toBeLessThan(400);
-      await expect(real.page).toHaveURL(`${portalUrl}/recover?error=1`);
       for (const prior of originalCookies.filter(cookie => cookie.name !== names[2])) {
         const current = (await real.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
         expect(current?.value, `${intentDamage} non-authoritative intent must not erase ${prior.name}`).toBe(prior.value);
         expect(current?.expires).toBe(prior.expires);
       }
-      // Restore only the original non-authorizing hint; never mint a new
-      // backend capability or infer authority from the requestId URL.
-      await real.context.addCookies([{
-        name: names[2], value: originalIntent!.value, url: portalUrl,
-        httpOnly: true, secure: productionMode, sameSite: "Lax"
-      }]);
+      // The server may rehydrate the NON-authorizing hint only after genuine
+      // key+browser proof and live TOTP binding, never from the forged ID.
+      await expect(real.page).toHaveURL(`${portalUrl}/recover?requestId=${originalId}`);
+      expect((await real.context.cookies(portalUrl)).find(cookie => cookie.name === names[2])?.value)
+        .toBe(originalIntent!.value);
+      await expect(real.page.locator('[aria-label="Aplicativo autenticador"]')).toContainText("Confirmado.");
     }
-    await real.page.goto(`${portalUrl}/recover?requestId=${originalId}`);
-    await expect(real.page.locator('[aria-label="Aplicativo autenticador"]')).toContainText("Confirmado.");
     expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } })).toBe(1);
     expect(await database.emailOutboxMessage.count({ where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" } }))
       .toBe(originalMessages);
@@ -1298,6 +1299,32 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
     contexts.push(independent.context);
     const syntheticId = await startSelectedTotpEmail(independent.page, ownerEmail);
     expect(syntheticId).not.toBe(originalId);
+    expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } })).toBe(1);
+    const syntheticPair = (await independent.context.cookies(portalUrl))
+      .filter(cookie => names.slice(0, 2).includes(cookie.name));
+    expect(syntheticPair).toHaveLength(2);
+    await independent.context.addCookies([{
+      name: names[2], value: `${randomBytes(32).toString("base64url")}.TOTP_EMAIL`,
+      url: portalUrl, httpOnly: true, secure: productionMode, sameSite: "Lax"
+    }]);
+    await independent.page.goto(`${portalUrl}/recover`);
+    await independent.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+    await independent.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    const syntheticRetry = independent.page.waitForResponse(response => response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/recover");
+    await independent.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    expect((await syntheticRetry).status()).toBeLessThan(400);
+    // A synthetic request contains no independently proven recovery to lose.
+    // A user correcting a typo must be able to request a new recovery rather
+    // than being trapped behind the first synthetic pair's one-hour cookie TTL.
+    await expect(independent.page).toHaveURL(/\/recover\?requestId=/u);
+    const retriedSyntheticId = new URL(independent.page.url()).searchParams.get("requestId");
+    expect(retriedSyntheticId).not.toBe(syntheticId);
+    expect(retriedSyntheticId).not.toBe(originalId);
+    for (const prior of syntheticPair) {
+      const current = (await independent.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+      expect(current?.value, "a synthetic retry may rotate only its own unproven bearer pair").not.toBe(prior.value);
+    }
     expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } })).toBe(1);
     const message = await database.emailOutboxMessage.findFirst({
       where: { recipientEmail: ownerEmail, kind: "ACCOUNT_RECOVERY" },

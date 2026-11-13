@@ -23,3 +23,13 @@ export function recoveryPolicyFromMethod(value: unknown): RecoveryPolicy | null 
   const policy = POLICIES[value as RecoveryRequestMethod];
   return { proofs: [...policy.proofs], adminReview: policy.adminReview };
 }
+
+// Reverse only the six public, fixed method policies; never trust a caller's
+// potentially corrupted intent cookie as the source of this mapping.
+export function recoveryMethodFromPolicy(value: RecoveryPolicy): RecoveryRequestMethod | null {
+  return (Object.keys(POLICIES) as RecoveryRequestMethod[]).find(method =>
+    POLICIES[method].adminReview === value.adminReview &&
+    POLICIES[method].proofs.length === value.proofs.length &&
+    POLICIES[method].proofs.every(proof => value.proofs.includes(proof))
+  ) ?? null;
+}

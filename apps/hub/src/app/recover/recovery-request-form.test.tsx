@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
-import { recoveryPolicyFromMethod } from "./recovery-method-selection";
+import { recoveryMethodFromPolicy, recoveryPolicyFromMethod } from "./recovery-method-selection";
 import { RecoveryRequestForm, truncateRecoveryComment, type RecoveryRequestMethod } from "./recovery-request-form";
 
 function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdmin: boolean, initialMethod?: RecoveryRequestMethod): string {
@@ -74,4 +74,9 @@ test("server-facing policies bind each selected method to exactly its required i
   assert.equal(recoveryPolicyFromMethod("EMAIL_ONLY"), null);
   assert.equal(recoveryPolicyFromMethod("__proto__"), null);
   assert.equal(recoveryPolicyFromMethod({ proofs: ["EMAIL"] }), null);
+  for (const method of ["PASSKEY_EMAIL", "TOTP_EMAIL", "PASSKEY_TOTP", "PASSKEY_ADMIN", "TOTP_ADMIN", "EMAIL_ADMIN"] as const) {
+    assert.equal(recoveryMethodFromPolicy(recoveryPolicyFromMethod(method)!), method,
+      "restoring a UI hint must map only a fixed independent proof policy");
+  }
+  assert.equal(recoveryMethodFromPolicy({ proofs: ["EMAIL"], adminReview: false }), null);
 });

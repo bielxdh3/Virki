@@ -14,7 +14,8 @@ import { recordSecurityDenial, recordSessionCsrfDenial } from "../../lib/audit-d
 import { getCurrentSession } from "../../lib/auth";
 import { expectedPasskeyRP } from "@virki/auth/passkeys";
 import {
-  canRetainMultiMethodRecoveryBrowser, finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, startMultiMethodRecovery, startRecoveryPasskeyAssertion,
+  canRetainMultiMethodRecoveryBrowser, finishRecoveryPasskeyAssertion, generateRecoveryPublicRequestId, restoreProvenMultiMethodRecoveryBrowser,
+  startMultiMethodRecovery, startRecoveryPasskeyAssertion,
   startRecoveryNewMailbox, verifyRecoveryNewMailbox, verifyMultiMethodRecoveryEmail, verifyMultiMethodRecoveryTotp
 } from "@virki/auth/recovery-methods";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../lib/cloudflare-access";
@@ -23,10 +24,11 @@ import { RECOVERY_COOKIE_NAME } from "../../lib/recovery";
 import {
   clearMultiMethodRecoveryCookies, clearRecoveryCandidateCookie, clearRecoveryCookie,
   parseRecoveryIntent, RECOVERY_BROWSER_COOKIE, RECOVERY_CANDIDATE_COOKIE, RECOVERY_INTENT_COOKIE,
+  restoreMultiMethodRecoveryIntent,
   setMultiMethodRecoveryCookies, setRecoveryCandidateCookie, setRecoveryCookie
 } from "./recovery-cookie";
 import { EMAIL_INPUT_MAX_LENGTH, readBoundedFormString } from "../../lib/action-input-limits";
-import { recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
+import { recoveryMethodFromPolicy, recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
 import { requiresRecoveryLinkSwitch } from "./recovery-switch";
 import type { RecoveryPasskeyStartState, RecoveryProofActionState } from "./recovery-proof-stage";
 
@@ -73,16 +75,16 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   const comment = readBoundedFormString(formData, "comment", 600);
   const cookieStore = await cookies();
   const existingIntent = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
-  // The intent cookie is only a UI hint. A missing/damaged hint must not
-  // authorize replacing a real, independently proven key+browserToken pair
-  // with synthetic credentials on a rejected anonymous restart.
-  const hasOpaquePairWithoutIntent = !existingIntent &&
-    Boolean(cookieStore.get(RECOVERY_COOKIE_NAME)?.value && cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value);
+  // The intent cookie is only a UI hint. Even a syntactically valid hint with
+  // a foreign request ID must not authorize overwriting the opaque bearer pair.
+  const activeKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "";
+  const activeBrowser = cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? "";
+  const hasOpaquePair = Boolean(activeKey && activeBrowser);
   const existingPolicy = recoveryPolicyFromMethod(existingIntent?.method);
   const existing = existingIntent ? {
     requestId: existingIntent.requestId,
-    requestKey: cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "",
-    browserToken: cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? ""
+    requestKey: activeKey,
+    browserToken: activeBrowser
   } : null;
   // Before handling a new anonymous request, protect this browser's existing,
   // independently proven recovery. A malformed or throttled restart must not
@@ -99,6 +101,19 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
       retentionUnavailable = true;
     }
   }
+  let recoveredIntent: { requestId: string; method: RecoveryRequestMethod; expiresAt: Date } | null = null;
+  if (hasOpaquePair && !canRetain && !retentionUnavailable) {
+    try {
+      const original = await restoreProvenMultiMethodRecoveryBrowser(activeKey, activeBrowser, expectedRole);
+      const originalMethod = original ? recoveryMethodFromPolicy(original.policy) : null;
+      if (original && originalMethod) {
+        recoveredIntent = { requestId: original.requestId, method: originalMethod, expiresAt: original.expiresAt };
+      }
+    } catch {
+      // Unknown backend status cannot prove or discard a bearer capability.
+      retentionUnavailable = true;
+    }
+  }
   let recovery = {
     // Use the same opaque format as real and synthetic backend requests. A
     // validation/error branch must never reveal account existence by ID shape.
@@ -106,7 +121,10 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     requestKey: randomBytes(24).toString("base64url"),
     browserToken: randomBytes(32).toString("base64url")
   };
-  if (!canRetain && !retentionUnavailable && !hasOpaquePairWithoutIntent) try {
+  // A synthetic or otherwise unproven pair must not prevent a legitimate
+  // retry. Only a live, independently proven capability vetoes replacement;
+  // indeterminate database failures preserve the existing pair fail-closed.
+  if (!canRetain && !retentionUnavailable && !recoveredIntent) try {
     // Enforce the role and method policy on the server; browser radios are never authoritative.
     if (!policy || !email ||
       (policy.adminReview ? formData.has("comment") && comment === null : formData.has("comment"))) throw new Error("Rejected.");
@@ -118,7 +136,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   }
   const remaining = 500 - (Date.now() - startTime);
   if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
-  if (retentionUnavailable || hasOpaquePairWithoutIntent) {
+  if (retentionUnavailable) {
     // Do not trust a cookie ID for authorization or navigation. Keep the
     // original cookies untouched and show the same generic retry message.
     redirect("/recover?error=1");
@@ -127,6 +145,13 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     // Retain the original bearer pair and its original cookie expiry unchanged.
     clearRecoveryCandidateCookie(cookieStore);
     redirect(`/recover?requestId=${encodeURIComponent(existing.requestId)}`);
+  }
+  if (recoveredIntent) {
+    // Restore only the non-authorizing UI hint. The original browser-bound
+    // bearer key and token, including their TTLs, remain completely untouched.
+    restoreMultiMethodRecoveryIntent(cookieStore, recoveredIntent.requestId, recoveredIntent.method, recoveredIntent.expiresAt);
+    clearRecoveryCandidateCookie(cookieStore);
+    redirect(`/recover?requestId=${encodeURIComponent(recoveredIntent.requestId)}`);
   }
   setMultiMethodRecoveryCookies(cookieStore, recovery.requestKey, recovery.browserToken, recovery.requestId, method as RecoveryRequestMethod);
   clearRecoveryCandidateCookie(cookieStore);

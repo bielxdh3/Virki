@@ -525,6 +525,34 @@ export async function canRetainMultiMethodRecoveryBrowser(
   }, { isolationLevel: "ReadCommitted" });
 }
 
+// The anonymous UI hint is not a credential. Recover a damaged hint only from
+// BOTH pre-existing browser bearer secrets, then run the same independent live
+// proof validation as a normal restart. Never enumerate by public request ID
+// or return an account/request identifier for a synthetic or unproven pair.
+export async function restoreProvenMultiMethodRecoveryBrowser(
+  requestKey: string, browserToken: string, expectedRole: AccountRecoveryRole,
+  now = new Date()
+): Promise<{ requestId: string; policy: RecoveryPolicy; expiresAt: Date } | null> {
+  if (!isRequestKey(requestKey) || !isBrowserToken(browserToken)) return null;
+  const candidate = await prisma.accountRecoveryRequest.findFirst({
+    where: {
+      requestKeyHash: hashRecoveryRequestKey(requestKey),
+      recoveryBrowserHash: browserHash(browserToken),
+      recoveryRole: expectedRole, purpose: "RECOVERY",
+      status: { in: ["PENDING", "APPROVED"] }, expiresAt: { gt: now }
+    },
+    select: { id: true, recoveryProofs: true, recoveryAdminReview: true, expiresAt: true }
+  });
+  if (!candidate) return null;
+  const policy = normalizeRecoveryPolicy({
+    proofs: candidate.recoveryProofs, adminReview: candidate.recoveryAdminReview
+  });
+  if (!policy || !await canRetainMultiMethodRecoveryBrowser({
+    requestId: candidate.id, requestKey, browserToken
+  }, expectedRole, policy, new Date())) return null;
+  return { requestId: candidate.id, policy, expiresAt: candidate.expiresAt };
+}
+
 async function lockReplacementRequest(tx: Prisma.TransactionClient, requestId: string, role: AccountRecoveryRole) {
   const initial = await tx.accountRecoveryRequest.findUnique({ where: { id: requestId }, select: { userId: true } });
   if (!initial || !await lockActiveRecoveryAccountInTransaction(tx, initial.userId, role)) throw FAILURE;
