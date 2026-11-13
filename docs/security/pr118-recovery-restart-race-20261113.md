@@ -128,6 +128,42 @@ GREEN rerun; a matching raw POST alone is not a success attestation.
 
 ## Outstanding independent and operational gates
 
+### Independent SOURCE NO-GO and PostgreSQL 18 browser blocker (13 Nov)
+
+An independent read-only reviewer inspected the exact code commit
+`ebcab0e7bf56f16c9cb6caaf5002763478e466d2` relative to `cd58c7e`
+and reported **SOURCE NO-GO**:
+
+- A legacy `GET /recover/open` or legacy `openRecoveryAction` started
+  **before** a fresh modern browser recovery has issued its first cookies
+  can return late and implicitly overwrite the newly TOTP-proven recovery.
+  The modern Web Lock cannot coordinate an ordinary legacy GET. Existing
+  legacy E2E checks start only after the modern TOTP proof, so they do not
+  cover this precise response-order race. This is an availability/continuity
+  P2, not an MFA bypass. It requires an independent, causally synchronized
+  physical RED and a reviewed explicit-adoption remediation plus GREEN.
+- The current explicit-restart UI for a synthetic ADMIN request also remains
+  **not green on physical Chromium 153 / PostgreSQL 18.6**. The exact committed
+  `ebcab0e` run `82b68636fcc644058fef65839fa85ba4` failed its
+  ADMIN consent/rotation assertion. Prior runs `136dc31c`,
+  `b84cd427`, and `09b5d0b1` likewise failed that one browser
+  journey while other recovery/CSRF scenarios passed. Source/transport
+  unit tests are **not** replacements for this failed browser gate.
+
+The failing tests used owned disposable PostgreSQL and Chromium containers;
+the runner recorded `dockerCleanupVerified=true` and
+`dockerMutationUncertain=false`. A subsequent **uncommitted** set of
+diagnostic hypotheses did not establish a passing ADMIN recovery path and
+was preserved in ignored local evidence
+`.virki-mission-tmp/pr118-admin-unvalidated-diagnostic-after-ebcab0e.patch`
+before restoring the worktree to the last reviewed code commit.
+
+**Disposition:** The local fresh/fresh Web Lock proof (2/2 PASS PG17) and
+the separate PG18 recovery integrations (9/9 PASS) remain valid **only
+for their exact respective snapshots and scenarios**. The whole PR is
+SOURCE NO-GO; do not push, merge, deploy, change Cloudflare, or imply hosted
+CI/CodeQL validation of any unpublished SHA.
+
 Independent SOURCE review of the **exact final commit** and its callers is
 required before a normal fast-forward publication. Hosted CI/CodeQL for that
 published SHA cannot be claimed from local source scans or old CI.
