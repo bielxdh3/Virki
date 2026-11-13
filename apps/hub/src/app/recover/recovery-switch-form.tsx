@@ -14,18 +14,22 @@ export function RecoverySwitchForm({ csrf, csrfFieldName, requestId }: { csrf: s
     // the entire Server Action response, including its Set-Cookie processing.
     if (!navigator.locks?.request) return { status: "error" };
     try {
-      return await navigator.locks.request("virki-recovery-start-v1", () => switchRecoveryAction(previous, formData));
+      return await navigator.locks.request("virki-recovery-start-v1", async () => {
+        const result = await switchRecoveryAction(previous, formData);
+        if (result.status === "complete" && result.requestId) {
+          // The Server Action can refresh the RSC tree and unmount this form
+          // before a state-driven effect runs. Navigate from the still-running
+          // action callback, after its response has installed Set-Cookie and
+          // while the shared recovery lock still serializes browser writers.
+          window.location.replace(`/recover?requestId=${encodeURIComponent(result.requestId)}`);
+        }
+        return result;
+      });
     } catch {
       // If the lock cannot be acquired, leave the existing bearer untouched.
       return { status: "error" };
     }
   }, initialState);
-
-  useEffect(() => {
-    if (state.status === "complete" && state.requestId) {
-      window.location.replace(`/recover?requestId=${encodeURIComponent(state.requestId)}`);
-    }
-  }, [state]);
 
   return <form className="form-stack" action={action}>
     <input type="hidden" name={csrfFieldName} value={csrf} />

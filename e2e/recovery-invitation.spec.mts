@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
@@ -14,6 +14,44 @@ const portalUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://por
 const hubMode = process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
 const sessionCookieName = getSessionCookieName({ NODE_ENV: process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development" });
 const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
+
+async function explicitlyAdoptLegacyRecoveryLink(page: Page, requestKey: string, expectedRequestId: string): Promise<void> {
+  // A legacy GET is discovery only. Neither opening an invitation nor opening
+  // a legacy recovery URL may replace an authorizing browser bearer until the
+  // visitor explicitly adopts the candidate through the CSRF-bound action.
+  await expect(page).toHaveURL(`${portalUrl}/recover?requestId=${expectedRequestId}&switch=1`);
+  await expect(page.getByRole("status")).toContainText("Nenhuma recuperação foi substituída ao visualizar o link.");
+  const primaryName = hubMode === "production" ? "__Host-virki_recovery" : "virki_recovery_v2";
+  const candidateName = hubMode === "production" ? "__Host-virki_recovery_candidate" : "virki_recovery_candidate";
+  const before = await page.context().cookies(portalUrl);
+  expect(before.find(cookie => cookie.name === primaryName)?.value ?? "",
+    "opening a legacy GET must not install the authorizing bearer").toBe("");
+  expect(before.find(cookie => cookie.name === candidateName)?.value,
+    "the discovery cookie must identify exactly the delivered link").toBe(requestKey);
+
+  await page.getByRole("button", { name: "Continuar com este link", exact: true }).click();
+  try {
+    await expect(page).toHaveURL(`${portalUrl}/recover?requestId=${expectedRequestId}`, { timeout: 10_000 });
+  } catch {
+    const current = new URL(page.url());
+    const afterClick = await page.context().cookies(portalUrl);
+    throw new Error(`Explicit legacy adoption did not reach its expected document: ${JSON.stringify({
+      route: current.pathname === "/recover" ? "recover" : current.pathname === "/login" ? "login" : "other",
+      requestIdMatches: current.searchParams.get("requestId") === expectedRequestId,
+      switchPending: current.searchParams.get("switch") === "1",
+      hasErrorParam: current.searchParams.has("error"),
+      primaryIsApprovedKey: afterClick.find(cookie => cookie.name === primaryName)?.value === requestKey,
+      candidateStillPresent: afterClick.find(cookie => cookie.name === candidateName)?.value === requestKey,
+      switchButtonVisible: await page.getByRole("button", { name: "Continuar com este link", exact: true }).isVisible().catch(() => false),
+      genericErrorVisible: await page.locator('p.form-error[role="alert"]').isVisible().catch(() => false)
+    })}`);
+  }
+  const adopted = await page.context().cookies(portalUrl);
+  expect(adopted.find(cookie => cookie.name === primaryName)?.value,
+    "the explicit switch must adopt the same live legacy link, not another capability").toBe(requestKey);
+  expect(adopted.find(cookie => cookie.name === candidateName)?.value ?? "",
+    "the consumed candidate must not remain available for a later switch").toBe("");
+}
 
 function hasLow05NoStoreDirectives(value: string): boolean {
   const directives = new Set(value.toLowerCase().split(",").map((directive) => directive.trim()));
@@ -255,10 +293,19 @@ test("invitation purpose survives URL spoofing and activates a USER once with on
     if (!account || !message) throw new Error("Invitation E2E fixture was not created.");
     const actionUrl = decryptEmailPayload(message.payload).actionUrl;
     if (!actionUrl || new URL(actionUrl).origin !== portalUrl) throw new Error("Invitation E2E link is invalid.");
+    const invitationKey = new URL(actionUrl).searchParams.get("request");
+    if (!invitationKey) throw new Error("Invitation E2E key is unavailable.");
+    const invitationRequest = await database.accountRecoveryRequest.findUnique({
+      where: { requestKeyHash: hashRecoveryRequestKey(invitationKey) },
+      select: { id: true, purpose: true }
+    });
+    expect(invitationRequest?.purpose).toBe("INVITATION");
+    if (!invitationRequest) throw new Error("Invitation E2E record is unavailable.");
     const spoofedUrl = new URL(actionUrl);
     spoofedUrl.searchParams.set("purpose", "RECOVERY");
     const page = await context.newPage();
     await page.goto(spoofedUrl.toString());
+    await explicitlyAdoptLegacyRecoveryLink(page, invitationKey, invitationRequest.id);
     await expect(page.getByRole("heading", { level: 1, name: "Ativar sua conta", exact: true })).toBeVisible();
     await expect(page.getByText("Bem-vindo ao Virki! Defina uma senha para ativar sua conta. O convite é válido por 72 horas e pode ser usado uma vez.", { exact: true })).toBeVisible();
     const passwordInput = page.getByLabel("Criar senha", { exact: true });
@@ -319,6 +366,7 @@ test("approved USER recovery keeps recovery copy and rejects a short password on
 
     const page = await context.newPage();
     await page.goto(actionUrl);
+    await explicitlyAdoptLegacyRecoveryLink(page, requestKey, recovery.id);
     await expect(page.getByRole("heading", { level: 1, name: "Recuperar conta", exact: true })).toBeVisible();
     await expect(page.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
     const passwordInput = page.getByLabel("Nova senha", { exact: true });
