@@ -128,7 +128,7 @@ async function resumeProvenBrowserAfterLostUrl(page: Page, base: string, id: str
 // resume action. The browser explicitly opens the restart form to generate a
 // genuine start POST, but the request is adversarially stripped of consent on
 // the wire before it reaches the same-origin/CSRF-protected server action.
-async function submitUnconsentedRecoveryStartWire(page: Page, email: string, expectedId: string, comment?: string): Promise<void> {
+async function submitUnconsentedRecoveryStartWire(page: Page, email: string, expectedId: string | null, comment?: string): Promise<void> {
   await page.goto(portalUrl + "/recover");
   await page.getByLabel("E-mail da conta", { exact: true }).fill(email);
   await page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
@@ -173,7 +173,10 @@ async function submitUnconsentedRecoveryStartWire(page: Page, email: string, exp
     // redirect instead of assuming the client router will apply tampered RSC.
     const redirect = response.headers()["x-action-redirect"] ?? response.headers()["location"] ?? "";
     expect(decodeURIComponent(redirect.split(";")[0] ?? ""),
-      "the server must retain the original proven request, not initiate another").toBe(`/recover?requestId=${expectedId}`);
+      expectedId
+        ? "the server must retain the original proven request, not initiate another"
+        : "an unproven browser pair must not be replaced without consent by the real start action")
+      .toBe(expectedId ? `/recover?requestId=${expectedId}` : "/recover?restart=1");
   } finally {
     await page.unroute(/\/recover(?:\?.*)?$/u, handler);
   }
@@ -1590,9 +1593,23 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
       expect((await independent.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name)?.value)
         .toBe(prior.value);
     }
+    // Discriminating server check: this SYNTHETIC pair has NO verified factor.
+    // An unmodified consent-bearing start would rotate it. Strip consent from
+    // the actual Next Server Action POST and require /restart=1, not a new ID.
+    // This exercises the explicit no-consent guard, unlike proven TOTP cases
+    // that are retained even when abandonment consent was supplied.
+    await submitUnconsentedRecoveryStartWire(independent.page, ownerEmail, null);
+    for (const prior of syntheticPair) {
+      const current = (await independent.context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+      expect(current?.value, "unconsented real start must not overwrite unproven bearer").toBe(prior.value);
+      expect(current?.expires, "unconsented real start must not extend bearer TTL").toBe(prior.expires);
+    }
+    expect(await database.accountRecoveryRequest.count({ where: { userId: ownerId } }),
+      "the unconsented start must not create an owner recovery row").toBe(1);
     // A legitimate typo correction remains possible after an affirmative
     // browser-visible acknowledgement, without teaching the browser whether
     // the previous attempt was synthetic or a real unproven request.
+    await independent.page.goto(`${portalUrl}/recover?restart=1`);
     await independent.page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
     await independent.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
     await independent.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
@@ -1611,6 +1628,9 @@ test("USER TOTP+EMAIL: same-browser restart retains the live partially proven ca
       throw new Error("Synthetic retry transport: " + JSON.stringify({ retryPhases, retryPostPaths }));
     });
     expect(retryResponse.status()).toBeLessThan(400);
+    expect(/name="(?:_\d+_)?method"\r?\n\r?\nTOTP_EMAIL:confirm-restart(?:\r?\n|$)/u.test(
+      retryResponse.request().postDataBuffer()?.toString("utf8") ?? ""),
+    "real positive restart POST must include the explicit consent suffix").toBe(true);
     // A synthetic request contains no independently proven recovery to lose.
     // A user correcting a typo must be able to request a new recovery rather
     // than being trapped behind the first synthetic pair's one-hour cookie TTL.
