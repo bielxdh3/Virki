@@ -7,7 +7,7 @@ import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { hashAuditIdentifier } from "@virki/auth/audit";
 import { getSessionCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
-import { createTotpSecret, encryptTotpSecret, hashEmailAddress, hashRecoveryRequestKey, hashSecurityCode } from "@virki/auth/security";
+import { createTotpSecret, encryptTotpSecret, hashEmailAddress, hashRecoveryRequestKey, hashSecurityCode, DEVICE_COOKIE_NAME, getLoginChallengeFactor } from "@virki/auth/security";
 // @ts-expect-error This reviewed JS guard has no separate type declaration.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 import { addCloudflareAccessHeader } from "../scripts/e2e/access-token.mts";
@@ -851,12 +851,37 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     await expect(page).toHaveURL(origin + "/login?returnTo=" + encodeURIComponent(path));
     await page.getByLabel("E-mail", { exact: true }).fill(email);
     await page.getByLabel("Senha", { exact: true }).fill(password);
-    const loginPost = page.waitForResponse((response) => response.request().method() === "POST" &&
+    const loginPost = page.waitForResponse(response => response.request().method() === "POST" &&
       new URL(response.url()).origin === origin && new URL(response.url()).pathname === "/api/login");
-    await page.getByRole("button", { name: "Entrar", exact: true }).click();
-    expect((await loginPost).status()).toBe(303);
-    await page.waitForURL((url) => url.pathname === "/login/verify" &&
-      url.searchParams.get("factor") === "email" && Boolean(url.searchParams.get("ceremony")));
+    await page.getByRole("button", { name: "Entrar", exact: true }).click({ noWaitAfter: true });
+    const post = await loginPost;
+    expect(post.status(), "real password login must start an MFA challenge").toBe(303);
+    const location = new URL(post.headers()["location"] ?? "/", origin);
+    expect(location.origin).toBe(origin);
+    expect(location.pathname).toBe("/login/verify");
+    expect(location.searchParams.get("factor")).toBe("email");
+    expect(location.searchParams.get("ceremony")).toBeTruthy();
+    try {
+      await page.waitForURL(url => url.origin === origin && url.pathname === "/login/verify" &&
+        url.searchParams.get("factor") === "email" && Boolean(url.searchParams.get("ceremony")), { timeout: 4_000 });
+    } catch (navigationError) {
+      if (origin !== hubUrl) throw navigationError;
+      // The synthetic Access test ingress can redirect a cold Chromium POST
+      // before its device cookie is attached to the next GET. This explicitly
+      // follows the *server-issued* 303 only AFTER confirming both the browser
+      // cookie and the ADMIN-scoped, DB-persisted MFA challenge. Do not count
+      // this as proof of automatic HTTP redirect handling by the test harness.
+      const device = (await page.context().cookies(origin)).find(cookie => cookie.name === DEVICE_COOKIE_NAME);
+      const issued = (await post.headersArray()).some(header => header.name.toLowerCase() === "set-cookie" &&
+        header.value.startsWith(DEVICE_COOKIE_NAME + "="));
+      expect(issued && Boolean(device?.value), "the browser must hold the real issued device cookie").toBe(true);
+      expect(await getLoginChallengeFactor(location.searchParams.get("ceremony")!, device!.value, "ADMIN"))
+        .toBe("email");
+      const document = await page.goto(location.href);
+      expect(document?.status(), "fresh Hub MFA GET must still validate Access").toBe(200);
+      console.info("E2E_HUB_REDIRECT_FOLLOWED_EXPLICITLY");
+    }
+    await expect(page.getByLabel("Código", { exact: true })).toBeVisible();
     const ceremony = new URL(page.url()).searchParams.get("ceremony")!;
     const emailProof = await database.emailOutboxMessage.findFirst({ where: {
       recipientEmail: email, idempotencyKey: `security-ceremony:${ceremony}`,
@@ -870,6 +895,7 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     await expect(page).toHaveURL(origin + path);
   }
 
+  let primaryFailure: unknown;
   try {
     expect(typeof reviewer.password).toBe("string");
     expect(typeof reviewer.administrativePassword).toBe("string");
@@ -941,7 +967,7 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
 
     const reviewerContext = await newContext();
     const reviewerPage = await reviewerContext.newPage();
-    await addCloudflareAccessHeader(reviewerPage);
+    await addCloudflareAccessHeader(reviewerPage, { hubOnlyBrowserRedirects: true });
     await signInWithEmailMfa(reviewerPage, hubUrl, "/admin/security", reviewer.email, reviewer.password!);
     await expect(reviewerPage.getByRole("heading", { level: 1, name: "Segurança" })).toBeVisible();
     await expect(reviewerPage.locator("article.list-row").filter({ hasText: ownerEmail }),
@@ -1239,6 +1265,9 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     });
     expect(freshSession).toMatchObject({ userId: owner.id, revokedAt: null });
     expect(freshSession.id).not.toBe(consumed.bootstrapSessionId);
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
     if (cdp && authenticatorId) await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId }).catch(() => undefined);
     await cdp?.detach().catch(() => undefined);
@@ -1246,7 +1275,12 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
     // Recovery and elevation write immutable audit references to the owned USER;
     // the disposable runner owns database teardown, so do not delete those rows.
     await database.$disconnect();
-    expect(closed.every((result) => result.status === "fulfilled")).toBe(true);
+    const failedCloses = closed.filter(result => result.status !== "fulfilled").length;
+    if (primaryFailure || test.info().status === "timedOut") {
+      if (failedCloses) console.warn("E2E_CONTEXT_CLEANUP_FAILURE_COUNT", failedCloses);
+    } else {
+      expect(failedCloses, "every isolated browser context must close").toBe(0);
+    }
   }
 });
 
