@@ -38,10 +38,37 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
   const [method, setMethod] = useState<RecoveryRequestMethod | "">(() =>
     initialMethod && [...independent, ...assisted].some(({ value }) => value === initialMethod) ? initialMethod : "");
   const [comment, setComment] = useState("");
+  const [restartConfirmed, setRestartConfirmed] = useState(false);
+  const [browserLockUnavailable, setBrowserLockUnavailable] = useState(false);
   const isAssisted = assisted.some(({ value }) => value === method);
   const canSubmit = independent.some(({ value }) => value === method) || isAssisted;
 
-  return <form action={action} className="form-stack">
+  async function submitWithBrowserLock(formData: FormData): Promise<void> {
+    // The first two tabs may submit before EITHER has a recovery cookie.
+    // Serializing only after server-side cookie inspection is too late: two
+    // responses can arrive out of order and the second can erase a newly
+    // proven first recovery. The lock must cover the fetch+Set-Cookie itself.
+    // Web Locks are per-origin; Hub and Portal remain separately isolated.
+    // An insecure/unsupported browser must not silently fall back to an
+    // unsafe concurrent submission.
+    if (!navigator.locks?.request) {
+      setBrowserLockUnavailable(true);
+      return;
+    }
+    // Snapshot the visible acknowledgement before awaiting another tab's
+    // lock. React may re-encode a nested FormData argument for Server Actions;
+    // explicitly supply the canonical, server-validated field name rather
+    // than trusting any transport-prefixed alias.
+    formData.delete("confirmRecoveryRestart");
+    if (hasExistingBrowserRecovery && restartConfirmed) {
+      formData.set("confirmRecoveryRestart", "yes");
+    }
+    await navigator.locks.request("virki-recovery-start-v1", async () => {
+      await action(formData);
+    });
+  }
+
+  return <form action={submitWithBrowserLock} className="form-stack">
     <input type="hidden" name={csrfFieldName} value={csrf} />
     <label>E-mail da conta<input type="email" name="email" autoComplete="email" maxLength={320} required /></label>
     <p className="muted">Escolha como deseja confirmar sua identidade. As opções disponíveis não indicam quais fatores estão cadastrados em uma conta.</p>
@@ -59,10 +86,14 @@ export function RecoveryRequestForm({ action, csrf, csrfFieldName, availableMeth
       <small aria-live="polite">{[...comment].length}/300</small>
     </label> : null}
     {hasExistingBrowserRecovery ? <label>
-      <input type="checkbox" name="confirmRecoveryRestart" value="yes" />
+      <input type="checkbox" name="confirmRecoveryRestart" value="yes"
+        checked={restartConfirmed} onChange={event => setRestartConfirmed(event.target.checked)} />
       Confirmo que quero substituir a recuperação anterior neste navegador e posso perder o progresso que ainda não foi concluído em outra aba.
     </label> : null}
     <button className="button-primary" type="submit" disabled={!canSubmit}>Solicitar recuperação</button>
+    {browserLockUnavailable ? <p role="alert" className="form-error">
+      Não foi possível iniciar a recuperação neste navegador. Use uma versão atualizada com acesso seguro (HTTPS).
+    </p> : null}
     {independent.length + assisted.length === 0 ? <p className="muted" role="status">Nenhum método de recuperação está disponível neste momento.</p> : null}
   </form>;
 }

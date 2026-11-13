@@ -69,6 +69,63 @@ containers removed.` Log:
 `.virki-mission-tmp/pr118-pg18-61f591c-tap-fixed.log`. This is a local
 physical integration result, not hosted CI or external staging evidence.
 
+## Additional fresh/fresh race and browser-origin serialization
+
+Independent SOURCE NO-GO on `7ba895a` identified a distinct case: two tabs
+both submit their **first** recovery form before receiving either bearer
+cookie. The original server-side consent guard sees `hasOpaquePair=false`
+twice. A genuine response can arrive and permit TOTP proof while the later
+synthetic response still has a pending `Set-Cookie`, which can erase the
+proven browser-bound pair without any explicit abandonment.
+
+Physical RED `720c9cc1113f456b89eac424618805dd` used two genuine Next
+Server Action POSTs and deliberately reordered their browser responses. The
+first real POST's TOTP proof was committed before release of the second
+synthetic response; the original bearer cookie was overwritten. Chromium
+153/Node 22, disposable PostgreSQL 17, expected 1 FAIL, Docker ownership
+cleanup verified with zero uncertainty. RED failures can contain random
+**disposable test cookie** values; keep raw logs local/private.
+
+The normal JavaScript recovery form now requires an exclusive per-origin
+`navigator.locks` Web Lock before invoking the existing Server Action.
+The lock includes the full asynchronous fetch and its `Set-Cookie` handling:
+the second tab queues its submission and the server then sees the first
+pair, rejecting implicit replacement. On browsers without Web Locks (or
+without secure context), the form fails closed and displays an error rather
+than falling back to an unsafe concurrent POST.
+
+GREEN physical run `f8feaccfb4334a7ba1623517082a8e5d`: **2/2 PASS**
+for fresh/fresh queued submission and the previous proven TOTP restart,
+with original bearer pair/TTL preserved, PG17, owner-verified Docker cleanup
+and zero uncertainty. The pending Web Lock assertion is real browser-side
+evidence that both tabs attempted the operation. Source was a working-tree
+snapshot on top of `7c657bc`; this result is **not** CI for a committed
+child until the exact patch is committed.
+
+**Security boundary/limitation:** Web Locks coordinate honest same-origin
+browser forms, not arbitrary HTTP clients or extensions that bypass this UI.
+The backend must continue enforcing host/CSRF, capability hashes, role,
+expiry, proof and explicit abandonment. A direct POST that is deliberately
+constructed outside the form can still induce the fresh/fresh cookie
+response-order race against its own browser. This is not an MFA bypass or an
+authorization grant, but it is a residual availability/UX risk requiring
+independent acceptance; do not claim a universal atomic cookie+DB guarantee.
+
+### ADMIN explicit restart and React Server Action field encoding
+
+The separate Chromium/PG18 ADMIN synthetic-session restart exposed a
+transport discrepancy: a client-form callback sending an explicit checked
+`confirmRecoveryRestart=yes` resulted in a multipart field named
+`_0_confirmRecoveryRestart` rather than the plain form field expected by
+`read(formData, "confirmRecoveryRestart")`. The Server Action returned to
+`?restart=1` and never rotated the opaque pair. The dedicated, bounded
+consent parser now accepts **one** exact field or React numeric-prefixed field
+with the literal value `yes`; conflicting or duplicate aliases fail closed.
+The client also snapshots the visible controlled checkbox before awaiting
+another tab's Web Lock. Neither changes role, CSRF, recovery proof, or browser
+capability authorization. This behavior requires an actual Chromium/PG18
+GREEN rerun; a matching raw POST alone is not a success attestation.
+
 ## Outstanding independent and operational gates
 
 Independent SOURCE review of the **exact final commit** and its callers is

@@ -1176,6 +1176,112 @@ test("USER PASSKEY_ADMIN: signed Portal passkey, independent Hub approval, repla
   }
 });
 
+test("USER fresh/fresh: two initial browser submissions serialize before any capability exists", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const { database } = await requireFixture();
+  const ownerEmail = `${randomUUID()}.fresh-race@e2e.invalid`;
+  const secret = createTotpSecret();
+  let ownerId: string | undefined;
+  let context: BrowserContext | undefined;
+  let releaseFirst = () => {};
+  let releaseSecond = () => {};
+  try {
+    const owner = await database.user.create({ data: {
+      email: ownerEmail, emailNormalized: ownerEmail, displayName: "Fresh two-tab E2E fixture",
+      passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+      role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+      secondFactorMethod: "TOTP", totpFactor: { create: {
+        secretCiphertext: encryptTotpSecret(secret), keyVersion: 1, status: "ACTIVE", confirmedAt: new Date()
+      } }
+    }, select: { id: true } });
+    ownerId = owner.id;
+    const first = await openRecovery(browser, "portal");
+    context = first.context;
+    const second = await context.newPage();
+    await second.goto(portalUrl + "/recover");
+    const names = productionMode
+      ? ["__Host-virki_recovery", "__Host-virki_recovery_browser", "__Host-virki_recovery_intent"]
+      : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
+    expect((await context.cookies(portalUrl)).filter(cookie => names.includes(cookie.name))).toHaveLength(0);
+    const firstHold = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const secondHold = new Promise<void>(resolve => { releaseSecond = resolve; });
+    let firstFetched = false;
+    let secondFetched = false;
+    await first.page.route(/\/recover(?:\?.*)?$/u, async route => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch({ maxRedirects: 0 });
+      firstFetched = true;
+      await firstHold;
+      await route.fulfill({ response });
+    });
+    await second.route(/\/recover(?:\?.*)?$/u, async route => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch({ maxRedirects: 0 });
+      secondFetched = true;
+      await secondHold;
+      await route.fulfill({ response });
+    });
+    for (const page of [first.page, second]) {
+      await page.getByLabel("E-mail da conta", { exact: true }).fill(ownerEmail);
+      await page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+    }
+    const firstClick = first.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+    try {
+      await expect.poll(() => firstFetched, { timeout: 20_000 }).toBe(true);
+      // route.fetch writes cookies into the Playwright context before fulfill.
+      // Remove only this test-harness side effect; both initial POSTs on the
+      // actual wire must arrive WITHOUT a browser-bound recovery pair.
+      for (const name of names) await context.clearCookies({ name });
+      const secondClick = second.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+      try {
+        // The second tab has actually tried to submit, but its request must
+        // be queued by the per-origin browser lock until the first response
+        // and its HttpOnly cookies have been received.
+        await expect.poll(() => second.evaluate(async () =>
+          (await navigator.locks.query()).pending?.some(lock => lock.name === "virki-recovery-start-v1") ?? false
+        ), { timeout: 20_000 }).toBe(true);
+        expect(secondFetched, "the queued fresh POST must not reach the server yet").toBe(false);
+        releaseFirst();
+        await firstClick;
+        await expect(first.page).toHaveURL(/\/recover\?requestId=/u);
+        const original = (await context.cookies(portalUrl)).filter(cookie => names.includes(cookie.name));
+        expect(original).toHaveLength(3);
+        await expect.poll(() => secondFetched, { timeout: 20_000 }).toBe(true);
+        // The delayed second POST now carries the first request's cookies
+        // and is denied implicit replacement, without changing the pair.
+        for (const prior of original) {
+          const current = (await context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+          expect(current?.value === prior.value).toBe(true);
+        }
+        const stage = first.page.locator('[aria-label="Aplicativo autenticador"]');
+        await stage.locator('input[name="code"]').fill(totpAt(secret));
+        await stage.getByRole("button", { name: "Confirmar", exact: true }).click();
+        await expect(stage).toContainText("Confirmado.");
+        const originalId = new URL(first.page.url()).searchParams.get("requestId");
+        const proven = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: originalId! } });
+        expect(proven.recoveryTotpVerifiedAt).not.toBeNull();
+        releaseSecond();
+        await secondClick;
+        await expect(second).toHaveURL(portalUrl + "/recover?restart=1");
+        for (const prior of original) {
+          const current = (await context.cookies(portalUrl)).find(cookie => cookie.name === prior.name);
+          expect(current?.value === prior.value,
+            "late second fresh POST must not overwrite the verified bearer pair").toBe(true);
+        }
+      } finally { releaseSecond(); }
+    } finally { releaseFirst(); }
+  } finally {
+    await context?.close();
+    if (ownerId) {
+      await database.accountRecoveryRequest.deleteMany({ where: { userId: ownerId } });
+      await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: ownerEmail } });
+      await database.totpFactor.deleteMany({ where: { userId: ownerId } });
+      await database.user.deleteMany({ where: { id: ownerId, email: ownerEmail } });
+    }
+    await database.$disconnect();
+  }
+});
+
 test("USER TOTP+EMAIL: same-browser restart retains the live partially proven capability only", async ({ browser }) => {
   test.setTimeout(120_000);
   const { database } = await requireFixture();
@@ -1834,8 +1940,22 @@ test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal AD
     await hub.page.getByLabel("E-mail da conta", { exact: true }).fill(randomUUID() + "@e2e.invalid");
     await hub.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
     await hub.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
+    const consentPost = hub.page.waitForResponse((response) => response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/recover");
     await hub.page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
-    await expect(hub.page).toHaveURL(/\/recover\?requestId=/u);
+    const submitted = await consentPost;
+    const postedBody = submitted.request().postDataBuffer()?.toString("utf8") ?? "";
+    expect(/name="(?:_\d+_)?confirmRecoveryRestart"\r?\n\r?\nyes(?:\r?\n|$)/u.test(postedBody),
+      "explicitly checked abandonment must reach the genuine ADMIN Server Action as yes").toBe(true);
+    const afterConsent = await hub.context.cookies(hubUrl);
+    const changedByAction = hubOriginalCookies.filter(cookie => !cookie.name.includes("intent"))
+      .every(cookie => afterConsent.find(current => current.name === cookie.name)?.value !== cookie.value);
+    expect(changedByAction,
+      "consent action must replace both opaque cookies before testing its navigation").toBe(true);
+    // Report only query PARAMETER NAMES on failure; never leak IDs, cookies, CSRF
+    // or recovery capabilities into runner output or CI failure logs.
+    await expect.poll(() => [...new URL(hub.page.url()).searchParams.keys()].sort().join(","),
+      { timeout: 10_000 }).toBe("requestId");
     expect(new URL(hub.page.url()).searchParams.get("requestId")).not.toBe(syntheticAdminId);
     for (const prior of hubOriginalCookies.filter((cookie) => !cookie.name.includes("intent"))) {
       expect((await hub.context.cookies(hubUrl)).find((cookie) => cookie.name === prior.name)?.value)

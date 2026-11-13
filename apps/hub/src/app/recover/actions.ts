@@ -30,6 +30,7 @@ import {
 import { EMAIL_INPUT_MAX_LENGTH, readBoundedFormString } from "../../lib/action-input-limits";
 import { recoveryMethodFromPolicy, recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
 import { requiresRecoveryLinkSwitch } from "./recovery-switch";
+import { hasRecoveryRestartConsent } from "./recovery-restart-consent";
 import type { RecoveryPasskeyStartState, RecoveryProofActionState } from "./recovery-proof-stage";
 
 export async function requestRecoveryAction(formData: FormData) {
@@ -84,7 +85,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   // recovery. Require a separate visible, affirmative acknowledgement before
   // replacing ANY existing pair (real or synthetic); treating them alike also
   // avoids making the pre-proof existence of an account observable.
-  const replaceConfirmed = read(formData, "confirmRecoveryRestart") === "yes";
+  const replaceConfirmed = hasRecoveryRestartConsent(formData);
   const existingPolicy = recoveryPolicyFromMethod(existingIntent?.method);
   const existing = existingIntent ? {
     requestId: existingIntent.requestId,
