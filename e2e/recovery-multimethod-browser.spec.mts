@@ -2328,3 +2328,185 @@ test("Hub ADMIN recovery requires synthetic Access and never exposes a Portal AD
     await database.$disconnect();
   }
 });
+
+for (const role of ["USER", "ADMIN"] as const) {
+  test(`${role} approved legacy key-only remains usable after unconsented modern POST`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const { fixture, database } = await requireFixture();
+    const email = `legacy-keyonly-${role.toLowerCase()}-${randomUUID()}@e2e.invalid`;
+    const origin = role === "ADMIN" ? hubUrl : portalUrl;
+    const key = randomBytes(24).toString("base64url");
+    const cookieName = productionMode ? "__Host-virki_recovery" : "virki_recovery_v2";
+    const newPassword = `recovered-legacy-${randomUUID()}-secure-password`;
+    let userId: string | undefined;
+    let context: BrowserContext | undefined;
+    try {
+      const owner = await database.user.create({ data: {
+        email, emailNormalized: email, displayName: "Legacy key-only browser fixture",
+        role, passwordHash: await hashPassword(randomBytes(32).toString("base64url")),
+        isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+        secondFactorMethod: "EMAIL"
+      }, select: { id: true } });
+      userId = owner.id;
+      const approved = await database.accountRecoveryRequest.create({ data: {
+        userId, status: "APPROVED", purpose: "RECOVERY",
+        requestKeyHash: hashRecoveryRequestKey(key), emailAddressHash: hashEmailAddress(email),
+        emailChallengeHash: hashSecurityCode("123456"), emailVerifiedAt: new Date(),
+        approvedAt: new Date(), reviewedByUserId: fixture.recoveryReviewer.id,
+        expiresAt: new Date(Date.now() + 25 * 60_000)
+      }, select: { id: true, status: true, requestKeyHash: true, expiresAt: true } });
+      const active = await openRecovery(browser, role === "ADMIN" ? "hub" : "portal");
+      context = active.context;
+      await active.page.goto(`${origin}/recover/open?request=${encodeURIComponent(key)}`);
+      await active.page.getByRole("button", { name: "Continuar com este link" }).click();
+      await expect.poll(async () => (await context!.cookies(origin))
+        .find(cookie => cookie.name === cookieName)?.value).toBe(key);
+      const before = (await context.cookies(origin)).find(cookie => cookie.name === cookieName)!;
+      expect((await context.cookies(origin)).find(cookie => cookie.name.includes("recovery_browser"))?.value ?? "").toBe("");
+      await active.page.goto(`${origin}/recover`);
+      await expect(active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u })).toBeVisible();
+      await active.page.getByRole("button", { name: "Retomar recuperação anterior" }).click();
+      await expect(active.page).toHaveURL(`${origin}/recover?requestId=${approved.id}`);
+      expect((await context.cookies(origin)).find(cookie => cookie.name === cookieName)?.value === before.value).toBe(true);
+      await active.page.goto(`${origin}/recover`);
+      await active.page.getByLabel("E-mail da conta", { exact: true }).fill(email);
+      await active.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+      if (role === "ADMIN") await addCloudflareAccessHeader(active.page, { hubOnlyBrowserRedirects: true });
+      // The fixed UI requires an explicit checkbox, but this test deliberately
+      // sends an actual Next Server Action POST with consent removed on the wire.
+      const checkbox = active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u });
+      if (await checkbox.count()) await checkbox.check();
+      let posts = 0;
+      let genuineNextAction = false;
+      let noConsentOnWire = false;
+      let redirectPath = "";
+      const intercepted = async (route: Route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        posts += 1;
+        const originalBody = route.request().postData() ?? "";
+        genuineNextAction = Boolean(route.request().headers()["next-action"]) &&
+          originalBody.includes("TOTP_EMAIL");
+        const withoutSuffix = originalBody.replace("TOTP_EMAIL:confirm-restart", "TOTP_EMAIL");
+        const stripped = withoutSuffix.replace(/(name="(?:_\d+_)?confirmRecoveryRestart"\r?\n\r?\n)yes(?=\r?\n)/gu, "$1no");
+        noConsentOnWire = !stripped.includes("TOTP_EMAIL:confirm-restart") &&
+          !/name="(?:_\d+_)?confirmRecoveryRestart"\r?\n\r?\nyes(?:\r?\n|$)/u.test(stripped);
+        await route.continue({ postData: stripped });
+      };
+      await active.page.route(/\/recover(?:\?.*)?$/u, intercepted);
+      try {
+        const pendingPost = active.page.waitForResponse(response =>
+          response.request().method() === "POST" && new URL(response.url()).pathname === "/recover");
+        await active.page.getByRole("button", { name: "Solicitar recuperação" }).click({ noWaitAfter: true });
+        const response = await pendingPost;
+        expect(response.status()).toBeLessThan(400);
+        redirectPath = decodeURIComponent((response.headers()["x-action-redirect"] ??
+          response.headers().location ?? "").split(";")[0] ?? "");
+      } finally {
+        await active.page.unroute(/\/recover(?:\?.*)?$/u, intercepted);
+      }
+      expect(posts, "must reach real selected Next start action").toBe(1);
+      expect(genuineNextAction, "must not accidentally test a resume action").toBe(true);
+      expect(noConsentOnWire, "both method suffix and multipart checkbox must be absent").toBe(true);
+      const after = (await context.cookies(origin)).find(cookie => cookie.name === cookieName);
+      expect(after?.value === before.value, "an unconsented start must not replace adopted legacy key").toBe(true);
+      expect(after?.expires, "unconsented start must not extend legacy TTL").toBe(before.expires);
+      expect(["/recover?restart=1", `/recover?requestId=${approved.id}`]).toContain(redirectPath);
+      expect(await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: approved.id },
+        select: { id: true, status: true, requestKeyHash: true, expiresAt: true } })).toEqual(approved);
+      expect(await database.accountRecoveryRequest.count({ where: { userId } })).toBe(1);
+      await active.page.goto(`${origin}/recover?requestId=${encodeURIComponent(approved.id)}`);
+      await expect(active.page.getByLabel("Nova senha", { exact: true })).toBeVisible();
+      await active.page.getByLabel("Nova senha", { exact: true }).fill(newPassword);
+      await active.page.getByRole("button", { name: "Concluir recuperação" }).click();
+      await expect(active.page).toHaveURL(`${origin}/login?recovered=1`);
+      expect((await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: approved.id } })).status).toBe("CONSUMED");
+      expect(await verifyPassword((await database.user.findUniqueOrThrow({ where: { id: userId } })).passwordHash ?? "",
+        newPassword)).toBe(true);
+    } finally {
+      await context?.close();
+      if (userId) {
+        await database.session.deleteMany({ where: { userId } });
+        await database.accountRecoveryRequest.deleteMany({ where: { userId } });
+        await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: email } });
+        await database.user.deleteMany({ where: { id: userId, email } });
+      }
+      await database.$disconnect();
+    }
+  });
+}
+
+for (const role of ["USER", "ADMIN"] as const) {
+  test(`${role} expired legacy key-only rotates to a real enrolled recovery with explicit consent`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const { database } = await requireFixture();
+    const email = `legacy-expired-${role.toLowerCase()}-${randomUUID()}@e2e.invalid`;
+    const origin = role === "ADMIN" ? hubUrl : portalUrl;
+    const cookieName = productionMode ? "__Host-virki_recovery" : "virki_recovery_v2";
+    const staleKey = randomBytes(24).toString("base64url");
+    let userId: string | undefined;
+    let context: BrowserContext | undefined;
+    try {
+      const secret = createTotpSecret();
+      const owner = await database.user.create({ data: {
+        email, emailNormalized: email, displayName: "Expired legacy positive rotation E2E",
+        role, passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+        isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+        secondFactorMethod: "TOTP",
+        totpFactor: { create: {
+          secretCiphertext: encryptTotpSecret(secret), keyVersion: 1,
+          status: "ACTIVE", confirmedAt: new Date()
+        } }
+      }, select: { id: true } });
+      userId = owner.id;
+      const expired = await database.accountRecoveryRequest.create({ data: {
+        userId, purpose: "RECOVERY", status: "EXPIRED",
+        requestKeyHash: hashRecoveryRequestKey(staleKey),
+        emailAddressHash: hashEmailAddress(email), emailChallengeHash: hashSecurityCode("123456"),
+        createdAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000)
+      }, select: { id: true, status: true, requestKeyHash: true, expiresAt: true } });
+      const active = await openRecovery(browser, role === "ADMIN" ? "hub" : "portal");
+      context = active.context;
+      await context.addCookies([{ name: cookieName, value: staleKey, url: `${origin}/`,
+        httpOnly: true, secure: productionMode, sameSite: "Lax",
+        expires: Math.floor(Date.now() / 1000) + 600 }]);
+      await active.page.goto(`${origin}/recover`);
+      await expect(active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u })).toBeVisible();
+      await active.page.getByLabel("E-mail da conta", { exact: true }).fill(email);
+      await active.page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+      await active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u }).check();
+      const sent = active.page.waitForResponse(response =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === "/recover");
+      await active.page.getByRole("button", { name: "Solicitar recuperação" }).click();
+      const post = await sent;
+      expect(post.status()).toBeLessThan(400);
+      expect(post.request().headers()["next-action"]).toBeTruthy();
+      expect((post.request().postData() ?? "").includes("TOTP_EMAIL:confirm-restart"),
+        "the actual start POST must carry explicit user consent").toBe(true);
+      await expect(active.page).toHaveURL(/\/recover\?requestId=[A-Za-z0-9_-]+$/u);
+      const newRequestId = new URL(active.page.url()).searchParams.get("requestId")!;
+      expect(newRequestId).not.toBe(expired.id);
+      const current = (await context.cookies(origin)).find(cookie => cookie.name === cookieName);
+      expect(Boolean(current?.value && current.value !== staleKey),
+        "affirmative abandonment of an expired key must mint a fresh bearer").toBe(true);
+      expect((await context.cookies(origin)).find(cookie => cookie.name.includes("recovery_browser"))?.value).toBeTruthy();
+      const created = await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: newRequestId } });
+      expect(created.userId).toBe(userId);
+      expect(created.recoveryRole).toBe(role);
+      expect(created.status).toBe("PENDING");
+      expect(created.recoveryProofs).toEqual(["EMAIL", "TOTP"]);
+      expect(created.requestKeyHash).toBe(hashRecoveryRequestKey(current!.value));
+      expect(await database.accountRecoveryRequest.findUniqueOrThrow({ where: { id: expired.id },
+        select: { id: true, status: true, requestKeyHash: true, expiresAt: true } })).toEqual(expired);
+    } finally {
+      await context?.close();
+      if (userId) {
+        await database.session.deleteMany({ where: { userId } });
+        await database.accountRecoveryRequest.deleteMany({ where: { userId } });
+        await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: email } });
+        await database.totpFactor.deleteMany({ where: { userId } });
+        await database.user.deleteMany({ where: { id: userId, email } });
+      }
+      await database.$disconnect();
+    }
+  });
+}

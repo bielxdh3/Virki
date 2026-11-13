@@ -64,12 +64,10 @@ export async function requestAdministrativeRecoveryAction(formData: FormData) {
   });
 }
 
-// A verified in-progress browser may lose the requestId URL while retaining
-// its two opaque, host-only cookies. Resume never creates a new request or
-// changes a bearer. Only the non-authorizing intent hint may be repaired
-// after revalidating both tokens and the original live proof.
-// This public request ID is returned only after BOTH bearer tokens and a
-// currently live, independently completed proof have been verified.
+// A browser may lose the requestId URL while retaining its recovery cookies.
+// Resume never creates a request or changes an authorizing bearer. Modern
+// recovery requires both cookies and a live independently proven factor;
+// legacy email-link recovery has its own high-entropy key and role/TTL gate.
 export async function resumeProvenRecoveryAction(formData: FormData): Promise<{ requestId: string | null }> {
   return withHubAuditRequest(async () => {
     const requestSurface = getSurface(await headers());
@@ -78,18 +76,25 @@ export async function resumeProvenRecoveryAction(formData: FormData): Promise<{ 
     const cookieStore = await cookies();
     const key = cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "";
     const browserToken = cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? "";
-    if (!key || !browserToken) return { requestId: null };
+    if (!key) return { requestId: null };
     try {
-      const proven = await restoreProvenMultiMethodRecoveryBrowser(key, browserToken, expectedRole);
-      if (!proven) return { requestId: null };
-      const method = recoveryMethodFromPolicy(proven.policy);
-      const hint = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
-      if (method && (!hint || hint.requestId !== proven.requestId || hint.method !== method)) {
-        // This cookie is display-only, not a recovery capability. Neither
-        // opaque bearer nor its original TTL is rewritten.
-        restoreMultiMethodRecoveryIntent(cookieStore, proven.requestId, method, proven.expiresAt);
+      if (browserToken) {
+        const proven = await restoreProvenMultiMethodRecoveryBrowser(key, browserToken, expectedRole);
+        if (proven) {
+          const method = recoveryMethodFromPolicy(proven.policy);
+          const hint = parseRecoveryIntent(cookieStore.get(RECOVERY_INTENT_COOKIE)?.value);
+          if (method && (!hint || hint.requestId !== proven.requestId || hint.method !== method)) {
+            // Repair only the non-authorizing UI hint, never either bearer.
+            restoreMultiMethodRecoveryIntent(cookieStore, proven.requestId, method, proven.expiresAt);
+          }
+          return { requestId: proven.requestId };
+        }
       }
-      return { requestId: proven.requestId };
+      // A previously adopted legacy link has a single host-only key, and no
+      // modern browser token. The same backend key/role/TTL validation used
+      // by /recover/open permits read-only resume after a lost URL.
+      const legacy = await getAccountRecoveryRequestId(key, new Date(), expectedRole);
+      return { requestId: legacy?.id ?? null };
     } catch {
       // Indeterminate DB/liveness states must never cause cookie mutation or
       // disclose an unverified requestId; the user can retry when healthy.
@@ -116,7 +121,10 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   // a foreign request ID must not authorize overwriting the opaque bearer pair.
   const activeKey = cookieStore.get(RECOVERY_COOKIE_NAME)?.value ?? "";
   const activeBrowser = cookieStore.get(RECOVERY_BROWSER_COOKIE)?.value ?? "";
-  const hasOpaquePair = Boolean(activeKey && activeBrowser);
+  // Legacy link adoption leaves only the primary key. A damaged modern
+  // recovery may also leave only one bearer cookie. Either must block an
+  // implicit replacement, regardless of whether the backend knows the key.
+  const hasExistingRecoveryCookies = Boolean(activeKey || activeBrowser);
   // A second form POST is not consent to abandon another tab's in-flight
   // recovery. Require a separate visible, affirmative acknowledgement before
   // replacing ANY existing pair (real or synthetic); treating them alike also
@@ -144,7 +152,7 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     }
   }
   let recoveredIntent: { requestId: string; method: RecoveryRequestMethod; expiresAt: Date } | null = null;
-  if (hasOpaquePair && !canRetain && !retentionUnavailable) {
+  if (activeKey && activeBrowser && !canRetain && !retentionUnavailable) {
     try {
       const original = await restoreProvenMultiMethodRecoveryBrowser(activeKey, activeBrowser, expectedRole);
       const originalMethod = original ? recoveryMethodFromPolicy(original.policy) : null;
@@ -153,6 +161,21 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
       }
     } catch {
       // Unknown backend status cannot prove or discard a bearer capability.
+      retentionUnavailable = true;
+    }
+  }
+  let retainedLegacyId: string | null = null;
+  if (activeKey && !canRetain && !retentionUnavailable && !recoveredIntent) {
+    try {
+      const legacy = await getAccountRecoveryRequestId(activeKey, new Date(), expectedRole);
+      if (legacy) {
+        const state = await getAccountRecoveryState(legacy.id, activeKey, new Date(), expectedRole);
+        // A completed email proof or approval is progress worth retaining,
+        // even if another method was selected with consent in a later tab.
+        if (state && (state.emailVerified || state.status === "APPROVED")) retainedLegacyId = legacy.id;
+      }
+    } catch {
+      // On indeterminate backend state, keep the only legacy bearer.
       retentionUnavailable = true;
     }
   }
@@ -166,7 +189,8 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
   // Synthetic/unproven requests can be retried only with explicit abandonment
   // consent. Without it, even an HTTP response delayed across a different
   // tab's just-committed TOTP proof cannot overwrite the original bearer pair.
-  if (!canRetain && !retentionUnavailable && !recoveredIntent && (!hasOpaquePair || replaceConfirmed)) try {
+  if (!canRetain && !retentionUnavailable && !recoveredIntent && !retainedLegacyId &&
+      (!hasExistingRecoveryCookies || replaceConfirmed)) try {
     // Enforce the role and method policy on the server; browser radios are never authoritative.
     if (!policy || !email ||
       (policy.adminReview ? formData.has("comment") && comment === null : formData.has("comment"))) throw new Error("Rejected.");
@@ -195,7 +219,12 @@ async function startSelectedRecovery(formData: FormData, expectedRole: "USER" | 
     clearRecoveryCandidateCookie(cookieStore);
     redirect(`/recover?requestId=${encodeURIComponent(recoveredIntent.requestId)}`);
   }
-  if (hasOpaquePair && !replaceConfirmed) {
+  if (retainedLegacyId) {
+    // No Set-Cookie is needed: a legacy approved/verified bearer already has
+    // the correct host-only key, role binding and original expiry.
+    redirect(`/recover?requestId=${encodeURIComponent(retainedLegacyId)}`);
+  }
+  if (hasExistingRecoveryCookies && !replaceConfirmed) {
     // This branch is identical for unproven real and synthetic pairs. It
     // changes no capability cookie and creates no account-specific request.
     redirect("/recover?restart=1");
