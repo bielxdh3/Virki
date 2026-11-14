@@ -61,6 +61,8 @@ test("real Compose config selects only the external-network manual worker withou
     PATH: process.env.PATH,
     SystemRoot: process.env.SystemRoot,
     COMSPEC: process.env.COMSPEC,
+    HOME: process.env.HOME,
+    TMPDIR: process.env.TMPDIR,
     ProgramFiles: process.env.ProgramFiles,
     APPDATA: process.env.APPDATA,
     LOCALAPPDATA: process.env.LOCALAPPDATA,
@@ -101,6 +103,11 @@ test("real Compose config selects only the external-network manual worker withou
     const candidate = { ...env };
     delete candidate[missing];
     const denied = run(candidate);
-    assert.notEqual(denied.status, 0, `omitting ${missing} must fail before work is started`);
+    assert.equal(denied.error, undefined, `Compose must actually execute while testing ${missing}`);
+    assert.equal(denied.signal, null, `Compose must exit normally while testing ${missing}`);
+    assert.ok(Number.isInteger(denied.status) && denied.status !== 0,
+      `omitting ${missing} must produce a real Compose rejection`);
+    assert.ok(denied.stderr.includes(missing),
+      `Compose must identify the exact missing staging source ${missing}, not fail for another reason`);
   }
 });
