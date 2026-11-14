@@ -80,6 +80,11 @@ from restarting automatically after a process failure or daemon/host restart
 and draining mail outside the approved observed test window. Before any
 standalone start, the operator must verify the **effective merged** Compose
 policy is `restart: "no"`, the worker is stopped and autostart is disabled.
+The `staging-email-worker-manual` Compose profile additionally keeps this
+worker out of an unqualified staging `docker compose up`: the worker must be
+specifically selected after a new operator-approved, supervised send window.
+An explicit `up email-worker` or enabled profile can still start it, so this
+is an accidental-start guard, **not** a cryptographic authorization gate.
 For an existing container, independently verify its **actual** Docker
 `HostConfig.RestartPolicy.Name` is `no`: rendering a new Compose config does
 not by itself update the restart policy of an already-created container.

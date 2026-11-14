@@ -16,8 +16,8 @@ const worker = read("packages/auth/src/email-worker.ts");
 const guard = read("packages/auth/src/email-worker-role.ts");
 
 test("staging override requires worker-only URL and never defaults to Hub runtime", () => {
-  assert.match(override, /services:\n  email-worker:\n(?: {4}#.*\n)* {4}restart: "no"\n    environment:\n/u,
-    "manual staging worker must explicitly disable inherited production auto-restart");
+  assert.match(override, /services:\n  email-worker:\n(?: {4}#.*\n)* {4}profiles: \["staging-email-worker-manual"\]\n(?: {4}#.*\n)* {4}restart: "no"\n    environment:\n/u,
+    "manual staging worker must require an explicit profile and disable inherited production auto-restart");
   assert.ok(override.includes("DATABASE_URL: $" + "{VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?"));
   assert.ok(override.includes("VIRKI_EMAIL_WORKER_SCOPED_ROLE: required"));
   assert.equal(override.split("\n      DATABASE_URL:").length - 1, 1);

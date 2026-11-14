@@ -4,6 +4,9 @@
 # restrictions, test allowlist and quota before any standalone worker start.
 services:
   email-worker:
+    # Omit from an unqualified staging `docker compose up`. The operator
+    # must select this service/profile explicitly after receiving approval.
+    profiles: ["staging-email-worker-manual"]
     # Override production's unless-stopped: manual staging sends must not
     # resume after worker failure or a Docker daemon/host restart.
     restart: "no"
