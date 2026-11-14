@@ -35,6 +35,9 @@ function fixture() {
   const staging = {
     hostId: "staging-host", dbHostId: "staging-postgres", dbName: "virki_stage",
     dbRoles: ["stage-migrator", "stage-runtime", "stage-worker"], smtpTenantId: "staging-smtp",
+    smtpEndpointId: "staging-smtp-endpoint", smtpAccountId: "staging-smtp-account",
+    smtpHost: "smtp.staging.example.invalid", smtpPort: 587, smtpSecure: false,
+    smtpUsernameSha256: "1".repeat(64),
     networkId: "d".repeat(64)
   };
   const approval = {
@@ -48,6 +51,9 @@ function fixture() {
     production: {
       hostId: "production-host", dbHostId: "production-postgres", dbName: "virki_prod",
       dbRoles: ["prod-migrator", "prod-runtime", "prod-worker"], smtpTenantId: "production-smtp",
+      smtpEndpointId: "production-smtp-endpoint", smtpAccountId: "production-smtp-account",
+      smtpHost: "smtp.production.example.invalid", smtpPort: 587, smtpSecure: false,
+      smtpUsernameSha256: "2".repeat(64),
       networkId: "e".repeat(64)
     },
     workerResourcePolicyId: "worker-resource-policy-001",
@@ -73,6 +79,11 @@ function fixture() {
       evidenceRef: "observer-worker-status-001"
     },
     relay: {
+      smtpTenantId: staging.smtpTenantId, smtpEndpointId: staging.smtpEndpointId,
+      smtpAccountId: staging.smtpAccountId, smtpHost: staging.smtpHost,
+      smtpPort: staging.smtpPort, smtpSecure: staging.smtpSecure,
+      smtpUsernameSha256: staging.smtpUsernameSha256,
+      smtpAuthenticationVerified: true, smtpAuthenticationEvidenceRef: "observer-smtp-auth-001",
       enforcement: "relay-hard-enforced", recipientPolicyId: "staging-policy-001",
       recipientIds: ["test-admin-inbox", "test-user-inbox"],
       unlistedRecipientRejected: true, denyEvidenceRef: "observer-deny-sample-001",
@@ -81,13 +92,19 @@ function fixture() {
     },
     queue: { queued: 0, processing: 0, retryable: 0, sent: 0, terminal: 0, deliveryAttempts: 0, evidenceRef: "observer-queue-empty-001" }
   };
+  const smtpConfig = {
+    tenantId: staging.smtpTenantId, endpointId: staging.smtpEndpointId,
+    accountId: staging.smtpAccountId, host: staging.smtpHost,
+    port: staging.smtpPort, secure: staging.smtpSecure,
+    usernameSha256: staging.smtpUsernameSha256
+  };
   const invoke = () => evaluateStagingOtpPreflight({
     approvalEnvelope: signed("approval", approval, approver),
     observationEnvelope: signed("observation", observation, observer),
     approverPublicKey: approver.publicKey, observerPublicKey: observer.publicKey,
-    expectedSourceSha: SOURCE, now: NOW
+    expectedSourceSha: SOURCE, smtpConfig, now: NOW
   });
-  return { approver, observer, approval, observation, invoke };
+  return { approver, observer, approval, observation, smtpConfig, invoke };
 }
 
 test("offline signed declaration result NEVER claims live worker verification, staging authorization or release", () => {
@@ -145,7 +162,7 @@ test("mutations without valid signatures cannot acquire a pass", () => {
   const options = {
     approvalEnvelope, observationEnvelope,
     approverPublicKey: f.approver.publicKey, observerPublicKey: f.observer.publicKey,
-    expectedSourceSha: SOURCE, now: NOW
+    expectedSourceSha: SOURCE, smtpConfig: f.smtpConfig, now: NOW
   };
   observationEnvelope.observation.worker.state = "running";
   assert.throws(() => evaluateStagingOtpPreflight(options), { code: "INVALID_SIGNATURE" });
@@ -163,6 +180,15 @@ const negativeCases = [
     ["database name shared with production", (a, o) => { a.staging.dbName = o.staging.dbName = a.production.dbName; }, "PRODUCTION_IDENTITY_REUSE"],
     ["role shared with production", (a) => { a.production.dbRoles[0] = a.staging.dbRoles[0]; a.production.dbRoles.sort(); }, "PRODUCTION_IDENTITY_REUSE"],
     ["SMTP tenant shared with production", (a, o) => { a.staging.smtpTenantId = o.staging.smtpTenantId = a.production.smtpTenantId; }, "PRODUCTION_IDENTITY_REUSE"],
+    ["SMTP endpoint shared with production", (a, o) => { a.staging.smtpEndpointId = o.staging.smtpEndpointId = a.production.smtpEndpointId; }, "PRODUCTION_IDENTITY_REUSE"],
+    ["SMTP account shared with production", (a, o) => { a.staging.smtpAccountId = o.staging.smtpAccountId = a.production.smtpAccountId; }, "PRODUCTION_IDENTITY_REUSE"],
+    ["SMTP username fingerprint shared with production", (a, o) => { a.staging.smtpUsernameSha256 = o.staging.smtpUsernameSha256 = a.production.smtpUsernameSha256; }, "PRODUCTION_IDENTITY_REUSE"],
+    ["missing SMTP endpoint identity", (a) => { delete a.staging.smtpEndpointId; }, "INVALID_SCHEMA"],
+    ["missing SMTP account identity", (a) => { delete a.staging.smtpAccountId; }, "INVALID_SCHEMA"],
+    ["invalid SMTP endpoint hostname", (a) => { a.staging.smtpHost = "https://smtp.example.invalid"; }, "INVALID_FIELD"],
+    ["invalid SMTP endpoint port", (a) => { a.staging.smtpPort = 0; }, "INVALID_LIMIT"],
+    ["invalid SMTP secure mode", (a) => { a.staging.smtpSecure = "false"; }, "INVALID_FIELD"],
+    ["invalid SMTP username fingerprint", (a) => { a.staging.smtpUsernameSha256 = "not-a-hash"; }, "INVALID_FIELD"],
     ["no recipient allowlist", (a) => { a.recipientIds = []; }, "INVALID_IDENTITIES"],
     ["duplicate recipient", (a) => { a.recipientIds = ["test-user-inbox", "test-user-inbox"]; }, "INVALID_IDENTITIES"],
     ["address/PII instead of opaque recipient ID", (a) => { a.recipientIds = ["user@example.invalid"]; }, "INVALID_IDENTITIES"],
@@ -224,6 +250,15 @@ const negativeCases = [
     ["allowlist not enforced at relay", (_a, o) => { o.relay.enforcement = "document-only"; }, "INVALID_ATTESTATION"],
     ["unlisted recipient not rejected", (_a, o) => { o.relay.unlistedRecipientRejected = false; }, "INVALID_ATTESTATION"],
     ["allowlist altered", (_a, o) => { o.relay.recipientIds = ["test-admin-inbox"]; }, "ATTESTATION_MISMATCH"],
+    ["relay tenant differs from owner approval", (_a, o) => { o.relay.smtpTenantId = "other-stage-tenant"; }, "ATTESTATION_MISMATCH"],
+    ["relay endpoint differs from owner approval", (_a, o) => { o.relay.smtpEndpointId = "other-stage-endpoint"; }, "ATTESTATION_MISMATCH"],
+    ["relay account differs from owner approval", (_a, o) => { o.relay.smtpAccountId = "other-stage-account"; }, "ATTESTATION_MISMATCH"],
+    ["relay hostname differs from owner approval", (_a, o) => { o.relay.smtpHost = "smtp.other.invalid"; }, "ATTESTATION_MISMATCH"],
+    ["relay port differs from owner approval", (_a, o) => { o.relay.smtpPort = 465; }, "ATTESTATION_MISMATCH"],
+    ["relay secure mode differs from owner approval", (_a, o) => { o.relay.smtpSecure = true; }, "ATTESTATION_MISMATCH"],
+    ["relay account username fingerprint differs from owner approval", (_a, o) => { o.relay.smtpUsernameSha256 = "3".repeat(64); }, "ATTESTATION_MISMATCH"],
+    ["relay SMTP authentication was not verified against the signed tenant", (_a, o) => { o.relay.smtpAuthenticationVerified = false; }, "INVALID_ATTESTATION"],
+    ["relay SMTP authentication evidence is missing", (_a, o) => { o.relay.smtpAuthenticationEvidenceRef = ""; }, "INVALID_FIELD"],
     ["provider budget cannot cover handoffs", (_a, o) => { o.relay.hardMaxHandoffs = 3; }, "SEND_BUDGET_NOT_PROVEN"],
     ["rate cap lower than actual interval throughput", (_a, o) => { o.relay.hardRateCapPerMinute = 20; }, "SEND_BUDGET_NOT_PROVEN"],
     ["daily quota unavailable", (_a, o) => { o.relay.remainingDailyQuota = 5; }, "INVALID_LIMIT"],
@@ -237,10 +272,27 @@ const negativeCases = [
 for (const [label, mutate, expected] of negativeCases) {
   test(`signed negative: ${label}`, () => {
     const f = fixture();
-    mutate(f.approval, f.observation);
+    mutate(f.approval, f.observation, f.smtpConfig);
     assert.throws(f.invoke, { code: expected }, label);
   });
 }
+
+test("effective SMTP host, port, TLS mode and account fingerprint must match the signed tenant/endpoint/account", () => {
+  const f = fixture();
+  for (const [field, value] of [
+    ["tenantId", "other-stage-tenant"], ["endpointId", "other-stage-endpoint"],
+    ["accountId", "other-stage-account"], ["host", "smtp.other.invalid"],
+    ["port", 465], ["secure", true], ["usernameSha256", "4".repeat(64)]
+  ]) {
+    const changed = { ...f.smtpConfig, [field]: value };
+    assert.throws(() => evaluateStagingOtpPreflight({
+      approvalEnvelope: signed("approval", f.approval, f.approver),
+      observationEnvelope: signed("observation", f.observation, f.observer),
+      approverPublicKey: f.approver.publicKey, observerPublicKey: f.observer.publicKey,
+      expectedSourceSha: SOURCE, smtpConfig: changed, now: NOW
+    }), { code: "ATTESTATION_MISMATCH" }, `changed ${field} must not pass`);
+  }
+});
 
 test("wrong independent key, forged observer fingerprint, expired approved signer and mismatched target SHA fail closed", () => {
   const f = fixture();
@@ -249,7 +301,7 @@ test("wrong independent key, forged observer fingerprint, expired approved signe
     approvalEnvelope: signed("approval", f.approval, f.approver),
     observationEnvelope: signed("observation", f.observation, f.observer),
     approverPublicKey: f.approver.publicKey, observerPublicKey: other.publicKey,
-    expectedSourceSha: SOURCE, now: NOW
+    expectedSourceSha: SOURCE, smtpConfig: f.smtpConfig, now: NOW
   }), { code: "INVALID_SIGNATURE" });
   f.approval.observerKeySha256 = other.fingerprint;
   assert.throws(f.invoke, { code: "OBSERVER_NOT_INDEPENDENT" });
@@ -258,14 +310,14 @@ test("wrong independent key, forged observer fingerprint, expired approved signe
     approvalEnvelope: signed("approval", g.approval, g.approver),
     observationEnvelope: signed("observation", g.observation, g.observer),
     approverPublicKey: g.approver.publicKey, observerPublicKey: g.observer.publicKey,
-    expectedSourceSha: "c".repeat(40), now: NOW
+    expectedSourceSha: "c".repeat(40), smtpConfig: g.smtpConfig, now: NOW
   }), { code: "ATTESTATION_MISMATCH" });
   const identical = fixture();
   assert.throws(() => evaluateStagingOtpPreflight({
     approvalEnvelope: signed("approval", identical.approval, identical.approver),
     observationEnvelope: signed("observation", identical.observation, identical.approver),
     approverPublicKey: identical.approver.publicKey, observerPublicKey: identical.approver.publicKey,
-    expectedSourceSha: SOURCE, now: NOW
+    expectedSourceSha: SOURCE, smtpConfig: identical.smtpConfig, now: NOW
   }), { code: "OBSERVER_NOT_INDEPENDENT" });
 });
 
@@ -278,7 +330,14 @@ test("CLI reads only explicit JSON/public-key documents, never leaks input field
       "--observation", path.join(dir, "observation.json"),
       "--approver-public-key", path.join(dir, "owner.pub.pem"),
       "--observer-public-key", path.join(dir, "observer.pub.pem"),
-      "--expected-source-sha", SOURCE
+      "--expected-source-sha", SOURCE,
+      "--smtp-tenant-id", f.smtpConfig.tenantId,
+      "--smtp-endpoint-id", f.smtpConfig.endpointId,
+      "--smtp-account-id", f.smtpConfig.accountId,
+      "--smtp-host", f.smtpConfig.host,
+      "--smtp-port", String(f.smtpConfig.port),
+      "--smtp-secure", String(f.smtpConfig.secure),
+      "--smtp-username-sha256", f.smtpConfig.usernameSha256
     ];
     writeFileSync(args[1], JSON.stringify(signed("approval", f.approval, f.approver)));
     writeFileSync(args[3], JSON.stringify(signed("observation", f.observation, f.observer)));
@@ -299,6 +358,13 @@ test("CLI reads only explicit JSON/public-key documents, never leaks input field
     assert.match(pass.stdout, /STAGING_AUTHORIZATION=NOT_GRANTED_BY_THIS_TOOL/u);
     assert.match(pass.stdout, /PRODUCTION_RELEASE=NO_GO/u);
     assert.equal(pass.stderr, "");
+    const smtpHostIndex = args.indexOf("--smtp-host") + 1;
+    const approvedSmtpHost = args[smtpHostIndex];
+    args[smtpHostIndex] = "smtp.production.example.invalid";
+    const wrongSmtp = capture();
+    assert.equal(wrongSmtp.status, 1);
+    assert.match(wrongSmtp.stderr, /BLOCK:ATTESTATION_MISMATCH/u);
+    args[smtpHostIndex] = approvedSmtpHost;
     const approvedBytes = JSON.stringify(signed("approval", f.approval, f.approver));
     const observedBytes = JSON.stringify(signed("observation", f.observation, f.observer));
     // JSON.parse would silently take the last value, thus preserving the

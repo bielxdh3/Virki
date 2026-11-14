@@ -11,6 +11,7 @@ const OCI_DIGEST = /^sha256:[a-f0-9]{64}$/u;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const DOCKER_NETWORK_ID = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9._-]{2,95}$/u;
+const SMTP_HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/u;
 const UTC_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const MAX_OBSERVATION_AGE_MS = 5 * 60_000;
 const NON_WORKER_SERVICES = ["audit-maintenance", "first-admin-bootstrap", "hub", "migrate", "oidc-issuer", "postgres", "public-site", "session-cleanup"];
@@ -94,14 +95,18 @@ function authenticated(envelope, field, publicKey) {
 }
 
 function site(site) {
-  shape(site, ["hostId", "dbHostId", "dbName", "dbRoles", "smtpTenantId", "networkId"]);
-  for (const field of ["hostId", "dbHostId", "dbName", "smtpTenantId"]) requireMatch(site[field], IDENTIFIER);
+  shape(site, ["hostId", "dbHostId", "dbName", "dbRoles", "smtpTenantId", "smtpEndpointId", "smtpAccountId", "smtpHost", "smtpPort", "smtpSecure", "smtpUsernameSha256", "networkId"]);
+  for (const field of ["hostId", "dbHostId", "dbName", "smtpTenantId", "smtpEndpointId", "smtpAccountId"]) requireMatch(site[field], IDENTIFIER);
+  requireMatch(site.smtpHost, SMTP_HOST);
+  requireInteger(site.smtpPort, 1, 65_535);
+  if (typeof site.smtpSecure !== "boolean") block("INVALID_FIELD");
+  requireMatch(site.smtpUsernameSha256, SHA256_HEX);
   requireIds(site.dbRoles, 3, 3);
   requireMatch(site.networkId, DOCKER_NETWORK_ID);
 }
 
 /** Returns only a static consistency result. Never claims the worker is stopped NOW. */
-export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvelope, approverPublicKey, observerPublicKey, expectedSourceSha, now = new Date() }) {
+export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvelope, approverPublicKey, observerPublicKey, expectedSourceSha, smtpConfig, now = new Date() }) {
   requireMatch(expectedSourceSha, SOURCE_SHA);
   const approver = publicEd25519(approverPublicKey);
   const observer = publicEd25519(observerPublicKey);
@@ -144,9 +149,24 @@ export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvel
   site(approval.production);
   site(observed.staging);
   requireSame(observed.staging, approval.staging);
-  for (const field of ["hostId", "dbHostId", "dbName", "smtpTenantId", "networkId"]) {
+  for (const field of ["hostId", "dbHostId", "dbName", "smtpTenantId", "smtpEndpointId", "smtpAccountId", "smtpUsernameSha256", "networkId"]) {
     if (approval.staging[field] === approval.production[field]) block("PRODUCTION_IDENTITY_REUSE");
   }
+  shape(smtpConfig, ["tenantId", "endpointId", "accountId", "host", "port", "secure", "usernameSha256"]);
+  requireMatch(smtpConfig.tenantId, IDENTIFIER);
+  requireMatch(smtpConfig.endpointId, IDENTIFIER);
+  requireMatch(smtpConfig.accountId, IDENTIFIER);
+  requireMatch(smtpConfig.host, SMTP_HOST);
+  requireInteger(smtpConfig.port, 1, 65_535);
+  if (typeof smtpConfig.secure !== "boolean") block("INVALID_FIELD");
+  requireMatch(smtpConfig.usernameSha256, SHA256_HEX);
+  requireSame(smtpConfig.tenantId, approval.staging.smtpTenantId);
+  requireSame(smtpConfig.endpointId, approval.staging.smtpEndpointId);
+  requireSame(smtpConfig.accountId, approval.staging.smtpAccountId);
+  requireSame(smtpConfig.host, approval.staging.smtpHost);
+  requireSame(smtpConfig.port, approval.staging.smtpPort);
+  requireSame(smtpConfig.secure, approval.staging.smtpSecure);
+  requireSame(smtpConfig.usernameSha256, approval.staging.smtpUsernameSha256);
   if (approval.staging.dbRoles.some((role) => approval.production.dbRoles.includes(role))) block("PRODUCTION_IDENTITY_REUSE");
   requireIds(approval.recipientIds, 1, 20); // Opaque IDs only; never email addresses or recipient secrets.
   requireMatch(approval.workerResourcePolicyId, IDENTIFIER);
@@ -179,7 +199,15 @@ export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvel
   requireSame(observed.worker.servicesWithInterval, ["email-worker"]);
   requireSame(observed.worker.observedServiceNames, ["email-worker", ...NON_WORKER_SERVICES].sort());
 
-  shape(observed.relay, ["enforcement", "recipientPolicyId", "recipientIds", "unlistedRecipientRejected", "denyEvidenceRef", "policyEvidenceRef", "hardRateCapPerMinute", "hardMaxHandoffs", "remainingDailyQuota"]);
+  shape(observed.relay, ["smtpTenantId", "smtpEndpointId", "smtpAccountId", "smtpHost", "smtpPort", "smtpSecure", "smtpUsernameSha256", "smtpAuthenticationVerified", "smtpAuthenticationEvidenceRef", "enforcement", "recipientPolicyId", "recipientIds", "unlistedRecipientRejected", "denyEvidenceRef", "policyEvidenceRef", "hardRateCapPerMinute", "hardMaxHandoffs", "remainingDailyQuota"]);
+  for (const [observedField, approvedField] of [
+    ["smtpTenantId", "smtpTenantId"], ["smtpEndpointId", "smtpEndpointId"],
+    ["smtpAccountId", "smtpAccountId"], ["smtpHost", "smtpHost"],
+    ["smtpPort", "smtpPort"], ["smtpSecure", "smtpSecure"],
+    ["smtpUsernameSha256", "smtpUsernameSha256"]
+  ]) requireSame(observed.relay[observedField], approval.staging[approvedField]);
+  requireBool(observed.relay.smtpAuthenticationVerified, true);
+  requireMatch(observed.relay.smtpAuthenticationEvidenceRef, IDENTIFIER);
   requireBool(observed.relay.enforcement, "relay-hard-enforced");
   requireSame(observed.relay.recipientPolicyId, approval.recipientPolicyId);
   requireIds(observed.relay.recipientIds, 1, 20);
@@ -333,7 +361,11 @@ function parseUniqueJson(text) {
 
 export function runStagingOtpPreflightCli(argv, { out = process.stdout, err = process.stderr, now = new Date() } = {}) {
   try {
-    const allowed = ["--approval", "--observation", "--approver-public-key", "--observer-public-key", "--expected-source-sha"];
+    const allowed = [
+      "--approval", "--observation", "--approver-public-key", "--observer-public-key", "--expected-source-sha",
+      "--smtp-tenant-id", "--smtp-endpoint-id", "--smtp-account-id", "--smtp-host",
+      "--smtp-port", "--smtp-secure", "--smtp-username-sha256"
+    ];
     if (argv.length !== allowed.length * 2) block("INVALID_ARGUMENTS");
     const args = new Map();
     for (let i = 0; i < argv.length; i += 2) {
@@ -344,7 +376,20 @@ export function runStagingOtpPreflightCli(argv, { out = process.stdout, err = pr
     const observationEnvelope = parseUniqueJson(readUnlinkedText(args.get("--observation"), ".json", 32_768));
     const approverPublicKey = readUnlinkedText(args.get("--approver-public-key"), ".pub.pem", 4096);
     const observerPublicKey = readUnlinkedText(args.get("--observer-public-key"), ".pub.pem", 4096);
-    const result = evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvelope, approverPublicKey, observerPublicKey, expectedSourceSha: args.get("--expected-source-sha"), now });
+    const smtpPortText = args.get("--smtp-port");
+    requireMatch(smtpPortText, /^[1-9][0-9]{0,4}$/u);
+    const smtpSecureText = args.get("--smtp-secure");
+    if (smtpSecureText !== "true" && smtpSecureText !== "false") block("INVALID_FIELD");
+    const smtpConfig = {
+      tenantId: args.get("--smtp-tenant-id"),
+      endpointId: args.get("--smtp-endpoint-id"),
+      accountId: args.get("--smtp-account-id"),
+      host: args.get("--smtp-host"),
+      port: Number(smtpPortText),
+      secure: smtpSecureText === "true",
+      usernameSha256: args.get("--smtp-username-sha256")
+    };
+    const result = evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvelope, approverPublicKey, observerPublicKey, expectedSourceSha: args.get("--expected-source-sha"), smtpConfig, now });
     out.write(`STAGING_OTP_PREFLIGHT=${result.status}\nLIVE_WORKER_STATE=${result.liveWorkerState}\nSTAGING_AUTHORIZATION=${result.stagingAuthorization}\nPRODUCTION_RELEASE=${result.release}\n`);
     return 0;
   } catch (error) {

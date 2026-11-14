@@ -54,7 +54,7 @@ fi
 export VIRKI_RUNTIME_DB_PASSWORD VIRKI_MIGRATOR_DB_PASSWORD VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD
 export AUDIT_LOG_RETENTION_DAYS
 
-psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 <<'SQL'
+psql --no-password --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 <<'SQL'
 \getenv database_name POSTGRES_DB
 \getenv runtime_password VIRKI_RUNTIME_DB_PASSWORD
 \getenv migrator_password VIRKI_MIGRATOR_DB_PASSWORD
@@ -539,7 +539,7 @@ SQL
 case "${VIRKI_LOCAL_MIGRATOR_CREATEDB:-false}" in
   false) ;;
   true)
-    psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 \
+    psql --no-password --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 \
       --command 'ALTER ROLE virki_migrator CREATEDB'
     ;;
   *)

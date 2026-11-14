@@ -26,3 +26,13 @@ test("PostgreSQL bootstrap allowlist accepts every table introduced by committed
   assert.deepEqual([...created].filter((name) => !allowed.has(name)).sort(), [],
     "schema upgrades must not make bootstrap role reconciliation reject legitimate Virki tables");
 });
+
+test("PostgreSQL role bootstrap never waits for an interactive password prompt", () => {
+  const bootstrap = readFileSync(path.join(root, "infra/postgres-init/10-virki-database-roles.sh"), "utf8");
+  const invocations = bootstrap.split(/\r?\n/u).filter((line) => /^\s*psql\b/u.test(line));
+  assert.equal(invocations.length, 2, "both role-management SQL entry points must remain explicit");
+  for (const invocation of invocations) {
+    assert.match(invocation, /^\s*psql --no-password\b/u,
+      "peer-auth failure must stop, never hang waiting for a password");
+  }
+});
