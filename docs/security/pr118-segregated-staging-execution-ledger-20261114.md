@@ -4,8 +4,8 @@
 
 ## Provenance and scope of the handoff
 
-- Source candidate: `678d81af31fb6aa5f1ab4effcdee823a030c38ce`, on `feat/virki-native-admin-perimeter-20261110`. Recheck the PR HEAD and exact image digest **at the beginning of an authorized staging window**; any code change invalidates the corresponding SHA evidence.
-- GitHub checks verified on this SHA: CI runs `43594678814` and `43594674461`, CodeQL `43594678827` — `SUCCESS`. The production-image publication jobs were skipped by branch policy. The hosted native Hub Chromium tests are CI fixtures, **not a live external staging run**.
+- Last **published** and CI-verified PR source: `678d81af31fb6aa5f1ab4effcdee823a030c38ce`, branch `feat/virki-native-admin-perimeter-20261110`. Staging transport/restart hardening is a **local-only descendant patch**, not yet independently accepted or published. Its commit SHA must be checked separately before any staging or release. Recheck the exact approved PR HEAD and immutable image digest at the beginning of a permitted staging window; any new source change invalidates earlier exact-SHA gates.
+- GitHub checks verified on the **published parent only**: CI runs `43594678814` and `43594674461`, CodeQL `43594678827` — `SUCCESS`. The local patch has **no hosted checks or required independent SOURCE GO yet**. The production-image publication jobs were skipped by branch policy. The hosted native Hub Chromium tests are CI fixtures, **not a live external staging run**.
 - Independent source reviews of the published code previously reported GO; this is **not** an independent operational-security sign-off, a GitHub `APPROVED` review, or permission to merge.
 - GitHub PR #118 remains `OPEN/DRAFT`; at handoff there were **four unresolved threads** (two outdated). The native Cloudflare Access perimeter thread stays open pending operator cutover acceptance.
 - Parent contracts, which take precedence if this ledger is incomplete: [`native-hub-staging-otp-acceptance-20261110.md`](native-hub-staging-otp-acceptance-20261110.md), [`native-hub-perimeter-cutover-20261110.md`](native-hub-perimeter-cutover-20261110.md), and [`staging-email-worker-role-20261112.md`](staging-email-worker-role-20261112.md).
@@ -20,6 +20,14 @@
 | `packages/auth/src/security.ts:973` (P2, not outdated) | `getAccountRecoveryRequestId` intentionally remains legacy-only. `recover/open` GET and first POST emit a **candidate-only** cookie; explicit switching requires matching candidate, live role/status, origin and CSRF. | Prior causal browser RED/GREEN/source review covers this flow. Do not auto-resolve before reviewer reconciliation. |
 
 No thread was resolved, dismissed, marked approved or posted to automatically by this staging preparation.
+
+### Local patch evidence — not external acceptance
+
+- Reproduced the previous worker-only Compose environment inheritance from the published parent: ordinary `VIRKI_EMAIL_*` SMTP/outbox sources remained after overriding only `DATABASE_URL`. A new contract assertion failed on the parent (3 PASS, 1 FAIL), then passed with the staging-only source override (4 PASS).
+- Effective Docker Compose interpolation with **synthetic values only**: staging Hub and worker receive the same synthetic outbox key, the worker's sender/SMTP fields come from explicit staging inputs, `restart=no`, and the manual worker profile stays enabled. Omitting either staging SMTP password, outbox key, or Hub database URL failed Compose rendering: **3/3 denied**. No Docker service/daemon activity or real SMTP was involved.
+- The actual stage guard previously accepted an exited worker despite an inherited auto-restart policy. Stubbed physical-Bash guard test reproduced the negative case before the fix; after inspecting `HostConfig.RestartPolicy.Name`, the focused test passed and denies `unless-stopped`, `always`, `on-failure`, absent/unknown policy, or active worker state.
+- Full local `scripts/production-ops.test.mjs` against temporarily linked approved dependencies: **64 total, 51 PASS, 0 FAIL, 13 platform-conditional SKIP**. The worker role/SCRAM suite: **7 PASS, 0 FAIL, 0 SKIP**. `npm run lint`, `npm run secrets:scan`, Bash syntax and `git diff --check` passed. The temporary dependency junction was checked and removed.
+- A descendant-worktree `npm run typecheck` using a temporary dependency junction failed on two unchanged issuer TypeScript inferences (`interaction` unknown); the issuer typecheck passed directly in the previously approved parent worktree. This local setup is **not** a full descendant typecheck PASS; fresh exact-SHA CI is required after independent SOURCE GO and eventual publication.
 
 **Evidence location:** an operator-controlled, access-restricted repository **outside this Git tree**. Use opaque receipt references here; never commit or upload `.env` values, personal data, recipient addresses, screenshots of OTPs, passkeys, private keys, tokens, URLs containing capabilities, SQL dumps, raw headers or unredacted logs.
 
