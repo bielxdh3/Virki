@@ -89,6 +89,11 @@ prove its secret bytes or destination differ from production.
 This overlay does **not** provision or isolate the rest of the stack,
 including the issuer, migrator, PostgreSQL and external edge/relay: those
 still require a separately reviewed staging-only base environment and host.
+Docker Compose interpolates each input file before merging the mappings:
+mandatory ordinary base-file variables must themselves contain **staging-only
+test values**, never a copied production `.env`, even where this overlay
+later replaces a worker or Hub field. Effective secret and destination
+identity must be inspected independently before the manual send window.
 Before any worker start, independently verify actual Hub/worker database
 identities, their shared staging outbox key, distinct SMTP tenant/sender,
 valid TLS/AUTH, provider allowlist and quota, and absence of any production
