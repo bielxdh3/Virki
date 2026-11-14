@@ -9,6 +9,8 @@ import {
   expectedPasskeyRP,
   hashPasskeyChallenge,
   readClientChallenge,
+  startPasskeyRegistration,
+  finishPasskeyRegistration,
   startPasskeyAuthentication,
   validatePasskeyName
 } from "./passkeys";
@@ -24,6 +26,28 @@ test("WebAuthn cannot expand the USER origin to the ADMIN subdomain", () => {
   assert.deepEqual(expectedPasskeyRP({ NODE_ENV: "test", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }, "portal.localhost"), { rpID: "portal.localhost", origin: "https://portal.localhost:3001" });
   assert.equal(passkeysEnabledForRequest("portal", "portal.localhost", { ...env, NODE_ENV: "test", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }), true);
   assert.equal(passkeysEnabledForRequest("portal", "portal.localhost", { ...env, NODE_ENV: "production", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }), false);
+});
+
+test("ADMIN WebAuthn requires a separate hub RP, separate rollout flag and role", async (context) => {
+  const env = { NODE_ENV: "production", VIRKI_PASSKEYS_ENABLED: "true", VIRKI_ADMIN_PASSKEYS_ENABLED: "true" };
+  assert.deepEqual(expectedPasskeyRP(env, "hub.biel.dev.br", "ADMIN"), { rpID: "hub.biel.dev.br", origin: "https://hub.biel.dev.br" });
+  assert.equal(passkeysEnabledForRequest("hub", "hub.biel.dev.br", env, "ADMIN"), true);
+  assert.equal(passkeysEnabledForRequest("hub", "hub.biel.dev.br", env, "USER"), false);
+  assert.equal(passkeysEnabledForRequest("portal", "portal.biel.dev.br", env, "ADMIN"), false);
+  assert.equal(passkeysEnabledForRequest("hub", "evil.hub.biel.dev.br", env, "ADMIN"), false);
+  assert.equal(passkeysEnabledForRequest("hub", "hub.biel.dev.br", { ...env, VIRKI_ADMIN_PASSKEYS_ENABLED: "false" }, "ADMIN"), false);
+  assert.throws(() => expectedPasskeyRP(env, "portal.biel.dev.br", "ADMIN"), /Passkey ceremony rejected/u);
+  assert.throws(() => expectedPasskeyRP(env, "hub.biel.dev.br", "USER"), /Passkey ceremony rejected/u);
+  assert.throws(() => expectedPasskeyRP(env, "attacker.invalid", "ADMIN"), /Passkey ceremony rejected/u);
+  assert.deepEqual(expectedPasskeyRP({ ...env, NODE_ENV: "test", VIRKI_PASSKEYS_LOCAL_TESTING: "true" }, "localhost", "ADMIN"), { rpID: "localhost", origin: "http://localhost:3001" });
+  assert.throws(() => expectedPasskeyRP({ ...env, VIRKI_PASSKEYS_LOCAL_TESTING: "true" }, "localhost", "ADMIN"));
+
+  const oldFlag = process.env.VIRKI_ADMIN_PASSKEYS_ENABLED;
+  process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "false";
+  context.after(() => { if (oldFlag === undefined) delete process.env.VIRKI_ADMIN_PASSKEYS_ENABLED; else process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = oldFlag; });
+  // Feature-disabled direct callers must not mint or consume a database challenge.
+  await assert.rejects(startPasskeyRegistration("user-id", "session-id", "password", createPasskeyBrowserToken(), "hub.biel.dev.br", "", "ADMIN"));
+  await assert.rejects(finishPasskeyRegistration("user-id", "session-id", createPasskeyBrowserToken(), {} as never, "key", "hub.biel.dev.br", "ADMIN"));
 });
 
 test("clientData only supplies an exact, bounded challenge; stored digest matches original", () => {

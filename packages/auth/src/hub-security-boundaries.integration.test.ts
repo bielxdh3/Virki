@@ -11,12 +11,13 @@ import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "./csrf";
 Object.assign(globalThis, { AsyncLocalStorage, React });
 after(() => prisma.$disconnect());
 
-async function requestContext<T>(host: string, token: string, operation: () => Promise<T>): Promise<T> {
+async function requestContext<T>(host: string, token: string, operation: () => Promise<T>, deviceToken?: string): Promise<T> {
   const { workAsyncStorage } = await import("next/dist/server/app-render/work-async-storage.external");
   const { workUnitAsyncStorage } = await import("next/dist/server/app-render/work-unit-async-storage.external");
   const { createRequestStoreForAPI } = await import("next/dist/server/async-storage/request-store");
   const { NextRequest } = await import("next/server");
-  const request = new NextRequest(`https://${host}/account/security`, { headers: { host, cookie: `${SESSION_COOKIE_NAME}=${token}` } });
+  const cookie = `${SESSION_COOKIE_NAME}=${token}${deviceToken ? `; virki_device=${deviceToken}` : ""}`;
+  const request = new NextRequest(`https://${host}/account/security`, { headers: { host, cookie } });
   const store = createRequestStoreForAPI(request, { pathname: "/account/security" }, { tags: [], expirationsByCacheKind: new Map() } as never, undefined, undefined, undefined);
   return workAsyncStorage.run({ route: "/account/security" } as never, () => workUnitAsyncStorage.run(store, operation));
 }
@@ -54,9 +55,11 @@ test("reauth intent survives password redirect, verification navigation and erro
   assert.equal(response.status, 303);
   const location = new URL(response.headers.get("location")!);
   assert.equal(location.searchParams.get("reauth"), "1");
+  const cookie = response.cookies.get("virki_device")?.value;
+  assert.ok(cookie, "Login must issue the bound browser capability for the verification page.");
   const { default: page } = await import("../../../apps/hub/src/app/login/verify/page");
   const params = Object.fromEntries(location.searchParams);
-  const tree = await requestContext("portal.example.invalid", user.token, () => page({ searchParams: Promise.resolve({ ...params, factor: "totp" }) }));
+  const tree = await requestContext("portal.example.invalid", user.token, () => page({ searchParams: Promise.resolve({ ...params, factor: "totp" }) }), cookie);
   function elements(node: unknown): Array<{ type?: string; props: Record<string, unknown> }> {
     if (!node || typeof node !== "object") return [];
     if (Array.isArray(node)) return node.flatMap(elements);
@@ -66,16 +69,16 @@ test("reauth intent survives password redirect, verification navigation and erro
   }
   const nodes = elements(tree);
   assert.ok(nodes.some((node) => node.type === "input" && node.props.name === "reauth" && node.props.value === "1"));
+  assert.ok(nodes.some((node) => node.type === "input" && node.props.name === "factor" && node.props.value === "email"),
+    "Untrusted factor=totp in a URL cannot upgrade the registered EMAIL ceremony.");
   const links = nodes.filter((node) => node.type === "a").map((node) => new URL(String(node.props.href), "https://portal.example.invalid"));
-  assert.ok(links.length >= 2);
+  assert.ok(links.length >= 1);
   for (const link of links) assert.equal(link.searchParams.get("reauth"), "1");
   const { POST: verify } = await import("../../../apps/hub/src/app/api/login/verify/route");
   const bad = new FormData();
   bad.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "login-verification" }));
   for (const [key, value] of location.searchParams) bad.set(key, value);
   bad.set("code", "wrong-code");
-  const cookie = response.cookies.get("virki_device")?.value;
-  assert.ok(cookie);
   const failure = await verify(new Request("https://portal.example.invalid/api/login/verify", { method: "POST", headers: { host: "portal.example.invalid", origin: "https://portal.example.invalid", cookie: `virki_device=${cookie}` }, body: bad }));
   assert.equal(new URL(failure.headers.get("location")!).searchParams.get("reauth"), "1");
   assert.ok((await queuedEmails(user.user.email)).length);

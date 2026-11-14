@@ -60,6 +60,21 @@ test("sent messages are not delayed when the send interval is zero", async () =>
   assert.deepEqual(loop.sleeps, [EMAIL_WORKER_IDLE_POLL_MS]);
 });
 
+test("terminalized exhausted outbox items do not masquerade as an empty queue", async () => {
+  const loop = harness(["reconciled", "reconciled", "sent", "idle"]);
+  await loop.run({ sendIntervalMs: 0 });
+  assert.equal(loop.calls, 4);
+  assert.deepEqual(loop.sleeps, [EMAIL_WORKER_IDLE_POLL_MS],
+    "cleaned-up exhausted rows must not each cause a five-second idle sleep");
+});
+
+test("a lost claim race pauses briefly rather than sleeping as an empty queue", async () => {
+  const loop = harness(["contended", "sent", "idle"]);
+  await loop.run({ sendIntervalMs: 0 });
+  assert.equal(loop.calls, 3);
+  assert.deepEqual(loop.sleeps, [EMAIL_WORKER_FAILURE_PAUSE_MS, EMAIL_WORKER_IDLE_POLL_MS]);
+});
+
 test("an idle queue waits the idle poll interval, five seconds by default", async () => {
   const loop = harness(["idle"]);
 

@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildE2ECommand, shouldBuildProductionHub } from "./run-e2e.mjs";
+import { assertNativeE2eFixture, buildE2ECommand, shouldBuildProductionHub } from "./run-e2e.mjs";
 import { buildServiceEnvironment, getServiceCommand } from "./isolated-service.mjs";
 import { redactBrowserE2ELog } from "./redact-browser-e2e-log.mjs";
 
@@ -42,6 +42,134 @@ test("Windows runs browser E2E in isolated Linux Docker and carries filters as J
     "-E2EOnly"
   ]);
   assert.deepEqual(JSON.parse(command.environment.VIRKI_E2E_PLAYWRIGHT_ARGUMENTS_JSON), playwrightArguments);
+});
+
+test("optional PG18 Chromium fixture pins version, image digest, local-only identities and cleanup evidence", () => {
+  const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  assert.match(runner, /\$env:VIRKI_E2E_POSTGRES_MAJOR -cne '18'/u);
+  assert.match(runner, /postgres:18\.6-alpine3\.24@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395/u);
+  assert.match(runner, /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
+  assert.match(runner, /\$postgresTmpfs = if \(\$requirePg18\) \{/u);
+  assert.match(runner, /'\/var\/lib\/postgresql:rw,noexec,nosuid,nodev,size=512m'/u);
+  assert.match(runner, /VERIFIED_DISPOSABLE_POSTGRES_VERSION_NUM=/u);
+  assert.match(runner, /\$repoDigests -notcontains 'docker\.io\/library\/postgres@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395'/u);
+  assert.match(runner, /if \(\$requirePg18\) \{ \$e2eEnvironment \+= @\('--env', 'VIRKI_E2E_POSTGRES_MAJOR=18'\) \}/u);
+  assert.match(runner, /postgresVersionNum = \$script:postgresVersionNum/u);
+  assert.match(runner, /Invoke-OwnedDockerCleanup \$resourceKind/u);
+});
+
+test("Windows PG18 image inspection flattens genuine RepoDigests without accepting forged repos", {
+  skip: process.platform !== "win32" && "Windows PowerShell 5.1 array semantics"
+}, () => {
+  const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  assert.match(runner, /\$repoDigests = \[string\[\]\]\(\$fields\[1\] \| ConvertFrom-Json -ErrorAction Stop\)/u);
+  const digest = "sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395";
+  const script = [
+    `$fields = @('image', '["postgres@${digest}"]', 'linux', 'amd64')`,
+    "$repoDigests = [string[]]($fields[1] | ConvertFrom-Json -ErrorAction Stop)",
+    `if ($repoDigests.Count -ne 1 -or $repoDigests -notcontains 'postgres@${digest}') { exit 1 }`,
+    `$fields[1] = '["attacker/postgres@${digest}"]'`,
+    "$repoDigests = [string[]]($fields[1] | ConvertFrom-Json -ErrorAction Stop)",
+    `if ($repoDigests -contains 'postgres@${digest}') { exit 2 }`
+  ].join("; ");
+  const checked = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    cwd: repositoryRoot, encoding: "utf8", timeout: 15_000, windowsHide: true
+  });
+  assert.equal(checked.error, undefined);
+  assert.equal(checked.status, 0, checked.stderr);
+});
+
+test("invalid PG18 browser opt-in is rejected before local Docker observation", {
+  skip: process.platform !== "win32" && "Windows-only PowerShell admission guard",
+}, () => {
+  const script = resolve(scriptDirectory, "run-isolated-linux-docker.ps1");
+  for (const invalid of ["17", "true", "18 ", "18,17"]) {
+    const child = spawnSync("powershell.exe", [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, "-E2EOnly"
+    ], {
+      cwd: repositoryRoot, encoding: "utf8", timeout: 15_000,
+      env: {
+        ...process.env,
+        DOCKER_CONTEXT: "", DOCKER_HOST: "", DOCKER_CONFIG: "",
+        VIRKI_E2E_POSTGRES_MAJOR: invalid
+      }
+    });
+    assert.equal(child.error, undefined);
+    assert.notEqual(child.status, 0, invalid);
+    assert.match(child.stderr, /exact explicit opt-in/u);
+    assert.doesNotMatch(child.stdout, /ISOLATED_RUN_ID|SOURCE_HEAD|\[RESULT\]/u,
+      "invalid PostgreSQL major must fail before any Docker runtime probing");
+  }
+});
+
+test("native Hub E2E is explicitly opt-in, Hub-only and a mandatory non-skipping CI gate", () => {
+  const config = readFileSync(resolve(repositoryRoot, "playwright.config.mts"), "utf8");
+  const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const spec = readFileSync(resolve(repositoryRoot, "e2e/native-hub-perimeter.spec.mts"), "utf8");
+  const isolatedService = readFileSync(resolve(scriptDirectory, "isolated-service.mjs"), "utf8");
+  assert.match(config, /process\.env\.VIRKI_E2E_NATIVE_HUB === "required"/u);
+  assert.match(config, /nativeHubGate && \(productionHubMode \|\| !process\.env\.VIRKI_E2E_DATABASE_URL/u);
+  assert.doesNotMatch(config, /!process\.env\.VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL/u,
+    "Playwright worker imports config after global setup removes privileged cleanup credentials");
+  assert.match(config, /nativeHubGate \? \{ VIRKI_HUB_PERIMETER_MODE: "native" \} : \{\}/u);
+  assert.match(config, /testMatch: "\*\*\/native-hub-perimeter\.spec\.mts"/u);
+  assert.match(config, /testIgnore: "\*\*\/native-hub-perimeter\.spec\.mts"/u);
+  assert.match(isolatedService, /hub: \[[\s\S]*?"VIRKI_HUB_PERIMETER_MODE"/u);
+  assert.doesNotMatch(isolatedService.match(/"public-site": \[[^\]]+\]/u)?.[0] ?? "", /VIRKI_HUB_PERIMETER_MODE/u);
+  assert.match(spec, /"NATIVE HUB: unauthenticated/u);
+  assert.match(spec, /"NATIVE HUB: legitimate USER/u);
+  assert.match(spec, /"NATIVE HUB: ADMIN password plus genuine queued MFA/u);
+  assert.doesNotMatch(spec, /addCloudflareAccessHeader/u);
+  const stage = workflow.split("- name: Run mandatory native Hub browser E2E without Cloudflare Access JWT")[1]?.split("- name: Run production Hub core browser E2E")[0];
+  assert.ok(stage, "mandatory native Hub stage must exist before production Hub rehearsal");
+  assert.match(stage, /VIRKI_E2E_NATIVE_HUB: required/u);
+  assert.match(stage, /npm run test:e2e -- e2e\/native-hub-perimeter\.spec\.mts --forbid-only/u);
+  assert.match(stage, /3 passed/u);
+  assert.match(stage, /set -euo pipefail/u);
+  assert.doesNotMatch(stage, /continue-on-error:|if:\s*false/u);
+  for (const mutation of [
+    workflow.replace("VIRKI_E2E_NATIVE_HUB: required", "VIRKI_E2E_NATIVE_HUB: false"),
+    workflow.replace("e2e/native-hub-perimeter.spec.mts --forbid-only", "e2e/public-entry.spec.mts"),
+    workflow.replace("3 passed", "0 passed")
+  ]) {
+    const candidate = mutation.split("- name: Run mandatory native Hub browser E2E without Cloudflare Access JWT")[1]?.split("- name: Run production Hub core browser E2E")[0] ?? "";
+    assert.equal(/VIRKI_E2E_NATIVE_HUB: required/u.test(candidate) &&
+      /e2e\/native-hub-perimeter\.spec\.mts --forbid-only/u.test(candidate) &&
+      /3 passed/u.test(candidate), false, "mutated native Hub CI gate must not look valid");
+  }
+});
+
+test("native Hub disposable cleanup credential is checked before worker startup but not required in browser workers", () => {
+  const fixture = {
+    VIRKI_E2E_NATIVE_HUB: "required",
+    VIRKI_E2E_DATABASE_URL: ["postgresql://", "virki_runtime_test", "@127.0.0.1:5432/virki_e2e_test"].join(""),
+    VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL: ["postgresql://", "virki_migrator", "@127.0.0.1:5432/virki_e2e_test"].join(""),
+    VIRKI_CORE_TEST_DATABASE_CONFIRM: "disposable"
+  };
+  assert.doesNotThrow(() => assertNativeE2eFixture(fixture, "linux"));
+  assert.doesNotThrow(() => assertNativeE2eFixture({}, "linux"), "non-native E2E remains unchanged");
+  for (const key of ["VIRKI_E2E_DATABASE_URL", "VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL", "VIRKI_CORE_TEST_DATABASE_CONFIRM"]) {
+    assert.throws(() => assertNativeE2eFixture({ ...fixture, [key]: "" }, "linux"), /exclusive disposable database/u);
+  }
+  assert.throws(() => assertNativeE2eFixture({ ...fixture, VIRKI_E2E_NATIVE_HUB: "false" }, "linux"), /explicit non-production opt-in/u);
+  assert.throws(() => assertNativeE2eFixture({ ...fixture, VIRKI_E2E_HUB_MODE: "production" }, "linux"), /explicit non-production opt-in/u);
+  assert.throws(() => assertNativeE2eFixture({ ...fixture, VIRKI_E2E_DATABASE_URL: "postgresql://test@remote.invalid/other" }, "linux"), /local or isolated CI host/u);
+  assert.doesNotThrow(() => assertNativeE2eFixture(fixture, "win32"), "the signed Windows Docker runner provisions an exclusive DB itself");
+});
+
+test("Windows native Hub opt-in reaches its isolated Docker browser and cannot become a silent Access-suite green", () => {
+  const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  const firstDockerProbe = runner.indexOf("$dockerProbe = Invoke-PinnedDocker version");
+  const nativeOptInValidation = runner.indexOf("if ($env:VIRKI_E2E_NATIVE_HUB -and $env:VIRKI_E2E_NATIVE_HUB -cne 'required')");
+  const nativeProdDenial = runner.indexOf("if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required' -and $env:VIRKI_E2E_HUB_MODE -eq 'production')");
+  const nativeDockerFlag = runner.indexOf("if ($env:VIRKI_E2E_NATIVE_HUB -ceq 'required') { $e2eEnvironment += @('--env', 'VIRKI_E2E_NATIVE_HUB=required') }");
+  const browserInvoke = runner.indexOf("Invoke-Stage -Name 'browser-e2e' -Command $playwrightCommand -Environment $e2eEnvironment");
+  assert.ok(nativeOptInValidation > 0 && nativeOptInValidation < firstDockerProbe, "invalid native opt-in must fail before Docker probing");
+  assert.ok(nativeProdDenial > nativeOptInValidation && nativeProdDenial < firstDockerProbe, "production-mode native E2E must fail before resource creation");
+  assert.ok(nativeDockerFlag > 0 && nativeDockerFlag < browserInvoke, "only the explicitly required native opt-in reaches the Linux browser process");
+  assert.match(runner, /VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL=' \+ \$urls\.migrator/u,
+    "the disposable Linux worker still receives its scoped audit cleanup fixture");
+  assert.ok(!runner.includes("'VIRKI_HUB_PERIMETER_MODE=native'"), "never set native mode in a shared non-browser service");
 });
 
 test("isolated Windows launcher rejects remote Docker context overrides before creating any fixture", {
@@ -124,14 +252,23 @@ test("CI runs production build/start core browser journeys after preserving the 
   assert.match(e2eJob, /Verify Node 22 and npm 10 E2E toolchain/u);
   assert.match(e2eJob, /run: npm ci/u);
   const dev = workflow.indexOf("- name: Run browser E2E");
+  const passkey = workflow.indexOf("- name: Run isolated passkey recovery browser E2E");
   const production = workflow.indexOf("- name: Run production Hub core browser E2E");
   const cleanup = workflow.indexOf("- name: Remove disposable PostgreSQL");
-  assert.ok(dev > 0 && production > dev && cleanup > production);
+  assert.ok(dev > 0 && passkey > dev && production > passkey && cleanup > production);
   const stage = workflow.slice(production, cleanup);
+  const passkeyStage = workflow.slice(passkey, production);
   const devStage = workflow.slice(dev, production);
   assert.doesNotMatch(devStage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must be able to read the disposable cleanup fixture");
   assert.match(stage, /rm -f -- "\$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE"/u, "the production step must remove its temporary credential");
   assert.match(stage, /VIRKI_E2E_HUB_MODE: production/u);
+  assert.match(passkeyStage, /VIRKI_E2E_PASSKEYS: "true"/u);
+  assert.match(passkeyStage, /VIRKI_E2E_ADMIN_PASSKEYS: "true"/u);
+  assert.match(passkeyStage, /VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"/u);
+  assert.match(passkeyStage, /npm run test:e2e -- --grep 'PASSKEY_\|USER virtual authenticator'/u,
+    "mandatory opt-in must run recovery/passkey E2E and the real USER credential-inventory lifecycle");
+  assert.doesNotMatch(stage, /VIRKI_E2E_ADMIN_PASSKEYS: "true"/u,
+    "privileged test-only passkey opt-in must never leak into the production-mode browser stage");
   assert.match(stage, /VIRKI_HUB_HOSTNAME: hub\.localhost/u);
   assert.match(stage, /VIRKI_PORTAL_HOSTNAME: portal\.localhost/u);
   assert.match(stage, /VIRKI_OIDC_PROXY_URL: http:\/\/127\.0\.0\.1:3003/u);
@@ -672,6 +809,24 @@ test("production E2E runner resolves its synthetic Access host to container loop
   assert.match(playwrightConfig, /subjectAltName=DNS:portal\.localhost,DNS:hub\.localhost,DNS:access\.e2e\.invalid,IP:127\.0\.0\.1/u);
 });
 
+test("isolated Chromium and Node route.fetch agree on runner-local Portal and Hub addresses", () => {
+  const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
+  const normalized = script.replace(/\r\n/gu, "\n");
+  const createStart = normalized.indexOf("$runnerCreateArguments = @('create'");
+  const createEnd = normalized.indexOf("$runnerName = Invoke-CreateOwnedDockerResource 'runner'", createStart);
+  assert.ok(createStart >= 0 && createEnd > createStart,
+    "inspect only the actual owned runner creation arguments, never an earlier unrelated stage guard");
+  const runnerCreation = normalized.slice(createStart, createEnd);
+  assert.match(runnerCreation, /if \(-not \$IntegrationOnly -and -not \$UnitOnly\) \{\n(?:\s*#[^\n]*\n)*\s*\$runnerCreateArguments \+= @\('--add-host', 'portal\.localhost:127\.0\.0\.1',\s*'--add-host', 'hub\.localhost:127\.0\.0\.1'\)\n\s*\}/u,
+    "both Node aliases must be inside the explicit browser-only guard on the disposable runner");
+  assert.equal((runnerCreation.match(/'portal\.localhost:127\.0\.0\.1'/gu) ?? []).length, 1,
+    "a browser-only alias must not also appear unguarded in the runner arguments");
+  assert.equal((runnerCreation.match(/'hub\.localhost:127\.0\.0\.1'/gu) ?? []).length, 1,
+    "the Hub alias must not also appear outside the browser-only guard");
+  const config = readFileSync(new URL("../../playwright.config.mts", import.meta.url), "utf8");
+  assert.match(config, /--host-resolver-rules=MAP portal\.localhost 127\.0\.0\.1,MAP hub\.localhost 127\.0\.0\.1/u);
+});
+
 test("isolated Linux runner clones the current local branch instead of a fixed repository branch", () => {
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
   assert.match(script, /git -C \$repoRoot branch --show-current/u);
@@ -830,10 +985,16 @@ test("browser E2E output redacts URL queries, fragments and credential-bearing h
   }
 });
 
-test("full isolated runner stores complete browser output only after redaction", () => {
+test("full isolated runner preserves spaced Playwright arguments and redacts browser output", () => {
   const script = readFileSync(new URL("./run-isolated-linux-docker.ps1", import.meta.url), "utf8");
-  assert.match(script, /npm run test:e2e -- "\$@" 2>&1 \| node scripts\/e2e\/redact-browser-e2e-log\.mjs > \/tmp\/browser-e2e\.log/u);
-  assert.match(script, /status=\$\?; cat \/tmp\/browser-e2e\.log; exit \$status/u);
+  const launcher = readFileSync(new URL("./run-redacted-browser.sh", import.meta.url), "utf8");
+  assert.match(script, /\$playwrightCommand = @\('bash', 'scripts\/e2e\/run-redacted-browser\.sh'\)/u,
+    "Pass the Bash script as an executable argv item instead of an inline shell command: Windows PowerShell 5.1 strips embedded double quotes.");
+  assert.doesNotMatch(script, /\$playwrightCommand = @\('bash', '-lc'/u);
+  assert.match(launcher, /node scripts\/e2e\/run-e2e\.mjs "\$@" 2>&1 \| node scripts\/e2e\/redact-browser-e2e-log\.mjs > \/tmp\/browser-e2e\.log/u);
+  assert.match(launcher, /set -o pipefail/u);
+  assert.match(launcher, /status=\$\?\s+cat \/tmp\/browser-e2e\.log\s+exit \$status/u);
+  assert.doesNotMatch(launcher, /npm run test:e2e/u);
 });
 
 test("isolated tooling stage redirects the entire compound command, never loses its first failure", () => {

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - "feat/virki-native-admin-perimeter-*"
   pull_request:
     branches:
       - main
@@ -169,7 +170,11 @@ jobs:
       - name: Native Linux production operations tests
         run: |
           bash -n scripts/production-server.sh
-          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
+          # Static isolated staging worker-role contract; never starts worker or DB.
+          bash -n infra/postgres-init/11-virki-email-worker-role.sh
+          node --test scripts/staging-email-worker-role.contract.test.mjs scripts/staging-email-worker-scram.test.mjs
+          npx --no-install tsx --test packages/auth/src/email-worker-role.test.ts
+          node --test scripts/production-ops.test.mjs scripts/production-ci.test.mjs scripts/e2e/verify-passkey-browser-gate.test.mjs scripts/production-compose.test.mjs scripts/production-image-provenance.test.mjs scripts/ghcr-transport-integration.test.mjs scripts/ghcr-publication.test.mjs scripts/ghcr-evidence.test.mjs
 
       - name: Verify native machine-id inode race defenses as root
         if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
@@ -273,7 +278,7 @@ jobs:
     name: Build tested production images (${{ matrix.arch }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # GHCR publication requires every independent audit to succeed.
-    needs: [validate, authenticated-e2e, tooling-policy, production-audit]
+    needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]
     permissions:
       contents: read
       packages: write
@@ -392,6 +397,68 @@ jobs:
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           test "$(gh api users/bielxdh3/packages/container/virki-evidence --jq .visibility)" = private
           printf 'VIRKI_EVIDENCE_DIGEST revision=%s run=%s kind=images platform=linux/%s digest=%s\n' "$ACCEPTED_SHA" "$ACCEPTED_RUN_ID" "$EXPECTED_ARCH" "$digest"
+
+  email-worker-hol:
+    name: Mandatory exclusive email worker HOL/CAS (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Refuse missing, skipped or shared-DB worker regressions
+        run: node --test scripts/integration/worker-hol.test.mjs
+
+      - name: Run required HOL/CAS tests in exclusive PostgreSQL
+        env:
+          VIRKI_HOL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash scripts/integration/worker-hol-ci.sh
+
+  recovery-pg18:
+    name: Mandatory independent ADMIN recovery PG18 proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      # The existing Docker-admission guard permits only the explicit local
+      # GitHub-hosted Linux engine at the exact tested source revision.
+      VIRKI_BUILD_REVISION: ${{ github.sha }}
+      VIRKI_BUILD_ARCH: amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Reject skipped, shortened or unowned recovery PG18 proof
+        run: node --test scripts/integration/recovery-pg18-contract.test.mjs
+
+      - name: Physically prove 5 ADMIN pair and 4 assisted recovery tests on separate PG18 databases
+        # The runner context is available to step env, not jobs.<job_id>.env.
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node scripts/integration/recovery-pg18-disposable.mjs
 
   authenticated-e2e:
     name: Authenticated browser E2E
@@ -517,6 +584,41 @@ jobs:
           # step deletes it, and the always() cleanup does so on any earlier error.
           trap 'unset cleanup_url' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e
+
+      - name: Run isolated passkey recovery browser E2E
+        env:
+          # Explicit, test-only opt-in. Never set privileged passkeys on the
+          # production-mode Hub step or on deployed services.
+          VIRKI_E2E_PASSKEYS: "true"
+          VIRKI_E2E_ADMIN_PASSKEYS: "true"
+          VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"
+        run: |
+          set -euo pipefail
+          cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
+          output_file="$(mktemp "$RUNNER_TEMP/virki-passkey-recovery.XXXXXX")"
+          trap 'unset cleanup_url; rm -f -- "$output_file"' EXIT
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- --grep 'PASSKEY_|USER virtual authenticator' --forbid-only 2>&1 | tee "$output_file"
+          # The brand-new Portal-RP USER recovery must actually PASS. Existing
+          # passkey tests passing cannot silently replace it after a rename or SKIP.
+          node scripts/e2e/verify-passkey-browser-gate.mjs "$output_file"
+
+      - name: Run mandatory native Hub browser E2E without Cloudflare Access JWT
+        env:
+          VIRKI_E2E_NATIVE_HUB: required
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
+          output_file="$(mktemp "$RUNNER_TEMP/virki-native-hub-browser.XXXXXX")"
+          trap 'unset cleanup_url; rm -f -- "$output_file"' EXIT
+          VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- e2e/native-hub-perimeter.spec.mts --forbid-only 2>&1 | tee "$output_file"
+          # In addition to the Playwright exit code, require exactly this
+          # browser spec's three real PASS results; 0 tests/SKIP is NO-GO.
+          grep -Eq '(^|[[:space:]])3 passed \(' "$output_file"
+          if grep -Eq '(^|[[:space:]])[1-9][0-9]* (skipped|failed)($|[^[:alpha:]])' "$output_file"; then
+            echo 'Native Hub browser gate cannot skip or fail tests.' >&2
+            exit 1
+          fi
 
       - name: Run production Hub core browser E2E
         env:

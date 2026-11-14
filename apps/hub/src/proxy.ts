@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
+import { isNativeHubPerimeterEnabled } from "./lib/hub-perimeter";
 import { writeHubAccessDenialAudit } from "./lib/access-denial-audit";
 import { createHubRenderProof, HUB_RENDER_PROVENANCE_HEADER, verifyHubRenderProof } from "./lib/hub-render-provenance";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
@@ -10,6 +11,7 @@ const PUBLIC_ROUTES = new Set([
   "/login",
   "/api/login",
   "/login/verify",
+  "/api/login/factor",
   "/api/login/verify",
   "/api/passkeys",
   "/api/logout",
@@ -99,7 +101,7 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
     const proof = createHubRenderProof(sessionToken, env as NodeJS.ProcessEnv);
     if (proof) forwardedHeaders.set(HUB_RENDER_PROVENANCE_HEADER, proof);
   }
-  if (/^\/(?:|login(?:\/verify)?|api\/(?:passkeys|login(?:\/verify)?|logout)|admin(?:\/(?:accounts|access|security|audit|connections))?|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
+  if (/^\/(?:|login(?:\/verify)?|api\/(?:passkeys|login(?:\/(?:verify|factor))?|logout)|admin(?:\/(?:accounts|access|security|audit|connections))?|account\/security|recover(?:\/open)?)$/u.test(pathname)) forwardedHeaders.set("x-virki-audit-route", pathname);
   forwardedHeaders.set("x-virki-audit-method", request.method);
   forwardedHeaders.set("x-nonce", nonce);
   forwardedHeaders.set("Content-Security-Policy", csp);
@@ -108,7 +110,13 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   // Loopback/Compose host names never pass through Cloudflare Access; in production they only serve the health probe.
   if (surface === "local" && env.NODE_ENV === "production" && pathname !== "/api/health" && !validInternalHubRsc) return withCsp(new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } }));
 
-  if (surface === "hub" && pathname !== "/api/health") {
+  // The independently audited native perimeter only takes effect with an
+  // explicit exact opt-in. Never forward a caller-supplied Access assertion
+  // as if it were an identity proof in native mode.
+  if (surface === "hub" && isNativeHubPerimeterEnabled(env)) {
+    forwardedHeaders.delete("cf-access-jwt-assertion");
+  }
+  if (surface === "hub" && pathname !== "/api/health" && !isNativeHubPerimeterEnabled(env)) {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);
     if (!access.allowed) {
       await writeHubAccessDenialAudit({ eventType: access.status === "missing" ? "ACCESS_JWT_MISSING" : "ACCESS_JWT_INVALID", result: "DENIED", reason: "cloudflare", resource: "hub", metadata: { requestId: auditRequestId, source: "hub-ingress", accessJwtStatus: access.status } });

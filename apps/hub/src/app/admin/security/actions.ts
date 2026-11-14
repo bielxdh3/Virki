@@ -9,6 +9,7 @@ import {
   changeAdministrativePassword,
   regenerateAdministrativeRecoveryCodes,
   recoverAdministrativeCredential,
+  recoverAdministrativeCredentialWithTotp,
   startAdministrativeCredentialSetup,
   startAdministrativeEmailRecovery,
   startSecurityElevation,
@@ -249,6 +250,34 @@ export async function completeAdminEmailRecoveryAction(_state: SecurityFormState
       return { status: "complete", recoveryCodes };
     } catch (error) {
       await recordSecurityDenial(await headers(), "admin-credential-email-recovery", "rejected", session);
+      return { status: passwordStatus(error) };
+    }
+  });
+}
+
+export async function recoverAdminCredentialWithTotpAction(_state: SecurityFormState, formData: FormData): Promise<SecurityFormState> {
+  return withHubAuditRequest(async () => {
+    const normalPassword = readBoundedFormString(formData, "normalPassword", PASSWORD_INPUT_MAX_LENGTH);
+    const newPassword = readBoundedFormString(formData, "newPassword", PASSWORD_INPUT_MAX_LENGTH);
+    const confirmPassword = readBoundedFormString(formData, "confirmPassword", PASSWORD_INPUT_MAX_LENGTH);
+    const totpCode = readBoundedFormString(formData, "totpCode", 6);
+    const session = await requireAdminMutation(formData, "admin-totp-credential-recovery");
+    if (normalPassword === null || newPassword === null || confirmPassword === null || totpCode === null) {
+      await recordSecurityDenial(await headers(), "admin-credential-totp-recovery", "rejected", session);
+      return { status: "error" };
+    }
+    if (newPassword !== confirmPassword) {
+      await recordSecurityDenial(await headers(), "admin-credential-totp-recovery", "rejected", session);
+      return { status: "password-mismatch" };
+    }
+    try {
+      const recoveryCodes = await recoverAdministrativeCredentialWithTotp({
+        actor: session.user, sessionId: session.id, normalPassword, totpCode, newPassword
+      });
+      revalidatePath("/admin/security");
+      return { status: "complete", recoveryCodes };
+    } catch (error) {
+      await recordSecurityDenial(await headers(), "admin-credential-totp-recovery", "rejected", session);
       return { status: passwordStatus(error) };
     }
   });

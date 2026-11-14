@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { after, test } from "node:test";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import {
   AdministrationMutationError,
   AdministrativePasswordReuseError,
@@ -20,9 +20,16 @@ import {
 } from "./administration";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
 import { cleanupInactiveSessions, hashAuditSessionReference, hashPassword, verifyPassword } from "./index";
-import { generateNumericCode, hashRecoveryCode, hashSecurityCode } from "./security";
+import { createTotpSecret, generateNumericCode, generateRecoveryCode, hashEmailAddress, hashRecoveryCode, hashSecurityCode, startLoginCeremony, verifyLoginEmailCode } from "./security";
+import { hashOidcIdentifier } from "./oidc-secrets";
+import { boundedRaceWait, holdAdminUserRow, isExpectedRecoveryRaceRejection } from "./admin-credential-recovery-race-fixture";
 
-after(() => prisma.$disconnect());
+// The shared application pool has a three-connection limit in CI. In the
+// two-writer collision it is entirely occupied by the row-lock holder and
+// both genuine blocked recovery transactions. A separate observer pool is
+// required to inspect pg_stat_activity without deadlocking on pool checkout.
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 const MINUTE = 60 * 1000;
 const DAY = 24 * 60 * MINUTE;
@@ -30,8 +37,8 @@ const NORMAL_PASSWORD = "integration-normal-login-1";
 const ADMIN_PASSWORD = "integration-admin-separate-1";
 const LOCALE = "pt-BR" as const;
 
-async function setupAdmin(options: { adminPassword?: string; credential?: boolean; accountStatus?: "ACTIVE" | "BLOCKED" } = {}) {
-  const admin = await createTestUser({ role: "ADMIN", label: "admin-elevation", password: NORMAL_PASSWORD });
+async function setupAdmin(options: { adminPassword?: string; credential?: boolean; accountStatus?: "ACTIVE" | "BLOCKED"; totpSecret?: string } = {}) {
+  const admin = await createTestUser({ role: "ADMIN", label: "admin-elevation", password: NORMAL_PASSWORD, ...(options.totpSecret ? { totpSecret: options.totpSecret } : {}) });
   const now = new Date();
   const session = await prisma.session.create({
     data: { userId: admin.id, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(now.getTime() + 2 * DAY) },
@@ -46,26 +53,170 @@ async function setupAdmin(options: { adminPassword?: string; credential?: boolea
   return { actor: { id: admin.id, role: "ADMIN" }, sessionId: session.id, email: admin.email };
 }
 
+async function createOldHubPasskey(userId: string): Promise<string> {
+  const credential = await prisma.passkeyCredential.create({
+    data: {
+      userId,
+      credentialId: randomBytes(32).toString("base64url"),
+      rpID: "hub.biel.dev.br",
+      publicKey: randomBytes(65),
+      backupEligible: false,
+      backupState: false,
+      name: "Prior administrative recovery passkey"
+    },
+    select: { id: true }
+  });
+  return credential.id;
+}
+
 async function latestEmailCode(email: string, kind: string): Promise<string> {
   const code = (await queuedEmails(email)).filter((message) => message.kind === kind).at(-1)?.code;
   assert.ok(code, "the newest emailed code is available");
   return code;
 }
 
-async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+async function assertRecoveredAdminCredentialCanReElevate(
+  admin: Awaited<ReturnType<typeof setupAdmin>>,
+  replacementPassword: string
+): Promise<void> {
+  const scope = "ADMIN_RECOVERY_REGENERATE" as const;
+  const input = {
+    actor: admin.actor, sessionId: admin.sessionId,
+    normalPassword: NORMAL_PASSWORD, scope,
+    duration: { kind: "TIMED" as const, minutes: 15 as const }, locale: LOCALE
+  };
+  await assert.rejects(startSecurityElevation({ ...input, administrativePassword: ADMIN_PASSWORD }),
+    AdministrationMutationError, "the previous administrative password must not authorize a new elevation");
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, scope), false,
+    "a recovered ADMIN must not inherit privileged access");
+  const beforeCodes = (await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id }, select: { codeHash: true }, orderBy: { codeHash: "asc" }
+  })).map((item) => item.codeHash);
+  assert.equal(beforeCodes.length, 10);
+  const beforeAuditCount = await prisma.auditLog.count({ where: {
+    actorUserId: admin.actor.id, eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS"
+  } });
+  await assert.rejects(regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId),
+    AdministrationMutationError, "protected code regeneration must reject an un-elevated session");
+  assert.deepEqual((await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id }, select: { codeHash: true }, orderBy: { codeHash: "asc" }
+  })).map((item) => item.codeHash), beforeCodes, "unauthorized regeneration cannot modify codes");
+  const challenge = await startSecurityElevation({ ...input, administrativePassword: replacementPassword });
+  const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
+  await verifySecurityElevation({ actor: admin.actor, sessionId: admin.sessionId, requestKey: challenge.requestKey, code });
+  assert.equal(await hasActiveSecurityElevation(admin.actor.id, admin.sessionId, scope), true,
+    "freshly verified new ADMIN credential must authorize the named elevation scope");
+  const newlyRotatedCodes = await regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId);
+  assert.equal(newlyRotatedCodes.length, 10,
+    "a real protected ADMIN mutation must be possible only after fresh elevation");
+  assert.equal(new Set(newlyRotatedCodes).size, 10);
+  const persistedCodes = (await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id, usedAt: null }, select: { codeHash: true }
+  })).map((item) => item.codeHash).sort();
+  assert.deepEqual(persistedCodes, newlyRotatedCodes.map(hashRecoveryCode).sort(),
+    "all newly issued codes must actually be stored as hashes, not merely returned");
+  assert.equal(beforeCodes.some((codeHash) => persistedCodes.includes(codeHash)), false,
+    "every previously issued administrative recovery code must be invalidated");
+  assert.equal(await prisma.auditLog.count({ where: {
+    actorUserId: admin.actor.id, eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS"
+  } }), beforeAuditCount + 1, "only the authorized regeneration produces a success audit");
+}
+
+async function seedAdministrativeRecoveryProofs(admin: Awaited<ReturnType<typeof setupAdmin>>) {
+  const userId = admin.actor.id;
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { passwordHash: true, secondFactorMethod: true } });
+  const factor = await prisma.totpFactor.findUniqueOrThrow({ where: { userId } });
+  assert.equal(user.secondFactorMethod, "TOTP");
+  const sibling = await prisma.session.create({ data: {
+    userId, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(Date.now() + DAY)
+  } });
+  const trusted = await prisma.trustedDevice.create({ data: {
+    userId, deviceIdHash: randomBytes(32).toString("hex"),
+    strongVerifiedAt: new Date(), rememberedUntil: new Date(Date.now() + DAY)
+  } });
+  const login = await startLoginCeremony(userId, undefined, LOCALE, new Date(), false, "ADMIN");
+  assert.equal(login.kind, "CEREMONY");
+  if (login.kind !== "CEREMONY") throw new Error("Expected a pending email login ceremony");
+  const loginCode = await latestEmailCode(admin.email, "NEW_DEVICE_VERIFICATION");
+  const passkey = await prisma.passkeyChallenge.create({ data: {
+    challengeHash: randomBytes(32).toString("hex"), ceremony: "AUTHENTICATION", userId,
+    browserHash: randomBytes(32).toString("hex"),
+    rpID: "hub.biel.dev.br", origin: "https://hub.biel.dev.br", expiresAt: new Date(Date.now() + DAY)
+  } });
+  const oidc = await prisma.oidcArtifact.create({ data: {
+    model: "Grant", idHash: randomBytes(32).toString("hex"), accountIdHash: hashOidcIdentifier(userId),
+    payloadCiphertext: "disposable-administrative-recovery-fixture"
+  } });
+  const pendingRecovery = await prisma.accountRecoveryRequest.create({ data: {
+    userId, requestKeyHash: randomBytes(32).toString("hex"),
+    emailAddressHash: hashEmailAddress(admin.email), emailChallengeHash: hashSecurityCode(generateNumericCode()),
+    expiresAt: new Date(Date.now() + DAY)
+  } });
+  return { user, factor, sibling, trusted, login, loginCode, passkey, oidc, pendingRecovery };
+}
+
+async function assertAdministrativeRecoveryRevocations(
+  admin: Awaited<ReturnType<typeof setupAdmin>>,
+  before: Awaited<ReturnType<typeof seedAdministrativeRecoveryProofs>>
+) {
+  const userId = admin.actor.id;
+  const normal = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { passwordHash: true, secondFactorMethod: true } });
+  assert.equal(normal.passwordHash, before.user.passwordHash, "normal login password hash must not rotate");
+  assert.equal(await verifyPassword(normal.passwordHash!, NORMAL_PASSWORD), true);
+  assert.equal(normal.secondFactorMethod, "TOTP", "normal second factor selection must remain active");
+  const factor = await prisma.totpFactor.findUniqueOrThrow({ where: { userId } });
+  assert.equal(factor.status, "ACTIVE");
+  assert.equal(factor.secretCiphertext, before.factor.secretCiphertext);
+  assert.equal(factor.keyVersion, before.factor.keyVersion);
+  assert.deepEqual(factor.confirmedAt, before.factor.confirmedAt);
+  assert.equal(factor.lastUsedStep, before.factor.lastUsedStep);
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null,
+    "the initiating session remains available for recovery confirmation");
+  assert.ok((await prisma.session.findUniqueOrThrow({ where: { id: before.sibling.id } })).revokedAt,
+    "sibling session must be revoked");
+  const device = await prisma.trustedDevice.findUniqueOrThrow({ where: { id: before.trusted.id } });
+  assert.equal(device.status, "REVOKED");
+  assert.ok(device.revokedAt);
+  assert.equal(device.rememberedUntil, null);
+  assert.equal(device.strongVerifiedAt, null);
+  assert.equal((await prisma.deviceChallenge.findUniqueOrThrow({ where: { ceremonyId: before.login.ceremonyId } })).status, "REVOKED");
+  await assert.rejects(verifyLoginEmailCode(before.login.ceremonyId, before.loginCode, before.login.deviceToken, new Date(), "ADMIN"),
+    "a previously emailed login proof cannot authorize a new session");
+  assert.equal(await prisma.passkeyChallenge.count({ where: { id: before.passkey.id } }), 0,
+    "pending passkey assertion must be removed");
+  assert.equal(await prisma.oidcArtifact.count({ where: { id: before.oidc.id } }), 0,
+    "OIDC grant must not survive credential recovery");
+  assert.equal((await prisma.accountRecoveryRequest.findUniqueOrThrow({ where: { id: before.pendingRecovery.id } })).status, "EXPIRED",
+    "pending normal-account recovery cannot survive a privileged credential reset");
+}
+
+async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment: string, expectedWaiters = 1): Promise<void> {
+  const deadline = Date.now() + (expectedWaiters > 1 ? 15_000 : 5_000);
+  let maxDirectWaiters = 0;
+  let maxUserWaiters = 0;
   while (Date.now() < deadline) {
-    const blocked = await prisma.$queryRaw<Array<{ waiters: number }>>`
-      SELECT count(*)::int AS waiters
-      FROM pg_stat_activity
-      WHERE wait_event_type = 'Lock'
-        AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
-        AND query LIKE ${`%${queryFragment}%`}
+    const blocked = await lockObserver.$queryRaw<Array<{ directMatches: number; directWaiters: number; userWaiters: number }>>`
+      SELECT
+        count(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND ${blockerPid} = ANY(pg_blocking_pids(pid))
+          AND query LIKE ${`%${queryFragment}%`})::int AS "directMatches",
+        count(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND ${blockerPid} = ANY(pg_blocking_pids(pid)))::int AS "directWaiters",
+        count(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND query LIKE ${`%${queryFragment}%`}
+          AND query LIKE '%FOR UPDATE%')::int AS "userWaiters"
+      FROM pg_stat_activity WHERE pid <> ${blockerPid} AND datname = current_database()
     `;
-    if ((blocked[0]?.waiters ?? 0) >= 1) return;
+    const state = blocked[0];
+    maxDirectWaiters = Math.max(maxDirectWaiters, state?.directWaiters ?? 0);
+    maxUserWaiters = Math.max(maxUserWaiters, state?.userWaiters ?? 0);
+    // PostgreSQL queues row locks as holder -> first waiter -> second waiter;
+    // only one pg_blocking_pids edge can point directly to our original holder.
+    if (expectedWaiters === 1 ? (state?.directMatches ?? 0) >= 1
+      : (state?.directWaiters ?? 0) >= 1 && (state?.userWaiters ?? 0) >= expectedWaiters) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
-  throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment}.`);
+  throw new Error(`Timed out waiting for ${expectedWaiters} PostgreSQL lock waiters on ${queryFragment} (max user=${maxUserWaiters}, max direct=${maxDirectWaiters}).`);
 }
 
 test("a timed elevation lasts its full duration from activation, not from when the code was sent", integrationOptions, async () => {
@@ -380,9 +531,11 @@ test("an administrative password equal to the normal password is rejected when c
 });
 
 test("an administrative password equal to the normal password is rejected when recovered", integrationOptions, async () => {
-  const admin = await setupAdmin();
+  const admin = await setupAdmin({ totpSecret: createTotpSecret() });
+  const oldPasskeyId = await createOldHubPasskey(admin.actor.id);
   const recoveryCode = `integration-recovery-${randomBytes(6).toString("hex")}`;
   await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(recoveryCode) } });
+  const oldProofs = await seedAdministrativeRecoveryProofs(admin);
 
   await assert.rejects(
     recoverAdministrativeCredential({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: NORMAL_PASSWORD }),
@@ -391,10 +544,63 @@ test("an administrative password equal to the normal password is rejected when r
   // The rejected attempt must not consume the single-use recovery code.
   const codes = await recoverAdministrativeCredential({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, recoveryCode, newPassword: "integration-recovered-admin-1" });
   assert.equal(codes.length, 10);
+  assert.ok((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskeyId } })).revokedAt,
+    "backup-code recovery must revoke old hub passkeys");
+  await assertAdministrativeRecoveryRevocations(admin, oldProofs);
+  await assertRecoveredAdminCredentialCanReElevate(admin, "integration-recovered-admin-1");
 });
 
+for (const state of ["revoked", "missing"] as const) {
+  test(`saved-code administrative recovery cannot reactivate a ${state} privileged credential`, integrationOptions, async () => {
+    const admin = await setupAdmin({ credential: state !== "missing" });
+    const savedCode = generateRecoveryCode();
+    const code = await prisma.administrativeRecoveryCode.create({ data: {
+      userId: admin.actor.id, codeHash: hashRecoveryCode(savedCode)
+    } });
+    let previousCredential: { passwordHash: string; keyVersion: number; revokedAt: Date | null } | null = null;
+    if (state === "revoked") {
+      const revokedAt = new Date();
+      const revoked = await prisma.administrativeCredential.update({
+        where: { userId: admin.actor.id }, data: { status: "REVOKED", revokedAt },
+        select: { passwordHash: true, keyVersion: true, revokedAt: true }
+      });
+      previousCredential = revoked;
+    }
+    await assert.rejects(recoverAdministrativeCredential({
+      actor: admin.actor,
+      sessionId: admin.sessionId,
+      normalPassword: NORMAL_PASSWORD,
+      recoveryCode: savedCode,
+      newPassword: "different-privileged-password-2026"
+    }), AdministrationMutationError);
+    const current = await prisma.administrativeCredential.findUnique({
+      where: { userId: admin.actor.id },
+      select: { status: true, passwordHash: true, keyVersion: true, revokedAt: true }
+    });
+    if (state === "revoked") {
+      assert.ok(current);
+      assert.equal(current.status, "REVOKED");
+      assert.deepEqual({
+        passwordHash: current.passwordHash, keyVersion: current.keyVersion, revokedAt: current.revokedAt
+      }, previousCredential);
+    } else {
+      assert.equal(current, null, "a missing credential must use its separate setup ceremony");
+    }
+    assert.equal((await prisma.administrativeRecoveryCode.findUniqueOrThrow({
+      where: { id: code.id }, select: { usedAt: true }
+    })).usedAt, null, "rejected code must stay unused");
+    assert.equal(await prisma.auditLog.count({
+      where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_RECOVERED" }
+    }), 0);
+    assert.equal((await prisma.session.findUniqueOrThrow({
+      where: { id: admin.sessionId }, select: { revokedAt: true }
+    })).revokedAt, null);
+  });
+}
+
 test("email recovery rotates only the separate ADMIN credential, replaces backup codes and revokes old access", integrationOptions, async () => {
-  const admin = await setupAdmin();
+  const admin = await setupAdmin({ totpSecret: createTotpSecret() });
+  const oldPasskeyId = await createOldHubPasskey(admin.actor.id);
   const oldCode = randomBytes(9).toString("hex");
   await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: hashRecoveryCode(oldCode) } });
   await seedActiveElevation(admin, "PROJECT_CONNECTION_MANAGE");
@@ -402,6 +608,7 @@ test("email recovery rotates only the separate ADMIN credential, replaces backup
     data: { userId: admin.actor.id, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(Date.now() + DAY) }
   });
   const device = await prisma.trustedDevice.create({ data: { userId: admin.actor.id, deviceIdHash: randomBytes(32).toString("hex") } });
+  const oldProofs = await seedAdministrativeRecoveryProofs(admin);
   const start = new Date();
   const requestKey = await startAdministrativeEmailRecovery({
     actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE, now: start
@@ -434,6 +641,9 @@ test("email recovery rotates only the separate ADMIN credential, replaces backup
   assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: otherSession.id } })).revokedAt !== null, true);
   assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
   assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
+  assert.ok((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskeyId } })).revokedAt,
+    "email recovery must revoke old hub passkeys");
+  await assertAdministrativeRecoveryRevocations(admin, oldProofs);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERY_STARTED", result: "INFO" } }), 1);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS" } }), 1);
   assert.ok((await queuedEmails(admin.email)).some((mail) => mail.kind === "ADMIN_CREDENTIAL_CHANGED"));
@@ -442,6 +652,7 @@ test("email recovery rotates only the separate ADMIN credential, replaces backup
     AdministrationMutationError,
     "the email code cannot be replayed"
   );
+  await assertRecoveredAdminCredentialCanReElevate(admin, replacementCredential);
 });
 
 test("ADMIN email recovery rejects invalid normal password and missing verified email before sending", integrationOptions, async () => {
@@ -457,6 +668,61 @@ test("ADMIN email recovery rejects invalid normal password and missing verified 
   );
   assert.equal((await queuedEmails(admin.email)).length, 0);
 });
+
+for (const state of ["revoked", "missing"] as const) {
+  test(`ADMIN email recovery rejects a ${state} credential both before OTP issuance and after an already-issued OTP`, integrationOptions, async () => {
+    const beforeStart = await setupAdmin({ credential: state !== "missing" });
+    if (state === "revoked") {
+      await prisma.administrativeCredential.update({
+        where: { userId: beforeStart.actor.id }, data: { status: "REVOKED", revokedAt: new Date() }
+      });
+    }
+    await assert.rejects(startAdministrativeEmailRecovery({
+      actor: beforeStart.actor, sessionId: beforeStart.sessionId,
+      normalPassword: NORMAL_PASSWORD, locale: LOCALE
+    }), AdministrationMutationError);
+    assert.equal((await queuedEmails(beforeStart.email)).length, 0, "invalid administrative credential must not mint an OTP");
+    assert.equal(await prisma.administrativeCredential.count({ where: { userId: beforeStart.actor.id, status: "ACTIVE" } }), 0);
+
+    const afterStart = await setupAdmin();
+    const requestKey = await startAdministrativeEmailRecovery({
+      actor: afterStart.actor, sessionId: afterStart.sessionId,
+      normalPassword: NORMAL_PASSWORD, locale: LOCALE
+    });
+    const code = await latestEmailCode(afterStart.email, "ADMIN_EMAIL_VERIFICATION");
+    const previous = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: afterStart.actor.id } });
+    if (state === "revoked") {
+      await prisma.administrativeCredential.update({
+        where: { userId: afterStart.actor.id }, data: { status: "REVOKED", revokedAt: new Date() }
+      });
+    } else {
+      await prisma.administrativeCredential.delete({ where: { userId: afterStart.actor.id } });
+    }
+    await assert.rejects(completeAdministrativeEmailRecovery({
+      actor: afterStart.actor, sessionId: afterStart.sessionId, requestKey, code,
+      normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-must-not-resurrect-2026"
+    }), AdministrationMutationError);
+    const current = await prisma.administrativeCredential.findUnique({ where: { userId: afterStart.actor.id } });
+    if (state === "missing") {
+      assert.equal(current, null, "the old OTP must not recreate an absent credential");
+    } else {
+      assert.equal(current?.status, "REVOKED");
+      assert.ok(current?.revokedAt);
+      assert.equal(current?.passwordHash, previous.passwordHash);
+      assert.equal(current?.keyVersion, previous.keyVersion);
+    }
+    assert.equal((await prisma.securityElevation.findUniqueOrThrow({
+      where: { requestKey }, select: { status: true }
+    })).status, "PENDING", "a rejected OTP must not be marked consumed or authorize an elevation");
+    assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: afterStart.actor.id } }), 0);
+    assert.equal(await prisma.auditLog.count({
+      where: { actorUserId: afterStart.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED" }
+    }), 0);
+    assert.equal((await prisma.session.findUniqueOrThrow({
+      where: { id: afterStart.sessionId }, select: { revokedAt: true }
+    })).revokedAt, null);
+  });
+}
 
 test("ADMIN email recovery fails closed for a changed verified mailbox, wrong session, stale version, wrong password and expiry", integrationOptions, async () => {
   const cases = ["wrong-session", "changed-email", "rotated-credential", "wrong-password", "expired", "incorrect-code", "same-as-normal"] as const;
@@ -519,18 +785,142 @@ test("starting another ADMIN email recovery invalidates the previous email OTP",
 
 test("competing ADMIN email recovery completions cannot rotate the credential twice", integrationOptions, async () => {
   const admin = await setupAdmin();
+  const sibling = await prisma.session.create({ data: {
+    userId: admin.actor.id, tokenHash: randomBytes(32).toString("base64url"), expiresAt: new Date(Date.now() + DAY)
+  } });
+  const device = await prisma.trustedDevice.create({ data: {
+    userId: admin.actor.id, deviceIdHash: randomBytes(32).toString("hex")
+  } });
+  const oldPasskeyId = await createOldHubPasskey(admin.actor.id);
   const requestKey = await startAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, normalPassword: NORMAL_PASSWORD, locale: LOCALE });
   const code = await latestEmailCode(admin.email, "ADMIN_EMAIL_VERIFICATION");
-  const attempts = await Promise.allSettled([
-    completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-concurrent-a-2026" }),
-    completeAdministrativeEmailRecovery({ actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword: "email-recovery-concurrent-b-2026" })
-  ]);
-  assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
-  assert.equal(attempts.filter((result) => result.status === "rejected").length, 1);
-  assert.equal((await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } })).keyVersion, 2);
-  assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 10);
+  const initialCredential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  const originalLoginHash = (await prisma.user.findUniqueOrThrow({ where: { id: admin.actor.id } })).passwordHash;
+  const candidates = ["email-recovery-concurrent-a-2026", "email-recovery-concurrent-b-2026"];
+  const race = holdAdminUserRow(admin.actor.id, lockObserver);
+  let attempts: Promise<PromiseSettledResult<string[]>[]> | undefined;
+  try {
+    const holderPid = await race.acquiredPid();
+    attempts = Promise.allSettled(candidates.map((newPassword) => completeAdministrativeEmailRecovery({
+      actor: admin.actor, sessionId: admin.sessionId, requestKey, code, normalPassword: NORMAL_PASSWORD, newPassword
+    })));
+    const blockedPids = await race.observeTwoWaiters(holderPid);
+    assert.ok(new Set(blockedPids).size >= 2, "two distinct PostgreSQL writers must wait before release");
+  } finally {
+    try { await race.release(); }
+    finally { if (attempts) await boundedRaceWait(attempts, "drain both ADMIN email completion writers"); }
+  }
+  assert.ok(attempts, "the PostgreSQL lock holder must be acquired before competing completions");
+  const outcomes = await attempts;
+  const winners = outcomes.flatMap((result, index) => result.status === "fulfilled" ? [{ index, codes: result.value }] : []);
+  const failures = outcomes.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(winners.length, 1);
+  assert.equal(failures.length, 1);
+  assert.ok(failures[0]!.reason instanceof AdministrationMutationError || isExpectedRecoveryRaceRejection(failures[0]!.reason),
+    "the loser must fail authorization or a real PostgreSQL serializable conflict");
+  const winner = winners[0]!;
+  assert.equal(winner.codes.length, 10);
+  assert.equal(new Set(winner.codes).size, 10);
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  assert.equal(credential.keyVersion, initialCredential.keyVersion + 1);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[winner.index]!), true);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[1 - winner.index]!), false);
+  assert.equal(await verifyPassword(credential.passwordHash, ADMIN_PASSWORD), false);
+  const recoveryCodes = await prisma.administrativeRecoveryCode.findMany({ where: { userId: admin.actor.id } });
+  assert.equal(recoveryCodes.length, 10);
+  assert.ok(recoveryCodes.every((entry) => entry.usedAt === null));
+  assert.deepEqual(recoveryCodes.map((entry) => entry.codeHash).sort(), winner.codes.map(hashRecoveryCode).sort());
+  assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: admin.actor.id } })).passwordHash, originalLoginHash);
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: admin.sessionId } })).revokedAt, null);
+  assert.ok((await prisma.session.findUniqueOrThrow({ where: { id: sibling.id } })).revokedAt);
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({ where: { id: device.id } })).status, "REVOKED");
+  assert.ok((await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: oldPasskeyId } })).revokedAt);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_EMAIL_RECOVERED", result: "SUCCESS" } }), 1);
   assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey } })).status, "CONSUMED");
+  assert.equal((await queuedEmails(admin.email)).filter((message) => message.kind === "ADMIN_CREDENTIAL_CHANGED").length, 1,
+    "two competing completions must enqueue one notification");
+});
+
+test("two sessions racing one unused ADMIN recovery code have exactly one committed winner", integrationOptions, async () => {
+  const admin = await setupAdmin();
+  const siblingSession = await prisma.session.create({ data: {
+    userId: admin.actor.id, tokenHash: randomBytes(32).toString("base64url"),
+    expiresAt: new Date(Date.now() + DAY)
+  }, select: { id: true } });
+  const recoveryCode = generateRecoveryCode();
+  const oldHash = hashRecoveryCode(recoveryCode);
+  await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: oldHash } });
+  const beforeNormal = (await prisma.user.findUniqueOrThrow({
+    where: { id: admin.actor.id }, select: { passwordHash: true }
+  })).passwordHash;
+  const beforeCredential = await prisma.administrativeCredential.findUniqueOrThrow({
+    where: { userId: admin.actor.id }, select: { keyVersion: true }
+  });
+  const candidates = ["same-code-recovery-first-2026", "same-code-recovery-second-2026"];
+  const sessions = [admin.sessionId, siblingSession.id];
+
+  // Hold the shared User row so both recovery transactions reach the real
+  // database lock before either can win. Promise.allSettled alone could run
+  // effectively sequentially, leaving the collision unproven.
+  let blockerPid = 0;
+  let locked!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = prisma.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${admin.actor.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 30_000 });
+  await ready;
+
+  const attempts = Promise.allSettled(sessions.map((sessionId, index) => recoverAdministrativeCredential({
+    actor: admin.actor, sessionId, normalPassword: NORMAL_PASSWORD,
+    recoveryCode, newPassword: candidates[index]!
+  })));
+  try {
+    await waitForBlockedPostgresQuery(blockerPid, 'FROM "User"', 2);
+  } finally {
+    release();
+    await blocker;
+  }
+  const results = await attempts;
+  const winners = results.flatMap((result, index) => result.status === "fulfilled"
+    ? [{ index, codes: result.value }] : []);
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(winners.length, 1, "exactly one session must rotate the credential");
+  assert.equal(failures.length, 1, "the competing recovery must reject, never silently succeed");
+  assert.ok(failures[0]!.reason instanceof AdministrationMutationError,
+    "the losing session must fail the administrative authorization check");
+  const winner = winners[0]!;
+  assert.equal(winner.codes.length, 10);
+  assert.equal(new Set(winner.codes).size, 10);
+
+  const credential = await prisma.administrativeCredential.findUniqueOrThrow({ where: { userId: admin.actor.id } });
+  assert.equal(credential.keyVersion, beforeCredential.keyVersion + 1);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[winner.index]!), true);
+  assert.equal(await verifyPassword(credential.passwordHash, candidates[1 - winner.index]!), false);
+  const persisted = await prisma.administrativeRecoveryCode.findMany({
+    where: { userId: admin.actor.id }, select: { codeHash: true, usedAt: true }
+  });
+  assert.equal(persisted.length, 10);
+  assert.ok(persisted.every((item) => item.usedAt === null));
+  assert.deepEqual(persisted.map((item) => item.codeHash).sort(), winner.codes.map(hashRecoveryCode).sort());
+  assert.equal(persisted.some((item) => item.codeHash === oldHash), false, "the spent code must be invalidated");
+  assert.equal(await prisma.auditLog.count({ where: {
+    actorUserId: admin.actor.id, eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS"
+  } }), 1);
+  const currentNormal = (await prisma.user.findUniqueOrThrow({
+    where: { id: admin.actor.id }, select: { passwordHash: true }
+  })).passwordHash;
+  assert.equal(currentNormal, beforeNormal, "normal login password must not change");
+  assert.equal(await verifyPassword(currentNormal!, NORMAL_PASSWORD), true);
+  for (const [index, sessionId] of sessions.entries()) {
+    const session = await prisma.session.findUniqueOrThrow({ where: { id: sessionId }, select: { revokedAt: true } });
+    assert.equal(session.revokedAt === null, index === winner.index,
+      "only the winning session must remain active");
+  }
 });
 
 test("administrative password change rejects a normal password committed while it waits for the account lock", integrationOptions, async () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { prisma } from "@virki/database";
+import { prisma, PrismaClient } from "@virki/database";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import {
@@ -10,7 +10,9 @@ import {
   createTotpSecret,
   disableTotp,
   DEVICE_TRUST_TTL_MS,
+  generateDeviceToken,
   generateRecoveryCode,
+  getLoginCeremonyFailureStage,
   getAccountRecoveryRequestId,
   hashDeviceToken,
   hashRecoveryCode,
@@ -30,7 +32,11 @@ import {
   verifyTotpCode
 } from "./security";
 
-after(() => prisma.$disconnect());
+// The account-lock holder and two real writers consume every connection in
+// the bounded application pool. Observe PostgreSQL from a separate pool so
+// the evidence query cannot itself wait on a checkout of that occupied pool.
+const lockObserver = new PrismaClient();
+after(async () => { await Promise.all([prisma.$disconnect(), lockObserver.$disconnect()]); });
 
 const MINUTE = 60 * 1000;
 const DAY = 24 * 60 * MINUTE;
@@ -68,10 +74,10 @@ async function countOidcArtifacts(userId: string): Promise<number> {
   return prisma.oidcArtifact.count({ where: { accountIdHash: hashOidcIdentifier(userId) } });
 }
 
-async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment?: string, minimumWaiters = 1): Promise<void> {
-  const deadline = Date.now() + 5_000;
+async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment?: string, minimumWaiters = 1,
+  deadline = Date.now() + 5_000): Promise<void> {
   while (Date.now() < deadline) {
-    const blocked = await prisma.$queryRaw<Array<{ waiters: number }>>`
+    const blocked = await lockObserver.$queryRaw<Array<{ waiters: number }>>`
       SELECT count(*)::int AS waiters
       FROM pg_stat_activity
       WHERE wait_event_type = 'Lock'
@@ -82,6 +88,81 @@ async function waitForBlockedPostgresQuery(blockerPid: number, queryFragment?: s
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error(`Timed out waiting for PostgreSQL lock wait on ${queryFragment ?? "any query"}.`);
+}
+
+// An observed waiter is not proof of a two-writer race. Require distinct
+// PostgreSQL backends blocked on the same parent row, including soft blockers
+// in PostgreSQL's lock queue, before releasing the account-lock holder.
+async function waitForLoginAndRevokeBlockedOnAccount(holderPid: number, deadline: number): Promise<void> {
+  type Blocked = { pid: number; query: string; blockingPids: number[]; eventType: string | null };
+  while (Date.now() < deadline) {
+    const rows = await lockObserver.$queryRaw<Blocked[]>`
+      SELECT pid, query, pg_blocking_pids(pid) AS "blockingPids",
+        wait_event_type AS "eventType"
+      FROM pg_stat_activity
+      WHERE datname = current_database() AND state = 'active'
+        AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()
+    `;
+    const byPid = new Map(rows.map((row) => [row.pid, row]));
+    function reachesHolder(pid: number, visited = new Set<number>()): boolean {
+      if (pid === holderPid) return true;
+      if (visited.has(pid)) return false;
+      visited.add(pid);
+      return (byPid.get(pid)?.blockingPids ?? []).some((blockedBy) => reachesHolder(blockedBy, visited));
+    }
+    const onUser = rows.filter((row) => row.eventType === "Lock" && /FROM\s+"User"/u.test(row.query) &&
+      Array.isArray(row.blockingPids) && reachesHolder(row.pid));
+    const login = onUser.find((row) => /FOR\s+UPDATE/u.test(row.query));
+    const revoke = onUser.find((row) => /FOR\s+KEY\s+SHARE/u.test(row.query) && row.pid !== login?.pid);
+    if (login && revoke) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("PostgreSQL did not prove distinct blocked login and revoke account-lock waiters.");
+}
+
+async function withinDeadline<T>(promise: Promise<T>, milliseconds: number, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Timed out: ${label}.`)), milliseconds);
+      })
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+// Readiness must reject if acquisition fails before the holder reaches locked().
+// A timed out readiness does not leave an unhandled blocked transaction.
+function startAccountLockHolder(userId: string) {
+  let pid = 0;
+  let locked!: () => void;
+  let rejectReady!: (error: unknown) => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve, reject) => { locked = resolve; rejectReady = reject; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const done = prisma.$transaction(async (transaction) => {
+    [{ pid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 30_000 });
+  // Attach the rejection synchronously, including failures before pg_backend_pid.
+  void done.catch(rejectReady);
+  return { ready, done, release, pid: () => pid };
+}
+
+async function drainRaceActors(promises: Promise<unknown>[]): Promise<PromiseSettledResult<unknown>[]> {
+  try {
+    return await withinDeadline(Promise.allSettled(promises), 25_000, "PostgreSQL race actor cleanup");
+  } catch (error) {
+    // Fail the suite rather than allowing later assertions to pass while stale
+    // transactions are still running in the shared app pool.
+    await withinDeadline(prisma.$disconnect(), 5_000, "abort stalled Prisma test pool").catch(() => {});
+    throw error;
+  }
 }
 
 // Email-factor login from a device. An untrusted candidate token is replaced by the server, so the
@@ -179,6 +260,66 @@ test("an EMAIL-factor user keeps a remembered browser for 7 days", integrationOp
   assert.equal(remembered.kind, "SESSION");
 });
 
+test("HTTP REGISTERED login preserves a password-only session for a remembered USER TOTP browser", integrationOptions, async () => {
+  const user = await createTestUser({ totpSecret: createTotpSecret(), label: "registered-remembered-user" });
+  const now = new Date();
+  const cookie = generateDeviceToken();
+  await prisma.trustedDevice.create({ data: {
+    userId: user.id, deviceIdHash: hashDeviceToken(cookie),
+    strongVerifiedAt: new Date(now.getTime() - MINUTE),
+    rememberedUntil: new Date(now.getTime() + DAY)
+  } });
+  const issued = await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED");
+  assert.equal(issued.kind, "SESSION", "registered-factor selection must not cancel a valid remembered grant");
+  if (issued.kind !== "SESSION") return;
+  assert.equal(issued.deviceToken, cookie);
+  assert.deepEqual((await prisma.session.findUniqueOrThrow({ where: { id: issued.session.id } })).authenticationMethods, ["pwd"]);
+  assert.equal(await prisma.deviceChallenge.count({ where: { userId: user.id, status: { in: ["PENDING", "VERIFIED"] } } }), 0);
+});
+
+test("HTTP REGISTERED login still requires MFA for forced USER, ADMIN, and untrusted browsers", integrationOptions, async () => {
+  const now = new Date();
+  const totpSecret = createTotpSecret();
+  const user = await createTestUser({ totpSecret, label: "registered-forced-user" });
+  const cookie = generateDeviceToken();
+  await prisma.trustedDevice.create({ data: {
+    userId: user.id, deviceIdHash: hashDeviceToken(cookie),
+    strongVerifiedAt: new Date(now.getTime() - MINUTE),
+    rememberedUntil: new Date(now.getTime() + DAY)
+  } });
+  const forced = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, true, "USER", undefined, "REGISTERED"));
+  assert.equal(forced.factor, "TOTP");
+  const untrusted = ceremonyOf(await startLoginCeremony(user.id, undefined, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(untrusted.factor, "TOTP");
+  assert.notEqual(untrusted.deviceToken, cookie);
+
+  const deviceWhere = { userId_deviceIdHash: { userId: user.id, deviceIdHash: hashDeviceToken(cookie) } };
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { rememberedUntil: new Date(now.getTime() - 1) } });
+  const expired = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(expired.factor, "TOTP", "an expired remembered grant cannot issue a password-only session");
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { rememberedUntil: new Date(now.getTime() + DAY), strongVerifiedAt: null } });
+  const noProof = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(noProof.factor, "TOTP", "a remembered grant without strong verification cannot bypass MFA");
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { strongVerifiedAt: new Date(now.getTime() + MINUTE) } });
+  const futureProof = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(futureProof.factor, "TOTP", "a future-dated strong verification cannot bypass MFA");
+  await prisma.trustedDevice.update({ where: deviceWhere, data: { status: "REVOKED", revokedAt: now, strongVerifiedAt: new Date(now.getTime() - MINUTE) } });
+  const revoked = ceremonyOf(await startLoginCeremony(user.id, cookie, "pt-BR", now, false, "USER", undefined, "REGISTERED"));
+  assert.equal(revoked.factor, "TOTP", "a revoked browser cannot bypass MFA");
+  assert.notEqual(revoked.deviceToken, cookie, "a revoked browser cannot reuse its old device cookie");
+
+  const admin = await createTestUser({ role: "ADMIN", totpSecret, label: "registered-remembered-admin" });
+  const adminCookie = generateDeviceToken();
+  await prisma.trustedDevice.create({ data: {
+    userId: admin.id, deviceIdHash: hashDeviceToken(adminCookie),
+    strongVerifiedAt: new Date(now.getTime() - MINUTE),
+    rememberedUntil: new Date(now.getTime() + DAY)
+  } });
+  const adminChallenge = ceremonyOf(await startLoginCeremony(admin.id, adminCookie, "pt-BR", now, false, "ADMIN", undefined, "REGISTERED"));
+  assert.equal(adminChallenge.factor, "TOTP");
+  assert.equal(await prisma.session.count({ where: { userId: admin.id } }), 0);
+});
+
 test("an ADMIN never receives a remembered password-only session", integrationOptions, async () => {
   const admin = await createTestUser({ role: "ADMIN", label: "login-admin-remember" });
   const base = new Date();
@@ -206,13 +347,23 @@ test("login email ceremonies are capped per account even after a correct passwor
 });
 
 test("login email ceremonies are capped per trusted client source", integrationOptions, async () => {
-  // A random host in TEST-NET-3 keeps the rate-limit window private to this run.
-  const address = `203.0.113.${randomInt(10, 250)}`;
+  // The old TEST-NET-3 host used only 240 possible values and could collide
+  // with a prior fixture's source quota in this shared disposable database.
+  // Use a distinct, randomly generated documentation IPv6 address instead.
+  const sourceId = randomUUID().replaceAll("-", "");
+  const address = `2001:db8:${sourceId.slice(0, 4)}:${sourceId.slice(4, 8)}:${sourceId.slice(8, 12)}:${sourceId.slice(12, 16)}:${sourceId.slice(16, 20)}:${sourceId.slice(20, 24)}`;
+  const { createRateLimitIdentifierHash } = await import("./rate-limit-config");
+  const sourceHash = createRateLimitIdentifierHash(`login-email-ceremony-source:${address}`);
+  assert.equal(await prisma.loginRateLimit.count({ where: { identifierHash: sourceHash } }), 0,
+    "the source-limiter oracle requires an unused test-only address");
   const base = new Date();
   let successes = 0;
+  let quotaDenials = 0;
   let step = 0;
+  const recipients: string[] = [];
   for (let index = 0; index < 5; index += 1) {
     const user = await createTestUser({ label: `login-source-${index}` });
+    recipients.push(user.email);
     for (let attempt = 0; attempt < LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT; attempt += 1) {
       step += 1;
       try {
@@ -220,10 +371,24 @@ test("login email ceremonies are capped per trusted client source", integrationO
         successes += 1;
       } catch (error) {
         assert.ok(error instanceof SecurityMutationError);
+        assert.equal(getLoginCeremonyFailureStage(error), "ceremony-rate-limited",
+          "an unexpected failure must not masquerade as a source quota denial");
+        quotaDenials += 1;
       }
     }
   }
   assert.equal(successes, LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
+  assert.equal(quotaDenials, 5 * LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT - LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT);
+  assert.equal((await prisma.loginRateLimit.findUniqueOrThrow({ where: { identifierHash: sourceHash } })).attempts,
+    LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT, "the shared source counter must spend exactly its cap");
+  assert.equal((await Promise.all(recipients.map(countLoginMails))).reduce((sum, count) => sum + count, 0),
+    successes, "the capped source may not enqueue additional login challenges");
+  const extraUser = await createTestUser({ label: "login-source-post-cap" });
+  await assert.rejects(startLoginCeremony(extraUser.id, undefined, "pt-BR",
+    new Date(base.getTime() + (step + 1) * 1_000), false, undefined, address),
+  (error: unknown) => getLoginCeremonyFailureStage(error) === "ceremony-rate-limited",
+  "the next account cannot bypass the shared source quota");
+  assert.equal(await countLoginMails(extraUser.email), 0);
 });
 
 test("an untrusted browser reuses its issued ceremony for 60 seconds and replaces it afterward", integrationOptions, async () => {
@@ -287,44 +452,37 @@ test("a revoked trusted-device cookie cannot reuse its old login challenge", int
   assert.equal(await countLoginMails(user.email), 3, "initial verification, forced fresh proof, and replacement each queue one email");
 });
 
-test("a trusted-device revoke racing a blocked login start cannot leave a challenge on the revoked cookie", {
-  ...integrationOptions,
-  skip: "INCONCLUSIVE: the PostgreSQL barrier confirmed the start waiter but could not observe the revoke waiter behind the same blocker; no race outcome was established."
-}, async () => {
+test("a trusted-device revoke racing a blocked login start cannot leave a challenge on the revoked cookie", integrationOptions, async () => {
   const secret = createTotpSecret();
   const user = await createTestUser({ totpSecret: secret, label: "login-revoke-start-race" });
   const deviceToken = randomBytes(32).toString("base64url");
   const device = await prisma.trustedDevice.create({ data: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken) }, select: { deviceKey: true } });
   const now = new Date();
-  let blockerPid = 0;
-  let locked!: () => void;
-  let release!: () => void;
-  const ready = new Promise<void>((resolve) => { locked = resolve; });
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const blocker = prisma.$transaction(async (transaction) => {
-    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
-    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
-    locked();
-    await gate;
-  }, { timeout: 10_000 });
-  await ready;
-
-  const starting = startLoginCeremony(user.id, deviceToken, "pt-BR", now, true, "USER")
-    .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
-  let revoking!: Promise<{ ok: true } | { ok: false; error: unknown }>;
-  let revokeWaitedForAccount: boolean;
+  const holder = startAccountLockHolder(user.id);
+  let starting: Promise<{ ok: true; value: LoginCeremonyStart } | { ok: false; error: unknown }> | null = null;
+  let revoking: Promise<{ ok: true } | { ok: false; error: unknown }> | null = null;
+  let observationError: unknown;
+  let settled: PromiseSettledResult<unknown>[];
   try {
-    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE");
+    await withinDeadline(holder.ready, 7_000, "account-lock holder readiness");
+    const deadline = Date.now() + 8_000;
+    starting = startLoginCeremony(user.id, deviceToken, "pt-BR", now, true, "USER")
+      .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+    await waitForBlockedPostgresQuery(holder.pid(), "FOR UPDATE", 1, deadline);
     revoking = revokeTrustedDevice(user.id, device.deviceKey)
       .then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
-    revokeWaitedForAccount = await Promise.race([
-      waitForBlockedPostgresQuery(blockerPid, undefined, 2).then(() => true),
-      revoking.then(() => false)
-    ]);
+    await waitForLoginAndRevokeBlockedOnAccount(holder.pid(), deadline);
+  } catch (error) {
+    observationError = error;
   } finally {
-    release();
+    holder.release();
+    // A missing lock or failed readiness must not strand background writers.
+    settled = await drainRaceActors([holder.done, ...(starting ? [starting] : []), ...(revoking ? [revoking] : [])]);
   }
-  await blocker;
+  if (observationError) throw observationError;
+  assert.equal(settled[0]?.status, "fulfilled", "the account lock holder must release cleanly");
+  assert.ok(starting, "the actual login-start actor must have been dispatched");
+  assert.ok(revoking, "the actual revoke actor must have been dispatched");
   const outcome = await starting;
   const revokeOutcome = await revoking;
   assert.equal(revokeOutcome.ok, true);
@@ -333,15 +491,74 @@ test("a trusted-device revoke racing a blocked login start cannot leave a challe
   const revoked = await prisma.trustedDevice.findUniqueOrThrow({ where: { deviceKey: device.deviceKey }, select: { status: true } });
   assert.equal(revoked.status, "REVOKED");
   assert.equal(await prisma.deviceChallenge.count({ where: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken), status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null } }), 0);
-  if (!revokeWaitedForAccount && outcome.ok && outcome.value.kind === "CEREMONY") {
-    assert.notEqual(outcome.value.deviceToken, deviceToken, "a start that runs after a completed revoke must not return the revoked cookie");
-  }
+  // The login transaction entered the PostgreSQL queue first, so returning
+  // the former cookie before a later revocation may be legitimate. The
+  // separate forced revoke-first test below asserts the opposite order and
+  // rejects returning that revoked cookie, even with no lingering challenge.
 });
 
-test("a trusted-device revoke racing TOTP verification invalidates the blocked challenge", {
-  ...integrationOptions,
-  skip: "INCONCLUSIVE: the PostgreSQL barrier confirmed the verifier waiter but could not observe the revoke waiter behind the same blocker; no race outcome was established."
-}, async () => {
+test("a PostgreSQL revoke-first lock queue never returns an obsolete trusted-device cookie", integrationOptions, async () => {
+  const user = await createTestUser({ totpSecret: createTotpSecret(), label: "login-revoke-first-order" });
+  const deviceToken = randomBytes(32).toString("base64url");
+  const device = await prisma.trustedDevice.create({
+    data: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken) },
+    select: { deviceKey: true }
+  });
+  const now = new Date();
+  const holder = startAccountLockHolder(user.id);
+  let revoking: Promise<{ ok: true } | { ok: false; error: unknown }> | null = null;
+  let starting: Promise<{ ok: true; value: LoginCeremonyStart } | { ok: false; error: unknown }> | null = null;
+  let observationError: unknown;
+  let settled: PromiseSettledResult<unknown>[];
+  try {
+    await withinDeadline(holder.ready, 7_000, "revoke-first holder readiness");
+    const deadline = Date.now() + 8_000;
+    // The revoker MUST enter PostgreSQL's account-row lock queue first.
+    revoking = revokeTrustedDevice(user.id, device.deviceKey).then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
+    await waitForBlockedPostgresQuery(holder.pid(), "FOR KEY SHARE", 1, deadline);
+    starting = startLoginCeremony(user.id, deviceToken, "pt-BR", now, true, "USER").then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error })
+    );
+    await waitForLoginAndRevokeBlockedOnAccount(holder.pid(), deadline);
+  } catch (error) {
+    observationError = error;
+  } finally {
+    holder.release();
+    settled = await drainRaceActors([holder.done, ...(revoking ? [revoking] : []), ...(starting ? [starting] : [])]);
+  }
+  if (observationError) throw observationError;
+  assert.equal(settled[0]?.status, "fulfilled", "the first-queued lock holder must release cleanly");
+  assert.ok(revoking, "the revoke actor must enter the lock queue");
+  assert.ok(starting, "the login actor must enter the lock queue after revoke");
+  const revoked = await revoking;
+  const start = await starting;
+  assert.equal(revoked.ok, true, "revoke must finish successfully before login can proceed");
+  // PostgreSQL queue admission, not JavaScript callback delivery order,
+  // establishes revoke-first serialization. Cross-connection Promise callbacks
+  // can fire in either order after the actual database commits.
+  if (start.ok) {
+    assert.equal(start.value.kind, "CEREMONY");
+    assert.notEqual(start.value.deviceToken, deviceToken,
+      "the successful start after revoke must not expose the old trusted-device cookie");
+  } else {
+    assert.ok(start.error instanceof SecurityMutationError, "a serializable conflict must fail safely");
+  }
+  assert.equal((await prisma.trustedDevice.findUniqueOrThrow({
+    where: { deviceKey: device.deviceKey }, select: { status: true }
+  })).status, "REVOKED");
+  assert.equal(await prisma.deviceChallenge.count({
+    where: { userId: user.id, deviceIdHash: hashDeviceToken(deviceToken),
+      status: { in: ["PENDING", "VERIFIED"] }, consumedAt: null }
+  }), 0);
+  const next = ceremonyOf(await startLoginCeremony(user.id, deviceToken, "pt-BR", new Date(now.getTime() + 1_000), true, "USER"));
+  assert.notEqual(next.deviceToken, deviceToken, "a fresh attempt after completed revoke must also rotate the cookie");
+});
+
+test("a trusted-device revoke racing TOTP verification invalidates the blocked challenge", integrationOptions, async () => {
   const secret = createTotpSecret();
   const user = await createTestUser({ totpSecret: secret, label: "login-revoke-verify-race" });
   const deviceToken = randomBytes(32).toString("base64url");
@@ -349,34 +566,30 @@ test("a trusted-device revoke racing TOTP verification invalidates the blocked c
   const now = new Date();
   const ceremony = ceremonyOf(await startLoginCeremony(user.id, deviceToken, "pt-BR", now, true, "USER"));
   const sessionsBefore = await prisma.session.count({ where: { userId: user.id } });
-  let blockerPid = 0;
-  let locked!: () => void;
-  let release!: () => void;
-  const ready = new Promise<void>((resolve) => { locked = resolve; });
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const blocker = prisma.$transaction(async (transaction) => {
-    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
-    await transaction.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
-    locked();
-    await gate;
-  }, { timeout: 10_000 });
-  await ready;
-
-  const verification = verifyLoginTotpCode(ceremony.ceremonyId, totpAt(secret, now), deviceToken, now, "USER")
-    .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
-  let revoking!: Promise<{ ok: true } | { ok: false; error: unknown }>;
+  const holder = startAccountLockHolder(user.id);
+  let verification: Promise<{ ok: true; value: Awaited<ReturnType<typeof verifyLoginTotpCode>> } | { ok: false; error: unknown }> | null = null;
+  let revoking: Promise<{ ok: true } | { ok: false; error: unknown }> | null = null;
+  let observationError: unknown;
+  let settled: PromiseSettledResult<unknown>[];
   try {
-    await waitForBlockedPostgresQuery(blockerPid, "FOR UPDATE");
+    await withinDeadline(holder.ready, 7_000, "account-lock holder readiness");
+    const deadline = Date.now() + 8_000;
+    verification = verifyLoginTotpCode(ceremony.ceremonyId, totpAt(secret, now), deviceToken, now, "USER")
+      .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+    await waitForBlockedPostgresQuery(holder.pid(), "FOR UPDATE", 1, deadline);
     revoking = revokeTrustedDevice(user.id, device.deviceKey)
       .then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
-    await Promise.race([
-      waitForBlockedPostgresQuery(blockerPid, undefined, 2),
-      revoking
-    ]);
+    await waitForLoginAndRevokeBlockedOnAccount(holder.pid(), deadline);
+  } catch (error) {
+    observationError = error;
   } finally {
-    release();
+    holder.release();
+    settled = await drainRaceActors([holder.done, ...(verification ? [verification] : []), ...(revoking ? [revoking] : [])]);
   }
-  await blocker;
+  if (observationError) throw observationError;
+  assert.equal(settled[0]?.status, "fulfilled", "the account lock holder must release cleanly");
+  assert.ok(verification, "the actual TOTP verifier must have been dispatched");
+  assert.ok(revoking, "the actual revoke actor must have been dispatched");
   const outcome = await verification;
   const revokeOutcome = await revoking;
   assert.equal(revokeOutcome.ok, true);

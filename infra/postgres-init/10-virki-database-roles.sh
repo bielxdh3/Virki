@@ -73,7 +73,7 @@ BEGIN
         '_prisma_migrations', 'AccountRecoveryRequest', 'AdministrativeCredential',
         'AdministrativeRecoveryCode', 'AuditLog', 'DeviceChallenge', 'EmailDeliveryAttempt',
         'EmailOutboxMessage', 'LoginRateLimit', 'OidcArtifact', 'PasskeyChallenge',
-        'PasskeyCredential', 'ProjectConnection', 'RecoveryCode',
+        'PasskeyCredential', 'ProjectConnection', 'RecoveryCode', 'RecoveryEmailRebind',
         'SanitizedAuditReference', 'SecurityElevation', 'Session',
         'TotpFactor', 'TrustedDevice', 'User', 'UserProjectGrant'
       )
@@ -92,7 +92,7 @@ BEGIN
       AND type.typtype IN ('d', 'e', 'm', 'r')
       AND type.typname NOT IN (
         'AccountStatus', 'AdministrativeCredentialStatus', 'DeliveryAttemptStatus',
-        'DeviceChallengeStatus', 'EmailMessageKind', 'OutboxMessageStatus',
+        'DeviceChallengeStatus', 'EmailMessageKind', 'LoginChallengeFactor', 'OutboxMessageStatus',
         'RecoveryRequestPurpose', 'RecoveryRequestStatus', 'SecondFactorMethod', 'SecurityElevationStatus',
         'SecurityFactorStatus', 'TrustedDeviceStatus', 'UserRole'
       )

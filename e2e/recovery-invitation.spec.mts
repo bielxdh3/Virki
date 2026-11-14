@@ -1,10 +1,10 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { PrismaClient } from "@virki/database";
 import { hashPassword, hashSessionToken, verifyPassword } from "@virki/auth";
 import { getSessionCookieName } from "@virki/auth/constants";
 import { decryptEmailPayload } from "@virki/auth/email";
-import { hashEmailAddress, hashRecoveryRequestKey, requestAccountRecovery } from "@virki/auth/security";
+import { createTotpSecret, encryptTotpSecret, hashEmailAddress, hashRecoveryRequestKey, requestAccountRecovery } from "@virki/auth/security";
 // @ts-expect-error The disposable-database guard is a JavaScript safety helper without a declaration file.
 import { assertDisposableCoreTestDatabase } from "../scripts/core-test-database-safety.mjs";
 // @ts-expect-error The LOW-05 diagnostics helper is a JavaScript test-only redaction boundary.
@@ -14,6 +14,44 @@ const portalUrl = process.env.VIRKI_E2E_HUB_MODE === "production" ? "https://por
 const hubMode = process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development";
 const sessionCookieName = getSessionCookieName({ NODE_ENV: process.env.VIRKI_E2E_HUB_MODE === "production" ? "production" : "development" });
 const e2eDatabaseUrl = process.env.VIRKI_E2E_DATABASE_URL?.trim();
+
+async function explicitlyAdoptLegacyRecoveryLink(page: Page, requestKey: string, expectedRequestId: string): Promise<void> {
+  // A legacy GET is discovery only. Neither opening an invitation nor opening
+  // a legacy recovery URL may replace an authorizing browser bearer until the
+  // visitor explicitly adopts the candidate through the CSRF-bound action.
+  await expect(page).toHaveURL(`${portalUrl}/recover?requestId=${expectedRequestId}&switch=1`);
+  await expect(page.getByRole("status")).toContainText("Nenhuma recuperação foi substituída ao visualizar o link.");
+  const primaryName = hubMode === "production" ? "__Host-virki_recovery" : "virki_recovery_v2";
+  const candidateName = hubMode === "production" ? "__Host-virki_recovery_candidate" : "virki_recovery_candidate";
+  const before = await page.context().cookies(portalUrl);
+  expect(before.find(cookie => cookie.name === primaryName)?.value ?? "",
+    "opening a legacy GET must not install the authorizing bearer").toBe("");
+  expect(before.find(cookie => cookie.name === candidateName)?.value,
+    "the discovery cookie must identify exactly the delivered link").toBe(requestKey);
+
+  await page.getByRole("button", { name: "Continuar com este link", exact: true }).click();
+  try {
+    await expect(page).toHaveURL(`${portalUrl}/recover?requestId=${expectedRequestId}`, { timeout: 10_000 });
+  } catch {
+    const current = new URL(page.url());
+    const afterClick = await page.context().cookies(portalUrl);
+    throw new Error(`Explicit legacy adoption did not reach its expected document: ${JSON.stringify({
+      route: current.pathname === "/recover" ? "recover" : current.pathname === "/login" ? "login" : "other",
+      requestIdMatches: current.searchParams.get("requestId") === expectedRequestId,
+      switchPending: current.searchParams.get("switch") === "1",
+      hasErrorParam: current.searchParams.has("error"),
+      primaryIsApprovedKey: afterClick.find(cookie => cookie.name === primaryName)?.value === requestKey,
+      candidateStillPresent: afterClick.find(cookie => cookie.name === candidateName)?.value === requestKey,
+      switchButtonVisible: await page.getByRole("button", { name: "Continuar com este link", exact: true }).isVisible().catch(() => false),
+      genericErrorVisible: await page.locator('p.form-error[role="alert"]').isVisible().catch(() => false)
+    })}`);
+  }
+  const adopted = await page.context().cookies(portalUrl);
+  expect(adopted.find(cookie => cookie.name === primaryName)?.value,
+    "the explicit switch must adopt the same live legacy link, not another capability").toBe(requestKey);
+  expect(adopted.find(cookie => cookie.name === candidateName)?.value ?? "",
+    "the consumed candidate must not remain available for a later switch").toBe("");
+}
 
 function hasLow05NoStoreDirectives(value: string): boolean {
   const directives = new Set(value.toLowerCase().split(",").map((directive) => directive.trim()));
@@ -96,56 +134,115 @@ test.skip(!e2eDatabaseUrl, "Recovery/invitation E2E requires an explicit disposa
 type AuthFixture = { admin: { id: string }; user: { id: string; email: string; password: string } };
 
 test("public recovery form gives known and unknown addresses the same browser response", async ({ browser }) => {
-  test.setTimeout(45_000);
+  test.setTimeout(90_000);
   if (!e2eDatabaseUrl) throw new Error("Recovery/invitation E2E database is unavailable.");
   assertDisposableCoreTestDatabase(e2eDatabaseUrl, process.env);
-  process.env.DATABASE_URL = e2eDatabaseUrl;
-  process.env.VIRKI_PORTAL_URL = portalUrl;
-  process.env.VIRKI_PORTAL_HOSTNAME = "portal.localhost";
-  const fixturePath = process.env.VIRKI_E2E_AUTH_FIXTURE_FILE;
-  if (!fixturePath) throw new Error("Recovery/invitation E2E fixture path is unavailable.");
-  const fixture = JSON.parse(await (await import("node:fs/promises")).readFile(fixturePath, "utf8")) as AuthFixture;
+  if (process.env.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable" || new URL(e2eDatabaseUrl).pathname !== "/virki_e2e_test") {
+    throw new Error("This recovery browser test requires the owned disposable E2E database.");
+  }
   const database = new PrismaClient({ datasources: { db: { url: e2eDatabaseUrl } } });
+  // The shared authentication fixture may have prior requests. A fresh owner-labelled
+  // TOTP account avoids cooldowns silently converting the real case to synthetic.
+  const knownEmail = `${randomUUID()}.invitation-recovery@e2e.invalid`;
   const unknownEmail = `${randomUUID()}@unknown.e2e.invalid`;
-  const responses: Array<{ url: string; httpStatus: number; body: string; status: string; heading: string }> = [];
+  const contexts: import("@playwright/test").BrowserContext[] = [];
+  const responses: Array<{ requestId: string; publicView: { path: string; httpStatus: number; body: string; proof: string; heading: string } }> = [];
+  let ownedUserId: string | undefined;
   try {
-    const knownRequestCountBefore = await database.accountRecoveryRequest.count({ where: { userId: fixture.user.id } });
-    const knownMessageCountBefore = await database.emailOutboxMessage.count({ where: { recipientEmail: fixture.user.email, kind: "ACCOUNT_RECOVERY" } });
-    for (const email of [fixture.user.email, unknownEmail]) {
+    const user = await database.user.create({ data: {
+      email: knownEmail, emailNormalized: knownEmail, displayName: "Owned recovery invitation E2E fixture",
+      passwordHash: await hashPassword(randomBytes(24).toString("base64url")),
+      role: "USER", isActive: true, accountStatus: "ACTIVE", emailVerifiedAt: new Date(),
+      secondFactorMethod: "TOTP",
+      totpFactor: { create: {
+        secretCiphertext: encryptTotpSecret(createTotpSecret()), keyVersion: 1,
+        status: "ACTIVE", confirmedAt: new Date()
+      } }
+    }, select: { id: true } });
+    ownedUserId = user.id;
+    const knownRequestCountBefore = await database.accountRecoveryRequest.count({ where: { userId: ownedUserId } });
+    const knownMessageCountBefore = await database.emailOutboxMessage.count({ where: { recipientEmail: knownEmail, kind: "ACCOUNT_RECOVERY" } });
+    for (const email of [knownEmail, unknownEmail]) {
       const context = await browser.newContext();
-      try {
-        const page = await context.newPage();
-        await page.goto(`${portalUrl}/recover`);
-        await page.getByLabel("E-mail", { exact: true }).fill(email);
-        const actionResponsePromise = page.waitForResponse((response) => {
-          const responseUrl = new URL(response.url());
-          return response.request().method() === "POST" && responseUrl.origin === new URL(portalUrl).origin && responseUrl.pathname === "/recover";
-        });
-        await page.getByRole("button", { name: "Enviar instruções", exact: true }).click();
-        const actionResponse = await actionResponsePromise;
-        await expect(page).toHaveURL(`${portalUrl}/recover?sent=1`);
-        const status = page.getByRole("status");
-        await expect(status).toHaveText("Se a conta puder ser recuperada, você receberá instruções no e-mail cadastrado.");
-        responses.push({
-          url: new URL(page.url()).pathname + new URL(page.url()).search,
-          httpStatus: actionResponse.status(),
-          body: await page.locator("main").innerText(),
-          status: await status.innerText(),
-          heading: await page.getByRole("heading", { level: 1 }).innerText()
-        });
-      } finally {
-        await context.close();
+      contexts.push(context);
+      const page = await context.newPage();
+      await page.goto(`${portalUrl}/recover`);
+      await page.getByLabel("E-mail da conta", { exact: true }).fill(email);
+      await page.locator('input[name="method"][value="TOTP_EMAIL"]').check();
+      const actionResponsePromise = page.waitForResponse((response) => {
+        const responseUrl = new URL(response.url());
+        return response.request().method() === "POST" && responseUrl.origin === portalUrl && responseUrl.pathname === "/recover";
+      });
+      await page.getByRole("button", { name: "Solicitar recuperação", exact: true }).click();
+      const actionResponse = await actionResponsePromise;
+      expect(actionResponse.status()).toBeGreaterThanOrEqual(200);
+      expect(actionResponse.status()).toBeLessThan(400);
+      await expect(page).toHaveURL(/\/recover\?requestId=[A-Za-z0-9_-]{43}$/u);
+      await expect(page.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toBeVisible();
+      const url = new URL(page.url());
+      const requestId = url.searchParams.get("requestId") ?? "";
+      expect(requestId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+      const cookieNames = hubMode === "production"
+        ? ["__Host-virki_recovery", "__Host-virki_recovery_browser", "__Host-virki_recovery_intent"]
+        : ["virki_recovery_v2", "virki_recovery_browser", "virki_recovery_intent"];
+      const cookies = await context.cookies(portalUrl);
+      for (const name of cookieNames) {
+        const cookie = cookies.find((candidate) => candidate.name === name);
+        expect(cookie, `each browser must have its own ${name}`).toBeDefined();
+        expect(cookie).toMatchObject({ domain: "portal.localhost", path: "/", httpOnly: true, sameSite: "Lax", secure: hubMode === "production" });
+        expect(cookie!.value).not.toBe("");
       }
+      expect(cookies.find((cookie) => cookie.name === cookieNames[2])?.value).toBe(`${requestId}.TOTP_EMAIL`);
+      responses.push({
+        requestId,
+        publicView: {
+          path: url.pathname,
+          httpStatus: actionResponse.status(),
+          body: (await page.locator("main").innerText()).trim(),
+          proof: (await page.locator('section[aria-label="Confirmação de identidade"]').innerText()).trim(),
+          heading: (await page.getByRole("heading", { level: 1 }).innerText()).trim()
+        }
+      });
     }
-    expect(responses[0]).toEqual(responses[1]);
-    const knownRequestCountAfter = await database.accountRecoveryRequest.count({ where: { userId: fixture.user.id } });
-    const knownMessageCountAfter = await database.emailOutboxMessage.count({ where: { recipientEmail: fixture.user.email, kind: "ACCOUNT_RECOVERY" } });
+    expect(responses).toHaveLength(2);
+    const [known, unknown] = responses;
+    expect(known.requestId).not.toBe(unknown.requestId);
+    expect(known.publicView).toEqual(unknown.publicView);
+    expect(await database.accountRecoveryRequest.findUnique({ where: { id: known.requestId }, select: { userId: true, recoveryProofs: true, recoveryRole: true } }))
+      .toMatchObject({ userId: ownedUserId, recoveryProofs: ["EMAIL", "TOTP"], recoveryRole: "USER" });
+    expect(await database.accountRecoveryRequest.findUnique({ where: { id: unknown.requestId } })).toBeNull();
+    const unboundContext = await browser.newContext();
+    contexts.push(unboundContext);
+    const unboundPage = await unboundContext.newPage();
+    const unboundUrl = `${portalUrl}/recover?requestId=${encodeURIComponent(known.requestId)}`;
+    const unboundResponse = await unboundPage.goto(unboundUrl);
+    expect(unboundResponse?.status()).toBe(200);
+    await expect(unboundPage).toHaveURL(unboundUrl);
+    await expect(unboundPage.getByRole("heading", { level: 1, name: "Recuperar conta" })).toBeVisible();
+    await expect(unboundPage.locator('p.form-error[role="alert"]')).toContainText("Este link de recuperação não é mais válido");
+    await expect(unboundPage.locator('[aria-label="E-mail cadastrado"] input[name="code"]')).toHaveCount(0);
+
+    const knownRequestCountAfter = await database.accountRecoveryRequest.count({ where: { userId: ownedUserId } });
+    const knownMessageCountAfter = await database.emailOutboxMessage.count({ where: { recipientEmail: knownEmail, kind: "ACCOUNT_RECOVERY" } });
     expect(knownRequestCountAfter).toBe(knownRequestCountBefore + 1);
     expect(knownMessageCountAfter).toBe(knownMessageCountBefore + 1);
     expect(await database.accountRecoveryRequest.count({ where: { emailAddressHash: hashEmailAddress(unknownEmail) } })).toBe(0);
     expect(await database.emailOutboxMessage.count({ where: { recipientEmail: unknownEmail, kind: "ACCOUNT_RECOVERY" } })).toBe(0);
   } finally {
-    await database.$disconnect();
+    try {
+      await Promise.all(contexts.map((context) => context.close()));
+    } finally {
+      try {
+        if (ownedUserId) {
+          await database.accountRecoveryRequest.deleteMany({ where: { userId: ownedUserId } });
+          await database.emailOutboxMessage.deleteMany({ where: { recipientEmail: knownEmail } });
+          await database.totpFactor.deleteMany({ where: { userId: ownedUserId } });
+          await database.user.deleteMany({ where: { id: ownedUserId, email: knownEmail } });
+        }
+      } finally {
+        await database.$disconnect();
+      }
+    }
   }
 });
 
@@ -196,10 +293,19 @@ test("invitation purpose survives URL spoofing and activates a USER once with on
     if (!account || !message) throw new Error("Invitation E2E fixture was not created.");
     const actionUrl = decryptEmailPayload(message.payload).actionUrl;
     if (!actionUrl || new URL(actionUrl).origin !== portalUrl) throw new Error("Invitation E2E link is invalid.");
+    const invitationKey = new URL(actionUrl).searchParams.get("request");
+    if (!invitationKey) throw new Error("Invitation E2E key is unavailable.");
+    const invitationRequest = await database.accountRecoveryRequest.findUnique({
+      where: { requestKeyHash: hashRecoveryRequestKey(invitationKey) },
+      select: { id: true, purpose: true }
+    });
+    expect(invitationRequest?.purpose).toBe("INVITATION");
+    if (!invitationRequest) throw new Error("Invitation E2E record is unavailable.");
     const spoofedUrl = new URL(actionUrl);
     spoofedUrl.searchParams.set("purpose", "RECOVERY");
     const page = await context.newPage();
     await page.goto(spoofedUrl.toString());
+    await explicitlyAdoptLegacyRecoveryLink(page, invitationKey, invitationRequest.id);
     await expect(page.getByRole("heading", { level: 1, name: "Ativar sua conta", exact: true })).toBeVisible();
     await expect(page.getByText("Bem-vindo ao Virki! Defina uma senha para ativar sua conta. O convite é válido por 72 horas e pode ser usado uma vez.", { exact: true })).toBeVisible();
     const passwordInput = page.getByLabel("Criar senha", { exact: true });
@@ -260,6 +366,7 @@ test("approved USER recovery keeps recovery copy and rejects a short password on
 
     const page = await context.newPage();
     await page.goto(actionUrl);
+    await explicitlyAdoptLegacyRecoveryLink(page, requestKey, recovery.id);
     await expect(page.getByRole("heading", { level: 1, name: "Recuperar conta", exact: true })).toBeVisible();
     await expect(page.getByRole("status")).toContainText("Defina uma nova senha para concluir o acesso à sua conta.");
     const passwordInput = page.getByLabel("Nova senha", { exact: true });

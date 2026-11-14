@@ -3,7 +3,7 @@ export const EMAIL_WORKER_DEFAULT_SEND_INTERVAL_MS = 250;
 export const EMAIL_WORKER_FAILURE_PAUSE_MS = 1_000;
 const MAX_SEND_INTERVAL_MS = 60_000;
 
-export type EmailProcessOutcome = "idle" | "sent" | "retryable-failure" | "terminal-failure";
+export type EmailProcessOutcome = "idle" | "reconciled" | "contended" | "sent" | "retryable-failure" | "terminal-failure";
 
 export type EmailWorkerLoopOptions = {
   processNext: () => Promise<EmailProcessOutcome>;
@@ -53,7 +53,11 @@ export async function runEmailWorkerLoop(options: EmailWorkerLoopOptions): Promi
       return;
     }
 
-    if (outcome === "sent") {
+    if (outcome === "reconciled") {
+      // A stale exhausted item was terminalized; check the next queued item
+      // immediately instead of falsely treating the outbox as empty.
+      continue;
+    } else if (outcome === "sent") {
       await pause(sendIntervalMs);
     } else if (outcome === "idle") {
       await pause(idlePollMs);

@@ -5,7 +5,7 @@ import { useState } from "react";
 
 type PasskeyRow = { id: string; name: string; createdAt: string; lastUsedAt: string | null; backupEligible: boolean; backupState: boolean };
 
-export function PasskeyManager({ csrfToken, initialPasskeys, requiresTotp }: { csrfToken: string; initialPasskeys: PasskeyRow[]; requiresTotp: boolean }) {
+export function PasskeyManager({ csrfToken, initialPasskeys, requiresTotp, role = "USER" }: { csrfToken: string; initialPasskeys: PasskeyRow[]; requiresTotp: boolean; role?: "USER" | "ADMIN" }) {
   const [passkeys, setPasskeys] = useState(initialPasskeys);
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
@@ -15,7 +15,7 @@ export function PasskeyManager({ csrfToken, initialPasskeys, requiresTotp }: { c
   const [error, setError] = useState("");
 
   async function post(body: Record<string, unknown>) {
-    const response = await fetch("/api/passkeys", { method: "POST", headers: { "content-type": "application/json" }, cache: "no-store", credentials: "same-origin", body: JSON.stringify({ ...body, csrfToken }) });
+    const response = await fetch("/api/passkeys", { method: "POST", headers: { "content-type": "application/json" }, cache: "no-store", credentials: "same-origin", body: JSON.stringify({ ...body, action: role === "ADMIN" ? `admin-${body.action}` : body.action, csrfToken }) });
     if (!response.ok) throw new Error("rejected");
     return response.json();
   }
@@ -44,7 +44,7 @@ export function PasskeyManager({ csrfToken, initialPasskeys, requiresTotp }: { c
 
   return <section className="surface" aria-labelledby="passkey-title">
     <h2 id="passkey-title">Passkeys ({passkeys.length})</h2>
-    <p>Use passkeys no portal para entrar com o dispositivo ou uma chave de segurança. Sua senha e os métodos de recuperação continuam ativos. Passkeys sincronizadas podem existir em vários aparelhos.</p>
+    <p>{role === "ADMIN" ? "Cadastre uma passkey deste hub para recuperação da senha normal. Antes de cada alteração, confirme uma elevação ADMIN_CREDENTIAL_CHANGE ativada nos últimos dez minutos, além da senha normal e do TOTP configurado. A credencial administrativa e a proteção Cloudflare Access continuam obrigatórias." : "Use passkeys no portal para entrar com o dispositivo ou uma chave de segurança. Sua senha e os métodos de recuperação continuam ativos. Passkeys sincronizadas podem existir em vários aparelhos."}</p>
     <div className="form-stack">
       <label>Senha atual para autorizar alterações<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} maxLength={256} disabled={pending} /></label>
       {requiresTotp && <label>Código atual do aplicativo autenticador<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={totpCode} onChange={event => setTotpCode(event.target.value)} disabled={pending} /></label>}

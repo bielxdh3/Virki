@@ -95,7 +95,8 @@ export async function POST(request: Request) {
       new Date(),
       reauth,
       requiredRole,
-      request.headers.get("cf-connecting-ip")?.trim()
+      request.headers.get("cf-connecting-ip")?.trim(),
+      "REGISTERED"
     );
   } catch (error) {
     await writeAuditLog({

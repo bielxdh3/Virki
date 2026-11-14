@@ -831,13 +831,83 @@ test("Virki staging is private, bounded, loopback-only, and does not start Tunne
   const stage = serverScript.slice(serverScript.indexOf("  stage)\n"), serverScript.indexOf("  first-admin-bootstrap)\n"));
   assert.match(stage, /verify_first_install_marker[\s\S]*?verify_first_install_volume[\s\S]*?assert_tunnel_stopped[\s\S]*?assert_staging_ports_available/u);
   assert.match(stage, /export PUBLIC_SITE_PORT=13000[\s\S]*?export HUB_PORT=13001/u);
-  assert.match(stage, /compose up --detach "\$\{application_services\[@\]\}"[\s\S]*?assert_revisions[\s\S]*?assert_loopback_ports[\s\S]*?assert_health/u);
+  assert.match(serverScript, /readonly staging_application_services=\(public-site hub oidc-issuer session-cleanup\)/u);
+  assert.match(stage, /assert_staging_mail_worker_stopped[\s\S]*?compose up --detach "\$\{staging_application_services\[@\]\}"[\s\S]*?assert_revisions "\$\{staging_application_services\[@\]\}"[\s\S]*?assert_loopback_ports[\s\S]*?assert_health[\s\S]*?assert_staging_mail_worker_stopped/u);
+  assert.doesNotMatch(stage, /compose up --detach "\$\{application_services\[@\]\}"/u);
   assert.doesNotMatch(stage, /compose up[^\n]*cloudflared/u);
+  const workerGate = serverScript.slice(serverScript.indexOf("assert_staging_mail_worker_stopped() {"), serverScript.indexOf("stop_stage_after_failure() {"));
+  assert.match(workerGate, /compose ps --all --quiet email-worker/u);
+  assert.match(workerGate, /docker inspect --format [^\n]*\.State\.Status[^\n]*\.State\.Running[^\n]*\.State\.Restarting/u);
+  assert.match(workerGate, /virki-prod\|email-worker\|created\|false\|false/u);
+  assert.match(workerGate, /virki-prod\|email-worker\|exited\|false\|false/u);
+  assert.doesNotMatch(workerGate, /--status running/u,
+    "checking running containers alone would miss a restart-policy worker in a restarting state");
+  assert.doesNotMatch(workerGate, /compose (?:up|start|run|stop) /u,
+    "worker readiness inspection must not mutate the worker");
   assert.ok(serverScript.includes('"127.0.0.1:$expected_port"'));
   const stageCleanup = serverScript.slice(serverScript.indexOf("stop_stage_after_failure() {"), serverScript.indexOf("is_valid_dns_hostname() {"));
-  assert.match(stageCleanup, /compose stop "\$\{application_services\[@\]\}"/u);
+  assert.match(stageCleanup, /compose stop "\$\{staging_application_services\[@\]\}"/u);
+  assert.doesNotMatch(stageCleanup, /compose stop "\$\{application_services\[@\]\}"/u,
+    "failed staging cannot stop a worker it never started or owned");
   assert.doesNotMatch(stageCleanup, /compose stop (?:postgres|cloudflared)/u);
   assert.doesNotMatch(stageCleanup, /cloudflared/u);
+});
+
+test("staging worker guard rejects actual running/restarting/unknown container states without touching Docker", {
+  skip: !existsSync(process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/bash")
+    ? "An isolated Bash parser is required to exercise the worker guard with stubbed commands."
+    : false
+}, () => {
+  const bashExecutable = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/bash";
+  const start = serverScript.indexOf("assert_staging_mail_worker_stopped() {");
+  const end = serverScript.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, "the exact source function must be extracted");
+  const sourceFunction = serverScript.slice(start, end + 3);
+  const fixture = `set -euo pipefail
+compose() {
+  [[ "$*" == 'ps --all --quiet email-worker' ]] || exit 98
+  [[ "\${STUB_COMPOSE_FAIL:-0}" == 0 ]] || return 1
+  printf '%s\\n' "\${STUB_WORKER_IDS:-}"
+}
+docker() {
+  [[ "$1" == inspect && "$2" == --format && "$#" == 4 ]] || exit 98
+  [[ "\${STUB_DOCKER_FAIL:-0}" == 0 ]] || return 1
+  if [[ "$4" == worker-safe ]]; then
+    printf '%s\\n' 'virki-prod|email-worker|exited|false|false'
+  else
+    printf '%s\\n' "\${STUB_DOCKER_IDENTITY:-}"
+  fi
+}
+fail() { printf '%s\\n' 'worker-gate-rejected' >&2; exit 79; }
+${sourceFunction}
+assert_staging_mail_worker_stopped
+`;
+  const check = (env, expectedStatus) => {
+    const child = spawnSync(bashExecutable, ["--noprofile", "--norc", "-s"], {
+      input: fixture,
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+      env: { ...process.env, PATH: "/__virki_no_external_commands__", ...env }
+    });
+    assert.equal(child.error, undefined, String(child.error));
+    assert.equal(child.status, expectedStatus, `unexpected worker-guard result: ${child.stderr}`);
+  };
+  check({}, 0);
+  check({ STUB_WORKER_IDS: "worker-safe" }, 0);
+  check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|created|false|false" }, 0);
+  for (const state of [
+    "virki-prod|email-worker|running|true|false",
+    "virki-prod|email-worker|restarting|true|true",
+    "virki-prod|email-worker|paused|true|false",
+    "virki-prod|email-worker|dead|false|false",
+    "another-project|email-worker|exited|false|false",
+    "virki-prod|hub|exited|false|false",
+    "garbage"
+  ]) check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_IDENTITY: state }, 79);
+  check({ STUB_WORKER_IDS: "worker-safe\nworker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|restarting|false|true" }, 79);
+  check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_FAIL: "1" }, 79);
+  check({ STUB_COMPOSE_FAIL: "1" }, 79);
 });
 
 test("production Compose uses the exact loaded runtime and migration image tags", () => {
@@ -1051,17 +1121,58 @@ test("recovery snapshots account for the intended legacy-key migration and retai
   assert.match(snapshotSql, /snapshot_phase" != after_migrations/u);
 
   const messageProjection = snapshotSql.slice(snapshotSql.indexOf("'messages'"), snapshotSql.indexOf("'attempts'"));
+  assert.match(messageProjection, /to_jsonb\(message\)->>'pendingSmtpHeaderMessageId'/u,
+    "Snapshot must preserve the in-flight ID across sender rotation and tolerate the pre-migration schema");
   for (const field of [
     '"id"', '"kind"', '"recipientEmail"', '"locale"', '"payload"', '"status"', '"attemptCount"',
     '"availableAt"', '"sentAt"', '"terminalFailedAt"', '"createdAt"', '"updatedAt"',
   ]) {
     assert.ok(messageProjection.includes(field), `Recovery snapshots must preserve the ${field} field.`);
   }
+  const attemptProjection = snapshotSql.slice(snapshotSql.indexOf("'attempts'"));
+  assert.match(attemptProjection, /to_jsonb\(attempt\)->>'smtpHeaderMessageId'/u,
+    "Snapshot must preserve SMTP Message-ID when present without referencing a column absent before migration");
 
   assert.match(serverScript, /before_recovery=\$\(recovery_snapshot "\$container" before_migrations\)/u);
   assert.match(serverScript, /after_recovery=\$\(recovery_snapshot "\$container" after_migrations\)/u);
   assert.match(serverScript, /before_recovery=\$\(recovery_snapshot "" before_migrations\)/u);
   assert.match(serverScript, /after_recovery=\$\(recovery_snapshot "" after_migrations\)/u);
+});
+
+test("rollback snapshot includes every outbox kind and corresponding delivery attempt", { skip: process.platform === "win32" ? "Requires Bash for the production SQL renderer." : false }, () => {
+  const start = serverScript.indexOf("recovery_snapshot_sql() {");
+  const end = serverScript.indexOf("\nrecovery_snapshot() {", start);
+  assert.ok(start >= 0 && end > start);
+  const renderer = serverScript.slice(start, end);
+  for (const phase of ["before_migrations", "after_migrations"]) {
+    const result = spawnSync("bash", ["-c", `set -euo pipefail\nfail() { exit 81; }\n${renderer}\nrecovery_snapshot_sql "$1"`, "virki-rollback-sql-test", phase], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const sql = result.stdout;
+    assert.match(sql, /FROM "EmailOutboxMessage" AS message/u);
+    assert.match(sql, /FROM "EmailDeliveryAttempt" AS attempt\s+JOIN "EmailOutboxMessage" AS message ON message\."id" = attempt\."messageId"/u);
+    assert.doesNotMatch(sql, /WHERE\s+(?:message\.)?"kind"/u,
+      "Rollback must retain ADMIN verification, mailbox rebind, notifications and all other email kinds, not just recovery email");
+    assert.match(sql, /to_jsonb\(message\)->>'pendingSmtpHeaderMessageId'/u);
+    assert.match(sql, /processingLeaseExpiresAt/u,
+      "Rollback must attest worker ownership leases, not just SMTP header IDs and message status.");
+    assert.match(sql, /to_jsonb\(attempt\)->>'smtpHeaderMessageId'/u);
+    if (phase === "before_migrations") {
+      assert.match(sql, /CASE WHEN "kind"::text = 'ACCOUNT_RECOVERY' AND "idempotencyKey" ~/u,
+        "Legacy idempotency normalization must never rewrite another email kind merely because its key shares the recovery prefix.");
+      assert.match(sql, /to_jsonb\(message\) \? 'processingLeaseExpiresAt'/u,
+        "Only a source schema without lease column may normalize the historical PROCESSING backfill.");
+    }
+  }
+});
+
+test("disposable rollback restore rehearsal includes ADMIN verification and both mailbox rebind message kinds", () => {
+  for (const kind of ["ACCOUNT_RECOVERY", "ADMIN_EMAIL_VERIFICATION", "RECOVERY_EMAIL_REBIND", "RECOVERY_EMAIL_REBIND_NOTICE"]) {
+    assert.ok(backupRestoreScript.includes(`kind: "${kind}"`), `Backup fixture must seed ${kind}.`);
+  }
+  assert.match(backupRestoreScript, /assert\.deepEqual\(restoredOutbox, sourceOutbox/u,
+    "The physical restore rehearsal must compare entire message and attempt inventories.");
+  assert.match(backupRestoreScript, /processingLeaseExpiresAt: new Date\(/u,
+    "Physical backup/restore must include a PROCESSING message with a retained lease expiry.");
 });
 
 test("non-whitespace backup sentinel content blocks preflight and transfer", async () => {
@@ -1610,6 +1721,76 @@ test("production health checks use validated configured hosts and the configured
   assert.match(health, /Host: \$portal_hostname/u);
   assert.match(health, /Host: \$hub_hostname/u);
   assert.doesNotMatch(health, /portal\.biel\.dev\.br|hub\.biel\.dev\.br/u);
+});
+
+test("ADMIN health probes fail closed for the effective native or Access perimeter", { skip: process.platform === "win32" ? "Requires a Bash operator fixture; Linux CI runs it." : false }, () => {
+  const validatorStart = serverScript.indexOf("is_valid_dns_hostname() {");
+  const healthStart = serverScript.indexOf("assert_health() {");
+  assert.ok(validatorStart >= 0 && healthStart >= 0);
+  const validator = serverScript.slice(validatorStart, serverScript.indexOf("\n}\n", validatorStart) + 2);
+  const health = serverScript.slice(healthStart, serverScript.indexOf("\n}\n", healthStart) + 2);
+  const bashFixture = String.raw`
+set -euo pipefail
+fail() { printf 'DENIED:%s\n' "$1" >&2; exit 80; }
+compose() {
+  if [[ "$1" == port ]]; then
+    if [[ "$2" == public-site ]]; then printf '127.0.0.1:13000'; return; fi
+    if [[ "$2" == hub ]]; then printf '127.0.0.1:13001'; return; fi
+  fi
+  if [[ "$1" == exec ]]; then
+    case "$*" in
+      *VIRKI_PORTAL_HOSTNAME*) printf 'portal.example.test'; return ;;
+      *VIRKI_HUB_HOSTNAME*) printf 'hub.example.test'; return ;;
+      *VIRKI_OIDC_ISSUER*) printf 'https://portal.example.test'; return ;;
+      *VIRKI_HUB_PERIMETER_MODE*) printf '%s' "$VIRKI_TEST_MODE"; return ;;
+    esac
+  fi
+  fail 'Unexpected Compose invocation'
+}
+curl() {
+  local args="$*"
+  if [[ "$args" == *'/admin/accounts'* ]]; then
+    [[ "$args" == *'cf-access-jwt-assertion: forged-staging-probe'* ]] || fail 'Missing forged assertion probe'
+    printf 'HTTP/1.1 %s Test\r\nLocation: %s\r\n\r\n\nVIRKI_STATUS:%s' "$VIRKI_TEST_ADMIN_STATUS" "$VIRKI_TEST_REDIRECT" "$VIRKI_TEST_ADMIN_STATUS"
+  elif [[ "$args" == *'/api/health'* ]]; then
+    printf 'HTTP/1.1 200 OK\r\n\r\n\nVIRKI_STATUS:200'
+  elif [[ "$args" == *'/.well-known/openid-configuration'* ]]; then
+    printf 'HTTP/1.1 200 OK\r\n\r\n{"issuer":"https://portal.example.test","code_challenge_methods_supported":["S256"],"response_types_supported":["code"]}\nVIRKI_STATUS:200'
+  else
+    printf 'HTTP/1.1 200 OK\r\n\r\n\nVIRKI_STATUS:200'
+  fi
+}
+assert_production_response_headers() { :; }
+${validator}
+${health}
+assert_health
+`;
+  const expected = "https://hub.example.test/login?returnTo=%2Fadmin%2Faccounts";
+  for (const { mode, status, location, allowed } of [
+    { mode: "access", status: "403", location: "", allowed: true },
+    { mode: "", status: "403", location: "", allowed: true },
+    { mode: "not-native", status: "403", location: "", allowed: true },
+    { mode: "native", status: "307", location: expected, allowed: true },
+    { mode: "native", status: "403", location: "", allowed: false },
+    { mode: "native", status: "302", location: expected, allowed: false },
+    { mode: "native", status: "307", location: "", allowed: false },
+    { mode: "access", status: "307", location: expected, allowed: false },
+    { mode: "native", status: "307", location: "https://attacker.invalid/login?returnTo=%2Fadmin%2Faccounts", allowed: false },
+    { mode: "native", status: "307", location: "https://hub.example.test/login?returnTo=%2Fadmin%2Fsecurity", allowed: false },
+    { mode: "native", status: "307", location: `${expected}\r\nLocation: ${expected}`, allowed: false },
+    { mode: "native", status: "307", location: `${expected}\r\n\r\nHTTP/1.1 403 Forbidden\r\nLocation: https://attacker.invalid`, allowed: false },
+  ]) {
+    const result = spawnSync("bash", ["-c", bashFixture], {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        VIRKI_TEST_MODE: mode,
+        VIRKI_TEST_ADMIN_STATUS: status,
+        VIRKI_TEST_REDIRECT: location,
+      },
+    });
+    assert.equal(result.status === 0, allowed, `mode=${mode} status=${status} location=${location}: ${result.stderr}`);
+  }
 });
 
 test("temporary dual-Codex task notes stay out of source and Docker archives", () => {

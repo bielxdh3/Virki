@@ -1,10 +1,8 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { getAccountRecoveryRequestId } from "@virki/auth/security";
 import { getSurface, getSurfaceBaseUrl } from "../../../lib/surface";
-import { RECOVERY_COOKIE_NAME, requiresRecoveryRequestSwitch } from "../../../lib/recovery";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
-import { setRecoveryCandidateCookie, setRecoveryCookie } from "../recovery-cookie";
+import { setRecoveryCandidateCookie } from "../recovery-cookie";
 
 export const dynamic = "force-dynamic";
 
@@ -23,17 +21,15 @@ export async function GET(request: Request) {
     return NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
   }
   destination.searchParams.set("requestId", recovery.id);
-  const response = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
-  const activeKey = (await cookies()).get(RECOVERY_COOKIE_NAME)?.value;
-  const activeRecovery = activeKey ? await getAccountRecoveryRequestId(activeKey, new Date(), expectedRole) : null;
-  if (requiresRecoveryRequestSwitch(activeRecovery?.id, recovery.id)) {
-    destination.searchParams.set("switch", "1");
-    const confirmation = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
-    setRecoveryCandidateCookie(confirmation.cookies, requestKey, recovery.expiresAt);
-    return confirmation;
-  }
-  setRecoveryCookie(response.cookies, requestKey, recovery.expiresAt);
-  return response;
+  // Merely opening a legacy GET must NEVER adopt/clear an authorizing bearer:
+  // the HTTP 303 could be held until another tab finishes a modern TOTP proof.
+  // The later Set-Cookie would silently destroy its only browser-bound pair.
+  // Candidate-only discovery is non-authorizing; an explicit CSRF-guarded POST
+  // must subsequently adopt the link, even when the browser had no old key.
+  destination.searchParams.set("switch", "1");
+  const confirmation = NextResponse.redirect(destination, { status: 303, headers: privateHeaders() });
+  setRecoveryCandidateCookie(confirmation.cookies, requestKey, recovery.expiresAt);
+  return confirmation;
 }
 
 function privateHeaders(): HeadersInit {

@@ -6,7 +6,7 @@ import path from "node:path";
 const WINDOWS_ICACLS = "C:\\Windows\\System32\\icacls.exe";
 const WINDOWS_POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 const WINDOWS_WHOAMI = "C:\\Windows\\System32\\whoami.exe";
-const SAFE_KIND = /^(?:passkeys|oidc)$/u;
+const SAFE_KIND = /^(?:passkeys|oidc|recovery)$/u;
 
 function ordinaryDirectory(location) {
   const state = lstatSync(location);
@@ -69,7 +69,8 @@ export function ensurePrivateEvidenceDirectory(location) {
   verifyWindowsAcl(home);
   const parent = path.join(home, ".virki-private-docker-receipts");
   if (location !== path.join(parent, "oidc") &&
-      location !== path.join(parent, "passkeys")) {
+      location !== path.join(parent, "passkeys") &&
+      location !== path.join(parent, "recovery")) {
     throw new Error("Docker receipt directory escaped the private user profile.");
   }
   for (const directory of [parent, location]) {
@@ -87,7 +88,8 @@ export function ensurePrivateEvidenceDirectory(location) {
 export function assertPrivateEvidenceFile(filename) {
   if (process.platform !== "win32") return;
   if (path.dirname(filename) !== ownerEvidenceDirectory("", "oidc") &&
-      path.dirname(filename) !== ownerEvidenceDirectory("", "passkeys")) {
+      path.dirname(filename) !== ownerEvidenceDirectory("", "passkeys") &&
+      path.dirname(filename) !== ownerEvidenceDirectory("", "recovery")) {
     throw new Error("Docker receipt file outside private evidence directory.");
   }
   const state = lstatSync(filename);
