@@ -113,13 +113,17 @@ worker out of an unqualified staging `docker compose up`: the worker must be
 specifically selected after a new operator-approved, supervised send window.
 The override also has **no inherited Compose PostgreSQL dependency**:
 `depends_on: !reset []` removes the production worker's dependency on the
-base `postgres` service. Therefore, an explicit one-service
-`up --no-deps email-worker` must not provision/start the bundled PostgreSQL
-or create/use its volume; the approved isolated staging PostgreSQL must be
-already running and separately inspected. This does **not** make an
-unqualified `docker compose up` safe: the base stack still contains other
-services and its production-style PostgreSQL volume. Never use the manual
-override as a full staging provisioning/deployment definition.
+base `postgres` service. Selecting only `email-worker` with
+`up --no-deps email-worker` must not start `postgres` **as a worker
+dependency**; the approved isolated staging PostgreSQL must already be
+running and separately inspected. This does **not** prove the Compose command
+cannot create or reconcile named project volumes: the base model still
+declares a PostgreSQL service and a persistent volume, and Compose versions
+may prepare project resources independently of the selected service. Without
+an approved staging-only base or exact-version nonmutating command-plan
+evidence, treat absence of volume side effects as **UNPROVEN / NO-GO**.
+Never use the manual override as a full staging provisioning/deployment
+definition or run an unqualified `docker compose up`.
 The manual overlay also requires `VIRKI_STAGING_COMPOSE_PROJECT` instead of
 silently inheriting the base project's default namespace. Verify the
 **effective** project name is an operator-approved isolated staging name, not
