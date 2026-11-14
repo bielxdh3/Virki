@@ -39,10 +39,10 @@ or approval of a production Access cutover.
 
 | Gate | Required operator evidence | Without it |
 | --- | --- | --- |
-| Provenance | Signed/verified source SHA, exact immutable OCI manifest digest and runtime image ID/config hash on the independent host | BLOCK |
+| Provenance | Signed/verified final source SHA, exact-SHA hosted CI/CodeQL and GHCR build-provenance evidence, immutable OCI manifest digest/platform, and runtime image ID/config hash on the independent host | BLOCK |
 | Segregation | Approved staging host identity, DB host/database/roles different from production, test accounts and separate owned mailboxes | BLOCK |
-| Ingress | HTTPS with valid staging certificate; deny unknown hosts; restrict external ingress/Access test policy; verify Portal and Hub routing separately | BLOCK |
-| Application flags | Staging-only `VIRKI_HUB_PERIMETER_MODE=native`; unchanged production `access` behavior and `VIRKI_ADMIN_PASSKEYS_ENABLED=false` | BLOCK |
+| Ingress | HTTPS with valid staging certificate; deny unknown hosts; because native mode skips Access JWT validation inside Hub, a separate edge/firewall policy must default-deny and allow only owner-approved operator/test source IPs or private VPN; retain independent evidence; verify Portal and Hub routing separately | BLOCK |
+| Application flags | Staging-only `VIRKI_HUB_PERIMETER_MODE=native`, both passkey flags explicitly `false` until staging RP IDs exist, `CLOUDFLARE_ACCESS_JWT_REQUIRED=false` and no Access audience/team/JWKS inputs; unchanged production `access` behavior and `VIRKI_ADMIN_PASSKEYS_ENABLED=false` | BLOCK |
 | Persistence | Committed migrations deployed to **staging only**, least-privilege runtime/worker/migrator accounts, snapshot and restored rollback rehearsal | BLOCK |
 | Worker and SMTP | Separate staging relay credentials, approved recipient allowlist, TLS authentication and connectivity checked **before enabling the mail-draining worker** | BLOCK |
 | Recovery safety | Old-email loss path tested without using third-party inbox access; independent ADMIN elevation and no self-review | BLOCK |
@@ -64,6 +64,17 @@ deployment script as an unreviewed staging provisioner. Do not send a
 diagnostic to an unapproved address. A local preflight is not permission to
 send the first real OTP.
 
+**Passkey staging blocker:** `packages/auth/src/passkeys.ts` currently hardcodes
+USER RP ID `portal.biel.dev.br` and ADMIN RP ID `hub.biel.dev.br`; the only
+alternate RP IDs are `portal.localhost`/`hub.localhost` behind
+`VIRKI_PASSKEYS_LOCAL_TESTING` when `NODE_ENV !== production`. A separate
+production-mode staging hostname cannot exercise those passkeys today. Do not
+reuse production hostnames/RP IDs or enable the local-test bypass in staging.
+Keep both passkey flags false and mark Portal/Hub RP separation **BLOCK** until
+dedicated staging RP IDs/origins are implemented and independently reviewed.
+TOTP-based recovery tests may proceed, but they do not satisfy the passkey
+release gate below.
+
 The worker uses `VIRKI_EMAIL_MIN_SEND_INTERVAL_MS`, forwarded only to the
 email-worker Compose service with its unchanged 250 ms default (valid range:
 0–60000 ms). The operator must explicitly review the staging effective value
@@ -77,6 +88,10 @@ provider rate budget. No SMTP retry,
 operator-provided JSON documents and two **public** Ed25519 PEM files; it
 never reads `.env`, contacts Docker/SSH, SMTP, Cloudflare or any database,
 starts a worker, performs an inbox probe or authorizes external operations.
+The operator passes the effective SMTP tenant/endpoint/account IDs, host, port,
+TLS mode and SHA-256 of the configured SMTP username as explicit non-secret
+arguments; the CLI compares these to both signed declarations. The password
+is never read, hashed or emitted by this tool.
 Stage these four input files in a private directory on a **verified local
 filesystem** (0700 directory on POSIX). The CLI rejects UNC paths, symlink
 parents, hardlinked files, unsafe POSIX directory permissions and duplicate
@@ -99,7 +114,14 @@ node scripts/staging-otp-preflight.mjs \
   --observation /approved/independent-observation.json \
   --approver-public-key /approved/owner.pub.pem \
   --observer-public-key /approved/independent-observer.pub.pem \
-  --expected-source-sha <exact-40-hex-approved-sha>
+  --expected-source-sha <exact-40-hex-approved-sha> \
+  --smtp-tenant-id <opaque-staging-tenant-id> \
+  --smtp-endpoint-id <opaque-staging-endpoint-id> \
+  --smtp-account-id <opaque-staging-account-id> \
+  --smtp-host <approved-lowercase-relay-host> \
+  --smtp-port <approved-port> \
+  --smtp-secure <true-or-false> \
+  --smtp-username-sha256 <sha256-of-configured-smtp-username>
 ```
 
 The approver and independent observer must sign their JSON payloads **out of
@@ -114,28 +136,56 @@ encoding; the synthetic, entirely local specimen is in
 this verifier or treat an arbitrary operator-supplied public key as a
 pre-established trusted anchor.
 
+The schema is exact-key and fail-closed: older approvals/observations that do
+not contain the current worker-resource and SMTP tenant/endpoint/account,
+runtime fingerprint and relay-authentication evidence fields are invalid.
+Reissue and independently sign both complete canonical payloads; never append
+fields to an already signed document or reuse an earlier signature.
+
 The signed **approval** binds distinct owner, operator and observer IDs,
-observer public-key SHA-256 fingerprint, UTC approval window, exact source
-SHA, `sha256:<64-hex>` immutable OCI digest, non-production host, database
-host/name and three disjoint DB role IDs, SMTP tenant ID, opaque recipient
-allowlist/policy ID, worker interval, provider per-minute quota and an absolute
-per-run handoff budget. It includes explicit *production comparison IDs* only
-as attestable non-secret identifiers, never production credentials.
+observer public-key SHA-256 fingerprint, UTC approval window and exact source
+SHA. It separately binds the immutable worker and Hub OCI digests, distinct
+worker and Hub Compose project identities, and the SHA-256 of the exact
+Hub-only Compose file. The staging host, database host/name, three disjoint DB
+role IDs, SMTP tenant/endpoint/account IDs, exact SMTP host/port/TLS mode,
+SHA-256 of the SMTP account username, and Docker network ID are bound
+separately from their production comparison identities. The SMTP password is
+never included in the signed documents. The Hub and worker must share the
+approved staging network, while that network must differ from production. The
+approval also binds the opaque recipient allowlist/policy ID, worker interval,
+provider per-minute quota and an absolute per-run handoff budget. It binds a
+worker resource-policy ID and exact positive memory-byte, CPU-nanocore and PID
+limits; these values must match the standalone Compose inputs and the physical
+container's effective `HostConfig`. Production comparison values are
+attestable non-secret identifiers only, never production credentials.
 
 The independently signed **observation**, no older than five minutes, must
-match that authorization's source/digest/target and independently attest:
+match that authorization's source, both OCI digests, both Compose project
+identities, Hub Compose file hash and staging host/database/network target,
+then independently attest:
 
 - Worker `stopped`, zero running replicas, restart and autostart disabled,
   **no outbox drain begun** and a separately documented worker observation;
   the virgin pre-drain outbox has zero queued, processing, retryable, sent,
   terminal messages **and zero delivery attempts**.
+- Exact worker resource-policy ID, independent resource-policy evidence
+  reference, and memory/CPU/PID limits equal to the signed owner approval.
+  Missing, zero, changed or unbounded limits fail closed. The offline verifier
+  proves only that the two signed declarations agree; the operator must still
+  compare the actual Docker `HostConfig` values on the staging host.
 - Effective interval `1..60000` ms in the worker **alone**, together with the
   entire expected Compose service-name inventory, without rendering secrets.
 - Provider/relay **hard-enforced** recipient allowlist and rate/attempt caps,
   a separately evidenced rejection of an unlisted recipient, remaining quota
-  and exact agreement with the approved opaque recipient IDs. No email is
-  sent by this command; provider observations belong to a separately approved
-  collection window.
+  and exact agreement with the approved opaque recipient IDs. The relay
+  observation must independently verify SMTP authentication against the
+  approved tenant and bind its tenant, endpoint, account, host, port, TLS mode
+  and username fingerprint to the owner approval, with a separate opaque
+  `smtpAuthenticationEvidenceRef`. The CLI also compares the
+  actual worker SMTP host/port/TLS mode and SHA-256 of its configured username
+  to those signed values; it never accepts or hashes the SMTP password. No
+  email is sent by this command; provider observations belong to a separately
+  approved collection window.
 
 Failures return `STAGING_OTP_PREFLIGHT=BLOCK:<reason>` and exit nonzero,
 without echoing document contents. A consistent pair returns only
@@ -162,8 +212,9 @@ browser profile and no Cloudflare Access JWT/JWKS synthetic server in native
 mode. Every case needs an explicit PASS/FAIL (never a silent SKIP):
 
 1. **Normal USER/ADMIN login-password recovery:** prove both roles, without
-   exclusive dependence on the original mailbox; correctly configured TOTP
-   or signed passkey on the corresponding Portal/Hub relying-party ID; and,
+   exclusive dependence on the original mailbox; correctly configured TOTP;
+   separately mark Portal/Hub passkey relying-party separation BLOCK until
+   dedicated staging RP IDs/origins are available; and,
    where required, authorization by a **different**, active, independently
    elevated ADMIN. Prove verified replacement-mailbox OTP before commit,
    new normal password in a fresh browser, old password/session/trusted
