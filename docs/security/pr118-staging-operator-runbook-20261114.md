@@ -67,6 +67,8 @@ export COMPOSE_DISABLE_ENV_FILE=1
 : "${VIRKI_STAGING_EMAIL_WORKER_NETWORK:?pre-existing staging network required}"
 : "${VIRKI_STAGING_APPROVED_NETWORK_ID:?independently witnessed network ID required}"
 : "${VIRKI_STAGING_APPROVED_NETWORK_POLICY:?signed network policy required}"
+: "${VIRKI_STAGING_RESOURCE_POLICY_ID:?signed worker resource policy required}"
+: "${VIRKI_STAGING_RESOURCE_POLICY_RECEIPT:?worker resource policy evidence required}"
 : "${VIRKI_STAGING_EMAIL_WORKER_IMAGE:?immutable staging image required}"
 : "${VIRKI_STAGING_APPROVED_IMAGE:?owner-approved exact image ref required}"
 command -v jq >/dev/null
@@ -140,6 +142,9 @@ printf '%s' "$config" | jq -e --arg project "$project" --arg image "$image" --ar
     and (($w.ipc // null) == null)
     and (($w.container_name // null) == null)
     and (($w.healthcheck // null) == null)
+    and (($w.mem_limit // null) == null)
+    and (($w.cpus // null) == null)
+    and (($w.pids_limit // null) == null)
     and (($w.networks // {}) | keys == ["staging-mail"])
     and ((.volumes // {}) | length == 0)
     and (.networks | keys == ["staging-mail"])
@@ -218,18 +223,21 @@ worker_id="$(docker --context "$ctx" compose --project-name "$project" \
   --profile "$profile" -f "$file" ps -q email-worker)"
 test -n "$worker_id"
 docker --context "$ctx" inspect "$worker_id" \
-  --format '{{.State.Status}}|{{.State.ExitCode}}|{{.HostConfig.RestartPolicy.Name}}|{{.RestartCount}}|{{.Image}}'
+  --format '{{.State.Status}}|{{.State.ExitCode}}|{{.HostConfig.RestartPolicy.Name}}|{{.RestartCount}}|{{.Image}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.PidsLimit}}|{{.HostConfig.CgroupParent}}'
 docker --context "$ctx" inspect "$worker_id" \
   --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}NO_HEALTHCHECK{{end}}'
 ```
 
 The only acceptable runtime policy is `restart=no`; verify it on the actual
-container, not just YAML. The standalone worker has **no Docker HEALTHCHECK**.
-Do not call a running container healthy: observe process state, scoped DB
-identity/privileges, bounded outbox/attempt transitions and sanitized worker
-logs. The worker must remain on the approved network with no published ports,
-mounts or volume dependencies. Record only opaque audit/provider receipt IDs
-and aggregate counts.
+container, not just YAML. The standalone worker has **no Docker HEALTHCHECK**
+and declares no Compose CPU, memory or PID limits. The signed resource policy
+must prove effective Docker/cgroup limits on the actual container or host; the
+fields above must match that policy. If the limits are unbounded or the policy
+cannot be independently observed, stop. Do not call a running container
+healthy: observe process state, scoped DB identity/privileges, bounded
+outbox/attempt transitions and sanitized worker logs. The worker must remain
+on the approved network with no published ports, mounts or volume dependencies.
+Record only opaque audit/provider receipt IDs and aggregate counts.
 
 After the single approved OTP window, stop the worker:
 
