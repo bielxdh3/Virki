@@ -13,3 +13,25 @@ services:
     environment:
       DATABASE_URL: ${VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?isolated staging email-worker URL and role required}
       VIRKI_EMAIL_WORKER_SCOPED_ROLE: required
+      # A Compose override merges environment maps: omitting these values would
+      # silently inherit the production worker's SMTP settings and outbox key.
+      # Every credential/config source must be explicitly staging-scoped.
+      VIRKI_EMAIL_TRANSPORT: smtp
+      VIRKI_EMAIL_OUTBOX_KEY: ${VIRKI_STAGING_EMAIL_OUTBOX_KEY:?isolated staging outbox key required}
+      VIRKI_EMAIL_SMTP_HOST: ${VIRKI_STAGING_EMAIL_SMTP_HOST:?staging SMTP host required}
+      VIRKI_EMAIL_SMTP_PORT: ${VIRKI_STAGING_EMAIL_SMTP_PORT:?staging SMTP port required}
+      VIRKI_EMAIL_SMTP_SECURE: ${VIRKI_STAGING_EMAIL_SMTP_SECURE:?staging SMTP TLS mode required}
+      VIRKI_EMAIL_SMTP_USER: ${VIRKI_STAGING_EMAIL_SMTP_USER:?staging SMTP username required}
+      VIRKI_EMAIL_SMTP_PASSWORD: ${VIRKI_STAGING_EMAIL_SMTP_PASSWORD:?staging SMTP password required}
+      VIRKI_EMAIL_MIN_SEND_INTERVAL_MS: ${VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS:?approved staging interval required}
+      VIRKI_EMAIL_FROM: ${VIRKI_STAGING_EMAIL_FROM:?approved staging sender required}
+      VIRKI_EMAIL_REPLY_TO: ${VIRKI_STAGING_EMAIL_REPLY_TO:-}
+
+  hub:
+    # Only when this optional worker override is explicitly loaded: the Hub
+    # must target the isolated staging DB and encrypt for the same worker key.
+    # This is NOT a complete provisioning override for the whole stack.
+    environment:
+      DATABASE_URL: ${VIRKI_STAGING_HUB_DATABASE_URL:?isolated staging Hub URL required}
+      VIRKI_EMAIL_OUTBOX_KEY: ${VIRKI_STAGING_EMAIL_OUTBOX_KEY:?isolated staging outbox key required}
+      VIRKI_EMAIL_TRANSPORT: smtp

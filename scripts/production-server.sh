@@ -637,15 +637,16 @@ assert_tunnel_stopped() {
 assert_staging_mail_worker_stopped() {
   local containers container observed
   # Docker restart:unless-stopped may temporarily report "restarting" rather
-  # than "running". Enumerate ALL project worker containers and inspect each
-  # actual Docker state; none may be active or about to resume delivery.
+  # than "running". A currently exited container is also unsafe if it can
+  # auto-restart after Docker/host recovery. Inspect actual restart policy as
+  # well as state; staging requires a genuinely disabled mail worker.
   containers=$(compose ps --all --quiet email-worker) || fail 'Could not enumerate staging mail-worker containers.'
   while IFS= read -r container; do
     [[ -z "$container" ]] && continue
-    observed=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}' "$container") || fail 'Could not inspect staging mail-worker state.'
+    observed=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}|{{.HostConfig.RestartPolicy.Name}}' "$container") || fail 'Could not inspect staging mail-worker state or restart policy.'
     case "$observed" in
-      'virki-prod|email-worker|created|false|false'|'virki-prod|email-worker|exited|false|false') ;;
-      *) fail 'Staging mail worker must remain stopped, not running, restarting or in an unknown state.' ;;
+      'virki-prod|email-worker|created|false|false|no'|'virki-prod|email-worker|exited|false|false|no') ;;
+      *) fail 'Staging mail worker must be stopped with auto-restart disabled, not running, restarting or in an unknown state.' ;;
     esac
   done <<< "$containers"
 }

@@ -70,6 +70,29 @@ It requires the separate variable VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL,
 without fallback to the Hub DATABASE_URL. The operator must independently
 verify the URL authenticates as virki_email_worker, targets the same isolated
 staging database used by Hub and has no production endpoint or identity.
+Compose merges service environment mappings: a worker-only database override
+would otherwise silently retain the production Compose SMTP credentials,
+sender, transport selector, rate and outbox encryption key. The manual
+override therefore explicitly replaces every inherited `VIRKI_EMAIL_` field
+with staging-only sources: mandatory `VIRKI_STAGING_EMAIL_OUTBOX_KEY`,
+`VIRKI_STAGING_EMAIL_SMTP_HOST`, `VIRKI_STAGING_EMAIL_SMTP_PORT`,
+`VIRKI_STAGING_EMAIL_SMTP_SECURE`, `VIRKI_STAGING_EMAIL_SMTP_USER`,
+`VIRKI_STAGING_EMAIL_SMTP_PASSWORD`, `VIRKI_STAGING_EMAIL_FROM`, and
+`VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS`. Its transport is explicitly
+`smtp`, and optional `VIRKI_STAGING_EMAIL_REPLY_TO` defaults to empty rather
+than inheriting a production reply address. The same override pins the Hub
+to `VIRKI_STAGING_HUB_DATABASE_URL`, the **same distinct staging outbox
+key**, and the `smtp` enqueue selector. Missing mandatory staging sources
+cause Compose interpolation to fail closed; renaming a variable does not
+prove its secret bytes or destination differ from production.
+
+This overlay does **not** provision or isolate the rest of the stack,
+including the issuer, migrator, PostgreSQL and external edge/relay: those
+still require a separately reviewed staging-only base environment and host.
+Before any worker start, independently verify actual Hub/worker database
+identities, their shared staging outbox key, distinct SMTP tenant/sender,
+valid TLS/AUTH, provider allowlist and quota, and absence of any production
+or deManage endpoint **without logging secret values**.
 This manual override additionally requires the application worker's
 `VIRKI_EMAIL_WORKER_SCOPED_ROLE=required` gate. The worker checks the effective
 PostgreSQL privilege matrix at startup and before **each** outbox-processing

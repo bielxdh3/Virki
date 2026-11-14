@@ -15,12 +15,34 @@ const docs = read("docs/security/staging-email-worker-role-20261112.md");
 const worker = read("packages/auth/src/email-worker.ts");
 const guard = read("packages/auth/src/email-worker-role.ts");
 
+function serviceEnvironmentFields(yaml, service) {
+  const lines = yaml.split("\n");
+  const start = lines.indexOf(`  ${service}:`);
+  assert.notEqual(start, -1, `missing ${service} service`);
+  const endOffset = lines.slice(start + 1).findIndex((line) => /^\x20{2}[a-z][a-z-]*:/u.test(line));
+  const body = lines.slice(start + 1, endOffset === -1 ? lines.length : start + 1 + endOffset);
+  const environmentIndex = body.indexOf("    environment:");
+  assert.notEqual(environmentIndex, -1, `missing ${service} environment`);
+  // YAML mapping indentation is fixed in these two deliberately small Compose files.
+  const fields = new Map();
+  for (const line of body.slice(environmentIndex + 1)) {
+    if (/^\x20{4}[^ ]/u.test(line)) break;
+    const match = /^\x20{6}([A-Z][A-Z0-9_]+):\x20(.*)$/u.exec(line);
+    if (match) {
+      assert.equal(fields.has(match[1]), false, `duplicate ${service} environment key ${match[1]}`);
+      fields.set(match[1], match[2]);
+    }
+  }
+  return fields;
+}
+
 test("staging override requires worker-only URL and never defaults to Hub runtime", () => {
   assert.match(override, /services:\n\x20{2}email-worker:\n(?:\x20{4}#.*\n)*\x20{4}profiles: \["staging-email-worker-manual"\]\n(?:\x20{4}#.*\n)*\x20{4}restart: "no"\n\x20{4}environment:\n/u,
     "manual staging worker must require an explicit profile and disable inherited production auto-restart");
   assert.ok(override.includes("DATABASE_URL: $" + "{VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?"));
   assert.ok(override.includes("VIRKI_EMAIL_WORKER_SCOPED_ROLE: required"));
-  assert.equal(override.split("\n      DATABASE_URL:").length - 1, 1);
+  assert.equal(override.split("\n      DATABASE_URL:").length - 1, 2,
+    "the manual overlay must separately pin the worker and Hub staging URLs");
   assert.equal(override.includes("$" + "{DATABASE_URL"), false);
   assert.equal(override.includes("VIRKI_RUNTIME_DB_PASSWORD"), false);
   assert.ok(prod.includes("email-worker:"));
@@ -30,6 +52,39 @@ test("staging override requires worker-only URL and never defaults to Hub runtim
   assert.equal((prod + dev + stage).includes("docker-compose.staging-email-worker.yml"), false,
     "normal production commands must not load an unapproved staging override");
   assert.ok(stage.includes("readonly staging_application_services=(public-site hub oidc-issuer session-cleanup)"));
+});
+
+test("manual staging worker cannot inherit ordinary SMTP credentials or outbox crypto key", () => {
+  const originalEmailKeys = [...serviceEnvironmentFields(prod, "email-worker").keys()].filter((key) =>
+    key.startsWith("VIRKI_EMAIL_"));
+  const stagingWorker = serviceEnvironmentFields(override, "email-worker");
+  for (const key of originalEmailKeys) {
+    assert.ok(stagingWorker.has(key), `staging override must replace inherited ${key}`);
+  }
+  const requiredStageSources = [
+    ["VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_STAGING_EMAIL_OUTBOX_KEY"],
+    ["VIRKI_EMAIL_SMTP_HOST", "VIRKI_STAGING_EMAIL_SMTP_HOST"],
+    ["VIRKI_EMAIL_SMTP_PORT", "VIRKI_STAGING_EMAIL_SMTP_PORT"],
+    ["VIRKI_EMAIL_SMTP_SECURE", "VIRKI_STAGING_EMAIL_SMTP_SECURE"],
+    ["VIRKI_EMAIL_SMTP_USER", "VIRKI_STAGING_EMAIL_SMTP_USER"],
+    ["VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_STAGING_EMAIL_SMTP_PASSWORD"],
+    ["VIRKI_EMAIL_FROM", "VIRKI_STAGING_EMAIL_FROM"],
+    ["VIRKI_EMAIL_MIN_SEND_INTERVAL_MS", "VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS"]
+  ];
+  for (const [key, source] of requiredStageSources) {
+    assert.ok(stagingWorker.get(key)?.startsWith("${" + source + ":?"),
+      `${key} needs its own mandatory staging source`);
+  }
+  assert.equal(stagingWorker.get("VIRKI_EMAIL_TRANSPORT"), "smtp",
+    "manual worker must select SMTP explicitly");
+  assert.equal(stagingWorker.get("VIRKI_EMAIL_REPLY_TO"), "${VIRKI_STAGING_EMAIL_REPLY_TO:-}",
+    "even optional Reply-To cannot inherit the production sender");
+  const stagingHub = serviceEnvironmentFields(override, "hub");
+  assert.ok(stagingHub.get("VIRKI_EMAIL_OUTBOX_KEY")?.startsWith("${VIRKI_STAGING_EMAIL_OUTBOX_KEY:?"),
+    "the Hub must encrypt with the same staging-only outbox key");
+  assert.ok(stagingHub.get("DATABASE_URL")?.startsWith("${VIRKI_STAGING_HUB_DATABASE_URL:?"),
+    "the Hub must not use an inherited production DATABASE_URL in this manual override");
+  assert.equal(stagingHub.get("VIRKI_EMAIL_TRANSPORT"), "smtp");
 });
 
 test("postmigration SQL is atomic and limits worker to mail data instead of identity", () => {

@@ -838,6 +838,8 @@ test("Virki staging is private, bounded, loopback-only, and does not start Tunne
   const workerGate = serverScript.slice(serverScript.indexOf("assert_staging_mail_worker_stopped() {"), serverScript.indexOf("stop_stage_after_failure() {"));
   assert.match(workerGate, /compose ps --all --quiet email-worker/u);
   assert.match(workerGate, /docker inspect --format [^\n]*\.State\.Status[^\n]*\.State\.Running[^\n]*\.State\.Restarting/u);
+  assert.match(workerGate, /docker inspect --format [^\n]*\.HostConfig\.RestartPolicy\.Name/u,
+    "staging cannot accept a stopped worker with an inherited auto-restart policy");
   assert.match(workerGate, /virki-prod\|email-worker\|created\|false\|false/u);
   assert.match(workerGate, /virki-prod\|email-worker\|exited\|false\|false/u);
   assert.doesNotMatch(workerGate, /--status running/u,
@@ -873,7 +875,7 @@ docker() {
   [[ "$1" == inspect && "$2" == --format && "$#" == 4 ]] || exit 98
   [[ "\${STUB_DOCKER_FAIL:-0}" == 0 ]] || return 1
   if [[ "$4" == worker-safe ]]; then
-    printf '%s\\n' 'virki-prod|email-worker|exited|false|false'
+    printf '%s\\n' 'virki-prod|email-worker|exited|false|false|no'
   else
     printf '%s\\n' "\${STUB_DOCKER_IDENTITY:-}"
   fi
@@ -895,17 +897,21 @@ assert_staging_mail_worker_stopped
   };
   check({}, 0);
   check({ STUB_WORKER_IDS: "worker-safe" }, 0);
-  check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|created|false|false" }, 0);
+  check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|created|false|false|no" }, 0);
   for (const state of [
-    "virki-prod|email-worker|running|true|false",
-    "virki-prod|email-worker|restarting|true|true",
-    "virki-prod|email-worker|paused|true|false",
-    "virki-prod|email-worker|dead|false|false",
-    "another-project|email-worker|exited|false|false",
-    "virki-prod|hub|exited|false|false",
+    "virki-prod|email-worker|running|true|false|no",
+    "virki-prod|email-worker|restarting|true|true|no",
+    "virki-prod|email-worker|paused|true|false|no",
+    "virki-prod|email-worker|dead|false|false|no",
+    "virki-prod|email-worker|exited|false|false|unless-stopped",
+    "virki-prod|email-worker|created|false|false|always",
+    "virki-prod|email-worker|exited|false|false|on-failure",
+    "virki-prod|email-worker|exited|false|false|",
+    "another-project|email-worker|exited|false|false|no",
+    "virki-prod|hub|exited|false|false|no",
     "garbage"
   ]) check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_IDENTITY: state }, 79);
-  check({ STUB_WORKER_IDS: "worker-safe\nworker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|restarting|false|true" }, 79);
+  check({ STUB_WORKER_IDS: "worker-safe\nworker-unknown", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|restarting|false|true|no" }, 79);
   check({ STUB_WORKER_IDS: "worker-unknown", STUB_DOCKER_FAIL: "1" }, 79);
   check({ STUB_COMPOSE_FAIL: "1" }, 79);
 });
