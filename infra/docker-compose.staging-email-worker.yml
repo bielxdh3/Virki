@@ -4,6 +4,9 @@
 # restrictions, test allowlist and quota before any standalone worker start.
 services:
   email-worker:
+    # Override production's unless-stopped: manual staging sends must not
+    # resume after worker failure or a Docker daemon/host restart.
+    restart: "no"
     environment:
       DATABASE_URL: ${VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?isolated staging email-worker URL and role required}
       VIRKI_EMAIL_WORKER_SCOPED_ROLE: required

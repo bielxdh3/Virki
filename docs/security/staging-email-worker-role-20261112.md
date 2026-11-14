@@ -74,6 +74,20 @@ This manual override additionally requires the application worker's
 `VIRKI_EMAIL_WORKER_SCOPED_ROLE=required` gate. The worker checks the effective
 PostgreSQL privilege matrix at startup and before **each** outbox-processing
 iteration, stopping further sends when later `PUBLIC` grants widen the role.
+The override also explicitly sets `restart: "no"`, replacing production's
+`unless-stopped` policy. This prevents a manually activated staging worker
+from restarting automatically after a process failure or daemon/host restart
+and draining mail outside the approved observed test window. Before any
+standalone start, the operator must verify the **effective merged** Compose
+policy is `restart: "no"`, the worker is stopped and autostart is disabled.
+For an existing container, independently verify its **actual** Docker
+`HostConfig.RestartPolicy.Name` is `no`: rendering a new Compose config does
+not by itself update the restart policy of an already-created container.
+Do not reuse or reconcile a discrepant container without staging-specific
+operator approval and a new stopped-worker observation.
+This does not prevent someone from starting the worker manually or including
+it in an explicit `up` operation: only a separately authorized, supervised
+start is permitted, and every later start requires fresh evidence and approval.
 The check is not an atomic DDL barrier: a grant racing between a check and
 send still requires independent administrator monitoring and a frozen
 migration/permission-change window during staging acceptance.
