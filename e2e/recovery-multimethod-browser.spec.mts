@@ -2795,6 +2795,13 @@ for (const role of ["USER", "ADMIN"] as const) {
           .find(cookie => cookie.name === cookieName)?.value === key).toBe(true);
         const before = (await context.cookies(origin)).find(cookie => cookie.name === cookieName)!;
         expect((await context.cookies(origin)).some(cookie => cookie.name.includes("recovery_browser"))).toBe(false);
+        // Set-Cookie is observable before the browser finishes the explicit
+        // switch action's full-document location.replace. Wait for that
+        // legitimate navigation to commit before starting the separate
+        // restart-consent journey, or page.goto can interrupt it and create a
+        // false negative even though the primary bearer was adopted correctly.
+        await expect(active.page).toHaveURL(`${origin}/recover?requestId=${original.id}`);
+        await active.page.waitForLoadState("domcontentloaded");
         await active.page.goto(`${origin}/recover`);
         await expect(active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u })).toBeVisible();
         await active.page.getByLabel("E-mail da conta", { exact: true }).fill(email);
