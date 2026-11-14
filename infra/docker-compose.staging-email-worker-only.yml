@@ -11,6 +11,11 @@ services:
     pull_policy: never
     profiles: ["staging-email-worker-manual"]
     restart: "no"
+    # Limits are mandatory and come from the signed staging resource policy;
+    # no implicit/unbounded worker CPU, memory or process budget is accepted.
+    mem_limit: ${VIRKI_STAGING_EMAIL_WORKER_MEMORY_LIMIT:?signed staging memory limit required}
+    cpus: ${VIRKI_STAGING_EMAIL_WORKER_CPUS_LIMIT:?signed staging CPU limit required}
+    pids_limit: ${VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT:?signed staging PID limit required}
     user: node:node
     read_only: true
     cap_drop: [ALL]

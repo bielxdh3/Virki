@@ -24,10 +24,16 @@ test("isolated SMTP worker manifest has only a manual service, external staging 
     "no additional Compose services, especially postgres, may appear");
   assert.match(content, /^\x20{4}profiles: \["staging-email-worker-manual"\]/mu);
   assert.match(content, /^\x20{4}restart: "no"/mu);
+  assert.match(content, /^\x20{4}mem_limit: \$\{VIRKI_STAGING_EMAIL_WORKER_MEMORY_LIMIT:\?/mu);
+  assert.match(content, /^\x20{4}cpus: \$\{VIRKI_STAGING_EMAIL_WORKER_CPUS_LIMIT:\?/mu);
+  assert.match(content, /^\x20{4}pids_limit: \$\{VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT:\?/mu);
   assert.match(content, /^\x20{4}pull_policy: never/mu);
+  assert.match(content, /^\x20{4}user: node:node$/mu);
+  assert.match(content, /^\x20{4}command: npm run email:worker --workspace @virki\/auth$/mu);
   assert.match(content, /^\x20{4}read_only: true/mu);
   assert.match(content, /^\x20{4}cap_drop: \[ALL\]/mu);
   assert.match(content, /^\x20{4}security_opt: \[no-new-privileges:true\]/mu);
+  assert.match(content, /^\x20{4}tmpfs:\n\x20{6}- \/tmp:rw,noexec,nosuid,nodev,size=64m$/mu);
   assert.match(content, /^networks:\n\x20{2}staging-mail:\n\x20{4}external: true/mu);
   assert.match(content, /^\x20{4}name: \$\{VIRKI_STAGING_EMAIL_WORKER_NETWORK:\?/mu);
   for (const forbidden of [/^volumes:/mu, /^\x20{4}volumes:/mu, /^\x20{4}depends_on:/mu, /^\x20{4}ports:/mu, /^\x20{4}build:/mu, /virki_postgres_data/u]) {
@@ -36,6 +42,9 @@ test("isolated SMTP worker manifest has only a manual service, external staging 
   for (const sourceName of [
     "VIRKI_STAGING_EMAIL_WORKER_IMAGE",
     "VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL",
+    "VIRKI_STAGING_EMAIL_WORKER_MEMORY_LIMIT",
+    "VIRKI_STAGING_EMAIL_WORKER_CPUS_LIMIT",
+    "VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT",
     "VIRKI_STAGING_EMAIL_OUTBOX_KEY",
     "VIRKI_STAGING_EMAIL_SMTP_HOST",
     "VIRKI_STAGING_EMAIL_SMTP_PORT",
@@ -74,6 +83,9 @@ test("real Compose config selects only the external-network manual worker withou
     VIRKI_STAGING_COMPOSE_PROJECT: "virki-standalone-test",
     VIRKI_STAGING_EMAIL_WORKER_NETWORK: "approved-staging-test-network",
     VIRKI_STAGING_EMAIL_WORKER_IMAGE: "fixture.invalid/virki@sha256:" + "a".repeat(64),
+    VIRKI_STAGING_EMAIL_WORKER_MEMORY_LIMIT: "512m",
+    VIRKI_STAGING_EMAIL_WORKER_CPUS_LIMIT: "1.0",
+    VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT: "128",
     VIRKI_STAGING_EMAIL_SMTP_PORT: "587",
     VIRKI_STAGING_EMAIL_SMTP_SECURE: "false",
     VIRKI_STAGING_EMAIL_OUTBOX_KEY: "b".repeat(64),
@@ -90,7 +102,32 @@ test("real Compose config selects only the external-network manual worker withou
   assert.equal(config.name, "virki-standalone-test");
   assert.deepEqual(Object.keys(config.services), ["email-worker"]);
   assert.equal(config.services["email-worker"].restart, "no");
+  assert.equal(config.services["email-worker"].mem_limit, "536870912");
+  assert.equal(config.services["email-worker"].cpus, 1);
+  assert.equal(config.services["email-worker"].pids_limit, 128);
+  assert.equal(config.services["email-worker"].user, "node:node");
+  assert.equal(config.services["email-worker"].read_only, true);
+  assert.deepEqual(config.services["email-worker"].cap_drop, ["ALL"]);
+  assert.deepEqual(config.services["email-worker"].security_opt, ["no-new-privileges:true"]);
+  assert.deepEqual(config.services["email-worker"].tmpfs, ["/tmp:rw,noexec,nosuid,nodev,size=64m"]);
   assert.equal(config.services["email-worker"].depends_on, undefined);
+  assert.equal(config.services["email-worker"].volumes, undefined);
+  assert.equal(config.services["email-worker"].ports, undefined);
+  assert.equal(config.services["email-worker"].healthcheck, undefined);
+  assert.equal(config.services["email-worker"].env_file, undefined);
+  assert.equal(config.services["email-worker"].build, undefined);
+  assert.equal(config.services["email-worker"].privileged, undefined);
+  assert.equal(config.services["email-worker"].devices, undefined);
+  assert.equal(config.services["email-worker"].network_mode, undefined);
+  assert.equal(config.services["email-worker"].pid, undefined);
+  assert.equal(config.services["email-worker"].ipc, undefined);
+  assert.equal(config.services["email-worker"].container_name, undefined);
+  assert.deepEqual(Object.keys(config.services["email-worker"].environment).sort(), [
+    "DATABASE_URL", "NODE_ENV", "VIRKI_EMAIL_FROM", "VIRKI_EMAIL_MIN_SEND_INTERVAL_MS",
+    "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_EMAIL_REPLY_TO", "VIRKI_EMAIL_SMTP_HOST",
+    "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_SMTP_PORT", "VIRKI_EMAIL_SMTP_SECURE",
+    "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_TRANSPORT", "VIRKI_EMAIL_WORKER_SCOPED_ROLE"
+  ]);
   assert.ok(!config.volumes || Object.keys(config.volumes).length === 0);
   assert.deepEqual(Object.keys(config.networks), ["staging-mail"]);
   assert.equal(config.networks["staging-mail"].external, true);
@@ -98,6 +135,8 @@ test("real Compose config selects only the external-network manual worker withou
   for (const missing of [
     "VIRKI_STAGING_COMPOSE_PROJECT", "VIRKI_STAGING_EMAIL_WORKER_NETWORK",
     "VIRKI_STAGING_EMAIL_WORKER_IMAGE", "VIRKI_STAGING_EMAIL_SMTP_PASSWORD",
+    "VIRKI_STAGING_EMAIL_WORKER_MEMORY_LIMIT", "VIRKI_STAGING_EMAIL_WORKER_CPUS_LIMIT",
+    "VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT",
     "VIRKI_STAGING_EMAIL_OUTBOX_KEY", "VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL"
   ]) {
     const candidate = { ...env };

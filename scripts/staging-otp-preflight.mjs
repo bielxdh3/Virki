@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const SOURCE_SHA = /^[a-f0-9]{40}$/u;
 const OCI_DIGEST = /^sha256:[a-f0-9]{64}$/u;
+const SHA256_HEX = /^[a-f0-9]{64}$/u;
+const DOCKER_NETWORK_ID = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9._-]{2,95}$/u;
 const UTC_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const MAX_OBSERVATION_AGE_MS = 5 * 60_000;
@@ -92,9 +94,10 @@ function authenticated(envelope, field, publicKey) {
 }
 
 function site(site) {
-  shape(site, ["hostId", "dbHostId", "dbName", "dbRoles", "smtpTenantId"]);
+  shape(site, ["hostId", "dbHostId", "dbName", "dbRoles", "smtpTenantId", "networkId"]);
   for (const field of ["hostId", "dbHostId", "dbName", "smtpTenantId"]) requireMatch(site[field], IDENTIFIER);
   requireIds(site.dbRoles, 3, 3);
+  requireMatch(site.networkId, DOCKER_NETWORK_ID);
 }
 
 /** Returns only a static consistency result. Never claims the worker is stopped NOW. */
@@ -106,8 +109,8 @@ export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvel
 
   const approval = authenticated(approvalEnvelope, "approval", approver);
   const observed = authenticated(observationEnvelope, "observation", observer);
-  shape(approval, ["authorizationId", "ownerId", "operatorId", "observerId", "observerKeySha256", "issuedAt", "expiresAt", "sourceSha", "ociDigest", "staging", "production", "recipientPolicyId", "recipientIds", "workerIntervalMs", "maxHandoffs", "providerPerMinuteQuota"]);
-  shape(observed, ["authorizationId", "observerId", "observedAt", "sourceSha", "ociDigest", "staging", "worker", "relay", "queue"]);
+  shape(approval, ["authorizationId", "ownerId", "operatorId", "observerId", "observerKeySha256", "issuedAt", "expiresAt", "sourceSha", "ociDigest", "hubOciDigest", "workerComposeProject", "hubComposeProject", "hubComposeFileSha256", "staging", "production", "workerResourcePolicyId", "workerMemoryLimitBytes", "workerCpuLimitNano", "workerPidsLimit", "recipientPolicyId", "recipientIds", "workerIntervalMs", "maxHandoffs", "providerPerMinuteQuota"]);
+  shape(observed, ["authorizationId", "observerId", "observedAt", "sourceSha", "ociDigest", "hubOciDigest", "workerComposeProject", "hubComposeProject", "hubComposeFileSha256", "staging", "worker", "relay", "queue"]);
   for (const id of [approval.authorizationId, approval.ownerId, approval.operatorId, approval.observerId, approval.recipientPolicyId]) requireMatch(id, IDENTIFIER);
   if (new Set([approval.ownerId, approval.operatorId, approval.observerId]).size !== 3 ||
       approval.observerKeySha256 !== observer.fingerprint) block("OBSERVER_NOT_INDEPENDENT");
@@ -120,19 +123,36 @@ export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvel
       observedAt < issuedAt || observedAt > clock || clock - observedAt > MAX_OBSERVATION_AGE_MS) block("STALE_OR_UNAUTHORIZED_EVIDENCE");
   requireMatch(approval.sourceSha, SOURCE_SHA);
   requireMatch(approval.ociDigest, OCI_DIGEST);
+  requireMatch(approval.hubOciDigest, OCI_DIGEST);
+  requireMatch(approval.workerComposeProject, IDENTIFIER);
+  requireMatch(approval.hubComposeProject, IDENTIFIER);
+  requireMatch(approval.hubComposeFileSha256, SHA256_HEX);
+  if (approval.workerComposeProject === approval.hubComposeProject ||
+      approval.workerComposeProject === "virki-prod" || approval.hubComposeProject === "virki-prod" ||
+      approval.workerComposeProject.startsWith("demanage") || approval.hubComposeProject.startsWith("demanage")) {
+    block("PRODUCTION_IDENTITY_REUSE");
+  }
   if (approval.sourceSha !== expectedSourceSha || observed.sourceSha !== expectedSourceSha ||
       observed.ociDigest !== approval.ociDigest || observed.authorizationId !== approval.authorizationId ||
+      observed.hubOciDigest !== approval.hubOciDigest ||
+      observed.workerComposeProject !== approval.workerComposeProject ||
+      observed.hubComposeProject !== approval.hubComposeProject ||
+      observed.hubComposeFileSha256 !== approval.hubComposeFileSha256 ||
       observed.observerId !== approval.observerId) block("ATTESTATION_MISMATCH");
 
   site(approval.staging);
   site(approval.production);
   site(observed.staging);
   requireSame(observed.staging, approval.staging);
-  for (const field of ["hostId", "dbHostId", "dbName", "smtpTenantId"]) {
+  for (const field of ["hostId", "dbHostId", "dbName", "smtpTenantId", "networkId"]) {
     if (approval.staging[field] === approval.production[field]) block("PRODUCTION_IDENTITY_REUSE");
   }
   if (approval.staging.dbRoles.some((role) => approval.production.dbRoles.includes(role))) block("PRODUCTION_IDENTITY_REUSE");
   requireIds(approval.recipientIds, 1, 20); // Opaque IDs only; never email addresses or recipient secrets.
+  requireMatch(approval.workerResourcePolicyId, IDENTIFIER);
+  requireInteger(approval.workerMemoryLimitBytes, 1, Number.MAX_SAFE_INTEGER);
+  requireInteger(approval.workerCpuLimitNano, 1, Number.MAX_SAFE_INTEGER);
+  requireInteger(approval.workerPidsLimit, 1, Number.MAX_SAFE_INTEGER);
   requireInteger(approval.workerIntervalMs, 1, 60_000);
   requireInteger(approval.maxHandoffs, 1, 20);
   requireInteger(approval.providerPerMinuteQuota, 1, 10_000);
@@ -140,7 +160,7 @@ export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvel
   if (Math.floor(60_000 / approval.workerIntervalMs) + 1 > approval.providerPerMinuteQuota ||
       approval.maxHandoffs > approval.providerPerMinuteQuota) block("SEND_BUDGET_NOT_PROVEN");
 
-  shape(observed.worker, ["state", "runningReplicas", "restartDisabled", "autostartDisabled", "outboxDrainStarted", "effectiveIntervalMs", "servicesWithInterval", "observedServiceNames", "evidenceRef"]);
+  shape(observed.worker, ["state", "runningReplicas", "restartDisabled", "autostartDisabled", "outboxDrainStarted", "effectiveIntervalMs", "servicesWithInterval", "observedServiceNames", "resourcePolicyId", "resourcePolicyEvidenceRef", "memoryLimitBytes", "cpuLimitNano", "pidsLimit", "evidenceRef"]);
   requireBool(observed.worker.state, "stopped");
   requireInteger(observed.worker.runningReplicas, 0, 0);
   requireBool(observed.worker.restartDisabled, true);
@@ -148,6 +168,14 @@ export function evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvel
   requireBool(observed.worker.outboxDrainStarted, false);
   requireMatch(observed.worker.evidenceRef, IDENTIFIER);
   requireSame(observed.worker.effectiveIntervalMs, approval.workerIntervalMs);
+  requireSame(observed.worker.resourcePolicyId, approval.workerResourcePolicyId);
+  requireMatch(observed.worker.resourcePolicyEvidenceRef, IDENTIFIER);
+  requireInteger(observed.worker.memoryLimitBytes, 1, Number.MAX_SAFE_INTEGER);
+  requireInteger(observed.worker.cpuLimitNano, 1, Number.MAX_SAFE_INTEGER);
+  requireInteger(observed.worker.pidsLimit, 1, Number.MAX_SAFE_INTEGER);
+  requireSame(observed.worker.memoryLimitBytes, approval.workerMemoryLimitBytes);
+  requireSame(observed.worker.cpuLimitNano, approval.workerCpuLimitNano);
+  requireSame(observed.worker.pidsLimit, approval.workerPidsLimit);
   requireSame(observed.worker.servicesWithInterval, ["email-worker"]);
   requireSame(observed.worker.observedServiceNames, ["email-worker", ...NON_WORKER_SERVICES].sort());
 
