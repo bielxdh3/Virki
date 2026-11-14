@@ -16,7 +16,7 @@ const worker = read("packages/auth/src/email-worker.ts");
 const guard = read("packages/auth/src/email-worker-role.ts");
 
 test("staging override requires worker-only URL and never defaults to Hub runtime", () => {
-  assert.match(override, /services:\n  email-worker:\n(?: {4}#.*\n)* {4}profiles: \["staging-email-worker-manual"\]\n(?: {4}#.*\n)* {4}restart: "no"\n    environment:\n/u,
+  assert.match(override, /services:\n\x20{2}email-worker:\n(?:\x20{4}#.*\n)*\x20{4}profiles: \["staging-email-worker-manual"\]\n(?:\x20{4}#.*\n)*\x20{4}restart: "no"\n\x20{4}environment:\n/u,
     "manual staging worker must require an explicit profile and disable inherited production auto-restart");
   assert.ok(override.includes("DATABASE_URL: $" + "{VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?"));
   assert.ok(override.includes("VIRKI_EMAIL_WORKER_SCOPED_ROLE: required"));
@@ -24,7 +24,7 @@ test("staging override requires worker-only URL and never defaults to Hub runtim
   assert.equal(override.includes("$" + "{DATABASE_URL"), false);
   assert.equal(override.includes("VIRKI_RUNTIME_DB_PASSWORD"), false);
   assert.ok(prod.includes("email-worker:"));
-  assert.match(prod, /  email-worker:\n(?: {4}[^\n]*\n)* {4}restart: unless-stopped\n/u,
+  assert.match(prod, /\x20{2}email-worker:\n(?:\x20{4}[^\n]*\n)*\x20{4}restart: unless-stopped\n/u,
     "production worker intentionally has a restart policy; staging must override it");
   assert.ok(prod.includes("DATABASE_URL: $" + "{DATABASE_URL:?"));
   assert.equal((prod + dev + stage).includes("docker-compose.staging-email-worker.yml"), false,
