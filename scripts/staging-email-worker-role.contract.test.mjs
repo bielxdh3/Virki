@@ -37,8 +37,8 @@ function serviceEnvironmentFields(yaml, service) {
 }
 
 test("staging override requires worker-only URL and never defaults to Hub runtime", () => {
-  assert.match(override, /services:\n\x20{2}email-worker:\n(?:\x20{4}#.*\n)*\x20{4}profiles: \["staging-email-worker-manual"\]\n(?:\x20{4}#.*\n)*\x20{4}restart: "no"\n\x20{4}environment:\n/u,
-    "manual staging worker must require an explicit profile and disable inherited production auto-restart");
+  assert.match(override, /services:\n\x20{2}email-worker:\n(?:\x20{4}#.*\n)*\x20{4}profiles: \["staging-email-worker-manual"\]\n(?:\x20{4}#.*\n)*\x20{4}depends_on: !reset \[\]\n(?:\x20{4}#.*\n)*\x20{4}restart: "no"\n\x20{4}environment:\n/u,
+    "manual staging worker must disable dependency startup and auto-restart behind an explicit profile");
   assert.ok(override.includes("DATABASE_URL: $" + "{VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?"));
   assert.ok(override.includes("VIRKI_EMAIL_WORKER_SCOPED_ROLE: required"));
   assert.equal(override.split("\n      DATABASE_URL:").length - 1, 2,
@@ -85,6 +85,17 @@ test("manual staging worker cannot inherit ordinary SMTP credentials or outbox c
   assert.ok(stagingHub.get("DATABASE_URL")?.startsWith("${VIRKI_STAGING_HUB_DATABASE_URL:?"),
     "the Hub must not use an inherited production DATABASE_URL in this manual override");
   assert.equal(stagingHub.get("VIRKI_EMAIL_TRANSPORT"), "smtp");
+});
+
+test("manual staging email-worker cannot inherit the production PostgreSQL startup dependency", () => {
+  assert.match(override, /name: \$\{VIRKI_STAGING_COMPOSE_PROJECT:\?[^}]+\}/u,
+    "manual staging must require an explicitly selected project namespace");
+  assert.match(prod, /\x20{2}email-worker:[\s\S]*?\x20{4}depends_on:\n\x20{6}postgres:/u,
+    "regression proof must track the real parent worker dependency");
+  assert.match(override, /\x20{2}email-worker:\n(?:\x20{4}[^\n]*\n)*?\x20{4}depends_on: !reset \[\]/u,
+    "manual worker must not start inherited base postgres/volume during up email-worker");
+  assert.match(docs, /no inherited Compose PostgreSQL dependency/u,
+    "operator must know the worker requires a separately provisioned staging database");
 });
 
 test("postmigration SQL is atomic and limits worker to mail data instead of identity", () => {

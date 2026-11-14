@@ -111,6 +111,23 @@ policy is `restart: "no"`, the worker is stopped and autostart is disabled.
 The `staging-email-worker-manual` Compose profile additionally keeps this
 worker out of an unqualified staging `docker compose up`: the worker must be
 specifically selected after a new operator-approved, supervised send window.
+The override also has **no inherited Compose PostgreSQL dependency**:
+`depends_on: !reset []` removes the production worker's dependency on the
+base `postgres` service. Therefore, an explicit one-service
+`up --no-deps email-worker` must not provision/start the bundled PostgreSQL
+or create/use its volume; the approved isolated staging PostgreSQL must be
+already running and separately inspected. This does **not** make an
+unqualified `docker compose up` safe: the base stack still contains other
+services and its production-style PostgreSQL volume. Never use the manual
+override as a full staging provisioning/deployment definition.
+The manual overlay also requires `VIRKI_STAGING_COMPOSE_PROJECT` instead of
+silently inheriting the base project's default namespace. Verify the
+**effective** project name is an operator-approved isolated staging name, not
+`virki-prod`, and confirm the selected Docker host/context, network and
+volume identities before every action. The CLI `-p` option and
+`COMPOSE_PROJECT_NAME` can override top-level `name`: a required variable
+by itself does not enforce the namespace boundary. Never reuse a production
+project, even with `--no-deps`.
 An explicit `up email-worker` or enabled profile can still start it, so this
 is an accidental-start guard, **not** a cryptographic authorization gate.
 For an existing container, independently verify its **actual** Docker

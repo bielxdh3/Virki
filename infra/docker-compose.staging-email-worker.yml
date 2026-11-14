@@ -2,11 +2,20 @@
 # this file in routine production/stage actions. Stage must keep worker OFF.
 # The operator must independently prove the dedicated worker role, SMTP relay
 # restrictions, test allowlist and quota before any standalone worker start.
+# Never silently reuse the base Compose default project namespace. An explicit
+# -p or COMPOSE_PROJECT_NAME overrides this, so the operator must also verify
+# the final rendered project name against the production namespace.
+name: ${VIRKI_STAGING_COMPOSE_PROJECT:?approved isolated staging project name required}
+
 services:
   email-worker:
     # Omit from an unqualified staging `docker compose up`. The operator
     # must select this service/profile explicitly after receiving approval.
     profiles: ["staging-email-worker-manual"]
+    # The production parent depends on its bundled postgres service. An
+    # explicit `up email-worker` must not start that service or its volume.
+    # Staging PostgreSQL must already exist and be independently authorized.
+    depends_on: !reset []
     # Override production's unless-stopped: manual staging sends must not
     # resume after worker failure or a Docker daemon/host restart.
     restart: "no"
