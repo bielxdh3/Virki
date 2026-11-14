@@ -62,7 +62,43 @@ rejection and rollback of the role reconciliation. The helper clears ambient
 libpq PG* connection settings, pins the local PostgreSQL Unix socket on port
 5432 and verifies the connected server is not TCP before role mutations.
 
-The worker-only Compose override is:
+The preferred standalone manual worker Compose is:
+
+- `infra/docker-compose.staging-email-worker-only.yml`
+
+**Use this file alone**, never layered with `docker-compose.prod.yml`.
+It contains **only** the email-worker service and a pre-existing external
+Docker staging network, without `postgres`, database volume declarations,
+default project network, inbound ports, mounts or `depends_on`. It retains
+the manual profile, restart `no`, read-only Node runtime, scoped PostgreSQL
+worker-role check, SMTP transport and staging-only environment requirements.
+The approved image is provided as
+`VIRKI_STAGING_EMAIL_WORKER_IMAGE` and must be independently checked to
+identify the exact approved immutable OCI `@sha256:` digest; Compose's
+required nonempty variable alone does **not** validate the image digest.
+Likewise, `VIRKI_STAGING_EMAIL_WORKER_NETWORK` must identify a **pre-existing
+independently approved** external network, not a shared production network.
+No PostgreSQL host, network, container or volume is created by the standalone
+manifest's declared model. It does not prove what an incorrectly selected
+Docker context/project or a pre-existing similarly named container may do.
+
+Before any human-authorized execution, independently witness the actual
+Docker host/context, effective project (including overrides by `-p` or
+`COMPOSE_PROJECT_NAME`), worker/image identity, network name/owner,
+isolated staging DB and worker role, staging SMTP tenant/allowlist/quota,
+worker stopped state and real restart policy. Confirm the selected
+standalone configuration, no other `-f` files, and no unexpected environment
+files; do not print the interpolated Compose JSON because it contains
+SMTP credentials and outbox encryption material. Start only in the approved
+attended test window with `up --no-deps email-worker`; even this explicit
+start **cannot** be authorized by a configuration test or this document.
+Fresh observation of real worker and outbox state is mandatory before and
+after each approved window. The external staging PostgreSQL must be
+provisioned with committed migrations and worker-only ACLs beforehand.
+
+The previous multi-file worker override remains available for use solely
+with a separately vetted isolated staging *base stack*, not as a safe
+worker-only launch from the production-style base:
 
 - infra/docker-compose.staging-email-worker.yml
 

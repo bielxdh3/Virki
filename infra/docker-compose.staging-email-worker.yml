@@ -13,8 +13,9 @@ services:
     # must select this service/profile explicitly after receiving approval.
     profiles: ["staging-email-worker-manual"]
     # The production parent depends on its bundled postgres service. An
-    # explicit `up email-worker` must not start that service or its volume.
-    # Staging PostgreSQL must already exist and be independently authorized.
+    # explicit `up email-worker` must not start that service through dependency
+    # resolution. The base still declares a volume and may prepare resources:
+    # prefer the standalone worker-only file for isolated staging acceptance.
     depends_on: !reset []
     # Override production's unless-stopped: manual staging sends must not
     # resume after worker failure or a Docker daemon/host restart.
