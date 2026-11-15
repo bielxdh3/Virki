@@ -42,10 +42,17 @@ export VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER
 # solicit an interactive password or consult an ambient PGPASSFILE.
 unset PGHOSTADDR PGHOST PGPORT PGSERVICE PGSERVICEFILE PGOPTIONS PGUSER PGDATABASE
 unset PGPASSWORD PGPASSFILE PGSSLMODE PGSSLCERT PGSSLKEY PGSSLROOTCERT PGSSLCRL
+unset PGSSLKEYLOGFILE SSLKEYLOGFILE
 unset PGSSLMINPROTOCOLVERSION PGSSLMAXPROTOCOLVERSION PGCHANNELBINDING
 unset PGCONNECT_TIMEOUT PGTARGETSESSIONATTRS PGAPPNAME PGCLIENTENCODING
 unset PGSSLNEGOTIATION PGREQUIREPEER PGGSSENCMODE PGGSSDELEGATION PGKRBSRVNAME
 unset PGREQUIRESSL PGSSLCOMPRESSION PGLOADBALANCEHOSTS
+unset PGREQUIREAUTH PGSSLCERTMODE PGSSLCRLDIR PGSSLSNI PGGSSLIB
+unset PGMINPROTOCOLVERSION PGMAXPROTOCOLVERSION PGSYSCONFDIR PGLOCALEDIR
+unset PGDATESTYLE PGTZ PGGEQO PGOAUTHDEBUG PGOAUTHCAFILE
+# Unsetting PGPASSFILE restores libpq's per-user ~/.pgpass default. Pin the
+# passfile to /dev/null so local peer authentication is the only credential.
+export PGPASSFILE=/dev/null
 psql --no-psqlrc --no-password --host=/var/run/postgresql --port=5432 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 <<'SQL'
 \getenv database_name POSTGRES_DB
 \getenv worker_verifier VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER
@@ -254,6 +261,16 @@ BEGIN
          AND has_function_privilege('virki_email_worker', routine.oid, 'EXECUTE')
      )
      OR EXISTS (
+       -- Enum/domain/range USAGE may be inherited from PUBLIC independently
+       -- of grants on the worker's three required mail enum types.
+       SELECT 1 FROM pg_type AS type
+       JOIN pg_namespace AS namespace ON namespace.oid = type.typnamespace
+       WHERE namespace.nspname = 'public'
+         AND type.typtype IN ('d', 'e', 'm', 'r')
+         AND type.typname NOT IN ('OutboxMessageStatus', 'DeliveryAttemptStatus', 'EmailMessageKind')
+         AND has_type_privilege('virki_email_worker', type.oid, 'USAGE')
+     )
+     OR EXISTS (
        -- PUBLIC can grant USAGE on a protected schema independently of the
        -- direct REVOKE above; deny every non-system, non-public schema.
        SELECT 1 FROM pg_namespace AS namespace
@@ -272,6 +289,15 @@ BEGIN
          AND namespace.nspname <> 'information_schema'
          AND left(namespace.nspname, 3) <> 'pg_'
          AND has_function_privilege('virki_email_worker', routine.oid, 'EXECUTE')
+     )
+     OR EXISTS (
+       SELECT 1 FROM pg_type AS type
+       JOIN pg_namespace AS namespace ON namespace.oid = type.typnamespace
+       WHERE namespace.nspname <> 'public'
+         AND namespace.nspname <> 'information_schema'
+         AND left(namespace.nspname, 3) <> 'pg_'
+         AND type.typtype IN ('d', 'e', 'm', 'r')
+         AND has_type_privilege('virki_email_worker', type.oid, 'USAGE')
      )
      OR EXISTS (
        SELECT 1 FROM pg_class AS relation

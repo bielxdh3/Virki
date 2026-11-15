@@ -4,12 +4,145 @@
 
 ## Provenance and scope of the handoff
 
-- Last **published** and CI-verified PR source: `678d81af31fb6aa5f1ab4effcdee823a030c38ce`, branch `feat/virki-native-admin-perimeter-20261110`. Current local runtime-code candidate: `2cb74f576039cac8d83fd2d1cc52e47f36184ad1` (eleven commits since the published source); the originally specified `6feb2da5ab9bd25ce1cc2f53c6a7c4fc4807bd1c` remains its ancestor. The final runbook/acceptance/ledger updates are committed as a documentation-only descendant of that runtime candidate. No local candidate commit is published or independently accepted. Recheck the exact approved PR HEAD and immutable image digest at the beginning of a permitted staging window; any new source change invalidates earlier exact-SHA gates.
-- The originally requested authenticated SOURCE interval `678d81a..6feb2da` remains included, but it is no longer sufficient for the current runtime-code candidate: subsequent commits add the signed staging-preflight, standalone worker resource policy, relay tenant/endpoint/account binding and non-interactive database-role provisioning. The complete code review must cover `678d81a..2cb74f5` (including incremental `6feb2da..2cb74f5`). Claude Code OAuth remains expired; the existing user-run request `ur_ljfd70bt9yqs` (`claude auth login` in `E:\Virki\.worktrees\virki-pr118-intent-opaque-restart-20261113-prime`) is still OPEN. No login or authentication bypass was attempted.
-- GitHub checks verified on the **published parent only**: CI runs `43594678814` and `43594674461`, CodeQL `43594678827` — `SUCCESS`. The local patch has **no hosted checks or required independent SOURCE GO yet**. The production-image publication jobs were skipped by branch policy. The hosted native Hub Chromium tests are CI fixtures, **not a live external staging run**.
+- Previously independently **CI-verified** PR source: `678d81af31fb6aa5f1ab4effcdee823a030c38ce` on `feat/virki-native-admin-perimeter-20261110`. Earlier runtime baseline `2cb74f576039cac8d83fd2d1cc52e47f36184ad1` includes the original `6feb2da5ab9bd25ce1cc2f53c6a7c4fc4807bd1c`. Descendant hardening includes operator-only `scripts/staging-pgpass-bootstrap-binding.mjs` and `scripts/staging-prisma-migration-ledger-binding.mjs`, bootstrap/HBA changes, and **runtime changes to passkey RP-ID selection and recovery validation**, with local regressions. Operator helpers are not imported into Hub/worker; passkey and recovery changes are. Publication of a new descendant commit is NOT an independently accepted SOURCE GO. Review and CI/CodeQL must cover the exact new PR head and immutable image digest, not just `2cb74f5`; changes invalidate prior exact-SHA gates.
+- The originally requested authenticated SOURCE interval `678d81a..6feb2da` remains included, but insufficient: subsequent commits add staging preflight, resource/relay policy and role provisioning. Final SOURCE review must cover **all descendants through the actual final PR HEAD**, including runtime WebAuthn/recovery modifications, operator helpers/tests and runbook. The historical Claude Code OAuth issue is not a substitute for review; no authentication bypass was attempted.
+- GitHub checks verified on the **previously published parent** at this local inspection: CI runs `43594678814` and `43594674461`, CodeQL `43594678827` — `SUCCESS`. Those checks **do not approve the descendant source**: re-evaluate hosted exact-final-SHA CI/CodeQL and required independent SOURCE GO after publication. The production-image publication jobs were skipped by branch policy. Hosted native Hub Chromium tests are CI fixtures, **not an external staging run**.
 - Independent source reviews of the published code previously reported GO; this is **not** an independent operational-security sign-off, a GitHub `APPROVED` review, or permission to merge.
 - GitHub PR #118 remains `OPEN/DRAFT`. The three P2 threads were reconciled against the reviewed application code in original candidate `6feb2da5ab9bd25ce1cc2f53c6a7c4fc4807bd1c` and resolved with evidence; local `2cb74f5` changes only the signed staging preflight/standalone worker contract and PostgreSQL bootstrap prompt behavior, not those reviewed application paths. The P1 native/Access trust-boundary thread remains open pending external edge/rollback acceptance. Resolving findings is not a GitHub APPROVED review.
 - Parent contracts, which take precedence if this ledger is incomplete: [`native-hub-staging-otp-acceptance-20261110.md`](native-hub-staging-otp-acceptance-20261110.md), [`native-hub-perimeter-cutover-20261110.md`](native-hub-perimeter-cutover-20261110.md), and [`staging-email-worker-role-20261112.md`](staging-email-worker-role-20261112.md).
+
+### 2026-11-15 operator-helper provenance inventory (local pre-publication inspection)
+
+This inventory is **source scope, not proof of production or staging execution**.
+The physical worktree was inspected at source HEAD
+`60e05bffdc2f741417a93002f1e02157d9db133f` on branch
+`fix/pr118-native-admin-perimeter-hardening-20261115-r2`. The operator-only
+changes below were **uncommitted at the inspection point** and cannot
+inherit older hosted approval. A later commit and push still require
+their own exact-SHA CI/CodeQL and independent acceptance.
+Independent final review must cover the exact resulting candidate including
+all of these files, not merely the runtime interval ending at `2cb74f5`:
+
+- `scripts/staging-prisma-migration-ledger-binding.mjs` and
+  `scripts/staging-prisma-migration-ledger-binding.test.mjs`: raw Git object
+  and migration-ledger binding, adversarial SHA-1/SHA-256 trees, commits,
+  ODB layouts, Windows Git executable and lossless PostgreSQL row encoding.
+- `scripts/staging-pgpass-bootstrap-binding.mjs`: protected libpq credentials
+  and strict worker/Hub runtime URL-password binding.
+- `scripts/staging-toolchain-preflight.mjs` and
+  `scripts/staging-toolchain-preflight.test.mjs`: Node/npm version range,
+  real npm CLI, hostile `PATH` and preload regression checks.
+- `scripts/staging-otp-preflight.mjs` and
+  `scripts/staging-otp-preflight.test.mjs`: already-committed offline
+  signed-declaration gate used by this runbook (unchanged in this pass).
+- `scripts/secret-scan.mjs` and `scripts/secret-scan.test.mjs`:
+  exact three-file allowlist for non-export read-only HBA SQL verifiers;
+  real credential and other database-dump detection remains enforced.
+- `scripts/staging-remote-hba-active.sql`,
+  `scripts/staging-remote-hba-rules.sql`,
+  `scripts/staging-local-hba-peer.sql`, and
+  `scripts/postgres-bootstrap-allowlist.test.mjs`: effective HBA, active
+  reload, auth/role checks and PostgreSQL security regression contracts.
+- `scripts/staging-email-worker-standalone.contract.test.mjs` and
+  `scripts/staging-runbook-lifecycle.test.mjs`: immutable/synthetic standalone
+  worker inventory and Hub/worker guarded shutdown/fault injection.
+- `infra/postgres-init/10-virki-database-roles.sh`,
+  `infra/postgres-init/11-virki-email-worker-role.sh`,
+  `package.json`, this evidence ledger,
+  `docs/security/native-hub-staging-otp-acceptance-20261110.md`, and
+  `docs/security/pr118-staging-operator-runbook-20261114.md`.
+
+Local observations on 2026-11-15: a compatible isolated Windows
+Node 22.22.1/npm 10.9.4 passed 141/141 focused OTP-signed-declaration,
+PostgreSQL, toolchain, secret-scanner regression and synthetic Docker
+Compose contract tests; the standalone source secret scanner also PASSed;
+the runbook's isolated Bash/mocked-Docker lifecycle tests passed 12/12
+on WSL, including interrupted/failed worker stop and a Git
+`assume-unchanged` attack. The migration ledger verifier passed 42/43
+focused tests on the pinned Windows Node 22.22.1 (0 failures, 1 skipped
+POSIX FIFO fixture not applicable on Windows), including the
+hexadecimal-row-forgery regression for SHA-1 and SHA-256. Independent
+read-only Git/HBA/runbook reviewers reconciled the integration.
+Separate local TOTP, passkey, recovery and mocked-email suites passed
+80/80 on the pinned Windows Node 22.22.1 using a transient dependency
+overlay built from another worktree with an identical package-lock digest;
+all workspace module junctions were explicitly linked back to the
+current worktree, and all 202 temporary links were removed and
+independently checked. A second, non-overlapping functional batch of
+15 test files passed **74/74**, covering recovery origin/consent,
+TOTP, session revocation, admin authorization, same-origin CSRF,
+email worker privilege and native perimeter; the total focused local
+TOTP/passkey/recovery/mock-email suite is now **154/154 PASS**. The
+same lock-identical offline dependency overlay was verified, removed
+and rechecked after the new run. Ten additional read-only SMTP-wire
+and disposable-worker isolation contract tests passed **10/10**
+without creating containers, connecting to a relay or delivering a
+message. No external PostgreSQL,
+SMTP, recipient mailbox, deployed native ingress/egress, CI/CodeQL on the
+final source, or physical staging rollback was exercised. All operational
+Gate 0-4 cells below remain `NOT RUN` / release **NO-GO**.
+The npm cache remains incomplete (`nodemailer@10.2.1`), so a fresh clean
+offline `npm ci` did not pass; the matching-lock temporary overlay is
+limited to local verification, not a deployment dependency installation.
+Open acceptance dependencies include the exact-final-SHA hosted CI/CodeQL,
+independently verified deployed DB CA for the Hub and worker, staging-only
+WebAuthn RP IDs, the signed external network boundary, and real staged
+provider-to-inbox OTP evidence. The role bootstrap scripts deliberately
+require a Unix socket on port 5432; other staging ports are unsupported
+without separately reviewed bootstrap changes. Do not promote local or
+historical E2E PASS to this source SHA.
+
+**Precisely bounded staging blockers — passkeys and database trust:** this
+source candidate adds an explicit production-mode native-only
+staging USER/ADMIN RP resolver in `packages/auth/src/passkeys.ts`, reused
+for passkey recovery liveness in `packages/auth/src/recovery-methods.ts`.
+Default production RP IDs and flags remain unchanged; invalid staging
+hostname pairs or opt-in contexts fail closed. A separate local source-only
+regression batch on pinned Node 22.22.1 passed **60/60** tests, including
+new malicious/partial staging RP configurations, cross-role credential
+rejection, and the exact staging Host API route; the auth package TypeScript
+typecheck also PASSed. No real RP hostnames were approved or exercised.
+Staging RP separation still cannot be proven from test-only hostnames;
+reusing production RP IDs, enabling local testing in production, or
+counting TOTP as passkey coverage remains prohibited. For PostgreSQL, the
+approved libpq CA alone does not establish the certificate trusted by
+Prisma 6.19.3 inside either runtime image. This local revision adds a
+separate `infra/Dockerfile.staging-db-trust` requiring an explicit signed
+base digest, mandatory BuildKit CA secret, independently approved SHA256,
+strict CA-only PEM/X.509 parsing and root-owned 0444 installation at
+`/app/ca/staging-db-root.pem`. `infra/Dockerfile.prod` is byte-identical
+to the source HEAD and its implicit CI build target is unchanged. The
+runtime helper and both operator URL checks require **only**
+`sslmode=require&sslaccept=strict&sslcert=<fixed in-image CA path>`, the
+Prisma 6 parameter names described in its documentation, rejecting absent,
+duplicate, unknown, invalid-mode or alternate-path TLS arguments. The
+operator runbook additionally defines a bounded, **non-executing**
+`docker create` + `docker cp` extraction of the final image CA directory
+for each Hub and worker image; a separate pinned host-side Node 22 TAR
+verifier rejects noncanonical paths, symlinks/hardlink entries, wrong CA
+digest, non-root owner and wrong file/directory modes. The inspection
+container is never started. Cleanup is attempted even after create errors
+using a preassigned random name and ownership nonce; bounded repeated
+inspection catches delayed creation. If the daemon's final create result
+cannot be established, staging remains **BLOCK** pending independent
+manual reconciliation of that named resource (an empty one-time query is
+not accepted as proof of cleanup).
+Docker daemon-supplied archive metadata is still not an independent image
+signature or actual TLS proof; no OCI inspection was **run against an
+actual image** here. The image verifier contract passed **2/2** offline
+tests using a public unrelated X.509 CA fixture; worker/Hub URL and
+Compose contracts passed **8/8**; runbook Bash/mock-lifecycle passed
+**13/13**, including false-hash, volume, create, copy and cleanup faults.
+Secret scan and diff checks PASS.
+Production Dockerfile remained unchanged. The earlier Prisma 6.19.3
+Windows native engine inspection found support markers for `sslcert` and
+`sslaccept`, but not a reliable basis for libpq-specific `sslrootcert`
+or the Linux engine's actual peer hostname validation. **Neither local
+URL parsing nor an OCI image label proves trusted TLS.** Signed CA/base
+images, exact Linux Prisma engine live CA/SAN positive and negative
+connections, real edge isolation and external browser acceptance remain
+**BLOCK**, as do hosted exact-final-SHA CI/CodeQL and physical rollback.
+No source-only acceptance or simulated test was promoted to operational GO.
 
 ### Four existing GitHub review threads reconciled against source
 
@@ -38,9 +171,9 @@ The three P2 threads were replied to with exact-candidate evidence and resolved.
 - `scripts/staging-otp-preflight.test.mjs`: **105/105 PASS** after extending the Ed25519-signed approval/observation schema with separate worker/Hub OCI digests, distinct Compose project IDs, Hub Compose file SHA-256, staging/production Docker network IDs, worker resource limits, and non-secret SMTP tenant/endpoint/account IDs, exact host/port/TLS mode, username fingerprint and independent credential-authentication evidence. Signed negatives reject missing/invalid/reused identities, relay/runtime mismatches, unauthenticated or unproven relay observations, network/image mismatches, unbounded resources and stale/invalid declarations. This proves offline signature/declaration consistency only; no owner/observer signatures or live target were supplied.
 - Compose inspection: the standalone worker manifest has one profiled service, no ports, bind mounts, persistent volumes or dependencies, and one pre-existing external network; read-only root, `node:node`, all capabilities dropped, `no-new-privileges`, `pull_policy: never`, `restart: no`, one bounded `/tmp` tmpfs and mandatory signed `mem_limit`, `cpus` and `pids_limit`. It has **no Docker HEALTHCHECK** and does not itself enforce network egress/recipient allowlisting; the host firewall, relay policy and external observation remain mandatory.
 - The standalone Compose contract passes **2/2** using Docker Compose's actual JSON renderer and synthetic-only values. The effective model requires memory `512m` (rendered as 536870912 bytes), CPU `1.0` (1,000,000,000 nanocores), PID limit `128`, `node:node`, one external network, exactly 13 worker environment keys, no volumes and no healthcheck. These are test fixtures, not approved staging resource values. The missing-environment negative cases require a real Compose exit status and the exact missing-variable diagnostic; process launch errors/timeouts cannot count as a successful denial.
-- Final focused local validation on runtime-code candidate `2cb74f5`: **130/130 PASS** across OTP preflight, standalone Compose, worker-role/SCRAM, PostgreSQL bootstrap allowlist/auth and production Compose contracts; `npm run lint`, `npm run secrets:scan`, eight runbook POSIX blocks via `bash -n`, and `git diff --check` passed. Lint used a temporary dependency junction to an existing worktree with the identical `package-lock.json` hash; the junction was removed afterward. A synthetic Hub-only Compose fixture also rendered and passed the equivalent isolation/environment assertions using Docker Compose's JSON renderer. The Windows environment has no `jq` binary, so the runbook's actual jq filters were not executed locally; `jq` is an explicit staging-host prerequisite and live Docker inspections remain external. No CI/CodeQL rerun was performed because the candidate remains unpublished.
+- Earlier focused local validation on the descendant of runtime-code baseline `2cb74f5`: **136/136 PASS** across OTP preflight, standalone Compose, worker-role/SCRAM, PostgreSQL bootstrap allowlist/auth (including the exact TLS bootstrap-service/PGPASSFILE/`POSTGRES_PASSWORD` binding) and production Compose contracts; `npm run lint`, `npm run secrets:scan`, all eight then-existing runbook POSIX blocks via `bash -n`, and `git diff --check` passed. Lint used a temporary dependency junction to an existing worktree with identical `package-lock.json` hash; the junction was removed. A synthetic Hub-only Compose fixture rendered and passed equivalent isolation assertions. The Windows environment had no `jq` binary; staging-host jq/Docker inspection remains unverified. Hosted CI/CodeQL for this subsequently hardened exact SHA was **not part of that local test pass** and must be checked independently after push.
 - `scripts/database-role-isolation.test.mjs` was attempted separately but stopped **before Docker activity** with `DISPOSABLE_RUNNER_JOURNAL_UNAVAILABLE` because this Windows session lacks the required protected journal/ACL identity. A WSL retry could not start within the session and was stopped; no ACL or runner guard was bypassed. This is an environment-blocked disposable integration test, not a passing integration result.
-- The operator runbook now binds signed worker/Hub projects, both OCI digests, Hub Compose hash, resource-policy identity/receipt and exact memory/CPU/PID/interval values; checks the OCI source/revision labels against the final approved source SHA (labels remain consistency checks, not provenance); compares the live SMTP tenant/endpoint/account, host/port/TLS mode and username fingerprint against the signed owner approval and independent authenticated-relay observation; and checks the effective Hub/worker command, restart policy, non-root user, read-only root, exact capability/security options, tmpfs-only mounts, absence of Docker/API socket, bind/persistent mounts, ports, devices, added groups, alternate runtime, host/shared namespaces, environment and external network. It requires separate exact-SHA hosted CI/CodeQL and GHCR provenance evidence, verifies PostgreSQL TLS endpoints, Hub/worker DB principals, virgin outbox, and a peer-authenticated staging-only superuser rollback path that requires the sole local HBA rule to be an exact direct `peer` match with no map option and a freshly loaded canonical HBA file before restore into a fresh DB. The native-mode staging Hub requires a separate default-deny edge IP allowlist because application Access JWT validation is bypassed in native mode; production remains on Access.
+- The operator runbook now binds signed worker/Hub projects, both OCI digests, Hub Compose hash, resource-policy identity/receipt and exact memory/CPU/PID/interval values; checks the OCI source/revision labels against the final approved source SHA (labels remain consistency checks, not provenance); compares the live SMTP tenant/endpoint/account, host/port/TLS mode and username fingerprint against the signed owner approval and independent authenticated-relay observation; and checks the effective Hub/worker command, restart policy, non-root user, read-only root, exact capability/security options, tmpfs-only mounts, absence of Docker/API socket, bind/persistent mounts, ports, devices, added groups, alternate runtime, host/shared namespaces, environment and external network. The worker runtime gate compares its effective environment against the immutable image baseline merged with the exact approved service keys, rejecting duplicate/unapproved keys and any baked worker secret. Separate Hub/worker egress-policy evidence is mandatory even for an internal Docker network: Hub is restricted to signed DB/identity/application endpoints and the approved DNS path, worker to staging DB/approved SMTP and the approved DNS path, and both deny all Docker Engine TCP API listeners (including 2375/2376 and custom ports), SSH/RDP and host-gateway management. It requires separate exact-SHA hosted CI/CodeQL and GHCR provenance evidence, clears ambient libpq overrides before remote connections, verifies PostgreSQL TLS endpoints and effective remote `hostssl` SCRAM authentication for the migrator/runtime/worker/bootstrap roles, binds `POSTGRES_PASSWORD` to exactly one bootstrap PGPASSFILE row for both `postgres` and the restore DB, and binds `VIRKI_EMAIL_WORKER_DB_PASSWORD` to worker rows for the approved and restore DBs (literal `*` remains valid in password fields; wildcard match fields are rejected), checks Hub/worker DB principals and virgin outbox, and requires a peer-authenticated staging-only superuser rollback path with exactly two local HBA rules: one exact direct `peer` match for `postgres` and one for the fresh restore DB, both restricted to the bootstrap role with no options; included HBA files are rejected and the canonical main HBA file must have been loaded after its exact modification time; the restored Prisma migration ledger must exactly match every committed migration name and SHA-256 checksum, with no extra, missing, duplicate, unfinished or rolled-back rows; script 10 independently clears ambient libpq overrides and pins local Unix-socket access before role provisioning. The native-mode staging Hub requires a separate default-deny edge IP allowlist because application Access JWT validation is bypassed in native mode; production remains on Access.
 - **Passkey staging remains BLOCKED:** current code hardcodes USER RP ID `portal.biel.dev.br` and ADMIN RP ID `hub.biel.dev.br`; alternate `*.localhost` RP IDs are non-production local-test-only. A separate production-mode staging hostname cannot prove Portal/Hub RP separation. Runbook therefore keeps staging passkey flags false and prohibits production-host reuse or `VIRKI_PASSKEYS_LOCAL_TESTING`; a dedicated staging RP/origin implementation and independent review are required. TOTP staging tests cannot satisfy this passkey gate. No real staging environment was rendered or started.
 - Reconciled the older staging-worker advisory: the published parent `678d81a` already sets the layered override to `restart: "no"` and `depends_on: !reset []`; the effective synthetic merged Compose render confirms both. That layered project still declares the base PostgreSQL volume and unrelated services, so the worker-only standalone manifest remains the preferred isolated path.
 
@@ -63,6 +196,10 @@ All fields below must be completed by the actual owner/operator and independentl
 | Pre-approved staging-only immutable OCI digest and source SHA, verified independently on target | — | NOT RUN |
 | Out-of-band pinned owner and observer Ed25519 identities, offline signed approvals | — | NOT RUN |
 | Signed worker resource-policy ID and exact memory-byte, CPU-nanocore and PID limits, matched to independent observation | — | NOT RUN |
+| Native Hub staging edge ingress: owner-approved default-deny policy, exact operator/test source IPs or private VPN, unknown-host denial; production DNS/Access/hostnames unchanged | — | NOT RUN |
+| Hub host/firewall egress policy: signed policy ID and receipt, independently observed active; staging DB + signed identity/application endpoints + approved DNS only; SMTP and all other destinations denied | — | NOT RUN |
+| Worker host/firewall egress policy: distinct signed policy ID and receipt, independently observed active; staging DB + approved SMTP relay + approved DNS only; all other destinations denied | — | NOT RUN |
+| Hub/worker egress policy IDs differ and their receipts differ; receipts are opaque references, not proof of active enforcement | — | NOT RUN |
 | Named rollback operator, baseline snapshot custody, restore rehearsal and stop conditions | — | NOT RUN |
 
 **Stop immediately** if there is a target-identity mismatch, possible production/deManage crossover, untrusted signing key, unknown mailbox owner, unexpected inbound route, worker already running or unexplained queued email. Do not silently reconcile a discrepant environment.
@@ -81,6 +218,10 @@ All fields below must be completed by the actual owner/operator and independentl
 | Image / SHA / effective configuration matched | — | NOT RUN |
 | Host, origin, TLS and PostgreSQL isolation proved | — | NOT RUN |
 | Fresh backup and restoration plan independently validated | — | NOT RUN |
+| Native Hub edge ingress allowlist physically active and independently observed; unknown hosts denied; no broad Access bypass | — | NOT RUN |
+| Hub egress host/firewall policy physically active and independently observed; policy ID/receipt distinct from worker | — | NOT RUN |
+| Worker egress host/firewall policy physically active and independently observed; policy ID/receipt distinct from Hub | — | NOT RUN |
+| Hub/worker database sessions use TLS with exact hostssl SCRAM-SHA-256 HBA rules; no trust/cert/MD5 or broad/group fallback | — | NOT RUN |
 | Worker physical stopped state, `no` restart, profile, no backlog, zero attempts | — | NOT RUN |
 | Signed owner approval + independent observation, offline preflight consistent | — | NOT RUN |
 

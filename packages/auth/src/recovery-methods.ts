@@ -74,9 +74,10 @@ export function recoveryPasskeyBinding(credential: { id: string; userId: string;
 }
 
 function credentialRPMatchesRole(rpID: string, role: AccountRecoveryRole) {
-  if (rpID === (role === "ADMIN" ? "hub.biel.dev.br" : "portal.biel.dev.br")) return true;
-  return process.env.NODE_ENV !== "production" && process.env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" &&
-    (rpID === "localhost" || rpID === (role === "ADMIN" ? "hub.localhost" : "portal.localhost"));
+  // Share the same exact active RP decision as registration and assertion
+  // verification. Production credentials must not become staging factors.
+  try { return expectedPasskeyRP(process.env, rpID, role).rpID === rpID; }
+  catch { return false; }
 }
 function matchesHash(value: string, expected: string | null): boolean {
   if (!expected || !/^[a-f0-9]{64}$/.test(expected)) return false;

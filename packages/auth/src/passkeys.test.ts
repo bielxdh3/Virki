@@ -50,6 +50,129 @@ test("ADMIN WebAuthn requires a separate hub RP, separate rollout flag and role"
   await assert.rejects(finishPasskeyRegistration("user-id", "session-id", createPasskeyBrowserToken(), {} as never, "key", "hub.biel.dev.br", "ADMIN"));
 });
 
+const stagingPasskeyEnv = {
+  NODE_ENV: "production",
+  VIRKI_HUB_PERIMETER_MODE: "native",
+  VIRKI_STAGING_PASSKEY_RP_ENABLED: "true",
+  VIRKI_PORTAL_HOSTNAME: "staging-portal.biel.dev.br",
+  VIRKI_HUB_HOSTNAME: "staging-hub.biel.dev.br",
+  VIRKI_PASSKEYS_ENABLED: "true",
+  VIRKI_ADMIN_PASSKEYS_ENABLED: "true",
+  VIRKI_PASSKEYS_LOCAL_TESTING: "true"
+};
+
+test("opted-in native staging uses distinct exact HTTPS USER and ADMIN relying parties", () => {
+  const env = stagingPasskeyEnv;
+  assert.deepEqual(expectedPasskeyRP(env, env.VIRKI_PORTAL_HOSTNAME, "USER"), {
+    rpID: env.VIRKI_PORTAL_HOSTNAME, origin: "https://staging-portal.biel.dev.br"
+  });
+  assert.deepEqual(expectedPasskeyRP(env, env.VIRKI_HUB_HOSTNAME, "ADMIN"), {
+    rpID: env.VIRKI_HUB_HOSTNAME, origin: "https://staging-hub.biel.dev.br"
+  });
+  assert.equal(passkeysEnabledForRequest("portal", env.VIRKI_PORTAL_HOSTNAME, env, "USER"), true);
+  assert.equal(passkeysEnabledForRequest("hub", env.VIRKI_HUB_HOSTNAME, env, "ADMIN"), true);
+
+  for (const [surface, host, role] of [
+    ["hub", env.VIRKI_PORTAL_HOSTNAME, "USER"],
+    ["portal", env.VIRKI_HUB_HOSTNAME, "ADMIN"],
+    ["portal", env.VIRKI_HUB_HOSTNAME, "USER"],
+    ["hub", env.VIRKI_PORTAL_HOSTNAME, "ADMIN"],
+    ["portal", "portal.biel.dev.br", "USER"],
+    ["hub", "hub.biel.dev.br", "ADMIN"],
+    ["portal", `evil.${env.VIRKI_PORTAL_HOSTNAME}`, "USER"],
+    ["hub", `evil.${env.VIRKI_HUB_HOSTNAME}`, "ADMIN"],
+    ["hub", env.VIRKI_HUB_HOSTNAME, "USER"],
+    ["portal", env.VIRKI_PORTAL_HOSTNAME, "ADMIN"],
+    ["local", "localhost", "USER"],
+    ["local", "localhost", "ADMIN"]
+  ] as const) {
+    assert.equal(passkeysEnabledForRequest(surface, host, env, role), false, `${role} ${surface}/${host}`);
+  }
+  assert.throws(() => expectedPasskeyRP(env, env.VIRKI_HUB_HOSTNAME, "USER"), /Passkey ceremony rejected/u);
+  assert.throws(() => expectedPasskeyRP(env, env.VIRKI_PORTAL_HOSTNAME, "ADMIN"), /Passkey ceremony rejected/u);
+  assert.throws(() => expectedPasskeyRP(env, "portal.biel.dev.br", "USER"), /Passkey ceremony rejected/u);
+  assert.throws(() => expectedPasskeyRP(env, "hub.biel.dev.br", "ADMIN"), /Passkey ceremony rejected/u);
+  assert.throws(() => expectedPasskeyRP(env, "localhost", "ADMIN"), /Passkey ceremony rejected/u);
+  assert.equal(passkeysEnabledForRequest("portal", env.VIRKI_PORTAL_HOSTNAME, {
+    ...env, VIRKI_PASSKEYS_ENABLED: "false"
+  }), false);
+  assert.equal(passkeysEnabledForRequest("hub", env.VIRKI_HUB_HOSTNAME, {
+    ...env, VIRKI_ADMIN_PASSKEYS_ENABLED: "false"
+  }, "ADMIN"), false);
+  assert.equal(passkeysEnabledForRequest("hub", env.VIRKI_HUB_HOSTNAME, {
+    ...env, VIRKI_PASSKEYS_ENABLED: "false"
+  }, "ADMIN"), false);
+});
+
+test("native staging RP opt-in fails closed for incomplete, reused or malformed names and contexts", () => {
+  const defaults = {
+    ...stagingPasskeyEnv,
+    VIRKI_STAGING_PASSKEY_RP_ENABLED: "false",
+    VIRKI_PORTAL_HOSTNAME: "staging-portal.biel.dev.br",
+    VIRKI_HUB_HOSTNAME: "staging-hub.biel.dev.br"
+  };
+  // Custom surface hostnames alone never alter production's RP default.
+  assert.deepEqual(expectedPasskeyRP(defaults, "portal.biel.dev.br"), {
+    rpID: "portal.biel.dev.br", origin: "https://portal.biel.dev.br"
+  });
+  assert.deepEqual(expectedPasskeyRP(defaults, "hub.biel.dev.br", "ADMIN"), {
+    rpID: "hub.biel.dev.br", origin: "https://hub.biel.dev.br"
+  });
+  assert.equal(passkeysEnabledForRequest("portal", "staging-portal.biel.dev.br", defaults), false);
+  assert.equal(passkeysEnabledForRequest("hub", "staging-hub.biel.dev.br", defaults, "ADMIN"), false);
+
+  const invalid: Array<[string, Record<string, string | undefined>]> = [
+    ["missing portal", { VIRKI_PORTAL_HOSTNAME: undefined }],
+    ["missing hub", { VIRKI_HUB_HOSTNAME: undefined }],
+    ["empty portal", { VIRKI_PORTAL_HOSTNAME: "" }],
+    ["same host", { VIRKI_HUB_HOSTNAME: stagingPasskeyEnv.VIRKI_PORTAL_HOSTNAME }],
+    ["prod USER host", { VIRKI_PORTAL_HOSTNAME: "portal.biel.dev.br" }],
+    ["prod ADMIN host", { VIRKI_HUB_HOSTNAME: "hub.biel.dev.br" }],
+    ["cross-role prod USER host", { VIRKI_HUB_HOSTNAME: "portal.biel.dev.br" }],
+    ["cross-role prod ADMIN host", { VIRKI_PORTAL_HOSTNAME: "hub.biel.dev.br" }],
+    ["shared parent", { VIRKI_PORTAL_HOSTNAME: "biel.dev.br" }],
+    ["nested under prod", { VIRKI_HUB_HOSTNAME: "staging.hub.biel.dev.br" }],
+    ["upper case", { VIRKI_PORTAL_HOSTNAME: "Staging-Portal.biel.dev.br" }],
+    ["trailing dot", { VIRKI_PORTAL_HOSTNAME: "staging-portal.biel.dev.br." }],
+    ["leading dot", { VIRKI_PORTAL_HOSTNAME: ".staging.biel.dev.br" }],
+    ["extra port", { VIRKI_PORTAL_HOSTNAME: "staging-portal.biel.dev.br:443" }],
+    ["scheme", { VIRKI_HUB_HOSTNAME: "https://staging-hub.biel.dev.br" }],
+    ["wildcard", { VIRKI_PORTAL_HOSTNAME: "*.biel.dev.br" }],
+    ["IP", { VIRKI_PORTAL_HOSTNAME: "192.0.2.12" }],
+    ["bracketed IPv6", { VIRKI_HUB_HOSTNAME: "[2001:db8::1]" }],
+    ["localhost", { VIRKI_PORTAL_HOSTNAME: "localhost" }],
+    ["localhost suffix", { VIRKI_PORTAL_HOSTNAME: "portal.localhost" }],
+    ["unicode", { VIRKI_PORTAL_HOSTNAME: "portál.staging.example" }],
+    ["punycode IDN", { VIRKI_PORTAL_HOSTNAME: "xn--portl-4sa.example" }],
+    ["control", { VIRKI_PORTAL_HOSTNAME: "staging\nhost.example" }],
+    ["space", { VIRKI_PORTAL_HOSTNAME: "staging host.example" }],
+    ["invalid label", { VIRKI_PORTAL_HOSTNAME: "-staging.example" }],
+    ["single label", { VIRKI_PORTAL_HOSTNAME: "staging" }],
+    ["staging flag empty", { VIRKI_STAGING_PASSKEY_RP_ENABLED: "" }],
+    ["staging flag wrong case", { VIRKI_STAGING_PASSKEY_RP_ENABLED: "TRUE" }],
+    ["non-native", { VIRKI_HUB_PERIMETER_MODE: "access" }],
+    ["missing perimeter mode", { VIRKI_HUB_PERIMETER_MODE: undefined }],
+    ["test NODE_ENV", { NODE_ENV: "test" }],
+    ["missing NODE_ENV", { NODE_ENV: undefined }]
+  ];
+  for (const [reason, overrides] of invalid) {
+    const env = { ...stagingPasskeyEnv, ...overrides };
+    for (const [role, host, surface] of [
+      ["USER", "staging-portal.biel.dev.br", "portal"],
+      ["ADMIN", "staging-hub.biel.dev.br", "hub"]
+    ] as const) {
+      assert.throws(() => expectedPasskeyRP(env, host, role), /Passkey ceremony rejected/u, `${reason}, ${role}`);
+      assert.equal(passkeysEnabledForRequest(surface, host, env, role), false, `${reason}, ${role}`);
+    }
+    assert.throws(() => expectedPasskeyRP(env, "portal.biel.dev.br", "USER"),
+      /Passkey ceremony rejected/u, `${reason}: no production fallback`);
+    assert.throws(() => expectedPasskeyRP(env, "hub.biel.dev.br", "ADMIN"),
+      /Passkey ceremony rejected/u, `${reason}: no production ADMIN fallback`);
+    assert.equal(passkeysEnabledForRequest("local", "localhost", env, "USER"), false,
+      `${reason}: no localhost bypass`);
+  }
+});
+
 test("clientData only supplies an exact, bounded challenge; stored digest matches original", () => {
   const challenge = "f".repeat(43);
   const data = Buffer.from(JSON.stringify({ type: "webauthn.get", challenge, origin: "https://portal.biel.dev.br" })).toString("base64url");

@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { isIP } from "node:net";
 import { Prisma, prisma } from "@virki/database";
 import {
   generateAuthenticationOptions,
@@ -32,11 +33,45 @@ export const PASSKEY_BROWSER_COOKIE = "virki_passkey_browser";
 
 type PasskeyRole = "USER" | "ADMIN";
 
+type PasskeyRP = { rpID: string; origin: string };
+
+// The staging opt-in deliberately does NOT follow arbitrary Host headers or
+// override production's original RPs. Both isolated staging names must be
+// explicitly provisioned and approved before this code can enable them.
+function isCanonicalStagingRPHostname(host: string | undefined): host is string {
+  if (!host || host.length > 253 ||
+      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u.test(host) ||
+      isIP(host) !== 0 || /^(?:[0-9]+\.){3}[0-9]+$/u.test(host) ||
+      host.split(".").some(label => label === "localhost" || label.startsWith("xn--")) ||
+      host === "biel.dev.br" || host === RP_ID || host === ADMIN_RP_ID ||
+      host.endsWith(`.${RP_ID}`) || host.endsWith(`.${ADMIN_RP_ID}`)) return false;
+  return true;
+}
+
+function effectivePasskeyRPs(env: Readonly<Record<string, string | undefined>>): Record<PasskeyRole, PasskeyRP> {
+  const optIn = env.VIRKI_STAGING_PASSKEY_RP_ENABLED;
+  if (optIn === undefined || optIn === "false") {
+    return {
+      USER: { rpID: RP_ID, origin: ORIGIN },
+      ADMIN: { rpID: ADMIN_RP_ID, origin: `https://${ADMIN_RP_ID}` }
+    };
+  }
+  if (optIn !== "true" || env.NODE_ENV !== "production" || env.VIRKI_HUB_PERIMETER_MODE !== "native") throw FAILURE;
+  const portal = env.VIRKI_PORTAL_HOSTNAME;
+  const hub = env.VIRKI_HUB_HOSTNAME;
+  if (!isCanonicalStagingRPHostname(portal) || !isCanonicalStagingRPHostname(hub) || portal === hub) throw FAILURE;
+  return {
+    USER: { rpID: portal, origin: `https://${portal}` },
+    ADMIN: { rpID: hub, origin: `https://${hub}` }
+  };
+}
+
 function requireAdminPasskeyFlag(role: PasskeyRole) {
   if (role === "ADMIN" && (process.env.VIRKI_PASSKEYS_ENABLED !== "true" || process.env.VIRKI_ADMIN_PASSKEYS_ENABLED !== "true")) throw FAILURE;
 }
 
 export function expectedPasskeyRP(env: Readonly<Record<string, string | undefined>> = process.env, host = RP_ID, role: PasskeyRole = "USER") {
+  const rps = effectivePasskeyRPs(env); // Invalid staging opt-ins must not fall back to production.
   // Only for the TLS Playwright portal.localhost fixture; production never accepts this RP.
   if (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && role === "USER" && host === "portal.localhost") {
     return { rpID: "portal.localhost", origin: "https://portal.localhost:3001" };
@@ -47,19 +82,21 @@ export function expectedPasskeyRP(env: Readonly<Record<string, string | undefine
   if (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && host === "localhost") {
     return { rpID: "localhost", origin: "http://localhost:3001" };
   }
-  if (role === "ADMIN" && host === ADMIN_RP_ID) return { rpID: ADMIN_RP_ID, origin: `https://${ADMIN_RP_ID}` };
-  if (role === "USER" && host === RP_ID) return { rpID: RP_ID, origin: ORIGIN };
+  if (role === "ADMIN" && host === rps.ADMIN.rpID) return rps.ADMIN;
+  if (role === "USER" && host === rps.USER.rpID) return rps.USER;
   throw FAILURE;
 }
 
 export function passkeysEnabledForRequest(surface: string, host: string, env: Readonly<Record<string, string | undefined>> = process.env, role: PasskeyRole = "USER") {
+  let rps: Record<PasskeyRole, PasskeyRP>;
+  try { rps = effectivePasskeyRPs(env); } catch { return false; }
   if (role === "ADMIN") return env.VIRKI_PASSKEYS_ENABLED === "true" && env.VIRKI_ADMIN_PASSKEYS_ENABLED === "true" && (
-    (surface === "hub" && host === ADMIN_RP_ID) ||
+    (surface === "hub" && host === rps.ADMIN.rpID) ||
     (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && surface === "local" && host === "localhost") ||
     (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && surface === "hub" && host === "hub.localhost")
   );
   return env.VIRKI_PASSKEYS_ENABLED === "true" && (
-    (surface === "portal" && host === RP_ID) ||
+    (surface === "portal" && host === rps.USER.rpID) ||
     (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && surface === "portal" && host === "portal.localhost") ||
     (env.NODE_ENV !== "production" && env.VIRKI_PASSKEYS_LOCAL_TESTING === "true" && surface === "local" && host === "localhost")
   );

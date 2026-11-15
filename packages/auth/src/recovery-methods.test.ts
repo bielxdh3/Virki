@@ -274,6 +274,8 @@ test("optional recovery comment rejects oversized and control-laden content", ()
 test("recovery passkey proof stays bound to exact credential and signing key, independent of changing counter", () => {
   const credential = { id: "credential-1", userId: "user-1", credentialId: "webauthn-id", publicKey: Buffer.from("public-key-v1") };
   const initial = recoveryPasskeyBinding(credential);
+  assert.equal(initial, recoveryPasskeyBinding({ ...credential, rpID: "portal.biel.dev.br" }),
+    "legacy RP fallback remains bound to the existing production USER RP");
   assert.equal(initial, recoveryPasskeyBinding({ ...credential, publicKey: Buffer.from("public-key-v1") }));
   assert.notEqual(initial, recoveryPasskeyBinding({ ...credential, publicKey: Buffer.from("different-key") }));
   assert.notEqual(initial, recoveryPasskeyBinding({ ...credential, rpID: "hub.biel.dev.br" }));
@@ -327,6 +329,63 @@ test("passkey recovery proof is rejected after credential revocation or key rota
   credential.revokedAt = null;
   credential.publicKey = Buffer.from("rotated-key");
   await assert.rejects(requireLiveRecoveryProofsInTransaction(tx, row));
+});
+
+test("staging passkey recovery liveness uses the same role-specific RP configuration as ceremonies", async (context) => {
+  const names = [
+    "NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "VIRKI_STAGING_PASSKEY_RP_ENABLED",
+    "VIRKI_PORTAL_HOSTNAME", "VIRKI_HUB_HOSTNAME", "VIRKI_PASSKEYS_LOCAL_TESTING"
+  ] as const;
+  const previous = new Map(names.map(name => [name, process.env[name]]));
+  context.after(() => {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  Object.assign(process.env, {
+    NODE_ENV: "production",
+    VIRKI_HUB_PERIMETER_MODE: "native",
+    VIRKI_STAGING_PASSKEY_RP_ENABLED: "true",
+    VIRKI_PORTAL_HOSTNAME: "staging-portal.biel.dev.br",
+    VIRKI_HUB_HOSTNAME: "staging-hub.biel.dev.br",
+    VIRKI_PASSKEYS_LOCAL_TESTING: "true"
+  });
+  const credential = {
+    id: "staging-credential", userId: "staging-user", credentialId: "staging-credential-id",
+    publicKey: Buffer.from("owned-test-key"), rpID: "staging-portal.biel.dev.br", revokedAt: null
+  };
+  const tx = {
+    passkeyCredential: { findFirst: async () => credential }
+  } as unknown as Prisma.TransactionClient;
+  const row = {
+    userId: credential.userId, recoveryRole: "USER",
+    recoveryProofs: ["PASSKEY"], recoveryTotpBindingHash: null, recoveryTotpUsedStep: null,
+    recoveryPasskeyCredentialId: credential.id, recoveryPasskeyBindingHash: recoveryPasskeyBinding(credential)
+  };
+  await assert.doesNotReject(requireLiveRecoveryProofsInTransaction(tx, row),
+    "staging USER credential is a live USER proof");
+
+  row.recoveryRole = "ADMIN";
+  await assert.rejects(requireLiveRecoveryProofsInTransaction(tx, row),
+    "staging USER credential cannot serve as ADMIN proof");
+  credential.rpID = "staging-hub.biel.dev.br";
+  row.recoveryPasskeyBindingHash = recoveryPasskeyBinding(credential);
+  await assert.doesNotReject(requireLiveRecoveryProofsInTransaction(tx, row),
+    "staging ADMIN credential is a live ADMIN proof");
+
+  row.recoveryRole = "USER";
+  await assert.rejects(requireLiveRecoveryProofsInTransaction(tx, row),
+    "staging ADMIN credential cannot serve as USER proof");
+  credential.rpID = "portal.biel.dev.br";
+  row.recoveryPasskeyBindingHash = recoveryPasskeyBinding(credential);
+  await assert.rejects(requireLiveRecoveryProofsInTransaction(tx, row),
+    "production USER credential cannot serve as a staging USER proof");
+  credential.rpID = "staging-portal.biel.dev.br";
+  row.recoveryPasskeyBindingHash = recoveryPasskeyBinding(credential);
+  process.env.VIRKI_HUB_PERIMETER_MODE = "access";
+  await assert.rejects(requireLiveRecoveryProofsInTransaction(tx, row),
+    "invalid staging opt-in cannot fall back to a production or local proof");
 });
 
 test("administrator queue accepts one proven factor only when reviewer is still required", () => {

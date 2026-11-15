@@ -41,9 +41,11 @@ or approval of a production Access cutover.
 | --- | --- | --- |
 | Provenance | Signed/verified final source SHA, exact-SHA hosted CI/CodeQL and GHCR build-provenance evidence, immutable OCI manifest digest/platform, and runtime image ID/config hash on the independent host | BLOCK |
 | Segregation | Approved staging host identity, DB host/database/roles different from production, test accounts and separate owned mailboxes | BLOCK |
-| Ingress | HTTPS with valid staging certificate; deny unknown hosts; because native mode skips Access JWT validation inside Hub, a separate edge/firewall policy must default-deny and allow only owner-approved operator/test source IPs or private VPN; retain independent evidence; verify Portal and Hub routing separately | BLOCK |
+| Ingress | HTTPS with valid staging certificate; deny unknown hosts; because native mode skips Access JWT validation inside Hub, a separate edge/firewall policy must default-deny and allow only owner-approved operator/test source IPs or private VPN; independently observe the active rule on the actual edge; retain an opaque receipt; do not change production DNS, Access policies or hostnames, and do not create a broad Access bypass; verify Portal and Hub routing separately | BLOCK |
+| Egress | Separate independently evidenced Hub and worker host/firewall policies: worker only to the staging DB, approved SMTP relay and approved DNS resolution path; Hub only to the staging DB, signed identity/application endpoints and approved DNS resolution path. Both must deny all Docker Engine TCP API listeners (including 2375/2376 and any custom port), SSH/RDP, host-gateway management services and every unapproved destination, even on an internal Docker network. Require distinct policy IDs and distinct receipts; independently observe that each policy is active on the actual host/firewall because an ID or receipt string alone proves nothing | BLOCK |
 | Application flags | Staging-only `VIRKI_HUB_PERIMETER_MODE=native`, both passkey flags explicitly `false` until staging RP IDs exist, `CLOUDFLARE_ACCESS_JWT_REQUIRED=false` and no Access audience/team/JWKS inputs; unchanged production `access` behavior and `VIRKI_ADMIN_PASSKEYS_ENABLED=false` | BLOCK |
-| Persistence | Committed migrations deployed to **staging only**, least-privilege runtime/worker/migrator accounts, snapshot and restored rollback rehearsal | BLOCK |
+| Persistence | Committed migrations deployed to **staging only**; restored `_prisma_migrations` names and SHA-256 checksums exactly match every committed migration directory, with no missing/extra/duplicate/unfinished/rolled-back row; least-privilege runtime/worker/migrator accounts, snapshot and restored rollback rehearsal | BLOCK |
+| Database authentication | Distinct Hub/worker/migrator/bootstrap principals; **operator/migrator libpq** remote probes require `sslmode=verify-full` and an approved `sslrootcert`. **Hub/worker Prisma 6** URLs instead require `sslmode=require&sslaccept=strict&sslcert=<approved image CA path>`; their Linux engine's actual CA-chain and hostname/SAN verification remain **BLOCK** pending observed positive/negative TLS tests. Exact database/user `hostssl` `scram-sha-256` HBA rules prohibit trust/cert/MD5 and broad/group fallback. Rollback bootstrap uses the staging-only superuser and two exact local `peer` rules (one for `postgres`, one for the fresh restore DB), with no options/includes and a verified canonical HBA reload after file modification | BLOCK |
 | Worker and SMTP | Separate staging relay credentials, approved recipient allowlist, TLS authentication and connectivity checked **before enabling the mail-draining worker** | BLOCK |
 | Recovery safety | Old-email loss path tested without using third-party inbox access; independent ADMIN elevation and no self-review | BLOCK |
 | Monitoring | Redacted application security audit, queue status, SMTP attempts and externally observed events; no OTP/secret in logs | BLOCK |
@@ -64,16 +66,22 @@ deployment script as an unreviewed staging provisioner. Do not send a
 diagnostic to an unapproved address. A local preflight is not permission to
 send the first real OTP.
 
-**Passkey staging blocker:** `packages/auth/src/passkeys.ts` currently hardcodes
-USER RP ID `portal.biel.dev.br` and ADMIN RP ID `hub.biel.dev.br`; the only
-alternate RP IDs are `portal.localhost`/`hub.localhost` behind
-`VIRKI_PASSKEYS_LOCAL_TESTING` when `NODE_ENV !== production`. A separate
-production-mode staging hostname cannot exercise those passkeys today. Do not
-reuse production hostnames/RP IDs or enable the local-test bypass in staging.
-Keep both passkey flags false and mark Portal/Hub RP separation **BLOCK** until
-dedicated staging RP IDs/origins are implemented and independently reviewed.
-TOTP-based recovery tests may proceed, but they do not satisfy the passkey
-release gate below.
+**Passkey staging blocker:** the source candidate adds a strictly
+opt-in staging RP resolver in `packages/auth/src/passkeys.ts`, shared with
+recovery liveness checks. Production defaults remain USER
+`portal.biel.dev.br` and ADMIN `hub.biel.dev.br` without opt-in. A staging
+opt-in requires exactly `VIRKI_STAGING_PASSKEY_RP_ENABLED=true`,
+`NODE_ENV=production`, `VIRKI_HUB_PERIMETER_MODE=native`, and separate,
+canonical, explicitly configured `VIRKI_PORTAL_HOSTNAME` and
+`VIRKI_HUB_HOSTNAME` values that are not either production RP. An invalid
+opt-in rejects both roles; `VIRKI_PASSKEYS_LOCAL_TESTING` is **never** a
+production substitute. No approved staging RP host pair, external TLS/DNS
+validation, real WebAuthn ceremony or independent accepted final source SHA
+exists yet. **Keep `VIRKI_STAGING_PASSKEY_RP_ENABLED` unset, both passkey
+flags false, and Portal/Hub RP separation BLOCK** until the actual signed
+staging inventory and user-agent/browser/role/recovery acceptance are proven.
+Source-only unit/route tests do not satisfy this release gate. TOTP-based
+recovery may be checked separately but cannot replace passkey acceptance.
 
 The worker uses `VIRKI_EMAIL_MIN_SEND_INTERVAL_MS`, forwarded only to the
 email-worker Compose service with its unchanged 250 ms default (valid range:

@@ -26,6 +26,47 @@ test("ADMIN passkey login remains blocked and forged portal-host enrollment cann
   assert.equal((await request("hub.biel.dev.br", "admin-register-options")).status, 404, "ADMIN flag closed before session/database access");
 });
 
+test("staging RP opt-in routes only the exact configured portal host, never production or a spoof", async (t) => {
+  const keys = [
+    "NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "VIRKI_STAGING_PASSKEY_RP_ENABLED",
+    "VIRKI_PORTAL_HOSTNAME", "VIRKI_HUB_HOSTNAME",
+    "VIRKI_PASSKEYS_ENABLED", "VIRKI_ADMIN_PASSKEYS_ENABLED"
+  ] as const;
+  const before = Object.fromEntries(keys.map(key => [key, process.env[key]])) as Record<typeof keys[number], string | undefined>;
+  t.after(() => {
+    for (const key of keys) {
+      const value = before[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const portal = "stage-portal.example.invalid";
+  const hub = "stage-hub.example.invalid";
+  Object.assign(process.env, {
+    NODE_ENV: "production",
+    VIRKI_HUB_PERIMETER_MODE: "native",
+    VIRKI_STAGING_PASSKEY_RP_ENABLED: "true",
+    VIRKI_PORTAL_HOSTNAME: portal,
+    VIRKI_HUB_HOSTNAME: hub,
+    VIRKI_PASSKEYS_ENABLED: "true",
+    VIRKI_ADMIN_PASSKEYS_ENABLED: "true"
+  });
+  const probe = (host: string, action = "unsupported") => POST(new Request(`https://${host}/api/passkeys`, {
+    method: "POST",
+    headers: { host, origin: `https://${host}`, "content-type": "application/json" },
+    body: JSON.stringify({ action })
+  }));
+
+  assert.equal((await probe(portal)).status, 400, "the exact staging portal reaches the unrecognized-action guard");
+  assert.equal((await probe("portal.biel.dev.br")).status, 404, "production passkeys cannot be reached from staging");
+  assert.equal((await probe(`evil.${portal}`)).status, 404, "subdomain spoofing never inherits a staging RP");
+  assert.equal((await probe(hub)).status, 404, "USER RP cannot become the ADMIN host");
+  assert.equal((await probe(portal, "admin-unsupported")).status, 404, "ADMIN RP cannot become the USER host");
+
+  process.env.VIRKI_STAGING_PASSKEY_RP_ENABLED = "false";
+  assert.equal((await probe(portal)).status, 404, "changing a hostname alone must never enable staging passkeys");
+});
+
 test("rejected passkey login and management ceremonies generate sanitized audit events outside failed transactions", async (t) => {
   const beforeFlag = process.env.VIRKI_PASSKEYS_ENABLED;
   process.env.VIRKI_PASSKEYS_ENABLED = "true";
