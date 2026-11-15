@@ -2603,6 +2603,10 @@ for (const role of ["USER", "ADMIN"] as const) {
         .find(cookie => cookie.name === cookieName)?.value).toBe(key);
       const before = (await context.cookies(origin)).find(cookie => cookie.name === cookieName)!;
       expect((await context.cookies(origin)).find(cookie => cookie.name.includes("recovery_browser"))?.value ?? "").toBe("");
+      // Set-Cookie can arrive before the switch form's location.replace commits.
+      // Do not interrupt that navigation when opening the separate resume page.
+      await expect(active.page).toHaveURL(`${origin}/recover?requestId=${approved.id}`);
+      await active.page.waitForLoadState("domcontentloaded");
       await active.page.goto(`${origin}/recover`);
       await expect(active.page.getByRole("checkbox", { name: /Confirmo que quero substituir/u })).toBeVisible();
       await active.page.getByRole("button", { name: "Retomar recuperação anterior" }).click();
