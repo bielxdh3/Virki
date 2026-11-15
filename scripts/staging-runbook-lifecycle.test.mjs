@@ -188,6 +188,7 @@ testBash("worker late pre-up control flow blocks newly appeared containers and p
       hub_image=mock-image; hub_image_id=mock-image-id
       hub_id=$(printf 'a%.0s' {1..64}); hub_initial_restarts=0
       docker() {
+        printf 'docker mock call: %s\\n' "$*" >&2
         case "$*" in
           *"ps -aq --filter label=com.docker.compose.project=mock-worker"*)
             [[ "$MODE" == "lookup-failed" ]] && return 87
@@ -200,18 +201,26 @@ testBash("worker late pre-up control flow blocks newly appeared containers and p
             printf '%s\\n' "$hub_id";;
           *"ps -aq --filter label=com.docker.compose.service=hub"*) printf '%s\\n' "$hub_id";;
           *"compose --project-name mock-hub -f mock-hub.yml ps -q hub"*) printf '%s\\n' "$hub_id";;
-          *"inspect $hub_id"*) printf '[{}]\\n';;
-          *) return 87;;
+          *"inspect $hub_id"*)
+            # Large valid JSON makes a non-draining mock consumer SIGPIPE under pipefail.
+            printf '[%*s{}%*s]\\n' 65536 '' 65536 '';;
+          *) printf 'unexpected docker mock invocation: %s\\n' "$*" >&2; return 87;;
         esac
       }
-      jq() { [[ "$MODE" != "hub-unhealthy" ]]; }
+      jq() {
+        printf 'jq mock mode=%s args=%s\\n' "$MODE" "$*" >&2
+        # A real jq consumes the producer's stdin; drain it to avoid a false
+        # pipefail/SIGPIPE from this mock when Docker writes a large inspect.
+        if ! cat >/dev/null; then return 1; fi
+        [[ "$MODE" != "hub-unhealthy" ]]
+      }
       ${guard}
       if late_worker_context_guard; then exit 0; else exit 17; fi`;
     const result = spawnSync(bash, ["--noprofile", "--norc", "-c", script], {
       env: { PATH: "/usr/bin:/bin", MODE: mode }, encoding: "utf8", timeout: 5000
     });
     assert.ifError(result.error);
-    assert.equal(result.status, expected, `${mode}: ${result.stderr}`);
+    assert.equal(result.status, expected, `${mode}: stdout=${result.stdout}; stderr=${result.stderr}`);
   }
 });
 
