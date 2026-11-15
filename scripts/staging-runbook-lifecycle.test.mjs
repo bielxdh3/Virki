@@ -15,12 +15,30 @@ const testBash = process.platform === "win32" ? test.skip : test;
 const root = fileURLToPath(new URL("../", import.meta.url));
 // Checkout may have CRLF on Windows; copied Bash code blocks use LF on Linux.
 const runbook = readFileSync(path.join(root, "docs/security/pr118-staging-operator-runbook-20261114.md"), "utf8").replace(/\r\n/g, "\n");
+const ledger = readFileSync(path.join(root, "docs/security/pr118-segregated-staging-execution-ledger-20261114.md"), "utf8").replace(/\r\n/g, "\n");
 const start = runbook.indexOf("hub_cleanup_armed=0\n");
 const end = runbook.indexOf("hub_abort() {", start);
 assert.ok(start > 0 && end > start, "protected shell cleanup block must exist");
 const lifecycle = runbook.slice(start, end);
 
 const bash = process.env.BASH_FOR_STAGING_TEST ?? "/bin/bash";
+
+test("staging handoff reflects implemented isolated RPs and the complete signed preflight contract", () => {
+  assert.doesNotMatch(ledger, /current code hardcodes USER RP ID/u);
+  assert.doesNotMatch(ledger, /a dedicated staging RP\/origin implementation .* required/u);
+  assert.match(ledger, /VIRKI_STAGING_PASSKEY_RP_ENABLED=true/u);
+  assert.match(ledger, /separately approved passkey-enabled staging procedure/u);
+  const gate1 = ledger.slice(ledger.indexOf("## Gate 1 —"), ledger.indexOf("## Gate 2 —"));
+  assert.match(gate1, /signed_staging_runtime_preflight/u);
+  assert.match(gate1, /13 mandatory `--runtime-\*` bindings/u);
+  assert.match(runbook, /signed_staging_runtime_preflight\(\) \{/u);
+  assert.doesNotMatch(gate1, /Run `node scripts\/staging-otp-preflight\.mjs` with the two signed JSON declarations/u);
+  const signedGate = gate1.indexOf("signed_staging_runtime_preflight");
+  const startupInstruction = gate1.indexOf("7. Only after the signed preflight has passed");
+  assert.ok(signedGate > 0 && startupInstruction > signedGate,
+    "Hub activation must follow rather than precede the signed Gate-1 preflight");
+  assert.match(gate1.slice(0, signedGate), /Do not start the Hub before step 6/u);
+});
 
 function simulate({ hub, worker, operation, failDocker = "" }) {
   const tmp = mkdtempSync(path.join(tmpdir(), "virki-runbook-test-"));
@@ -131,6 +149,141 @@ testBash("signed staging runtime assertions bind measured identities before Hub 
     "resource-policy-id", "resource-policy-evidence-ref", "worker-memory-bytes",
     "worker-cpu-nano", "worker-pids-limit", "worker-interval-ms"]) {
     assert.ok(body.includes(`--runtime-${flag}`), `signed preflight must bind ${flag}`);
+  }
+});
+
+testBash("worker activation rechecks empty project/service inventories and original healthy Hub immediately before up", () => {
+  const workerSection = runbook.indexOf("## 3. Explicit attended worker window");
+  const guardStart = runbook.indexOf("late_worker_context_guard() {", workerSection);
+  const guardCall = runbook.indexOf("late_worker_context_guard || abort_worker", guardStart);
+  const up = runbook.indexOf("worker_cleanup_armed=1", guardCall);
+  assert.ok(workerSection > 0 && guardStart > workerSection && guardCall > guardStart && up > guardCall);
+  const guard = runbook.slice(guardStart, guardCall);
+  for (const must of [
+    'label=com.docker.compose.project=$project',
+    'label=com.docker.compose.service=email-worker',
+    'label=com.docker.compose.project=$hub_project',
+    'label=com.docker.compose.service=hub',
+    'docker --context "$ctx" compose --project-name "$hub_project"',
+    'docker --context "$ctx" inspect "$hub_id"',
+    '$c.State.Status == "running"',
+    '$c.State.Health.Status == "healthy"',
+    '$c.HostConfig.RestartPolicy.Name == "no"',
+    '$c.RestartCount == $initial_restarts',
+    '$c.Config.Labels["com.docker.compose.project"] == $hub_project',
+    '$c.Config.Labels["com.docker.compose.service"] == "hub"',
+    '$c.NetworkSettings.Networks[$network].NetworkID == $network_id'
+  ]) assert.ok(guard.includes(must), `missing late pre-up guard ${must}`);
+});
+
+testBash("worker late pre-up control flow blocks newly appeared containers and propagates jq failure", () => {
+  const start = runbook.indexOf("late_worker_context_guard() {");
+  const end = runbook.indexOf("late_worker_context_guard || abort_worker", start);
+  assert.ok(start > 0 && end > start);
+  const guard = runbook.slice(start, end);
+  for (const [mode, expected] of [["clean", 0], ["worker-appeared", 17], ["hub-replaced", 17], ["lookup-failed", 17], ["hub-unhealthy", 17]]) {
+    const script = `set -euo pipefail
+      ctx=mock-context; project=mock-worker; hub_project=mock-hub; hub_file=mock-hub.yml
+      network=mock-network; network_id=mock-network-id
+      hub_image=mock-image; hub_image_id=mock-image-id
+      hub_id=$(printf 'a%.0s' {1..64}); hub_initial_restarts=0
+      docker() {
+        case "$*" in
+          *"ps -aq --filter label=com.docker.compose.project=mock-worker"*)
+            [[ "$MODE" == "lookup-failed" ]] && return 87
+            [[ "$MODE" == "worker-appeared" ]] && printf 'rogue-worker\\n'
+            return 0;;
+          *"ps -aq --filter label=com.docker.compose.service=email-worker"*) return 0;;
+          *"volume ls -q --filter label=com.docker.compose.project="*|*"network ls -q --filter label=com.docker.compose.project="*) return 0;;
+          *"ps -aq --filter label=com.docker.compose.project=mock-hub"*)
+            [[ "$MODE" == "hub-replaced" ]] && { printf 'wrong-hub\\n'; return 0; }
+            printf '%s\\n' "$hub_id";;
+          *"ps -aq --filter label=com.docker.compose.service=hub"*) printf '%s\\n' "$hub_id";;
+          *"compose --project-name mock-hub -f mock-hub.yml ps -q hub"*) printf '%s\\n' "$hub_id";;
+          *"inspect $hub_id"*) printf '[{}]\\n';;
+          *) return 87;;
+        esac
+      }
+      jq() { [[ "$MODE" != "hub-unhealthy" ]]; }
+      ${guard}
+      if late_worker_context_guard; then exit 0; else exit 17; fi`;
+    const result = spawnSync(bash, ["--noprofile", "--norc", "-c", script], {
+      env: { PATH: "/usr/bin:/bin", MODE: mode }, encoding: "utf8", timeout: 5000
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, expected, `${mode}: ${result.stderr}`);
+  }
+});
+
+testBash("worker late pre-up inspect predicate rejects mutated Docker fields with real jq", t => {
+  const jq = spawnSync("jq", ["--version"], { encoding: "utf8", timeout: 5000 });
+  if (jq.status !== 0) {
+    // The pinned local WSL tooling has no jq binary and must not download one.
+    // GitHub-hosted Ubuntu executes this mandatory semantic fixture with jq.
+    if (process.env.CI === "true") assert.fail("hosted Linux guard fixture requires preinstalled jq");
+    t.skip("jq is not installed in this offline WSL environment; control-flow mock still runs");
+    return;
+  }
+  const start = runbook.indexOf("late_worker_context_guard() {");
+  const end = runbook.indexOf("late_worker_context_guard || abort_worker", start);
+  assert.ok(start > 0 && end > start);
+  const guard = runbook.slice(start, end);
+  const hubId = "a".repeat(64);
+  const secretSentinel = "VIRKI_TEST_SECRET_SENTINEL=fixture-only-never-print";
+  const valid = {
+    Id: hubId,
+    State: { Status: "running", Health: { Status: "healthy" } },
+    HostConfig: { RestartPolicy: { Name: "no" }, NetworkMode: "mock-network" },
+    RestartCount: 0,
+    Config: { Image: "mock-image", Env: [secretSentinel], Labels: { "com.docker.compose.project": "mock-hub", "com.docker.compose.service": "hub" } },
+    Image: "mock-image-id",
+    NetworkSettings: { Networks: { "mock-network": { NetworkID: "mock-network-id" } } }
+  };
+  const cases = [
+    ["valid", null, 0],
+    ["replaced ID", c => { c.Id = "b".repeat(64); }, 17],
+    ["stopped", c => { c.State.Status = "exited"; }, 17],
+    ["unhealthy", c => { c.State.Health.Status = "unhealthy"; }, 17],
+    ["restart policy", c => { c.HostConfig.RestartPolicy.Name = "always"; }, 17],
+    ["restarted", c => { c.RestartCount = 1; }, 17],
+    ["unexpected image ref", c => { c.Config.Image = "another-image"; }, 17],
+    ["unexpected image ID", c => { c.Image = "another-id"; }, 17],
+    ["wrong project", c => { c.Config.Labels["com.docker.compose.project"] = "other"; }, 17],
+    ["wrong service", c => { c.Config.Labels["com.docker.compose.service"] = "other"; }, 17],
+    ["extra network", c => { c.NetworkSettings.Networks.extra = { NetworkID: "extra-id" }; }, 17],
+    ["network ID", c => { c.NetworkSettings.Networks["mock-network"].NetworkID = "other-id"; }, 17],
+    ["network mode", c => { c.HostConfig.NetworkMode = "host"; }, 17],
+    ["inspect missing", c => { delete c.State.Health; }, 17],
+    ["inspect fails", null, 17]
+  ];
+  for (const [name, mutate, expected] of cases) {
+    const fixture = structuredClone(valid);
+    if (mutate) mutate(fixture);
+    const script = `set -euo pipefail
+      ctx=mock-context; project=mock-worker; hub_project=mock-hub; hub_file=mock-hub.yml
+      network=mock-network; network_id=mock-network-id; hub_image=mock-image; hub_image_id=mock-image-id
+      hub_id=$(printf 'a%.0s' {1..64}); hub_initial_restarts=0
+      docker() {
+        case "$*" in
+          *"ps -aq --filter label=com.docker.compose.project=mock-worker"*|*"ps -aq --filter label=com.docker.compose.service=email-worker"*|*"volume ls -q"*|*"network ls -q"*) return 0;;
+          *"ps -aq --filter label=com.docker.compose.project=mock-hub"*|*"ps -aq --filter label=com.docker.compose.service=hub"*|*"compose --project-name mock-hub -f mock-hub.yml ps -q hub"*) printf '%s\\n' "$hub_id";;
+          *"inspect $hub_id"*)
+            [[ "$MOCK_INSPECT_FAIL" == "yes" ]] && return 88
+            printf '%s\\n' "$HUB_FIXTURE";;
+          *) return 87;;
+        esac
+      }
+      ${guard}
+      if late_worker_context_guard; then exit 0; else exit 17; fi`;
+    const result = spawnSync(bash, ["--noprofile", "--norc", "-c", script], {
+      env: { PATH: process.env.PATH, HUB_FIXTURE: JSON.stringify([fixture]), MOCK_INSPECT_FAIL: name === "inspect fails" ? "yes" : "no" },
+      encoding: "utf8", timeout: 5000
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, expected, `${name}: ${result.stderr}`);
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.doesNotMatch(output, /DATABASE_URL|SECRET|PASSWORD/u, "inspect output must remain private");
+    assert.ok(!output.includes(secretSentinel), "synthetic container environment must never be emitted");
   }
 });
 

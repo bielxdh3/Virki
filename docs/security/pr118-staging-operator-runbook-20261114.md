@@ -1336,6 +1336,60 @@ abort_worker() {
 queue_counts="$(PGSERVICE=virki-staging-worker psql --no-password -XAtqc \
   'select (select count(*) from public."EmailOutboxMessage")::text || chr(124) || (select count(*) from public."EmailDeliveryAttempt")::text')" || abort_worker
 [[ "$queue_counts" == "0|0" ]] || abort_worker
+# Earlier project inventories and Hub health are historical once the attended
+# browser window has elapsed. Immediately before worker activation, recheck
+# against the same daemon and original Hub ID; never adopt a late container or
+# continue after a Hub restart/replacement. This reduces, but cannot remove,
+# a hostile concurrent Docker-actor race: the independent daemon/host access
+# boundary and post-start verification remain mandatory.
+late_worker_context_guard() {
+  local worker_project_now worker_service_now worker_volumes_now worker_networks_now
+  local hub_project_now hub_service_now hub_volumes_now hub_networks_now hub_compose_id
+  if ! worker_project_now="$(docker --context "$ctx" ps -aq \
+    --filter "label=com.docker.compose.project=$project")"; then return 1; fi
+  if ! worker_service_now="$(docker --context "$ctx" ps -aq \
+    --filter "label=com.docker.compose.service=email-worker")"; then return 1; fi
+  if ! worker_volumes_now="$(docker --context "$ctx" volume ls -q \
+    --filter "label=com.docker.compose.project=$project")"; then return 1; fi
+  if ! worker_networks_now="$(docker --context "$ctx" network ls -q \
+    --filter "label=com.docker.compose.project=$project")"; then return 1; fi
+  [[ -z "$worker_project_now" && -z "$worker_service_now" &&
+     -z "$worker_volumes_now" && -z "$worker_networks_now" ]] || return 1
+  if ! hub_project_now="$(docker --context "$ctx" ps -aq \
+    --filter "label=com.docker.compose.project=$hub_project")"; then return 1; fi
+  if ! hub_service_now="$(docker --context "$ctx" ps -aq \
+    --filter "label=com.docker.compose.service=hub")"; then return 1; fi
+  if ! hub_volumes_now="$(docker --context "$ctx" volume ls -q \
+    --filter "label=com.docker.compose.project=$hub_project")"; then return 1; fi
+  if ! hub_networks_now="$(docker --context "$ctx" network ls -q \
+    --filter "label=com.docker.compose.project=$hub_project")"; then return 1; fi
+  if ! hub_compose_id="$(docker --context "$ctx" compose --project-name "$hub_project" \
+    -f "$hub_file" ps -q hub)"; then return 1; fi
+  [[ "$hub_project_now" == "$hub_id" && "$hub_service_now" == "$hub_id" &&
+     "$hub_compose_id" == "$hub_id" && -z "$hub_volumes_now" &&
+     -z "$hub_networks_now" ]] || return 1
+  if ! docker --context "$ctx" inspect "$hub_id" | jq -e \
+      --arg hub_id "$hub_id" --arg hub_project "$hub_project" \
+      --arg hub_image "$hub_image" --arg hub_image_id "$hub_image_id" \
+      --arg network "$network" --arg network_id "$network_id" \
+      --argjson initial_restarts "$hub_initial_restarts" '
+    length == 1
+    and (.[0] as $c
+      | $c.Id == $hub_id
+        and $c.State.Status == "running"
+        and $c.State.Health.Status == "healthy"
+        and $c.HostConfig.RestartPolicy.Name == "no"
+        and $c.RestartCount == $initial_restarts
+        and $c.Config.Image == $hub_image
+        and $c.Image == $hub_image_id
+        and $c.Config.Labels["com.docker.compose.project"] == $hub_project
+        and $c.Config.Labels["com.docker.compose.service"] == "hub"
+        and ($c.NetworkSettings.Networks | keys == [$network])
+        and $c.NetworkSettings.Networks[$network].NetworkID == $network_id
+        and $c.HostConfig.NetworkMode == $network)
+  ' >/dev/null; then return 1; fi
+}
+late_worker_context_guard || abort_worker
 worker_cleanup_armed=1
 if ! docker --context "$ctx" compose --project-name "$project" \
   --profile "$profile" -f "$file" \
