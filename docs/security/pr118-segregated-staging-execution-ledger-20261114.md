@@ -13,6 +13,50 @@ turn any `NOT RUN` physical gate into `PASS`. The conditional architectural
 consent recorded on 2026-11-10 is not permission to start staging or change the
 production Cloudflare Access perimeter; the P1 trust-boundary thread stays open.
 
+## PR #118 pre-reconciliation source and review snapshot — 2026-11-15
+
+This records the authoritative state at the start of this ledger-only
+acceptance reconciliation, distinct from the older historical provenance and
+local-evidence records below. Reconcile the actual PR HEAD again against GitHub
+before any future external operation:
+
+- Exact source SHA: `ec00c4a13691825dc1a7f49ac2a257ea358e4d93` in the local
+  hardening worktree, origin
+  `refs/heads/feat/virki-native-admin-perimeter-20261110`, and PR #118 head.
+- PR #118 is `OPEN/DRAFT`, base `main`; GitHub `reviewDecision` is empty and
+  there is no formal `APPROVED` review. The local worktree was clean at the
+  start of this reconciliation, before the ledger-only update below.
+- Exact-SHA hosted checks: CI runs `43761442588` and `43761448953`, and CodeQL
+  run `43761448962`, all completed `SUCCESS`. The PR rollup is **15
+  COMPLETED/SUCCESS, 2 COMPLETED/SKIPPED, zero failures and zero in-progress**.
+  The only skipped checks are the two downstream
+  `Build tested production images (${{ matrix.arch }})` matrix jobs; no
+  Validate, CodeQL, or authenticated browser E2E check was skipped.
+- Both `Validate` jobs passed. The hosted unit suite reported **774 tests,
+  770 pass, 0 fail, 4 skipped**; it explicitly logged
+  `ok 752 - worker late pre-up inspect predicate rejects mutated Docker fields
+  with real jq`. Both authenticated browser E2E jobs
+  (`132956931177`, `132956949640`) completed `SUCCESS`, including disposable
+  PostgreSQL integration, browser E2E, isolated passkey recovery, native Hub
+  without a Cloudflare Access JWT, production Hub core browser E2E and cleanup.
+- The latest incremental review of the exact `ec00c4a` diff
+  (`6901379370`) reported zero actionable P0/P1/P2 candidates. The independent
+  read-only worker-6 review of the final real-`jq`/secret-sentinel regression
+  also returned GO. These are source reviews, not external operational
+  acceptance or a formal GitHub approval.
+- Four current review threads were reconciled: three P2 threads are resolved;
+  the Cloudflare Access/native perimeter P1
+  (`PRRT_kwDOTCBp-M62aUxf`, `apps/hub/src/lib/cloudflare-access.ts:19`) remains
+  `OPEN` and not outdated. The factual exact-SHA status update is already
+  recorded in PR comment `6901550051`; do not duplicate it without new
+  evidence.
+
+The checks above establish source/CI/browser-fixture status only. They do not
+establish an approved staging host, CA/OCI provenance on that host, live Prisma
+TLS, external WebAuthn, provider-to-inbox delivery, active network isolation,
+physical rollback, P1 resolution, or owner authorization for a production
+perimeter change.
+
 ## Provenance and scope of the handoff
 
 - Previously independently **CI-verified** PR source: `678d81af31fb6aa5f1ab4effcdee823a030c38ce` on `feat/virki-native-admin-perimeter-20261110`. Earlier runtime baseline `2cb74f576039cac8d83fd2d1cc52e47f36184ad1` includes the original `6feb2da5ab9bd25ce1cc2f53c6a7c4fc4807bd1c`. Descendant hardening includes operator-only `scripts/staging-pgpass-bootstrap-binding.mjs` and `scripts/staging-prisma-migration-ledger-binding.mjs`, bootstrap/HBA changes, and **runtime changes to passkey RP-ID selection and recovery validation**, with local regressions. Operator helpers are not imported into Hub/worker; passkey and recovery changes are. Publication of a new descendant commit is NOT an independently accepted SOURCE GO. Review and CI/CodeQL must cover the exact new PR head and immutable image digest, not just `2cb74f5`; changes invalidate prior exact-SHA gates.
@@ -293,6 +337,41 @@ If the provider-to-inbox join cannot be established without exposing sensitive h
 | Separate explicit final owner approval for any production perimeter change | NOT RUN |
 
 **Decision rule:** release remains **NO-GO** unless **all** applicable cells have external evidence and independent acceptance. Code/source review, green CI/CodeQL, a Compose dry run or a signed statement alone cannot substitute. Any blocker, unknown, missing receipt, secret spill, provider discrepancy or unverifiable restore forces **NO-GO** and a new reviewed window.
+
+## Unified external acceptance matrix and accountability
+
+The detailed commands and scenario inventories remain in Gates 0–4 and the
+linked operator/acceptance documents above. This matrix is the single decision
+index: every gate needs a named person/identity, an independent evidence
+receipt, and an explicit PASS/FAIL result. **Role descriptions below are not
+appointments.** No infrastructure operator, SMTP tenant/account, authorized
+recipient, independent operational-security reviewer, or rollback operator is
+currently named in this ledger; the owner must identify them in the signed
+approval before any external action. The owner cannot self-certify the
+independent reviewer role.
+
+| External gate | Effective responsibility (names/IDs still required) | Prerequisites and objective PASS evidence | FAIL / current state |
+| --- | --- | --- | --- |
+| **1. CA + immutable OCI provenance** | Owner approves the exact source SHA, CA fingerprint and Hub/worker image digests. CA issuer and OCI registry/build provider supply the certificate chain, immutable manifests and signed build provenance. Infrastructure operator verifies the actual platform-specific manifests and loaded runtime images. Independent security reviewer verifies signatures and source-to-image binding. | Exact final PR SHA is bound to signed build provenance and immutable Hub/worker OCI manifest digests/platforms; signatures/attestations verify against independently pinned trust anchors. Both final image filesystems contain the same owner-approved CA bytes at `/app/ca/staging-db-root.pem`, root-owned `0444`, non-symlink. The approved platform-specific manifest digest remains pinned separately in the image reference/`RepoDigests`; its OCI `config.digest` must match Docker image `.Id`, and the runtime container `.Image` must equal that `.Id`. Each effective runtime configuration is checked field-by-field against the signed approval and immutable image baseline. Retain redacted signature/provenance verification, CA SHA-256/fingerprint, manifest/platform digests, runtime image/config IDs, effective-configuration verification, UTC timestamps and reviewer receipt. | Any unsigned/mutable/unmatched image, untrusted signer, CA mismatch, missing runtime identity or unverifiable provenance is FAIL. **NOT RUN / BLOCKED:** no owner-approved CA, final staging OCI digest or independently verified external-host image inventory exists. |
+| **2. Prisma 6.19.3 TLS chain + hostname/SAN** | CA issuer supplies the approved CA/leaf chain. Infrastructure/database operator controls the exact staging PostgreSQL endpoint and both runtime images. Independent security reviewer witnesses positive and negative connections using the actual Prisma 6.19.3 Linux query engine from each approved Hub and worker image. | From both exact approved images, Prisma connects to the exact staging DB host with `sslmode=require&sslaccept=strict&sslcert=/app/ca/staging-db-root.pem`; the valid CA chain and hostname/SAN match succeed. A deliberately untrusted/wrong CA and a trusted certificate with a wrong hostname/SAN each fail closed. No `sslrootcert` substitution, invalid-cert mode, fallback or libpq-only result is accepted. Retain engine version, image digest, approved host, CA fingerprint, certificate SAN, redacted positive/negative result and independent witness receipt. | Positive failure, either negative connection succeeding, a fallback, or evidence from OpenSSL/libpq instead of Prisma is FAIL. **NOT RUN / BLOCKED:** image CA extraction/URL contracts are source/local checks only; no live Prisma 6.19.3 Linux CA-and-SAN handshake has been witnessed. |
+| **3. HTTPS WebAuthn USER/ADMIN origins and RP IDs** | Owner approves the exact distinct staging Portal/Hub hostnames and test identities. Infrastructure operator provisions DNS, HTTPS certificates and isolated routes. Independent security reviewer witnesses clean-browser ceremonies with separate USER and ADMIN principals. | Both approved origins resolve over valid HTTPS; USER Portal and ADMIN Hub use distinct, non-overlapping staging RP IDs that do not overlap each other or production. On each origin, real browser registration and assertion succeed for the correct role; wrong origin/RP/role, replay, expiry and revoked-credential cases fail. Recovery/passkey checks remain role-specific; TOTP is not passkey evidence. Retain host/RP/origin/certificate fingerprints, sanitized browser/audit receipts, role and positive/negative outcomes. | Missing host approval, shared/parent-child RP scope, invalid TLS, wrong-role acceptance, or test-only/local/CI fixtures presented as staging is FAIL. **NOT RUN / BLOCKED:** the source resolver exists, but the runbook keeps staging RP opt-in unset and passkey flags false; no approved external RP pair or physical HTTPS ceremony exists. |
+| **4. Real SMTP/provider-to-recipient OTP** | Owner approves the exact provider tenant/account, opaque recipient allowlist, quota and send window. Infrastructure operator configures the isolated worker and DB role. SMTP provider supplies authenticated relay and provider-event evidence, including an unlisted-recipient rejection. The authorized inbox owner independently confirms receipt. Independent reviewer joins the chain. | One authorized Virki action for the exact USER or ADMIN ceremony under test correlates to the expected outbox row, one worker claim/CAS attempt, authenticated STARTTLS/AUTH, provider acceptance event/message ID, and the actual Virki-generated OTP in the authorized inbox through one safe end-to-end trace ID. If both roles are in acceptance scope, correlate each role-specific ceremony separately. Unlisted recipient is rejected; expiry/replay/wrong-role denial is proved; worker is stopped and uncertain sends reconciled. Retain only opaque/HMAC IDs, provider event receipt, recipient confirmation and redacted audit evidence; never record OTP or raw headers. | SMTP `250`, database `SENT`, RFC `Message-ID`, diagnostic mail, or provider event without independently matched inbox receipt is FAIL / `OTP_CORRELATION_UNPROVEN`. **NOT RUN / BLOCKED:** no approved staging tenant/recipient, provider event or real Virki OTP inbox receipt exists. |
+| **5. Effective ingress/egress and resource isolation** | Owner approves topology, source-IP/VPN allowlist, host allowlist and separate Hub/worker destination policies. Infrastructure operator applies and observes host/firewall, Docker context/project, namespace, network, service and volume boundaries. Independent security/operator reviewer witnesses actual enforcement, not merely policy IDs. | Native Hub edge is default-deny: only exact approved operator/test IPs or private VPN and approved host/origin routes pass; unknown hosts and all other sources fail. Hub egress is limited to approved staging DB, identity/application endpoints and DNS; worker egress to staging DB, approved SMTP relay and DNS. Both deny Docker Engine TCP APIs (2375/2376/custom), SSH/RDP, host-gateway management and all unapproved destinations. Actual host, DB, namespaces, Docker projects, networks, services, mounts/volumes and credentials are separated from production/deManage; the worker uses the standalone worker-only manifest, no ports/binds/persistent volumes/DB service, and its physical container/resource limits match signed values. Retain distinct active policy IDs/receipts, independent route/deny observations, sanitized host/daemon/project/network/container/volume inventory and UTC witness receipts. | Any public/unapproved ingress, unbounded egress, shared production/deManage resource or identity, unexpected service/volume/mount/port, Docker API/management reachability, stale/unknown container or merely asserted (not observed) policy is FAIL. **NOT RUN / BLOCKED:** no independent staging host/firewall/namespace/volume observation or active policy receipt exists. |
+| **6. Physical staging rollback** | Owner approves the baseline snapshot, restore target, maintenance window and named rollback operator. Infrastructure/database operator performs the physical stop/restore/application rollback. The owner-designated authorized operator revokes/rotates the staging SMTP credential in the provider console if an unexpected recipient, unbounded send, host mismatch or uncertain exposure is found; the provider may assist. Independent security reviewer witnesses post-restore invariants. | Worker is physically stopped and unable to restart; uncertain mail attempts are quarantined, reconciled and never resent automatically. Uncertain delivery alone does not trigger automatic credential rotation. Restore the approved snapshot into a new staging DB, verify exact committed Prisma migration names/checksums, DB roles/grants/HBA/TLS, source/image and ingress rollback, and compare sanitized user/session/recovery/elevation/outbox/attempt/audit invariants before/after. Retain snapshot digest/custody, restore command/result receipt, database/migration/role/HBA proofs, container stop state, queue reconciliation and independent witness sign-off. No production or production Cloudflare resource is touched. | In-place/production restore, active worker, uncertain send that is retried or left unreconciled, migration/role/HBA drift, failed restore, missing custody or unverified ingress rollback is FAIL. **NOT RUN / BLOCKED:** no physical restore on an independently approved staging target has been performed or witnessed. |
+| **7. Formal security, policy and release acceptance** | Owner alone decides whether to authorize the exact perimeter-policy replacement, exact resources and execution window, and names the rollback operator. Independent security reviewer signs the completed external evidence. Authorized repository-policy owner reconciles `AGENTS.md` only after the decision and evidence. A GitHub reviewer supplies the formal PR review. | All applicable Gates 1–6 have independent PASS receipts tied to the exact final PR SHA and OCI digests. The reviewer explicitly accepts the externally enforced native perimeter and rollback; the owner signs the exact host/resources, default-deny edge policy, policy replacement, execution window and rollback owner. Only then may the authorized policy owner reconcile the documented Cloudflare Access outer-boundary rule and the P1 reviewer thread be considered for resolution; GitHub must show formal `APPROVED` review. Production cutover still requires its own explicit owner authorization. | Missing any physical gate, owner authorization, independent security sign-off, policy reconciliation or formal GitHub approval is BLOCK. **BLOCKED:** P1 `PRRT_kwDOTCBp-M62aUxf` remains OPEN; `AGENTS.md:16` mandates Cloudflare Access as the outer boundary and `AGENTS.md:50` prohibits weakening it; PR `reviewDecision` is empty. The 2026-11-10 “Sim” approves the architectural direction only after isolated staging/security acceptance, not these exact resources, policy change, staging operation or production cutover. |
+
+**P1 resolution rule:** the outstanding requirement is the independent, witnessed
+default-deny external ingress/egress and rollback boundary for the intentionally
+native Hub, followed by the owner's separate approval of the exact perimeter
+policy/resources/window and an authorized reconciliation of `AGENTS.md`. The
+current evidence does not demonstrate a new application-side ADMIN session,
+role, CSRF or elevation bypass; it does demonstrate an intentional application
+Access-JWT bypass in native mode. That design makes external edge enforcement
+and policy acceptance mandatory. This is a real trust-boundary/policy and
+operational-acceptance conflict, not something CI or another application test
+can close. Do not re-open the 2026-11-10 in-principle architecture decision,
+modify production policy or `AGENTS.md`, or resolve the P1 thread before the
+stated gates and owner authority exist.
 
 ## Residual risks and follow-up ownership
 
