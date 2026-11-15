@@ -7,6 +7,7 @@ import { prisma } from "@virki/database";
 import { headers } from "next/headers";
 import { listUserPasskeys, passkeysEnabledForRequest } from "@virki/auth/passkeys";
 import { requireAdminPage } from "../../../lib/admin-page";
+import { isNativeHubPerimeterEnabled } from "../../../lib/hub-perimeter";
 import { getSurface, requestHost } from "../../../lib/surface";
 import { PasskeyManager } from "../../account/security/passkey-manager";
 import { approveRecoveryAction } from "../../recover/actions";
@@ -43,7 +44,7 @@ export default async function SecurityPage({ searchParams }: { searchParams: Pro
       } : undefined}
     />
     <ElevationControls csrf={csrf} credentialReady={credential?.status === "ACTIVE"} active={activeElevations.map((item) => ({ ...item, expiresAt: item.expiresAt.toISOString() }))} />
-    {adminPasskeysEnabled ? <PasskeyManager role="ADMIN" csrfToken={csrf} requiresTotp={factor?.secondFactorMethod === "TOTP"} initialPasskeys={adminPasskeys.map(({ createdAt, lastUsedAt, ...item }) => ({ ...item, createdAt: createdAt.toISOString(), lastUsedAt: lastUsedAt?.toISOString() ?? null }))} /> : null}
+    {adminPasskeysEnabled ? <PasskeyManager role="ADMIN" nativePerimeter={isNativeHubPerimeterEnabled()} csrfToken={csrf} requiresTotp={factor?.secondFactorMethod === "TOTP"} initialPasskeys={adminPasskeys.map(({ createdAt, lastUsedAt, ...item }) => ({ ...item, createdAt: createdAt.toISOString(), lastUsedAt: lastUsedAt?.toISOString() ?? null }))} /> : null}
     <section className="surface"><h2>Recuperação de contas ({recoveryRequests.length})</h2><p className="muted">Pedidos expirados, não verificados ou da sua própria conta não aparecem aqui. Aprovar autoriza a recuperação apenas após a prova exigida; é necessária elevação ativa e a aprovação não pode ser feita pelo titular.</p>
       {recoveryRequests.length === 0 ? <p className="muted">Nenhum pedido pendente.</p> : <div className="row-list">{recoveryRequests.map((request) => <article className="list-row" key={request.id}><div className="row-main"><strong>{request.user.displayName || request.user.emailNormalized}</strong><span>{request.user.role === "ADMIN" ? "Administrador" : "Usuário"} · {request.user.emailNormalized} · expira {formatDateTime(request.expiresAt)}</span><RecoveryReviewDetails request={request} /></div>{recoveryNeedsAdministrativeReview(request) ? <form action={approveRecoveryAction}><input type="hidden" name={CSRF_FORM_FIELD_NAME} value={csrf} /><input type="hidden" name="requestId" value={request.id} /><button className="button-primary" type="submit">Aprovar recuperação</button></form> : null}</article>)}</div>}
     </section>
