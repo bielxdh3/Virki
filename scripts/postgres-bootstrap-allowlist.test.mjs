@@ -109,10 +109,10 @@ test("staging runbook binds remote HBA to exact SCRAM rules and rejects every in
       `${name} must collapse PostgreSQL backslash-newline continuations before scanning physical records`);
     assert.ok(sql.includes("E'\\n'"),
       `${name} must split the normalized canonical HBA file on actual newline characters`);
-    assert.ok(sql.includes("regexp_replace(hba_line.line, '^[[:space:]]+', '')"),
-      `${name} must detect directives with leading tabs and other whitespace`);
-    assert.ok(sql.includes("'^(include|include_if_exists|include_dir)([[:space:]]|$)'"),
-      `${name} must reject every include directive, not similarly prefixed tokens`);
+    assert.ok(sql.includes(`regexp_replace(hba_line.line, '"', '', 'g')`),
+      `${name} must account for PostgreSQL's dequoting of the first HBA token`);
+    assert.ok(sql.includes("'^[[:space:],]*(include|include_if_exists|include_dir)([[:space:],]|$)'"),
+      `${name} must reject directives with comma-separated or comma-prefixed HBA tokens`);
   }
   assert.match(rulesSql, /LEFT JOIN hba_rules AS r/u);
   assert.match(rulesSql, /hba_state AS MATERIALIZED/u);
@@ -152,19 +152,38 @@ test("staging runbook binds remote HBA to exact SCRAM rules and rejects every in
     "an empty PGPASSWORD override must not bypass the deliberately incorrect passfile");
   assert.equal((runbook.match(/hostaddr=\$VIRKI_STAGING_APPROVED_DB_SERVER_ADDR/gu) ?? []).length, 4,
     "positive and negative probes must pin the approved server address while retaining TLS host verification");
+  // PostgreSQL 18 hba.c next_token() discards double quotes and skips leading
+  // commas, while tokenize_auth_file() compares the first dequoted token with
+  // the include keyword. The scan intentionally rejects a conservative
+  // superset; harmless invalid HBA records may also be rejected fail-closed.
   const includeScanner = (contents) => contents.replace(/\\\r?\n/gu, "").split(/\r?\n/u).some((line) =>
-    /^(include|include_if_exists|include_dir)(?:[\s]|$)/iu.test(line.replace(/^[\s]+/u, "")));
+    /^[\s,]*(include|include_if_exists|include_dir)(?:[\s,]|$)/iu.test(line.replaceAll('"', "")));
   for (const directive of [
     "\tinclude /etc/postgresql/extra.conf",
     " \tinclude_if_exists /tmp/extra.conf",
     "include_dir /tmp/hba.d",
     "incl\\\nude /tmp/continued.conf",
     "include_if_\\\r\nexists /tmp/continued-optional.conf",
-    "include_\\\ndir /tmp/continued-directory"
+    "include_\\\ndir /tmp/continued-directory",
+    '"include" /tmp/quoted-directive.conf',
+    '"include_if_exists" /tmp/optional-missing.conf',
+    '"include_dir" /tmp/quoted-dir',
+    'in"clu"de /tmp/mixed-quotes.conf',
+    'include_if_"exists" /tmp/mixed-optional.conf',
+    ',include /tmp/comma-prefix.conf',
+    ',  "include" /tmp/comma-and-quoted.conf',
+    'include,junk /tmp/comma-field.conf',
+    'in"clu"de,junk /tmp/mixed-and-comma.conf',
+    '"incl\\\nude" /tmp/quoted-continuation.conf',
+    '"include_if_\\\r\nexists" /tmp/quoted-continuation-optional.conf'
   ]) {
     assert.equal(includeScanner(directive), true, directive);
   }
   assert.equal(includeScanner("# include /tmp/commented.conf"), false);
+  assert.equal(includeScanner("# comment continued \\\ninclude /tmp/still-commented.conf"), false);
+  assert.equal(includeScanner("  # quoted \"include\" /tmp/commented.conf"), false);
+  assert.equal(includeScanner('local "postgres" postgres peer'), false);
+  assert.equal(includeScanner('hostssl all all 127.0.0.1/32 scram-sha-256 # include /tmp/commented.conf'), false);
   assert.equal(includeScanner("includeish /tmp/not-a-directive"), false);
   assert.match(runbook, /"\$node_bin" scripts\/staging-toolchain-preflight\.mjs/u,
     "staging toolchain preflight must use the approved Node binary rather than PATH");

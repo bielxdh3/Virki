@@ -35,6 +35,12 @@ type PasskeyRole = "USER" | "ADMIN";
 
 type PasskeyRP = { rpID: string; origin: string };
 
+// A browser can use a parent-domain RP ID for a subdomain. Keep staging RP
+// scopes disjoint from both production RPs and from the other staging role.
+function overlappingPasskeyRPDomain(left: string, right: string): boolean {
+  return left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`);
+}
+
 // The staging opt-in deliberately does NOT follow arbitrary Host headers or
 // override production's original RPs. Both isolated staging names must be
 // explicitly provisioned and approved before this code can enable them.
@@ -43,8 +49,8 @@ function isCanonicalStagingRPHostname(host: string | undefined): host is string 
       !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u.test(host) ||
       isIP(host) !== 0 || /^(?:[0-9]+\.){3}[0-9]+$/u.test(host) ||
       host.split(".").some(label => label === "localhost" || label.startsWith("xn--")) ||
-      host === "biel.dev.br" || host === RP_ID || host === ADMIN_RP_ID ||
-      host.endsWith(`.${RP_ID}`) || host.endsWith(`.${ADMIN_RP_ID}`)) return false;
+      host === "biel.dev.br" || overlappingPasskeyRPDomain(host, RP_ID) ||
+      overlappingPasskeyRPDomain(host, ADMIN_RP_ID)) return false;
   return true;
 }
 
@@ -59,7 +65,8 @@ function effectivePasskeyRPs(env: Readonly<Record<string, string | undefined>>):
   if (optIn !== "true" || env.NODE_ENV !== "production" || env.VIRKI_HUB_PERIMETER_MODE !== "native") throw FAILURE;
   const portal = env.VIRKI_PORTAL_HOSTNAME;
   const hub = env.VIRKI_HUB_HOSTNAME;
-  if (!isCanonicalStagingRPHostname(portal) || !isCanonicalStagingRPHostname(hub) || portal === hub) throw FAILURE;
+  if (!isCanonicalStagingRPHostname(portal) || !isCanonicalStagingRPHostname(hub) ||
+      overlappingPasskeyRPDomain(portal, hub)) throw FAILURE;
   return {
     USER: { rpID: portal, origin: `https://${portal}` },
     ADMIN: { rpID: hub, origin: `https://${hub}` }

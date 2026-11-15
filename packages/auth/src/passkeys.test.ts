@@ -104,6 +104,58 @@ test("opted-in native staging uses distinct exact HTTPS USER and ADMIN relying p
   }, "ADMIN"), false);
 });
 
+test("staging RP IDs cannot enclose another role or any production RP", () => {
+  // Browsers may use a parent domain as a WebAuthn RP ID for a subdomain.
+  // Therefore exact origin verification alone does not isolate credentials
+  // when a staging RP is an ancestor of another role or a production RP.
+  const overlapping: Array<[string, Record<string, string>]> = [
+    ["USER encloses ADMIN", {
+      VIRKI_PORTAL_HOSTNAME: "staging.biel.dev.br",
+      VIRKI_HUB_HOSTNAME: "hub.staging.biel.dev.br"
+    }],
+    ["ADMIN encloses USER", {
+      VIRKI_PORTAL_HOSTNAME: "portal.staging.biel.dev.br",
+      VIRKI_HUB_HOSTNAME: "staging.biel.dev.br"
+    }],
+    ["USER is production ancestor", { VIRKI_PORTAL_HOSTNAME: "dev.br" }],
+    ["ADMIN is production ancestor", { VIRKI_HUB_HOSTNAME: "dev.br" }],
+    ["USER is common production ancestor", { VIRKI_PORTAL_HOSTNAME: "biel.dev.br" }],
+    ["ADMIN is common production ancestor", { VIRKI_HUB_HOSTNAME: "biel.dev.br" }],
+    ["USER nested inside production ADMIN", { VIRKI_PORTAL_HOSTNAME: "portal.hub.biel.dev.br" }],
+    ["ADMIN nested inside production USER", { VIRKI_HUB_HOSTNAME: "hub.portal.biel.dev.br" }]
+  ];
+  for (const [reason, override] of overlapping) {
+    const env = { ...stagingPasskeyEnv, ...override };
+    for (const [role, host, surface] of [
+      ["USER", env.VIRKI_PORTAL_HOSTNAME, "portal"],
+      ["ADMIN", env.VIRKI_HUB_HOSTNAME, "hub"]
+    ] as const) {
+      assert.throws(() => expectedPasskeyRP(env, host, role), /Passkey ceremony rejected/u,
+        `${reason}: ${role} should fail closed even at the explicitly configured Host`);
+      assert.equal(passkeysEnabledForRequest(surface, host, env, role), false,
+        `${reason}: ${role} should be disabled, not fall back to production`);
+    }
+    assert.throws(() => expectedPasskeyRP(env, "portal.biel.dev.br", "USER"),
+      /Passkey ceremony rejected/u, `${reason}: no production USER fallback`);
+    assert.throws(() => expectedPasskeyRP(env, "hub.biel.dev.br", "ADMIN"),
+      /Passkey ceremony rejected/u, `${reason}: no production ADMIN fallback`);
+  }
+
+  // Sibling staging origins are deliberately allowed: they do not have
+  // parent/child RP relationships even if they share a DNS zone.
+  const siblings = {
+    ...stagingPasskeyEnv,
+    VIRKI_PORTAL_HOSTNAME: "portal.stage.biel.dev.br",
+    VIRKI_HUB_HOSTNAME: "hub.stage.biel.dev.br"
+  };
+  assert.deepEqual(expectedPasskeyRP(siblings, siblings.VIRKI_PORTAL_HOSTNAME, "USER"), {
+    rpID: siblings.VIRKI_PORTAL_HOSTNAME, origin: `https://${siblings.VIRKI_PORTAL_HOSTNAME}`
+  });
+  assert.deepEqual(expectedPasskeyRP(siblings, siblings.VIRKI_HUB_HOSTNAME, "ADMIN"), {
+    rpID: siblings.VIRKI_HUB_HOSTNAME, origin: `https://${siblings.VIRKI_HUB_HOSTNAME}`
+  });
+});
+
 test("native staging RP opt-in fails closed for incomplete, reused or malformed names and contexts", () => {
   const defaults = {
     ...stagingPasskeyEnv,

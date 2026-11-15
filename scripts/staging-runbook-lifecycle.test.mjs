@@ -110,6 +110,83 @@ testBash("worker is armed before up and disarmed only after physical stopped che
   assert.match(runbook, /abort_worker\(\) \{\n {2}printf /);
 });
 
+testBash("Hub startup waits for bounded real health before inspecting the final healthy state", () => {
+  const startup = runbook.slice(runbook.indexOf("hub_cleanup_armed=1"), runbook.indexOf("STAGING_HUB_RUNTIME_ISOLATION=PASS"));
+  assert.match(startup, /up --no-deps --pull never --wait --wait-timeout 120 hub/u);
+  assert.match(startup, /\[\[ "\$hub_health" == "healthy" \]\] \|\| hub_abort/u);
+});
+
+testBash("signed staging runtime assertions bind measured identities before Hub startup and again before worker", () => {
+  const definition = runbook.indexOf("signed_staging_runtime_preflight() {");
+  const firstCall = runbook.indexOf("signed_staging_runtime_preflight ||", definition);
+  const hubStartup = runbook.indexOf("hub_cleanup_armed=1", firstCall);
+  const secondCall = runbook.indexOf("signed_staging_runtime_preflight ||", hubStartup);
+  const workerStartup = runbook.indexOf("worker_cleanup_armed=1", secondCall);
+  assert.ok(definition > 0 && firstCall > definition && hubStartup > firstCall &&
+    secondCall > hubStartup && workerStartup > secondCall,
+  "a fresh signed comparison must precede each staging activation");
+  const body = runbook.slice(definition, firstCall);
+  for (const flag of ["worker-oci-digest", "hub-oci-digest", "worker-compose-project",
+    "hub-compose-project", "hub-compose-file-sha256", "network-id", "db-name",
+    "resource-policy-id", "resource-policy-evidence-ref", "worker-memory-bytes",
+    "worker-cpu-nano", "worker-pids-limit", "worker-interval-ms"]) {
+    assert.ok(body.includes(`--runtime-${flag}`), `signed preflight must bind ${flag}`);
+  }
+});
+
+testBash("both negative SCRAM probes reject chmod and entropy errors inside an ||-guarded subshell", () => {
+  const probes = [...runbook.matchAll(/remote_scram_probe\(\) \{([\s\S]*?)\n\}/gu)];
+  assert.equal(probes.length, 2, "operator and rollback use separate probes");
+  for (const match of probes) {
+    for (const fault of ["chmod", "od"]) {
+      const script = `set -euo pipefail
+        umask 077
+        service_dir="$(mktemp -d)"
+        trap 'rm -rf -- "$service_dir"' EXIT
+        VIRKI_STAGING_APPROVED_DB_HOST=db.example.test
+        VIRKI_STAGING_APPROVED_DB_PORT=5432
+        VIRKI_STAGING_APPROVED_DB_SERVER_ADDR=127.0.0.1
+        staging_db_client_addr=127.0.0.1
+        same_ip_address() { return 0; }
+        psql() {
+          if [[ "$*" == *"select 1"* ]]; then
+            printf 'password authentication failed for user \\"virki_runtime\\"\\n' >&2
+            return 3
+          fi
+          printf '127.0.0.1|5432|virki_stage|virki_runtime|virki_runtime|true|127.0.0.1\\n'
+        }
+        ${fault}() { return 33; }
+        remote_scram_probe() {${match[1]}
+        }
+        if remote_scram_probe virki-staging-hub virki_stage virki_runtime; then
+          exit 0
+        else
+          exit 17
+        fi
+      `;
+      const result = spawnSync(bash, ["--noprofile", "--norc", "-c", script], { encoding: "utf8", timeout: 5000 });
+      assert.ifError(result.error);
+      assert.equal(result.status, 17, `${fault} failure must BLOCK both probes: ${result.stderr}`);
+    }
+  }
+});
+
+testBash("Hub Compose and runtime environment reject unexpected keys, duplicates and staging passkey opt-in", () => {
+  const compose = runbook.slice(runbook.indexOf('if ! hub_config="$(docker'),
+    runbook.indexOf("STAGING_HUB_ISOLATION_PREFLIGHT=PASS"));
+  const runtime = runbook.slice(runbook.indexOf("if ! { printf '%s\\n' \"$hub_config\""),
+    runbook.indexOf("STAGING_HUB_RUNTIME_ISOLATION=PASS"));
+  assert.ok(runtime.length > 100, "runtime image, Compose and container inspection must be explicit");
+  assert.match(compose, /hub_allowed_env_keys/u);
+  assert.match(compose, /VIRKI_STAGING_PASSKEY_RP_ENABLED/u);
+  assert.match(runtime, /\$allowed_env_keys/u);
+  assert.match(runtime, /\$runtime_env_keys/u);
+  assert.match(runtime, /VIRKI_STAGING_PASSKEY_RP_ENABLED/u);
+  assert.match(runtime, /unique/u);
+  assert.match(runtime, /docker --context "\$ctx" image inspect "\$hub_image"/u);
+  assert.match(runtime, /\$compose_env \| to_entries/u);
+});
+
 testBash("both staging and rollback compare IPv6 addresses canonically, without DNS", () => {
   const helpers = [...runbook.matchAll(/same_ip_address\(\) \{([\s\S]*?)\n\}/g)];
   assert.equal(helpers.length, 2, "the operator and rollback shells are separate");

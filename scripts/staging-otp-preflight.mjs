@@ -364,7 +364,12 @@ export function runStagingOtpPreflightCli(argv, { out = process.stdout, err = pr
     const allowed = [
       "--approval", "--observation", "--approver-public-key", "--observer-public-key", "--expected-source-sha",
       "--smtp-tenant-id", "--smtp-endpoint-id", "--smtp-account-id", "--smtp-host",
-      "--smtp-port", "--smtp-secure", "--smtp-username-sha256"
+      "--smtp-port", "--smtp-secure", "--smtp-username-sha256",
+      "--runtime-worker-oci-digest", "--runtime-hub-oci-digest", "--runtime-worker-compose-project",
+      "--runtime-hub-compose-project", "--runtime-hub-compose-file-sha256", "--runtime-network-id",
+      "--runtime-db-name", "--runtime-resource-policy-id", "--runtime-resource-policy-evidence-ref",
+      "--runtime-worker-memory-bytes", "--runtime-worker-cpu-nano", "--runtime-worker-pids-limit",
+      "--runtime-worker-interval-ms"
     ];
     if (argv.length !== allowed.length * 2) block("INVALID_ARGUMENTS");
     const args = new Map();
@@ -390,6 +395,39 @@ export function runStagingOtpPreflightCli(argv, { out = process.stdout, err = pr
       usernameSha256: args.get("--smtp-username-sha256")
     };
     const result = evaluateStagingOtpPreflight({ approvalEnvelope, observationEnvelope, approverPublicKey, observerPublicKey, expectedSourceSha: args.get("--expected-source-sha"), smtpConfig, now });
+    // The signatures authenticate the declarations. Bind operator-supplied
+    // deployment measurements to BOTH declarations before reporting even an
+    // offline consistency PASS. Callers must independently verify the actual
+    // image/project/network/limits; CLI arguments alone are never live proof.
+    const approval = approvalEnvelope.approval;
+    const observation = observationEnvelope.observation;
+    for (const [flag, expected, observed] of [
+      ["--runtime-worker-oci-digest", approval.ociDigest, observation.ociDigest],
+      ["--runtime-hub-oci-digest", approval.hubOciDigest, observation.hubOciDigest],
+      ["--runtime-worker-compose-project", approval.workerComposeProject, observation.workerComposeProject],
+      ["--runtime-hub-compose-project", approval.hubComposeProject, observation.hubComposeProject],
+      ["--runtime-hub-compose-file-sha256", approval.hubComposeFileSha256, observation.hubComposeFileSha256],
+      ["--runtime-network-id", approval.staging.networkId, observation.staging.networkId],
+      ["--runtime-db-name", approval.staging.dbName, observation.staging.dbName],
+      ["--runtime-resource-policy-id", approval.workerResourcePolicyId, observation.worker.resourcePolicyId],
+      ["--runtime-resource-policy-evidence-ref", observation.worker.resourcePolicyEvidenceRef, observation.worker.resourcePolicyEvidenceRef]
+    ]) {
+      requireSame(args.get(flag), expected);
+      requireSame(args.get(flag), observed);
+    }
+    for (const [flag, expected, observed] of [
+      ["--runtime-worker-memory-bytes", approval.workerMemoryLimitBytes, observation.worker.memoryLimitBytes],
+      ["--runtime-worker-cpu-nano", approval.workerCpuLimitNano, observation.worker.cpuLimitNano],
+      ["--runtime-worker-pids-limit", approval.workerPidsLimit, observation.worker.pidsLimit],
+      ["--runtime-worker-interval-ms", approval.workerIntervalMs, observation.worker.effectiveIntervalMs]
+    ]) {
+      const value = args.get(flag);
+      requireMatch(value, /^[1-9][0-9]{0,15}$/u);
+      const measured = Number(value);
+      requireInteger(measured, 1, Number.MAX_SAFE_INTEGER);
+      requireSame(measured, expected);
+      requireSame(measured, observed);
+    }
     out.write(`STAGING_OTP_PREFLIGHT=${result.status}\nLIVE_WORKER_STATE=${result.liveWorkerState}\nSTAGING_AUTHORIZATION=${result.stagingAuthorization}\nPRODUCTION_RELEASE=${result.release}\n`);
     return 0;
   } catch (error) {

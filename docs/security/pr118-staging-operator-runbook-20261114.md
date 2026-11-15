@@ -246,6 +246,15 @@ export COMPOSE_DISABLE_ENV_FILE=1
 : "${VIRKI_STAGING_APPROVED_IMAGE:?owner-approved exact image ref required}"
 : "${VIRKI_STAGING_APPROVED_OCI_DIGEST:?signed worker OCI digest required}"
 : "${VIRKI_STAGING_APPROVED_SOURCE_SHA:?owner-approved exact source SHA required}"
+# Both approval and independent observation must be pinned BEFORE any Hub
+# activation, not only immediately before the later worker send window.
+: "${VIRKI_STAGING_APPROVAL_JSON:?fresh owner-signed approval JSON path required}"
+: "${VIRKI_STAGING_OBSERVATION_JSON:?fresh independent observation JSON path required}"
+: "${VIRKI_STAGING_APPROVER_PUBLIC_KEY:?pinned owner public key path required}"
+: "${VIRKI_STAGING_OBSERVER_PUBLIC_KEY:?pinned independent observer public key path required}"
+: "${VIRKI_STAGING_APPROVED_SMTP_TENANT_ID:?signed staging SMTP tenant identity required}"
+: "${VIRKI_STAGING_APPROVED_SMTP_ENDPOINT_ID:?signed staging SMTP endpoint identity required}"
+: "${VIRKI_STAGING_APPROVED_SMTP_ACCOUNT_ID:?signed staging SMTP account identity required}"
 command -v docker >/dev/null
 test -x /usr/bin/git
 command -v psql >/dev/null
@@ -693,6 +702,14 @@ fi
 printf '%s' "$hub_config" | jq -e --arg project "$hub_project" --arg image "$hub_image" --arg network "$network" '
   .services.hub as $h
   | .networks as $networks
+  | ["DATABASE_URL", "NODE_ENV", "VIRKI_HUB_URL", "VIRKI_PORTAL_URL",
+     "VIRKI_HUB_HOSTNAME", "VIRKI_PORTAL_HOSTNAME", "VIRKI_OIDC_PROXY_URL",
+     "VIRKI_PASSKEYS_ENABLED", "VIRKI_ADMIN_PASSKEYS_ENABLED",
+     "VIRKI_HUB_PERIMETER_MODE", "VIRKI_RATE_LIMIT_HASH_SECRET",
+     "VIRKI_AUDIT_HASH_SECRET", "VIRKI_CSRF_SIGNING_KEY",
+     "VIRKI_CSRF_SIGNING_KEY_PREVIOUS", "VIRKI_TOTP_ENCRYPTION_KEY",
+     "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_EMAIL_TRANSPORT",
+     "CLOUDFLARE_ACCESS_JWT_REQUIRED"] as $hub_allowed_env_keys
   | .name == $project
     and $h.image == $image
     and (($h.command | if type == "array" then join(" ") else . end) == "npm run start --workspace @virki/hub")
@@ -733,6 +750,9 @@ printf '%s' "$hub_config" | jq -e --arg project "$hub_project" --arg image "$hub
     and (($h.deploy // {}) | length == 0)
     and (($h.build // null) == null)
     and (($h.env_file // []) | length == 0)
+    and ($h.environment | type == "object")
+    and all($h.environment | keys[]; . as $key | ($hub_allowed_env_keys | index($key)) != null)
+    and (($h.environment | has("VIRKI_STAGING_PASSKEY_RP_ENABLED")) | not)
     and $h.environment.DATABASE_URL == env.VIRKI_STAGING_HUB_DATABASE_URL
     and $h.environment.VIRKI_EMAIL_OUTBOX_KEY == env.VIRKI_STAGING_EMAIL_OUTBOX_KEY
     and $h.environment.NODE_ENV == "production"
@@ -753,7 +773,49 @@ printf '%s' "$hub_config" | jq -e --arg project "$hub_project" --arg image "$hub
     and ((.volumes // {}) | length == 0)
     and any($h.networks | keys[]; . as $key | $networks[$key].external == true and $networks[$key].name == $network)
 ' >/dev/null
-unset hub_config
+# The signed file and in-memory Compose render contain credentials. Keep their
+# exact bytes only in this protected shell; never pass them as CLI arguments or
+# print them in an evidence log. The runtime check compares via stdin below.
+# This function checks signed declarations against independently collected
+# operator measurements. It does NOT itself attest that an edge or worker is
+# live/stopped. Rerun with a NEW independent observation before worker start.
+signed_staging_runtime_preflight() {
+  local smtp_username_sha256 preflight_output expected_preflight_output
+  : "${VIRKI_STAGING_APPROVAL_JSON:?signed approval required}" || return 1
+  : "${VIRKI_STAGING_OBSERVATION_JSON:?signed observation required}" || return 1
+  : "${VIRKI_STAGING_APPROVER_PUBLIC_KEY:?pinned owner key required}" || return 1
+  : "${VIRKI_STAGING_OBSERVER_PUBLIC_KEY:?pinned observer key required}" || return 1
+  smtp_username_sha256="$(printf '%s' "$VIRKI_STAGING_EMAIL_SMTP_USER" | sha256sum | cut -d' ' -f1)" || return 1
+  [[ "$smtp_username_sha256" =~ ^[a-f0-9]{64}$ ]] || return 1
+  preflight_output="$("$node_bin" scripts/staging-otp-preflight.mjs \
+    --approval "$VIRKI_STAGING_APPROVAL_JSON" \
+    --observation "$VIRKI_STAGING_OBSERVATION_JSON" \
+    --approver-public-key "$VIRKI_STAGING_APPROVER_PUBLIC_KEY" \
+    --observer-public-key "$VIRKI_STAGING_OBSERVER_PUBLIC_KEY" \
+    --expected-source-sha "$VIRKI_STAGING_APPROVED_SOURCE_SHA" \
+    --smtp-tenant-id "$VIRKI_STAGING_APPROVED_SMTP_TENANT_ID" \
+    --smtp-endpoint-id "$VIRKI_STAGING_APPROVED_SMTP_ENDPOINT_ID" \
+    --smtp-account-id "$VIRKI_STAGING_APPROVED_SMTP_ACCOUNT_ID" \
+    --smtp-host "$VIRKI_STAGING_EMAIL_SMTP_HOST" \
+    --smtp-port "$VIRKI_STAGING_EMAIL_SMTP_PORT" \
+    --smtp-secure "$VIRKI_STAGING_EMAIL_SMTP_SECURE" \
+    --smtp-username-sha256 "$smtp_username_sha256" \
+    --runtime-worker-oci-digest "${image##*@}" \
+    --runtime-hub-oci-digest "${hub_image##*@}" \
+    --runtime-worker-compose-project "$project" \
+    --runtime-hub-compose-project "$hub_project" \
+    --runtime-hub-compose-file-sha256 "$hub_file_sha" \
+    --runtime-network-id "$network_id" \
+    --runtime-db-name "$worker_db_name" \
+    --runtime-resource-policy-id "$VIRKI_STAGING_RESOURCE_POLICY_ID" \
+    --runtime-resource-policy-evidence-ref "$VIRKI_STAGING_RESOURCE_POLICY_RECEIPT" \
+    --runtime-worker-memory-bytes "$memory_bytes" \
+    --runtime-worker-cpu-nano "$cpu_nanos" \
+    --runtime-worker-pids-limit "$VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT" \
+    --runtime-worker-interval-ms "$VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS")" || return 1
+  expected_preflight_output=$'STAGING_OTP_PREFLIGHT=SIGNED_OFFLINE_DECLARATIONS_CONSISTENT\nLIVE_WORKER_STATE=NOT_OBSERVED_BY_THIS_TOOL\nSTAGING_AUTHORIZATION=NOT_GRANTED_BY_THIS_TOOL\nPRODUCTION_RELEASE=NO_GO'
+  [[ "$preflight_output" == "$expected_preflight_output" ]] || return 1
+}
 printf 'STAGING_HUB_ISOLATION_PREFLIGHT=PASS\n'
 
 # First activation must not silently adopt/reconcile any resource left by a
@@ -900,24 +962,24 @@ remote_scram_probe() {
   negative_pass_file="$negative_dir/pgpass"
   (
     trap 'rm -f -- "$negative_pass_file"; rmdir -- "$negative_dir"' EXIT
-    chmod 0700 -- "$negative_dir"
-    [[ "$(stat -c '%u:%a' "$negative_dir")" == "$(id -u):700" ]]
+    chmod 0700 -- "$negative_dir" || exit 1
+    [[ "$(stat -c '%u:%a' "$negative_dir")" == "$(id -u):700" ]] || exit 1
     local wrong_password negative_output
-    wrong_password="virki-invalid-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-    [[ "$wrong_password" =~ ^virki-invalid-[a-f0-9]{32}$ ]]
+    wrong_password="virki-invalid-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" || exit 1
+    [[ "$wrong_password" =~ ^virki-invalid-[a-f0-9]{32}$ ]] || exit 1
     local negative_host
     negative_host="${VIRKI_STAGING_APPROVED_DB_HOST//\\/\\\\}"
     negative_host="${negative_host//:/\\:}"
-    printf '%s:%s:%s:%s:%s\n' "$negative_host" "$VIRKI_STAGING_APPROVED_DB_PORT" "$database" "$expected_user" "$wrong_password" > "$negative_pass_file"
-    chmod 0600 -- "$negative_pass_file"
-    test -f "$negative_pass_file" && test ! -L "$negative_pass_file"
-    [[ "$(stat -c '%u:%a:%h' "$negative_pass_file")" == "$(id -u):600:1" ]]
+    printf '%s:%s:%s:%s:%s\n' "$negative_host" "$VIRKI_STAGING_APPROVED_DB_PORT" "$database" "$expected_user" "$wrong_password" > "$negative_pass_file" || exit 1
+    chmod 0600 -- "$negative_pass_file" || exit 1
+    [[ -f "$negative_pass_file" && ! -L "$negative_pass_file" ]] || exit 1
+    [[ "$(stat -c '%u:%a:%h' "$negative_pass_file")" == "$(id -u):600:1" ]] || exit 1
     unset PGPASSWORD
     if negative_output="$(LC_ALL=C PGSERVICE="$service" PGPASSFILE="$negative_pass_file" psql --no-password \
       --dbname="service=$service dbname=$database hostaddr=$VIRKI_STAGING_APPROVED_DB_SERVER_ADDR" -XAtqc 'select 1' 2>&1)"; then
       exit 1
     fi
-    [[ "$negative_output" == *"password authentication failed"* ]]
+    [[ "$negative_output" == *"password authentication failed"* ]] || exit 1
   ) || return 1
 }
 verify_remote_hba_active() {
@@ -1090,6 +1152,7 @@ hub_abort() {
   printf 'BLOCK: Hub runtime verification failed; independently confirm physical stop before continuing\n' >&2
   exit 1
 }
+signed_staging_runtime_preflight || hub_abort
 existing_hub_containers="$(docker --context "$ctx" ps -aq \
   --filter "label=com.docker.compose.project=$hub_project")"
 existing_hub_volumes="$(docker --context "$ctx" volume ls -q \
@@ -1108,7 +1171,7 @@ if [[ -n "$existing_hub_services" ]]; then
 fi
 hub_cleanup_armed=1
 if ! docker --context "$ctx" compose --project-name "$hub_project" -f "$hub_file" \
-  up --no-deps --pull never --detach hub; then
+  up --no-deps --pull never --wait --wait-timeout 120 hub; then
   hub_abort
 fi
 if ! hub_id="$(docker --context "$ctx" compose --project-name "$hub_project" \
@@ -1128,12 +1191,38 @@ if ! hub_project_networks="$(docker --context "$ctx" network ls -q \
 hub_service_containers="$(docker --context "$ctx" ps -aq \
   --filter "label=com.docker.compose.service=hub")"
 [[ "$hub_service_containers" == "$hub_id" ]] || hub_abort
-if ! docker --context "$ctx" inspect "$hub_id" | jq -e \
+# Compare the signed image defaults, approved Compose render and actual
+# container through stdin only; never expose resolved secrets in process argv.
+if ! { printf '%s\n' "$hub_config"; \
+       docker --context "$ctx" image inspect "$hub_image"; \
+       docker --context "$ctx" inspect "$hub_id"; } | jq -s -e \
   --arg image "$hub_image" --arg image_id "$hub_image_id" \
   --arg network "$network" --arg network_id "$network_id" '
-  length == 1
-  and (.[0] as $c
-  | $c.State.Status == "running"
+  length == 3
+  and (.[0].services.hub.environment as $compose_env
+  | .[1] as $images
+  | .[2] as $containers
+  | ($images[0].Config.Env // []) as $image_env
+  | ($containers[0].Config.Env // []) as $runtime_env
+  | ([$image_env[]? | split("=")[0]] | sort) as $image_env_keys
+  | ([$runtime_env[]? | split("=")[0]] | sort) as $runtime_env_keys
+  | (($image_env_keys + ($compose_env | keys)) | unique | sort) as $allowed_env_keys
+  | $containers[0] as $c
+  | ($images | length == 1)
+    and ($containers | length == 1)
+    and $images[0].Id == $image_id
+    and ($compose_env | type == "object")
+    and ($image_env | length == ($image_env_keys | unique | length))
+    and ($runtime_env | length == ($runtime_env_keys | unique | length))
+    and $runtime_env_keys == $allowed_env_keys
+    and all($compose_env | to_entries[]; . as $entry
+      | ($runtime_env | index($entry.key + "=" + ($entry.value | tostring))) != null)
+    and all($image_env[]?; . as $entry | ($entry | split("=")[0]) as $key
+      | ($compose_env | has($key)) or ($runtime_env | index($entry) != null))
+    and ([$runtime_env_keys[] | select(. == "VIRKI_STAGING_PASSKEY_RP_ENABLED" or
+        . == "VIRKI_PASSKEYS_LOCAL_TESTING" or . == "CLOUDFLARE_ACCESS_AUDIENCE" or
+        . == "CLOUDFLARE_TEAM_DOMAIN" or . == "CLOUDFLARE_ACCESS_JWKS_URL")] | length == 0)
+    and $c.State.Status == "running"
     and $c.Config.Image == $image
     and $c.Image == $image_id
     and (($c.Config.Entrypoint // []) | length == 0)
@@ -1192,6 +1281,7 @@ if ! docker --context "$ctx" inspect "$hub_id" | jq -e \
 ' >/dev/null; then
   hub_abort
 fi
+unset hub_config
 if ! hub_health="$(docker --context "$ctx" inspect "$hub_id" \
   --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}NO_HEALTHCHECK{{end}}')"; then
   hub_abort
@@ -1234,31 +1324,10 @@ set -euo pipefail
   printf 'BLOCK: worker requires the same protected Hub shell with an armed EXIT cleanup trap\n' >&2
   exit 1
 }
-: "${VIRKI_STAGING_APPROVAL_JSON:?fresh owner-signed approval JSON path required}"
-: "${VIRKI_STAGING_OBSERVATION_JSON:?fresh independent observation JSON path required}"
-: "${VIRKI_STAGING_APPROVER_PUBLIC_KEY:?pinned owner public key path required}"
-: "${VIRKI_STAGING_OBSERVER_PUBLIC_KEY:?pinned independent observer public key path required}"
-: "${VIRKI_STAGING_APPROVED_SMTP_TENANT_ID:?signed staging SMTP tenant identity required}"
-: "${VIRKI_STAGING_APPROVED_SMTP_ENDPOINT_ID:?signed staging SMTP endpoint identity required}"
-: "${VIRKI_STAGING_APPROVED_SMTP_ACCOUNT_ID:?signed staging SMTP account identity required}"
-smtp_username_sha256="$(printf '%s' "$VIRKI_STAGING_EMAIL_SMTP_USER" | sha256sum | cut -d' ' -f1)"
-preflight_output="$("$node_bin" scripts/staging-otp-preflight.mjs \
-  --approval "$VIRKI_STAGING_APPROVAL_JSON" \
-  --observation "$VIRKI_STAGING_OBSERVATION_JSON" \
-  --approver-public-key "$VIRKI_STAGING_APPROVER_PUBLIC_KEY" \
-  --observer-public-key "$VIRKI_STAGING_OBSERVER_PUBLIC_KEY" \
-  --expected-source-sha "$VIRKI_STAGING_APPROVED_SOURCE_SHA" \
-  --smtp-tenant-id "$VIRKI_STAGING_APPROVED_SMTP_TENANT_ID" \
-  --smtp-endpoint-id "$VIRKI_STAGING_APPROVED_SMTP_ENDPOINT_ID" \
-  --smtp-account-id "$VIRKI_STAGING_APPROVED_SMTP_ACCOUNT_ID" \
-  --smtp-host "$VIRKI_STAGING_EMAIL_SMTP_HOST" \
-  --smtp-port "$VIRKI_STAGING_EMAIL_SMTP_PORT" \
-  --smtp-secure "$VIRKI_STAGING_EMAIL_SMTP_SECURE" \
-  --smtp-username-sha256 "$smtp_username_sha256")"
-unset smtp_username_sha256
-expected_preflight_output=$'STAGING_OTP_PREFLIGHT=SIGNED_OFFLINE_DECLARATIONS_CONSISTENT\nLIVE_WORKER_STATE=NOT_OBSERVED_BY_THIS_TOOL\nSTAGING_AUTHORIZATION=NOT_GRANTED_BY_THIS_TOOL\nPRODUCTION_RELEASE=NO_GO'
-[[ "$preflight_output" == "$expected_preflight_output" ]]
-unset preflight_output expected_preflight_output
+signed_staging_runtime_preflight || {
+  printf 'BLOCK: fresh signed worker preflight does not match witnessed staging identities\n' >&2
+  exit 1
+}
 
 abort_worker() {
   printf 'BLOCK: worker runtime verification failed; protected EXIT cleanup will stop worker then Hub; independently confirm both physical stops\n' >&2
@@ -1901,24 +1970,24 @@ remote_scram_probe() {
   negative_pass_file="$negative_dir/pgpass"
   (
     trap 'rm -f -- "$negative_pass_file"; rmdir -- "$negative_dir"' EXIT
-    chmod 0700 -- "$negative_dir"
-    [[ "$(stat -c '%u:%a' "$negative_dir")" == "$(id -u):700" ]]
+    chmod 0700 -- "$negative_dir" || exit 1
+    [[ "$(stat -c '%u:%a' "$negative_dir")" == "$(id -u):700" ]] || exit 1
     local wrong_password negative_output
-    wrong_password="virki-invalid-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-    [[ "$wrong_password" =~ ^virki-invalid-[a-f0-9]{32}$ ]]
+    wrong_password="virki-invalid-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" || exit 1
+    [[ "$wrong_password" =~ ^virki-invalid-[a-f0-9]{32}$ ]] || exit 1
     local negative_host
     negative_host="${VIRKI_STAGING_APPROVED_DB_HOST//\\/\\\\}"
     negative_host="${negative_host//:/\\:}"
-    printf '%s:%s:%s:%s:%s\n' "$negative_host" "$VIRKI_STAGING_APPROVED_DB_PORT" "$database" "$expected_user" "$wrong_password" > "$negative_pass_file"
-    chmod 0600 -- "$negative_pass_file"
-    test -f "$negative_pass_file" && test ! -L "$negative_pass_file"
-    [[ "$(stat -c '%u:%a:%h' "$negative_pass_file")" == "$(id -u):600:1" ]]
+    printf '%s:%s:%s:%s:%s\n' "$negative_host" "$VIRKI_STAGING_APPROVED_DB_PORT" "$database" "$expected_user" "$wrong_password" > "$negative_pass_file" || exit 1
+    chmod 0600 -- "$negative_pass_file" || exit 1
+    [[ -f "$negative_pass_file" && ! -L "$negative_pass_file" ]] || exit 1
+    [[ "$(stat -c '%u:%a:%h' "$negative_pass_file")" == "$(id -u):600:1" ]] || exit 1
     unset PGPASSWORD
     if negative_output="$(LC_ALL=C PGSERVICE="$service" PGPASSFILE="$negative_pass_file" psql --no-password \
       --dbname="service=$service dbname=$database hostaddr=$VIRKI_STAGING_APPROVED_DB_SERVER_ADDR" -XAtqc 'select 1' 2>&1)"; then
       exit 1
     fi
-    [[ "$negative_output" == *"password authentication failed"* ]]
+    [[ "$negative_output" == *"password authentication failed"* ]] || exit 1
   ) || return 1
 }
 remote_scram_probe virki-staging-migrator "$VIRKI_STAGING_APPROVED_DB_NAME" virki_migrator

@@ -337,7 +337,20 @@ test("CLI reads only explicit JSON/public-key documents, never leaks input field
       "--smtp-host", f.smtpConfig.host,
       "--smtp-port", String(f.smtpConfig.port),
       "--smtp-secure", String(f.smtpConfig.secure),
-      "--smtp-username-sha256", f.smtpConfig.usernameSha256
+      "--smtp-username-sha256", f.smtpConfig.usernameSha256,
+      "--runtime-worker-oci-digest", f.approval.ociDigest,
+      "--runtime-hub-oci-digest", f.approval.hubOciDigest,
+      "--runtime-worker-compose-project", f.approval.workerComposeProject,
+      "--runtime-hub-compose-project", f.approval.hubComposeProject,
+      "--runtime-hub-compose-file-sha256", f.approval.hubComposeFileSha256,
+      "--runtime-network-id", f.approval.staging.networkId,
+      "--runtime-db-name", f.approval.staging.dbName,
+      "--runtime-resource-policy-id", f.approval.workerResourcePolicyId,
+      "--runtime-resource-policy-evidence-ref", f.observation.worker.resourcePolicyEvidenceRef,
+      "--runtime-worker-memory-bytes", String(f.approval.workerMemoryLimitBytes),
+      "--runtime-worker-cpu-nano", String(f.approval.workerCpuLimitNano),
+      "--runtime-worker-pids-limit", String(f.approval.workerPidsLimit),
+      "--runtime-worker-interval-ms", String(f.approval.workerIntervalMs)
     ];
     writeFileSync(args[1], JSON.stringify(signed("approval", f.approval, f.approver)));
     writeFileSync(args[3], JSON.stringify(signed("observation", f.observation, f.observer)));
@@ -358,6 +371,32 @@ test("CLI reads only explicit JSON/public-key documents, never leaks input field
     assert.match(pass.stdout, /STAGING_AUTHORIZATION=NOT_GRANTED_BY_THIS_TOOL/u);
     assert.match(pass.stdout, /PRODUCTION_RELEASE=NO_GO/u);
     assert.equal(pass.stderr, "");
+    for (const [name, malformed] of [
+      ["--runtime-worker-oci-digest", `sha256:${"f".repeat(64)}`],
+      ["--runtime-hub-oci-digest", `sha256:${"d".repeat(64)}`],
+      ["--runtime-worker-compose-project", "different-worker-project"],
+      ["--runtime-hub-compose-project", "different-hub-project"],
+      ["--runtime-hub-compose-file-sha256", "e".repeat(64)],
+      ["--runtime-network-id", "a".repeat(64)],
+      ["--runtime-db-name", "different_stage_db"],
+      ["--runtime-resource-policy-id", "different-policy-001"],
+      ["--runtime-resource-policy-evidence-ref", "different-receipt-001"],
+      ["--runtime-worker-memory-bytes", "1073741824"],
+      ["--runtime-worker-cpu-nano", "2000000000"],
+      ["--runtime-worker-pids-limit", "129"],
+      ["--runtime-worker-interval-ms", "3000"]
+    ]) {
+      const index = args.indexOf(name) + 1;
+      const original = args[index];
+      args[index] = malformed;
+      const rejected = capture();
+      assert.equal(rejected.status, 1, `${name} mismatch must block`);
+      assert.match(rejected.stderr, /BLOCK:ATTESTATION_MISMATCH/u);
+      args[index] = original;
+    }
+    const omittedRuntime = args.splice(args.indexOf("--runtime-network-id"), 2);
+    assert.equal(capture().status, 1, "missing runtime comparison must fail closed");
+    args.splice(args.indexOf("--runtime-db-name"), 0, ...omittedRuntime);
     const smtpHostIndex = args.indexOf("--smtp-host") + 1;
     const approvedSmtpHost = args[smtpHostIndex];
     args[smtpHostIndex] = "smtp.production.example.invalid";

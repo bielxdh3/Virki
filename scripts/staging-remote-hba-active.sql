@@ -18,8 +18,10 @@ WITH hba_rules AS MATERIALIZED (
        ),
        E'\n'
      ) AS hba_line(line)
-     WHERE regexp_replace(hba_line.line, '^[[:space:]]+', '') ~*
-       '^(include|include_if_exists|include_dir)([[:space:]]|$)') AS includes
+     -- PostgreSQL 18 dequotes the first HBA token and accepts leading commas.
+     -- Even an absent include_if_exists file leaves no parsed rule to count.
+     WHERE regexp_replace(hba_line.line, '"', '', 'g') ~*
+       '^[[:space:],]*(include|include_if_exists|include_dir)([[:space:],]|$)') AS includes
   FROM hba_file
 )
 SELECT current_database() || '|' || current_user || '|' ||
