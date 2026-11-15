@@ -107,7 +107,7 @@ testBash("worker is armed before up and disarmed only after physical stopped che
   assert.ok(hubDisarm > disarm);
   assert.match(runbook.slice(disarm, hubDisarm), /stopped_hub_restart.*no/);
   assert.match(runbook.slice(hubDisarm, hubDisarm + 85), /trap - EXIT INT TERM HUP/);
-  assert.match(runbook, /abort_worker\(\) \{\n  printf /);
+  assert.match(runbook, /abort_worker\(\) \{\n {2}printf /);
 });
 
 testBash("both staging and rollback compare IPv6 addresses canonically, without DNS", () => {

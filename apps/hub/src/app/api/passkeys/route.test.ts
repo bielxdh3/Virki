@@ -37,7 +37,7 @@ test("staging RP opt-in routes only the exact configured portal host, never prod
     for (const key of keys) {
       const value = before[key];
       if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
+      else Reflect.set(process.env, key, value);
     }
   });
   const portal = "stage-portal.example.invalid";

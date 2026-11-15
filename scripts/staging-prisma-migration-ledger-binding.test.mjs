@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  constants as fsConstants,
+  closeSync,
   existsSync,
+  fstatSync,
   linkSync,
   chmodSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -33,7 +36,13 @@ import {
 
 const scriptPath = fileURLToPath(new URL("./staging-prisma-migration-ledger-binding.mjs", import.meta.url));
 const gitExecutable = GIT_EXECUTABLE;
-const gitExecutableStat = lstatSync(gitExecutable, { bigint: true });
+const gitExecutableFd = openSync(gitExecutable, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+let gitExecutableStat;
+try {
+  gitExecutableStat = fstatSync(gitExecutableFd, { bigint: true });
+} finally {
+  closeSync(gitExecutableFd);
+}
 assert.ok(gitExecutableStat.isFile() && !gitExecutableStat.isSymbolicLink() &&
   (process.platform === "win32" || gitExecutableStat.nlink === 1n),
   "tests must use the pinned, regular system Git executable");
@@ -132,7 +141,7 @@ test("Windows Git path is derived from HKLM registration and ignores ProgramFile
   assert.throws(() => parseWindowsGitInstallPath("InstallPath REG_EXPAND_SZ %ProgramFiles%\\Git"), {
     code: "UNTRUSTED_GIT_EXECUTABLE"
   });
-  assert.throws(() => parseWindowsGitInstallPath("InstallPath REG_SZ \\\\\server\\share\\Git"), {
+  assert.throws(() => parseWindowsGitInstallPath(String.raw`InstallPath REG_SZ \\server\share\Git`), {
     code: "UNTRUSTED_GIT_EXECUTABLE"
   });
   assert.match(verifierSource, /GLOBALROOT\/SystemRoot\/System32\/reg\.exe/u);
@@ -828,12 +837,26 @@ test("SHA-256 loose-object bytes are rehashed instead of trusting Git's object l
   }
 });
 
+function snapshotFromPinnedFile(filePath) {
+  // The test fixture is owned by this test, but its metadata must still come
+  // from the handle that was actually opened, not a pathname stat followed by
+  // a separate filesystem operation.
+  const descriptor = openSync(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(descriptor, { bigint: true });
+    assert.ok(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n);
+    return { path: filePath, stat };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 test("leaf-file identity snapshots detect replacement after the initial read", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "virki-object-leaf-snapshot-"));
   try {
     const filePath = path.join(directory, "loose-object");
     writeFileSync(filePath, "original object bytes");
-    const snapshot = { path: filePath, stat: lstatSync(filePath, { bigint: true }) };
+    const snapshot = snapshotFromPinnedFile(filePath);
     writeFileSync(filePath, "replacement object bytes");
     assert.throws(() => verifyRegularFileSnapshot(snapshot), {
       code: "UNTRUSTED_GIT_OBJECT_STORE"
@@ -849,7 +872,7 @@ test("leaf-file snapshots reject atomic path replacement with identical content"
     const filePath = path.join(directory, "loose-object");
     const original = Buffer.from("identical Git object content");
     writeFileSync(filePath, original);
-    const snapshot = { path: filePath, stat: lstatSync(filePath, { bigint: true }) };
+    const snapshot = snapshotFromPinnedFile(filePath);
     renameSync(filePath, path.join(directory, "previous-object"));
     writeFileSync(filePath, original);
     assert.deepEqual(readFileSync(filePath), original);

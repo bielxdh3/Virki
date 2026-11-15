@@ -16,7 +16,6 @@ const secretName = "virki_staging_db_root_ca";
 const imageCa = "/app/ca/staging-db-root.pem";
 const imageCaDirectory = "/app/ca";
 const imageSecret = `/run/secrets/${secretName}`;
-const shaArg = "VIRKI_STAGING_APPROVED_DB_CA_SHA256";
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 
 function assertImageContract(source) {
@@ -69,7 +68,7 @@ function publicCaFixture() {
 test("staging CA target is isolated; missing mount or SHA guard fails the static contract", () => {
   assertImageContract(dockerfile);
   for (const mutation of [
-    dockerfile.replace("FROM \${VIRKI_STAGING_APPROVED_BASE_IMAGE}", "FROM node:22-alpine"),
+    dockerfile.replace("FROM ${VIRKI_STAGING_APPROVED_BASE_IMAGE}", "FROM node:22-alpine"),
     dockerfile.replace("ARG VIRKI_STAGING_APPROVED_BASE_IMAGE\n", "ARG VIRKI_STAGING_APPROVED_BASE_IMAGE=node:22-alpine\n"),
     dockerfile.replace("ghcr\\.io\\/bielxdh3\\/virki-runtime@sha256:", ".*@sha256:"),
     dockerfile.replace("ARG VIRKI_STAGING_APPROVED_DB_CA_SHA256\n", ""),

@@ -150,11 +150,25 @@ function sameFileIdentity(left, right) {
     .every((field) => left[field] === right[field]);
 }
 
+// Pin the leaf first, then check and read through the same descriptor. A
+// pathname lstat before open is not a safe authorization for the later open:
+// an attacker could exchange the leaf between those two operations. POSIX
+// refuses symlinks at open; Windows checks the path against the pinned FD
+// after the read (Node does not expose O_NOFOLLOW there).
+function openPinnedLeaf(filePath, failureCode) {
+  if (process.platform !== "win32" && !Number.isInteger(fsConstants.O_NOFOLLOW)) {
+    fail(failureCode);
+  }
+  return openSync(filePath,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+}
+
 function readRegularFile(filePath, failureCode, expectedBytes, sizeMismatchCode = failureCode, snapshots) {
   let descriptor;
   try {
     if (!Buffer.isBuffer(expectedBytes)) fail(failureCode);
-    const before = lstatSync(filePath, { bigint: true });
+    descriptor = openPinnedLeaf(filePath, failureCode);
+    const before = fstatSync(descriptor, { bigint: true });
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
         before.size !== BigInt(expectedBytes.length)) {
       fail(before.isFile() && !before.isSymbolicLink() && before.nlink === 1n
@@ -165,17 +179,8 @@ function readRegularFile(filePath, failureCode, expectedBytes, sizeMismatchCode 
       fail(failureCode);
     }
 
-    // POSIX can pin the leaf without following a symlink. Windows Node does
-    // not expose O_NOFOLLOW, so retain pre/post lstat plus the pinned FD identity.
-    if (process.platform !== "win32" && !Number.isInteger(fsConstants.O_NOFOLLOW)) {
-      fail(failureCode);
-    }
-    descriptor = openSync(filePath,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
-    if (!sameFileIdentity(before, fstatSync(descriptor, { bigint: true }))) fail(failureCode);
-
     // Read at most one byte beyond the approved blob size. A concurrent
-    // writer cannot force an unbounded allocation between lstat and read.
+    // writer cannot force an unbounded allocation after the pinned FD stat.
     const bytes = Buffer.alloc(expectedBytes.length + 1);
     let length = 0;
     while (length < bytes.length) {
@@ -201,18 +206,11 @@ function readRegularFile(filePath, failureCode, expectedBytes, sizeMismatchCode 
 function readBoundedObjectStoreFile(filePath, expectedStat, maximumBytes = 64 * 1024) {
   let descriptor;
   try {
-    const before = lstatSync(filePath, { bigint: true });
+    descriptor = openPinnedLeaf(filePath, "UNTRUSTED_GIT_OBJECT_STORE");
+    const before = fstatSync(descriptor, { bigint: true });
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
         before.size < 1n || before.size > BigInt(maximumBytes) ||
         !sameFileIdentity(expectedStat, before)) {
-      fail("UNTRUSTED_GIT_OBJECT_STORE");
-    }
-    if (process.platform !== "win32" && !Number.isInteger(fsConstants.O_NOFOLLOW)) {
-      fail("UNTRUSTED_GIT_OBJECT_STORE");
-    }
-    descriptor = openSync(filePath,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
-    if (!sameFileIdentity(before, fstatSync(descriptor, { bigint: true }))) {
       fail("UNTRUSTED_GIT_OBJECT_STORE");
     }
     const bytes = Buffer.alloc(Number(before.size) + 1);
@@ -239,19 +237,14 @@ function readBoundedObjectStoreFile(filePath, expectedStat, maximumBytes = 64 * 
 function verifyCommitGraphChecksum(filePath, expectedStat, objectFormat, hashBytes, expectedHash) {
   let descriptor;
   try {
-    const before = lstatSync(filePath, { bigint: true });
+    descriptor = openPinnedLeaf(filePath, "UNTRUSTED_GIT_OBJECT_STORE");
+    const before = fstatSync(descriptor, { bigint: true });
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
         before.size <= BigInt(hashBytes) || before.size > 1_073_741_824n ||
         before.size > BigInt(Number.MAX_SAFE_INTEGER) ||
         !sameFileIdentity(expectedStat, before)) {
       fail("UNTRUSTED_GIT_OBJECT_STORE");
     }
-    descriptor = openSync(filePath,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
-    if (!sameFileIdentity(before, fstatSync(descriptor, { bigint: true }))) {
-      fail("UNTRUSTED_GIT_OBJECT_STORE");
-    }
-
     const contentLength = Number(before.size) - hashBytes;
     const digest = createHash(objectFormat);
     const chunk = Buffer.alloc(1024 * 1024);
@@ -937,7 +930,11 @@ function decodeLedgerHexField(encoded, maximumBytes) {
   }
   const bytes = Buffer.from(encoded, "hex");
   const decoded = bytes.toString("utf8");
-  if (!Buffer.from(decoded, "utf8").equals(bytes) || /[\u0000-\u001f\u007f]/u.test(decoded)) {
+  if (!Buffer.from(decoded, "utf8").equals(bytes) ||
+      [...decoded].some(character => {
+        const codePoint = character.codePointAt(0);
+        return codePoint <= 31 || codePoint === 127;
+      })) {
     fail("INVALID_MIGRATION_LEDGER_ROW");
   }
   return decoded;
