@@ -1758,6 +1758,8 @@ curl() {
   if [[ "$args" == *'/admin/accounts'* ]]; then
     [[ "$args" == *'cf-access-jwt-assertion: forged-staging-probe'* ]] || fail 'Missing forged assertion probe'
     printf 'HTTP/1.1 %s Test\r\nLocation: %s\r\n\r\n\nVIRKI_STATUS:%s' "$VIRKI_TEST_ADMIN_STATUS" "$VIRKI_TEST_REDIRECT" "$VIRKI_TEST_ADMIN_STATUS"
+  elif [[ "$args" == *'/login'* ]]; then
+    printf 'HTTP/1.1 %s Test\r\n\r\n\nVIRKI_STATUS:%s' "$VIRKI_TEST_LOGIN_STATUS" "$VIRKI_TEST_LOGIN_STATUS"
   elif [[ "$args" == *'/api/health'* ]]; then
     printf 'HTTP/1.1 200 OK\r\n\r\n\nVIRKI_STATUS:200'
   elif [[ "$args" == *'/.well-known/openid-configuration'* ]]; then
@@ -1772,11 +1774,12 @@ ${health}
 assert_health
 `;
   const expected = "https://hub.example.test/login?returnTo=%2Fadmin%2Faccounts";
-  for (const { mode, status, location, allowed } of [
+  for (const { mode, status, location, loginStatus, allowed } of [
     { mode: "access", status: "403", location: "", allowed: true },
     { mode: "", status: "403", location: "", allowed: true },
     { mode: "not-native", status: "403", location: "", allowed: true },
-    { mode: "native", status: "307", location: expected, allowed: true },
+    { mode: "native", status: "307", location: expected, loginStatus: "200", allowed: true },
+    { mode: "native", status: "307", location: expected, loginStatus: "403", allowed: false },
     { mode: "native", status: "403", location: "", allowed: false },
     { mode: "native", status: "302", location: expected, allowed: false },
     { mode: "native", status: "307", location: "", allowed: false },
@@ -1793,6 +1796,7 @@ assert_health
         VIRKI_TEST_MODE: mode,
         VIRKI_TEST_ADMIN_STATUS: status,
         VIRKI_TEST_REDIRECT: location,
+        VIRKI_TEST_LOGIN_STATUS: loginStatus ?? "200",
       },
     });
     assert.equal(result.status === 0, allowed, `mode=${mode} status=${status} location=${location}: ${result.stderr}`);

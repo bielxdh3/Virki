@@ -687,6 +687,11 @@ assert_health() {
   access_status=${access_response##*$'\nVIRKI_STATUS:'}
   [[ "$public_status" == 200 && "$hub_status" == 200 ]] || fail 'Production application health check failed.'
   if [[ "$hub_perimeter_mode" == native ]]; then
+    local login_response login_status
+    login_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' --header "Host: $hub_hostname" "http://$hub_binding/login") || fail 'Native Hub login probe failed.'
+    login_status=${login_response##*$'\nVIRKI_STATUS:'}
+    [[ "$login_status" == 200 ]] || fail 'Native Hub public login entry must be reachable.'
+    assert_production_response_headers "$login_response" 'strict-origin'
     [[ "$access_status" == 307 ]] || fail 'Native Hub must redirect unauthenticated ADMIN requests.'
     # Require precisely one canonical redirect to the configured Hub login.
     # A redirect to another host, route or an untrusted returnTo is not healthy.

@@ -2,4 +2,4 @@
 
 Reserved folder for optional reverse-proxy configuration.
 
-Cloudflare Tunnel + Cloudflare Access is the default production ingress layer. For an explicit Cloudflare-Access-free native ADMIN perimeter, `hub-native-edge.conf` and `../docker-compose.native-edge.yml` provide a fail-closed TLS 1.3 + mTLS + CIDR-allowlist edge proxy.
+Cloudflare Tunnel is the production ingress transport layer. Default production Compose keeps Cloudflare Access enabled (`access` mode) until an authorized cutover to `native` mode, where Virki alone authenticates ADMIN requests.

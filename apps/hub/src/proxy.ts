@@ -1,11 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@virki/auth/constants";
 import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
-import {
-  isNativeHubPerimeterEnabled,
-  NATIVE_EDGE_PROOF_HEADER,
-  verifyNativeHubEdgeProof
-} from "./lib/hub-perimeter";
+import { isNativeHubPerimeterEnabled } from "./lib/hub-perimeter";
 import { writeHubAccessDenialAudit } from "./lib/access-denial-audit";
 import { createHubRenderProof, HUB_RENDER_PROVENANCE_HEADER, verifyHubRenderProof } from "./lib/hub-render-provenance";
 import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
@@ -81,7 +77,6 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   // Never trust client-supplied internal headers; only values set below reach the app.
   const forwardedHeaders = new Headers(request.headers);
   forwardedHeaders.delete(TRUSTED_REQUEST_PATH_HEADER);
-  forwardedHeaders.delete(NATIVE_EDGE_PROOF_HEADER);
   forwardedHeaders.delete("x-nonce");
   forwardedHeaders.delete("x-virki-audit-request-id");
   forwardedHeaders.set("x-virki-audit-request-id", auditRequestId);
@@ -119,22 +114,10 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
   // Loopback/Compose host names never pass through Cloudflare Access; in production they only serve the health probe.
   if (surface === "local" && env.NODE_ENV === "production" && pathname !== "/api/health" && !validInternalHubRsc) return withCsp(new NextResponse("Not found", { status: 404, headers: { "Cache-Control": "no-store" } }));
 
-  // The independently audited native perimeter only takes effect with an
-  // explicit exact opt-in. Never forward a caller-supplied Access assertion
-  // as if it were an identity proof in native mode.
+  // The native perimeter only takes effect with an explicit exact opt-in.
+  // Never forward a caller-supplied Access assertion as if it were an identity proof in native mode.
   if (surface === "hub" && isNativeHubPerimeterEnabled(env)) {
     forwardedHeaders.delete("cf-access-jwt-assertion");
-    if (pathname !== "/api/health" && env.NODE_ENV === "production" && !verifyNativeHubEdgeProof(request.headers, env)) {
-      const hasProof = Boolean(request.headers.get(NATIVE_EDGE_PROOF_HEADER)?.trim());
-      await writeHubAccessDenialAudit({
-        eventType: hasProof ? "ACCESS_JWT_INVALID" : "ACCESS_JWT_MISSING",
-        result: "DENIED",
-        reason: "cloudflare",
-        resource: "hub",
-        metadata: { requestId: auditRequestId, source: "hub-native-edge", accessJwtStatus: hasProof ? "invalid" : "missing" }
-      });
-      return withCsp(new NextResponse("Forbidden", { status: 403, headers: { "Cache-Control": "no-store" } }));
-    }
   }
   if (surface === "hub" && pathname !== "/api/health" && !isNativeHubPerimeterEnabled(env)) {
     const access = await validateCloudflareAccessJwt(request.headers, env as NodeJS.ProcessEnv);

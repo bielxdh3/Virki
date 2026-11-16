@@ -1,9 +1,5 @@
 import { validateCloudflareAccessJwt, type CloudflareAccessJwtResult } from "@virki/auth/cloudflare-access";
-import {
-  isNativeHubPerimeterEnabled,
-  NATIVE_EDGE_PROOF_HEADER,
-  verifyNativeHubEdgeProof
-} from "./hub-perimeter";
+import { isNativeHubPerimeterEnabled } from "./hub-perimeter";
 import {
   createAuditRequestMetadata,
   writeAuditLog,
@@ -16,27 +12,9 @@ export async function validateHubCloudflareAccess(
   headers: Pick<Headers, "get">,
   source: string
 ): Promise<CloudflareAccessJwtResult> {
-  // Native ADMIN login/recovery is independent of Cloudflare Access only when
-  // the verified mTLS/VPN first-ingress edge proof is present in production.
+  // Native ADMIN authentication is performed solely by Virki without a second external Access gate.
   if (isNativeHubPerimeterEnabled()) {
-    if (process.env.NODE_ENV !== "production" || verifyNativeHubEdgeProof(headers)) {
-      return { allowed: true, required: false, status: "disabled" };
-    }
-    const hasProof = Boolean(headers.get(NATIVE_EDGE_PROOF_HEADER)?.trim());
-    const denied: CloudflareAccessJwtResult = {
-      allowed: false,
-      required: true,
-      status: hasProof ? "invalid" : "missing",
-      reason: hasProof ? "invalid-cloudflare-access-jwt" : "missing-cloudflare-access-jwt"
-    };
-    await writeAuditLog({
-      eventType: getAccessAuditEventType(denied.status),
-      result: getAccessAuditResult(denied.allowed),
-      resource: "hub",
-      message: getAccessAuditMessage(denied.status),
-      metadata: getAccessAuditMetadata(headers, source, denied)
-    });
-    return denied;
+    return { allowed: true, required: false, status: "disabled" };
   }
   const result = await validateCloudflareAccessJwt(headers);
 
