@@ -1,4 +1,4 @@
-FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS build
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -59,7 +59,7 @@ LABEL org.opencontainers.image.revision="${VIRKI_BUILD_REVISION}" \
 USER node:node
 CMD ["npm", "run", "prisma:migrate:deploy"]
 
-FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS production-dependencies
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS production-dependencies
 WORKDIR /app
 COPY package*.json ./
 COPY apps/public-site/package*.json ./apps/public-site/
@@ -70,7 +70,7 @@ COPY packages/database/package*.json ./packages/database/
 COPY packages/oidc-node/package*.json ./packages/oidc-node/
 RUN npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit
 
-FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS production
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS production
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -86,7 +86,6 @@ COPY --from=production-dependencies /app/packages/auth/package.json ./packages/a
 COPY --from=production-dependencies /app/packages/database/package.json ./packages/database/package.json
 COPY --from=production-dependencies /app/packages/oidc-node/package.json ./packages/oidc-node/package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
-COPY --from=production-dependencies /app/packages/auth/node_modules ./packages/auth/node_modules
 
 COPY --from=build /app/apps/public-site/.next ./apps/public-site/.next
 COPY --from=build /app/apps/public-site/public ./apps/public-site/public
@@ -105,8 +104,9 @@ COPY --from=build /runtime-artifacts/node_modules/.bin/tsx ./node_modules/.bin/t
 COPY --from=build /runtime-artifacts/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /runtime-artifacts/apps-hub-prisma ./apps/hub/node_modules/.prisma
 
-# The auth email worker imports Nodemailer from its workspace, not root.
-# Fail the image build if a lockfile/install change breaks runtime resolution.
+# The auth email worker imports Nodemailer from its workspace source path.
+# npm may hoist that declared workspace dependency to root node_modules; fail
+# the image build if the final image layout breaks Node's workspace resolution.
 RUN node -e 'require.resolve("nodemailer", { paths: ["/app/packages/auth/src"] })'
 
 RUN mkdir -p /app/node_modules/.bin \

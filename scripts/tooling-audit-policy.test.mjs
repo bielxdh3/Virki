@@ -4,6 +4,14 @@ import test from "node:test";
 import { evaluateToolingAudit, interpretNpmAuditResult, npmAuditArguments, summarizeToolingAuditReport, EXPECTED_TOOLING_VERSIONS } from "./tooling-audit-policy.mjs";
 
 const accepted = JSON.parse(readFileSync(new URL("./fixtures/tooling-audit/accepted.json", import.meta.url), "utf8"));
+const rootPackage = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const databasePackage = JSON.parse(readFileSync(new URL("../packages/database/package.json", import.meta.url), "utf8"));
+const lockfile = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const runtimeDockerfiles = [
+  readFileSync(new URL("../infra/Dockerfile", import.meta.url), "utf8"),
+  readFileSync(new URL("../infra/Dockerfile.prod", import.meta.url), "utf8")
+];
 
 function copy(value) {
   return JSON.parse(JSON.stringify(value));
@@ -92,4 +100,34 @@ test("policy command cannot replace live audit with an environment-provided JSON
   assert.match(source, /timeout: AUDIT_PROCESS_TIMEOUT_MS/u);
   assert.match(source, /const AUDIT_PROCESS_TIMEOUT_MS = 45_000/u);
   assert.match(source, /const execution = runAudit\(\)/u);
+});
+
+test("keeps Prisma CLI, Client, Config, workspace manifests and lockfile on one pinned version", () => {
+  const cliVersion = databasePackage.devDependencies?.prisma;
+  const clientVersion = databasePackage.dependencies?.["@prisma/client"];
+  const configVersion = EXPECTED_TOOLING_VERSIONS["@prisma/config"];
+
+  assert.equal(rootPackage.overrides?.prisma, cliVersion);
+  assert.equal(cliVersion, EXPECTED_TOOLING_VERSIONS.prisma);
+  assert.equal(clientVersion, EXPECTED_TOOLING_VERSIONS["@prisma/client"]);
+  assert.equal(cliVersion, clientVersion);
+  assert.equal(configVersion, cliVersion);
+  assert.equal(lockfile.packages["node_modules/prisma"]?.version, cliVersion);
+  assert.equal(lockfile.packages["node_modules/@prisma/client"]?.version, clientVersion);
+  assert.equal(lockfile.packages["node_modules/@prisma/config"]?.version, configVersion);
+});
+
+test("keeps Node engines, type declarations, CI and runtime images on Node 22", () => {
+  assert.match(rootPackage.engines?.node ?? "", /^>=22\.\d+\.\d+\s+<23$/u);
+  assert.match(rootPackage.devDependencies?.["@types/node"] ?? "", /^22\./u);
+
+  const ciMajors = [...ciWorkflow.matchAll(/^\s*node-version:\s*(\d+)\.\d+\.\d+\s*$/gmu)].map((match) => match[1]);
+  assert.ok(ciMajors.length > 0, "CI must declare explicit Node.js versions");
+  assert.deepEqual([...new Set(ciMajors)], ["22"]);
+
+  const imageMajors = runtimeDockerfiles.flatMap((dockerfile) =>
+    [...dockerfile.matchAll(/^FROM\s+node:(\d+)-/gmu)].map((match) => match[1])
+  );
+  assert.ok(imageMajors.length > 0, "runtime Dockerfiles must declare Node.js base images");
+  assert.deepEqual([...new Set(imageMajors)], ["22"]);
 });
