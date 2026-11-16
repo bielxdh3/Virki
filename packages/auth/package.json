@@ -31,11 +31,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@node-rs/argon2": "^2.2.1",
+    "@node-rs/argon2": "^2.2.2",
     "@simplewebauthn/server": "^14.1.0",
     "@virki/database": "0.1.0",
     "jose": "^6.2.3",
-    "nodemailer": "^10.2.1"
+    "nodemailer": "^10.5.0"
   },
   "devDependencies": {
     "@types/nodemailer": "^8.0.2"
