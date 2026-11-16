@@ -100,13 +100,14 @@ function publicationNeedsAreSafe(source) {
   if (!needs) return false;
   const members = needs[1].split(",").map((name) => name.trim());
   if (members.some((name) => !name) || new Set(members).size !== members.length) return false;
-  for (const dependency of ["validate", "authenticated-e2e", "email-worker-hol", "production-audit", "tooling-policy"]) {
+  for (const dependency of ["validate", "authenticated-e2e", "email-worker-hol", "recovery-pg18", "production-audit", "tooling-policy"]) {
     if (!members.includes(dependency) || !jobs.has(dependency)) return false;
   }
   for (const [jobName, auditScript] of [
     ["production-audit", "node scripts/production-dependency-audit.mjs"],
     ["tooling-policy", "node scripts/tooling-audit-policy.mjs"],
-    ["email-worker-hol", "bash scripts/integration/worker-hol-ci.sh"]
+    ["email-worker-hol", "bash scripts/integration/worker-hol-ci.sh"],
+    ["recovery-pg18", "node scripts/integration/recovery-pg18-disposable.mjs"]
   ]) {
     const job = jobs.get(jobName);
     if (job.some((line) => /^ {4}(if:|continue-on-error:)/u.test(line)) ||
@@ -123,6 +124,18 @@ function publicationNeedsAreSafe(source) {
   const stepLines = holJob.slice(stepAt, followingStep < 0 ? undefined : followingStep);
   if (stepLines.filter((line) => line.trim() === "run: bash scripts/integration/worker-hol-ci.sh").length !== 1 ||
       stepLines.some((line) => /^ {8}(?:if:|continue-on-error:)/u.test(line))) return false;
+  const recoveryJob = jobs.get("recovery-pg18");
+  for (const [name, command] of [
+    ["Reject skipped, shortened or unowned recovery PG18 proof", "node --test scripts/integration/recovery-pg18-contract.test.mjs"],
+    ["Physically prove 5 ADMIN pair and 4 assisted recovery tests on separate PG18 databases", "node scripts/integration/recovery-pg18-disposable.mjs"]
+  ]) {
+    const start = recoveryJob.findIndex((line) => line === `      - name: ${name}`);
+    if (start < 0) return false;
+    const next = recoveryJob.findIndex((line, index) => index > start && /^ {6}- name:/u.test(line));
+    const step = recoveryJob.slice(start, next < 0 ? undefined : next);
+    if (step.filter((line) => line.trim() === `run: ${command}`).length !== 1 ||
+        step.some((line) => /^ {8}(?:if:|continue-on-error:)/u.test(line))) return false;
+  }
   return !publisher.some((line) => /^ {4}continue-on-error:/u.test(line));
 }
 const reviewedSarif = codeqlDocument([{
@@ -389,7 +402,7 @@ test("a publisher log naming another CodeQL run cannot satisfy the exact-SHA evi
 
 test("private GHCR images publish only after exact main-push builds pass on both architectures", () => {
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
-  assert.match(workflow, /needs: \[validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
+  assert.match(workflow, /needs: \[validate, authenticated-e2e, email-worker-hol, recovery-pg18, tooling-policy, production-audit\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
   assert.match(workflow, /--target production[\s\S]*?--target migrator/u);
   assert.match(workflow, /VIRKI_BUILD_REVISION=\$\{\{ github\.sha \}\}[\s\S]*?docker image inspect[\s\S]*?node scripts\/production-runtime-smoke\.mjs/u);
   const migratorSmoke = workflow.indexOf("name: Production migrator image smoke");
@@ -413,10 +426,10 @@ test("private GHCR images publish only after exact main-push builds pass on both
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
 });
 
-test("GHCR publication requires successful audit jobs in GitHub Actions needs closure", () => {
-  assert.equal(publicationNeedsAreSafe(workflow), true, "both audit jobs must complete successfully before GHCR publication");
+test("GHCR publication requires successful audit and physical recovery PG18 jobs in GitHub Actions needs closure", () => {
+  assert.equal(publicationNeedsAreSafe(workflow), true, "all mandatory audit and recovery jobs must complete successfully before GHCR publication");
 
-  for (const removed of ["tooling-policy", "production-audit", "validate", "authenticated-e2e", "email-worker-hol"]) {
+  for (const removed of ["tooling-policy", "production-audit", "validate", "authenticated-e2e", "email-worker-hol", "recovery-pg18"]) {
     const mutated = workflow.replace(
       /^ {4}needs: \[[^\]\n]+\]$/mu,
       (line) => line.replace(new RegExp(removed + "(?:, )?|, " + removed, "u"), "")
@@ -427,9 +440,10 @@ test("GHCR publication requires successful audit jobs in GitHub Actions needs cl
   assert.equal(publicationNeedsAreSafe(workflow.replace("  production-audit:", "  renamed-production-audit:")), false);
   assert.equal(publicationNeedsAreSafe(workflow.replace("  tooling-policy:", "  renamed-tooling-policy:")), false);
   assert.equal(publicationNeedsAreSafe(workflow.replace("  email-worker-hol:", "  renamed-email-worker-hol:")), false);
+  assert.equal(publicationNeedsAreSafe(workflow.replace("  recovery-pg18:", "  renamed-recovery-pg18:")), false);
   assert.equal(publicationNeedsAreSafe(workflow.replace(
-    "    needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]",
-    "    needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]\n    if: always()"
+    "    needs: [validate, authenticated-e2e, email-worker-hol, recovery-pg18, tooling-policy, production-audit]",
+    "    needs: [validate, authenticated-e2e, email-worker-hol, recovery-pg18, tooling-policy, production-audit]\n    if: always()"
   )), false, "duplicate or bypassing job conditions must block publication");
   assert.equal(publicationNeedsAreSafe(workflow.replace(
     "        run: bash scripts/integration/worker-hol-ci.sh", "        run: echo skipped"
@@ -445,6 +459,14 @@ test("GHCR publication requires successful audit jobs in GitHub Actions needs cl
   assert.notEqual(skippedHol, workflow, "the mutation must reach the physical worker HOL step");
   assert.equal(publicationNeedsAreSafe(skippedHol), false,
     "a skipped physical worker HOL step must block image publication");
+  for (const bad of [
+    workflow.replace("        run: node scripts/integration/recovery-pg18-disposable.mjs", "        run: echo recovery skipped"),
+    workflow.replace("        run: node scripts/integration/recovery-pg18-disposable.mjs", "        if: false\n        run: node scripts/integration/recovery-pg18-disposable.mjs"),
+    workflow.replace("        run: node --test scripts/integration/recovery-pg18-contract.test.mjs", "        continue-on-error: true\n        run: node --test scripts/integration/recovery-pg18-contract.test.mjs")
+  ]) {
+    assert.notEqual(bad, workflow, "the mutation must reach a mandatory recovery gate");
+    assert.equal(publicationNeedsAreSafe(bad), false, "a bypassed, shortened or skipped recovery PG18 proof must block GHCR publication");
+  }
   assert.equal(publicationNeedsAreSafe(workflow.replace(
     "        run: node scripts/production-dependency-audit.mjs",
     "        run: echo audit disabled"
@@ -480,10 +502,10 @@ test("Docker safety inventory and native-image smoke checks are mandatory withou
     assert.match(env, /VIRKI_BUILD_ARCH: \$\{\{ matrix\.arch \}\}/u);
     assert.match(env, /VIRKI_BUILD_REVISION: \$\{\{ github\.sha \}\}/u);
   }
-  for (const removed of ["production-audit", "tooling-policy", "email-worker-hol"]) {
+  for (const removed of ["production-audit", "tooling-policy", "email-worker-hol", "recovery-pg18"]) {
     const bad = normalized.replace(
-      "needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]",
-      `needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]`.replace(
+      "needs: [validate, authenticated-e2e, email-worker-hol, recovery-pg18, tooling-policy, production-audit]",
+      `needs: [validate, authenticated-e2e, email-worker-hol, recovery-pg18, tooling-policy, production-audit]`.replace(
         new RegExp(`(?:, )?${removed}`, "u"), "")
     );
     assert.notEqual(bad, normalized, "the test mutation must actually remove its target");
