@@ -40,6 +40,35 @@ test("A02 hosted CI must execute the first-ADMIN bootstrap against a separately 
   assert.doesNotMatch(workflow.slice(cloned, shared), /continue-on-error:\s*true/u);
 });
 
+test("hosted passkey recovery requires physical USER Portal PASSKEY_ADMIN PASS and rejects silent SKIP", () => {
+  const hasRequiredGate = (source) => {
+    const start = source.indexOf("- name: Run isolated passkey recovery browser E2E");
+    const end = source.indexOf("- name: Run mandatory native Hub browser E2E without Cloudflare Access JWT");
+    if (start < 0 || end <= start) return false;
+    const stage = source.slice(start, end);
+    return stage.includes('VIRKI_E2E_PASSKEYS: "true"') &&
+      stage.includes('VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"') &&
+      stage.includes("set -euo pipefail") &&
+      stage.includes("--grep 'PASSKEY_|USER virtual authenticator' --forbid-only 2>&1 | tee") &&
+      stage.includes('node scripts/e2e/verify-passkey-browser-gate.mjs "$output_file"') &&
+      source.includes('scripts/production-ci.test.mjs scripts/e2e/verify-passkey-browser-gate.test.mjs') &&
+      !/^ {8}(?:continue-on-error:|if:)/mu.test(stage);
+  };
+  assert.equal(hasRequiredGate(workflow), true);
+  for (const mutation of [
+    workflow.replace('VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "true"', 'VIRKI_E2E_REQUIRE_RECOVERY_PASSKEYS: "false"'),
+    workflow.replace('node scripts/e2e/verify-passkey-browser-gate.mjs "$output_file"', "true"),
+    workflow.replace("--grep 'PASSKEY_|USER virtual authenticator' --forbid-only", "--grep 'USER virtual authenticator'"),
+    workflow.replace("--forbid-only 2>&1 | tee", "2>&1 | tee"),
+    workflow.replace('scripts/production-ci.test.mjs scripts/e2e/verify-passkey-browser-gate.test.mjs', 'scripts/production-ci.test.mjs'),
+    workflow.replace("Run isolated passkey recovery browser E2E", "Passkey disabled"),
+    workflow.replace("- name: Run isolated passkey recovery browser E2E", "- name: Run isolated passkey recovery browser E2E\n        if: github.ref == 'refs/heads/main'"),
+    workflow.replace("- name: Run isolated passkey recovery browser E2E", "- name: Run isolated passkey recovery browser E2E\n        continue-on-error: true")
+  ]) {
+    assert.equal(hasRequiredGate(mutation), false, "weakened passkey stage must not satisfy the CI contract");
+  }
+});
+
 function publicationNeedsAreSafe(source) {
   // Parse the job-level portion of this workflow instead of matching a
   // "needs:" substring that might belong to another job or a comment.
@@ -71,18 +100,29 @@ function publicationNeedsAreSafe(source) {
   if (!needs) return false;
   const members = needs[1].split(",").map((name) => name.trim());
   if (members.some((name) => !name) || new Set(members).size !== members.length) return false;
-  for (const dependency of ["validate", "authenticated-e2e", "production-audit", "tooling-policy"]) {
+  for (const dependency of ["validate", "authenticated-e2e", "email-worker-hol", "production-audit", "tooling-policy"]) {
     if (!members.includes(dependency) || !jobs.has(dependency)) return false;
   }
   for (const [jobName, auditScript] of [
     ["production-audit", "node scripts/production-dependency-audit.mjs"],
-    ["tooling-policy", "node scripts/tooling-audit-policy.mjs"]
+    ["tooling-policy", "node scripts/tooling-audit-policy.mjs"],
+    ["email-worker-hol", "bash scripts/integration/worker-hol-ci.sh"]
   ]) {
     const job = jobs.get(jobName);
     if (job.some((line) => /^ {4}(if:|continue-on-error:)/u.test(line)) ||
         job.some((line) => /^\s+continue-on-error:\s*true\s*$/u.test(line)) ||
         !job.some((line) => line.trim() === "run: " + auditScript)) return false;
   }
+  // GitHub marks a job successful when its sole required test step is SKIPPED
+  // by `if: false`, allowing the publisher's `needs` gate to false-green.
+  // Assert both the exact mandatory step and its unconditional execution.
+  const holJob = jobs.get("email-worker-hol");
+  const stepAt = holJob.findIndex((line) => line === "      - name: Run required HOL/CAS tests in exclusive PostgreSQL");
+  if (stepAt < 0) return false;
+  const followingStep = holJob.findIndex((line, index) => index > stepAt && /^ {6}- name:/u.test(line));
+  const stepLines = holJob.slice(stepAt, followingStep < 0 ? undefined : followingStep);
+  if (stepLines.filter((line) => line.trim() === "run: bash scripts/integration/worker-hol-ci.sh").length !== 1 ||
+      stepLines.some((line) => /^ {8}(?:if:|continue-on-error:)/u.test(line))) return false;
   return !publisher.some((line) => /^ {4}continue-on-error:/u.test(line));
 }
 const reviewedSarif = codeqlDocument([{
@@ -349,7 +389,7 @@ test("a publisher log naming another CodeQL run cannot satisfy the exact-SHA evi
 
 test("private GHCR images publish only after exact main-push builds pass on both architectures", () => {
   assert.match(workflow, /production-images:[\s\S]*?if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
-  assert.match(workflow, /needs: \[validate, authenticated-e2e, tooling-policy, production-audit\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
+  assert.match(workflow, /needs: \[validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit\][\s\S]*?arch: amd64[\s\S]*?runner: ubuntu-latest[\s\S]*?arch: arm64[\s\S]*?runner: ubuntu-24\.04-arm/u);
   assert.match(workflow, /--target production[\s\S]*?--target migrator/u);
   assert.match(workflow, /VIRKI_BUILD_REVISION=\$\{\{ github\.sha \}\}[\s\S]*?docker image inspect[\s\S]*?node scripts\/production-runtime-smoke\.mjs/u);
   const migratorSmoke = workflow.indexOf("name: Production migrator image smoke");
@@ -376,7 +416,7 @@ test("private GHCR images publish only after exact main-push builds pass on both
 test("GHCR publication requires successful audit jobs in GitHub Actions needs closure", () => {
   assert.equal(publicationNeedsAreSafe(workflow), true, "both audit jobs must complete successfully before GHCR publication");
 
-  for (const removed of ["tooling-policy", "production-audit", "validate", "authenticated-e2e"]) {
+  for (const removed of ["tooling-policy", "production-audit", "validate", "authenticated-e2e", "email-worker-hol"]) {
     const mutated = workflow.replace(
       /^ {4}needs: \[[^\]\n]+\]$/mu,
       (line) => line.replace(new RegExp(removed + "(?:, )?|, " + removed, "u"), "")
@@ -386,10 +426,25 @@ test("GHCR publication requires successful audit jobs in GitHub Actions needs cl
   }
   assert.equal(publicationNeedsAreSafe(workflow.replace("  production-audit:", "  renamed-production-audit:")), false);
   assert.equal(publicationNeedsAreSafe(workflow.replace("  tooling-policy:", "  renamed-tooling-policy:")), false);
+  assert.equal(publicationNeedsAreSafe(workflow.replace("  email-worker-hol:", "  renamed-email-worker-hol:")), false);
   assert.equal(publicationNeedsAreSafe(workflow.replace(
-    "    needs: [validate, authenticated-e2e, tooling-policy, production-audit]",
-    "    needs: [validate, authenticated-e2e, tooling-policy, production-audit]\n    if: always()"
+    "    needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]",
+    "    needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]\n    if: always()"
   )), false, "duplicate or bypassing job conditions must block publication");
+  assert.equal(publicationNeedsAreSafe(workflow.replace(
+    "        run: bash scripts/integration/worker-hol-ci.sh", "        run: echo skipped"
+  )), false, "a removed exclusive PostgreSQL gate must block image publication");
+  assert.equal(publicationNeedsAreSafe(workflow.replace(
+    "        run: bash scripts/integration/worker-hol-ci.sh",
+    "        run: bash scripts/integration/worker-hol-ci.sh\n        continue-on-error: true"
+  )), false, "a soft-failed worker HOL job must block image publication");
+  const skippedHol = workflow.replace(
+    /(^ {6}- name: Run required HOL\/CAS tests in exclusive PostgreSQL\r?\n)/mu,
+    "$1        if: false\n"
+  );
+  assert.notEqual(skippedHol, workflow, "the mutation must reach the physical worker HOL step");
+  assert.equal(publicationNeedsAreSafe(skippedHol), false,
+    "a skipped physical worker HOL step must block image publication");
   assert.equal(publicationNeedsAreSafe(workflow.replace(
     "        run: node scripts/production-dependency-audit.mjs",
     "        run: echo audit disabled"
@@ -425,11 +480,13 @@ test("Docker safety inventory and native-image smoke checks are mandatory withou
     assert.match(env, /VIRKI_BUILD_ARCH: \$\{\{ matrix\.arch \}\}/u);
     assert.match(env, /VIRKI_BUILD_REVISION: \$\{\{ github\.sha \}\}/u);
   }
-  for (const removed of ["production-audit", "tooling-policy"]) {
+  for (const removed of ["production-audit", "tooling-policy", "email-worker-hol"]) {
     const bad = normalized.replace(
-      "needs: [validate, authenticated-e2e, tooling-policy, production-audit]",
-      `needs: [validate, authenticated-e2e, ${removed === "production-audit" ? "tooling-policy" : "production-audit"}]`
+      "needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]",
+      `needs: [validate, authenticated-e2e, email-worker-hol, tooling-policy, production-audit]`.replace(
+        new RegExp(`(?:, )?${removed}`, "u"), "")
     );
+    assert.notEqual(bad, normalized, "the test mutation must actually remove its target");
     assert.equal(publicationNeedsAreSafe(bad), false, `GHCR publication must block without ${removed}`);
   }
 });

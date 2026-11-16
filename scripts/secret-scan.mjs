@@ -17,6 +17,13 @@ if (revisionArguments.length > 0) {
 
 const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
 const sensitiveDirectorySegments = new Set(["backup", "backups", "dumps", "gmail", "takeout", "google takeout", "attachments", "secrets"]);
+// These are reviewed read-only verification queries, not database exports.
+// Their contents still go through all secret-content checks below.
+const verificationSqlFiles = new Set([
+  "scripts/staging-local-hba-peer.sql",
+  "scripts/staging-remote-hba-active.sql",
+  "scripts/staging-remote-hba-rules.sql"
+]);
 
 const forbiddenPathRules = [
   {
@@ -46,7 +53,8 @@ const forbiddenPathRules = [
     id: "database-dump",
     test: (filePath) =>
       /\.(?:bak|backup|db|dump|sqlite|sqlite3|sql)(?:\.(?:gz|gzip|bz2|xz|zst|lz4)|-(?:wal|shm|journal))?$/u.test(filePath) &&
-      !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/i.test(filePath)
+      !/^packages\/database\/prisma\/migrations\/[^/]+\/migration\.sql$/i.test(filePath) &&
+      !verificationSqlFiles.has(filePath)
   },
   {
     id: "application-log",

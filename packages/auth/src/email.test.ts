@@ -10,6 +10,7 @@ import {
   createSmtpEmailTransport,
   decryptEmailPayload,
   getEmailTransportStatus,
+  getEmailEnqueueStatus,
   isSmtpEmailTransportConfigured,
   getEmailProcessingLeaseExpiresAt,
   processNextEmailMessage,
@@ -50,6 +51,23 @@ test("production email is unavailable without a real transport or outbox key", (
     }),
     { state: "configured" }
   );
+});
+
+test("production Hub may enqueue with a scoped outbox key and SMTP mode, never SMTP credentials", () => {
+  const scopedHub = {
+    NODE_ENV: "production",
+    VIRKI_EMAIL_TRANSPORT: "smtp",
+    VIRKI_EMAIL_OUTBOX_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+  };
+  assert.deepEqual(getEmailEnqueueStatus(scopedHub), { state: "configured" });
+  assert.deepEqual(getEmailTransportStatus(scopedHub), { state: "unavailable", reason: "adapter-unavailable" },
+    "SMTP worker must not start from an enqueue-capable Hub environment");
+  assert.deepEqual(getEmailEnqueueStatus({ ...scopedHub, VIRKI_EMAIL_TRANSPORT: "" }),
+    { state: "unavailable", reason: "transport-missing" });
+  assert.deepEqual(getEmailEnqueueStatus({ ...scopedHub, VIRKI_EMAIL_TRANSPORT: "file" }),
+    { state: "unavailable", reason: "adapter-unavailable" });
+  assert.deepEqual(getEmailEnqueueStatus({ ...scopedHub, VIRKI_EMAIL_OUTBOX_KEY: "" }),
+    { state: "unavailable", reason: "outbox-key-missing" });
 });
 
 test("SMTP configuration is fail-closed without contacting the provider", () => {
@@ -99,7 +117,7 @@ test("SMTP accepts exactly one mailbox and rejects parsed recipient lists", () =
 test("SMTP mocked delivery hands Nodemailer one structured recipient and rejects address lists", async (context) => {
   const recipients: unknown[] = [];
   context.mock.method(nodemailer, "createTransport", () => ({
-    sendMail: async (message: { to: unknown }) => { recipients.push(message.to); }
+    sendMail: async (message: { to: unknown }) => { recipients.push(message.to); return { messageId: "<synthetic-smtp-id@example.invalid>" }; }
   }) as never);
   const transport = createSmtpEmailTransport({
     VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
@@ -107,10 +125,213 @@ test("SMTP mocked delivery hands Nodemailer one structured recipient and rejects
     VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
     VIRKI_EMAIL_FROM: "no-reply@example.invalid"
   });
-  await transport.send({ to: "josé@bücher.example", subject: "fixture", text: "fixture" });
+  assert.deepEqual(await transport.send({ to: "josé@bücher.example", subject: "fixture", text: "fixture" }), {
+    smtpHeaderMessageId: "<synthetic-smtp-id@example.invalid>"
+  });
   assert.deepEqual(recipients, [[{ name: "", address: "josé@bücher.example" }]]);
   await assert.rejects(transport.send({ to: "alice@example.invalid,attacker@example.invalid", subject: "fixture", text: "fixture" }));
   assert.equal(recipients.length, 1);
+});
+
+test("SMTP attempts use stable RFC Message-IDs across a worker retry, distinct across attempts", async (context) => {
+  const accepted: Array<{ messageId?: string; to: unknown }> = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (mail: { messageId?: string; to: unknown }) => {
+      accepted.push({ messageId: mail.messageId, to: mail.to });
+      return { messageId: mail.messageId };
+    }
+  }) as never);
+  const transport = createSmtpEmailTransport({
+    VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+    VIRKI_EMAIL_SMTP_USER: "sender@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+    VIRKI_EMAIL_FROM: "no-reply@example.invalid"
+  });
+  const mail = { to: "owner@example.invalid", subject: "fixture", text: "fixture" };
+  const first = await transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:2" });
+  const same = await transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:2" });
+  const next = await transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:3" });
+  assert.deepEqual(first, same);
+  assert.notDeepEqual(first, next);
+  assert.match(first?.smtpHeaderMessageId ?? "", /^<[a-f0-9]{64}@example\.invalid>$/u);
+  assert.deepEqual(accepted.map((entry) => entry.messageId), [
+    first?.smtpHeaderMessageId, first?.smtpHeaderMessageId, next?.smtpHeaderMessageId
+  ]);
+  assert.equal(accepted.every((entry) => JSON.stringify(entry.to).includes("owner@example.invalid")), true);
+  await assert.rejects(transport.send({ ...mail, deliveryAttemptReference: "mail-recovered:2\r\nBcc:other@example.invalid" }));
+  assert.equal(accepted.length, 3);
+});
+
+test("SMTP correlation accepts long valid sender domains without exceeding the RFC Message-ID limit", async (context) => {
+  const accepted: string[] = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (mail: { messageId?: string }) => {
+      if (!mail.messageId) throw new Error("Missing correlation header");
+      accepted.push(mail.messageId);
+      return { messageId: mail.messageId };
+    }
+  }) as never);
+  const domains = [
+    // The exact boundary: 64 hex chars + <@> (3) + 188-domain = 255.
+    ["a".repeat(63), "b".repeat(63), "c".repeat(60)].join("."),
+    ["a".repeat(63), "b".repeat(63), "c".repeat(61)].join("."),
+    ["a".repeat(63), "b".repeat(63), "c".repeat(63), "example", "invalid"].join("."),
+    // Same final DNS labels after shortening as the previous domain, but a
+    // different full sender domain. The digest must still be unique.
+    ["z".repeat(63), "b".repeat(63), "c".repeat(63), "example", "invalid"].join("."),
+    ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(43), "io"].join("."),
+    "bücher.example"
+  ];
+  const firstIds: string[] = [];
+  for (const domain of domains) {
+    const from = `a@${domain}`;
+    assert.equal(isSingleMailboxAddress(from), true, `fixture ${domain.length} domain must be accepted as SMTP mailbox`);
+    const transport = createSmtpEmailTransport({
+      VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+      VIRKI_EMAIL_SMTP_USER: "sender@example.invalid",
+      VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+      VIRKI_EMAIL_FROM: from
+    });
+    const message = { to: "recipient@example.invalid", subject: "fixture", text: "fixture",
+      deliveryAttemptReference: "opaque-message:1" };
+    const first = await transport.send(message);
+    const replay = await transport.send(message);
+    const next = await transport.send({ ...message, deliveryAttemptReference: "opaque-message:2" });
+    assert.equal(first?.smtpHeaderMessageId, replay?.smtpHeaderMessageId);
+    assert.notEqual(first?.smtpHeaderMessageId, next?.smtpHeaderMessageId);
+    assert.ok(first?.smtpHeaderMessageId);
+    firstIds.push(first.smtpHeaderMessageId);
+    assert.ok(first.smtpHeaderMessageId.length <= 255, `domain length ${domain.length}`);
+    assert.match(first.smtpHeaderMessageId, /^<[a-f0-9]{64}@[A-Za-z0-9.-]+>$/u);
+    if (domain.length === 188) assert.ok(first.smtpHeaderMessageId.endsWith(`@${domain}>`));
+  }
+  assert.equal(accepted.length, domains.length * 3);
+  assert.equal(firstIds[2].split("@")[1], firstIds[3].split("@")[1],
+    "the adversarial sender domains must produce exactly the same shortened DNS suffix");
+  assert.notEqual(firstIds[2], firstIds[3],
+    "the digest must bind the full original sender domain, not only its shortened suffix");
+  assert.equal(new Set(accepted.filter((_, i) => i % 3 === 0)).size, domains.length,
+    "different sender domains must not collide even when they share the same shortened suffix");
+});
+
+test("SMTP reuses the reserved Message-ID across sender rotation and rejects injected IDs", async (context) => {
+  const emitted: string[] = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (mail: { messageId?: string }) => {
+      if (mail.messageId) emitted.push(mail.messageId);
+      return { messageId: mail.messageId };
+    }
+  }) as never);
+  const transport = createSmtpEmailTransport({
+    VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+    VIRKI_EMAIL_SMTP_USER: "sender@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+    VIRKI_EMAIL_FROM: "no-reply@new.sender.example.invalid"
+  });
+  const reserved = `<${"a".repeat(64)}@old.sender.example.invalid>`;
+  const mail = { to: "recipient@example.invalid", subject: "fixture", text: "fixture",
+    deliveryAttemptReference: "mail-prior:2", preparedSmtpHeaderMessageId: reserved };
+  assert.deepEqual(await transport.send(mail), { smtpHeaderMessageId: reserved });
+  assert.deepEqual(emitted, [reserved]);
+  for (const malicious of [
+    `${reserved}\r\nBcc:attacker@example.invalid`,
+    `<${"a".repeat(64)}@${"x".repeat(200)}.invalid>`,
+    "<not-a-valid-hash@example.invalid>"
+  ]) await assert.rejects(transport.send({ ...mail, preparedSmtpHeaderMessageId: malicious }));
+  assert.deepEqual(emitted, [reserved], "no malformed header reaches Nodemailer");
+});
+
+test("SMTP handoff before a failed DB finalize remains traceable after lease reclaim", async () => {
+  await withTestOutboxKey(async () => {
+    const previousFrom = process.env.VIRKI_EMAIL_FROM;
+    // The SMTP adapter accepts the same sender with surrounding whitespace.
+    // The DB claim must normalize it identically before reserving the header.
+    process.env.VIRKI_EMAIL_FROM = " \t no-reply@original.sender.example.invalid \t ";
+    try {
+    const now = new Date("2026-11-10T12:00:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-crash", idempotencyKey: "mail-crash", kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: "owner@example.invalid", locale: "en", payload: encryptedTestEmailPayload(),
+      status: "QUEUED", attemptCount: 0, availableAt: new Date(0), sentAt: null,
+      terminalFailedAt: null, processingLeaseExpiresAt: null, createdAt: new Date(0), updatedAt: new Date(0)
+    }, { failAttemptStatus: "SENT" });
+    const references: string[] = [];
+    const preparedIds: string[] = [];
+    const acceptedTransport = {
+      async send(mail: { deliveryAttemptReference?: string; preparedSmtpHeaderMessageId?: string }) {
+        references.push(mail.deliveryAttemptReference ?? "missing");
+        preparedIds.push(mail.preparedSmtpHeaderMessageId ?? "missing");
+        return { smtpHeaderMessageId: mail.preparedSmtpHeaderMessageId };
+      }
+    };
+
+    await assert.rejects(processNextEmailMessage(acceptedTransport, now, queued.client as never), /attempt history unavailable/u);
+    assert.equal(queued.message().status, "PROCESSING");
+    assert.equal(queued.message().attemptCount, 1);
+    assert.deepEqual(references, ["mail-crash:1"]);
+    assert.match(preparedIds[0], /^<[a-f0-9]{64}@original\.sender\.example\.invalid>$/u);
+    assert.equal(queued.attempts().length, 0);
+
+    // A lease reclaim marks the uncertain first handoff interrupted, then
+    // assigns a distinct persisted attempt. Rotating the SMTP sender must NOT
+    // lose the first attempt's exact original Message-ID in the DB history.
+    process.env.VIRKI_EMAIL_FROM = "no-reply@replacement.sender.example.invalid";
+    const afterLease = new Date(now.getTime() + 6 * 60 * 1000);
+    await assert.rejects(processNextEmailMessage(acceptedTransport, afterLease, queued.client as never), /attempt history unavailable/u);
+    assert.deepEqual(references, ["mail-crash:1", "mail-crash:2"]);
+    assert.equal(queued.message().attemptCount, 2);
+    assert.deepEqual(queued.attempts().map((item) => [item.attempt, item.status, item.errorCode, item.smtpHeaderMessageId]), [
+      [1, "FAILED", "worker-interrupted", preparedIds[0]]
+    ]);
+    assert.notEqual(preparedIds[0], preparedIds[1]);
+    } finally {
+      if (previousFrom === undefined) delete process.env.VIRKI_EMAIL_FROM;
+      else process.env.VIRKI_EMAIL_FROM = previousFrom;
+    }
+  });
+});
+
+test("successful SMTP handoff stores a non-secret Message-ID without mistaking it for inbox delivery", async () => {
+  await withTestOutboxKey(async () => {
+    const now = new Date("2026-11-10T12:00:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-correlation",
+      idempotencyKey: "mail-correlation",
+      kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: "owner@example.invalid",
+      locale: "en",
+      payload: encryptedTestEmailPayload(),
+      status: "QUEUED",
+      attemptCount: 0,
+      availableAt: new Date(0),
+      sentAt: null,
+      terminalFailedAt: null,
+      processingLeaseExpiresAt: null,
+      createdAt: new Date(0),
+      updatedAt: new Date(0)
+    });
+    const transport = { async send() { return { smtpHeaderMessageId: "<correlation-123@example.invalid>" }; } };
+    assert.equal(await processNextEmailMessage(transport, now, queued.client as never), "sent");
+    assert.equal(queued.message().status, "SENT");
+    assert.equal(queued.attempts()[0].smtpHeaderMessageId, "<correlation-123@example.invalid>");
+  });
+});
+
+test("SMTP receipt with control characters is never stored in delivery metadata", async () => {
+  await withTestOutboxKey(async () => {
+    const now = new Date("2026-11-10T12:00:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-malformed-receipt", idempotencyKey: "mail-malformed-receipt", kind: "EMAIL_TWO_FACTOR",
+      recipientEmail: "owner@example.invalid", locale: "en", payload: encryptedTestEmailPayload(),
+      status: "QUEUED", attemptCount: 0, availableAt: new Date(0), sentAt: null,
+      terminalFailedAt: null, processingLeaseExpiresAt: null, createdAt: new Date(0), updatedAt: new Date(0)
+    });
+    const result = await processNextEmailMessage({
+      async send() { return { smtpHeaderMessageId: "<valid@example.invalid>\r\nAuthorization: secret" }; }
+    }, now, queued.client as never);
+    assert.equal(result, "sent");
+    assert.equal(queued.attempts()[0].smtpHeaderMessageId, undefined);
+  });
 });
 
 test("SMTP delivery failures are redacted without contacting an external provider", async () => {
@@ -264,10 +485,31 @@ test("a stale final attempt is terminalized without sending again", async () => 
   });
   const sent = createDeterministicTestTransport();
 
-  assert.equal(await processNextEmailMessage(sent.transport, now, stale.client as never), "idle");
+  assert.equal(await processNextEmailMessage(sent.transport, now, stale.client as never), "reconciled");
   assert.equal(sent.sent.length, 0);
   assert.equal(stale.message().status, "TERMINAL_FAILURE");
   assert.deepEqual(stale.attempts(), [{ messageId: "mail-exhausted", attempt: 5, status: "FAILED", errorCode: "worker-interrupted", attemptedAt: now }]);
+});
+
+test("a lost compare-and-swap claim is contention, not an empty outbox or a send", async () => {
+  await withTestOutboxKey(async () => {
+    const now = new Date("2026-11-10T15:25:00.000Z");
+    const queued = createMockOutboxDatabase({
+      id: "mail-lost-claim", idempotencyKey: "mail-lost-claim",
+      kind: "EMAIL_TWO_FACTOR", recipientEmail: "owner@example.invalid", locale: "en",
+      payload: encryptedTestEmailPayload(), status: "QUEUED", attemptCount: 0,
+      availableAt: new Date(0), sentAt: null, terminalFailedAt: null,
+      processingLeaseExpiresAt: null, createdAt: new Date(0), updatedAt: new Date(0)
+    }, { loseClaim: true });
+    const sent = createDeterministicTestTransport();
+    assert.equal(await processNextEmailMessage(sent.transport, now, queued.client as never), "contended");
+    assert.equal((await claimNextEmailMessage(now, queued.client as never)), null,
+      "direct claim callers retain their previous null-on-lost-CAS API");
+    assert.equal(sent.sent.length, 0);
+    assert.equal(queued.message().status, "QUEUED");
+    assert.equal(queued.message().attemptCount, 0);
+    assert.deepEqual(queued.attempts(), []);
+  });
 });
 
 test("a fresh processing lease is not reclaimed", async () => {
@@ -345,6 +587,7 @@ test("a reclaimed stale message can complete delivery", async () => {
 
     assert.equal(await processNextEmailMessage(sent.transport, now, stale.client as never), "sent");
     assert.equal(sent.sent.length, 1);
+    assert.equal(sent.sent[0]?.deliveryAttemptReference, "mail-recovered:3");
     assert.equal(stale.message().status, "SENT");
     assert.equal(stale.message().attemptCount, 3);
     assert.deepEqual(stale.attempts().map(({ attempt, status, errorCode }) => ({ attempt, status, errorCode })), [
@@ -422,7 +665,7 @@ test("retry backoff starts after a failed transport attempt completes", async ()
   });
 });
 
-function createMockOutboxDatabase(initialMessage: Record<string, unknown>, options: { failAttemptStatus?: string } = {}) {
+function createMockOutboxDatabase(initialMessage: Record<string, unknown>, options: { failAttemptStatus?: string; loseClaim?: boolean } = {}) {
   let message = structuredClone(initialMessage) as Record<string, unknown>;
   let attemptRows: Array<Record<string, unknown>> = [];
   const transaction = {
@@ -447,6 +690,7 @@ function createMockOutboxDatabase(initialMessage: Record<string, unknown>, optio
         return eligible ? structuredClone(message) : null;
       },
       async updateMany({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) {
+        if (options.loseClaim) return { count: 0 };
         const leaseWhere = where.processingLeaseExpiresAt as { lte?: Date } | undefined;
         const lease = message.processingLeaseExpiresAt as Date | null;
         const leaseMatches = where.processingLeaseExpiresAt === null

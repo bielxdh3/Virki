@@ -5,6 +5,7 @@ import { isoCBOR } from "@simplewebauthn/server/helpers";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { prisma, PrismaClient } from "@virki/database";
 import { createTestUser, integrationOptions, queuedEmails, requestKeyFromActionUrl, seedAdminSessionWithElevation } from "./integration-fixtures";
+import { changeAdministrativePassword, startSecurityElevation, verifySecurityElevation } from "./administration";
 import { approveAccountRecovery, confirmTotpEnrollment, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, requestAccountRecovery, startTotpEnrollment, verifyAccountRecoveryEmail } from "./security";
 import { authenticateUser } from "./index";
 import { getOidcAuthenticationContext } from "../../../apps/issuer/src/authorization-policy";
@@ -123,19 +124,144 @@ function clientData(type: "webauthn.create" | "webauthn.get", challenge: string,
   return Buffer.from(JSON.stringify({ type, challenge, origin: targetOrigin, crossOrigin: false })).toString("base64url");
 }
 
-function registerResponse(key: ReturnType<typeof authenticator>, challenge: string, flags = 0x45): RegistrationResponseJSON {
+function registerResponse(key: ReturnType<typeof authenticator>, challenge: string, flags = 0x45, targetRpID = rpID, targetOrigin = origin): RegistrationResponseJSON {
   const identifier = Buffer.from(key.credentialId, "base64url");
   const data = Buffer.concat([
-    sha(rpID), Buffer.from([flags, 0, 0, 0, 0]), Buffer.alloc(16),
+    sha(targetRpID), Buffer.from([flags, 0, 0, 0, 0]), Buffer.alloc(16),
     Buffer.from([identifier.length >> 8, identifier.length & 255]), identifier, Buffer.from(key.key)
   ]);
   const attestation = isoCBOR.encode(new Map<string, string | Map<string, never> | Uint8Array>([["fmt", "none"], ["attStmt", new Map<string, never>()], ["authData", data]]));
   return {
     id: key.credentialId, rawId: key.credentialId, type: "public-key",
-    response: { clientDataJSON: clientData("webauthn.create", challenge), attestationObject: Buffer.from(attestation).toString("base64url"), transports: ["internal"] },
+    response: { clientDataJSON: clientData("webauthn.create", challenge, targetOrigin), attestationObject: Buffer.from(attestation).toString("base64url"), transports: ["internal"] },
     clientExtensionResults: {}, authenticatorAttachment: "platform"
   };
 }
+
+test("ADMIN hub registration requires a fresh independent elevation and rejects stale role/session", integrationOptions, async (t) => {
+  const previousGlobal = process.env.VIRKI_PASSKEYS_ENABLED;
+  const previousAdmin = process.env.VIRKI_ADMIN_PASSKEYS_ENABLED;
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "true";
+  t.after(() => {
+    if (previousGlobal === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = previousGlobal;
+    if (previousAdmin === undefined) delete process.env.VIRKI_ADMIN_PASSKEYS_ENABLED; else process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = previousAdmin;
+  });
+  const admin = await createTestUser({ label: "admin-passkey-hub", role: "ADMIN" });
+  const bare = await prisma.session.create({ data: { userId: admin.id, tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 60_000) } });
+  await assert.rejects(startPasskeyRegistration(admin.id, bare.id, admin.password, createPasskeyBrowserToken(), "hub.biel.dev.br", "", "ADMIN"),
+    "normal password without independent admin elevation cannot enroll");
+
+  const { sessionId, elevationId } = await seedAdminSessionWithElevation(admin.id, "ADMIN_CREDENTIAL_CHANGE");
+  await prisma.securityElevation.update({ where: { id: elevationId }, data: { activatedAt: new Date() } });
+  const firstToken = createPasskeyBrowserToken();
+  const first = await startPasskeyRegistration(admin.id, sessionId, admin.password, firstToken, "hub.biel.dev.br", "", "ADMIN");
+  assert.equal(first.authenticatorSelection?.residentKey, "required", "ADMIN recovery enrollment must produce discoverable credentials");
+  const key = authenticator();
+  await finishPasskeyRegistration(admin.id, sessionId, firstToken,
+    registerResponse(key, first.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"), "Hub recovery key", "hub.biel.dev.br", "ADMIN");
+  const credential = await prisma.passkeyCredential.findUniqueOrThrow({ where: { credentialId: key.credentialId } });
+  assert.equal(credential.rpID, "hub.biel.dev.br");
+  assert.equal((await listUserPasskeys(admin.id, "ADMIN", "hub.biel.dev.br")).length, 1);
+  assert.equal((await listUserPasskeys(admin.id)).length, 0, "hub credential never appears in USER RP inventory");
+
+  const staleToken = createPasskeyBrowserToken();
+  const stale = await startPasskeyRegistration(admin.id, sessionId, admin.password, staleToken, "hub.biel.dev.br", "", "ADMIN");
+  await prisma.securityElevation.update({ where: { id: elevationId }, data: { status: "REVOKED", revokedAt: new Date() } });
+  await assert.rejects(finishPasskeyRegistration(admin.id, sessionId, staleToken,
+    registerResponse(authenticator(), stale.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"), "Stale elevation", "hub.biel.dev.br", "ADMIN"));
+
+  const { sessionId: secondSession, elevationId: secondElevation } = await seedAdminSessionWithElevation(admin.id, "ADMIN_CREDENTIAL_CHANGE");
+  await prisma.securityElevation.update({ where: { id: secondElevation }, data: { activatedAt: new Date() } });
+  const roleToken = createPasskeyBrowserToken();
+  const started = await startPasskeyRegistration(admin.id, secondSession, admin.password, roleToken, "hub.biel.dev.br", "", "ADMIN");
+  await prisma.user.update({ where: { id: admin.id }, data: { role: "USER" } });
+  await assert.rejects(finishPasskeyRegistration(admin.id, secondSession, roleToken,
+    registerResponse(authenticator(), started.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"), "Role changed", "hub.biel.dev.br", "ADMIN"));
+  assert.equal(await prisma.passkeyCredential.count({ where: { userId: admin.id, rpID: "hub.biel.dev.br" } }), 1);
+});
+
+test("ADMIN registration challenge is invalid after administrative credential rotation, even with fresh V2 elevation", integrationOptions, async (t) => {
+  const previousGlobal = process.env.VIRKI_PASSKEYS_ENABLED;
+  const previousAdmin = process.env.VIRKI_ADMIN_PASSKEYS_ENABLED;
+  process.env.VIRKI_PASSKEYS_ENABLED = "true";
+  process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = "true";
+  t.after(() => {
+    if (previousGlobal === undefined) delete process.env.VIRKI_PASSKEYS_ENABLED; else process.env.VIRKI_PASSKEYS_ENABLED = previousGlobal;
+    if (previousAdmin === undefined) delete process.env.VIRKI_ADMIN_PASSKEYS_ENABLED; else process.env.VIRKI_ADMIN_PASSKEYS_ENABLED = previousAdmin;
+  });
+
+  const admin = await createTestUser({ label: "admin-passkey-credential-rotation", role: "ADMIN" });
+  const actor = { id: admin.id, role: "ADMIN" };
+  const { sessionId, elevationId } = await seedAdminSessionWithElevation(admin.id, "ADMIN_CREDENTIAL_CHANGE");
+  await prisma.securityElevation.update({ where: { id: elevationId }, data: { activatedAt: new Date() } });
+  const originalCredential = await prisma.administrativeCredential.findUniqueOrThrow({
+    where: { userId: admin.id }, select: { keyVersion: true, passwordHash: true }
+  });
+  const normalPasswordBefore = await prisma.user.findUniqueOrThrow({
+    where: { id: admin.id }, select: { passwordHash: true, updatedAt: true }
+  });
+
+  const staleToken = createPasskeyBrowserToken();
+  const stale = await startPasskeyRegistration(admin.id, sessionId, admin.password, staleToken, "hub.biel.dev.br", "", "ADMIN");
+  const staleChallenge = await prisma.passkeyChallenge.findUniqueOrThrow({
+    where: { challengeHash: hashPasskeyChallenge(stale.challenge) }
+  });
+  assert.equal(staleChallenge.consumedAt, null);
+  assert.ok(staleChallenge.expiresAt > new Date(), "V1 ceremony must remain live when ADMIN credential rotates");
+
+  const newAdminPassword = "Independent-Admin-Credential-V2-2026!";
+  await changeAdministrativePassword(actor, sessionId, newAdminPassword);
+  const rotatedCredential = await prisma.administrativeCredential.findUniqueOrThrow({
+    where: { userId: admin.id }, select: { keyVersion: true, passwordHash: true }
+  });
+  assert.equal(rotatedCredential.keyVersion, originalCredential.keyVersion + 1);
+  assert.notEqual(rotatedCredential.passwordHash, originalCredential.passwordHash);
+  assert.equal((await prisma.securityElevation.findUniqueOrThrow({ where: { id: elevationId } })).status, "REVOKED");
+  assert.deepEqual(await prisma.user.findUniqueOrThrow({
+    where: { id: admin.id }, select: { passwordHash: true, updatedAt: true }
+  }), normalPasswordBefore, "rotating the separate ADMIN credential must not itself invalidate the normal-password/TOTP digest");
+  assert.equal((await prisma.session.findUniqueOrThrow({ where: { id: sessionId } })).revokedAt, null);
+
+  // Obtain genuinely NEW V2 elevation using the rotated ADMIN password and its
+  // independently emailed code, rather than inventing authorization in the test.
+  const elevated = await startSecurityElevation({
+    actor, sessionId, normalPassword: admin.password, administrativePassword: newAdminPassword,
+    scope: "ADMIN_CREDENTIAL_CHANGE", duration: { kind: "TIMED", minutes: 15 }, locale: "pt-BR"
+  });
+  const emailProof = (await queuedEmails(admin.email)).filter(message => message.kind === "ADMIN_EMAIL_VERIFICATION").at(-1)?.code;
+  assert.ok(emailProof, "the V2 elevation must have an actual queued independent email proof");
+  await verifySecurityElevation({ actor, sessionId, requestKey: elevated.requestKey, code: emailProof });
+  const freshElevation = await prisma.securityElevation.findUniqueOrThrow({ where: { requestKey: elevated.requestKey } });
+  assert.equal(freshElevation.status, "ACTIVE");
+  assert.equal(freshElevation.credentialKeyVersion, rotatedCredential.keyVersion);
+  const preservedV1 = await prisma.passkeyChallenge.findUnique({
+    where: { challengeHash: hashPasskeyChallenge(stale.challenge) }
+  });
+  assert.ok(preservedV1 && preservedV1.consumedAt === null && preservedV1.expiresAt > new Date(),
+    "V1 challenge must still physically exist, unconsumed and live after ADMIN rotation and new V2 elevation");
+
+  const oldKey = authenticator();
+  const outcomes = await Promise.allSettled([
+    finishPasskeyRegistration(admin.id, sessionId, staleToken,
+      registerResponse(oldKey, stale.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"),
+      "Pre-rotation ADMIN proof must fail", "hub.biel.dev.br", "ADMIN")
+  ]);
+  assert.equal(outcomes[0]?.status, "rejected",
+    "a V1 WebAuthn challenge must not be accepted under a distinct V2 ADMIN credential, even with fresh V2 elevation");
+  assert.equal(await prisma.passkeyCredential.count({ where: { userId: admin.id } }), 0);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.id, eventType: "PASSKEY_REGISTERED", result: "SUCCESS" } }), 0);
+
+  // A wholly new V2 challenge with the same real V2 elevation must still work.
+  const currentToken = createPasskeyBrowserToken();
+  const current = await startPasskeyRegistration(admin.id, sessionId, admin.password, currentToken, "hub.biel.dev.br", "", "ADMIN");
+  const currentKey = authenticator();
+  await finishPasskeyRegistration(admin.id, sessionId, currentToken,
+    registerResponse(currentKey, current.challenge, 0x45, "hub.biel.dev.br", "https://hub.biel.dev.br"),
+    "New V2 challenge", "hub.biel.dev.br", "ADMIN");
+  assert.equal(await prisma.passkeyCredential.count({ where: { userId: admin.id } }), 1);
+  assert.equal(await prisma.auditLog.count({ where: { actorUserId: admin.id, eventType: "PASSKEY_REGISTERED", result: "SUCCESS" } }), 1);
+});
 
 function assertion(key: ReturnType<typeof authenticator>, userId: string, challenge: string, overrides: { targetOrigin?: string; targetRpId?: string; uv?: boolean; counter?: number; userHandle?: string; flags?: number } = {}): AuthenticationResponseJSON {
   const data = Buffer.concat([sha(overrides.targetRpId ?? rpID), Buffer.from([overrides.flags ?? (overrides.uv === false ? 0x01 : 0x05)]), Buffer.from([0, 0, 0, overrides.counter ?? 1])]);
@@ -269,6 +395,7 @@ test("passkey cryptography, account binding, replay, UV, RP, origin, revocation 
 
   const regToken = createPasskeyBrowserToken();
   const options = await startPasskeyRegistration(user.id, session.id, user.password, regToken);
+  assert.equal(options.authenticatorSelection?.residentKey, "required", "USER recovery enrollment must produce discoverable credentials");
   await finishPasskeyRegistration(user.id, session.id, regToken, registerResponse(key, options.challenge), "Chave A");
   assert.equal((await listUserPasskeys(user.id))[0]?.name, "Chave A");
   assert.equal((await listUserPasskeys(other.id)).length, 0);

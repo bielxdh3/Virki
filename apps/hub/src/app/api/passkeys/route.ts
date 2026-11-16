@@ -3,6 +3,7 @@ import { getCurrentSession } from "../../../lib/auth";
 import { recordSecurityDenial } from "../../../lib/audit-denial";
 import { requestHost, getSurface, sameOriginFailureReason } from "../../../lib/surface";
 import { validateSessionCsrfToken } from "../../../lib/session-csrf";
+import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { SESSION_COOKIE_NAME, createAuditRequestMetadata, getSessionCookieOptions, hashAuditEmail, hashAuditSessionReference, normalizeEmail, writeAuditLog } from "@virki/auth";
 import {
   PASSKEY_BROWSER_COOKIE,
@@ -60,34 +61,38 @@ function discardBrowserCookie(response: NextResponse) {
 
 export async function POST(request: Request) {
   const host = requestHost(request.headers);
-  if (!passkeysEnabledForRequest(getSurface(request.headers), host)) return guardedJson({ error: "Unavailable" }, 404);
-  if (sameOriginFailureReason(request.headers)) {
-    await recordSecurityDenial(request.headers, "portal-passkeys-origin", "csrf");
-    return guardedJson({ error: "Rejected" }, 403);
-  }
   const body = await boundedJson(request);
   if (!body) return guardedJson({ error: "Invalid request" }, 400);
   const action = property(body, "action", 40);
+  const adminAction = action.startsWith("admin-");
+  const role = adminAction ? "ADMIN" : "USER";
+  const surface = getSurface(request.headers);
+  if (!passkeysEnabledForRequest(surface, host, process.env, role)) return guardedJson({ error: "Unavailable" }, 404);
+  if (adminAction && surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-passkeys"))) return guardedJson({ error: "Rejected" }, 403);
+  if (sameOriginFailureReason(request.headers)) {
+    await recordSecurityDenial(request.headers, adminAction ? "admin-passkeys-origin" : "portal-passkeys-origin", "csrf");
+    return guardedJson({ error: "Rejected" }, 403);
+  }
   const auditState: { session: Awaited<ReturnType<typeof getCurrentSession>>; csrfDenied: boolean } = { session: null, csrfDenied: false };
   async function requireProtectedSessionForRequest() {
     const session = await getCurrentSession();
-    if (!session || session.user.role !== "USER") throw new Error("Rejected");
-    // Identify the authenticated USER before checking CSRF so rejected requests
+    if (!session || session.user.role !== role) throw new Error("Rejected");
+    // Identify the authenticated actor before checking CSRF so rejected requests
     // retain their verified audit actor without treating a bad proof as anonymous.
     auditState.session = session;
-    if (!(await validateSessionCsrfToken(property(body!, "csrfToken", 1200), "account-security"))) {
+    if (!(await validateSessionCsrfToken(property(body!, "csrfToken", 1200), adminAction ? "admin-security" : "account-security"))) {
       auditState.csrfDenied = true;
       throw new Error("Rejected");
     }
     return session;
   }
   try {
-    if (action === "login-options" || action === "register-options") {
+    if (action === "login-options" || action === "register-options" || action === "admin-register-options") {
       const browserToken = createPasskeyBrowserToken();
       let options;
-      if (action === "register-options") {
+      if (action === "register-options" || action === "admin-register-options") {
         const session = await requireProtectedSessionForRequest();
-        options = await startPasskeyRegistration(session.user.id, session.id, property(body, "password"), browserToken, host, property(body, "totpCode", 6));
+        options = await startPasskeyRegistration(session.user.id, session.id, property(body, "password"), browserToken, host, property(body, "totpCode", 6), role);
       } else {
         options = await startPasskeyAuthentication(browserToken, request.headers.get("cf-connecting-ip")?.trim() ?? "", property(body, "email", 320) || undefined, host, property(body, "password"));
       }
@@ -109,16 +114,16 @@ export async function POST(request: Request) {
       return response;
     }
 
-    if (action === "register-verify" || action === "rename" || action === "revoke") {
+    if (action === "register-verify" || action === "rename" || action === "revoke" || action === "admin-register-verify" || action === "admin-rename" || action === "admin-revoke") {
       const session = await requireProtectedSessionForRequest();
-      if (action === "register-verify") {
+      if (action === "register-verify" || action === "admin-register-verify") {
         const browserToken = cookieValue(request.headers.get("cookie"), PASSKEY_BROWSER_COOKIE);
-        await finishPasskeyRegistration(session.user.id, session.id, browserToken, body.response as RegistrationResponseJSON, property(body, "name", 80), host);
+        await finishPasskeyRegistration(session.user.id, session.id, browserToken, body.response as RegistrationResponseJSON, property(body, "name", 80), host, role);
         const response = guardedJson({ success: true });
         discardBrowserCookie(response);
         return response;
       }
-      await mutatePasskey(session.user.id, session.id, property(body, "id", 80), property(body, "password"), action, property(body, "name", 80), property(body, "totpCode", 6));
+      await mutatePasskey(session.user.id, session.id, property(body, "id", 80), property(body, "password"), action.endsWith("rename") ? "rename" : "revoke", property(body, "name", 80), property(body, "totpCode", 6), role, host);
       return guardedJson({ success: true });
     }
 
@@ -139,11 +144,11 @@ export async function POST(request: Request) {
       eventType: csrfDenied ? "CSRF_DENIED" : loginAttempt ? "AUTH_LOGIN_FAILURE" : "SECURITY_PROOF_REJECTED",
       result: loginAttempt && !csrfDenied ? "FAILURE" : "DENIED",
       actorUserId: auditedSession?.user.id,
-      actorRole: auditedSession?.user.role === "USER" ? "USER" : undefined,
+      actorRole: auditedSession?.user.role === "USER" ? "USER" : auditedSession?.user.role === "ADMIN" ? "ADMIN" : undefined,
       sessionRef: auditedSession ? hashAuditSessionReference(auditedSession.id) : undefined,
       actorEmailHash,
       resource: "identity.passkey",
-      metadata: createAuditRequestMetadata(request.headers, `portal-passkeys-${action}`)
+      metadata: createAuditRequestMetadata(request.headers, `${adminAction ? "admin" : "portal"}-passkeys-${action}`)
     });
     return guardedJson({ error: "Authentication rejected or service unavailable" }, 403);
   }

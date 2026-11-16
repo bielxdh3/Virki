@@ -36,11 +36,33 @@ test("production exposes only the public site and loopback application surfaces"
   assert.doesNotMatch(productionCompose, /VIRKI_INTAKE|apps\/intake/iu);
 });
 
+test("the SMTP worker alone receives its configurable provider send interval with unchanged 250ms default", () => {
+  const worker = serviceBlock(productionCompose, "email-worker");
+  assert.match(worker, /VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:\s*\$\{VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:-250\}/u);
+  assert.equal((worker.match(/^\s+VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:/gmu) ?? []).length, 1);
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup", "migrate", "first-admin-bootstrap", "postgres"]) {
+    assert.doesNotMatch(serviceBlock(productionCompose, service), /^\s+VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:/mu,
+      `send spacing belongs only to the worker, never to ${service}`);
+  }
+  assert.match(environmentTemplate, /^VIRKI_EMAIL_MIN_SEND_INTERVAL_MS=250$/mu);
+  const workerLoop = readFileSync(path.join(repositoryRoot, "packages", "auth", "src", "email-worker-loop.ts"), "utf8");
+  assert.match(workerLoop, /EMAIL_WORKER_DEFAULT_SEND_INTERVAL_MS = 250/u,
+    "new Compose default must match the existing worker behavior");
+  assert.match(workerLoop, /MAX_SEND_INTERVAL_MS = 60_000/u,
+    "effective maximum is bounded for staging rate-budget review");
+});
+
 test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared environment", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
+  assert.match(hub, /VIRKI_HUB_PERIMETER_MODE:\s*\$\{VIRKI_HUB_PERIMETER_MODE:-access\}/u,
+    "Native Hub access must require an explicit opt-in; default stays fail-closed behind Access");
+  assert.doesNotMatch(issuer, /VIRKI_HUB_PERIMETER_MODE/u,
+    "Hub perimeter mode must not be forwarded to the OIDC issuer");
   assert.match(hub, /VIRKI_PASSKEYS_ENABLED:\s*\$\{VIRKI_PASSKEYS_ENABLED:-false\}/u,
     "Production Hub must receive the explicitly enabled passkey rollout flag, defaulting to disabled");
+  assert.match(hub, /VIRKI_ADMIN_PASSKEYS_ENABLED:\s*\$\{VIRKI_ADMIN_PASSKEYS_ENABLED:-false\}/u,
+    "Production Hub must receive the separate ADMIN passkey rollout flag, defaulting to disabled");
   assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
   assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:\?/u);
   assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u);
@@ -52,6 +74,14 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
   assert.match(issuer, /VIRKI_RATE_LIMIT_HASH_SECRET:\s*\$\{VIRKI_RATE_LIMIT_HASH_SECRET:\?/u);
   assert.match(hub, /VIRKI_AUDIT_HASH_SECRET:\s*\$\{VIRKI_AUDIT_HASH_SECRET:\?/u);
   assert.match(hub, /VIRKI_CSRF_SIGNING_KEY:\s*\$\{VIRKI_CSRF_SIGNING_KEY:\?/u);
+  assert.match(hub, /VIRKI_EMAIL_TRANSPORT:\s*\$\{VIRKI_EMAIL_TRANSPORT:-\}/u,
+    "Hub needs only the non-secret enqueue transport mode");
+  assert.doesNotMatch(hub, /VIRKI_EMAIL_SMTP_HOST|VIRKI_EMAIL_SMTP_USER|VIRKI_EMAIL_SMTP_PASSWORD|VIRKI_EMAIL_FROM/u,
+    "SMTP provider configuration belongs exclusively to email-worker");
+  const emailWorker = serviceBlock(productionCompose, "email-worker");
+  for (const secret of ["VIRKI_EMAIL_SMTP_HOST", "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_FROM"]) {
+    assert.match(emailWorker, new RegExp(`^\\s+${secret}:`, "mu"));
+  }
   assert.doesNotMatch(productionCompose, /VIRKI_OIDC_SIGNING_JWKS:\s*\$\{/u);
   assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
 });
@@ -154,6 +184,15 @@ test("production workers and database retain restart policy without published po
   assert.match(serviceBlock(productionCompose, "postgres"), /postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24/u);
   assert.match(serviceBlock(cloudflareCompose, "cloudflared"), /cloudflare\/cloudflared:2026\.9\.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c/u);
   assert.match(readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8"), /node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402/u);
+});
+
+test("staging application services cannot implicitly activate the email worker as a dependency", () => {
+  // Compose starts depends_on services even when the worker is omitted from
+  // the explicit `stage` list. Fence those accidental dependency edges too.
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup"]) {
+    assert.doesNotMatch(serviceBlock(productionCompose, service), /^\s+(?:email-worker:|- email-worker(?:\s|$))/mu,
+      `${service} must not make staging drain the unapproved mail outbox`);
+  }
 });
 
 test("runtime, migrator, and PostgreSQL bootstrap credentials stay separated", () => {

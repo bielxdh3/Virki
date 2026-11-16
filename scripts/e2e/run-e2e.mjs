@@ -60,8 +60,26 @@ export function assertProductionE2eFixture(environment = process.env, platform =
   assertDisposableCoreTestDatabase(environment.VIRKI_E2E_DATABASE_URL, { ...environment, NODE_ENV: "test" });
 }
 
+export function assertNativeE2eFixture(environment = process.env, platform = process.platform) {
+  if (!environment.VIRKI_E2E_NATIVE_HUB) return;
+  if (environment.VIRKI_E2E_NATIVE_HUB !== "required" || environment.VIRKI_E2E_HUB_MODE === "production") {
+    throw new Error("Native Hub E2E requires an explicit non-production opt-in.");
+  }
+  // On Windows the signed Docker launcher owns and provisions the disposable
+  // Linux fixture. On Linux this is the initial process, BEFORE global setup
+  // intentionally removes the powerful cleanup connection from workers.
+  if (platform === "win32") return;
+  if (!environment.VIRKI_E2E_DATABASE_URL?.trim() ||
+      !environment.VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL?.trim() ||
+      environment.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable") {
+    throw new Error("Native Hub E2E requires the exclusive disposable database and audit cleanup fixture.");
+  }
+  assertDisposableCoreTestDatabase(environment.VIRKI_E2E_DATABASE_URL, { ...environment, NODE_ENV: "test" });
+}
+
 function runE2E() {
   assertProductionE2eFixture();
+  assertNativeE2eFixture();
   const command = buildE2ECommand(process.platform, process.argv.slice(2));
   if (process.platform !== "win32" && shouldBuildProductionHub()) {
     const build = spawnSync("npm", ["run", "build", "--workspace", "@virki/hub"], {
