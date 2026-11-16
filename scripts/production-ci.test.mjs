@@ -501,7 +501,8 @@ test("CI and CodeQL run on stacked cdx pull requests while production builds rem
 
 test("CodeQL analysis stays read-only and preserves SARIF for later trusted publication", () => {
   assert.match(codeqlWorkflow, /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/u);
-  assert.match(codeqlWorkflow, /uses: github\/codeql-action\/(?:init|analyze)@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4\.38\.2/u);
+  assert.match(codeqlWorkflow, /uses: github\/codeql-action\/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4\.39\.3/u);
+  assert.match(codeqlWorkflow, /uses: github\/codeql-action\/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4\.39\.3/u);
   assert.doesNotMatch(codeqlWorkflow, /uses: [^\s]+@v\d/u);
   assert.match(codeqlWorkflow, /queries: security-extended/u);
   assert.match(codeqlWorkflow, /output: codeql-results[\s\S]*?upload: never/u);
