@@ -7,6 +7,7 @@ import Provider, { interactionPolicy, type Account, type KoaContextWithOIDC } fr
 import { installAuditResponseGate, requireAuditBeforeResponse, useNativeOidcResponse } from "./audit-gate";
 import { readInteractionDetailsOrRespond } from "./interaction-error";
 import { createProviderEventAudit } from "./provider-audit";
+import { OIDC_PROVIDER_SECURITY_CONFIGURATION } from "./provider-security-config";
 import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
 import { readIssuer, readSigningJwks } from "./issuer-config";
 import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, parseBasicClientId, parseBearerToken, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
@@ -100,20 +101,17 @@ const provider = new Provider(issuer, {
   scopes: ["openid", "profile", "email"],
   claims: OIDC_PROVIDER_CLAIMS,
   features: {
+    ...OIDC_PROVIDER_SECURITY_CONFIGURATION.features,
     devInteractions: { enabled: false },
     clientCredentials: { enabled: false },
     registration: { enabled: false },
     registrationManagement: { enabled: false },
-    requestObjects: { request: false, requestUri: false },
     ...OIDC_DISCOVERY_CONFIGURATION.features,
     deviceFlow: { enabled: false },
     introspection: { enabled: false },
     revocation: { enabled: true }
   },
-  pkce: {
-    methods: ["S256"],
-    required: () => true
-  },
+  pkce: OIDC_PROVIDER_SECURITY_CONFIGURATION.pkce,
   ttl: {
     AuthorizationCode: 90,
     AccessToken: 300

@@ -20,6 +20,6 @@
     "@prisma/client": "6.19.3"
   },
   "devDependencies": {
-    "prisma": "7.10.1"
+    "prisma": "6.19.3"
   }
 }
