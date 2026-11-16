@@ -305,27 +305,57 @@ test("root and admin audit attribution replace untrusted route headers", async (
   }
 });
 
-test("explicit native Hub mode exposes only login and recovery without granting an ADMIN session", async () => {
-  const native = { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" };
+test("explicit native Hub mode fails closed without verified edge config/proof and sanitizes forwarded proto", async () => {
+  const edgeSecret = "native-edge-test-value-".repeat(2);
+  // Contradicting CLOUDFLARE_ACCESS_JWT_REQUIRED=true or missing edge secret must fail closed (403)
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", {
+    headers: { host: "hub.biel.dev.br", "x-virki-native-edge-proof": edgeSecret }
+  }), { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native", VIRKI_NATIVE_EDGE_PROOF_SECRET: edgeSecret })).status, 403);
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", {
+    headers: { host: "hub.biel.dev.br" }
+  }), { ...env, NODE_ENV: "production", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false", VIRKI_HUB_PERIMETER_MODE: "native" })).status, 403);
+
+  const native = {
+    ...env,
+    NODE_ENV: "production",
+    CLOUDFLARE_ACCESS_JWT_REQUIRED: "false",
+    VIRKI_HUB_PERIMETER_MODE: "native",
+    VIRKI_NATIVE_EDGE_PROOF_SECRET: edgeSecret
+  };
+  // Direct-origin or forged edge proof must be rejected (403)
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", {
+    headers: { host: "hub.biel.dev.br" }
+  }), native)).status, 403);
+  assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/admin/accounts", {
+    headers: { host: "hub.biel.dev.br", "x-virki-native-edge-proof": "forged" }
+  }), native)).status, 403);
+
   for (const route of ["/login", "/login/verify", "/recover", "/recover/open"]) {
     const response = await evaluateProxyRequest(new NextRequest(`https://hub.biel.dev.br${route}`, {
-      headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged" }
+      headers: {
+        host: "hub.biel.dev.br",
+        "cf-access-jwt-assertion": "forged",
+        "x-virki-native-edge-proof": edgeSecret,
+        "x-forwarded-proto": "http"
+      }
     }), native);
     assert.equal(response.status, 200, route);
     assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate");
     assert.equal(response.headers.get("x-middleware-request-cf-access-jwt-assertion"), null);
+    assert.equal(response.headers.get("x-middleware-request-x-virki-native-edge-proof"), null);
+    assert.equal(response.headers.get("x-middleware-request-x-forwarded-proto"), "https");
   }
   const protectedResponse = await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/admin/accounts", {
-    headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged" }
+    headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged", "x-virki-native-edge-proof": edgeSecret }
   }), native);
   assert.equal(protectedResponse.status, 307);
   assert.equal(protectedResponse.headers.get("location"), "https://hub.biel.dev.br/login?returnTo=%2Fadmin%2Faccounts");
   assert.equal((await evaluateProxyRequest(new NextRequest("https://other.invalid/recover", {
-    headers: { host: "other.invalid" }
+    headers: { host: "other.invalid", "x-virki-native-edge-proof": edgeSecret }
   }), native)).status, 404);
   for (const value of ["NATIVE", "true", "enabled", "", "access"]) {
     const response = await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/recover", {
-      headers: { host: "hub.biel.dev.br" }
+      headers: { host: "hub.biel.dev.br", "x-virki-native-edge-proof": edgeSecret }
     }), { ...native, VIRKI_HUB_PERIMETER_MODE: value });
     assert.equal(response.status, 403, `invalid or default mode: ${value}`);
   }

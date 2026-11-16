@@ -1,0 +1,3 @@
+# Fail-closed default: deny all clients until the operator mounts an
+# explicit VPN/operator CIDR allowlist before `deny all;`.
+deny all;
