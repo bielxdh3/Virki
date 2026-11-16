@@ -52,7 +52,7 @@ test("the SMTP worker alone receives its configurable provider send interval wit
     "effective maximum is bounded for staging rate-budget review");
 });
 
-test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared environment", () => {
+test("production Hub defaults to Access, requires explicit native opt-out, and isolates OIDC secrets", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
   assert.match(hub, /VIRKI_HUB_PERIMETER_MODE:\s*\$\{VIRKI_HUB_PERIMETER_MODE:-access\}/u,
@@ -63,7 +63,10 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
     "Production Hub must receive the explicitly enabled passkey rollout flag, defaulting to disabled");
   assert.match(hub, /VIRKI_ADMIN_PASSKEYS_ENABLED:\s*\$\{VIRKI_ADMIN_PASSKEYS_ENABLED:-false\}/u,
     "Production Hub must receive the separate ADMIN passkey rollout flag, defaulting to disabled");
-  assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
+  assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"\$\{VIRKI_PRODUCTION_ADMIN_ACCESS_REQUIRED:-true\}"/u,
+    "Production must default to Access while permitting an explicit, separately approved native-mode opt-out");
+  assert.doesNotMatch(environmentTemplate, /^VIRKI_PRODUCTION_ADMIN_ACCESS_REQUIRED=/mu,
+    "The production Access opt-out must not be inherited implicitly from the development .env template");
   assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:\?/u);
   assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u);
   assert.match(hub, /path: \.\.\/\.env\.oidc-data/u);
@@ -83,7 +86,8 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
     assert.match(emailWorker, new RegExp(`^\\s+${secret}:`, "mu"));
   }
   assert.doesNotMatch(productionCompose, /VIRKI_OIDC_SIGNING_JWKS:\s*\$\{/u);
-  assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
+  assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{CLOUDFLARE_ACCESS_JWT_REQUIRED/u,
+    "Do not inherit the development-only Access flag into production");
 });
 
 test("production containers receive only their scoped secret files", () => {
