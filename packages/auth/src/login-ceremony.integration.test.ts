@@ -277,6 +277,34 @@ test("HTTP REGISTERED login preserves a password-only session for a remembered U
   assert.equal(await prisma.deviceChallenge.count({ where: { userId: user.id, status: { in: ["PENDING", "VERIFIED"] } } }), 0);
 });
 
+test("real PostgreSQL account lock crossing USER remembered-grant expiry requires fresh MFA", integrationOptions, async () => {
+  const user = await createTestUser({ totpSecret: createTotpSecret(), label: "remembered-expiry-lock" });
+  const beforeLock = new Date();
+  const rememberedUntil = new Date(beforeLock.getTime() + 1_800);
+  const cookie = generateDeviceToken();
+  await prisma.trustedDevice.create({ data: {
+    userId: user.id, deviceIdHash: hashDeviceToken(cookie),
+    strongVerifiedAt: new Date(beforeLock.getTime() - MINUTE), rememberedUntil
+  } });
+  const blocker = startAccountLockHolder(user.id);
+  await blocker.ready;
+  const login = startLoginCeremony(user.id, cookie, "pt-BR", new Date(), false, "USER", undefined, "REGISTERED", undefined, () => new Date());
+  try {
+    await waitForBlockedPostgresQuery(blocker.pid(), 'FROM "User"');
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, rememberedUntil.getTime() - Date.now() + 180)));
+  } finally {
+    blocker.release();
+  }
+  const outcomes = await drainRaceActors([blocker.done, login]);
+  assert.equal(outcomes[0]?.status, "fulfilled", "lock holder must complete cleanly");
+  assert.equal(outcomes[1]?.status, "fulfilled", "the expired remembered grant must fall back to an MFA ceremony");
+  if (outcomes[1]?.status !== "fulfilled") return;
+  const result = outcomes[1].value as LoginCeremonyStart;
+  assert.equal(result.kind, "CEREMONY", "an expired grant cannot mint a password-only USER session after lock wait");
+  if (result.kind === "CEREMONY") assert.equal(result.factor, "TOTP");
+  assert.equal(await prisma.session.count({ where: { userId: user.id } }), 0);
+});
+
 test("HTTP REGISTERED login still requires MFA for forced USER, ADMIN, and untrusted browsers", integrationOptions, async () => {
   const now = new Date();
   const totpSecret = createTotpSecret();

@@ -651,6 +651,24 @@ assert_staging_mail_worker_stopped() {
   done <<< "$containers"
 }
 
+assert_production_mail_worker_ready() {
+  local containers container observed
+  # The public Hub may enqueue password/MFA mail while a missing SMTP worker
+  # continuously restarts. Production cannot advertise healthy or open Tunnel
+  # on web/OIDC responses alone. This is process/config readiness, NOT proof
+  # of external SMTP STARTTLS/AUTH or message delivery.
+  containers=$(compose ps --all --quiet email-worker) || fail 'Production email-worker inventory is unavailable.'
+  [[ -n "$containers" && "$containers" != *$'\n'* ]] || fail 'Production requires exactly one email-worker container.'
+  container=$containers
+  observed=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}|{{.RestartCount}}' "$container") || fail 'Production email-worker state is unavailable.'
+  [[ "$observed" == 'virki-prod|email-worker|running|true|false|0' ]] || fail 'Production email-worker is stopped, restarting or has crashed since startup.'
+  # Execute the same worker-only SMTP validator as the real startup process;
+  # never copy provider secrets into the Hub or print their contents.
+  compose exec -T email-worker node --import tsx --input-type=module -e \
+    'import { getEmailTransportStatus } from "./packages/auth/src/email.ts"; if (getEmailTransportStatus().state !== "configured") process.exit(11)' \
+    >/dev/null 2>&1 || fail 'Production email-worker SMTP configuration is not ready.'
+}
+
 stop_stage_after_failure() {
   local original_status=$1
   trap - EXIT
@@ -1908,6 +1926,7 @@ resume_services() {
   compose up --detach --force-recreate "${application_services[@]}" >/dev/null
   assert_revisions
   assert_loopback_ports
+  assert_production_mail_worker_ready
   assert_health
   # Commit verified recovery while the public Tunnel is still STOPPED. A host
   # crash cannot leave the Tunnel auto-restarting with maintenance markers.
@@ -2210,6 +2229,7 @@ case "$action" in
     compose up --detach "${application_services[@]}" >/dev/null
     assert_revisions
     assert_loopback_ports
+    assert_production_mail_worker_ready
     assert_health
     compose up --detach cloudflared >/dev/null
     assert_tunnel_running
@@ -2225,6 +2245,7 @@ case "$action" in
     compose up --detach --force-recreate "${application_services[@]}" >/dev/null
     assert_revisions
     assert_loopback_ports
+    assert_production_mail_worker_ready
     assert_health
     compose up --detach cloudflared >/dev/null
     assert_tunnel_running
@@ -2237,6 +2258,7 @@ case "$action" in
     compose stop cloudflared >/dev/null 2>&1 || true
     assert_revisions
     assert_loopback_ports
+    assert_production_mail_worker_ready
     assert_health
     compose up --detach cloudflared >/dev/null
     assert_tunnel_running
@@ -2263,6 +2285,7 @@ case "$action" in
     assert_revisions
     ;;
   health)
+    assert_production_mail_worker_ready
     assert_health
     ;;
   logs)

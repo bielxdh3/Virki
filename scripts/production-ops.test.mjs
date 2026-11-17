@@ -916,6 +916,71 @@ assert_staging_mail_worker_stopped
   check({ STUB_COMPOSE_FAIL: "1" }, 79);
 });
 
+test("production Tunnel requires running, configured SMTP email-worker readiness, never a restarting or missing worker", () => {
+  const start = serverScript.indexOf("assert_production_mail_worker_ready() {");
+  const end = serverScript.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, "production needs a dedicated fail-closed mail-worker gate");
+  const guard = serverScript.slice(start, end + 3);
+  assert.match(guard, /compose ps --all --quiet email-worker/u);
+  assert.match(guard, /docker inspect --format [^\n]*\.State\.Status[^\n]*\.State\.Running[^\n]*\.State\.Restarting/u);
+  assert.match(guard, /getEmailTransportStatus/u, "the actual worker transport validator must reject incomplete SMTP config");
+  const bashExecutable = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/bash";
+  if (existsSync(bashExecutable)) {
+    const fixture = `set -euo pipefail
+compose() {
+  if [[ "$*" == 'ps --all --quiet email-worker' ]]; then
+    [[ "\${STUB_COMPOSE_FAIL:-0}" == 0 ]] || return 1
+    printf '%s\\n' "\${STUB_WORKER_IDS:-}"
+  elif [[ "$1" == exec && "$2" == -T && "$3" == email-worker ]]; then
+    [[ "\${STUB_SMTP_CONFIGURED:-0}" == 1 ]]
+  else
+    exit 98
+  fi
+}
+docker() {
+  [[ "$1" == inspect && "$2" == --format && "$#" == 4 ]] || exit 98
+  [[ "\${STUB_DOCKER_FAIL:-0}" == 0 ]] || return 1
+  printf '%s\\n' "\${STUB_DOCKER_IDENTITY:-}"
+}
+fail() { exit 79; }
+${guard}
+assert_production_mail_worker_ready
+`;
+    const check = (env, expectedStatus) => {
+      const child = spawnSync(bashExecutable, ["--noprofile", "--norc", "-s"], {
+        input: fixture, encoding: "utf8", timeout: 5_000, windowsHide: true,
+        env: { ...process.env, PATH: "/__virki_no_external_commands__", ...env }
+      });
+      assert.equal(child.error, undefined, String(child.error));
+      assert.equal(child.status, expectedStatus, `mail readiness result: ${child.stderr}`);
+    };
+    const valid = { STUB_WORKER_IDS: "worker-a", STUB_DOCKER_IDENTITY: "virki-prod|email-worker|running|true|false|0", STUB_SMTP_CONFIGURED: "1" };
+    check(valid, 0);
+    check({ ...valid, STUB_SMTP_CONFIGURED: "0" }, 79);
+    for (const state of [
+      "virki-prod|email-worker|restarting|false|true|2", "virki-prod|email-worker|exited|false|false|3",
+      "virki-prod|email-worker|running|true|false|2", "another-project|email-worker|running|true|false|0",
+      "virki-prod|hub|running|true|false|0", "garbage"
+    ]) check({ ...valid, STUB_DOCKER_IDENTITY: state }, 79);
+    check({ ...valid, STUB_WORKER_IDS: "" }, 79);
+    check({ ...valid, STUB_WORKER_IDS: "worker-a\nworker-b" }, 79);
+    check({ ...valid, STUB_COMPOSE_FAIL: "1" }, 79);
+    check({ ...valid, STUB_DOCKER_FAIL: "1" }, 79);
+  }
+  for (const segment of [
+    serverScript.slice(serverScript.indexOf("resume_services() {"), serverScript.indexOf("\ninstall_source() {")),
+    serverScript.slice(serverScript.indexOf("  start)\n"), serverScript.indexOf("  restart)\n")),
+    serverScript.slice(serverScript.indexOf("  restart)\n"), serverScript.indexOf("  start-tunnel)\n")),
+    serverScript.slice(serverScript.indexOf("  start-tunnel)\n"), serverScript.indexOf("  stop)\n")),
+    serverScript.slice(serverScript.indexOf("  health)\n"), serverScript.indexOf("  logs)\n"))
+  ]) {
+    assert.match(segment, /assert_production_mail_worker_ready\s*\n\s*assert_health/u,
+      "production health and Tunnel must refuse a non-ready email worker");
+  }
+  const stage = serverScript.slice(serverScript.indexOf("  stage)\n"), serverScript.indexOf("  first-admin-bootstrap)\n"));
+  assert.doesNotMatch(stage, /assert_production_mail_worker_ready/u, "private staging must keep the email worker stopped");
+});
+
 test("production Compose uses the exact loaded runtime and migration image tags", () => {
   assert.match(serverScript, /--project-directory "\$source_dir\/infra"/u);
   const compose = readFileSync(new URL("../infra/docker-compose.prod.yml", import.meta.url), "utf8");

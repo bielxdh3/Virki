@@ -6,6 +6,27 @@ import { createBoundedDenialSessionLookup } from "./denial-session-lookup";
 
 const lookupDenialSession = createBoundedDenialSessionLookup(getSessionByToken);
 
+/** Failed public MFA proofs are attacker-reachable even with a valid public CSRF
+ * token. Bound native Hub writes and cookie attribution, but never sample a
+ * failure associated with a live ADMIN session or a verified login success. */
+export async function writeLoginVerificationFailureAudit(
+  requestHeaders: Pick<Headers, "get">,
+  sessionToken: string | undefined,
+  input: AuditLogInput
+): Promise<void> {
+  const nativeHub = getSurface(requestHeaders) === "hub" && isNativeHubPerimeterEnabled();
+  const session = nativeHub && sessionToken ? await lookupDenialSession(sessionToken) : null;
+  const writer = nativeHub && session?.user.role !== "ADMIN" ? writePreauthDenialAudit : writeAuditLog;
+  await writer({
+    ...input,
+    ...(session ? {
+      actorUserId: session.user.id,
+      actorRole: session.user.role === "ADMIN" || session.user.role === "USER" ? session.user.role : undefined,
+      sessionRef: hashAuditSessionReference(session.id)
+    } : {})
+  });
+}
+
 // Fixed public login/recovery identifiers, logout Origin/CSRF and ADMIN passkey
 // Origin/invalid-CSRF after a bounded live session lookup. Only a verified ADMIN session
 // avoids the native Hub audit budget: a portal USER session cannot turn native

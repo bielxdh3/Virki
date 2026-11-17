@@ -407,7 +407,8 @@ export async function startLoginCeremony(
   expectedRole?: RequiredLoginRole,
   trustedClientAddress?: string,
   factorSelection?: LoginFactorSelection,
-  verifiedLoginPassword?: string
+  verifiedLoginPassword?: string,
+  proofClock: () => Date = () => now
 ): Promise<LoginCeremonyStart> {
   const candidateToken = deviceToken && isDeviceToken(deviceToken) ? deviceToken : undefined;
   let stage: LoginCeremonyFailureStage = "transaction-start";
@@ -443,6 +444,11 @@ export async function startLoginCeremony(
             FOR UPDATE
           `;
         }
+        // A remembered USER browser grant is a time-bound substitute for a
+        // fresh login factor. Its clock must be sampled after BOTH account and
+        // trusted-device locks; a valid-at-request cookie is not sufficient
+        // if those locks were held until after rememberedUntil.
+        now = proofClock();
         stage = "trusted-device-lookup";
         await transaction.trustedDevice.updateMany({ where: { userId, status: "TRUSTED", createdAt: { lte: new Date(now.getTime() - DEVICE_TRUST_TTL_MS) } }, data: { status: "REVOKED", revokedAt: now, rememberedUntil: null, strongVerifiedAt: null } });
         const trusted = candidateHash ? await transaction.trustedDevice.findUnique({ where: { userId_deviceIdHash: { userId, deviceIdHash: candidateHash } }, select: { status: true, revokedAt: true, rememberedUntil: true, strongVerifiedAt: true } }) : null;
@@ -467,8 +473,14 @@ export async function startLoginCeremony(
         if (hasRememberedGrant && !forceFreshProof) {
           stage = "remembered-challenges-revoke";
           await revokeLoginChallenges(transaction, userId, deviceIdHash);
+          // Reject if the grant ages out during any subsequent transaction
+          // lock wait, before issuing an unchallenged password-only session.
+          if (!isRememberedGrantActive(trusted, proofClock())) throw new SecurityMutationError();
           stage = "remembered-session-create";
           const session = await createSessionInTransaction(transaction, userId, now);
+          // Session INSERT may itself wait for a lock. Roll back that insert
+          // if the remembered proof expires before the transaction returns.
+          if (!isRememberedGrantActive(trusted, proofClock())) throw new SecurityMutationError();
           stage = "transaction-commit";
           return {
             kind: "SESSION",
