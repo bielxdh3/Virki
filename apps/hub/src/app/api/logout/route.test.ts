@@ -5,9 +5,74 @@ import { NextRequest } from "next/server";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { hashSessionToken, SESSION_COOKIE_NAME } from "@virki/auth";
+import { prisma } from "@virki/database";
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 
 import { POST } from "./route";
+
+test("native anonymous logout Origin flood is bounded without sampling a verified ADMIN denial", async () => {
+  const keys = ["NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "VIRKI_HUB_URL", "VIRKI_HUB_HOSTNAME", "VIRKI_AUDIT_HASH_SECRET"] as const;
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const originalAudit = prisma.auditLog.create;
+  const originalLookup = prisma.session.findUnique;
+  const validToken = "A".repeat(43);
+  const userToken = "B".repeat(43);
+  let writes = 0;
+  const auditEvents: Record<string, unknown>[] = [];
+  try {
+    Reflect.set(process.env, "NODE_ENV", "production");
+    process.env.VIRKI_HUB_PERIMETER_MODE = "native";
+    process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED = "false";
+    process.env.VIRKI_HUB_URL = "https://hub.biel.dev.br";
+    process.env.VIRKI_HUB_HOSTNAME = "hub.biel.dev.br";
+    process.env.VIRKI_AUDIT_HASH_SECRET = "22".repeat(32);
+    prisma.auditLog.create = (async (input: { data: Record<string, unknown> }) => {
+      writes += 1;
+      auditEvents.push(input.data);
+      return {};
+    }) as unknown as typeof originalAudit;
+    prisma.session.findUnique = (async (input: { where: { tokenHash: string } }) => {
+      if (input.where.tokenHash !== hashSessionToken(validToken) &&
+          input.where.tokenHash !== hashSessionToken(userToken)) return null;
+      const admin = input.where.tokenHash === hashSessionToken(validToken);
+      return {
+        id: admin ? "verified-admin-session" : "verified-user-session", createdAt: new Date(), expiresAt: new Date(Date.now() + 60_000),
+        revokedAt: null, authenticationMethods: ["pwd", "totp"],
+        user: { id: admin ? "verified-admin" : "verified-user",
+          email: "actor@example.invalid", displayName: "Actor",
+          role: admin ? "ADMIN" : "USER", isActive: true, accountStatus: "ACTIVE" }
+      };
+    }) as unknown as typeof originalLookup;
+    const hostile = { host: "hub.biel.dev.br", origin: "https://untrusted.invalid" };
+    const crossRoleResponses = await Promise.all(Array.from({ length: 180 }, () =>
+      POST(new NextRequest("https://hub.biel.dev.br/api/logout", {
+        method: "POST", headers: { ...hostile, cookie: `${SESSION_COOKIE_NAME}=${userToken}` }
+      }))));
+    assert.ok(crossRoleResponses.every((response) => response.status === 403));
+    assert.ok(writes <= 120, `valid USER session cannot escape native ADMIN audit limit, got ${writes}`);
+    const responses = await Promise.all(Array.from({ length: 180 }, () =>
+      POST(new NextRequest("https://hub.biel.dev.br/api/logout", { method: "POST", headers: hostile }))));
+    assert.ok(responses.every((response) => response.status === 403));
+    assert.ok(writes <= 120, `anonymous logout Origin flood must not write every event, got ${writes}`);
+    const afterFlood = writes;
+    const verified = await POST(new NextRequest("https://hub.biel.dev.br/api/logout", {
+      method: "POST", headers: { ...hostile, cookie: `${SESSION_COOKIE_NAME}=${validToken}` }
+    }));
+    assert.equal(verified.status, 403);
+    assert.equal(writes, afterFlood + 1, "verified ADMIN Origin denial must not be sampled after anonymous flood");
+    assert.equal(auditEvents.at(-1)?.actorUserId, "verified-admin");
+    assert.equal(auditEvents.at(-1)?.actorRole, "ADMIN");
+  } finally {
+    prisma.auditLog.create = originalAudit;
+    prisma.session.findUnique = originalLookup;
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else Reflect.set(process.env, key, value);
+    }
+  }
+});
 
 test("logout redirects to the configured public hub origin", async () => {
   const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;

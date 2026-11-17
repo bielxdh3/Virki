@@ -2,12 +2,17 @@ import { createAuditRequestMetadata, getSessionByToken, hashAuditSessionReferenc
 import { writePreauthDenialAudit } from "./preauth-denial-audit";
 import { isNativeHubPerimeterEnabled } from "./hub-perimeter";
 import { getSurface } from "./surface";
+import { createBoundedDenialSessionLookup } from "./denial-session-lookup";
 
-// These are fixed internal identifiers for public login/recovery entrypoints.
-// Protected ADMIN and account mutation guards can reject Origin before the
-// session is loaded; `!session` alone must never classify them as pre-auth.
+const lookupDenialSession = createBoundedDenialSessionLookup(getSessionByToken);
+
+// Fixed public login/recovery identifiers, logout Origin and ADMIN passkey
+// Origin after an attempted live session lookup. Only a verified ADMIN session
+// avoids the native Hub audit budget: a portal USER session cannot turn native
+// Hub Origin probes into unlimited AuditLog writes. Other protected guards may
+// reject Origin before session lookup and remain outside this source allowlist.
 const PUBLIC_PREAUTH_DENIAL_SOURCES = new Set([
-  "login-origin", "login-csrf", "login-factor-origin", "login-factor-csrf",
+  "login-origin", "login-csrf", "login-factor-origin", "login-factor-csrf", "logout-origin", "admin-passkeys-origin",
   "login-verification-origin", "login-verification-csrf",
   "account-recovery-request", "account-recovery-access", "account-recovery-switch",
   "account-recovery-verify", "account-recovery-new-mail-start", "account-recovery-new-mail-verify",
@@ -16,7 +21,7 @@ const PUBLIC_PREAUTH_DENIAL_SOURCES = new Set([
 
 export async function recordSecurityDenial(requestHeaders: Pick<Headers, "get">, source: string, reason: "csrf" | "role" | "rejected" | "unavailable", session?: AuthenticatedSession | null): Promise<void> {
   const eventType: AuditLogInput["eventType"] = reason === "csrf" ? "CSRF_DENIED" : reason === "role" ? "AUTHORIZATION_DENIED" : "SECURITY_PROOF_REJECTED";
-  const bestEffortAudit = !session && PUBLIC_PREAUTH_DENIAL_SOURCES.has(source) &&
+  const bestEffortAudit = session?.user.role !== "ADMIN" && PUBLIC_PREAUTH_DENIAL_SOURCES.has(source) &&
     getSurface(requestHeaders) === "hub" && isNativeHubPerimeterEnabled()
     ? writePreauthDenialAudit : writeAuditLog;
   await bestEffortAudit({
@@ -29,13 +34,20 @@ export async function recordSecurityDenial(requestHeaders: Pick<Headers, "get">,
 }
 
 export async function recordSessionCsrfDenial(requestHeaders: Pick<Headers, "get">, source: string, sessionToken?: string): Promise<void> {
+  // Only public native Hub Origin guards have an attacker-triggerable session
+  // lookup before the standard authentication boundary. Portal, Access, and
+  // protected ADMIN mutation guards retain their previous attribution policy.
+  const preauthOrigin =
+    (source === "logout-origin" || source === "admin-passkeys-origin") &&
+    getSurface(requestHeaders) === "hub" && isNativeHubPerimeterEnabled();
   let session: AuthenticatedSession | null = null;
-  // Session tokens are 32-byte base64url values; reject malformed cookie data before a DB lookup.
-  if (sessionToken && /^[A-Za-z0-9_-]{43}$/u.test(sessionToken)) {
+  if (preauthOrigin) {
+    session = await lookupDenialSession(sessionToken);
+  } else if (sessionToken && /^[A-Za-z0-9_-]{43}$/u.test(sessionToken)) {
     try {
       session = await getSessionByToken(sessionToken);
     } catch {
-      // Actor attribution is best-effort; keep the denial event even if lookup fails.
+      // This is best-effort actor attribution, not an authorization decision.
     }
   }
   await recordSecurityDenial(requestHeaders, source, "csrf", session);

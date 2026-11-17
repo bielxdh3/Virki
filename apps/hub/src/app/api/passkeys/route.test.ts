@@ -1,8 +1,72 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { prisma } from "@virki/database";
-import { hashPassword } from "@virki/auth";
+import { hashPassword, hashSessionToken, SESSION_COOKIE_NAME } from "@virki/auth";
 import { POST } from "./route";
+
+test("native ADMIN passkey Origin flood is bounded while a verified ADMIN denial remains audited", async () => {
+  const keys = ["NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "VIRKI_HUB_HOSTNAME", "VIRKI_PASSKEYS_ENABLED", "VIRKI_ADMIN_PASSKEYS_ENABLED",
+    "VIRKI_AUDIT_HASH_SECRET"] as const;
+  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const originalAudit = prisma.auditLog.create;
+  const originalLookup = prisma.session.findUnique;
+  const validToken = "A".repeat(43);
+  const userToken = "B".repeat(43);
+  let writes = 0;
+  const audits: Record<string, unknown>[] = [];
+  try {
+    Object.assign(process.env, {
+      NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native",
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "false", VIRKI_HUB_HOSTNAME: "hub.biel.dev.br",
+      VIRKI_PASSKEYS_ENABLED: "true", VIRKI_ADMIN_PASSKEYS_ENABLED: "true",
+      VIRKI_AUDIT_HASH_SECRET: "22".repeat(32)
+    });
+    prisma.auditLog.create = (async (input: { data: Record<string, unknown> }) => {
+      writes += 1;
+      audits.push(input.data);
+      return {};
+    }) as unknown as typeof originalAudit;
+    prisma.session.findUnique = (async (input: { where: { tokenHash: string } }) => {
+      if (input.where.tokenHash !== hashSessionToken(validToken) &&
+          input.where.tokenHash !== hashSessionToken(userToken)) return null;
+      const admin = input.where.tokenHash === hashSessionToken(validToken);
+      return {
+        id: admin ? "verified-admin-session" : "verified-user-session", createdAt: new Date(), expiresAt: new Date(Date.now() + 60_000),
+        revokedAt: null, authenticationMethods: ["pwd", "totp"],
+        user: { id: admin ? "verified-admin" : "verified-user",
+          role: admin ? "ADMIN" : "USER", email: "actor@example.invalid",
+          displayName: "Actor", isActive: true, accountStatus: "ACTIVE" }
+      };
+    }) as unknown as typeof originalLookup;
+    const request = (cookie?: string) => POST(new Request("https://hub.biel.dev.br/api/passkeys", {
+      method: "POST", headers: {
+        host: "hub.biel.dev.br", origin: "https://untrusted.invalid",
+        "content-type": "application/json",
+        ...(cookie ? { cookie: `${SESSION_COOKIE_NAME}=${cookie}` } : {})
+      }, body: JSON.stringify({ action: "admin-register-options" })
+    }));
+    const crossRoleResponses = await Promise.all(Array.from({ length: 180 }, () => request(userToken)));
+    assert.ok(crossRoleResponses.every((response) => response.status === 403));
+    assert.ok(writes <= 120, `valid USER session cannot bypass native ADMIN passkey audit budget, got ${writes}`);
+    const responses = await Promise.all(Array.from({ length: 180 }, () => request()));
+    assert.ok(responses.every((response) => response.status === 403), "native ADMIN passkeys should reject every hostile Origin");
+    assert.ok(writes <= 120, `native ADMIN passkey anonymous audit writes must be bounded, got ${writes}`);
+    const afterFlood = writes;
+    assert.equal((await request(validToken)).status, 403);
+    assert.equal(writes, afterFlood + 1, "verified ADMIN Origin denial must remain audited after anonymous flood");
+    assert.equal(audits.at(-1)?.actorUserId, "verified-admin");
+    assert.equal(audits.at(-1)?.actorRole, "ADMIN");
+  } finally {
+    prisma.auditLog.create = originalAudit;
+    prisma.session.findUnique = originalLookup;
+    for (const key of keys) {
+      const value = before[key];
+      if (value === undefined) delete process.env[key];
+      else Reflect.set(process.env, key, value);
+    }
+  }
+});
 
 test("ADMIN passkey login remains blocked and forged portal-host enrollment cannot reach hub", async (t) => {
   const oldUser = process.env.VIRKI_PASSKEYS_ENABLED;

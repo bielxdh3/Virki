@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCurrentSession } from "../../../lib/auth";
-import { recordSecurityDenial } from "../../../lib/audit-denial";
+import { recordSecurityDenial, recordSessionCsrfDenial } from "../../../lib/audit-denial";
+import { isNativeHubPerimeterEnabled } from "../../../lib/hub-perimeter";
 import { requestHost, getSurface, sameOriginFailureReason } from "../../../lib/surface";
 import { validateSessionCsrfToken } from "../../../lib/session-csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
@@ -70,7 +71,14 @@ export async function POST(request: Request) {
   if (!passkeysEnabledForRequest(surface, host, process.env, role)) return guardedJson({ error: "Unavailable" }, 404);
   if (adminAction && surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-passkeys"))) return guardedJson({ error: "Rejected" }, 403);
   if (sameOriginFailureReason(request.headers)) {
-    await recordSecurityDenial(request.headers, adminAction ? "admin-passkeys-origin" : "portal-passkeys-origin", "csrf");
+    if (adminAction && surface === "hub" && isNativeHubPerimeterEnabled()) {
+      // Attribute a live ADMIN cookie before applying the anonymous Origin
+      // audit budget; an actual ADMIN denial must retain forensic evidence.
+      await recordSessionCsrfDenial(request.headers, "admin-passkeys-origin",
+        cookieValue(request.headers.get("cookie"), SESSION_COOKIE_NAME));
+    } else {
+      await recordSecurityDenial(request.headers, adminAction ? "admin-passkeys-origin" : "portal-passkeys-origin", "csrf");
+    }
     return guardedJson({ error: "Rejected" }, 403);
   }
   const auditState: { session: Awaited<ReturnType<typeof getCurrentSession>>; csrfDenied: boolean } = { session: null, csrfDenied: false };
