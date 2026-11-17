@@ -46,6 +46,8 @@ function fakeFetch(overrides = {}) {
       } else {
         assert.equal(options.headers.Cookie, undefined, "ordinary anonymous probes must never send a session cookie");
       }
+      assert.equal(options.headers["cf-access-jwt-assertion"], paths.length >= 8 ? "forged" : undefined,
+        "only the final negative probes may supply a forged Cloudflare Access assertion");
       const parsed = new URL(url);
       assert.equal(parsed.origin, base);
       paths.push(parsed.pathname);
@@ -57,8 +59,30 @@ function fakeFetch(overrides = {}) {
 test("native Hub ingress allows anonymous login and recovery, while privileged routes redirect to Virki login", async () => {
   const client = fakeFetch();
   const result = await checkNativeHubIngress(base, client.fetch);
-  assert.deepEqual(result, { origin: base, checked: ["/login", "/recover", "/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections", "/admin/accounts (forged cookie)"] });
-  assert.deepEqual(client.paths, ["/login", "/recover", "/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections", "/admin/accounts"]);
+  assert.deepEqual(result, { origin: base, checked: ["/login", "/recover", "/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections", "/admin/accounts (forged cookie)", "/login (forged Access JWT)", "/admin/accounts (forged Access JWT)"] });
+  assert.deepEqual(client.paths, ["/login", "/recover", "/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections", "/admin/accounts", "/login", "/admin/accounts"]);
+});
+
+test("native HTTPS ingress rejects a forged Cloudflare Access assertion as a substitute for native login", async () => {
+  const client = fakeFetch();
+  await assert.rejects(checkNativeHubIngress(base, async (url, options) => {
+    const expected = await client.fetch(url, options);
+    if (options.headers["cf-access-jwt-assertion"] && new URL(url).pathname === "/login") {
+      return new Response("Forbidden", { status: 403, headers: routeHeaders });
+    }
+    return expected;
+  }), /login.*HTTP 403.*native/i);
+});
+
+test("native HTTPS ingress never accepts a forged Cloudflare Access JWT as ADMIN authorization", async () => {
+  const client = fakeFetch();
+  await assert.rejects(checkNativeHubIngress(base, async (url, options) => {
+    const expected = await client.fetch(url, options);
+    if (options.headers["cf-access-jwt-assertion"] && new URL(url).pathname === "/admin/accounts") {
+      return new Response("ADMIN data", { status: 200, headers: routeHeaders });
+    }
+    return expected;
+  }), /admin\/accounts.*HTTP 200.*unauthenticated/i);
 });
 
 test("Cloudflare Access interstitial redirect prevents staging acceptance", async () => {

@@ -26,19 +26,22 @@ export async function checkNativeHubIngress(target, fetcher = fetch) {
     { path: "/admin/security" },
     { path: "/admin/access" },
     { path: "/admin/connections" },
-    { path: "/admin/accounts", forgedCookie: true }
+    { path: "/admin/accounts", forgedCookie: true },
+    { path: "/login", forgedAccessJwt: true },
+    { path: "/admin/accounts", forgedAccessJwt: true }
   ];
-  for (const { path, forgedCookie } of probes) {
-    const label = forgedCookie ? `${path} (forged cookie)` : path;
+  for (const { path, forgedCookie, forgedAccessJwt } of probes) {
+    const label = forgedCookie ? `${path} (forged cookie)` : forgedAccessJwt ? `${path} (forged Access JWT)` : path;
     const response = await fetcher(`${origin}${path}`, {
       method: "GET",
       redirect: "manual",
-      headers: { Accept: "text/html", "Cache-Control": "no-cache", ...(forgedCookie ? { Cookie: "__Host-virki_session=forged" } : {}) },
+      headers: { Accept: "text/html", "Cache-Control": "no-cache", ...(forgedCookie ? { Cookie: "__Host-virki_session=forged" } : {}),
+        ...(forgedAccessJwt ? { "cf-access-jwt-assertion": "forged" } : {}) },
       signal: AbortSignal.timeout(10000)
     });
     const privileged = path.startsWith("/admin/");
     if (!privileged && response.status !== 200) {
-      throw new Error(`${path}: HTTP ${response.status}; native login/recovery is not publicly reachable without an external authentication gate.`);
+      throw new Error(`${label}: HTTP ${response.status}; native login/recovery is not publicly reachable without an external authentication gate.`);
     }
     if (privileged && response.status !== 307) {
       throw new Error(`${label}: HTTP ${response.status}; unauthenticated ADMIN must redirect to Virki login.`);
@@ -53,7 +56,8 @@ export async function checkNativeHubIngress(target, fetcher = fetch) {
       }
     }
   }
-  return { origin, checked: probes.map(({ path, forgedCookie }) => forgedCookie ? `${path} (forged cookie)` : path) };
+  return { origin, checked: probes.map(({ path, forgedCookie, forgedAccessJwt }) => forgedCookie
+    ? `${path} (forged cookie)` : forgedAccessJwt ? `${path} (forged Access JWT)` : path) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

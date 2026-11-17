@@ -112,20 +112,32 @@ try {
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   const nativeLogin = await assertStatus(`http://127.0.0.1:${nativeHubPort}/login`, 200, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   assertSecurityHeaders(nativeLogin.headers, "strict-origin");
+  const csrfField = 'name="csrfToken"';
+  if (!nativeLogin.body.includes("<form") || !nativeLogin.body.includes('name="password"') ||
+      !nativeLogin.body.includes(csrfField)) {
+    throw new Error("Native OCI login must render the real password form and its CSRF field.");
+  }
   // The OCI fixture intentionally has no PostgreSQL: bare /recover queries
   // the live ADMIN count to determine supported recovery methods. Exercise the
   // same route's legacy-link entry (no cookie or DB read) here; bare /recover
   // is separately verified against the real database-backed HTTPS staging.
   const nativeRecovery = await assertStatus(`http://127.0.0.1:${nativeHubPort}/recover?request=oci-smoke`, 200, { host: hubHost });
   assertSecurityHeaders(nativeRecovery.headers, "strict-origin");
-  if (!nativeRecovery.body.includes("Recuperar acesso administrativo")) {
-    throw new Error("Native OCI recovery must render the Virki ADMIN recovery screen.");
+  if (!nativeRecovery.body.includes("Recuperar acesso administrativo") ||
+      !nativeRecovery.body.includes("<form") || !nativeRecovery.body.includes('name="requestKey"') ||
+      !nativeRecovery.body.includes(csrfField)) {
+    throw new Error("Native OCI recovery must render the Virki ADMIN link-open form and its CSRF field.");
   }
-  const nativeAdmin = await assertStatus(`http://127.0.0.1:${nativeHubPort}/admin/accounts`, 307, { host: hubHost, "cf-access-jwt-assertion": "forged" });
-  assertSecurityHeaders(nativeAdmin.headers, "strict-origin");
-  if (!isCanonicalNativeAdminRedirect(nativeAdmin.headers.location, `https://${hubHost}`, "/admin/accounts") ||
-      !nativeLogin.headers["x-virki-request-id"] || !nativeRecovery.headers["x-virki-request-id"] ||
-      !nativeAdmin.headers["x-virki-request-id"]) {
+  const nativeAdminPaths = ["/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections"];
+  for (const adminPath of nativeAdminPaths) {
+    const nativeAdmin = await assertStatus(`http://127.0.0.1:${nativeHubPort}${adminPath}`, 307, { host: hubHost, "cf-access-jwt-assertion": "forged" });
+    assertSecurityHeaders(nativeAdmin.headers, "strict-origin");
+    if (!isCanonicalNativeAdminRedirect(nativeAdmin.headers.location, `https://${hubHost}`, adminPath) ||
+        !nativeAdmin.headers["x-virki-request-id"]) {
+      throw new Error(`Native OCI Hub must deny anonymous ${adminPath} with Virki's canonical login redirect.`);
+    }
+  }
+  if (!nativeLogin.headers["x-virki-request-id"] || !nativeRecovery.headers["x-virki-request-id"]) {
     throw new Error("The native OCI Hub must serve login and recovery and redirect anonymous ADMIN to its own canonical login.");
   }
   const response = await waitForResponse(`http://127.0.0.1:${hubPort}/.well-known/openid-configuration`, { host: publicHost });
