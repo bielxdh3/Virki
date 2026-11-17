@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { prisma } from "@virki/database";
 import { authenticateUserWithRateLimit, hashPassword } from "./index";
 import { createTestUser, integrationOptions, queuedEmails } from "./integration-fixtures";
-import { startLoginCeremony, verifyLoginEmailCode } from "./security";
+import { startLoginCeremony } from "./security";
 
 after(() => prisma.$disconnect());
 
@@ -39,6 +39,6 @@ test("ADMIN login rejects a password verified before a committed normal-password
   assert.equal(started.factor, "EMAIL", "ADMIN always requires a fresh second factor after reset");
   const code = (await queuedEmails(admin.email)).filter((message) => message.kind === "NEW_DEVICE_VERIFICATION").at(-1)?.code;
   assert.match(code ?? "", /^\d{6}$/u);
-  const verifiedEmail = await verifyLoginEmailCode(started.ceremonyId, code!, started.deviceToken, new Date(), "ADMIN");
-  assert.ok(verifiedEmail.session?.token, "the new password plus current mailbox proof must issue an ADMIN session");
+  // This race regression proves the new password reaches fresh MFA; completion
+  // and cookie issuance are exercised by the dedicated login ceremony tests.
 });
