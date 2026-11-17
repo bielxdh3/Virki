@@ -11,7 +11,7 @@ export async function probeStagingMfaLocalDatabase(prisma, expected) {
       current_user AS "role",
       session_user AS "sessionRole",
       current_setting('server_version_num')::integer AS "pgVersion",
-      inet_server_addr()::text AS "host",
+      host(inet_server_addr()) AS "host",
       inet_server_port()::integer AS "port",
       pg_get_userbyid(database.datdba) AS "owner",
       EXISTS(

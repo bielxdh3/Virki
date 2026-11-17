@@ -52,7 +52,7 @@ async function main() {
     const rows = await prisma.$queryRaw`
       SELECT current_database() AS "database",
         current_user AS "role",
-        inet_server_addr()::text AS "host",
+        host(inet_server_addr()) AS "host",
         inet_server_port()::integer AS "port",
         pg_get_userbyid(database.datdba) AS "owner",
         EXISTS(

@@ -336,3 +336,11 @@ test("successful credential preparation retains an owner-only file", async () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("staging DB identity queries strip CIDR mask via host(inet_server_addr())", () => {
+  for (const relPath of ["./lib/staging-mfa-local-db-probe.mjs", "./staging-mfa-bootstrap.mjs"]) {
+    const src = readFileSync(new URL(relPath, import.meta.url), "utf8");
+    assert.match(src, /host\(inet_server_addr\(\)\)\s+AS\s+"host"/u, `${relPath} must use host(inet_server_addr())`);
+    assert.doesNotMatch(src, /inet_server_addr\(\)::text\s+AS\s+"host"/u, `${relPath} must not cast inet_server_addr() with CIDR mask`);
+  }
+});
