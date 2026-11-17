@@ -524,7 +524,7 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
         sleep() { [[ "$1" == "1" ]]; }
         docker() {
           printf '%s\\n' "$*" >> "$MOCK_DOCKER_LOG"
-          if [[ "$*" == *"image inspect"* ]]; then printf '%s\\n' "$MOCK_VOLUME"; return; fi
+          if [[ "$*" == *"image inspect"* ]]; then printf '%s\\n' "$MOCK_VOLUME"; return 0; fi
           if [[ "$*" == *" ps -aq "* ]]; then
             counter="$(cat "$MOCK_POLL_COUNTER")"
             counter=$((counter + 1))
@@ -544,9 +544,9 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
             printf '1' > "$MOCK_CREATED"
             if [[ "$MOCK_FAIL" == "timeout-create" ]]; then return 124; fi
             [[ "$MOCK_FAIL" != "orphan" && "$MOCK_FAIL" != "late" ]] || return 8
-            if [[ "$MOCK_FAIL" == "id" ]]; then printf '%s\\n' '--help'; return; fi
+            if [[ "$MOCK_FAIL" == "id" ]]; then printf '%s\\n' '--help'; return 0; fi
             printf '%064d\\n' 0
-            return
+            return 0
           fi
           if [[ "$*" == *" container inspect "* ]]; then
             nonce="$(cat "$MOCK_NONCE_FILE")"
@@ -556,17 +556,17 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
             else
               printf '%s\\n' "$nonce"
             fi
-            return
+            return 0
           fi
           if [[ "$*" == *" cp "* ]]; then
             [[ "$MOCK_FAIL" != "cp" ]] || return 8
             cat "$MOCK_TAR"
-            return
+            return 0
           fi
           if [[ "$*" == *" rm --force "* ]]; then
             [[ "$MOCK_FAIL" != "rm" ]] || return 8
             : > "$MOCK_CREATED"
-            return
+            return 0
           fi
           return 9
         }
@@ -578,6 +578,10 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
           printf 'BLOCK\\n'
         fi
       `;
+      const mockDockerBody = shell.split("docker() {")[1]?.split("\n        verify_staging_prisma_image_ca()")[0];
+      assert.ok(mockDockerBody, "the disposable Docker mock must remain present");
+      assert.doesNotMatch(mockDockerBody, /\breturn(?=\s*(?:;|\n|\}))/u,
+        "successful mock branches require explicit return 0, including during EXIT cleanup");
       const result = spawnSync(bash, ["-c", shell], {
         encoding: "utf8", timeout: 10000,
         env: { PATH: "/usr/bin:/bin", MOCK_CA_DIGEST: caDigest,
