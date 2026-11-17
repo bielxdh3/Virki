@@ -404,6 +404,17 @@ db_url_target="$("$node_bin" -e '
       url.searchParams.get("sslaccept") !== "strict" ||
       url.searchParams.get("sslcert") !== "/app/ca/staging-db-root.pem") process.exit(1);
   const host = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  // This worker runs in an isolated Docker network namespace. Loopback,
+  // unspecified and host-gateway names cannot identify its approved PG18
+  // service. Matching an approved hostname string is not reachability proof.
+  // PostgreSQL URLs have a non-special URL scheme: unlike HTTP, the WHATWG
+  // parser does not necessarily canonicalize numeric/octal/hex IPv4 aliases.
+  if (host.includes("%") || host.endsWith(".") ||
+      /^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$/u.test(host) ||
+      host === "localhost" || host.endsWith(".localhost") ||
+      host === "0.0.0.0" || host === "::" || host === "::1" ||
+      /^127\./u.test(host) || host.startsWith("::ffff:") ||
+      ["host.docker.internal", "gateway.docker.internal", "host.containers.internal"].includes(host)) process.exit(1);
   const database = decodeURIComponent(url.pathname.replace(/^\//u, ""));
   const username = decodeURIComponent(url.username);
   if (!database || username !== "virki_email_worker") process.exit(1);
@@ -1307,6 +1318,23 @@ fi
 printf 'STAGING_HUB_RUNTIME_ISOLATION=PASS\n'
 ```
 
+**Mandatory published-route and database-binding witness — NO-GO until observed.**
+The previous container inspection authenticates the *approved Hub container*
+but does not prove that the public `hub-staging.biel.dev.br` hostname is
+actually forwarded to it. Before any owner browser login, email-producing
+request or worker activation, an independently authorized operator must
+observe the live staging HTTPS ingress and every forwarding hop (including
+Windows/WSL relay, if present) through the `:13001` listener to the exact
+approved Hub PID/container identity and process start identity, with no
+recycled PID, unrelated old Hub or ambiguous upstream. Independently witness
+the **actual published Hub PostgreSQL session** targeting the approved
+`stage_mfa_20261117` database as `virki_runtime`, not the old `stage_pr130`;
+record only non-secret, fresh evidence through the approved operator channel.
+A healthy container, HTTP 200 `/login`, signed *offline* declarations and
+`staging:mfa:local-db-probe` in a separate operator process are insufficient.
+Without this positive witnessed binding, stop before the browser window and
+keep `FULL_STAGING=NO_GO`. Never infer or fabricate an observation receipt.
+
 Keep the Hub running for the approved browser window. The Hub runtime check
 requires the exact immutable image, `restart=no`, `node:node`, read-only root,
 all capabilities dropped, exact `no-new-privileges` security options, only the
@@ -1325,6 +1353,15 @@ credential-authentication evidence, TLS/AUTH, rate cap, total-message cap,
 empty queue, test inbox ownership and a fresh stopped-worker observation have
 all passed. The
 separate Hub must use the same staging outbox key and its own staging DB URL.
+Reconfirm the published HTTPS-to-Hub-to-`stage_mfa_20261117` binding above
+immediately before worker activation. Separately witness that the worker's
+non-loopback endpoint, from **inside its approved isolated Docker network**,
+reaches that same PostgreSQL database using `virki_email_worker` with the
+approved network egress/TLS constraints; the host's `127.0.0.1:55492` is
+not the worker container's loopback. A missing, stale or conflicting live
+route or DB-network witness is a mandatory NO-GO, regardless of a successful
+offline signature preflight. No host networking or gateway exception is
+implied or authorized here.
 Immediately before activation, rerun the offline signed-declaration check
 with a newly signed observation. Its four inputs must be absolute paths in a
 private local directory; independently pin both public keys out of band.

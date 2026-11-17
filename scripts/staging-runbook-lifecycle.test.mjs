@@ -40,6 +40,44 @@ test("staging handoff reflects implemented isolated RPs and the complete signed 
   assert.match(gate1.slice(0, signedGate), /Do not start the Hub before step 6/u);
 });
 
+test("staging worker URL rejects loopback and host gateways inside its own network namespace", () => {
+  const start = runbook.indexOf("  const url = new URL(process.env.VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL);");
+  const end = runbook.indexOf("')\"", start);
+  assert.ok(start > 0 && end > start, "worker URL parser must remain embedded in the runbook");
+  const parse = runbook.slice(start, end);
+  const base = (host) => {
+    const url = new URL(`postgresql://virki_email_worker@${host}:55492/stage_mfa_20261117?sslmode=require&sslaccept=strict&sslcert=%2Fapp%2Fca%2Fstaging-db-root.pem`);
+    url.password = "placeholder";
+    return url.href;
+  };
+  const run = (host) => spawnSync(process.execPath, ["-e", parse], {
+    env: { PATH: process.env.PATH, VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL: base(host) },
+    encoding: "utf8", timeout: 5000
+  });
+  const accepted = run("pg18-stage.internal");
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.stdout, "pg18-stage.internal|55492|stage_mfa_20261117|virki_email_worker");
+  for (const host of ["127.0.0.1", "127.0.0.2", "127.1", "0x7f000001", "localhost", "localhost.", "localhost%2e", "db.localhost", "0.0.0.0", "0", "[::1]", "[::]", "[::ffff:7f00:1]", "host.docker.internal", "gateway.docker.internal", "host.containers.internal"]) {
+    const rejected = run(host);
+    assert.notEqual(rejected.status, 0, `worker must reject ${host} from its isolated namespace`);
+  }
+});
+
+test("public Hub-to-DB and worker-to-DB live binding remains a mandatory independent witness", () => {
+  const hubWitness = runbook.indexOf("**Mandatory published-route and database-binding witness — NO-GO until observed.**");
+  const browser = runbook.indexOf("Keep the Hub running for the approved browser window.", hubWitness);
+  const workerSection = runbook.indexOf("## 3. Explicit attended worker window", browser);
+  const workerWitness = runbook.indexOf("Reconfirm the published HTTPS-to-Hub-to-", workerSection);
+  const workerActivation = runbook.indexOf("worker_cleanup_armed=1", workerWitness);
+  assert.ok(hubWitness > 0 && browser > hubWitness && workerSection > browser &&
+    workerWitness > workerSection && workerActivation > workerWitness,
+  "live route and DB observations must be required before the browser and worker windows");
+  assert.match(runbook.slice(hubWitness, browser), /actual published Hub PostgreSQL session/u);
+  assert.match(runbook.slice(hubWitness, browser), /stage_pr130/u);
+  assert.match(runbook.slice(workerWitness, workerActivation), /non-loopback endpoint/u);
+  assert.match(runbook.slice(workerWitness, workerActivation), /mandatory NO-GO/u);
+});
+
 function simulate({ hub, worker, operation, failDocker = "" }) {
   const tmp = mkdtempSync(path.join(tmpdir(), "virki-runbook-test-"));
   const log = path.join(tmp, "mock-docker.log");
