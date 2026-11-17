@@ -3,6 +3,8 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { createCsrfToken, CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { POST } from "./route";
+import { prisma } from "@virki/database";
+import { recordSecurityDenial } from "../../../lib/audit-denial";
 
 const ENV_KEYS = [
   "NODE_ENV",
@@ -106,5 +108,46 @@ test("production native Hub login enforces Origin and CSRF, rejects spoofed IP f
     }));
     assert.equal(spoofedIp.status, 303);
     assert.equal(spoofedIp.headers.get("location"), "https://hub.biel.dev.br/login?error=1");
+  });
+});
+
+test("native pre-auth origin flood remains 403 without an unbounded audit database write per request", async () => {
+  await withEnv({
+    NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false",
+    VIRKI_HUB_URL: "https://hub.biel.dev.br", VIRKI_HUB_HOSTNAME: "hub.biel.dev.br",
+    VIRKI_CSRF_SIGNING_KEY: "11".repeat(32), VIRKI_AUDIT_HASH_SECRET: "22".repeat(32),
+    VIRKI_RATE_LIMIT_HASH_SECRET: "33".repeat(32)
+  }, async () => {
+    const original = prisma.auditLog.create;
+    let writes = 0;
+    prisma.auditLog.create = (async () => { writes += 1; return {}; }) as unknown as typeof original;
+    try {
+      const responses = await Promise.all(Array.from({ length: 180 }, () => POST(new NextRequest(
+        "https://hub.biel.dev.br/api/login", {
+          method: "POST", headers: { host: "hub.biel.dev.br", origin: "https://untrusted.invalid" }
+        }
+      ))));
+      assert.ok(responses.every((response) => response.status === 403), "every cross-origin request must remain denied");
+      assert.ok(writes <= 120, `anonymous login audit writes must be capped, got ${writes}`);
+      const afterAnonymousFlood = writes;
+      await recordSecurityDenial(new Headers({ host: "hub.biel.dev.br" }), "admin-account-state", "csrf", {
+        id: "verified-session", createdAt: new Date(), expiresAt: new Date(Date.now() + 60_000),
+        authenticationMethods: ["pwd", "totp"],
+        user: { id: "verified-admin", role: "ADMIN", email: "admin@example.invalid", displayName: "Admin" }
+      });
+      assert.equal(writes, afterAnonymousFlood + 1,
+        "authenticated ADMIN denial audit must not inherit the anonymous flood budget");
+      await recordSecurityDenial(new Headers({ host: "hub.biel.dev.br", origin: "https://untrusted.invalid" }), "admin-account-state", "csrf");
+      assert.equal(writes, afterAnonymousFlood + 2,
+        "a protected ADMIN Origin denial before session lookup must not be sampled by the public login budget");
+      await recordSecurityDenial(new Headers({ host: "hub.biel.dev.br", origin: "https://untrusted.invalid" }), "account-recovery-approve", "csrf");
+      assert.equal(writes, afterAnonymousFlood + 3,
+        "ADMIN recovery approval must not be sampled by public login budget");
+      await recordSecurityDenial(new Headers({ host: "portal.biel.dev.br" }), "portal-origin", "csrf");
+      assert.equal(writes, afterAnonymousFlood + 4,
+        "the USER portal's existing audit behavior must remain unchanged");
+    } finally {
+      prisma.auditLog.create = original;
+    }
   });
 });

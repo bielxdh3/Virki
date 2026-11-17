@@ -16,6 +16,8 @@ import { getSurface, getSurfaceBaseUrl, safeReturnTo, sameOriginFailureReason } 
 import { readBoundedFormData } from "../../../lib/request-form";
 import { createLoginResponseAfterRequiredAudit } from "../../../lib/login-audit";
 import { recordSecurityDenial } from "../../../lib/audit-denial";
+import { writePreauthDenialAudit } from "../../../lib/preauth-denial-audit";
+import { isNativeHubPerimeterEnabled } from "../../../lib/hub-perimeter";
 
 export const dynamic = "force-dynamic";
 
@@ -56,8 +58,9 @@ export async function POST(request: Request) {
   const user = authentication.user;
 
   if (!user) {
-    if (authentication.failureMode === "rate-limited" || authentication.failureMode === "limiter-unavailable") await writeAuditLog({ eventType: "RATE_LIMIT_REACHED", result: "DENIED", reason: authentication.failureMode === "rate-limited" ? "rate-limited" : "unavailable", actorEmailHash, resource: surface, metadata: auditMetadata });
-    await writeAuditLog({
+    const bestEffortAudit = surface === "hub" && isNativeHubPerimeterEnabled() ? writePreauthDenialAudit : writeAuditLog;
+    if (authentication.failureMode === "rate-limited" || authentication.failureMode === "limiter-unavailable") await bestEffortAudit({ eventType: "RATE_LIMIT_REACHED", result: "DENIED", reason: authentication.failureMode === "rate-limited" ? "rate-limited" : "unavailable", actorEmailHash, resource: surface, metadata: auditMetadata });
+    await bestEffortAudit({
       eventType: "AUTH_LOGIN_FAILURE",
       result: "FAILURE",
       actorEmailHash,

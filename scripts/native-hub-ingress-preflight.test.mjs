@@ -4,7 +4,17 @@ import { checkNativeHubIngress } from "./native-hub-ingress-preflight.mjs";
 import { isCanonicalNativeAdminRedirect } from "./lib/native-hub-login-redirect.mjs";
 
 const base = "https://hub-staging.example.test";
-const routeHeaders = { "x-virki-request-id": "test-generated-id", "content-security-policy": "default-src 'self'" };
+const routeHeaders = {
+  "x-virki-request-id": "test-generated-id",
+  "content-security-policy": "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+  "cache-control": "private, no-store, max-age=0",
+  "strict-transport-security": "max-age=31536000",
+  "x-frame-options": "DENY",
+  "x-content-type-options": "nosniff"
+};
+const fixtureCsrf = (scope) => `v2.${"a".repeat(64)}.1790000000000.${"A".repeat(32)}.${Buffer.from(scope).toString("base64url")}.${"A".repeat(43)}`;
+const publicLogin = `<main><h1 id="login-title">Entrar</h1><form action="/api/login" method="post"><input name="csrfToken" value="${fixtureCsrf("login")}"/><input name="password"/><input name="email"/></form></main>`;
+const publicRecovery = `<main><h1 id="recover-title">Recuperar acesso administrativo</h1><form><input name="csrfToken" value="${fixtureCsrf("recovery-admin-request")}"/><input name="email"/><input name="method"/></form></main>`;
 
 test("native ADMIN login redirects accept canonical absolute and relative Locations", () => {
   const origin = "https://hub.biel.dev.br";
@@ -26,7 +36,7 @@ test("native ADMIN login redirects reject external origins, wrong destinations, 
 });
 
 function responseFor(path) {
-  if (path === "/login" || path === "/recover") return new Response("Virki", { status: 200, headers: routeHeaders });
+  if (path === "/login" || path === "/recover") return new Response(path === "/login" ? publicLogin : publicRecovery, { status: 200, headers: routeHeaders });
   if (["/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections"].includes(path)) return new Response(null, {
     status: 307,
     headers: { ...routeHeaders, location: `${base}/login?returnTo=${encodeURIComponent(path)}` }
@@ -51,7 +61,8 @@ function fakeFetch(overrides = {}) {
       const parsed = new URL(url);
       assert.equal(parsed.origin, base);
       paths.push(parsed.pathname);
-      return overrides[parsed.pathname] ?? responseFor(parsed.pathname);
+      // A repeated HTTPS probe receives a fresh HTTP body, unlike a reused Response stream.
+      return (overrides[parsed.pathname] ?? responseFor(parsed.pathname)).clone();
     }
   };
 }
@@ -99,6 +110,73 @@ test("Cloudflare Access denies login, so staging cannot be marked ready", async 
 test("an arbitrary HTTP 200 page does not impersonate Virki login", async () => {
   const client = fakeFetch({ "/login": new Response("fake login", { status: 200 }) });
   await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*Virki request identity/i);
+});
+
+test("HTTP 200 with forged Virki request/CSP headers must not substitute a real native login form", async () => {
+  const client = fakeFetch({ "/login": new Response("<html>Single Sign-On waiting room</html>", { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*(form|CSRF|password)/i);
+});
+
+test("HTTP 200 with Virki headers cannot hide an unavailable ADMIN recovery form", async () => {
+  const client = fakeFetch({ "/recover": new Response("<html><h1>Reset unavailable</h1></html>", { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /recover.*(form|CSRF|ADMIN)/i);
+});
+
+test("login and recovery forms without scoped structurally intact CSRF tokens are not accepted", async () => {
+  for (const [path, badMarkup] of [
+    ["/login", publicLogin.replace(fixtureCsrf("login"), "v2.fake")],
+    ["/recover", publicRecovery.replace(fixtureCsrf("recovery-admin-request"), fixtureCsrf("login"))],
+  ]) {
+    const client = fakeFetch({ [path]: new Response(badMarkup, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /CSRF/i);
+  }
+});
+
+test("a native login or protected ADMIN redirect without anti-cache, HSTS and clickjacking headers is NO-GO", async () => {
+  for (const path of ["/login", "/admin/accounts"]) {
+    for (const header of ["cache-control", "strict-transport-security", "x-frame-options", "x-content-type-options"]) {
+      const badHeaders = { ...routeHeaders };
+      delete badHeaders[header];
+      if (path === "/admin/accounts") badHeaders.location = `${base}/login?returnTo=%2Fadmin%2Faccounts`;
+      const mocked = new Response(path === "/login" ? publicLogin : null, { status: path === "/login" ? 200 : 307, headers: badHeaders });
+      const client = fakeFetch({ [path]: mocked });
+      await assert.rejects(checkNativeHubIngress(base, client.fetch), /security headers/i, `${path} missing ${header}`);
+    }
+  }
+});
+
+test("a nominal CSP missing frame-ancestors, base-uri or object-src is not native staging acceptance", async () => {
+  for (const missing of ["frame-ancestors 'none'", "base-uri 'none'", "object-src 'none'"]) {
+    const headers = { ...routeHeaders, "content-security-policy": routeHeaders["content-security-policy"].replace(missing, "") };
+    const client = fakeFetch({ "/recover": new Response(publicRecovery, { status: 200, headers }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /security headers/i);
+  }
+});
+
+test("explicit weaker or duplicated CSP directives and ambiguous HSTS cannot pass staging acceptance", async () => {
+  const unsafeHeaders = [
+    { "content-security-policy": "default-src 'none'; object-src 'self'; frame-ancestors 'none'; base-uri 'none'" },
+    { "content-security-policy": `${routeHeaders["content-security-policy"]}; object-src 'self'` },
+    { "content-security-policy": `frame-ancestors 'self'; ${routeHeaders["content-security-policy"]}` },
+    { "content-security-policy": `base-uri 'self'; ${routeHeaders["content-security-policy"]}` },
+    { "strict-transport-security": "max-age=0; max-age=31536000" },
+    { "strict-transport-security": "max-age=31536000; max-age=0" }
+  ];
+  for (const override of unsafeHeaders) {
+    const client = fakeFetch({ "/login": new Response(publicLogin, { status: 200, headers: { ...routeHeaders, ...override } }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /security headers/i, JSON.stringify(override));
+  }
+});
+
+test("external Tunnel HSTS with thirty-day max-age remains acceptable while zero-age is rejected", async () => {
+  const valid = fakeFetch({ "/login": new Response(publicLogin, {
+    status: 200, headers: { ...routeHeaders, "strict-transport-security": "max-age=2592000" }
+  }) });
+  await assert.doesNotReject(checkNativeHubIngress(base, valid.fetch));
+  const weak = fakeFetch({ "/login": new Response(publicLogin, {
+    status: 200, headers: { ...routeHeaders, "strict-transport-security": "max-age=0" }
+  }) });
+  await assert.rejects(checkNativeHubIngress(base, weak.fetch), /security headers/i);
 });
 
 test("unauthenticated privileged content being returned directly is a critical failure", async () => {

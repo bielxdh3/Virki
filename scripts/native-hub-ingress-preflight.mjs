@@ -49,6 +49,21 @@ export async function checkNativeHubIngress(target, fetcher = fetch) {
     if (!response.headers.get("x-virki-request-id") || !response.headers.get("content-security-policy")) {
       throw new Error(`${label}: missing Virki request identity/security headers; response may come from Cloudflare Access or another gateway.`);
     }
+    if (!hasRequiredSecurityHeaders(response.headers)) {
+      throw new Error(`${label}: missing native ingress security headers (HSTS, no-store, clickjacking and CSP controls).`);
+    }
+    if (!privileged) {
+      const markup = await response.text();
+      const isLogin = path === "/login";
+      const hasNativeForm = isLogin
+        ? markup.includes('<h1 id="login-title">Entrar</h1>') && markup.includes('<form') &&
+          markup.includes('action="/api/login" method="post"') && markup.includes('name="password"') && markup.includes('name="email"')
+        : markup.includes('<h1 id="recover-title">Recuperar acesso administrativo</h1>') &&
+          markup.includes('<form') && markup.includes('name="email"') && markup.includes('name="method"');
+      if (!hasNativeForm || !hasScopedCsrfField(markup, isLogin ? "login" : "recovery-admin-request")) {
+        throw new Error(`${label}: Virki's native login/recovery form or correctly scoped CSRF field is missing.`);
+      }
+    }
     if (privileged) {
       const location = response.headers.get("location");
       if (!isCanonicalNativeAdminRedirect(location, origin, path)) {
@@ -58,6 +73,36 @@ export async function checkNativeHubIngress(target, fetcher = fetch) {
   }
   return { origin, checked: probes.map(({ path, forgedCookie, forgedAccessJwt }) => forgedCookie
     ? `${path} (forged cookie)` : forgedAccessJwt ? `${path} (forged Access JWT)` : path) };
+}
+
+function hasRequiredSecurityHeaders(headers) {
+  const csp = new Map();
+  for (const directive of (headers.get("content-security-policy") ?? "").split(";").map((value) => value.trim().toLowerCase()).filter(Boolean)) {
+    const name = directive.split(/\s+/u, 1)[0];
+    // Browsers use the first occurrence of duplicated directives; don't accept
+    // a later safe value when an earlier effective one is permissive.
+    if (csp.has(name)) return false;
+    csp.set(name, directive);
+  }
+  const hstsMaxAges = (headers.get("strict-transport-security") ?? "").split(";").map((value) => value.trim())
+    .filter((value) => /^max-age\s*=/iu.test(value));
+  const hstsAge = hstsMaxAges.length === 1 ? /^max-age=(\d+)$/iu.exec(hstsMaxAges[0]) : null;
+  return csp.get("frame-ancestors") === "frame-ancestors 'none'" && csp.get("base-uri") === "base-uri 'none'" &&
+    (csp.get("object-src") === "object-src 'none'" || (!csp.has("object-src") && csp.get("default-src") === "default-src 'none'")) &&
+    // Cloudflare's independently observed staging HTTPS policy currently sets 30 days.
+    Number(hstsAge?.[1]) >= 2_592_000 &&
+    (headers.get("cache-control") ?? "").split(",").some((directive) => directive.trim().toLowerCase() === "no-store") &&
+    headers.get("x-frame-options") === "DENY" && headers.get("x-content-type-options") === "nosniff";
+}
+
+function hasScopedCsrfField(markup, scope) {
+  const encodedScope = Buffer.from(scope, "utf8").toString("base64url");
+  return [...markup.matchAll(/name="csrfToken" value="([^"]+)"/gu)].some((match) => {
+    const parts = match[1].split(".");
+    return parts.length === 6 && parts[0] === "v2" && /^[a-f0-9]{64}$/u.test(parts[1]) &&
+      /^[0-9]{13}$/u.test(parts[2]) && /^[A-Za-z0-9_-]{32}$/u.test(parts[3]) &&
+      parts[4] === encodedScope && /^[A-Za-z0-9_-]{43}$/u.test(parts[5]);
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
