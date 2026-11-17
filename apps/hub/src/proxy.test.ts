@@ -306,13 +306,14 @@ test("root and admin audit attribution replace untrusted route headers", async (
 });
 
 test("explicit native Hub mode allows public login/recovery without Access or edge proof, redirects unauthenticated ADMIN, and fails closed on invalid mode", async () => {
-  // Contradicting CLOUDFLARE_ACCESS_JWT_REQUIRED=true or missing opt-out must fail closed (403)
-  assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", {
-    headers: { host: "hub.biel.dev.br" }
-  }), { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" })).status, 403);
-  assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", {
-    headers: { host: "hub.biel.dev.br" }
-  }), { ...env, NODE_ENV: "production", CLOUDFLARE_ACCESS_JWT_REQUIRED: "true", VIRKI_HUB_PERIMETER_MODE: "native" })).status, 403);
+  for (const accessFlag of [undefined, "true", "false"]) {
+    const nativeEnv = { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" };
+    if (accessFlag === undefined) delete (nativeEnv as Record<string, string | undefined>).CLOUDFLARE_ACCESS_JWT_REQUIRED;
+    else nativeEnv.CLOUDFLARE_ACCESS_JWT_REQUIRED = accessFlag;
+    assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", {
+      headers: { host: "hub.biel.dev.br" }
+    }), nativeEnv)).status, 200, `native without external JWT flag: ${accessFlag}`);
+  }
 
   const native = {
     ...env,

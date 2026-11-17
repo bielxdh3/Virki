@@ -1749,6 +1749,8 @@ compose() {
       *VIRKI_HUB_HOSTNAME*) printf 'hub.example.test'; return ;;
       *VIRKI_OIDC_ISSUER*) printf 'https://portal.example.test'; return ;;
       *VIRKI_HUB_PERIMETER_MODE*) printf '%s' "$VIRKI_TEST_MODE"; return ;;
+      *CLOUDFLARE_ACCESS_AUDIENCE*) printf '%s' "$VIRKI_TEST_ACCESS_AUDIENCE"; return ;;
+      *CLOUDFLARE_TEAM_DOMAIN*) printf '%s' "$VIRKI_TEST_ACCESS_TEAM_DOMAIN"; return ;;
     esac
   fi
   fail 'Unexpected Compose invocation'
@@ -1774,10 +1776,14 @@ ${health}
 assert_health
 `;
   const expected = "https://hub.example.test/login?returnTo=%2Fadmin%2Faccounts";
-  for (const { mode, status, location, loginStatus, allowed } of [
+  for (const { mode, status, location, loginStatus, allowed, accessAudience, accessTeamDomain } of [
     { mode: "access", status: "403", location: "", allowed: true },
-    { mode: "", status: "403", location: "", allowed: true },
-    { mode: "not-native", status: "403", location: "", allowed: true },
+    { mode: "access", status: "403", location: "", accessAudience: "", allowed: false },
+    { mode: "access", status: "403", location: "", accessTeamDomain: "", allowed: false },
+    { mode: "access", status: "403", location: "", accessTeamDomain: "http://team.example.test", allowed: false },
+    { mode: "access", status: "403", location: "", accessTeamDomain: "https://127.0.0.1", allowed: false },
+    { mode: "", status: "403", location: "", allowed: false },
+    { mode: "not-native", status: "403", location: "", allowed: false },
     { mode: "native", status: "307", location: expected, loginStatus: "200", allowed: true },
     { mode: "native", status: "307", location: expected, loginStatus: "403", allowed: false },
     { mode: "native", status: "403", location: "", allowed: false },
@@ -1794,6 +1800,8 @@ assert_health
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         VIRKI_TEST_MODE: mode,
+        VIRKI_TEST_ACCESS_AUDIENCE: accessAudience ?? "test-access-audience",
+        VIRKI_TEST_ACCESS_TEAM_DOMAIN: accessTeamDomain ?? "https://team.example.test",
         VIRKI_TEST_ADMIN_STATUS: status,
         VIRKI_TEST_REDIRECT: location,
         VIRKI_TEST_LOGIN_STATUS: loginStatus ?? "200",

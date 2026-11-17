@@ -1,15 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { checkNativeHubIngress } from "./native-hub-ingress-preflight.mjs";
+import { isCanonicalNativeAdminRedirect } from "./lib/native-hub-login-redirect.mjs";
 
 const base = "https://hub-staging.example.test";
 const routeHeaders = { "x-virki-request-id": "test-generated-id", "content-security-policy": "default-src 'self'" };
 
+test("native ADMIN login redirects accept canonical absolute and relative Locations", () => {
+  const origin = "https://hub.biel.dev.br";
+  const path = "/admin/accounts";
+  assert.equal(isCanonicalNativeAdminRedirect("/login?returnTo=%2Fadmin%2Faccounts", origin, path), true);
+  assert.equal(isCanonicalNativeAdminRedirect(`${origin}/login?returnTo=%2Fadmin%2Faccounts`, origin, path), true);
+});
+
+test("native ADMIN login redirects reject external origins, wrong destinations, and extra parameters", () => {
+  const origin = "https://hub.biel.dev.br";
+  const path = "/admin/accounts";
+  for (const location of [
+    null, "", "//evil.example.test/login?returnTo=%2Fadmin%2Faccounts",
+    "https://evil.example.test/login?returnTo=%2Fadmin%2Faccounts",
+    "https://user@hub.biel.dev.br/login?returnTo=%2Fadmin%2Faccounts",
+    "/login?returnTo=%2Fadmin%2Faudit", "/login?returnTo=%2Fadmin%2Faccounts&next=evil",
+    "/login?returnTo=%2Fadmin%2Faccounts#fragment", "/admin/accounts"
+  ]) assert.equal(isCanonicalNativeAdminRedirect(location, origin, path), false, String(location));
+});
+
 function responseFor(path) {
   if (path === "/login" || path === "/recover") return new Response("Virki", { status: 200, headers: routeHeaders });
-  if (path === "/admin/accounts") return new Response(null, {
+  if (["/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections"].includes(path)) return new Response(null, {
     status: 307,
-    headers: { ...routeHeaders, location: `${base}/login?returnTo=%2Fadmin%2Faccounts` }
+    headers: { ...routeHeaders, location: `${base}/login?returnTo=${encodeURIComponent(path)}` }
   });
   throw new Error(`Unexpected request path ${path}`);
 }
@@ -21,7 +41,11 @@ function fakeFetch(overrides = {}) {
     fetch: async (url, options) => {
       assert.equal(options.redirect, "manual", "must never follow an external identity redirect");
       assert.equal(options.method, "GET");
-      assert.equal(options.headers.Cookie, undefined, "never send a session cookie in the anonymous probe");
+      if (paths.length === 7) {
+        assert.equal(options.headers.Cookie, "__Host-virki_session=forged", "the final probe must use the actual production cookie name");
+      } else {
+        assert.equal(options.headers.Cookie, undefined, "ordinary anonymous probes must never send a session cookie");
+      }
       const parsed = new URL(url);
       assert.equal(parsed.origin, base);
       paths.push(parsed.pathname);
@@ -33,8 +57,8 @@ function fakeFetch(overrides = {}) {
 test("native Hub ingress allows anonymous login and recovery, while privileged routes redirect to Virki login", async () => {
   const client = fakeFetch();
   const result = await checkNativeHubIngress(base, client.fetch);
-  assert.deepEqual(result, { origin: base, checked: ["/login", "/recover", "/admin/accounts"] });
-  assert.deepEqual(client.paths, ["/login", "/recover", "/admin/accounts"]);
+  assert.deepEqual(result, { origin: base, checked: ["/login", "/recover", "/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections", "/admin/accounts (forged cookie)"] });
+  assert.deepEqual(client.paths, ["/login", "/recover", "/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections", "/admin/accounts"]);
 });
 
 test("Cloudflare Access interstitial redirect prevents staging acceptance", async () => {
@@ -56,6 +80,25 @@ test("an arbitrary HTTP 200 page does not impersonate Virki login", async () => 
 test("unauthenticated privileged content being returned directly is a critical failure", async () => {
   const client = fakeFetch({ "/admin/accounts": new Response("ADMIN data", { status: 200, headers: routeHeaders }) });
   await assert.rejects(checkNativeHubIngress(base, client.fetch), /admin\/accounts.*HTTP 200.*unauthenticated/i);
+});
+
+test("audit and security routes must reject anonymous requests before revealing privileged data", async () => {
+  for (const path of ["/admin/audit", "/admin/security", "/admin/access", "/admin/connections"]) {
+    const client = fakeFetch({ [path]: new Response("sensitive", { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /unauthenticated ADMIN/i);
+  }
+});
+
+test("a forged Virki session cookie is never accepted as ADMIN", async () => {
+  const calls = [];
+  const client = async (url, options) => {
+    const path = new URL(url).pathname;
+    calls.push({ path, cookie: options.headers.Cookie });
+    if (options.headers.Cookie) return new Response("stolen ADMIN data", { status: 200, headers: routeHeaders });
+    return responseFor(path);
+  };
+  await assert.rejects(checkNativeHubIngress(base, client), /forged.*ADMIN|unauthenticated ADMIN/i);
+  assert.equal(calls.at(-1)?.cookie, "__Host-virki_session=forged");
 });
 
 test("privileged redirects must remain on the same origin and point to the intended Virki login", async () => {

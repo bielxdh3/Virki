@@ -147,7 +147,9 @@ test("Playwright loads E2E config, setup, and OIDC spec through their ESM entryp
       environment.PATH = process.env.Path;
     }
     const cliPath = resolve(repositoryRoot, "node_modules/playwright/cli.js");
-    const options = { cwd: repositoryRoot, env: environment, encoding: "utf8", timeout: 30_000, windowsHide: true };
+    // ESM discovery on WSL-mounted NTFS measured about 30s on its own: that
+    // is legitimate filesystem latency, not evidence of a hung Playwright CLI.
+    const options = { cwd: repositoryRoot, env: environment, encoding: "utf8", timeout: 90_000, windowsHide: true };
     const setupResult = spawnSync(process.execPath, [cliPath, "test", "--config", configPath], options);
     assert.ifError(setupResult.error);
     const setupOutput = `${setupResult.stdout ?? ""}\n${setupResult.stderr ?? ""}`;

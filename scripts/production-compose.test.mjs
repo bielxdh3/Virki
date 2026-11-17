@@ -52,23 +52,25 @@ test("the SMTP worker alone receives its configurable provider send interval wit
     "effective maximum is bounded for staging rate-budget review");
 });
 
-test("production Hub defaults to Access, requires explicit native opt-out, and isolates OIDC secrets", () => {
+test("production Hub requires explicit perimeter selection and native never depends on Access-only variables", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
-  assert.match(hub, /VIRKI_HUB_PERIMETER_MODE:\s*\$\{VIRKI_HUB_PERIMETER_MODE:-access\}/u,
-    "Native Hub access must require an explicit opt-in; default stays fail-closed behind Access");
+  assert.match(hub, /VIRKI_HUB_PERIMETER_MODE:\s*\$\{VIRKI_HUB_PERIMETER_MODE:\?/u,
+    "Production requires a deliberate access or native selection; no implicit external login default");
+  assert.doesNotMatch(environmentTemplate, /^VIRKI_HUB_PERIMETER_MODE=/mu,
+    "Do not inherit an ADMIN perimeter cutover from the development environment template");
   assert.doesNotMatch(issuer, /VIRKI_HUB_PERIMETER_MODE/u,
     "Hub perimeter mode must not be forwarded to the OIDC issuer");
   assert.match(hub, /VIRKI_PASSKEYS_ENABLED:\s*\$\{VIRKI_PASSKEYS_ENABLED:-false\}/u,
     "Production Hub must receive the explicitly enabled passkey rollout flag, defaulting to disabled");
   assert.match(hub, /VIRKI_ADMIN_PASSKEYS_ENABLED:\s*\$\{VIRKI_ADMIN_PASSKEYS_ENABLED:-false\}/u,
     "Production Hub must receive the separate ADMIN passkey rollout flag, defaulting to disabled");
-  assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"\$\{VIRKI_PRODUCTION_ADMIN_ACCESS_REQUIRED:-true\}"/u,
-    "Production must default to Access while permitting an explicit, separately approved native-mode opt-out");
-  assert.doesNotMatch(environmentTemplate, /^VIRKI_PRODUCTION_ADMIN_ACCESS_REQUIRED=/mu,
-    "The production Access opt-out must not be inherited implicitly from the development .env template");
-  assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:\?/u);
-  assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u);
+  assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED|VIRKI_PRODUCTION_ADMIN_ACCESS_REQUIRED/u,
+    "Native mode must never depend on a second JWT opt-out");
+  assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:-\}/u,
+    "Access-only audience is optional for native mode");
+  assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:-\}/u,
+    "Access-only issuer is optional for native mode");
   assert.match(hub, /path: \.\.\/\.env\.oidc-data/u);
   assert.match(hub, /required: true/u);
   assert.match(issuer, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
@@ -275,4 +277,24 @@ test("oidc-issuer is reachable only on the internal Compose network", () => {
   }
   assert.match(productionCompose, /VIRKI_OIDC_PROXY_URL:\s*http:\/\/oidc-issuer:3003/u);
   assert.doesNotMatch(cloudflareCompose, /^\s{4}ports:/mu);
+});
+
+test("the actual OCI runtime smoke exercises native ADMIN login, recovery, denial, and legacy Access on distinct containers", () => {
+  const source = readFileSync(path.join(repositoryRoot, "scripts", "production-runtime-smoke.mjs"), "utf8");
+  assert.match(source, /hubNative: `virki-runtime-hub-native-\$\{suffix\}`/u);
+  assert.match(source, /session\.mutate\("create-native-hub"/u);
+  assert.match(source, /"--env", "VIRKI_HUB_PERIMETER_MODE=native"/u);
+  assert.match(source, /"--env", "VIRKI_HUB_PERIMETER_MODE=access"/u);
+  const nativeStart = source.indexOf('session.mutate("create-native-hub"');
+  const nativeEnd = source.indexOf("const nativeHubPort =", nativeStart);
+  assert.ok(nativeStart >= 0 && nativeEnd > nativeStart, "native OCI runtime smoke must create its own disposable Hub");
+  const nativeRun = source.slice(nativeStart, nativeEnd);
+  assert.doesNotMatch(nativeRun, /CLOUDFLARE_ACCESS_JWT_REQUIRED|CLOUDFLARE_ACCESS_AUDIENCE|CLOUDFLARE_TEAM_DOMAIN/u,
+    "the real native image must start without any Access setting");
+  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/login`, 200/u);
+  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/recover`, 200/u);
+  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/admin\/accounts`, 307/u);
+  assert.match(source, /isCanonicalNativeAdminRedirect\(nativeAdmin\.headers\.location, `https:\/\/\$\{hubHost\}`, "\/admin\/accounts"\)/u);
+  assert.match(source, /"cf-access-jwt-assertion": "forged"/u,
+    "the native OCI image must ignore an untrusted Access assertion rather than requiring it");
 });

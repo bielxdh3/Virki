@@ -2,6 +2,7 @@ import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { createDisposableDockerSession } from "./lib/disposable-docker-session.mjs";
+import { isCanonicalNativeAdminRedirect } from "./lib/native-hub-login-redirect.mjs";
 
 const image = process.env.VIRKI_RUNTIME_IMAGE?.trim();
 if (!image) throw new Error("Runtime smoke requires VIRKI_RUNTIME_IMAGE.");
@@ -12,6 +13,7 @@ const ownerLabel = `org.virki.validation=${suffix}`;
 const containers = {
   publicSite: `virki-runtime-public-${suffix}`,
   hub: `virki-runtime-hub-${suffix}`,
+  hubNative: `virki-runtime-hub-native-${suffix}`,
   issuer: `virki-runtime-issuer-${suffix}`,
 };
 const publicHost = "portal.biel.dev.br";
@@ -68,12 +70,38 @@ try {
     "--env", `VIRKI_TOTP_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
     "--env", `VIRKI_EMAIL_OUTBOX_KEY=${randomBytes(32).toString("hex")}`,
     "--env", `VIRKI_OIDC_ADAPTER_KEY=${adapterKey}`,
+    "--env", "VIRKI_HUB_PERIMETER_MODE=access",
     "--env", "CLOUDFLARE_ACCESS_JWT_REQUIRED=true",
     "--env", "CLOUDFLARE_ACCESS_AUDIENCE=runtime-smoke-audience",
     "--env", "CLOUDFLARE_TEAM_DOMAIN=runtime.example.invalid",
     image,
   ]);
   const hubPort = readLoopbackPort(containers.hub, "3001/tcp");
+
+  // The identical production image must also work in single-login native
+  // mode, without a JWT switch, audience, team domain, edge proof or database
+  // fixture. Only anonymous routes are exercised: privileged sessions require
+  // a separately isolated PostgreSQL/browser integration test.
+  session.mutate("create-native-hub", [
+    "run", ...runtimeSafetyArgs, "--tmpfs", "/app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", containers.hubNative,
+    "--network", network, "--label", ownerLabel,
+    "--publish", "127.0.0.1::3001", "--env", "NODE_ENV=production",
+    "--env", "VIRKI_HUB_PERIMETER_MODE=native",
+    "--env", `VIRKI_HUB_URL=https://${hubHost}`,
+    "--env", `VIRKI_PORTAL_URL=https://${publicHost}`,
+    "--env", `VIRKI_HUB_HOSTNAME=${hubHost}`,
+    "--env", `VIRKI_PORTAL_HOSTNAME=${publicHost}`,
+    "--env", "VIRKI_OIDC_PROXY_URL=http://oidc-issuer:3003",
+    "--env", "DATABASE_URL=postgresql://virki_app:local-validation-only@database:5432/virki",
+    "--env", `VIRKI_RATE_LIMIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_AUDIT_HASH_SECRET=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_CSRF_SIGNING_KEY=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_TOTP_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_EMAIL_OUTBOX_KEY=${randomBytes(32).toString("hex")}`,
+    "--env", `VIRKI_OIDC_ADAPTER_KEY=${adapterKey}`,
+    image,
+  ]);
+  const nativeHubPort = readLoopbackPort(containers.hubNative, "3001/tcp");
 
   const publicResponse = await assertStatus(`http://127.0.0.1:${publicPort}/`, 200);
   assertSecurityHeaders(publicResponse.headers);
@@ -82,6 +110,17 @@ try {
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost });
   await assertStatus(`http://127.0.0.1:${hubPort}/login`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
+  const nativeLogin = await assertStatus(`http://127.0.0.1:${nativeHubPort}/login`, 200, { host: hubHost, "cf-access-jwt-assertion": "forged" });
+  assertSecurityHeaders(nativeLogin.headers, "strict-origin");
+  const nativeRecovery = await assertStatus(`http://127.0.0.1:${nativeHubPort}/recover`, 200, { host: hubHost });
+  assertSecurityHeaders(nativeRecovery.headers, "strict-origin");
+  const nativeAdmin = await assertStatus(`http://127.0.0.1:${nativeHubPort}/admin/accounts`, 307, { host: hubHost, "cf-access-jwt-assertion": "forged" });
+  assertSecurityHeaders(nativeAdmin.headers, "strict-origin");
+  if (!isCanonicalNativeAdminRedirect(nativeAdmin.headers.location, `https://${hubHost}`, "/admin/accounts") ||
+      !nativeLogin.headers["x-virki-request-id"] || !nativeRecovery.headers["x-virki-request-id"] ||
+      !nativeAdmin.headers["x-virki-request-id"]) {
+    throw new Error("The native OCI Hub must serve login and recovery and redirect anonymous ADMIN to its own canonical login.");
+  }
   const response = await waitForResponse(`http://127.0.0.1:${hubPort}/.well-known/openid-configuration`, { host: publicHost });
   assertSecurityHeaders(response.headers);
   const discovery = JSON.parse(response.body);
@@ -106,6 +145,7 @@ if (smokeFailure) throw smokeFailure;
 
 console.log(JSON.stringify({ status: "passed", runtimeImage: image, http: true,
   securityHeaders: true, oidcDiscovery: true, unauthorizedAccessRejected: true,
+  nativeHubImageEntrypoints: true, nativeHubExternalAccessNotRequired: true,
   disposableResourcesRemoved: true, disposableRunId: suffix }));
 
 function createSigningKey() {

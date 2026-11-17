@@ -71,7 +71,7 @@ The deploy command creates a `git archive` from that exact commit with Git repla
 | `npm run status:prod` | Show container status. |
 | `npm run revision:prod` | Verify application image revision labels. |
 | `npm run status:ports` | Verify application ports bind only to loopback. |
-| `npm run health:prod` | Check public and hub health, portal OIDC discovery, and denial of Hub access without Cloudflare Access. |
+| `npm run health:prod` | Check public and Hub health, portal OIDC discovery, and mode-specific ADMIN boundary: `access` rejects invalid Access JWT; `native` serves login but redirects anonymous ADMIN to Virki login. |
 | `npm run logs:prod` | Return only sanitized log-line availability; log contents are withheld. |
 | `node scripts/production-remote.mjs start-tunnel` | Start the Cloudflare Tunnel connector after the routed applications are healthy. |
 | `node scripts/production-remote.mjs maintenance-on` | Stop public, Hub, OIDC, worker, and Tunnel services while leaving PostgreSQL and its persistent volume available. |

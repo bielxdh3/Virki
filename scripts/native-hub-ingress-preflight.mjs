@@ -4,6 +4,7 @@
  * An Access interstitial cannot be mistaken for Virki's own login page.
  */
 import { pathToFileURL } from "node:url";
+import { isCanonicalNativeAdminRedirect } from "./lib/native-hub-login-redirect.mjs";
 
 export async function checkNativeHubIngress(target, fetcher = fetch) {
   let origin;
@@ -17,33 +18,42 @@ export async function checkNativeHubIngress(target, fetcher = fetch) {
     throw new Error("An unadorned HTTPS origin is required (no paths, credentials, ports, or query parameters).");
   }
 
-  for (const path of ["/login", "/recover", "/admin/accounts"]) {
+  const probes = [
+    { path: "/login" },
+    { path: "/recover" },
+    { path: "/admin/accounts" },
+    { path: "/admin/audit" },
+    { path: "/admin/security" },
+    { path: "/admin/access" },
+    { path: "/admin/connections" },
+    { path: "/admin/accounts", forgedCookie: true }
+  ];
+  for (const { path, forgedCookie } of probes) {
+    const label = forgedCookie ? `${path} (forged cookie)` : path;
     const response = await fetcher(`${origin}${path}`, {
       method: "GET",
       redirect: "manual",
-      headers: { Accept: "text/html", "Cache-Control": "no-cache" },
+      headers: { Accept: "text/html", "Cache-Control": "no-cache", ...(forgedCookie ? { Cookie: "__Host-virki_session=forged" } : {}) },
       signal: AbortSignal.timeout(10000)
     });
-    const privileged = path === "/admin/accounts";
+    const privileged = path.startsWith("/admin/");
     if (!privileged && response.status !== 200) {
       throw new Error(`${path}: HTTP ${response.status}; native login/recovery is not publicly reachable without an external authentication gate.`);
     }
     if (privileged && response.status !== 307) {
-      throw new Error(`${path}: HTTP ${response.status}; unauthenticated ADMIN must redirect to Virki login.`);
+      throw new Error(`${label}: HTTP ${response.status}; unauthenticated ADMIN must redirect to Virki login.`);
     }
     if (!response.headers.get("x-virki-request-id") || !response.headers.get("content-security-policy")) {
-      throw new Error(`${path}: missing Virki request identity/security headers; response may come from Cloudflare Access or another gateway.`);
+      throw new Error(`${label}: missing Virki request identity/security headers; response may come from Cloudflare Access or another gateway.`);
     }
     if (privileged) {
       const location = response.headers.get("location");
-      let redirect;
-      try { redirect = new URL(location ?? "", origin); } catch { /* Invalid redirect fails below. */ }
-      if (redirect?.origin !== origin || redirect?.pathname !== "/login" || redirect.searchParams.get("returnTo") !== "/admin/accounts") {
-        throw new Error(`${path}: redirect is not the canonical Virki login; possible external identity gate.`);
+      if (!isCanonicalNativeAdminRedirect(location, origin, path)) {
+        throw new Error(`${label}: redirect is not the canonical Virki login; possible external identity gate.`);
       }
     }
   }
-  return { origin, checked: ["/login", "/recover", "/admin/accounts"] };
+  return { origin, checked: probes.map(({ path, forgedCookie }) => forgedCookie ? `${path} (forged cookie)` : path) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

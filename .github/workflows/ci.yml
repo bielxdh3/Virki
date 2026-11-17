@@ -260,6 +260,9 @@ jobs:
 
       - name: Validate production Compose config
         env:
+          # Explicitly validate the existing legacy boundary; the real release
+          # never selects a perimeter implicitly and native has no second JWT gate.
+          VIRKI_HUB_PERIMETER_MODE: access
           VIRKI_RATE_LIMIT_HASH_SECRET: replace-with-test-secret
           VIRKI_BUILD_REVISION: 0123456789abcdef0123456789abcdef01234567
           VIRKI_PRODUCTION_IMAGE: virki-production-ci:0123456789abcdef0123456789abcdef01234567

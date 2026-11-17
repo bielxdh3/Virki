@@ -513,6 +513,13 @@ test("Docker safety inventory and native-image smoke checks are mandatory withou
   }
 });
 
+test("hosted Compose admission explicitly selects legacy access mode without mutating developer defaults", () => {
+  const composeStep = workflow.split("- name: Validate production Compose config")[1]?.split("\n  production-images:")[0] ?? "";
+  assert.match(composeStep, /VIRKI_HUB_PERIMETER_MODE: access/u,
+    "the CI fixture must declare the currently deployed mode, since production no longer has an implicit default");
+  assert.match(composeStep, /docker compose --env-file \.env -f infra\/docker-compose\.prod\.yml/u);
+});
+
 test("hosted Linux CI explicitly executes native machine-id race regression with root privileges", () => {
   const normalized = workflow.replace(/\r\n/gu, "\n");
   const command = 'sudo "$(command -v node)" --test infra/offline/trusted-owner-machine-id-race.test.mjs';

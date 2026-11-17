@@ -675,6 +675,18 @@ assert_health() {
   portal_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_PORTAL_HOSTNAME ?? "")') || fail 'Configured portal host could not be read.'
   hub_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_HOSTNAME ?? "")') || fail 'Configured Hub host could not be read.'
   hub_perimeter_mode=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_PERIMETER_MODE ?? "")') || fail 'Configured Hub perimeter mode could not be read.'
+  case "$hub_perimeter_mode" in
+    native|access) ;;
+    *) fail 'Hub perimeter mode must be explicitly configured as native or access.' ;;
+  esac
+  if [[ "$hub_perimeter_mode" == access ]]; then
+    # An invalid Access configuration also denies the forged probe below. Do
+    # not treat that accidental 403 as proof the owner could sign in.
+    local access_audience access_team_domain
+    access_audience=$(compose exec -T hub node -e 'process.stdout.write(process.env.CLOUDFLARE_ACCESS_AUDIENCE ?? "")') || fail 'Legacy Access audience could not be read.'
+    access_team_domain=$(compose exec -T hub node -e 'process.stdout.write(process.env.CLOUDFLARE_TEAM_DOMAIN ?? "")') || fail 'Legacy Access team domain could not be read.'
+    [[ -n "${access_audience//[[:space:]]/}" && "$access_team_domain" =~ ^(https://)?([A-Za-z0-9-]+\.)+[A-Za-z][A-Za-z-]*/?$ ]] || fail 'Legacy Access requires a configured audience and HTTPS team domain.'
+  fi
   oidc_issuer=$(compose exec -T oidc-issuer node -e 'process.stdout.write(process.env.VIRKI_OIDC_ISSUER ?? "")') || fail 'Configured OIDC issuer could not be read.'
   is_valid_dns_hostname "$portal_hostname" && is_valid_dns_hostname "$hub_hostname" && [[ "$oidc_issuer" == "https://$portal_hostname" ]] || fail 'Configured application hosts or OIDC issuer are invalid.'
   public_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' "http://$public_binding") || fail 'Public site health request failed.'

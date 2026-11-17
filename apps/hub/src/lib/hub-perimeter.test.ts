@@ -3,7 +3,7 @@ import test from "node:test";
 import { isNativeHubPerimeterEnabled } from "./hub-perimeter";
 import { validateHubCloudflareAccess } from "./cloudflare-access";
 
-test("native perimeter requires explicit native mode and Access opt-out in production without an edge secret", () => {
+test("native perimeter is selected solely by explicit native mode, without an Access JWT configuration dependency", () => {
   assert.equal(isNativeHubPerimeterEnabled({ NODE_ENV: "production" }), false);
   for (const value of ["", "true", "enabled", "NATIVE", " native", "native ", "access", "cloudflare"]) {
     assert.equal(
@@ -16,22 +16,14 @@ test("native perimeter requires explicit native mode and Access opt-out in produ
       `production:${value}`
     );
   }
-  // Contradicting CLOUDFLARE_ACCESS_JWT_REQUIRED=true or omitting it must fail closed to Access.
-  assert.equal(
-    isNativeHubPerimeterEnabled({
+  // A stale, missing or contradictory Access switch never re-enables a second login in native mode.
+  for (const accessFlag of [undefined, "false", "true", "invalid"]) {
+    assert.equal(isNativeHubPerimeterEnabled({
       NODE_ENV: "production",
       VIRKI_HUB_PERIMETER_MODE: "native",
-      CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
-    }),
-    false
-  );
-  assert.equal(
-    isNativeHubPerimeterEnabled({
-      NODE_ENV: "production",
-      VIRKI_HUB_PERIMETER_MODE: "native"
-    }),
-    false
-  );
+      ...(accessFlag === undefined ? {} : { CLOUDFLARE_ACCESS_JWT_REQUIRED: accessFlag })
+    }), true);
+  }
   assert.equal(
     isNativeHubPerimeterEnabled({
       NODE_ENV: "production",
@@ -46,14 +38,14 @@ test("native perimeter requires explicit native mode and Access opt-out in produ
   }
 });
 
-test("native perimeter in production allows downstream Hub routes without Access JWT or edge proof", async () => {
+test("native perimeter in production allows downstream Hub routes without Access JWT, edge proof or Access opt-out", async () => {
   const keys = ["NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED"] as const;
   const before = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   try {
     Object.assign(process.env, {
       NODE_ENV: "production",
       VIRKI_HUB_PERIMETER_MODE: "native",
-      CLOUDFLARE_ACCESS_JWT_REQUIRED: "false"
+      CLOUDFLARE_ACCESS_JWT_REQUIRED: "true"
     });
     const allowed = await validateHubCloudflareAccess(new Headers(), "native-test");
     assert.deepEqual(allowed, { allowed: true, required: false, status: "disabled" });
