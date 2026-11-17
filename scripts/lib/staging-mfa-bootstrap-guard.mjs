@@ -64,8 +64,19 @@ function canonicalOrigin(value, hostname) {
  * shape and segregation; none are returned or formatted in an error.
  */
 export function assertStagingMfaBootstrapEnvironment(env) {
+  if (env.VIRKI_STAGING_MFA_BOOTSTRAP !== "enabled") reject();
+  return assertStagingMfaSharedEnvironment(env);
+}
+
+/** Distinct read-only opt-in; never requires/enables the mutating bootstrap flag. */
+export function assertStagingMfaLocalProbeEnvironment(env) {
+  if (env.VIRKI_STAGING_MFA_LOCAL_DB_PROBE !== "read-only" ||
+      ![undefined, ""].includes(env.VIRKI_STAGING_MFA_BOOTSTRAP)) reject();
+  return assertStagingMfaSharedEnvironment(env);
+}
+
+function assertStagingMfaSharedEnvironment(env) {
   if (env.NODE_ENV !== "production" ||
-      env.VIRKI_STAGING_MFA_BOOTSTRAP !== "enabled" ||
       env.VIRKI_HUB_PERIMETER_MODE !== "native" ||
       env.VIRKI_ADMIN_PASSKEYS_ENABLED !== "false" ||
       env.VIRKI_PASSKEYS_ENABLED !== "false" ||

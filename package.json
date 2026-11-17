@@ -58,6 +58,7 @@
     "stage:prod": "node scripts/production-remote.mjs stage",
     "first-admin:prod": "node scripts/production-remote.mjs first-admin-bootstrap",
     "staging:mfa:bootstrap": "node --import tsx scripts/staging-mfa-bootstrap.mjs",
+    "staging:mfa:local-db-probe": "node --import tsx scripts/staging-mfa-local-db-probe.mjs",
     "start:prod": "node scripts/production-remote.mjs start",
     "stop:prod": "node scripts/production-remote.mjs stop",
     "restart:prod": "node scripts/production-remote.mjs restart",

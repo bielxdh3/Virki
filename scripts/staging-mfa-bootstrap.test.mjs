@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { withPrivateMfaCredentialFile } from "./lib/staging-mfa-credential-file.mjs";
+import { probeStagingMfaLocalDatabase } from "./lib/staging-mfa-local-db-probe.mjs";
 import {
   assertStagingMfaBootstrapEnvironment,
+  assertStagingMfaLocalProbeEnvironment,
   assertStagingMfaRuntimeIdentity,
   isStagingDirectoryOutsideRepository,
   stagingCredentialSecurityRoot,
@@ -162,6 +164,111 @@ test("staging runtime identity requires distinct migrator owner and no schema cr
   ]) {
     assert.throws(() => assertStagingMfaRuntimeIdentity({ ...safeIdentity, ...changed }, target), /STAGING_MFA_/u);
   }
+});
+
+test("read-only probe has separate opt-in and refuses mutating bootstrap switch", () => {
+  const env = {
+    ...safeEnvironment(),
+    VIRKI_STAGING_MFA_BOOTSTRAP: "",
+    VIRKI_STAGING_MFA_LOCAL_DB_PROBE: "read-only"
+  };
+  assert.equal(assertStagingMfaLocalProbeEnvironment(env).database, "stage_mfa_20261117");
+  for (const changed of [
+    { VIRKI_STAGING_MFA_LOCAL_DB_PROBE: "" },
+    { VIRKI_STAGING_MFA_BOOTSTRAP: "enabled" },
+    { DATABASE_URL: disposableDatabaseUrl({ database: "stage_pr130" }) },
+    { VIRKI_HUB_PERIMETER_MODE: "access" }
+  ]) assert.throws(() => assertStagingMfaLocalProbeEnvironment({ ...env, ...changed }), /STAGING_MFA_/u);
+  assert.throws(() => assertStagingMfaBootstrapEnvironment(env), /STAGING_MFA_/u);
+});
+
+test("read-only local PG18 probe verifies actual role/schema/ledger and non-mutating SELECTs", async () => {
+  const queries = [];
+  const fake = {
+    $queryRaw: async (strings) => {
+      queries.push(strings.join(""));
+      return [{ ...safeIdentity, sessionRole: "virki_runtime", pgVersion: 180000 }];
+    },
+    user: { count: async () => 0 },
+    session: { count: async () => 0 },
+    auditLog: { count: async () => 0 },
+    emailOutboxMessage: { count: async () => 0 }
+  };
+  assert.equal(await probeStagingMfaLocalDatabase(fake,
+    assertStagingMfaBootstrapEnvironment(safeEnvironment())), true);
+  assert.equal(queries.length, 1);
+  assert.match(queries[0], /current_database\(\)/u);
+  assert.match(queries[0], /current_user/u);
+  assert.match(queries[0], /session_user/u);
+  assert.match(queries[0], /migrationLedgerRestricted/u);
+  assert.doesNotMatch(queries[0], /\b(?:INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE)\s+(?:INTO|TABLE|SCHEMA|ROLE)\b/iu);
+});
+
+test("read-only local PG18 probe fails closed on wrong DB, owner, ACL, missing tables or partial ADMIN", async () => {
+  const expected = assertStagingMfaBootstrapEnvironment(safeEnvironment());
+  for (const identity of [
+    { database: "stage_pr130" }, { role: "postgres" },
+    { owner: "virki_runtime" }, { migratorPresent: false },
+    { runtimeCanCreate: true }, { migrationLedgerRestricted: false },
+    { schemaReady: false }, { host: "10.0.0.4" }, { port: 5432 },
+    { sessionRole: "bielx" }, { pgVersion: 170000 }
+  ]) {
+    const db = {
+      $queryRaw: async () => [{ ...safeIdentity, sessionRole: "virki_runtime", pgVersion: 180000, ...identity }],
+      user: { count: async () => 0 },
+      session: { count: async () => 0 },
+      auditLog: { count: async () => 0 },
+      emailOutboxMessage: { count: async () => 0 }
+    };
+    await assert.rejects(() => probeStagingMfaLocalDatabase(db, expected), /STAGING_MFA_/u);
+  }
+  const populated = {
+    $queryRaw: async () => [{ ...safeIdentity, sessionRole: "virki_runtime", pgVersion: 180000 }],
+    user: { count: async () => 1 },
+    session: { count: async () => 0 },
+    auditLog: { count: async () => 0 },
+    emailOutboxMessage: { count: async () => 0 }
+  };
+  await assert.rejects(() => probeStagingMfaLocalDatabase(populated, expected), /STAGING_MFA_/u);
+  await assert.rejects(() => probeStagingMfaLocalDatabase({
+    ...populated, user: { count: async () => 0 },
+    emailOutboxMessage: { count: async () => { throw new Error("database disconnected"); } }
+  }, expected), /database disconnected/u);
+});
+
+test("local PG18 CLI rejects missing operator opt-in before connecting and never prints connection secrets", () => {
+  const env = safeEnvironment();
+  const result = spawnSync(process.execPath, ["scripts/staging-mfa-local-db-probe.mjs"], {
+    cwd: new URL("..", import.meta.url),
+    env: { ...process.env, ...env, VIRKI_STAGING_MFA_LOCAL_DB_PROBE: "" },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /^STAGING_MFA_LOCAL_DB_PROBE=BLOCK\n$/u);
+  assert.equal(result.stderr.includes(new URL(env.DATABASE_URL).password), false);
+  assert.doesNotMatch(result.stderr, /operator@owned-test\.example|postgresql:\/\//u);
+  const cli = readFileSync(new URL("./staging-mfa-local-db-probe.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(cli, /bootstrapFirstAdmin|withPrivateMfaCredentialFile|prisma\.\$executeRaw/u);
+});
+
+test("local PG18 operator probe runtime imports the real Prisma package without a DB connection", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(packageJson.scripts["staging:mfa:local-db-probe"],
+    "node --import tsx scripts/staging-mfa-local-db-probe.mjs");
+  const result = spawnSync(process.execPath, [
+    "--import", "tsx", "--input-type=module", "-e",
+    "import('@virki/database').then(({prisma})=> { if (typeof prisma.$queryRaw !== 'function') process.exitCode = 1; })"
+  ], {
+    cwd: new URL("..", import.meta.url),
+    env: { ...process.env, ...safeEnvironment() },
+    encoding: "utf8",
+    timeout: 10000
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, "approved Node 22 must import the Prisma package through tsx");
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
 });
 
 test("CLI preserves the production bootstrap guard and never accepts passwords from argv", () => {
