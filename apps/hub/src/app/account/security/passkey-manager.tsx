@@ -14,7 +14,7 @@ export function PasskeyManager({ csrfToken, initialPasskeys, requiresTotp, role 
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const adminPerimeterNotice = nativePerimeter
-    ? "Neste modo, o Hub não exige JWT do Cloudflare Access na aplicação; o perímetro externo de rede aprovado continua necessário."
+    ? "Neste modo, a Virki autentica o ADMIN com MFA; o Hub não exige JWT do Cloudflare Access na aplicação. O Tunnel fornece somente o transporte HTTPS."
     : "O Cloudflare Access continua obrigatório como perímetro externo do Hub.";
 
   async function post(body: Record<string, unknown>) {

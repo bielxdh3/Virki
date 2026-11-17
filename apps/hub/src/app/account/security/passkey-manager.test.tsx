@@ -33,7 +33,8 @@ test("ADMIN passkey copy distinguishes Access and native trust boundaries", () =
   assert.match(access, /Cloudflare Access continua obrigatório/u);
   assert.doesNotMatch(native, /Cloudflare Access continua obrigatório/u);
   assert.match(native, /não exige JWT do Cloudflare Access/u);
-  assert.match(native, /perímetro externo de rede/u);
+  assert.match(native, /Virki autentica o ADMIN/u);
+  assert.doesNotMatch(native, /perímetro externo de rede/u);
 });
 
 test("USER passkey copy is independent of the ADMIN perimeter", () => {
