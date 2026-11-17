@@ -5,11 +5,11 @@ import { consumeRateLimitAttemptInTransaction, hashAuditIdentifier, hashAuditSes
 import { prisma, type Prisma } from "@virki/database";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import { ELEVATION_SCOPES, type ElevationScope } from "./elevation-scopes";
-import { AdministrationMutationError, assertAdminSessionCurrentInTransaction, lockAdminSessionInTransaction, lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { AdministrationMutationError, assertAdminSessionCurrentInTransaction, assertSecurityElevationCurrentAfterWrite, lockAdminSessionInTransaction, lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export { ELEVATION_SCOPES, ELEVATION_SCOPE_ACTIONS, UI_ELEVATION_SCOPES } from "./elevation-scopes";
 export type { ElevationScope } from "./elevation-scopes";
-export { AdministrationMutationError, assertAdminSessionCurrentInTransaction, lockAdminSessionInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+export { AdministrationMutationError, assertAdminSessionCurrentInTransaction, assertSecurityElevationCurrentAfterWrite, lockAdminSessionInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 
 export const ELEVATION_PROTOCOL_VERSION = 1;
 export type ElevationDuration = { kind: "TIMED"; minutes: 15 | 60 | 240 | 1440 } | { kind: "MANUAL"; confirmed: boolean };
@@ -116,6 +116,9 @@ export async function completeAdministrativeCredentialSetup(input: {
     await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, finalCheckedAt);
     if (!isElevationCeremonyOpen(currentCeremony, finalCheckedAt)) throw new AdministrationMutationError();
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_SETUP", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.admin", message: "Administrative credential configured." });
+    const committedAt = new Date(Math.max(finalCheckedAt.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, committedAt);
+    if (!isElevationCeremonyOpen(currentCeremony, committedAt)) throw new AdministrationMutationError();
     return recoveryCodes;
   }, { isolationLevel: "Serializable" });
   return recoveryCodes;
@@ -177,6 +180,9 @@ export async function verifySecurityElevation(input: { actor: { id: string; role
     });
     if (updated.count !== 1) throw new AdministrationMutationError();
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_ELEVATION_ACTIVATED", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.elevation", message: "Administrative elevation activated.", metadata: { requestRef: hashAuditIdentifier(input.requestKey) } });
+    const committedAt = new Date(Math.max(checkedAt.getTime(), Date.now()));
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, committedAt);
+    if (!isElevationCeremonyOpen(currentCeremony, committedAt)) throw new AdministrationMutationError();
   });
 }
 
@@ -255,13 +261,14 @@ export async function changeAdministrativePassword(actor: { id: string; role: st
   await assertNotNormalPassword(admin.passwordHash, newPassword);
   const passwordHash = await hashPassword(newPassword);
   await prisma.$transaction(async (transaction) => {
-    await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ADMIN_CREDENTIAL_CHANGE", now);
+    const authorizationProofId = await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "ADMIN_CREDENTIAL_CHANGE", now);
     const currentAdmin = await transaction.user.findUnique({ where: { id: actor.id }, select: { passwordHash: true } });
     await assertNotNormalPassword(currentAdmin?.passwordHash ?? null, newPassword);
     const changed = await transaction.administrativeCredential.updateMany({ where: { userId: actor.id, status: "ACTIVE", revokedAt: null }, data: { passwordHash, keyVersion: { increment: 1 } } });
     if (changed.count !== 1) throw new AdministrationMutationError();
     await transaction.securityElevation.updateMany({ where: { userId: actor.id, status: { in: ["PENDING", "ACTIVE"] } }, data: { status: "REVOKED", revokedAt: now } });
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_CHANGED", result: "SUCCESS", actorUserId: actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(sessionId), resource: "identity.admin", message: "Administrative credential changed." });
+    await assertSecurityElevationCurrentAfterWrite(transaction, actor.id, sessionId, "ADMIN_CREDENTIAL_CHANGE", authorizationProofId);
   });
 }
 
@@ -274,6 +281,7 @@ export async function regenerateAdministrativeRecoveryCodes(actor: { id: string;
     await transaction.administrativeRecoveryCode.deleteMany({ where: { userId: actor.id } });
     await transaction.administrativeRecoveryCode.createMany({ data: recoveryCodes.map((value) => ({ userId: actor.id, codeHash: hashRecoveryCode(value) })) });
     await writeAuditLogInTransaction(transaction, { eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS", actorUserId: actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(sessionId), resource: "identity.admin", message: "Administrative recovery codes regenerated." });
+    await assertSecurityElevationCurrentAfterWrite(transaction, actor.id, sessionId, "ADMIN_RECOVERY_REGENERATE");
   });
   return recoveryCodes;
 }
@@ -339,6 +347,7 @@ export async function recoverAdministrativeCredential(input: { actor: { id: stri
     // rejection rolls back the code use, credential change, and recovery data.
     await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, new Date(Math.max(now.getTime(), Date.now())));
     await writeAuditLogInTransaction(transaction, { eventType: "ADMIN_CREDENTIAL_RECOVERED", result: "SUCCESS", actorUserId: input.actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(input.sessionId), resource: "identity.admin", message: "Administrative credential recovered." });
+    await assertAdminSessionCurrentInTransaction(transaction, input.actor.id, input.sessionId, new Date(Math.max(now.getTime(), Date.now())));
     return recoveryCodes;
   });
   return recoveryCodes;
@@ -706,6 +715,7 @@ export async function grantProjectAccess(actor: { id: string; role: string }, se
     if (users.length !== 1 || connections.length !== 1) throw new AdministrationMutationError();
     await transaction.userProjectGrant.upsert({ where: { userId_connectionId: { userId, connectionId } }, create: { userId, connectionId, grantedByUserId: actor.id }, update: { revokedAt: null, grantedByUserId: actor.id } });
     await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_ACCESS_GRANTED", result: "SUCCESS", actorUserId: actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(sessionId), resource: "project.access", message: "Project access granted.", metadata: { userRef: hashOidcIdentifier(userId), connectionRef: hashOidcIdentifier(connectionId) } });
+    await assertSecurityElevationCurrentAfterWrite(transaction, actor.id, sessionId, "PROJECT_ACCESS_CHANGE");
   }, { isolationLevel: "Serializable" });
 }
 
@@ -720,5 +730,6 @@ export async function revokeProjectAccess(actor: { id: string; role: string }, s
     if (changed.count === 0) return;
     await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(grant.connection.clientId), accountIdHash: hashOidcIdentifier(grant.userId) } });
     await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_ACCESS_REVOKED", result: "SUCCESS", actorUserId: actor.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(sessionId), resource: "project.access", message: "Project access revoked and OIDC artifacts cleared.", metadata: { userRef: hashOidcIdentifier(grant.userId), connectionRef: hashOidcIdentifier(grant.connectionId) } });
+    await assertSecurityElevationCurrentAfterWrite(transaction, actor.id, sessionId, "PROJECT_ACCESS_CHANGE");
   }, { isolationLevel: "ReadCommitted" });
 }

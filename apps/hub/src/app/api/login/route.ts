@@ -99,7 +99,8 @@ export async function POST(request: Request) {
       reauth,
       requiredRole,
       request.headers.get("cf-connecting-ip")?.trim(),
-      "REGISTERED"
+      "REGISTERED",
+      surface === "hub" ? password : undefined
     );
   } catch (error) {
     await writeAuditLog({

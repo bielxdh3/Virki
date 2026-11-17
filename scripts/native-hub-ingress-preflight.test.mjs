@@ -14,7 +14,10 @@ const routeHeaders = {
 };
 const fixtureCsrf = (scope) => `v2.${"a".repeat(64)}.1790000000000.${"A".repeat(32)}.${Buffer.from(scope).toString("base64url")}.${"A".repeat(43)}`;
 const publicLogin = `<main><h1 id="login-title">Entrar</h1><form action="/api/login" method="post"><input name="csrfToken" value="${fixtureCsrf("login")}"/><input name="password"/><input name="email"/></form></main>`;
-const publicRecovery = `<main><h1 id="recover-title">Recuperar acesso administrativo</h1><form><input name="csrfToken" value="${fixtureCsrf("recovery-admin-request")}"/><input name="email"/><input name="method"/></form></main>`;
+const publicRecovery = `<main><h1 id="recover-title">Recuperar acesso administrativo</h1>
+  <form action="javascript:throw new Error('React form unexpectedly submitted')"><input name="csrfToken" value="${fixtureCsrf("recovery-admin-request")}"/><input name="email"/><input name="method"/></form>
+  <form action="" encType="multipart/form-data" method="POST"><input name="$ACTION_ID_${"a".repeat(40)}"/><input name="csrfToken" value="${fixtureCsrf("recovery-admin-request")}"/><input name="email"/></form>
+</main>`;
 
 test("native ADMIN login redirects accept canonical absolute and relative Locations", () => {
   const origin = "https://hub.biel.dev.br";
@@ -120,6 +123,157 @@ test("HTTP 200 with forged Virki request/CSP headers must not substitute a real 
 test("HTTP 200 with Virki headers cannot hide an unavailable ADMIN recovery form", async () => {
   const client = fakeFetch({ "/recover": new Response("<html><h1>Reset unavailable</h1></html>", { status: 200, headers: routeHeaders }) });
   await assert.rejects(checkNativeHubIngress(base, client.fetch), /recover.*(form|CSRF|ADMIN)/i);
+});
+
+test("a fabricated native login assembled from unrelated forms must not pass preflight", async () => {
+  const counterfeit = `<main><h1 id="login-title">Entrar</h1>
+    <form action="/api/login" method="post"><input name="email"></form>
+    <form action="/other" method="post"><input name="password"><input name="csrfToken" value="${fixtureCsrf("login")}"></form>
+  </main>`;
+  const client = fakeFetch({ "/login": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*(form|CSRF)/i,
+    "a POST action, credentials and CSRF must belong to the SAME usable login form");
+});
+
+test("data-* attributes cannot masquerade as actionable login form attributes", async () => {
+  const counterfeit = `<main><h1 id="login-title">Entrar</h1>
+    <form data-action="/api/login" data-method="post">
+      <input data-name="email"><input data-name="password">
+      <input data-name="csrfToken" data-value="${fixtureCsrf("login")}">
+    </form></main>`;
+  const client = fakeFetch({ "/login": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*(form|CSRF)/i,
+    "lookalike data attributes are not browser-submitted login fields");
+});
+
+test("data-* attributes cannot impersonate both ADMIN recovery forms", async () => {
+  const counterfeit = `<main><h1 id="recover-title">Recuperar acesso administrativo</h1>
+    <form><input data-name="email"><input data-name="method">
+      <input data-name="csrfToken" data-value="${fixtureCsrf("recovery-admin-request")}"></form>
+    <form data-method="POST"><input data-name="$ACTION_ID_${"a".repeat(40)}">
+      <input data-name="email"><input data-name="csrfToken" data-value="${fixtureCsrf("recovery-admin-request")}"></form>
+    </main>`;
+  const client = fakeFetch({ "/recover": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /recover.*(form|CSRF)/i,
+    "lookalike data attributes are not real recovery fields or submission methods");
+});
+
+test("HTML comments and inert templates cannot impersonate a live login form", async () => {
+  for (const hiddenMarkup of [
+    `<!-- ${publicLogin} -->`,
+    `<template>${publicLogin}</template>`,
+    `<script type="text/plain">${publicLogin}</script>`
+  ]) {
+    const markup = `<h1 id="login-title">Entrar</h1>${hiddenMarkup}`;
+    const client = fakeFetch({ "/login": new Response(markup, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*(form|CSRF)/i,
+      "inert HTML must not satisfy the login form contract");
+  }
+});
+
+test("RCDATA/RAWTEXT elements cannot impersonate operative login or ADMIN recovery forms", async () => {
+  for (const tag of ["title", "xmp", "iframe", "noembed"]) {
+    const login = `<html><head><${tag}>${publicLogin}</${tag}></head></html>`;
+    const loginFetch = fakeFetch({ "/login": new Response(login, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, loginFetch.fetch), /login.*(form|CSRF)/i,
+      `${tag} contains no operable browser form`);
+    const recovery = `<html><head><${tag}>${publicRecovery}</${tag}></head></html>`;
+    const recoverFetch = fakeFetch({ "/recover": new Response(recovery, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, recoverFetch.fetch), /recover.*(form|CSRF)/i,
+      `${tag} contains no operable recovery forms`);
+  }
+});
+
+test("form-decoy and input-decoy custom tags cannot impersonate native forms", async () => {
+  const bogus = `<h1 id="login-title">Entrar</h1><form-decoy action="/api/login" method="post">
+    <input-decoy name="email"><input-decoy name="password">
+    <input-decoy name="csrfToken" value="${fixtureCsrf("login")}"></form>`;
+  const client = fakeFetch({ "/login": new Response(bogus, { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*(form|CSRF)/i,
+    "custom elements are not HTML forms or inputs");
+});
+
+test("HTML fragments quoted inside a harmless attribute are not operative forms", async () => {
+  for (const [path, content] of [["/login", publicLogin], ["/recover", publicRecovery]]) {
+    const counterfeit = `<div data-fixture='${content}'></div>`;
+    const client = fakeFetch({ [path]: new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /form|CSRF/i,
+      `${path}: the browser keeps quoted tags in an attribute, not the DOM`);
+  }
+});
+
+test("disabled, foreign-form and disabled-fieldset inputs are not usable login controls", async () => {
+  for (const counterfeit of [
+    publicLogin.replace('name="email"', 'name="email" disabled'),
+    publicLogin.replace('name="password"', 'name="password" form="other-form"'),
+    publicLogin.replace('<input name="email"/>', '<fieldset disabled><input name="email"/></fieldset>')
+  ]) {
+    const client = fakeFetch({ "/login": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*(form|CSRF)/i);
+  }
+});
+
+test("disabled and unowned inputs cannot fabricate either ADMIN recovery stage", async () => {
+  for (const counterfeit of [
+    publicRecovery.replace('name="email"', 'name="email" disabled'),
+    publicRecovery.replace('name="email"', 'name="email" form="other-form"'),
+    publicRecovery.replace('<input name="email"/>', '<fieldset disabled><input name="email"/></fieldset>')
+  ]) {
+    const client = fakeFetch({ "/recover": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /recover.*(form|CSRF)/i);
+  }
+});
+
+test("forms inside disabled ancestor fieldsets are not operable", async () => {
+  for (const [path, markup] of [["/login", publicLogin], ["/recover", publicRecovery]]) {
+    const counterfeit = `<fieldset disabled>${markup}</fieldset>`;
+    const client = fakeFetch({ [path]: new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /form|CSRF/i,
+      `${path}: controls inside a disabled ancestor fieldset cannot be submitted`);
+  }
+});
+
+test("hidden and readonly credential fields do not make a usable login screen", async () => {
+  for (const counterfeit of [
+    publicLogin.replace('name="email"', 'type="hidden" name="email" value="fixed"'),
+    publicLogin.replace('name="password"', 'type="hidden" name="password" value="fixed"'),
+    publicLogin.replace('name="email"', 'name="email" readonly')
+  ]) {
+    const client = fakeFetch({ "/login": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /login.*(form|CSRF)/i);
+  }
+});
+
+test("hidden and readonly recovery email controls cannot fake a recovery UI", async () => {
+  for (const counterfeit of [
+    publicRecovery.replace('name="email"', 'type="hidden" name="email" value="fixed"'),
+    publicRecovery.replace('name="email"', 'name="email" readonly')
+  ]) {
+    const client = fakeFetch({ "/recover": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+    await assert.rejects(checkNativeHubIngress(base, client.fetch), /recover.*(form|CSRF)/i);
+  }
+});
+
+test("a GET-only recovery-looking form must not count as a working ADMIN recovery entrypoint", async () => {
+  const counterfeit = `<main><h1 id="recover-title">Recuperar acesso administrativo</h1>
+    <form action="/sso" method="get"><input name="email"><input name="method">
+      <input name="csrfToken" value="${fixtureCsrf("recovery-admin-request")}"></form>
+  </main>`;
+  const client = fakeFetch({ "/recover": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /recover.*(form|CSRF)/i,
+    "a read-only GET form cannot submit ADMIN recovery");
+});
+
+test("a single POST form impersonating both ADMIN recovery stages cannot pass native ingress", async () => {
+  const counterfeit = `<main><h1 id="recover-title">Recuperar acesso administrativo</h1>
+    <form method="post"><input name="email"><input name="method">
+      <input name="$ACTION_ID_${"a".repeat(40)}">
+      <input name="csrfToken" value="${fixtureCsrf("recovery-admin-request")}">
+    </form>
+  </main>`;
+  const client = fakeFetch({ "/recover": new Response(counterfeit, { status: 200, headers: routeHeaders }) });
+  await assert.rejects(checkNativeHubIngress(base, client.fetch), /recover.*(form|CSRF)/i,
+    "both recovery stages must have distinct independently rendered forms");
 });
 
 test("login and recovery forms without scoped structurally intact CSRF tokens are not accepted", async () => {

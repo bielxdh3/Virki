@@ -8,7 +8,7 @@ import { provisionInvitedUserAccount } from "@virki/auth/account-invitation";
 import { revokeUserAuthenticationProofsInTransaction } from "@virki/auth/security";
 import { encryptOidcClientSecret, hashOidcIdentifier } from "@virki/auth/oidc-secrets";
 import { deleteProjectConnectionInTransaction, PROJECT_CONNECTION_MUTATION_ISOLATION_LEVEL, setProjectConnectionEnabledInTransaction } from "@virki/auth/oidc-connection";
-import { AdministrationMutationError, grantProjectAccess, revokeProjectAccess, requireSecurityElevation, requireSecurityElevationInTransaction } from "@virki/auth/administration";
+import { AdministrationMutationError, assertSecurityElevationCurrentAfterWrite, grantProjectAccess, revokeProjectAccess, requireSecurityElevation, requireSecurityElevationInTransaction } from "@virki/auth/administration";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
@@ -94,6 +94,7 @@ export async function setAccountStateAction(formData: FormData): Promise<void> {
         await transaction.oidcArtifact.deleteMany({ where: { accountIdHash: hashOidcIdentifier(userId) } });
       }
       await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_STATE_CHANGED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "account", message: enabled ? "User account enabled." : "User account disabled and sessions revoked.", after: { enabled, accountStatus: enabled ? "ACTIVE" : "INACTIVE" }, metadata: { targetRef: hashOidcIdentifier(userId), enabled } });
+      await assertSecurityElevationCurrentAfterWrite(transaction, actor.user.id, actor.id, "ACCOUNT_STATE_CHANGE");
     }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/accounts");
     redirect("/admin/accounts?status=updated");
@@ -168,6 +169,7 @@ export async function createProjectConnectionAction(_state: ConnectionActionStat
         select: { id: true }
       });
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_CREATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "External OIDC connection created.", metadata: { connectionRef: hashOidcIdentifier(created.id), clientRef: hashOidcIdentifier(clientId) } });
+      await assertSecurityElevationCurrentAfterWrite(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/connections");
     return { status: "created", clientId, secret };
@@ -245,6 +247,7 @@ export async function updateProjectConnectionAction(_state: ConnectionEditAction
           launchUrlConfigured: Boolean(connection.launchUrl)
         }
       });
+      await assertSecurityElevationCurrentAfterWrite(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
       return {
         saved: true as const,
         name: connection.name,
@@ -303,6 +306,7 @@ export async function rotateProjectClientSecretAction(_state: ConnectionActionSt
       if (!rotated) throw new Error("Project connection changed before secret rotation completed.");
       await transaction.oidcArtifact.deleteMany({ where: { clientIdHash: hashOidcIdentifier(connection.clientId) } });
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "Client secret rotated and outstanding OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id), clientRef: hashOidcIdentifier(connection.clientId) } });
+      await assertSecurityElevationCurrentAfterWrite(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     }, { isolationLevel: "Serializable" });
     revalidatePath("/admin/connections");
     return { status: "rotated", clientId: connection.clientId, secret };
@@ -325,6 +329,7 @@ export async function setProjectConnectionEnabledAction(formData: FormData): Pro
       await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE", now);
       const connection = await setProjectConnectionEnabledInTransaction(transaction, connectionId, enabled);
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_UPDATED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: enabled ? "External connection enabled." : "External connection disabled and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
+      await assertSecurityElevationCurrentAfterWrite(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     }, { isolationLevel: PROJECT_CONNECTION_MUTATION_ISOLATION_LEVEL });
     revalidatePath("/admin/connections");
     redirect("/admin/connections?status=updated");
@@ -348,6 +353,7 @@ export async function deleteProjectConnectionAction(formData: FormData): Promise
       await requireSecurityElevationInTransaction(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE", now);
       const connection = await deleteProjectConnectionInTransaction(transaction, connectionId);
       await writeAuditLogInTransaction(transaction, { eventType: "PROJECT_CONNECTION_REVOKED", result: "SUCCESS", actorUserId: actor.user.id, actorRole: "ADMIN", sessionRef: hashAuditSessionReference(actor.id), resource: "project.connection", message: "External connection deleted and OIDC artifacts cleared.", metadata: { connectionRef: hashOidcIdentifier(connection.id) } });
+      await assertSecurityElevationCurrentAfterWrite(transaction, actor.user.id, actor.id, "PROJECT_CONNECTION_MANAGE");
     }, { isolationLevel: PROJECT_CONNECTION_MUTATION_ISOLATION_LEVEL });
     revalidatePath("/admin/connections");
     redirect("/admin/connections?status=deleted");

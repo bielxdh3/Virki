@@ -23,7 +23,7 @@ import {
   writeAuditLogInTransaction
 } from "./index";
 import { prisma, Prisma } from "@virki/database";
-import { lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { assertSecurityElevationCurrentAfterWrite, lockAdministrativeCredentialInTransaction, requireSecurityElevationInTransaction } from "./elevation-authorization";
 import { isRecoveryCapabilityAuthorized, needsRecoveryNewMailbox, recoveryReviewReady, requireLiveRecoveryProofsInTransaction } from "./recovery-methods";
 
 export { DEVICE_COOKIE_NAME } from "./constants";
@@ -139,6 +139,7 @@ export type LoginCeremonyFailureStage =
   | "account-state"
   | "account-lock-query"
   | "account-lock-no-match"
+  | "account-password-recheck"
   | "trusted-device-lock"
   | "trusted-device-lookup"
   | "remembered-challenges-revoke"
@@ -405,7 +406,8 @@ export async function startLoginCeremony(
   forceFreshProof = false,
   expectedRole?: RequiredLoginRole,
   trustedClientAddress?: string,
-  factorSelection?: LoginFactorSelection
+  factorSelection?: LoginFactorSelection,
+  verifiedLoginPassword?: string
 ): Promise<LoginCeremonyStart> {
   const candidateToken = deviceToken && isDeviceToken(deviceToken) ? deviceToken : undefined;
   let stage: LoginCeremonyFailureStage = "transaction-start";
@@ -422,6 +424,15 @@ export async function startLoginCeremony(
         if (!accountLocked) {
           stage = "account-lock-no-match";
           throw new SecurityMutationError();
+        }
+        if (verifiedLoginPassword !== undefined) {
+          // The API verified this password before entering the ceremony transaction.
+          // Normal-account recovery may have committed a new password while the
+          // request waited for the User lock. Reverify the current hash under
+          // that lock before creating or reusing any login proof.
+          stage = "account-password-recheck";
+          const current = await transaction.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+          if (!current?.passwordHash || !await verifyPassword(current.passwordHash, verifiedLoginPassword)) throw new SecurityMutationError();
         }
         const candidateHash = candidateToken ? hashDeviceToken(candidateToken) : undefined;
         if (candidateHash) {
@@ -1110,6 +1121,7 @@ export async function approveAccountRecovery(actor: { id: string; role: string }
       await enqueueEmailMessageForClient(transaction, { idempotencyKey: `account-recovery-approved:${randomBytes(24).toString("base64url")}`, kind: "ACCOUNT_RECOVERY", recipientEmail: request.user.email, locale: "pt-BR", payload: { publicValues: { displayName: request.user.displayName ?? "" }, protectedValues: { actionUrl } } });
     }
     await writeAuditLogInTransaction(transaction, { eventType: "ACCOUNT_RECOVERY_APPROVED", result: "SUCCESS", actorUserId: actor.id, resource: "identity.recovery", message: "Account recovery approved.", metadata: { requestRef: hashAuditIdentifier(requestId) } });
+    await assertSecurityElevationCurrentAfterWrite(transaction, actor.id, sessionId, "ACCOUNT_STATE_CHANGE");
     return approvedCount;
   }, { isolationLevel: "Serializable" });
   if (result !== 1) throw new SecurityMutationError();

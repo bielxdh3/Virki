@@ -19,7 +19,7 @@ import {
   verifyPassword
 } from "./index";
 import { writeAuditLogInTransaction } from "./audit";
-import { requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { assertSecurityElevationCurrentAfterWrite, requireSecurityElevationInTransaction } from "./elevation-authorization";
 import { consumeSecurityProofAttempt, decryptTotpSecret, lockActiveLoginAccountInTransaction, verifyTotpCode } from "./security";
 
 const RP_ID = "portal.biel.dev.br";
@@ -311,6 +311,7 @@ export async function finishPasskeyRegistration(userId: string, sessionId: strin
     await lockLiveSession(tx, userId, sessionId);
     if ((await registrationProofBinding(tx, userId, role)).digest !== row.proofHash) throw FAILURE;
     if (row.expiresAt <= new Date()) throw FAILURE;
+    if (role === "ADMIN") await assertSecurityElevationCurrentAfterWrite(tx, userId, sessionId, "ADMIN_CREDENTIAL_CHANGE", undefined, 10 * 60_000);
   });
 }
 
@@ -422,5 +423,6 @@ export async function mutatePasskey(userId: string, sessionId: string, id: strin
     if (result.count !== 1) throw FAILURE;
     await writeAuditLogInTransaction(tx, { eventType: operation === "rename" ? "PASSKEY_RENAMED" : "PASSKEY_REVOKED", result: "SUCCESS", actorUserId: userId, resource: "identity.passkey" });
     await lockLiveSession(tx, userId, sessionId);
+    if (role === "ADMIN") await assertSecurityElevationCurrentAfterWrite(tx, userId, sessionId, "ADMIN_CREDENTIAL_CHANGE", undefined, 10 * 60_000);
   });
 }

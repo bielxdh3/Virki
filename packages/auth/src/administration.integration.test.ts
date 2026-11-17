@@ -1534,3 +1534,80 @@ for (const lockTarget of ["session", "elevation"] as const) test(`administrative
   await rejection;
   assert.equal(await prisma.administrativeRecoveryCode.count({ where: { userId: admin.actor.id } }), 0);
 });
+
+test("real PG: ADMIN code rotation rolls back when elevation expires during the success audit INSERT", integrationOptions, async () => {
+  const migrationUrl = process.env.MIGRATION_DATABASE_URL;
+  const runtimeUrl = process.env.VIRKI_INTEGRATION_DATABASE_URL;
+  assert.ok(migrationUrl && runtimeUrl, "the disposable PostgreSQL URLs are mandatory");
+  const migration = new URL(migrationUrl);
+  const runtime = new URL(runtimeUrl);
+  assert.equal(migration.hostname, "127.0.0.1");
+  assert.equal(migration.username, "virki_migrator");
+  assert.ok(["/virki_e2e_test", "/virki_integration_test"].includes(migration.pathname));
+  assert.equal(runtime.hostname, migration.hostname);
+  assert.equal(runtime.port, migration.port);
+  assert.equal(runtime.pathname, migration.pathname);
+  assert.equal(runtime.username, "virki_runtime_test");
+
+  const admin = await setupAdmin();
+  const elevation = await seedActiveElevation(admin, "ADMIN_RECOVERY_REGENERATE");
+  const originalCode = hashRecoveryCode(`before-lock-${randomBytes(18).toString("base64url")}`);
+  await prisma.administrativeRecoveryCode.create({ data: { userId: admin.actor.id, codeHash: originalCode } });
+
+  const migrationDb = new PrismaClient({ datasources: { db: { url: migrationUrl } } });
+  let release!: () => void;
+  let locked!: () => void;
+  let blockerPid = 0;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = migrationDb.$transaction(async (transaction) => {
+    [{ pid: blockerPid }] = await transaction.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    await transaction.$executeRawUnsafe('LOCK TABLE "AuditLog" IN ACCESS EXCLUSIVE MODE');
+    locked();
+    await gate;
+  }, { timeout: 12_000 }).then(() => ({ ok: true as const, error: null }), (error: unknown) => ({ ok: false as const, error }));
+
+  let outcome: Promise<{ ok: boolean; error: unknown }> | undefined;
+  let observed = false;
+  try {
+    await Promise.race([ready, holder.then((result) => { throw result.error ?? Error("audit holder ended before lock readiness"); })]);
+    const expiresAt = new Date(Date.now() + 2_800);
+    await prisma.securityElevation.update({ where: { id: elevation.id }, data: { expiresAt } });
+    outcome = regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId).then(
+      () => ({ ok: true, error: null }), (error: unknown) => ({ ok: false, error })
+    );
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const blocked = await lockObserver.$queryRaw<Array<{ count: number }>>`
+        SELECT count(*)::int AS count FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock'
+          AND pg_blocking_pids(pid) @> ARRAY[${blockerPid}]::integer[]
+          AND query LIKE '%INSERT%AuditLog%'
+      `;
+      if ((blocked[0]?.count ?? 0) > 0) { observed = true; break; }
+      await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    }
+    assert.equal(observed, true, "a real PostgreSQL success-audit INSERT must be waiting on the holder");
+    assert.ok(Date.now() < expiresAt.getTime(), "elevation must be valid when the audit INSERT blocks");
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, expiresAt.getTime() - Date.now() + 120)));
+  } finally {
+    release();
+    await Promise.allSettled([holder, outcome]);
+    await migrationDb.$disconnect();
+  }
+  assert.equal((await holder).ok, true);
+  assert.equal((await outcome)?.ok, false);
+  assert.ok((await outcome)?.error instanceof AdministrationMutationError,
+    "the fresh DB-clock authorization fence must reject, not a Prisma timeout");
+  assert.deepEqual(
+    (await prisma.administrativeRecoveryCode.findMany({ where: { userId: admin.actor.id }, select: { codeHash: true } })).map(({ codeHash }) => codeHash),
+    [originalCode], "the failed rotation must preserve the original recovery code"
+  );
+  assert.equal(await prisma.auditLog.count({ where: {
+    actorUserId: admin.actor.id, eventType: "RECOVERY_CODES_REGENERATED", result: "SUCCESS"
+  } }), 0, "the rolled-back mutation cannot leave a success audit");
+
+  await prisma.securityElevation.update({ where: { id: elevation.id }, data: { expiresAt: new Date(Date.now() + 60_000) } });
+  assert.equal((await regenerateAdministrativeRecoveryCodes(admin.actor, admin.sessionId)).length, 10,
+    "a fresh live elevation can complete a new properly audited rotation");
+});

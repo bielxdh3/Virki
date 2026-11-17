@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { getCurrentSession } from "../../../lib/auth";
 import { recordSecurityDenial, recordSessionCsrfDenial } from "../../../lib/audit-denial";
 import { isNativeHubPerimeterEnabled } from "../../../lib/hub-perimeter";
+import { writePreauthDenialAudit } from "../../../lib/preauth-denial-audit";
+import { shouldBoundNativePasskeyDenial } from "../../../lib/native-passkey-denial";
 import { requestHost, getSurface, sameOriginFailureReason } from "../../../lib/surface";
-import { validateSessionCsrfToken } from "../../../lib/session-csrf";
+import { validateSessionCsrfToken, validateSessionCsrfTokenFor } from "../../../lib/session-csrf";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { SESSION_COOKIE_NAME, createAuditRequestMetadata, getSessionCookieOptions, hashAuditEmail, hashAuditSessionReference, normalizeEmail, writeAuditLog } from "@virki/auth";
 import {
@@ -81,8 +83,21 @@ export async function POST(request: Request) {
     }
     return guardedJson({ error: "Rejected" }, 403);
   }
-  const auditState: { session: Awaited<ReturnType<typeof getCurrentSession>>; csrfDenied: boolean } = { session: null, csrfDenied: false };
+  const auditState: { session: Awaited<ReturnType<typeof getCurrentSession>>; csrfDenied: boolean; preaudited: boolean } =
+    { session: null, csrfDenied: false, preaudited: false };
   async function requireProtectedSessionForRequest() {
+    if (adminAction && surface === "hub" && isNativeHubPerimeterEnabled()) {
+      const sessionToken = cookieValue(request.headers.get("cookie"), SESSION_COOKIE_NAME);
+      // A plausible cookie and a deliberately invalid CSRF token must not
+      // force unlimited database lookups before authentication. Check the
+      // session-bound HMAC locally first, then use bounded actor attribution
+      // for a denial. Existing Access and USER Portal behavior is untouched.
+      if (!validateSessionCsrfTokenFor(sessionToken, property(body!, "csrfToken", 1200), "admin-security")) {
+        auditState.preaudited = true;
+        await recordSessionCsrfDenial(request.headers, "admin-passkeys-csrf", sessionToken);
+        throw new Error("Rejected");
+      }
+    }
     const session = await getCurrentSession();
     if (!session || session.user.role !== role) throw new Error("Rejected");
     // Identify the authenticated actor before checking CSRF so rejected requests
@@ -137,7 +152,8 @@ export async function POST(request: Request) {
 
     return guardedJson({ error: "Invalid request" }, 400);
   } catch {
-    const { session: auditedSession, csrfDenied } = auditState;
+    const { session: auditedSession, csrfDenied, preaudited } = auditState;
+    if (preaudited) return guardedJson({ error: "Authentication rejected or service unavailable" }, 403);
     const loginAttempt = action === "login-options" || action === "login-verify";
     let actorEmailHash: string | undefined;
     if (action === "login-options") {
@@ -148,7 +164,12 @@ export async function POST(request: Request) {
     }
     // Audit outside the ceremony's transaction: rejected proofs roll back their transaction.
     // Never persist the WebAuthn response, password, credential ID, challenge or raw email.
-    await writeAuditLog({
+    // ADMIN passkeys are public at ingress until a live session is loaded.
+    // Budget unverified native Hub denial writes; keep verified ADMIN events
+    // on the full writer and leave USER Portal and legacy Access unchanged.
+    const auditWriter = shouldBoundNativePasskeyDenial(adminAction, surface, auditedSession?.user.role)
+      ? writePreauthDenialAudit : writeAuditLog;
+    await auditWriter({
       eventType: csrfDenied ? "CSRF_DENIED" : loginAttempt ? "AUTH_LOGIN_FAILURE" : "SECURITY_PROOF_REJECTED",
       result: loginAttempt && !csrfDenied ? "FAILURE" : "DENIED",
       actorUserId: auditedSession?.user.id,

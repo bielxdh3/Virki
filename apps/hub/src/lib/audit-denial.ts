@@ -6,13 +6,13 @@ import { createBoundedDenialSessionLookup } from "./denial-session-lookup";
 
 const lookupDenialSession = createBoundedDenialSessionLookup(getSessionByToken);
 
-// Fixed public login/recovery identifiers, logout Origin and ADMIN passkey
-// Origin after an attempted live session lookup. Only a verified ADMIN session
+// Fixed public login/recovery identifiers, logout Origin/CSRF and ADMIN passkey
+// Origin/invalid-CSRF after a bounded live session lookup. Only a verified ADMIN session
 // avoids the native Hub audit budget: a portal USER session cannot turn native
 // Hub Origin probes into unlimited AuditLog writes. Other protected guards may
 // reject Origin before session lookup and remain outside this source allowlist.
 const PUBLIC_PREAUTH_DENIAL_SOURCES = new Set([
-  "login-origin", "login-csrf", "login-factor-origin", "login-factor-csrf", "logout-origin", "admin-passkeys-origin",
+  "login-origin", "login-csrf", "login-factor-origin", "login-factor-csrf", "logout-origin", "logout-csrf", "admin-passkeys-origin", "admin-passkeys-csrf",
   "login-verification-origin", "login-verification-csrf",
   "account-recovery-request", "account-recovery-access", "account-recovery-switch",
   "account-recovery-verify", "account-recovery-new-mail-start", "account-recovery-new-mail-verify",
@@ -34,11 +34,12 @@ export async function recordSecurityDenial(requestHeaders: Pick<Headers, "get">,
 }
 
 export async function recordSessionCsrfDenial(requestHeaders: Pick<Headers, "get">, source: string, sessionToken?: string): Promise<void> {
-  // Only public native Hub Origin guards have an attacker-triggerable session
-  // lookup before the standard authentication boundary. Portal, Access, and
-  // protected ADMIN mutation guards retain their previous attribution policy.
+  // Public native Hub logout Origin AND invalid-CSRF guards can run without
+  // authenticating a session. Both need bounded attribution; otherwise a
+  // plausible forged cookie would evade the PostgreSQL SELECT ceiling.
+  // Portal, Access, and protected ADMIN mutation guards stay unchanged.
   const preauthOrigin =
-    (source === "logout-origin" || source === "admin-passkeys-origin") &&
+    (source === "logout-origin" || source === "logout-csrf" || source === "admin-passkeys-origin" || source === "admin-passkeys-csrf") &&
     getSurface(requestHeaders) === "hub" && isNativeHubPerimeterEnabled();
   let session: AuthenticatedSession | null = null;
   if (preauthOrigin) {

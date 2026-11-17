@@ -74,6 +74,67 @@ test("native anonymous logout Origin flood is bounded without sampling a verifie
   }
 });
 
+test("native same-Origin logout with invalid CSRF cannot amplify audit writes or forged-session SELECTs", async () => {
+  const keys = ["NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "VIRKI_HUB_HOSTNAME", "VIRKI_AUDIT_HASH_SECRET"] as const;
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const originalAudit = prisma.auditLog.create;
+  const originalLookup = prisma.session.findUnique;
+  const forgedToken = "C".repeat(43);
+  const adminToken = "D".repeat(43);
+  const audits: Record<string, unknown>[] = [];
+  let lookups = 0;
+  try {
+    Reflect.set(process.env, "NODE_ENV", "production");
+    Object.assign(process.env, {
+      VIRKI_HUB_PERIMETER_MODE: "native", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false",
+      VIRKI_HUB_HOSTNAME: "hub.biel.dev.br", VIRKI_AUDIT_HASH_SECRET: "22".repeat(32)
+    });
+    prisma.auditLog.create = (async (input: { data: Record<string, unknown> }) => {
+      audits.push(input.data);
+      return {};
+    }) as unknown as typeof originalAudit;
+    prisma.session.findUnique = (async (input: { where: { tokenHash: string } }) => {
+      lookups += 1;
+      if (input.where.tokenHash !== hashSessionToken(adminToken)) return null;
+      return {
+        id: "confirmed-admin-session", createdAt: new Date(), expiresAt: new Date(Date.now() + 60_000),
+        revokedAt: null, authenticationMethods: ["pwd", "totp"],
+        user: { id: "confirmed-admin", role: "ADMIN", email: "admin@example.invalid",
+          displayName: "Admin", isActive: true, accountStatus: "ACTIVE" }
+      };
+    }) as unknown as typeof originalLookup;
+    const post = (cookie?: string) => POST(new NextRequest("https://hub.biel.dev.br/api/logout", {
+      method: "POST",
+      body: new URLSearchParams({ csrfToken: "invalid" }),
+      headers: {
+        host: "hub.biel.dev.br", origin: "https://hub.biel.dev.br",
+        ...(cookie ? { cookie: `${SESSION_COOKIE_NAME}=${cookie}` } : {})
+      }
+    }));
+    const anonymous = await Promise.all(Array.from({ length: 180 }, () => post()));
+    assert.ok(anonymous.every((response) => response.status === 403));
+    assert.ok(audits.length <= 120, `anonymous invalid-CSRF requests caused ${audits.length} audit writes`);
+    const forged = await Promise.all(Array.from({ length: 180 }, () => post(forgedToken)));
+    assert.ok(forged.every((response) => response.status === 403));
+    assert.ok(audits.length <= 120, `forged session cookie bypassed logout CSRF audit budget: ${audits.length}`);
+    assert.ok(lookups <= 8, `forged-session attribution SELECTs must have bounded concurrency; got ${lookups}`);
+    const count = audits.length;
+    assert.equal((await post(adminToken)).status, 403);
+    assert.equal(audits.length, count + 1, "a verified ADMIN's invalid-CSRF denial remains audited");
+    assert.equal(audits.at(-1)?.actorRole, "ADMIN");
+    assert.equal(audits.at(-1)?.actorUserId, "confirmed-admin");
+  } finally {
+    prisma.auditLog.create = originalAudit;
+    prisma.session.findUnique = originalLookup;
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else Reflect.set(process.env, key, value);
+    }
+  }
+});
+
 test("logout redirects to the configured public hub origin", async () => {
   const originalAccessRequired = process.env.CLOUDFLARE_ACCESS_JWT_REQUIRED;
   const originalAccessAudience = process.env.CLOUDFLARE_ACCESS_AUDIENCE;

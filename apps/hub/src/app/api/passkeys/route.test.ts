@@ -1,8 +1,23 @@
+import "next/dist/server/node-environment-baseline";
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import test from "node:test";
+import React from "react";
 import { prisma } from "@virki/database";
 import { hashPassword, hashSessionToken, SESSION_COOKIE_NAME } from "@virki/auth";
 import { POST } from "./route";
+import { shouldBoundNativePasskeyDenial } from "../../../lib/native-passkey-denial";
+
+test("native ADMIN passkey audit selection budgets only unverified actors", () => {
+  assert.equal(shouldBoundNativePasskeyDenial(true, "hub", undefined, true), true);
+  assert.equal(shouldBoundNativePasskeyDenial(true, "hub", "USER", true), true);
+  assert.equal(shouldBoundNativePasskeyDenial(true, "hub", "ADMIN", true), false,
+    "a verified ADMIN must always use the full audit writer");
+  assert.equal(shouldBoundNativePasskeyDenial(true, "hub", undefined, false), false,
+    "legacy access must keep the original audit path");
+  assert.equal(shouldBoundNativePasskeyDenial(false, "portal", "USER", true), false,
+    "USER Portal must keep the original audit path");
+});
 
 test("native ADMIN passkey Origin flood is bounded while a verified ADMIN denial remains audited", async () => {
   const keys = ["NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
@@ -60,6 +75,114 @@ test("native ADMIN passkey Origin flood is bounded while a verified ADMIN denial
   } finally {
     prisma.auditLog.create = originalAudit;
     prisma.session.findUnique = originalLookup;
+    for (const key of keys) {
+      const value = before[key];
+      if (value === undefined) delete process.env[key];
+      else Reflect.set(process.env, key, value);
+    }
+  }
+});
+
+test("same-Origin native ADMIN passkey proof rejection cannot generate unlimited anonymous audit writes", async () => {
+  const keys = ["NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "VIRKI_HUB_HOSTNAME", "VIRKI_PASSKEYS_ENABLED", "VIRKI_ADMIN_PASSKEYS_ENABLED",
+    "VIRKI_AUDIT_HASH_SECRET"] as const;
+  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const originalAudit = prisma.auditLog.create;
+  const audits: Record<string, unknown>[] = [];
+  try {
+    Reflect.set(process.env, "NODE_ENV", "production");
+    Object.assign(process.env, {
+      VIRKI_HUB_PERIMETER_MODE: "native", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false",
+      VIRKI_HUB_HOSTNAME: "hub.biel.dev.br", VIRKI_PASSKEYS_ENABLED: "true",
+      VIRKI_ADMIN_PASSKEYS_ENABLED: "true", VIRKI_AUDIT_HASH_SECRET: "22".repeat(32)
+    });
+    prisma.auditLog.create = (async (input: { data: Record<string, unknown> }) => {
+      audits.push(input.data);
+      return {};
+    }) as unknown as typeof originalAudit;
+    const post = (cookie?: string) => POST(new Request("https://hub.biel.dev.br/api/passkeys", {
+      method: "POST",
+      body: JSON.stringify({ action: "admin-register-options", csrfToken: "invalid" }),
+      headers: { host: "hub.biel.dev.br", origin: "https://hub.biel.dev.br",
+        "content-type": "application/json",
+        ...(cookie ? { cookie: `${SESSION_COOKIE_NAME}=${cookie}` } : {}) }
+    }));
+    const anonymous = await Promise.all(Array.from({ length: 180 }, () => post()));
+    assert.ok(anonymous.every((response) => response.status === 403));
+    assert.ok(audits.length <= 120, `native anonymous passkey failures caused ${audits.length} AuditLog writes`);
+  } finally {
+    prisma.auditLog.create = originalAudit;
+    for (const key of keys) {
+      const value = before[key];
+      if (value === undefined) delete process.env[key];
+      else Reflect.set(process.env, key, value);
+    }
+  }
+});
+
+test("native ADMIN passkey with forged well-shaped cookie and bad CSRF must not start unlimited session SELECTs", async () => {
+  Object.assign(globalThis, { AsyncLocalStorage, React });
+  const { workAsyncStorage } = await import("next/dist/server/app-render/work-async-storage.external");
+  const { workUnitAsyncStorage } = await import("next/dist/server/app-render/work-unit-async-storage.external");
+  const { createRequestStoreForAPI } = await import("next/dist/server/async-storage/request-store");
+  const { NextRequest } = await import("next/server");
+  const keys = ["NODE_ENV", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "VIRKI_HUB_HOSTNAME", "VIRKI_PASSKEYS_ENABLED", "VIRKI_ADMIN_PASSKEYS_ENABLED",
+    "VIRKI_AUDIT_HASH_SECRET"] as const;
+  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const originalLookup = prisma.session.findUnique;
+  const originalAudit = prisma.auditLog.create;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let lookups = 0;
+  let writes = 0;
+  try {
+    Reflect.set(process.env, "NODE_ENV", "production");
+    Object.assign(process.env, {
+      VIRKI_HUB_PERIMETER_MODE: "native", CLOUDFLARE_ACCESS_JWT_REQUIRED: "false",
+      VIRKI_HUB_HOSTNAME: "hub.biel.dev.br", VIRKI_PASSKEYS_ENABLED: "true",
+      VIRKI_ADMIN_PASSKEYS_ENABLED: "true", VIRKI_AUDIT_HASH_SECRET: "22".repeat(32)
+    });
+    prisma.session.findUnique = (async () => {
+      lookups += 1;
+      await gate;
+      return null;
+    }) as unknown as typeof originalLookup;
+    prisma.auditLog.create = (async () => {
+      writes += 1;
+      return {};
+    }) as unknown as typeof originalAudit;
+    const invoke = async () => {
+      const pathname = "/api/passkeys";
+      const request = new NextRequest("https://hub.biel.dev.br/api/passkeys", {
+        method: "POST",
+        headers: { host: "hub.biel.dev.br", origin: "https://hub.biel.dev.br",
+          "content-type": "application/json", cookie: `${SESSION_COOKIE_NAME}=${"Z".repeat(43)}` },
+        body: JSON.stringify({ action: "admin-rename", csrfToken: "invalid" })
+      });
+      const store = createRequestStoreForAPI(request, { pathname },
+        { tags: [], expirationsByCacheKind: new Map() } as never, undefined, undefined, undefined);
+      return workAsyncStorage.run({ route: pathname, incrementalCache: {}, cacheLifeProfiles: {} } as never,
+        () => workUnitAsyncStorage.run(store, () => POST(request)));
+    };
+    // Register all rejections immediately so an early infrastructure error
+    // cannot leave 30 unhandled promises while the test checks the SELECT cap.
+    const requests = Array.from({ length: 30 }, () => invoke().then(
+      response => ({ response, error: null as unknown }),
+      error => ({ response: null as Response | null, error })
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(lookups <= 8, `invalid-CSRF passkey traffic spawned ${lookups} concurrent session SELECTs`);
+    release();
+    const responses = await Promise.all(requests);
+    for (const result of responses) if (result.error) throw result.error;
+    assert.ok(responses.every((result) => result.response?.status === 403), "every forged cookie must remain denied");
+    assert.ok(writes <= 120, `native passkey denials must stay inside the local audit budget, got ${writes}`);
+  } finally {
+    release();
+    prisma.session.findUnique = originalLookup;
+    prisma.auditLog.create = originalAudit;
     for (const key of keys) {
       const value = before[key];
       if (value === undefined) delete process.env[key];
