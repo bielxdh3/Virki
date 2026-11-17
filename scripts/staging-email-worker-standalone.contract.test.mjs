@@ -194,7 +194,8 @@ test("worker runtime env gate preserves allowlisted SMTP keys and rejects unappr
     "DATABASE_URL", "NODE_ENV", "VIRKI_EMAIL_FROM", "VIRKI_EMAIL_MIN_SEND_INTERVAL_MS",
     "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_EMAIL_REPLY_TO", "VIRKI_EMAIL_SMTP_HOST",
     "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_SMTP_PORT", "VIRKI_EMAIL_SMTP_SECURE",
-    "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_TRANSPORT", "VIRKI_EMAIL_WORKER_SCOPED_ROLE"
+    "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_TRANSPORT", "VIRKI_EMAIL_WORKER_SCOPED_ROLE",
+    "VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST"
   ];
   const allowlistStart = runbook.indexOf('["DATABASE_URL"');
   const allowlistEnd = runbook.indexOf("as $worker_env_keys", allowlistStart);
@@ -235,6 +236,7 @@ test("isolated SMTP worker manifest has only a manual service, external staging 
   assert.match(content, /^\x20{4}pull_policy: never/mu);
   assert.match(content, /^\x20{4}user: node:node$/mu);
   assert.match(content, /^\x20{4}command: npm run email:worker --workspace @virki\/auth$/mu);
+  assert.match(content, /^\x20{6}VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: \$\{VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST:\?/mu);
   assert.match(content, /^\x20{4}read_only: true/mu);
   assert.match(content, /^\x20{4}cap_drop: \[ALL\]/mu);
   assert.match(content, /^\x20{4}security_opt: \[no-new-privileges:true\]/mu);
@@ -256,6 +258,7 @@ test("isolated SMTP worker manifest has only a manual service, external staging 
     "VIRKI_STAGING_EMAIL_SMTP_SECURE",
     "VIRKI_STAGING_EMAIL_SMTP_USER",
     "VIRKI_STAGING_EMAIL_SMTP_PASSWORD",
+    "VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST",
     "VIRKI_STAGING_EMAIL_FROM",
     "VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS"
   ]) {
@@ -352,7 +355,8 @@ test("real Compose config selects only the external-network manual worker withou
     "DATABASE_URL", "NODE_ENV", "VIRKI_EMAIL_FROM", "VIRKI_EMAIL_MIN_SEND_INTERVAL_MS",
     "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_EMAIL_REPLY_TO", "VIRKI_EMAIL_SMTP_HOST",
     "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_SMTP_PORT", "VIRKI_EMAIL_SMTP_SECURE",
-    "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_TRANSPORT", "VIRKI_EMAIL_WORKER_SCOPED_ROLE"
+    "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_TRANSPORT", "VIRKI_EMAIL_WORKER_SCOPED_ROLE",
+    "VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST"
   ]);
   assert.ok(!config.volumes || Object.keys(config.volumes).length === 0);
   assert.deepEqual(Object.keys(config.networks), ["staging-mail"]);
@@ -363,6 +367,7 @@ test("real Compose config selects only the external-network manual worker withou
     "VIRKI_STAGING_EMAIL_WORKER_IMAGE", "VIRKI_STAGING_EMAIL_SMTP_PASSWORD",
     "VIRKI_STAGING_EMAIL_WORKER_MEMORY_LIMIT", "VIRKI_STAGING_EMAIL_WORKER_CPUS_LIMIT",
     "VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT",
+    "VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST",
     "VIRKI_STAGING_EMAIL_OUTBOX_KEY", "VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL"
   ]) {
     const candidate = { ...env };

@@ -166,6 +166,7 @@ test("actual scoped worker process sends over verified loopback STARTTLS AUTH on
     const env = {
       NODE_ENV: "test", DATABASE_URL: workerUrl.href,
       VIRKI_EMAIL_WORKER_SCOPED_ROLE: "required",
+      VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: recipient,
       VIRKI_EMAIL_OUTBOX_KEY: process.env.VIRKI_EMAIL_OUTBOX_KEY ?? "",
       VIRKI_EMAIL_TRANSPORT: "smtp",
       VIRKI_EMAIL_SMTP_HOST: "127.0.0.1",
@@ -274,6 +275,7 @@ test("two real scoped workers reconcile exhausted heads and send one OTP over ST
     const env = {
       NODE_ENV: "test", DATABASE_URL: workerUrl.href,
       VIRKI_EMAIL_WORKER_SCOPED_ROLE: "required",
+      VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: recipient,
       VIRKI_EMAIL_OUTBOX_KEY: process.env.VIRKI_EMAIL_OUTBOX_KEY ?? "",
       VIRKI_EMAIL_TRANSPORT: "smtp", VIRKI_EMAIL_SMTP_HOST: "127.0.0.1",
       VIRKI_EMAIL_SMTP_PORT: String(sink.port), VIRKI_EMAIL_SMTP_SECURE: "false",

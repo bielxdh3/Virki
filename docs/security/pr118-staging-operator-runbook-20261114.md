@@ -611,7 +611,7 @@ printf '%s' "$config" | jq -e --arg project "$project" --arg image "$image" --ar
       "VIRKI_EMAIL_MIN_SEND_INTERVAL_MS","VIRKI_EMAIL_OUTBOX_KEY","VIRKI_EMAIL_REPLY_TO",
       "VIRKI_EMAIL_SMTP_HOST","VIRKI_EMAIL_SMTP_PASSWORD","VIRKI_EMAIL_SMTP_PORT",
       "VIRKI_EMAIL_SMTP_SECURE","VIRKI_EMAIL_SMTP_USER","VIRKI_EMAIL_TRANSPORT",
-      "VIRKI_EMAIL_WORKER_SCOPED_ROLE"])
+      "VIRKI_EMAIL_WORKER_SCOPED_ROLE","VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST"])
     and $w.environment.NODE_ENV == "production"
     and $w.environment.VIRKI_EMAIL_WORKER_SCOPED_ROLE == "required"
     and $w.environment.VIRKI_EMAIL_TRANSPORT == "smtp"
@@ -620,13 +620,15 @@ printf '%s' "$config" | jq -e --arg project "$project" --arg image "$image" --ar
     and $w.environment.VIRKI_EMAIL_MIN_SEND_INTERVAL_MS == $interval
     and (["DATABASE_URL","VIRKI_EMAIL_OUTBOX_KEY","VIRKI_EMAIL_SMTP_HOST",
       "VIRKI_EMAIL_SMTP_PORT","VIRKI_EMAIL_SMTP_SECURE","VIRKI_EMAIL_SMTP_USER",
-      "VIRKI_EMAIL_SMTP_PASSWORD","VIRKI_EMAIL_FROM","VIRKI_EMAIL_MIN_SEND_INTERVAL_MS"]
+      "VIRKI_EMAIL_SMTP_PASSWORD","VIRKI_EMAIL_FROM","VIRKI_EMAIL_MIN_SEND_INTERVAL_MS",
+      "VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST"]
       | all(.[]; $w.environment[.] != null and $w.environment[.] != ""))
     and $w.environment.VIRKI_EMAIL_SMTP_HOST == env.VIRKI_STAGING_EMAIL_SMTP_HOST
     and $w.environment.VIRKI_EMAIL_SMTP_PORT == env.VIRKI_STAGING_EMAIL_SMTP_PORT
     and $w.environment.VIRKI_EMAIL_SMTP_SECURE == env.VIRKI_STAGING_EMAIL_SMTP_SECURE
     and $w.environment.VIRKI_EMAIL_SMTP_USER == env.VIRKI_STAGING_EMAIL_SMTP_USER
     and $w.environment.VIRKI_EMAIL_SMTP_PASSWORD == env.VIRKI_STAGING_EMAIL_SMTP_PASSWORD
+    and $w.environment.VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST == env.VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST
     and $w.environment.VIRKI_EMAIL_FROM == env.VIRKI_STAGING_EMAIL_FROM
     and $w.environment.VIRKI_EMAIL_REPLY_TO == (env.VIRKI_STAGING_EMAIL_REPLY_TO // "")
 ' >/dev/null
@@ -1456,7 +1458,8 @@ if ! { docker --context "$ctx" image inspect "$image"; \
   | ["DATABASE_URL","NODE_ENV","VIRKI_EMAIL_FROM","VIRKI_EMAIL_MIN_SEND_INTERVAL_MS",
      "VIRKI_EMAIL_OUTBOX_KEY","VIRKI_EMAIL_REPLY_TO","VIRKI_EMAIL_SMTP_HOST",
      "VIRKI_EMAIL_SMTP_PASSWORD","VIRKI_EMAIL_SMTP_PORT","VIRKI_EMAIL_SMTP_SECURE",
-     "VIRKI_EMAIL_SMTP_USER","VIRKI_EMAIL_TRANSPORT","VIRKI_EMAIL_WORKER_SCOPED_ROLE"] as $worker_env_keys
+     "VIRKI_EMAIL_SMTP_USER","VIRKI_EMAIL_TRANSPORT","VIRKI_EMAIL_WORKER_SCOPED_ROLE",
+     "VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST"] as $worker_env_keys
   | ([$image_env[]? | split("=")[0]] | unique) as $image_env_keys
   | (($image_env_keys + $worker_env_keys) | unique | sort) as $allowed_env_keys
   | ([$runtime_env[]? | split("=")[0]] | sort) as $runtime_env_keys
@@ -1517,6 +1520,7 @@ if ! { docker --context "$ctx" image inspect "$image"; \
     and ($runtime_env | index("VIRKI_EMAIL_SMTP_SECURE=" + env.VIRKI_STAGING_EMAIL_SMTP_SECURE) != null)
     and ($runtime_env | index("VIRKI_EMAIL_SMTP_USER=" + env.VIRKI_STAGING_EMAIL_SMTP_USER) != null)
     and ($runtime_env | index("VIRKI_EMAIL_SMTP_PASSWORD=" + env.VIRKI_STAGING_EMAIL_SMTP_PASSWORD) != null)
+    and ($runtime_env | index("VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST=" + env.VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST) != null)
     and ($runtime_env | index("VIRKI_EMAIL_FROM=" + env.VIRKI_STAGING_EMAIL_FROM) != null)
     and ($runtime_env | index("VIRKI_EMAIL_REPLY_TO=" + (env.VIRKI_STAGING_EMAIL_REPLY_TO // "")) != null))
 ' >/dev/null; then

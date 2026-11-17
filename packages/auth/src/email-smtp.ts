@@ -19,6 +19,7 @@ function getSmtpConfig(env: SmtpEnvironment): {
   credential: string;
   from: string;
   replyTo?: string;
+  allowedRecipient?: string;
 } | null {
   const host = env.VIRKI_EMAIL_SMTP_HOST?.trim();
   const user = env.VIRKI_EMAIL_SMTP_USER?.trim();
@@ -29,6 +30,10 @@ function getSmtpConfig(env: SmtpEnvironment): {
   const secureValue = env.VIRKI_EMAIL_SMTP_SECURE?.trim().toLowerCase();
   const secure =
     !secureValue ? false : secureValue === "true" ? true : secureValue === "false" ? false : null;
+  // The standalone staging worker is deliberately limited to one owner-approved
+  // test inbox. Production's normal worker does not require this staging flag.
+  const scopedStagingWorker = env.VIRKI_EMAIL_WORKER_SCOPED_ROLE === "required";
+  const allowedRecipient = env.VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST;
 
   if (
     !host ||
@@ -36,6 +41,9 @@ function getSmtpConfig(env: SmtpEnvironment): {
     !credential ||
     !isEmailAddress(from) ||
     (replyTo && !isEmailAddress(replyTo)) ||
+    (scopedStagingWorker && !allowedRecipient) ||
+    (allowedRecipient !== undefined &&
+      (!isEmailAddress(allowedRecipient) || allowedRecipient !== allowedRecipient.trim())) ||
     secure === null ||
     !Number.isInteger(port) ||
     port < 1 ||
@@ -44,7 +52,9 @@ function getSmtpConfig(env: SmtpEnvironment): {
     return null;
   }
 
-  return { host, port, secure, user, credential, from, ...(replyTo ? { replyTo } : {}) };
+  return { host, port, secure, user, credential, from,
+    ...(replyTo ? { replyTo } : {}),
+    ...(allowedRecipient ? { allowedRecipient } : {}) };
 }
 
 export function isSmtpEmailTransportConfigured(env: SmtpEnvironment = process.env): boolean {
@@ -82,6 +92,9 @@ export function createSmtpEmailTransport(
     async send(message: EmailTransportMessage): Promise<EmailTransportReceipt> {
       try {
         if (!isSingleMailboxAddress(message.to)) throw new Error("Invalid recipient.");
+        if (config.allowedRecipient && message.to !== config.allowedRecipient) {
+          throw new Error("Recipient outside staging allowlist.");
+        }
         const preparedId = message.preparedSmtpHeaderMessageId;
         if (preparedId !== undefined &&
             (preparedId.length > 255 || !/^<[a-f0-9]{64}@[a-z0-9.-]+>$/u.test(preparedId))) {

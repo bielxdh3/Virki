@@ -34,6 +34,8 @@ services:
       VIRKI_EMAIL_SMTP_SECURE: ${VIRKI_STAGING_EMAIL_SMTP_SECURE:?approved SMTP TLS mode required}
       VIRKI_EMAIL_SMTP_USER: ${VIRKI_STAGING_EMAIL_SMTP_USER:?staging SMTP identity required}
       VIRKI_EMAIL_SMTP_PASSWORD: ${VIRKI_STAGING_EMAIL_SMTP_PASSWORD:?staging SMTP credential required}
+      # Exact single test mailbox; enforced before SMTP network I/O.
+      VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: ${VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST:?approved single test recipient required}
       VIRKI_EMAIL_MIN_SEND_INTERVAL_MS: ${VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS:?approved staging interval required}
       VIRKI_EMAIL_FROM: ${VIRKI_STAGING_EMAIL_FROM:?approved test sender required}
       VIRKI_EMAIL_REPLY_TO: ${VIRKI_STAGING_EMAIL_REPLY_TO:-}

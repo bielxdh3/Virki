@@ -99,6 +99,50 @@ test("SMTP configuration is fail-closed without contacting the provider", () => 
   );
 });
 
+test("staging scoped SMTP requires a single approved recipient before worker startup", () => {
+  const stage = {
+    NODE_ENV: "production",
+    VIRKI_EMAIL_WORKER_SCOPED_ROLE: "required",
+    VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+    VIRKI_EMAIL_SMTP_PORT: "587",
+    VIRKI_EMAIL_SMTP_SECURE: "false",
+    VIRKI_EMAIL_SMTP_USER: "test@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+    VIRKI_EMAIL_FROM: "no-reply@example.invalid"
+  };
+  assert.equal(isSmtpEmailTransportConfigured(stage), false);
+  assert.equal(isSmtpEmailTransportConfigured({ ...stage, NODE_ENV: "test" }), false,
+    "scoped staging is restricted even if the worker is accidentally launched outside production mode");
+  assert.equal(isSmtpEmailTransportConfigured({ ...stage, VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "" }), false);
+  assert.equal(isSmtpEmailTransportConfigured({ ...stage, VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "owner@example.invalid,attacker@example.invalid" }), false);
+  assert.equal(isSmtpEmailTransportConfigured({ ...stage, VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: " owner@example.invalid" }), false);
+  assert.equal(isSmtpEmailTransportConfigured({ ...stage, VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "owner@example.invalid" }), true);
+});
+
+test("staging scoped SMTP never calls the provider for a non-allowlisted recipient", async (context) => {
+  const delivered: string[] = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (message: { to: Array<{ address: string }> }) => {
+      delivered.push(message.to[0].address);
+      return { messageId: "<fixture@example.invalid>" };
+    }
+  }) as never);
+  const transport = createSmtpEmailTransport({
+    NODE_ENV: "production",
+    VIRKI_EMAIL_WORKER_SCOPED_ROLE: "required",
+    VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "owner@example.invalid",
+    VIRKI_EMAIL_SMTP_HOST: "smtp.example.invalid",
+    VIRKI_EMAIL_SMTP_USER: "test@example.invalid",
+    VIRKI_EMAIL_SMTP_PASSWORD: "synthetic-fixture-password",
+    VIRKI_EMAIL_FROM: "no-reply@example.invalid"
+  });
+  await assert.rejects(() => transport.send({ to: "attacker@example.invalid", subject: "Test", text: "Test" }),
+    /SMTP email delivery failed/u);
+  assert.deepEqual(delivered, []);
+  await transport.send({ to: "owner@example.invalid", subject: "Test", text: "Test" });
+  assert.deepEqual(delivered, ["owner@example.invalid"]);
+});
+
 test("SMTP accepts exactly one mailbox and rejects parsed recipient lists", () => {
   for (const valid of ["alice@example.invalid", "alice.smith+trial@sub.example.invalid", "josé@exemplo.com", "alice@exemplo.com.br", "alice@bücher.example"]) {
     assert.equal(isSingleMailboxAddress(valid), true);
