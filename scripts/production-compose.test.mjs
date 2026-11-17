@@ -292,7 +292,13 @@ test("the actual OCI runtime smoke exercises native ADMIN login, recovery, denia
   assert.doesNotMatch(nativeRun, /CLOUDFLARE_ACCESS_JWT_REQUIRED|CLOUDFLARE_ACCESS_AUDIENCE|CLOUDFLARE_TEAM_DOMAIN/u,
     "the real native image must start without any Access setting");
   assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/login`, 200/u);
-  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/recover`, 200/u);
+  // The runtime image fixture deliberately contains no PostgreSQL. Bare
+  // /recover queries the active ADMIN count; the no-cookie legacy-link view
+  // exercises the actual recovery page without requiring an absent database.
+  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/recover\?request=oci-smoke`, 200/u);
+  assert.doesNotMatch(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/recover`, 200/u);
+  assert.match(source, /nativeRecovery\.body\.includes\("Recuperar acesso administrativo"\)/u,
+    "the no-database OCI probe must still render the real Virki recovery screen");
   assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/admin\/accounts`, 307/u);
   assert.match(source, /isCanonicalNativeAdminRedirect\(nativeAdmin\.headers\.location, `https:\/\/\$\{hubHost\}`, "\/admin\/accounts"\)/u);
   assert.match(source, /"cf-access-jwt-assertion": "forged"/u,

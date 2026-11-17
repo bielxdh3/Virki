@@ -112,8 +112,15 @@ try {
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   const nativeLogin = await assertStatus(`http://127.0.0.1:${nativeHubPort}/login`, 200, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   assertSecurityHeaders(nativeLogin.headers, "strict-origin");
-  const nativeRecovery = await assertStatus(`http://127.0.0.1:${nativeHubPort}/recover`, 200, { host: hubHost });
+  // The OCI fixture intentionally has no PostgreSQL: bare /recover queries
+  // the live ADMIN count to determine supported recovery methods. Exercise the
+  // same route's legacy-link entry (no cookie or DB read) here; bare /recover
+  // is separately verified against the real database-backed HTTPS staging.
+  const nativeRecovery = await assertStatus(`http://127.0.0.1:${nativeHubPort}/recover?request=oci-smoke`, 200, { host: hubHost });
   assertSecurityHeaders(nativeRecovery.headers, "strict-origin");
+  if (!nativeRecovery.body.includes("Recuperar acesso administrativo")) {
+    throw new Error("Native OCI recovery must render the Virki ADMIN recovery screen.");
+  }
   const nativeAdmin = await assertStatus(`http://127.0.0.1:${nativeHubPort}/admin/accounts`, 307, { host: hubHost, "cf-access-jwt-assertion": "forged" });
   assertSecurityHeaders(nativeAdmin.headers, "strict-origin");
   if (!isCanonicalNativeAdminRedirect(nativeAdmin.headers.location, `https://${hubHost}`, "/admin/accounts") ||
