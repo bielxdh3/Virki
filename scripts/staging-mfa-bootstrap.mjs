@@ -7,20 +7,27 @@
  * on the staging operator's computer. No password or TOTP seed is printed.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertStagingMfaBootstrapEnvironment,
   assertStagingMfaRuntimeIdentity,
+  isStagingDirectoryOutsideRepository,
+  isNativeLinuxCredentialFilesystem,
+  stagingCredentialSecurityRoot,
   StagingMfaBootstrapError
 } from "./lib/staging-mfa-bootstrap-guard.mjs";
 import { withPrivateMfaCredentialFile } from "./lib/staging-mfa-credential-file.mjs";
 
 async function main() {
   const expected = assertStagingMfaBootstrapEnvironment(process.env);
-  if (process.argv.length !== 2 || !process.stdin.isTTY || !process.stdout.isTTY) {
+  // Only the approved WSL/Linux Node 22 POSIX-metadata environment is supported.
+  // Native Windows Node mode bits are not a reliable credential ACL proof.
+  if (process.platform !== "linux" || Number(process.versions.node.split(".")[0]) !== 22 ||
+      process.argv.length !== 2 ||
+      !process.stdin.isTTY || !process.stdout.isTTY) {
     throw new StagingMfaBootstrapError();
   }
 
@@ -28,12 +35,12 @@ async function main() {
   if (!privateDir || !isAbsolute(privateDir)) throw new StagingMfaBootstrapError();
   const realDir = realpathSync(privateDir);
   const dirStat = statSync(realDir);
-  const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
-  const relativeToRepo = relative(repo, realDir);
+  const repo = realpathSync(resolve(fileURLToPath(new URL("..", import.meta.url))));
+  const securityRoot = stagingCredentialSecurityRoot(repo);
   if (!dirStat.isDirectory() || (dirStat.mode & 0o077) !== 0 ||
       (process.getuid && dirStat.uid !== process.getuid()) ||
-      relativeToRepo === "" ||
-      (!relativeToRepo.startsWith("..") && !isAbsolute(relativeToRepo))) {
+      !isNativeLinuxCredentialFilesystem(statfsSync(realDir).type) ||
+      !isStagingDirectoryOutsideRepository(securityRoot, realDir)) {
     throw new StagingMfaBootstrapError();
   }
   const credentialPath = join(realDir, "mfa-admin-credentials.txt");

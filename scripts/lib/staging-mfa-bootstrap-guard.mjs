@@ -4,6 +4,26 @@
  * separate first-admin bootstrap guard is intentionally left unchanged.
  */
 import { createHash } from "node:crypto";
+import { basename, dirname, isAbsolute, relative, sep } from "node:path";
+
+/** Treat only a full parent component (or a different-volume absolute path) as outside. */
+export function isStagingDirectoryOutsideRepository(repo, directory) {
+  const pathFromRepo = relative(repo, directory);
+  return pathFromRepo === ".." || pathFromRepo.startsWith(`..${sep}`) || isAbsolute(pathFromRepo);
+}
+
+/** A linked worktree is still part of the original Git checkout's trust boundary. */
+export function stagingCredentialSecurityRoot(checkoutRoot) {
+  const parent = dirname(checkoutRoot);
+  return basename(parent) === ".worktrees" ? dirname(parent) : checkoutRoot;
+}
+
+// Mode 0700 on WSL DrvFs/NTFS is not a proof of restrictive Windows DACLs.
+// Permit only native, persistent Linux filesystems for raw staging credentials.
+const PRIVATE_CREDENTIAL_FILESYSTEM_TYPES = new Set([0xEF53, 0x58465342, 0x9123683E]); // ext4, XFS, Btrfs
+export function isNativeLinuxCredentialFilesystem(fsType) {
+  return Number.isInteger(fsType) && PRIVATE_CREDENTIAL_FILESYSTEM_TYPES.has(fsType >>> 0);
+}
 
 // SHA-256 of "virki-staging-mfa-origin-pair-v1\n" followed by the two
 // owner-approved canonical HTTPS origins (Hub then Portal, newline terminated).
@@ -66,6 +86,9 @@ export function assertStagingMfaBootstrapEnvironment(env) {
   const recipient = env.VIRKI_STAGING_MFA_TEST_EMAIL?.trim().toLowerCase();
   if (!recipient || recipient.length > 320 ||
       !/^[a-z0-9.!#$%&'*+/=?^`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(recipient)) reject();
+  // The bootstrap and the manual SMTP worker must bind to exactly the same
+  // owner-approved inbox. Refuse a different or noncanonical worker allowlist.
+  if (env.VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST !== recipient) reject();
 
   const keyNames = [
     "VIRKI_CSRF_SIGNING_KEY",

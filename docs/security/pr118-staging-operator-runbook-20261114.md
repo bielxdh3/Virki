@@ -111,6 +111,10 @@ secret manager, never from the production `.env` or a committed file:
   the signed approval and independent relay observation.
 - `VIRKI_STAGING_EMAIL_FROM`,
   `VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS`
+- `VIRKI_STAGING_MFA_TEST_EMAIL` and
+  `VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST` — the exact same canonical,
+  owner-approved single test mailbox. Verify it independently against the
+  signed owner approval before any SMTP connection or ADMIN bootstrap.
 - Optional `VIRKI_STAGING_EMAIL_REPLY_TO`.
 
 The operator must also supply `VIRKI_STAGING_APPROVED_NODE_BIN` (an absolute,
@@ -255,6 +259,13 @@ export COMPOSE_DISABLE_ENV_FILE=1
 : "${VIRKI_STAGING_APPROVED_SMTP_TENANT_ID:?signed staging SMTP tenant identity required}"
 : "${VIRKI_STAGING_APPROVED_SMTP_ENDPOINT_ID:?signed staging SMTP endpoint identity required}"
 : "${VIRKI_STAGING_APPROVED_SMTP_ACCOUNT_ID:?signed staging SMTP account identity required}"
+: "${VIRKI_STAGING_MFA_TEST_EMAIL:?owner-approved ADMIN test mailbox required}"
+: "${VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST:?staging SMTP recipient required}"
+[[ "$VIRKI_STAGING_MFA_TEST_EMAIL" == "$VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST" &&
+   "$VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST" == "${VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST,,}" ]] || {
+  printf 'BLOCK: ADMIN and staging SMTP recipient must match the owner-approved canonical mailbox\n' >&2
+  exit 1
+}
 command -v docker >/dev/null
 test -x /usr/bin/git
 command -v psql >/dev/null

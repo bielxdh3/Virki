@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { withPrivateMfaCredentialFile } from "./lib/staging-mfa-credential-file.mjs";
 import {
   assertStagingMfaBootstrapEnvironment,
-  assertStagingMfaRuntimeIdentity
+  assertStagingMfaRuntimeIdentity,
+  isStagingDirectoryOutsideRepository,
+  stagingCredentialSecurityRoot,
+  isNativeLinuxCredentialFilesystem
 } from "./lib/staging-mfa-bootstrap-guard.mjs";
 
 const key = (digit) => digit.repeat(64);
@@ -31,6 +34,7 @@ const safeEnvironment = () => ({
   VIRKI_ADMIN_PASSKEYS_ENABLED: "false",
   VIRKI_PASSKEYS_ENABLED: "false",
   VIRKI_STAGING_MFA_TEST_EMAIL: "operator@owned-test.example",
+  VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "operator@owned-test.example",
   VIRKI_CSRF_SIGNING_KEY: key("a"),
   VIRKI_TOTP_ENCRYPTION_KEY: key("b"),
   VIRKI_AUDIT_HASH_SECRET: key("c"),
@@ -60,6 +64,53 @@ test("staging-only context accepts an isolated native Hub and returns redacted t
   });
 });
 
+test("operator preflight binds the staging worker inbox to the disposable ADMIN inbox before Docker", () => {
+  const runbook = readFileSync(new URL("../docs/security/pr118-staging-operator-runbook-20261114.md", import.meta.url), "utf8");
+  const guard = runbook.indexOf('[[ "$VIRKI_STAGING_MFA_TEST_EMAIL" == "$VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST"');
+  const docker = runbook.indexOf("command -v docker >/dev/null");
+  assert.ok(guard >= 0 && docker > guard, "the operator must reject a mismatched mailbox before contacting Docker");
+  assert.match(runbook, /owner-approved canonical mailbox/u);
+});
+
+test("credential path guard rejects deceptive dot-dot-prefixed names inside checkout", () => {
+  const repo = resolve("/var/virki/checkout");
+  assert.equal(isStagingDirectoryOutsideRepository(repo, repo), false);
+  assert.equal(isStagingDirectoryOutsideRepository(repo, join(repo, "..credentials")), false);
+  assert.equal(isStagingDirectoryOutsideRepository(repo, join(repo, "private", "..credentials")), false);
+  assert.equal(isStagingDirectoryOutsideRepository(repo, resolve(repo, "../other-owner-private")), true);
+  const worktree = join(repo, ".worktrees", "pr130");
+  assert.equal(stagingCredentialSecurityRoot(worktree), repo);
+  assert.equal(isStagingDirectoryOutsideRepository(stagingCredentialSecurityRoot(worktree),
+    join(repo, "..credentials")), false, "sibling of the worktree must not be inside the main repository");
+  assert.equal(isStagingDirectoryOutsideRepository(stagingCredentialSecurityRoot(worktree),
+    resolve(repo, "../outside-both-repositories")), true);
+});
+
+test("credential repository guard canonicalizes worktree symlink aliases", () => {
+  const disposable = mkdtempSync(join(tmpdir(), "virki-mfa-repo-alias-"));
+  try {
+    const mainRepo = join(disposable, "repo");
+    mkdirSync(join(mainRepo, ".worktrees", "pr130"), { recursive: true });
+    symlinkSync(mainRepo, join(disposable, "repo-alias"), "dir");
+    const canonicalWorktree = realpathSync(join(disposable, "repo-alias", ".worktrees", "pr130"));
+    const securityRoot = stagingCredentialSecurityRoot(canonicalWorktree);
+    assert.equal(securityRoot, mainRepo);
+    assert.equal(isStagingDirectoryOutsideRepository(securityRoot, join(mainRepo, "..credentials")), false);
+    assert.equal(isStagingDirectoryOutsideRepository(securityRoot, join(disposable, "approved-private")), true);
+  } finally {
+    rmSync(disposable, { recursive: true, force: true });
+  }
+});
+
+test("credential filesystem guard rejects DrvFs/NTFS and other non-native mounts", () => {
+  for (const native of [0xEF53, 0x58465342, 0x9123683E]) {
+    assert.equal(isNativeLinuxCredentialFilesystem(native), true);
+  }
+  for (const unsupported of [0x794C7630, 0x65735546, 0x01021994, 0, null]) {
+    assert.equal(isNativeLinuxCredentialFilesystem(unsupported), false);
+  }
+});
+
 test("staging-only context refuses production, Access, unsafe hosts and URL redirects", () => {
   const overrides = [
     { NODE_ENV: "development" },
@@ -83,6 +134,10 @@ test("staging-only context refuses production, Access, unsafe hosts and URL redi
     { DATABASE_URL: disposableDatabaseUrl({ schema: "other" }) },
     { MIGRATION_DATABASE_URL: disposableDatabaseUrl({ username: "virki_migrator" }) },
     { VIRKI_STAGING_MFA_TEST_EMAIL: "" },
+    { VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "" },
+    { VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "attacker@owned-test.example" },
+    { VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: "operator@owned-test.example,attacker@owned-test.example" },
+    { VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: " Operator@owned-test.example" },
     { VIRKI_AUDIT_HASH_SECRET: key("a") }
   ];
   for (const changed of overrides) {
@@ -116,6 +171,7 @@ test("CLI preserves the production bootstrap guard and never accepts passwords f
   assert.match(cli, /assertStagingMfaBootstrapEnvironment\(process\.env\)/u);
   assert.match(cli, /bootstrapFirstAdmin/u);
   assert.match(cli, /process\.stdin\.isTTY/u);
+  assert.match(cli, /process\.versions\.node\.split/u);
   assert.doesNotMatch(cli, /process\.argv\[[1-9]\]/u);
   assert.doesNotMatch(cli, /console\.log\([^)]*(password|secret|DATABASE_URL)/iu);
 });
