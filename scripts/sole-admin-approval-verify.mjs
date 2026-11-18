@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, lstatSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { resolve } from "node:path";
 import { verifySoleAdminApprovalBundle } from "./lib/sole-admin-approval.mjs";
 
@@ -8,9 +8,27 @@ const KEYS = ["--bundle", "--registry", "--registry-sha256", "--expected"];
 
 function readBoundedJson(name) {
   const path = resolve(name);
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.size < 2 || stat.size > 16 * 1024) throw new Error("Invalid evidence file.");
-  return readFileSync(path);
+  const limit = 16 * 1024;
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+  const fd = openSync(path, flags);
+  try {
+    const stat = fstatSync(fd, { bigint: true });
+    // Keep the regular-file and no-symlink contract even where O_NOFOLLOW is unavailable.
+    const named = lstatSync(path, { bigint: true });
+    if (!stat.isFile() || !named.isFile() || stat.dev !== named.dev || stat.ino !== named.ino ||
+        stat.size < 2n || stat.size > BigInt(limit)) throw new Error("Invalid evidence file.");
+    const buffer = Buffer.alloc(limit + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const count = readSync(fd, buffer, total, buffer.length - total, null);
+      if (count === 0) break;
+      total += count;
+    }
+    if (total < 2 || total > limit || BigInt(total) !== stat.size) throw new Error("Invalid evidence file.");
+    return buffer.subarray(0, total);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function readCanonicalJson(name) {
