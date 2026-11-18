@@ -21,7 +21,7 @@ const end = runbook.indexOf("hub_abort() {", start);
 assert.ok(start > 0 && end > start, "protected shell cleanup block must exist");
 const lifecycle = runbook.slice(start, end);
 
-const bash = process.env.BASH_FOR_STAGING_TEST ?? "/bin/bash";
+const bash = "/bin/bash";
 
 test("staging handoff reflects implemented isolated RPs and the complete signed preflight contract", () => {
   assert.doesNotMatch(ledger, /current code hardcodes USER RP ID/u);
