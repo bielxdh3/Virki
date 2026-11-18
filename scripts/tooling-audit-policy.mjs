@@ -41,8 +41,8 @@ export const TEMPORARY_TOOLING_ADVISORY_EXCEPTION = Object.freeze({
 
 const ALLOWED_EXCEPTION_CHAIN = new Set(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.allowedChainPackages);
 
-export function isTemporaryToolingExceptionValid(audit, { productionReachable = false, now = new Date() } = {}) {
-  if (productionReachable) return false;
+export function isTemporaryToolingExceptionValid(audit, { productionReachable, now = new Date() } = {}) {
+  if (productionReachable !== false) return false;
   const createdMs = Date.parse(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.createdAt);
   const expiresMs = Date.parse(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.expiresAt);
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now);
@@ -77,12 +77,12 @@ export function isTemporaryToolingExceptionValid(audit, { productionReachable = 
   });
 }
 
-export function evaluateToolingAudit(audit, { versions = EXPECTED_TOOLING_VERSIONS, productionReachable = false, now = new Date() } = {}) {
+export function evaluateToolingAudit(audit, { versions = EXPECTED_TOOLING_VERSIONS, productionReachable, now = new Date() } = {}) {
   const errors = [];
   const counts = audit?.metadata?.vulnerabilities;
   const vulnerabilities = audit?.vulnerabilities;
 
-  if (productionReachable) errors.push("The tooling advisory is reachable from the production tree.");
+  if (productionReachable === true) errors.push("The tooling advisory is reachable from the production tree.");
   if (audit?.auditReportVersion !== 2) errors.push("Unexpected npm audit report version.");
   const hasZeroVulnerabilities = stable(counts) === stable(expectedCounts) && stable(vulnerabilities) === stable(expectedVulnerabilities);
   const allowedByTemporaryException = !hasZeroVulnerabilities && isTemporaryToolingExceptionValid(audit, { productionReachable, now });
@@ -119,7 +119,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
 }
 
-export function summarizeToolingAuditReport(report, versions, { productionReachable = false, now = new Date() } = {}) {
+export function summarizeToolingAuditReport(report, versions, { productionReachable, now = new Date() } = {}) {
   const result = evaluateToolingAudit(report, { versions, productionReachable, now });
   if (result.ok) return result;
   const counts = report.metadata.vulnerabilities;

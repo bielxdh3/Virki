@@ -178,21 +178,26 @@ test("temporary exception allows only exact dev-only GHSA-fc5q-39xc-vjpf chain b
   const prod = evaluateToolingAudit(report, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: true, now: new Date("2026-11-18T12:00:00Z") });
   assert.equal(prod.ok, false);
 
+  // Negative: omitted productionReachable fails closed for temporary exception
+  const omittedProd = evaluateToolingAudit(report, { versions: EXPECTED_TOOLING_VERSIONS, now: new Date("2026-11-18T12:00:00Z") });
+  assert.equal(omittedProd.ok, false);
+  assert.equal(summarizeToolingAuditReport(report, EXPECTED_TOOLING_VERSIONS, { now: new Date("2026-11-18T12:00:00Z") }).ok, false);
+
   // Negative: different advisory on picomatch
   const otherAdvisory = buildPicomatchExceptionReport();
   otherAdvisory.vulnerabilities.picomatch.via.push({ name: "picomatch", url: "https://github.com/advisories/GHSA-0000-0000-0000", severity: "high", range: "<=4.0.7" });
-  assert.equal(evaluateToolingAudit(otherAdvisory, { versions: EXPECTED_TOOLING_VERSIONS, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
+  assert.equal(evaluateToolingAudit(otherAdvisory, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: false, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
 
   // Negative: unrelated package outside allowed dev chain
   const extraPkg = buildPicomatchExceptionReport();
   extraPkg.vulnerabilities.lodash = { name: "lodash", severity: "high", isDirect: false, via: ["picomatch"] };
   extraPkg.metadata.vulnerabilities.high = 10;
   extraPkg.metadata.vulnerabilities.total = 10;
-  assert.equal(evaluateToolingAudit(extraPkg, { versions: EXPECTED_TOOLING_VERSIONS, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
+  assert.equal(evaluateToolingAudit(extraPkg, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: false, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
 
   // Negative: critical vulnerability present
   const withCritical = buildPicomatchExceptionReport();
   withCritical.metadata.vulnerabilities.critical = 1;
   withCritical.metadata.vulnerabilities.total = 10;
-  assert.equal(evaluateToolingAudit(withCritical, { versions: EXPECTED_TOOLING_VERSIONS, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
+  assert.equal(evaluateToolingAudit(withCritical, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: false, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
 });
