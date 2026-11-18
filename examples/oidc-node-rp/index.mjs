@@ -27,9 +27,13 @@ async function main() {
   try {
     await pool.query('SELECT 1');
     const store = new EncryptedPostgresTransactionStore(pool, key);
+    const accessSecret = configured.RP_ACCESS_CLIENT_SECRET;
+    const cloudflareAccess = configured.RP_ACCESS_CLIENT_ID !== undefined || configured.RP_ACCESS_CLIENT_SECRET !== undefined
+      ? { clientId: configured.RP_ACCESS_CLIENT_ID, clientSecret: accessSecret }
+      : undefined;
     const oidc = await createVirkiOidcClient({
       issuer, clientId: configured.OIDC_CLIENT_ID, clientSecret: confidentialCredential,
-      redirectUri, store
+      redirectUri, store, ...(cloudflareAccess ? { cloudflareAccess } : {})
     });
     const handler = createRpHandler({ oidc, db: pool, origin: origin.origin, issuer, sessionKey: sessionCryptoKey(key),
       revokeOnLogout: configured.RP_REVOKE_ON_LOGOUT !== 'false', generateId: randomRpSessionId });

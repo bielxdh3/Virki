@@ -160,6 +160,117 @@ test("public discovery factory rejects forged signed tokens, not just manually c
   }
 });
 
+test("optional Access backchannel authenticates actual discovery, token, JWKS, userinfo and revocation with pinned transport", async () => {
+  const f = fixture();
+  const accessClientId = "synthetic-access-service-id";
+  const accessClientSecret = "synthetic-access-service-secret";
+  const visited: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const endpoint = new URL(request.url);
+    assert.equal(endpoint.origin, issuer, "Access identity must never reach another origin");
+    assert.equal(request.redirect, "manual", "credentialed requests must never auto-follow redirects");
+    assert.equal(request.headers.get("cf-access-client-id"), accessClientId);
+    assert.equal(request.headers.get("cf-access-client-secret"), accessClientSecret);
+    visited.push(endpoint.pathname);
+    if (endpoint.pathname === "/.well-known/openid-configuration") {
+      return new Response(JSON.stringify(f.metadata), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return f.handleFetch(request.url, { method: request.method,
+      headers: Object.fromEntries(request.headers.entries()), redirect: "manual",
+      body: request.method === "GET" ? undefined : await request.text() });
+  };
+  try {
+    const client = await createVirkiOidcClient({ ...f.settings, store: new MemoryTransactionStore(),
+      cloudflareAccess: { clientId: accessClientId, clientSecret: accessClientSecret } });
+    const browserBinding = randomBytes(32).toString("base64url");
+    const start = await client.beginLogin(browserBinding);
+    assert.doesNotMatch(start.url.href, /synthetic-access-service/u);
+    f.setActiveNonce(start.url.searchParams.get("nonce")!);
+    const callback = new URL(redirectUri);
+    callback.searchParams.set("code", "synthetic-access-code");
+    callback.searchParams.set("state", start.url.searchParams.get("state")!);
+    const verified = await client.completeCallback(callback, browserBinding);
+    assert.equal(verified.identity.sub, "user-1", "Real ES256 verification and PKCE still apply with Access");
+    assert.equal((await client.userInfo(verified.serverOnly.accessToken, "user-1") as { sub: string }).sub, "user-1");
+    await client.revokeAccessToken(verified.serverOnly.accessToken);
+    for (const path of ["/.well-known/openid-configuration", "/token", "/jwks", "/me", "/token/revocation"]) {
+      assert.ok(visited.includes(path), `${path} must carry the server-only Access identity`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Access backchannel fails closed on 302 foreign redirects and cannot send credentials to foreign metadata endpoints", async () => {
+  const f = fixture();
+  const accessClientSecret = "synthetic-access-service-secret";
+  const originalFetch = globalThis.fetch;
+  const visited: string[] = [];
+  const cloudflareAccess = { clientId: "synthetic-access-service-id", clientSecret: accessClientSecret };
+  try {
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      visited.push(request.url);
+      assert.equal(request.redirect, "manual");
+      assert.equal(request.headers.get("cf-access-client-secret"), accessClientSecret);
+      return new Response(null, { status: 302,
+        headers: { location: "https://cross-origin.example.invalid/collect?request=synthetic" } });
+    };
+    await assert.rejects(createVirkiOidcClient({ ...f.settings, store: new MemoryTransactionStore(), cloudflareAccess }),
+      (error: unknown) => error instanceof Error && !error.message.includes(accessClientSecret));
+    assert.deepEqual(visited, [`${issuer}/.well-known/openid-configuration`], "No redirect target is ever requested");
+
+    visited.length = 0;
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      visited.push(request.url);
+      assert.equal(request.headers.get("cf-access-client-secret"), accessClientSecret);
+      const metadata = { ...f.metadata, jwks_uri: "https://cross-origin.example.invalid/jwks" };
+      return new Response(JSON.stringify(metadata), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    await assert.rejects(createVirkiOidcClient({ ...f.settings, store: new MemoryTransactionStore(), cloudflareAccess }),
+      /Untrusted OIDC issuer metadata/u);
+    assert.deepEqual(visited, [`${issuer}/.well-known/openid-configuration`]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Access backchannel refuses token-endpoint redirects and consumes the authorization state", async () => {
+  const f = fixture();
+  const originalFetch = globalThis.fetch;
+  const visited: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    assert.equal(request.redirect, "manual");
+    assert.equal(request.headers.get("cf-access-client-id"), "synthetic-access-id");
+    const endpoint = new URL(request.url);
+    assert.equal(endpoint.origin, issuer);
+    visited.push(endpoint.pathname);
+    if (endpoint.pathname === "/.well-known/openid-configuration") {
+      return new Response(JSON.stringify(f.metadata), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    assert.equal(endpoint.pathname, "/token");
+    return new Response(null, { status: 302, headers: { location: "https://foreign.invalid/collect" } });
+  };
+  try {
+    const client = await createVirkiOidcClient({ ...f.settings, store: new MemoryTransactionStore(),
+      cloudflareAccess: { clientId: "synthetic-access-id", clientSecret: "synthetic-access-secret" } });
+    const binding = randomBytes(32).toString("base64url");
+    const started = await client.beginLogin(binding);
+    const callback = new URL(redirectUri);
+    callback.searchParams.set("state", started.url.searchParams.get("state")!);
+    callback.searchParams.set("code", "synthetic-redirect-code");
+    await assert.rejects(client.completeCallback(callback, binding), /OIDC callback rejected\./u);
+    await assert.rejects(client.completeCallback(callback, binding), /OIDC callback rejected\./u);
+    assert.deepEqual(visited, ["/.well-known/openid-configuration", "/token"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("public factory caches pinned JWKS, rejects fresh unknown kid, and refreshes after rotation cooldown", async () => {
   const f = fixture();
   f.removeKey("fixture-k2"); // K2 is NOT prepublished at client startup.
