@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { evaluateToolingAudit, interpretNpmAuditResult, npmAuditArguments, summarizeToolingAuditReport, EXPECTED_TOOLING_VERSIONS } from "./tooling-audit-policy.mjs";
+import { evaluateToolingAudit, interpretNpmAuditResult, npmAuditArguments, summarizeToolingAuditReport, EXPECTED_TOOLING_VERSIONS, TEMPORARY_TOOLING_ADVISORY_EXCEPTION } from "./tooling-audit-policy.mjs";
 
 const accepted = JSON.parse(readFileSync(new URL("./fixtures/tooling-audit/accepted.json", import.meta.url), "utf8"));
 const rootPackage = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -130,4 +130,69 @@ test("keeps Node engines, type declarations, CI and runtime images on Node 22", 
   );
   assert.ok(imageMajors.length > 0, "runtime Dockerfiles must declare Node.js base images");
   assert.deepEqual([...new Set(imageMajors)], ["22"]);
+});
+
+function buildPicomatchExceptionReport() {
+  const report = copy(accepted);
+  report.vulnerabilities = {
+    picomatch: {
+      name: "picomatch",
+      severity: "high",
+      isDirect: false,
+      via: [{ name: "picomatch", url: "https://github.com/advisories/GHSA-fc5q-39xc-vjpf", severity: "high", range: "<=4.0.7" }]
+    },
+    fdir: { name: "fdir", severity: "high", isDirect: false, via: ["picomatch"] },
+    tinyglobby: { name: "tinyglobby", severity: "high", isDirect: false, via: ["fdir", "picomatch"] },
+    "@typescript-eslint/typescript-estree": { name: "@typescript-eslint/typescript-estree", severity: "high", isDirect: false, via: ["tinyglobby"] },
+    "@typescript-eslint/utils": { name: "@typescript-eslint/utils", severity: "high", isDirect: false, via: ["@typescript-eslint/typescript-estree"] },
+    "@typescript-eslint/parser": { name: "@typescript-eslint/parser", severity: "high", isDirect: false, via: ["@typescript-eslint/typescript-estree"] },
+    "@typescript-eslint/type-utils": { name: "@typescript-eslint/type-utils", severity: "high", isDirect: false, via: ["@typescript-eslint/typescript-estree", "@typescript-eslint/utils"] },
+    "@typescript-eslint/eslint-plugin": { name: "@typescript-eslint/eslint-plugin", severity: "high", isDirect: false, via: ["@typescript-eslint/parser", "@typescript-eslint/type-utils", "@typescript-eslint/utils"] },
+    "typescript-eslint": { name: "typescript-eslint", severity: "high", isDirect: true, via: ["@typescript-eslint/eslint-plugin", "@typescript-eslint/parser", "@typescript-eslint/typescript-estree", "@typescript-eslint/utils"] }
+  };
+  report.metadata.vulnerabilities = { info: 0, low: 0, moderate: 0, high: 9, critical: 0, total: 9 };
+  return report;
+}
+
+test("temporary GHSA-fc5q-39xc-vjpf exception has <=14-day window, risk record, and removal condition", () => {
+  const createdMs = Date.parse(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.createdAt);
+  const expiresMs = Date.parse(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.expiresAt);
+  assert.ok(Number.isFinite(createdMs) && Number.isFinite(expiresMs) && expiresMs > createdMs);
+  assert.ok(expiresMs - createdMs <= 14 * 24 * 60 * 60 * 1000);
+  assert.equal(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.advisoryId, "GHSA-fc5q-39xc-vjpf");
+  assert.ok(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.acceptedRisk.length > 20);
+  assert.ok(TEMPORARY_TOOLING_ADVISORY_EXCEPTION.removalCondition.length > 20);
+});
+
+test("temporary exception allows only exact dev-only GHSA-fc5q-39xc-vjpf chain before expiry", () => {
+  const report = buildPicomatchExceptionReport();
+  const valid = evaluateToolingAudit(report, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: false, now: new Date("2026-11-18T12:00:00Z") });
+  assert.equal(valid.ok, true);
+  assert.equal(valid.temporaryException, "GHSA-fc5q-39xc-vjpf");
+
+  // Negative: expired
+  const expired = evaluateToolingAudit(report, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: false, now: new Date("2026-12-02T00:00:01Z") });
+  assert.equal(expired.ok, false);
+
+  // Negative: reachable from production
+  const prod = evaluateToolingAudit(report, { versions: EXPECTED_TOOLING_VERSIONS, productionReachable: true, now: new Date("2026-11-18T12:00:00Z") });
+  assert.equal(prod.ok, false);
+
+  // Negative: different advisory on picomatch
+  const otherAdvisory = buildPicomatchExceptionReport();
+  otherAdvisory.vulnerabilities.picomatch.via.push({ name: "picomatch", url: "https://github.com/advisories/GHSA-0000-0000-0000", severity: "high", range: "<=4.0.7" });
+  assert.equal(evaluateToolingAudit(otherAdvisory, { versions: EXPECTED_TOOLING_VERSIONS, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
+
+  // Negative: unrelated package outside allowed dev chain
+  const extraPkg = buildPicomatchExceptionReport();
+  extraPkg.vulnerabilities.lodash = { name: "lodash", severity: "high", isDirect: false, via: ["picomatch"] };
+  extraPkg.metadata.vulnerabilities.high = 10;
+  extraPkg.metadata.vulnerabilities.total = 10;
+  assert.equal(evaluateToolingAudit(extraPkg, { versions: EXPECTED_TOOLING_VERSIONS, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
+
+  // Negative: critical vulnerability present
+  const withCritical = buildPicomatchExceptionReport();
+  withCritical.metadata.vulnerabilities.critical = 1;
+  withCritical.metadata.vulnerabilities.total = 10;
+  assert.equal(evaluateToolingAudit(withCritical, { versions: EXPECTED_TOOLING_VERSIONS, now: new Date("2026-11-18T12:00:00Z") }).ok, false);
 });
