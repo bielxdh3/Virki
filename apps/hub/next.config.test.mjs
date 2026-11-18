@@ -11,6 +11,8 @@ test("OIDC rewrites default to Compose DNS for builds and allow loopback for dir
   try {
     const { default: config } = await import("./next.config.mjs");
     const { default: publicConfig } = await import("../public-site/next.config.mjs");
+    assert.equal(config.poweredByHeader, false);
+    assert.equal(publicConfig.poweredByHeader, false);
     const getDiscoveryRewrite = async () => (await config.rewrites()).find((route) => route.source === "/.well-known/:path*");
     const getAuthorizationRewrites = async () => (await config.rewrites()).filter((route) => route.source === "/auth" || route.source === "/auth/:uid");
     const getLogoutRewrites = async () => (await config.rewrites()).filter((route) => route.source === "/session/end" || route.source === "/session/end/:path*");
