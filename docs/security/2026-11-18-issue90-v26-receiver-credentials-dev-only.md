@@ -33,3 +33,10 @@ V23 is an unpublished prerequisite; the GitHub PR is not standalone. Local chain
 - The ordinary NoNewPrivs test requires the parent thread to start at zero and return unchanged, and checks the child inherits one; it passed in the current WSL environment.
 
 Remaining: supervisor identity provisioning/exclusivity, independent review, complete peer authentication and descriptor/namespace assurance, and the unfulfilled issue #90 adversarial acceptance criterion. The inherited fixture socketpair is supervisor provisioned; its peer credentials must not be mistaken for proof of child identity. No adversarial reproduction, production activation, merge or deployment performed.
+
+## Reviewer checklist
+
+- Review the V24, V25 and V26 incremental patches in the PR's Files changed view; the patches are deliberately textual and byte-preserved.
+- The CI Validate job verifies the checked-in patch hashes using the review manifest. This checks artifact integrity only; it does not build or execute the experimental receiver.
+- V23 is an excluded local prerequisite. The published artifacts alone are not a standalone reconstruction of BuildKit.
+- Review the explicit DEV custody contract and its ordinary positive tests, preserving all existing denial paths and production gates. The prior approval criteria are not claimed complete.

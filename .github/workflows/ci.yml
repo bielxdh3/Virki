@@ -112,6 +112,9 @@ jobs:
       - name: Secret scan
         run: npm run secrets:scan
 
+      - name: Verify issue 90 experimental patch integrity
+        run: sha256sum --check docs/security/experiments/issue90-review-patches.sha256
+
       - name: Production control tests
         run: npm run test:production-revision
 
