@@ -25,7 +25,7 @@ test("real role initializer path is regular and rejects simulated leaf, parent o
 });
 
 test("reviewed runtime and migrator profiles accept exact owned operations only", () => {
-  const runtime = { kind: "runtime", owner: OWNER, containers: ["public-run", "hub-run", "issuer-run"],
+  const runtime = { kind: "runtime", owner: OWNER, containers: ["public-run", "hub-run", "hub-native-run", "issuer-run"],
     network: "validation-network" };
   const label = `org.virki.validation=${OWNER}`;
   const revision = "a".repeat(40);
@@ -71,7 +71,7 @@ test("reviewed runtime and migrator profiles accept exact owned operations only"
     "--env", `VIRKI_TOTP_ENCRYPTION_KEY=${"a".repeat(64)}`,
     "--env", "DATABASE_URL=postgresql://virki_app:local-validation-only@database:5432/virki",
     img, "npm", "run", "start", "--workspace", "@virki/issuer"]);
-  check(runtime, "create-hub", ["run", ...base, "--tmpfs",
+  const hubArgs = ["run", ...base, "--tmpfs",
     "/app/apps/hub/.next/cache:rw,noexec,nosuid,nodev,size=128m", "--detach", "--name", "hub-run",
     "--network", runtime.network, "--label", label, "--publish", "127.0.0.1::3001",
     "--env", "NODE_ENV=production",
@@ -84,9 +84,28 @@ test("reviewed runtime and migrator profiles accept exact owned operations only"
     ...["VIRKI_RATE_LIMIT_HASH_SECRET", "VIRKI_AUDIT_HASH_SECRET", "VIRKI_CSRF_SIGNING_KEY",
       "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY"]
       .flatMap((key) => ["--env", `${key}=${"a".repeat(64)}`]),
+    "--env", "VIRKI_HUB_PERIMETER_MODE=access",
     "--env", "CLOUDFLARE_ACCESS_JWT_REQUIRED=true",
     "--env", "CLOUDFLARE_ACCESS_AUDIENCE=runtime-smoke-audience",
-    "--env", "CLOUDFLARE_TEAM_DOMAIN=runtime.example.invalid", img]);
+    "--env", "CLOUDFLARE_TEAM_DOMAIN=runtime.example.invalid", img];
+  check(runtime, "create-hub", hubArgs);
+  const nativeArgs = hubArgs
+    .filter((value, index, values) => !(/^(?:CLOUDFLARE_ACCESS_JWT_REQUIRED|CLOUDFLARE_ACCESS_AUDIENCE|CLOUDFLARE_TEAM_DOMAIN)=/u.test(value) ||
+      (value === "--env" && /^(?:CLOUDFLARE_ACCESS_JWT_REQUIRED|CLOUDFLARE_ACCESS_AUDIENCE|CLOUDFLARE_TEAM_DOMAIN)=/u.test(values[index + 1] ?? ""))))
+    .map((value) => value === "hub-run" ? "hub-native-run" : value === "VIRKI_HUB_PERIMETER_MODE=access" ? "VIRKI_HUB_PERIMETER_MODE=native" : value);
+  check(runtime, "create-native-hub", nativeArgs);
+  const nativeImageIndex = nativeArgs.indexOf(img);
+  for (const injection of [
+    ["--env", "CLOUDFLARE_ACCESS_JWT_REQUIRED=false"],
+    ["--env", "CLOUDFLARE_ACCESS_AUDIENCE=runtime-smoke-audience"],
+    ["--env", "CLOUDFLARE_TEAM_DOMAIN=runtime.example.invalid"],
+    ["--env", "VIRKI_HUB_PERIMETER_MODE=access"],
+    ["--network", "host"],
+    ["--privileged"]
+  ]) assert.throws(() => requireOwnedDisposableDockerMutation({ ...runtime, stage: "create-native-hub",
+    args: [...nativeArgs.slice(0, nativeImageIndex), ...injection, ...nativeArgs.slice(nativeImageIndex)] }), /refused/u);
+  assert.throws(() => requireOwnedDisposableDockerMutation({ ...runtime, stage: "create-native-hub",
+    args: nativeArgs.map((value) => value === "hub-native-run" ? "hub-run" : value) }), /refused/u);
   check(runtime, "run-assertion", ["run", "--rm", "--name", "public-run", "--label", label,
     "--network", "none", ...base, "--entrypoint", "node", img, "-e", pinnedRuntimeAssertion]);
   assert.throws(() => requireOwnedDisposableDockerMutation({ ...runtime, stage: "run-assertion",

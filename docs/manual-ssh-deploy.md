@@ -2,7 +2,7 @@
 
 SSH already encrypts the transport. **For an owner-operated, image-only staging update**, use the installed Docker/Compose tools. No custom SSH protocol, GHCR, release server, or new daemon is needed.
 
-This procedure is **staging-only**, for a previously tested image whose change needs **no database migration**. It does **not** bypass production CI/approval, backup/restore, schema-migration, or Cloudflare Access requirements. Do not use it for a new first install or a schema-changing release.
+This procedure is **staging-only**, for a previously tested image whose change needs **no database migration**. It does **not** bypass production CI/approval, backup/restore, schema-migration, or the selected ADMIN perimeter. In the existing `access` deployment that still includes Cloudflare Access; in approved isolated `native` staging it means Virki ADMIN login and MFA without external Access. Do not use it for a new first install or a schema-changing release.
 
 ## 1. Prepare the image (skip if the exact image is already on staging)
 
@@ -54,10 +54,10 @@ ssh stage-vm 'sudo docker ps --filter label=com.docker.compose.project=virki-man
 ssh stage-vm 'sudo docker inspect --format={{.Image}}:{{.State.Health.Status}} virki-manual-staging-hub-1'
 ```
 
-Require the exact new Hub image ID, Hub health `healthy`, and unchanged identities for PostgreSQL, issuer, public site, cleanup and email workers. Then verify real external HTTPS/OIDC/Access login separately. An interrupted command means **inspect first, never retry blindly**. A DB-changing release needs an independently verified backup/restore and a separate migration procedure; SSH encryption alone does not make migrations safe.
+Require the exact new Hub image ID, Hub health `healthy`, and unchanged identities for PostgreSQL, issuer, public site, cleanup and email workers. Then verify real external HTTPS/OIDC and **the configured** ADMIN perimeter separately. In native mode, the external route must reach Virki login directly with no Cloudflare Access challenge; see [native cutover](native-admin-cutover.md). An interrupted command means **inspect first, never retry blindly**. A DB-changing release needs an independently verified backup/restore and a separate migration procedure; SSH encryption alone does not make migrations safe.
 
 ## 4. Authenticated staging acceptance (separately authorized)
 
-First have the owner sign into the existing staging Hub via Cloudflare Access and complete ADMIN e-mail MFA. Without bypassing security elevation, use the **existing** `/admin/accounts` UI to invite a disposable USER (the user accepts the e-mail invitation), `/admin/connections` to register an HTTPS OIDC relying party with an exact callback URL, and `/admin/access` to grant that active USER access to that connection. **Creating any of these three resources requires specific owner approval; this guide does not authorize it.** Store the one-time OIDC client secret only in the relying party's own private configuration, never in logs or Git.
+First have the owner sign into the staging Hub through its selected perimeter (`native` uses only Virki; legacy `access` also uses Cloudflare Access), and complete mandatory ADMIN MFA. Without bypassing security elevation, use the **existing** `/admin/accounts` UI to invite a disposable USER (the user accepts the e-mail invitation), `/admin/connections` to register an HTTPS OIDC relying party with an exact callback URL, and `/admin/access` to grant that active USER access to that connection. **Creating any of these three resources requires specific owner approval; this guide does not authorize it.** Store the one-time OIDC client secret only in the relying party's own private configuration, never in logs or Git.
 
 The repository's existing `examples/oidc-node-rp` supplies a tested PKCE client; its `.env.example` documents the HTTPS callback and separate RP database. Once the user, client and grant exist, use that RP to verify the authorization-code+S256 PKCE login, one code-to-token exchange, issuer/JWKS/nonce validation and rejection of an invalid redirect URI. Do not claim staging PKCE passed from CI fixtures alone; authenticated browser evidence is still required.

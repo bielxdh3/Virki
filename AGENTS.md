@@ -13,7 +13,7 @@ Virki has five responsibilities: identity, authentication and SSO, security, pro
 
 - `biel.dev.br` is a minimal public page with a portal entry.
 - `portal.biel.dev.br` is the authenticated USER portal and OIDC issuer surface. A user sees only enabled projects with an active explicit grant.
-- `hub.biel.dev.br` is the ADMIN control plane. Cloudflare Access is the outer boundary; Virki authentication and authorization are the inner boundary.
+- `hub.biel.dev.br` is the ADMIN control plane. The owner-approved target is `native` mode: Cloudflare Tunnel transports HTTPS traffic, and Virki alone authenticates and authorizes ADMIN access (login, required ADMIN MFA, sessions, elevation, CSRF, rate limits, and recovery). Do not require a second external authentication gate (Cloudflare Access, VPN, or mTLS) for `native`. Existing `access` mode continues to require Cloudflare Access until an independently validated and separately authorized cutover.
 - The administration navigation contains only Contas, Acessos, Segurança, Auditoria, and Conexões.
 
 ## Identity and authorization
@@ -47,9 +47,9 @@ Virki has five responsibilities: identity, authentication and SSO, security, pro
 - Run `npm run preflight:prod` before any production mutation. Require stable SSH probes, the expected host, remote Docker, the production identity marker, and the exact accepted revision. Do not use a local or WSL fallback.
 - Deploy only a clean `main` revision matching `origin/main` after exact-SHA CI is green.
 - Before a database change, create a production backup outside the repository, restore it to a disposable database, and validate the migration plan against that restore. Apply committed Prisma migrations; never use `prisma db push` in production.
-- Preserve persistent volumes. Do not delete Docker volumes, expose database ports, weaken Cloudflare Access, or change router/firewall settings.
+- Preserve persistent volumes. Do not delete Docker volumes, expose database ports, bypass Cloudflare Access while `access` mode is active, or change router/firewall settings. This policy update does not authorize a `native` production cutover.
 - Keep deManage isolated. Do not inspect its data or change its containers, networks, volumes, or services.
-- Cloudflare DNS, Tunnel, and Access settings are external state. Verify the public portal route and ensure the ADMIN host remains protected without imposing its Access policy on the USER portal.
+- Cloudflare DNS, Tunnel, and Access settings are external state. Verify the public portal route and ensure the ADMIN host is protected by the selected mode without imposing the ADMIN Access policy on the USER portal. External changes require separate owner authorization.
 
 ## Documentation and validation
 

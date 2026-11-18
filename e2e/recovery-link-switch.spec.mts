@@ -88,6 +88,11 @@ test("approved ADMIN recovery link switch activates only the confirmed candidate
     const page = await context.newPage();
     await addCloudflareAccessHeader(page);
     await page.goto(first.actionUrl);
+    await expect(page.getByRole("button", { name: "Continuar com este link", exact: true })).toBeVisible();
+    expect((await context.cookies(hubUrl)).find(cookie => cookie.name === recoveryCookieName)?.value ?? "").toBe("");
+    expect((await context.cookies(hubUrl)).find(cookie => cookie.name === recoveryCandidateCookieName)?.value)
+      .toBe(first.requestKey);
+    await page.getByRole("button", { name: "Continuar com este link", exact: true }).click();
     await expect(page.getByLabel("Código de verificação", { exact: true })).toBeVisible();
     const firstActive = (await context.cookies(hubUrl)).find((cookie) => cookie.name === recoveryCookieName);
     expect(firstActive?.value).toBe(first.requestKey);

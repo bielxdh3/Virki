@@ -12,11 +12,12 @@ const CAPACITY_WARNING_INTERVAL_MS = 30_000;
  */
 export function createBoundedAccessDenialAuditWriter(
   write: (input: AuditLogInput) => Promise<void>,
-  options: { waitMs?: number; maxPending?: number; warn?: (message: string) => void } = {}
+  options: { waitMs?: number; maxPending?: number; warn?: (message: string) => void; label?: string } = {}
 ): (input: AuditLogInput) => Promise<void> {
   const waitMs = options.waitMs ?? AUDIT_WAIT_MS;
   const maxPending = options.maxPending ?? MAX_PENDING_AUDITS;
   const warn = options.warn ?? console.warn;
+  const label = options.label ?? "Hub Access";
   let pending = 0;
   let lastCapacityWarning = Number.NEGATIVE_INFINITY;
 
@@ -25,7 +26,7 @@ export function createBoundedAccessDenialAuditWriter(
       const now = Date.now();
       if (now - lastCapacityWarning >= CAPACITY_WARNING_INTERVAL_MS) {
         lastCapacityWarning = now;
-        warn("Hub Access denial audit capacity reached; denial remains enforced.");
+        warn(`${label} denial audit capacity reached; denial remains enforced.`);
       }
       return;
     }
@@ -33,7 +34,7 @@ export function createBoundedAccessDenialAuditWriter(
     pending += 1;
     const writing = Promise.resolve()
       .then(() => write(input))
-      .catch(() => { warn("Hub Access denial audit persistence failed."); })
+      .catch(() => { warn(`${label} denial audit persistence failed.`); })
       .finally(() => { pending -= 1; });
 
     let timer: ReturnType<typeof setTimeout> | undefined;

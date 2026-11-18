@@ -18,8 +18,12 @@ const ENV_NAMES = {
   "create-hub": new Set(["NODE_ENV", "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "VIRKI_HUB_HOSTNAME",
     "VIRKI_PORTAL_HOSTNAME", "VIRKI_OIDC_PROXY_URL", "DATABASE_URL", "VIRKI_RATE_LIMIT_HASH_SECRET",
     "VIRKI_AUDIT_HASH_SECRET", "VIRKI_CSRF_SIGNING_KEY", "VIRKI_TOTP_ENCRYPTION_KEY",
-    "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY", "VIRKI_HUB_PERIMETER_MODE", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
     "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN"]),
+  "create-native-hub": new Set(["NODE_ENV", "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "VIRKI_HUB_HOSTNAME",
+    "VIRKI_PORTAL_HOSTNAME", "VIRKI_OIDC_PROXY_URL", "DATABASE_URL", "VIRKI_RATE_LIMIT_HASH_SECRET",
+    "VIRKI_AUDIT_HASH_SECRET", "VIRKI_CSRF_SIGNING_KEY", "VIRKI_TOTP_ENCRYPTION_KEY",
+    "VIRKI_EMAIL_OUTBOX_KEY", "VIRKI_OIDC_ADAPTER_KEY", "VIRKI_HUB_PERIMETER_MODE"]),
   "create-database": new Set(["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
     "VIRKI_RUNTIME_DB_PASSWORD", "VIRKI_MIGRATOR_DB_PASSWORD",
     "VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD"]),
@@ -37,6 +41,7 @@ const FIXED_ENV = new Map([
   ["OIDC_ISSUER_PORT", "3003"],
   ["VIRKI_OIDC_ISSUER", "https://portal.biel.dev.br"],
   ["DATABASE_URL", "postgresql://virki_app:local-validation-only@database:5432/virki"],
+  // The value is pinned per-stage instead of being shared with all profiles.
   ["CLOUDFLARE_ACCESS_JWT_REQUIRED", "true"],
   ["CLOUDFLARE_ACCESS_AUDIENCE", "runtime-smoke-audience"],
   ["CLOUDFLARE_TEAM_DOMAIN", "runtime.example.invalid"],
@@ -54,6 +59,9 @@ function validEnvArgument(value, stage) {
     return body === null;
   }
   if (body === null) return false;
+  if (name === "VIRKI_HUB_PERIMETER_MODE") {
+    return body === (stage === "create-native-hub" ? "native" : "access");
+  }
   if (FIXED_ENV.has(name)) return body === FIXED_ENV.get(name);
   if (HEX_SECRETS.has(name)) return /^[a-f0-9]{64}$/u.test(body);
   if (name === "VIRKI_OIDC_COOKIE_KEY") return /^[A-Za-z0-9_-]{43}$/u.test(body);
@@ -124,8 +132,9 @@ export function requireOwnedDisposableDockerMutation({ kind, owner, containers, 
 
   const profiles = kind === "runtime" ? {
     "create-public": { name: containers[0], image: "production", network, command: ["npm", "run", "start", "--workspace", "@virki/public-site"], publish: "127.0.0.1::3000", detach: true },
-    "create-issuer": { name: containers[2], image: "production", network, command: ["npm", "run", "start", "--workspace", "@virki/issuer"], alias: "oidc-issuer", detach: true },
+    "create-issuer": { name: containers.length === 4 ? containers[3] : containers[2], image: "production", network, command: ["npm", "run", "start", "--workspace", "@virki/issuer"], alias: "oidc-issuer", detach: true },
     "create-hub": { name: containers[1], image: "production", network, command: [], publish: "127.0.0.1::3001", detach: true },
+    "create-native-hub": { name: containers.length === 4 ? containers[2] : undefined, image: "production", network, command: [], publish: "127.0.0.1::3001", detach: true },
     "run-assertion": { name: containers[0], image: "production", network: "none", assertion: true, temporary: true },
   } : {
     "create-database": { name: containers[0], image: "postgres", network, alias: /^database-[a-f0-9-]{36}$/u, detach: true, volume: true },
@@ -167,7 +176,7 @@ export function requireOwnedDisposableDockerMutation({ kind, owner, containers, 
   if (!privileged && (flags.has("--read-only") || list("--cap-drop").length ||
       list("--security-opt").length || list("--tmpfs").length)) refuse();
   const requiredTmpfs = privileged ? [ROOT_TMPFS,
-    ...(stage === "create-public" ? [PUBLIC_CACHE_TMPFS] : stage === "create-hub" ? [HUB_CACHE_TMPFS] : [])] : [];
+    ...(stage === "create-public" ? [PUBLIC_CACHE_TMPFS] : ["create-hub", "create-native-hub"].includes(stage) ? [HUB_CACHE_TMPFS] : [])] : [];
   if (list("--tmpfs").some((value) => !TMPFS.has(value)) ||
       !same([...list("--tmpfs")].sort(), requiredTmpfs.sort()) ||
       single("--publish") !== (profile.publish ?? null) ||

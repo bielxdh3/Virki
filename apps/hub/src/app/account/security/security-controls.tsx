@@ -2,8 +2,34 @@
 
 import { useSensitiveFormAction } from "../../../lib/use-sensitive-form-action";
 import { confirmTotpAction, disableTotpAction, regenerateRecoveryCodesAction, revokeOtherAccountSessionsAction, startTotpAction, type AccountSecurityState } from "./actions";
+import { confirmRecoveryEmailRebindAction, startRecoveryEmailRebindAction, type RecoveryEmailRebindState } from "./actions";
 
 const initial: AccountSecurityState = { status: "idle" };
+
+const initialRebind: RecoveryEmailRebindState = { status: "idle" };
+
+export function RecoveryEmailRebindControl({ csrf, oldEmail }: { csrf: string; oldEmail: string }) {
+  const [started, startAction, starting] = useSensitiveFormAction(startRecoveryEmailRebindAction, initialRebind);
+  const [verified, verifyAction, verifying] = useSensitiveFormAction(confirmRecoveryEmailRebindAction, initialRebind);
+  return <section className="surface" aria-labelledby="recovery-email-rebind-title">
+    <h2 id="recovery-email-rebind-title">Recuperar acesso ao e-mail da conta</h2>
+    <p>Seu acesso foi recuperado. Se perdeu a caixa <strong>{oldEmail}</strong>, confirme um novo endereço agora. Esta opção expira 20 minutos após a recuperação. O código será enviado somente para o e-mail novo.</p>
+    <form action={startAction} className="form-stack">
+      <input type="hidden" name="csrfToken" value={csrf} />
+      <label>Novo endereço de e-mail<input name="newEmail" type="email" autoComplete="email" maxLength={254} required /></label>
+      <button type="submit" disabled={starting}>{starting ? "Enviando…" : "Enviar código ao novo endereço"}</button>
+      {started.status === "started" && <p className="form-success" role="status">Se o endereço estiver disponível e o envio configurado, o código foi solicitado.</p>}
+      {started.status === "error" && <p className="form-error" role="alert">Não foi possível solicitar o código. Confira o e-mail e tente novamente.</p>}
+    </form>
+    <form action={verifyAction} className="form-stack">
+      <input type="hidden" name="csrfToken" value={csrf} />
+      <label>Código recebido no novo e-mail<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} pattern="[0-9]{6}" required /></label>
+      <button type="submit" disabled={verifying}>{verifying ? "Confirmando…" : "Confirmar novo e-mail"}</button>
+      {verified.status === "error" && <p className="form-error" role="alert">Código inválido, expirado ou sessão encerrada.</p>}
+    </form>
+    <p className="muted">Após confirmar, você será desconectado. Use o novo endereço e a senha recuperada para entrar.</p>
+  </section>;
+}
 
 export function TotpControls({ csrf, active, pending }: { csrf: string; active: boolean; pending: boolean }) {
   const [enrollment, startAction, starting] = useSensitiveFormAction(startTotpAction, initial);

@@ -1,0 +1,48 @@
+# Manual, operator-approved *isolated staging* override ONLY. Do not include
+# this file in routine production/stage actions. Stage must keep worker OFF.
+# The operator must independently prove the dedicated worker role, SMTP relay
+# restrictions, test allowlist and quota before any standalone worker start.
+# Never silently reuse the base Compose default project namespace. An explicit
+# -p or COMPOSE_PROJECT_NAME overrides this, so the operator must also verify
+# the final rendered project name against the production namespace.
+name: ${VIRKI_STAGING_COMPOSE_PROJECT:?approved isolated staging project name required}
+
+services:
+  email-worker:
+    # Omit from an unqualified staging `docker compose up`. The operator
+    # must select this service/profile explicitly after receiving approval.
+    profiles: ["staging-email-worker-manual"]
+    # The production parent depends on its bundled postgres service. An
+    # explicit `up email-worker` must not start that service through dependency
+    # resolution. The base still declares a volume and may prepare resources:
+    # prefer the standalone worker-only file for isolated staging acceptance.
+    depends_on: !reset []
+    # Override production's unless-stopped: manual staging sends must not
+    # resume after worker failure or a Docker daemon/host restart.
+    restart: "no"
+    environment:
+      DATABASE_URL: ${VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?isolated staging email-worker URL and role required}
+      VIRKI_EMAIL_WORKER_SCOPED_ROLE: required
+      # A Compose override merges environment maps: omitting these values would
+      # silently inherit the production worker's SMTP settings and outbox key.
+      # Every credential/config source must be explicitly staging-scoped.
+      VIRKI_EMAIL_TRANSPORT: smtp
+      VIRKI_EMAIL_OUTBOX_KEY: ${VIRKI_STAGING_EMAIL_OUTBOX_KEY:?isolated staging outbox key required}
+      VIRKI_EMAIL_SMTP_HOST: ${VIRKI_STAGING_EMAIL_SMTP_HOST:?staging SMTP host required}
+      VIRKI_EMAIL_SMTP_PORT: ${VIRKI_STAGING_EMAIL_SMTP_PORT:?staging SMTP port required}
+      VIRKI_EMAIL_SMTP_SECURE: ${VIRKI_STAGING_EMAIL_SMTP_SECURE:?staging SMTP TLS mode required}
+      VIRKI_EMAIL_SMTP_USER: ${VIRKI_STAGING_EMAIL_SMTP_USER:?staging SMTP username required}
+      VIRKI_EMAIL_SMTP_PASSWORD: ${VIRKI_STAGING_EMAIL_SMTP_PASSWORD:?staging SMTP password required}
+      VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: ${VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST:?approved single test recipient required}
+      VIRKI_EMAIL_MIN_SEND_INTERVAL_MS: ${VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS:?approved staging interval required}
+      VIRKI_EMAIL_FROM: ${VIRKI_STAGING_EMAIL_FROM:?approved staging sender required}
+      VIRKI_EMAIL_REPLY_TO: ${VIRKI_STAGING_EMAIL_REPLY_TO:-}
+
+  hub:
+    # Only when this optional worker override is explicitly loaded: the Hub
+    # must target the isolated staging DB and encrypt for the same worker key.
+    # This is NOT a complete provisioning override for the whole stack.
+    environment:
+      DATABASE_URL: ${VIRKI_STAGING_HUB_DATABASE_URL:?isolated staging Hub URL required}
+      VIRKI_EMAIL_OUTBOX_KEY: ${VIRKI_STAGING_EMAIL_OUTBOX_KEY:?isolated staging outbox key required}
+      VIRKI_EMAIL_TRANSPORT: smtp

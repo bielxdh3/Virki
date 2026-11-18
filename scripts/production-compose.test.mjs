@@ -36,14 +36,41 @@ test("production exposes only the public site and loopback application surfaces"
   assert.doesNotMatch(productionCompose, /VIRKI_INTAKE|apps\/intake/iu);
 });
 
-test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared environment", () => {
+test("the SMTP worker alone receives its configurable provider send interval with unchanged 250ms default", () => {
+  const worker = serviceBlock(productionCompose, "email-worker");
+  assert.match(worker, /VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:\s*\$\{VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:-250\}/u);
+  assert.equal((worker.match(/^\s+VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:/gmu) ?? []).length, 1);
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup", "migrate", "first-admin-bootstrap", "postgres"]) {
+    assert.doesNotMatch(serviceBlock(productionCompose, service), /^\s+VIRKI_EMAIL_MIN_SEND_INTERVAL_MS:/mu,
+      `send spacing belongs only to the worker, never to ${service}`);
+  }
+  assert.match(environmentTemplate, /^VIRKI_EMAIL_MIN_SEND_INTERVAL_MS=250$/mu);
+  const workerLoop = readFileSync(path.join(repositoryRoot, "packages", "auth", "src", "email-worker-loop.ts"), "utf8");
+  assert.match(workerLoop, /EMAIL_WORKER_DEFAULT_SEND_INTERVAL_MS = 250/u,
+    "new Compose default must match the existing worker behavior");
+  assert.match(workerLoop, /MAX_SEND_INTERVAL_MS = 60_000/u,
+    "effective maximum is bounded for staging rate-budget review");
+});
+
+test("production Hub requires explicit perimeter selection and native never depends on Access-only variables", () => {
   const hub = serviceBlock(productionCompose, "hub");
   const issuer = serviceBlock(productionCompose, "oidc-issuer");
+  assert.match(hub, /VIRKI_HUB_PERIMETER_MODE:\s*\$\{VIRKI_HUB_PERIMETER_MODE:\?/u,
+    "Production requires a deliberate access or native selection; no implicit external login default");
+  assert.doesNotMatch(environmentTemplate, /^VIRKI_HUB_PERIMETER_MODE=/mu,
+    "Do not inherit an ADMIN perimeter cutover from the development environment template");
+  assert.doesNotMatch(issuer, /VIRKI_HUB_PERIMETER_MODE/u,
+    "Hub perimeter mode must not be forwarded to the OIDC issuer");
   assert.match(hub, /VIRKI_PASSKEYS_ENABLED:\s*\$\{VIRKI_PASSKEYS_ENABLED:-false\}/u,
     "Production Hub must receive the explicitly enabled passkey rollout flag, defaulting to disabled");
-  assert.match(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*"true"/u);
-  assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:\?/u);
-  assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:\?/u);
+  assert.match(hub, /VIRKI_ADMIN_PASSKEYS_ENABLED:\s*\$\{VIRKI_ADMIN_PASSKEYS_ENABLED:-false\}/u,
+    "Production Hub must receive the separate ADMIN passkey rollout flag, defaulting to disabled");
+  assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED|VIRKI_PRODUCTION_ADMIN_ACCESS_REQUIRED/u,
+    "Native mode must never depend on a second JWT opt-out");
+  assert.match(hub, /CLOUDFLARE_ACCESS_AUDIENCE:\s*\$\{CLOUDFLARE_ACCESS_AUDIENCE:-\}/u,
+    "Access-only audience is optional for native mode");
+  assert.match(hub, /CLOUDFLARE_TEAM_DOMAIN:\s*\$\{CLOUDFLARE_TEAM_DOMAIN:-\}/u,
+    "Access-only issuer is optional for native mode");
   assert.match(hub, /path: \.\.\/\.env\.oidc-data/u);
   assert.match(hub, /required: true/u);
   assert.match(issuer, /path: \.\.\/\.env\.oidc(?:\s|$)/u);
@@ -52,8 +79,17 @@ test("hub keeps Cloudflare Access mandatory and OIDC secrets outside shared envi
   assert.match(issuer, /VIRKI_RATE_LIMIT_HASH_SECRET:\s*\$\{VIRKI_RATE_LIMIT_HASH_SECRET:\?/u);
   assert.match(hub, /VIRKI_AUDIT_HASH_SECRET:\s*\$\{VIRKI_AUDIT_HASH_SECRET:\?/u);
   assert.match(hub, /VIRKI_CSRF_SIGNING_KEY:\s*\$\{VIRKI_CSRF_SIGNING_KEY:\?/u);
+  assert.match(hub, /VIRKI_EMAIL_TRANSPORT:\s*\$\{VIRKI_EMAIL_TRANSPORT:-\}/u,
+    "Hub needs only the non-secret enqueue transport mode");
+  assert.doesNotMatch(hub, /VIRKI_EMAIL_SMTP_HOST|VIRKI_EMAIL_SMTP_USER|VIRKI_EMAIL_SMTP_PASSWORD|VIRKI_EMAIL_FROM/u,
+    "SMTP provider configuration belongs exclusively to email-worker");
+  const emailWorker = serviceBlock(productionCompose, "email-worker");
+  for (const secret of ["VIRKI_EMAIL_SMTP_HOST", "VIRKI_EMAIL_SMTP_USER", "VIRKI_EMAIL_SMTP_PASSWORD", "VIRKI_EMAIL_FROM"]) {
+    assert.match(emailWorker, new RegExp(`^\\s+${secret}:`, "mu"));
+  }
   assert.doesNotMatch(productionCompose, /VIRKI_OIDC_SIGNING_JWKS:\s*\$\{/u);
-  assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{/u);
+  assert.doesNotMatch(hub, /CLOUDFLARE_ACCESS_JWT_REQUIRED:\s*\$\{CLOUDFLARE_ACCESS_JWT_REQUIRED/u,
+    "Do not inherit the development-only Access flag into production");
 });
 
 test("production containers receive only their scoped secret files", () => {
@@ -167,6 +203,15 @@ test("production workers and database retain restart policy without published po
   assert.match(readFileSync(path.join(repositoryRoot, "infra", "Dockerfile.prod"), "utf8"), /node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402/u);
 });
 
+test("staging application services cannot implicitly activate the email worker as a dependency", () => {
+  // Compose starts depends_on services even when the worker is omitted from
+  // the explicit `stage` list. Fence those accidental dependency edges too.
+  for (const service of ["public-site", "hub", "oidc-issuer", "session-cleanup"]) {
+    assert.doesNotMatch(serviceBlock(productionCompose, service), /^\s+(?:email-worker:|- email-worker(?:\s|$))/mu,
+      `${service} must not make staging drain the unapproved mail outbox`);
+  }
+});
+
 test("runtime, migrator, and PostgreSQL bootstrap credentials stay separated", () => {
   const postgres = serviceBlock(productionCompose, "postgres");
   const developmentPostgres = serviceBlock(developmentCompose, "postgres");
@@ -243,4 +288,44 @@ test("oidc-issuer is reachable only on the internal Compose network", () => {
   }
   assert.match(productionCompose, /VIRKI_OIDC_PROXY_URL:\s*http:\/\/oidc-issuer:3003/u);
   assert.doesNotMatch(cloudflareCompose, /^\s{4}ports:/mu);
+});
+
+test("the actual OCI runtime smoke exercises native ADMIN login, recovery, denial, and legacy Access on distinct containers", () => {
+  const source = readFileSync(path.join(repositoryRoot, "scripts", "production-runtime-smoke.mjs"), "utf8");
+  assert.match(source, /hubNative: `virki-runtime-hub-native-\$\{suffix\}`/u);
+  assert.match(source, /session\.mutate\("create-native-hub"/u);
+  assert.match(source, /"--env", "VIRKI_HUB_PERIMETER_MODE=native"/u);
+  assert.match(source, /"--env", "VIRKI_HUB_PERIMETER_MODE=access"/u);
+  const nativeStart = source.indexOf('session.mutate("create-native-hub"');
+  const nativeEnd = source.indexOf("const nativeHubPort =", nativeStart);
+  assert.ok(nativeStart >= 0 && nativeEnd > nativeStart, "native OCI runtime smoke must create its own disposable Hub");
+  const nativeRun = source.slice(nativeStart, nativeEnd);
+  assert.doesNotMatch(nativeRun, /CLOUDFLARE_ACCESS_JWT_REQUIRED|CLOUDFLARE_ACCESS_AUDIENCE|CLOUDFLARE_TEAM_DOMAIN/u,
+    "the real native image must start without any Access setting");
+  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/login`, 200/u);
+  assert.match(source, /nativeLogin\.body\.includes\('name="password"'\)/u,
+    "the native OCI probe must render the actual password-login form");
+  assert.match(source, /nativeLogin\.body\.includes\(csrfField\)/u,
+    "the native OCI login form must carry a CSRF field");
+  // The runtime image fixture deliberately contains no PostgreSQL. Bare
+  // /recover queries the active ADMIN count; the no-cookie legacy-link view
+  // exercises the actual recovery page without requiring an absent database.
+  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/recover\?request=oci-smoke`, 200/u);
+  assert.doesNotMatch(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\/recover`, 200/u);
+  assert.match(source, /nativeRecovery\.body\.includes\("Recuperar acesso administrativo"\)/u,
+    "the no-database OCI probe must still render the real Virki recovery screen");
+  assert.match(source, /nativeRecovery\.body\.includes\('name="requestKey"'\)/u,
+    "the no-database OCI recovery branch must expose the actual link-open form");
+  assert.match(source, /nativeRecovery\.body\.includes\(csrfField\)/u,
+    "the recovery form must carry a CSRF field even without the DB fixture");
+  const routes = source.match(/const nativeAdminPaths = \[([\s\S]*?)\];/u)?.[1];
+  assert.ok(routes, "the OCI smoke must enumerate its protected ADMIN routes");
+  for (const path of ["/admin/accounts", "/admin/audit", "/admin/security", "/admin/access", "/admin/connections"]) {
+    assert.ok(routes.includes(JSON.stringify(path)), `the real OCI smoke must probe ${path}`);
+  }
+  assert.match(source, /for \(const adminPath of nativeAdminPaths\)/u);
+  assert.match(source, /assertStatus\(`http:\/\/127\.0\.0\.1:\$\{nativeHubPort\}\$\{adminPath\}`, 307/u);
+  assert.match(source, /isCanonicalNativeAdminRedirect\(nativeAdmin\.headers\.location, `https:\/\/\$\{hubHost\}`, adminPath\)/u);
+  assert.match(source, /"cf-access-jwt-assertion": "forged"/u,
+    "the native OCI image must ignore an untrusted Access assertion rather than requiring it");
 });

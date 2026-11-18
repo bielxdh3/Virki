@@ -42,7 +42,12 @@ if (parsed.hostname !== "127.0.0.1" || parsed.username !== "virki_runtime_test")
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), "--test", "--test-concurrency=1", ...files], {
+const result = spawnSync(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), "--test",
+  // The disposable PG18 runner inspects exact TAP test names and skips. Node22
+  // otherwise defaults to the pretty/spec reporter on Windows, which cannot
+  // satisfy that security acceptance gate even when every test succeeds.
+  ...(process.env.VIRKI_INTEGRATION_EXACT_TAP === "required" ? ["--test-reporter=tap"] : []),
+  "--test-concurrency=1", ...files], {
   cwd: root,
   env: {
     ...process.env,

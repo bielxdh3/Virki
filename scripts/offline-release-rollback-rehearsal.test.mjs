@@ -79,7 +79,7 @@ test("failed final health retains maintenance, stops routed services and keeps p
   writeFileSync(marker, "verified disposable backup\n");
   writeFileSync(path.join(f.root, ".virki-maintenance"), `revision=${candidate}\n`);
   const result = runProductionShellRehearsal(f,
-    ["read_migration_guard", "assert_original_migration_backup", "recover_interrupted_verified_resume", "resume_services", "activate_source", "stop_routed_services"],
+    ["read_migration_guard", "assert_original_migration_backup", "recover_interrupted_verified_resume", "resume_services", "activate_source", "stop_routed_services", "assert_production_mail_worker_ready"],
     "resume_services", { failure: "health", revisions: candidate });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /simulated health failure/u);
@@ -92,6 +92,21 @@ test("failed final health retains maintenance, stops routed services and keeps p
   assert.equal(readlinkSync(path.join(f.root, "current")), `releases/${candidate}`);
   assert.equal(readFileSync(path.join(f.root, ".virki-deploy-revision"), "utf8"), `${prior}\n`);
   assert.match(result.operations, /compose stop cloudflared/u);
+  assert.doesNotMatch(result.operations, /compose up .*cloudflared/u);
+  assertNoExternalMutation(result);
+});
+
+test("restarting SMTP worker denies verified resume before Tunnel and keeps recovery maintenance", linuxRehearsalOnly, (t) => {
+  const f = disposableReleaseFixture(t, prior, candidate);
+  writeFileSync(path.join(f.root, ".virki-migration-verification"), "verified disposable backup\n");
+  writeFileSync(path.join(f.root, ".virki-maintenance"), `revision=${candidate}\n`);
+  const result = runProductionShellRehearsal(f,
+    ["read_migration_guard", "assert_original_migration_backup", "recover_interrupted_verified_resume", "resume_services", "activate_source", "stop_routed_services", "assert_production_mail_worker_ready"],
+    "resume_services", { failure: "worker-restarting", revisions: candidate });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Production email-worker is stopped, restarting or has crashed/u);
+  assert.equal(existsSync(path.join(f.root, ".virki-maintenance")), true);
+  assert.match(result.operations, /docker inspect/u);
   assert.doesNotMatch(result.operations, /compose up .*cloudflared/u);
   assertNoExternalMutation(result);
 });

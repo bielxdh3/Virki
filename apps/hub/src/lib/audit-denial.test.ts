@@ -4,6 +4,40 @@ import { hashAuditSessionReference, hashSessionToken, SESSION_COOKIE_NAME } from
 import { prisma } from "@virki/database";
 import * as auditDenial from "./audit-denial";
 import { recordSecurityDenial } from "./audit-denial";
+import { createBoundedDenialSessionLookup } from "./denial-session-lookup";
+
+test("hostile plausible cookies cannot create unbounded session SELECTs or hold responses open", async () => {
+  let current = 100;
+  let started = 0;
+  let release: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const warnings: string[] = [];
+  const lookup = createBoundedDenialSessionLookup(async () => {
+    started += 1;
+    await blocked;
+    return { id: "fixture-session" };
+  }, { maxPending: 2, maxLookups: 3, windowMs: 1_000, waitMs: 5,
+    now: () => current, warn: (message) => { warnings.push(message); } });
+  const plausible = (index: number) => `${"A".repeat(38)}${String(index).padStart(5, "0")}`;
+  const denied = await Promise.all(Array.from({ length: 50 }, (_, i) => lookup(plausible(i))));
+  assert.ok(denied.every((session) => session === null), "timeout or saturation cannot grant a session");
+  assert.equal(started, 2, "the in-flight SELECT ceiling must hold even after response timeout");
+  assert.equal(warnings.length, 1);
+  assert.doesNotMatch(warnings[0], /A{20}|cookie|token/u);
+  assert.equal(await lookup(plausible(51)), null, "timed-out DB reads keep their slots");
+  assert.equal(started, 2);
+  release?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await lookup(plausible(52)), { id: "fixture-session" });
+  assert.equal(started, 3);
+  assert.equal(await lookup(plausible(53)), null, "per-window quota also limits fast DB SELECTs");
+  assert.equal(started, 3);
+  current += 1_001;
+  assert.deepEqual(await lookup(plausible(54)), { id: "fixture-session" });
+  assert.equal(started, 4, "next window must resume attribution");
+  assert.equal(await lookup("not-a-session"), null);
+  assert.equal(started, 4, "malformed cookies never hit the DB");
+});
 
 test("CSRF and role denial envelope contains verified pseudonyms and no request body/forwarded data", async () => {
   const original = prisma.auditLog.create;

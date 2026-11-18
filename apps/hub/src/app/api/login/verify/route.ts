@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
-import { createAuditRequestMetadata, hashAuditSessionReference, hashAuditIdentifier, writeAuditLog, writeAuditLogRequired } from "@virki/auth";
-import { DEVICE_COOKIE_NAME, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@virki/auth/security";
+import { createAuditRequestMetadata, hashAuditSessionReference, hashAuditIdentifier, writeAuditLogRequired } from "@virki/auth";
+import { DEVICE_COOKIE_NAME, verifyLoginBackupCode, verifyLoginEmailCode, verifyLoginRecoveryCode, verifyLoginTotpCode } from "@virki/auth/security";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../../lib/cloudflare-access";
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo } from "../../../../lib/surface";
 import { createLoginResponseAfterRequiredAudit, createVerifiedLoginAudit, type LoginSurface, type LoginVerificationFactor } from "../../../../lib/login-audit";
 import { getLoginRedirectPath } from "../../../../lib/login-redirect";
 import { SESSION_COOKIE_NAME, getSessionCookieOptions } from "@virki/auth";
 import { readBoundedFormData } from "../../../../lib/request-form";
-import { recordSecurityDenial } from "../../../../lib/audit-denial";
+import { recordSecurityDenial, writeLoginVerificationFailureAudit } from "../../../../lib/audit-denial";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +57,9 @@ export async function POST(request: Request) {
     if (factor === "totp") {
       return sessionResponse(await verifyLoginTotpCode(ceremony, code, deviceToken, new Date(), requiredRole), baseUrl, returnTo, surface, "totp", auditMetadata);
     }
+    if (factor === "backup") {
+      return sessionResponse(await verifyLoginBackupCode(ceremony, code, deviceToken, new Date(), requiredRole, request.headers.get("cf-connecting-ip")?.trim()), baseUrl, returnTo, surface, "backup", auditMetadata);
+    }
     if (factor === "recovery") {
       const result = await verifyLoginRecoveryCode(ceremony, code, deviceToken, new Date(), requiredRole, request.headers.get("cf-connecting-ip")?.trim());
       if (result.kind === "EMAIL_REQUIRED") {
@@ -71,7 +74,10 @@ export async function POST(request: Request) {
       return sessionResponse(result.session, baseUrl, returnTo, surface, "recovery", auditMetadata, "/account/security?recovered=totp");
     }
   } catch {
-    await writeAuditLog({ eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource: surface, message: "Security verification failed.", metadata: { ...auditMetadata, ceremonyRef: hashAuditIdentifier(ceremony) } });
+    await writeLoginVerificationFailureAudit(request.headers, readCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME), {
+      eventType: "AUTH_LOGIN_FAILURE", result: "FAILURE", resource: surface,
+      message: "Security verification failed.", metadata: { ...auditMetadata, ceremonyRef: hashAuditIdentifier(ceremony) }
+    });
   }
   return NextResponse.redirect(errorUrl, { status: 303 });
 }

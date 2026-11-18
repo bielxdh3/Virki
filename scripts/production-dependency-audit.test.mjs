@@ -54,18 +54,25 @@ test("Docker production dependency stages contain every declared workspace manif
   ), "final production image must retain the new workspace manifest");
 });
 
-test("production image includes workspace-local runtime dependencies from the lockfile", () => {
+test("production image includes hoisted workspace runtime dependencies from the lockfile", () => {
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
   const dockerfile = readFileSync(new URL("../infra/Dockerfile.prod", import.meta.url), "utf8");
   const copyLines = new Set(dockerfile.split(/\r?\n/u).map((line) => line.trim()));
+  const nodemailer = lock.packages?.["node_modules/nodemailer"];
   const nestedRuntimePaths = Object.entries(lock.packages ?? {})
     .filter(([name, metadata]) =>
       /^(?:packages|apps)\/[^/]+\/node_modules\//u.test(name) &&
       metadata.dev !== true && metadata.optional !== true && metadata.devOptional !== true)
     .map(([name]) => name.slice(0, name.indexOf("/node_modules/") + "/node_modules".length));
 
-  assert.ok(nestedRuntimePaths.includes("packages/auth/node_modules"),
-    "the lockfile must demonstrate the Nodemailer workspace-local runtime dependency");
+  assert.ok(nodemailer && nodemailer.dev !== true && nodemailer.optional !== true,
+    "the lockfile must retain Nodemailer as a production runtime dependency");
+  assert.ok(copyLines.has("COPY --from=production-dependencies /app/node_modules ./node_modules"),
+    "the final image must copy the root runtime tree where npm hoists Nodemailer");
+  if (!nestedRuntimePaths.includes("packages/auth/node_modules")) {
+    assert.ok(!copyLines.has("COPY --from=production-dependencies /app/packages/auth/node_modules ./packages/auth/node_modules"),
+      "the final image must not copy a workspace-local node_modules directory absent from the lockfile");
+  }
   for (const nestedPath of new Set(nestedRuntimePaths)) {
     assert.ok(copyLines.has(`COPY --from=production-dependencies /app/${nestedPath} ./${nestedPath}`),
       `${nestedPath} would be missing from the final production image`);

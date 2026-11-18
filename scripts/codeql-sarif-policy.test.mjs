@@ -60,6 +60,55 @@ const postMergePushFindings = [
     lineFingerprint: "b02a714376336c8a:1", columnFingerprint: "26" }
 ];
 
+// Exact findings captured from public-repository CodeQL security-extended,
+// run 43136441828 attempt 2 on SHA 261177e3. The independent review
+// explicitly does NOT promote the offline preflight into staging authority.
+const publicHostedFindings = [
+  { ruleId: "js/file-system-race", path: "scripts/staging-otp-preflight.mjs",
+    lineFingerprint: "1a5be53b7e24b39c:1", columnFingerprint: "5" },
+  { ruleId: "js/user-controlled-bypass", path: "scripts/integration/loopback-smtp-sink.mjs",
+    lineFingerprint: "a7bddb165db5ff66:1", columnFingerprint: "4" }
+];
+const publicReviewedLedger = readFileSync(new URL("../docs/security/codeql-reviewed-public-20261112.md", import.meta.url), "utf8");
+
+test("public hosted CodeQL findings require two individually documented exact dispositions", () => {
+  assert.equal(publicHostedFindings.length, 2);
+  for (const entry of publicHostedFindings) {
+    const key = `${entry.ruleId}|${entry.path}|${entry.lineFingerprint}|${entry.columnFingerprint}`;
+    assert.ok(publicReviewedLedger.includes(`\`${key}\``), `undocumented CodeQL finding: ${entry.path}`);
+  }
+  const result = evaluateCodeqlSarif([codeqlHostedCliDocument(publicHostedFindings)]);
+  assert.deepEqual(result, { ok: true, totalResults: 2, acceptedResults: 2, violations: [] });
+});
+
+test("public hosted CodeQL dispositions fail closed on changed location, rule, missing fingerprints and duplicates", () => {
+  for (const entry of publicHostedFindings) {
+    for (const mutation of [
+      { ...entry, ruleId: `${entry.ruleId}-unreviewed` },
+      { ...entry, path: `scripts/unreviewed/${entry.path.split("/").at(-1)}` },
+      { ...entry, lineFingerprint: `f${entry.lineFingerprint}` },
+      { ...entry, columnFingerprint: String(Number(entry.columnFingerprint) + 1) },
+      { ...entry, lineFingerprint: undefined },
+      { ...entry, columnFingerprint: undefined }
+    ]) {
+      const result = evaluateCodeqlSarif([codeqlHostedCliDocument([mutation])]);
+      assert.equal(result.ok, false, `unexpected acceptance: ${entry.path}`);
+      assert.equal(result.violations[0]?.reason, "unreviewed-finding");
+    }
+    const duplicate = evaluateCodeqlSarif([codeqlHostedCliDocument([entry, entry])]);
+    assert.deepEqual(duplicate.violations, [{
+      ruleId: entry.ruleId, path: entry.path, reason: "accepted-finding-count-exceeded"
+    }]);
+  }
+  const originalPathRace = evaluateCodeqlSarif([codeqlHostedCliDocument([
+    ...publicHostedFindings, fixedFdRace
+  ])]);
+  assert.equal(originalPathRace.ok, false);
+  assert.deepEqual(originalPathRace.violations, [{
+    ruleId: fixedFdRace.ruleId, path: fixedFdRace.path, reason: "unreviewed-finding"
+  }]);
+});
+
 test("postmerge PUSH findings require four individually documented exact dispositions", () => {
   assert.equal(postMergePushFindings.length, 4);
   assert.equal(new Set(postMergePushFindings.map(({ ruleId, path, lineFingerprint, columnFingerprint }) =>

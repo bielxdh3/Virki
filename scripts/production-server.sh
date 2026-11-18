@@ -49,6 +49,9 @@ readonly migration_directory='packages/database/prisma/migrations'
 readonly transition_migration_name='20260922090000_total_identity_security_rebaseline'
 readonly migration_status_args=(--profile migration run --rm --no-deps migrate npm run prisma:migrate:status --workspace @virki/database)
 readonly application_services=(public-site hub oidc-issuer session-cleanup email-worker)
+# Staging cannot drain queued OTPs until an independent operator has approved
+# the SMTP relay, recipients, quota, and worker-specific database credentials.
+readonly staging_application_services=(public-site hub oidc-issuer session-cleanup)
 readonly state_changing_actions=' install-source cleanup-deploy-staging first-install first-install-recovery first-admin-rescue-prepare first-admin-rescue stage first-admin-bootstrap deploy start restart start-tunnel stop maintenance-on maintenance-off backup-verify audit-cleanup sessions-cleanup '
 readonly -a legacy_transition_migrations=(
   20260624190000_initial_schema
@@ -248,7 +251,9 @@ compose_with_override() {
 
 assert_revisions() {
   local service container observed
-  for service in public-site hub oidc-issuer session-cleanup email-worker; do
+  local -a services=("${application_services[@]}")
+  if (($# > 0)); then services=("$@"); fi
+  for service in "${services[@]}"; do
     local -a containers=()
     mapfile -t containers < <(compose ps -q "$service")
     ((${#containers[@]} == 1)) || fail "Production service $service is not running exactly once."
@@ -629,12 +634,47 @@ assert_tunnel_stopped() {
   [[ -z "$running" ]] || fail 'Virki staging requires its Cloudflare Tunnel connector to remain stopped.'
 }
 
+assert_staging_mail_worker_stopped() {
+  local containers container observed
+  # Docker restart:unless-stopped may temporarily report "restarting" rather
+  # than "running". A currently exited container is also unsafe if it can
+  # auto-restart after Docker/host recovery. Inspect actual restart policy as
+  # well as state; staging requires a genuinely disabled mail worker.
+  containers=$(compose ps --all --quiet email-worker) || fail 'Could not enumerate staging mail-worker containers.'
+  while IFS= read -r container; do
+    [[ -z "$container" ]] && continue
+    observed=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}|{{.HostConfig.RestartPolicy.Name}}' "$container") || fail 'Could not inspect staging mail-worker state or restart policy.'
+    case "$observed" in
+      'virki-prod|email-worker|created|false|false|no'|'virki-prod|email-worker|exited|false|false|no') ;;
+      *) fail 'Staging mail worker must be stopped with auto-restart disabled, not running, restarting or in an unknown state.' ;;
+    esac
+  done <<< "$containers"
+}
+
+assert_production_mail_worker_ready() {
+  local containers container observed
+  # The public Hub may enqueue password/MFA mail while a missing SMTP worker
+  # continuously restarts. Production cannot advertise healthy or open Tunnel
+  # on web/OIDC responses alone. This is process/config readiness, NOT proof
+  # of external SMTP STARTTLS/AUTH or message delivery.
+  containers=$(compose ps --all --quiet email-worker) || fail 'Production email-worker inventory is unavailable.'
+  [[ -n "$containers" && "$containers" != *$'\n'* ]] || fail 'Production requires exactly one email-worker container.'
+  container=$containers
+  observed=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}|{{.RestartCount}}' "$container") || fail 'Production email-worker state is unavailable.'
+  [[ "$observed" == 'virki-prod|email-worker|running|true|false|0' ]] || fail 'Production email-worker is stopped, restarting or has crashed since startup.'
+  # Execute the same worker-only SMTP validator as the real startup process;
+  # never copy provider secrets into the Hub or print their contents.
+  compose exec -T email-worker node --import tsx --input-type=module -e \
+    'import { getEmailTransportStatus } from "./packages/auth/src/email.ts"; if (getEmailTransportStatus().state !== "configured") process.exit(11)' \
+    >/dev/null 2>&1 || fail 'Production email-worker SMTP configuration is not ready.'
+}
+
 stop_stage_after_failure() {
   local original_status=$1
   trap - EXIT
   set +e
-  compose stop "${application_services[@]}" >/dev/null 2>&1
-  printf '%s\n' 'Virki staging health check failed; only Virki application services were stopped. Database volume and Tunnel state were preserved.' >&2
+  compose stop "${staging_application_services[@]}" >/dev/null 2>&1
+  printf '%s\n' 'Virki staging health check failed; only explicitly staged application services were stopped. Database volume, mail-worker and Tunnel state were preserved.' >&2
   exit "$original_status"
 }
 
@@ -646,12 +686,25 @@ is_valid_dns_hostname() {
 assert_health() {
   local public_response hub_response discovery_response access_response
   local public_status hub_status discovery_status access_status
-  local public_binding hub_binding portal_hostname hub_hostname oidc_issuer
+  local public_binding hub_binding portal_hostname hub_hostname oidc_issuer hub_perimeter_mode
   public_binding=$(compose port public-site 3000)
   hub_binding=$(compose port hub 3001)
   [[ "$public_binding" =~ ^127\.0\.0\.1:[0-9]+$ && "$hub_binding" =~ ^127\.0\.0\.1:[0-9]+$ ]] || fail 'Production application port binding is not loopback-only.'
   portal_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_PORTAL_HOSTNAME ?? "")') || fail 'Configured portal host could not be read.'
   hub_hostname=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_HOSTNAME ?? "")') || fail 'Configured Hub host could not be read.'
+  hub_perimeter_mode=$(compose exec -T hub node -e 'process.stdout.write(process.env.VIRKI_HUB_PERIMETER_MODE ?? "")') || fail 'Configured Hub perimeter mode could not be read.'
+  case "$hub_perimeter_mode" in
+    native|access) ;;
+    *) fail 'Hub perimeter mode must be explicitly configured as native or access.' ;;
+  esac
+  if [[ "$hub_perimeter_mode" == access ]]; then
+    # An invalid Access configuration also denies the forged probe below. Do
+    # not treat that accidental 403 as proof the owner could sign in.
+    local access_audience access_team_domain
+    access_audience=$(compose exec -T hub node -e 'process.stdout.write(process.env.CLOUDFLARE_ACCESS_AUDIENCE ?? "")') || fail 'Legacy Access audience could not be read.'
+    access_team_domain=$(compose exec -T hub node -e 'process.stdout.write(process.env.CLOUDFLARE_TEAM_DOMAIN ?? "")') || fail 'Legacy Access team domain could not be read.'
+    [[ -n "${access_audience//[[:space:]]/}" && "$access_team_domain" =~ ^(https://)?([A-Za-z0-9-]+\.)+[A-Za-z][A-Za-z-]*/?$ ]] || fail 'Legacy Access requires a configured audience and HTTPS team domain.'
+  fi
   oidc_issuer=$(compose exec -T oidc-issuer node -e 'process.stdout.write(process.env.VIRKI_OIDC_ISSUER ?? "")') || fail 'Configured OIDC issuer could not be read.'
   is_valid_dns_hostname "$portal_hostname" && is_valid_dns_hostname "$hub_hostname" && [[ "$oidc_issuer" == "https://$portal_hostname" ]] || fail 'Configured application hosts or OIDC issuer are invalid.'
   public_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' "http://$public_binding") || fail 'Public site health request failed.'
@@ -662,7 +715,38 @@ assert_health() {
   hub_status=${hub_response##*$'\nVIRKI_STATUS:'}
   discovery_status=${discovery_response##*$'\nVIRKI_STATUS:'}
   access_status=${access_response##*$'\nVIRKI_STATUS:'}
-  [[ "$public_status" == 200 && "$hub_status" == 200 && "$access_status" == 403 ]] || fail 'Production health or ADMIN boundary check failed.'
+  [[ "$public_status" == 200 && "$hub_status" == 200 ]] || fail 'Production application health check failed.'
+  if [[ "$hub_perimeter_mode" == native ]]; then
+    local login_response login_status
+    login_response=$(curl --silent --show-error --max-time 10 --dump-header - --output /dev/null --write-out $'\nVIRKI_STATUS:%{http_code}' --header "Host: $hub_hostname" "http://$hub_binding/login") || fail 'Native Hub login probe failed.'
+    login_status=${login_response##*$'\nVIRKI_STATUS:'}
+    [[ "$login_status" == 200 ]] || fail 'Native Hub public login entry must be reachable.'
+    assert_production_response_headers "$login_response" 'strict-origin'
+    [[ "$access_status" == 307 ]] || fail 'Native Hub must redirect unauthenticated ADMIN requests.'
+    # Require precisely one canonical redirect to the configured Hub login.
+    # A redirect to another host, route or an untrusted returnTo is not healthy.
+    printf '%s\n' "$access_response" | awk -v expected="https://$hub_hostname/login?returnTo=%2Fadmin%2Faccounts" '
+      {
+        line = $0
+        sub(/\r$/, "", line)
+        if (NR == 1) {
+          if (line !~ /^HTTP\/[0-9.]+[[:space:]]+307([[:space:]]|$)/) invalid = 1
+          in_headers = 1
+        }
+        if (line ~ /^HTTP\//) status_count++
+        if (line == "") in_headers = 0
+      }
+      in_headers && tolower(line) ~ /^location:[[:space:]]*/ {
+        value = line
+        sub(/^[^:]*:[[:space:]]*/, "", value)
+        count++
+        if (value == expected) valid++
+      }
+      END { exit !(invalid == 0 && status_count == 1 && count == 1 && valid == 1) }
+    ' || fail 'Native Hub unauthenticated redirect target is invalid.'
+  else
+    [[ "$access_status" == 403 ]] || fail 'Hub Access boundary must refuse a forged assertion.'
+  fi
   [[ "$discovery_status" == 200 ]] || fail 'Portal OIDC discovery request returned an unexpected status.'
   [[ "$discovery_response" == *"\"issuer\":\"$oidc_issuer\""* && "$discovery_response" == *'"S256"'* && "$discovery_response" == *'"code"'* ]] || fail 'Portal discovery profile does not match the expected OIDC issuer.'
   assert_production_response_headers "$public_response" 'no-referrer'
@@ -1046,8 +1130,13 @@ identity_snapshot_sql='SELECT count(*) FILTER (WHERE "role"::text = '\''ADMIN'\'
 recovery_snapshot_sql() {
   local snapshot_phase=${1:-after_migrations}
   local recovery_key_expression='"idempotencyKey"'
+  local recovery_lease_expression="to_jsonb(message)->>'processingLeaseExpiresAt'"
   if [[ "$snapshot_phase" == before_migrations ]]; then
-    recovery_key_expression="CASE WHEN \"idempotencyKey\" ~ ('^account-recovery:[A-Za-z0-9_-]{32}' || chr(36)) THEN 'account-recovery-migrated:' || \"id\" ELSE \"idempotencyKey\" END"
+    recovery_key_expression="CASE WHEN \"kind\"::text = 'ACCOUNT_RECOVERY' AND \"idempotencyKey\" ~ ('^account-recovery:[A-Za-z0-9_-]{32}' || chr(36)) THEN 'account-recovery-migrated:' || \"id\" ELSE \"idempotencyKey\" END"
+    # An older source can lack the lease column; its committed migration
+    # initializes PROCESSING leases from updatedAt. Do not fabricate a lease
+    # when the column already exists, including an intentional NULL value.
+    recovery_lease_expression="CASE WHEN to_jsonb(message) ? 'processingLeaseExpiresAt' THEN to_jsonb(message)->>'processingLeaseExpiresAt' WHEN \"status\"::text = 'PROCESSING' THEN to_jsonb(message)->>'updatedAt' ELSE NULL END"
   elif [[ "$snapshot_phase" != after_migrations ]]; then
     fail 'Recovery outbox snapshot phase is invalid.'
   fi
@@ -1055,15 +1144,13 @@ recovery_snapshot_sql() {
   cat <<SQL
 SELECT jsonb_build_object(
   'messages', COALESCE((
-    SELECT jsonb_agg(jsonb_build_array("id", $recovery_key_expression, "kind"::text, "recipientEmail", "locale", "payload", "status"::text, "attemptCount", "availableAt", "sentAt", "terminalFailedAt", "createdAt", "updatedAt") ORDER BY "id")
-    FROM "EmailOutboxMessage"
-    WHERE "kind"::text = 'ACCOUNT_RECOVERY'
+    SELECT jsonb_agg(jsonb_build_array("id", $recovery_key_expression, "kind"::text, "recipientEmail", "locale", "payload", "status"::text, "attemptCount", "availableAt", "sentAt", "terminalFailedAt", "createdAt", "updatedAt", $recovery_lease_expression, to_jsonb(message)->>'pendingSmtpHeaderMessageId') ORDER BY "id")
+    FROM "EmailOutboxMessage" AS message
   ), '[]'::jsonb),
   'attempts', COALESCE((
-    SELECT jsonb_agg(jsonb_build_array(attempt."id", attempt."messageId", attempt."attempt", attempt."status"::text, attempt."errorCode", attempt."attemptedAt") ORDER BY attempt."id")
+    SELECT jsonb_agg(jsonb_build_array(attempt."id", attempt."messageId", attempt."attempt", attempt."status"::text, attempt."errorCode", attempt."attemptedAt", to_jsonb(attempt)->>'smtpHeaderMessageId') ORDER BY attempt."id")
     FROM "EmailDeliveryAttempt" AS attempt
     JOIN "EmailOutboxMessage" AS message ON message."id" = attempt."messageId"
-    WHERE message."kind"::text = 'ACCOUNT_RECOVERY'
   ), '[]'::jsonb)
 )::text
 SQL
@@ -1839,6 +1926,7 @@ resume_services() {
   compose up --detach --force-recreate "${application_services[@]}" >/dev/null
   assert_revisions
   assert_loopback_ports
+  assert_production_mail_worker_ready
   assert_health
   # Commit verified recovery while the public Tunnel is still STOPPED. A host
   # crash cannot leave the Tunnel auto-restarting with maintenance markers.
@@ -2097,18 +2185,22 @@ case "$action" in
     verify_first_install_volume
     assert_tunnel_stopped
     assert_staging_ports_available
+    # Do not implicitly stop an already-running worker; fail closed without
+    # changing its state so the operator can investigate the unexpected drain.
+    assert_staging_mail_worker_stopped
     export PUBLIC_SITE_PORT=13000
     export HUB_PORT=13001
     trap 'stop_stage_after_failure "$?"' EXIT
     compose up --detach postgres >/dev/null || fail 'Virki staging PostgreSQL could not be started.'
     wait_for_virki_postgres
-    compose up --detach "${application_services[@]}" >/dev/null || fail 'Virki staging application services could not be started.'
-    assert_revisions
+    compose up --detach "${staging_application_services[@]}" >/dev/null || fail 'Virki staging application services could not be started.'
+    assert_revisions "${staging_application_services[@]}"
     assert_loopback_ports
     assert_health
+    assert_staging_mail_worker_stopped
     assert_tunnel_stopped
     trap - EXIT
-    printf 'Virki staging is healthy on private loopback ports 13000 and 13001; Cloudflare Tunnel remains stopped.\n'
+    printf 'Virki staging is healthy on private loopback ports 13000 and 13001; Cloudflare Tunnel and mail-draining worker remain stopped.\n'
     ;;
   first-admin-bootstrap)
     assert_no_maintenance
@@ -2137,6 +2229,7 @@ case "$action" in
     compose up --detach "${application_services[@]}" >/dev/null
     assert_revisions
     assert_loopback_ports
+    assert_production_mail_worker_ready
     assert_health
     compose up --detach cloudflared >/dev/null
     assert_tunnel_running
@@ -2152,6 +2245,7 @@ case "$action" in
     compose up --detach --force-recreate "${application_services[@]}" >/dev/null
     assert_revisions
     assert_loopback_ports
+    assert_production_mail_worker_ready
     assert_health
     compose up --detach cloudflared >/dev/null
     assert_tunnel_running
@@ -2164,6 +2258,7 @@ case "$action" in
     compose stop cloudflared >/dev/null 2>&1 || true
     assert_revisions
     assert_loopback_ports
+    assert_production_mail_worker_ready
     assert_health
     compose up --detach cloudflared >/dev/null
     assert_tunnel_running
@@ -2190,6 +2285,7 @@ case "$action" in
     assert_revisions
     ;;
   health)
+    assert_production_mail_worker_ready
     assert_health
     ;;
   logs)
