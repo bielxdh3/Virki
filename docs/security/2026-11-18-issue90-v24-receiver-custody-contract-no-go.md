@@ -23,3 +23,11 @@
 - In environments where the parent test runner already starts with `NoNewPrivs: 1` (such as WSL), `NoNewPrivs: 1` in the child is consistent with launcher enforcement, while non-tainting of a `NoNewPrivs: 0` parent thread pool requires a host starting at `0`.
 - `scripts/experiments/issue90-receiver-custody.test.sh` continues to skip (`exit 77`) when run unprivileged.
 - Does **not** satisfy adversarial same-UID race closure, native C4 `SIGN_ACK`, durable owner rollback floor, or production admission.
+
+## Compilation repair and verification (2026-11-18)
+
+- Corrected truncated Go identifiers in the V24 Linux implementation and test without changing custody policy, privilege boundaries, or test intent.
+- Regenerated the patch against a fresh temporary Git index seeded with the pinned upstream and V23 patch. Forward and reverse index application and reverse check against the scratch passed.
+- Corrected V24 SHA-256: `9CF15BCA430A121C1FD8722499BF8D587179B96855E6BBE6AE299A1C74DE3587`.
+- WSL Go 1.26.10, `GOPROXY=off GOTOOLCHAIN=local`: four targeted V24 tests passed; targeted V24 race detector passed; Linux and Windows-target vet passed with `-copylocks=false` (preexisting V15 copylocks finding excluded). gofmt reported no affected files requiring formatting.
+- The subprocess launcher remains a test-only component. The integrated DEV path uses the private-parent policy, not an independently isolated receiver identity. No claim of complete issue #90 closure or authorization to publish, merge, activate protected FileSync, or deploy. C4 release/signing and production admission are separate gates, not additional issue #90 completion criteria. No independent external review of this repair or cross-UID concurrent publication validation was performed.
