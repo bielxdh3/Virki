@@ -16,7 +16,9 @@ for (const viewport of [
     const context = await browser.newContext({ viewport });
     try {
       const page = await context.newPage();
-      await page.goto(publicUrl);
+      const publicResponse = await page.goto(publicUrl);
+      expect(publicResponse?.status()).toBe(200);
+      expect(publicResponse?.headers()["x-powered-by"]).toBeUndefined();
 
       const enterLink = page.getByRole("link", { name: "Entrar", exact: true });
       await expect(enterLink).toHaveAttribute("href", portalUrl);
@@ -36,7 +38,9 @@ for (const viewport of [
     const context = await browser.newContext({ viewport });
     try {
       const page = await context.newPage();
-      await page.goto(`${portalUrl}/`);
+      const portalResponse = await page.goto(`${portalUrl}/`);
+      expect(portalResponse?.status()).toBe(200);
+      expect(portalResponse?.headers()["x-powered-by"]).toBeUndefined();
 
       await expect(page).toHaveURL(`${portalUrl}/login?returnTo=%2F`);
       await expect(page.getByRole("heading", { level: 1, name: "Entrar", exact: true })).toBeVisible();

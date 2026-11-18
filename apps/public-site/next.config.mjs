@@ -20,6 +20,7 @@ export function buildPublicContentSecurityPolicy(nodeEnv = process.env.NODE_ENV)
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  poweredByHeader: false,
   transpilePackages: [],
   async headers() {
     const headers = [

@@ -6,6 +6,7 @@ const workspaceRoot = path.resolve(appDir, "../..");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  poweredByHeader: false,
   experimental: {
     authInterrupts: true,
     // Keep the framework's existing raw Server Action body cap explicit.
