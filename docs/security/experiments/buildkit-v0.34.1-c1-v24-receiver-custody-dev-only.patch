@@ -1,0 +1,384 @@
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+new file mode 100644
+index 0000000..4676488
+--- /dev/null
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -0,0 +1,179 @@
++//go:build linux
++
++package filesync
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"syscall"
++
++	"golang.org/x/sys/unix"
++)
++
++// V24ReceiverCustodyPolicy defines DEV-only defensive process and directory
++// custody invariants for the isolated BuildKit receiver. Passing these checks
++// establishes ordinary permission-contract conformance, NOT adversarial
++// same-UID race immunity or native C4 owner authorization.
++type V24ReceiverCustodyPolicy struct {
++	RequireUnprivileged         bool
++	RequirePrivateParent        bool
++	RequireImmutableGrandparent bool
++	ExpectedReceiverUID         *uint32
++	ExpectedReceiverGID         *uint32
++	ForbiddenPeerUIDs           []uint32
++}
++
++func validateV24ProcessIdentity(policy V24ReceiverCustodyPolicy) error {
++	uid := os.Getuid()
++	euid := os.Geteuid()
++	gid := os.Getgid()
++	egid := os.Getegid()
++	if uid != euid || gid != egid {
++		return errors.New("C1 V24 refuses setuid/setgid receiver process")
++	}
++	if policy.RequireUnprivileged && (euid == 0 || egid == 0) {
++		return errors.New("C1 V24 refuses root receiver identity")
++	}
++	if policy.ExpectedReceiverUID != nil && uint32(euid) != *policy.ExpectedReceiverUID {
++		return fmt.Errorf("C1 V24 receiver UID %d does not match expected %d", euid, *policy.ExpectedReceiverUID)
++	}
++	if policy.ExpectedReceiverGID != nil && uint32(egid) != *policy.ExpectedReceiverGID {
++		return fmt.Errorf("C1 V24 receiver GID %d does not match expected %d", egid, *policy.ExpectedReceiverGID)
++	}
++	for _, forbidden := range policy.ForbiddenPeerUIDs {
++		if uint32(euid) == forbidden {
++			return fmt.Errorf("C1 V24 receiver UID %d must be distinct from peer/observer UID", euid)
++		}
++	}
++	return nil
++}
++
++func validateV24CustodyDirs(dest string, policy V24ReceiverCustodyPolicy) error {
++	if !filepath.IsAbs(dest) || filepath.Clean(dest) != dest || dest == "/" {
++		return errors.New("C1 V24 destination must be canonical absolute non-root Linux pathname")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(rootFD)
++
++	parent := filepath.Dir(dest)
++	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
++	})
++	if err != nil {
++		return fmt.Errorf("C1 V24 unsafe custody parent: %w", err)
++	}
++	defer unix.Close(parentFD)
++
++	var st unix.Stat_t
++	if err := unix.Fstat(parentFD, &st); err != nil {
++		return err
++	}
++	if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != uint32(os.Geteuid()) || st.Gid != uint32(os.Getegid()) {
++		return errors.New("C1 V24 custody parent must be real directory owned by receiver identity")
++	}
++	if policy.RequirePrivateParent {
++		if st.Mode&0777 != 0700 {
++			return fmt.Errorf("C1 V24 custody parent mode %04o must be 0700", st.Mode&0777)
++		}
++	} else if st.Mode&0022 != 0 {
++		return errors.New("C1 V24 custody parent must not be group/world writable")
++	}
++
++	if !policy.RequireImmutableGrandparent {
++		return nil
++	}
++	grandparent := filepath.Dir(parent)
++	var gpSt unix.Stat_t
++	if grandparent == "/" {
++		if err := unix.Fstat(rootFD, &gpSt); err != nil {
++			return err
++		}
++	} else {
++		gpFD, err := unix.Openat2(rootFD, strings.TrimPrefix(grandparent, "/"), &unix.OpenHow{
++			Flags:   uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
++		})
++		if err != nil {
++			return fmt.Errorf("C1 V24 unsafe custody grandparent: %w", err)
++		}
++		defer unix.Close(gpFD)
++		if err := unix.Fstat(gpFD, &gpSt); err != nil {
++			return err
++		}
++	}
++	if gpSt.Mode&unix.S_IFMT != unix.S_IFDIR {
++		return errors.New("C1 V24 custody grandparent must be real directory")
++	}
++	if gpSt.Uid == uint32(os.Geteuid()) {
++		return errors.New("C1 V24 custody grandparent must not be owned by receiver UID")
++	}
++	if gpSt.Mode&0022 != 0 {
++		return errors.New("C1 V24 custody grandparent must not be group/world writable")
++	}
++	return nil
++}
++
++// receiveV24WithCustody enforces V24ReceiverCustodyPolicy before delegating to
++// the FD-pinned V23 quarantined receiver.
++func receiveV24WithCustody(dest string, manifest V15SealedManifest,
++	policy V24ReceiverCustodyPolicy, receive func(string) error) error {
++	if err := validateV24ProcessIdentity(policy); err != nil {
++		return err
++	}
++	if err := validateV24CustodyDirs(dest, policy); err != nil {
++		return err
++	}
++	return receiveV23QuarantinedWithParentSync(dest, manifest, receive, unix.Fsync)
++}
++
++// runV24IsolatedSubprocess executes a receiver helper in a separate Linux
++// process with a sanitized environment and Pdeathsig=SIGKILL. When
++// ExpectedReceiverUID differs from os.Geteuid(), it attaches explicit
++// Credential separation (which requires CAP_SETUID/CAP_SETGID in the caller).
++func runV24IsolatedSubprocess(ctx context.Context, exe string, args []string,
++	policy V24ReceiverCustodyPolicy, extraEnv ...string) ([]byte, error) {
++	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe {
++		return nil, errors.New("C1 V24 helper executable must be canonical absolute path")
++	}
++	if policy.RequireUnprivileged && policy.ExpectedReceiverUID != nil && *policy.ExpectedReceiverUID == 0 {
++		return nil, errors.New("C1 V24 refuses root ExpectedReceiverUID")
++	}
++	if policy.ExpectedReceiverUID != nil {
++		for _, forbidden := range policy.ForbiddenPeerUIDs {
++			if *policy.ExpectedReceiverUID == forbidden {
++				return nil, errors.New("C1 V24 ExpectedReceiverUID must be distinct from peer/observer UID")
++			}
++		}
++	}
++	attr := &syscall.SysProcAttr{
++		Pdeathsig: unix.SIGKILL,
++	}
++	if policy.ExpectedReceiverUID != nil && uint32(os.Geteuid()) != *policy.ExpectedReceiverUID {
++		if os.Geteuid() != 0 {
++			return nil, errors.New("C1 V24 cross-UID credential separation requires privileged parent")
++		}
++		gid := uint32(os.Getegid())
++		if policy.ExpectedReceiverGID != nil {
++			gid = *policy.ExpectedReceiverGID
++		}
++		attr.Credential = &syscall.Credential{
++			Uid:         *policy.ExpectedReceiverUID,
++			Gid:         gid,
++			NoSetGroups: true,
++		}
++	}
++	env := append([]string{"PATH=/usr/bin:/bin", "LC_ALL=C", "HOME=/nonexistent", "TMPDIR=/tmp"}, extraEnv...)
++	cmd := exec.CommandContext(ctx, exe, args...)
++	cmd.Env = env
++	cmd.SysProcAttr = attr
++	return cmd.CombinedOutput()
++}
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+new file mode 100644
+index 0000000..b09f5d7
+--- /dev/null
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -0,0 +1,169 @@
++//go:build linux
++
++package filesync
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++func TestC1V24ReceiverCustodyIdentityContract(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged identity contract test requires non-root euid")
++	}
++	uid := uint32(os.Geteuid())
++	gid := uint32(os.Getegid())
++	other := uid + 1
++	zero := uint32(0)
++
++	require.NoError(t, validateV24ProcessIdentity(V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		ExpectedReceiverUID: &uid,
++		ExpectedReceiverGID: &gid,
++		ForbiddenPeerUIDs:   []uint32{other},
++	}))
++
++	require.ErrorContains(t, validateV24ProcessIdentity(V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		ExpectedReceiverUID: &zero,
++	}), "does not match expected")
++
++	require.ErrorContains(t, validateV24ProcessIdentity(V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		ForbiddenPeerUIDs:   []uint32{uid},
++	}), "distinct from peer/observer UID")
++}
++
++func TestC1V24ReceiverCustodyParentAndGrandparentContract(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged custody directory contract test requires non-root euid")
++	}
++	t.Setenv("TMPDIR", "/tmp")
++	gp := t.TempDir()
++	parent := filepath.Join(gp, "receiver")
++	require.NoError(t, os.Mkdir(parent, 0755))
++
++	m := v15PacketManifest()
++	dest := filepath.Join(parent, "published")
++
++	// Non-private parent (0755) must be rejected when RequirePrivateParent is set.
++	err := receiveV24WithCustody(dest, m, V24ReceiverCustodyPolicy{
++		RequireUnprivileged:  true,
++		RequirePrivateParent: true,
++	}, func(stage string) error {
++		return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++	})
++	require.ErrorContains(t, err, "must be 0700")
++	_, statErr := os.Lstat(dest)
++	require.ErrorIs(t, statErr, os.ErrNotExist)
++
++	// Tighten parent to 0700; grandparent is still owned by current UID so
++	// RequireImmutableGrandparent must still fail closed.
++	require.NoError(t, os.Chmod(parent, 0700))
++	err = receiveV24WithCustody(dest, m, V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++	}, func(stage string) error {
++		return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++	})
++	require.ErrorContains(t, err, "grandparent must not be owned by receiver UID")
++	_, statErr = os.Lstat(dest)
++	require.ErrorIs(t, statErr, os.ErrNotExist)
++
++	// With RequireImmutableGrandparent=false (synthetic same-user TempDir),
++	// private 0700 parent + unprivileged identity succeeds cleanly.
++	uid := uint32(os.Geteuid())
++	require.NoError(t, receiveV24WithCustody(dest, m, V24ReceiverCustodyPolicy{
++		RequireUnprivileged:  true,
++		RequirePrivateParent: true,
++		ExpectedReceiverUID:  &uid,
++		ForbiddenPeerUIDs:    []uint32{uid + 1},
++	}, func(stage string) error {
++		return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++	}))
++	got, readErr := os.ReadFile(filepath.Join(dest, "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("SAFE"), got)
++}
++
++func TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs(t *testing.T) {
++	if os.Getenv("VIRKI_V24_CUSTODY_PROBE") == "1" {
++		if os.Getenv("VIRKI_SYNTHETIC_SECRET") != "" {
++			t.Fatal("inherited secret env var leaked into isolated receiver subprocess")
++		}
++		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
++			t.Fatalf("PR_SET_NO_NEW_PRIVS failed: %v", err)
++		}
++		unix.Umask(0077)
++		status, err := os.ReadFile("/proc/self/status")
++		if err != nil {
++			t.Fatalf("read /proc/self/status: %v", err)
++		}
++		if !strings.Contains(string(status), "NoNewPrivs:\t1") {
++			t.Fatalf("expected NoNewPrivs: 1 in /proc/self/status")
++		}
++		dest := os.Getenv("VIRKI_V24_PROBE_DEST")
++		if dest == "" {
++			t.Fatal("missing VIRKI_V24_PROBE_DEST")
++		}
++		m := v15PacketManifest()
++		if err := receiveV24WithCustody(dest, m, V24ReceiverCustodyPolicy{
++			RequireUnprivileged:  os.Geteuid() != 0,
++			RequirePrivateParent: true,
++		}, func(stage string) error {
++			return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++		}); err != nil {
++			t.Fatalf("isolated subprocess receiveV24WithCustody failed: %v", err)
++		}
++		return
++	}
++
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged subprocess test requires non-root euid")
++	}
++	t.Setenv("TMPDIR", "/tmp")
++	t.Setenv("VIRKI_SYNTHETIC_SECRET", "must-not-cross-process-boundary")
++
++	exe, err := os.Executable()
++	require.NoError(t, err)
++	parent := t.TempDir()
++	require.NoError(t, os.Chmod(parent, 0700))
++	dest := filepath.Join(parent, "isolated-published")
++
++	uid := uint32(os.Geteuid())
++	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
++	defer cancel()
++	out, err := runV24IsolatedSubprocess(
++		ctx,
++		exe,
++		[]string{"-test.run=^TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs$"},
++		V24ReceiverCustodyPolicy{
++			RequireUnprivileged:  true,
++			RequirePrivateParent: true,
++			ExpectedReceiverUID:  &uid,
++			ForbiddenPeerUIDs:    []uint32{uid + 1},
++		},
++		"VIRKI_V24_CUSTODY_PROBE=1",
++		"VIRKI_V24_PROBE_DEST="+dest,
++	)
++	require.NoError(t, err, "subprocess output: %s", string(out))
++	got, readErr := os.ReadFile(filepath.Join(dest, "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("SAFE"), got)
++
++	// Cross-UID separation from an unprivileged parent must fail closed.
++	otherUID := uid + 1
++	_, err = runV24IsolatedSubprocess(ctx, exe, []string{"-test.v"}, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		ExpectedReceiverUID: &otherUID,
++	})
++	require.ErrorContains(t, err, "cross-UID credential separation requires privileged parent")
++}
+diff --git a/session/filesync/sealed_custody_v24_other.go b/session/filesync/sealed_custody_v24_other.go
+new file mode 100644
+index 0000000..c918fb0
+--- /dev/null
++++ b/session/filesync/sealed_custody_v24_other.go
+@@ -0,0 +1,18 @@
++//go:build !linux
++
++package filesync
++
++import "errors"
++
++type V24ReceiverCustodyPolicy struct {
++	RequireUnprivileged         bool
++	RequirePrivateParent        bool
++	RequireImmutableGrandparent bool
++	ExpectedReceiverUID         *uint32
++	ExpectedReceiverGID         *uint32
++	ForbiddenPeerUIDs           []uint32
++}
++
++func receiveV24WithCustody(_ string, _ V15SealedManifest, _ V24ReceiverCustodyPolicy, _ func(string) error) error {
++	return errors.New("C1 V24 receiver custody requires Linux; non-Linux denied")
++}
