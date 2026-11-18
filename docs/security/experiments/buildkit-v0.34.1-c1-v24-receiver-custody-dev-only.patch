@@ -1,9 +1,9 @@
 diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
-new file mode 100644
-index 0000000..4676488
+new file mode 100755
+index 0000000..1e2adf8
 --- /dev/null
 +++ b/session/filesync/sealed_custody_v24_linux.go
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,203 @@
 +//go:build linux
 +
 +package filesync
@@ -15,6 +15,7 @@ index 0000000..4676488
 +	"os"
 +	"os/exec"
 +	"path/filepath"
++	"runtime"
 +	"strings"
 +	"syscall"
 +
@@ -65,7 +66,7 @@ index 0000000..4676488
 +	}
 +	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 +	if err != nil {
-+		return err
++		return er
 +	}
 +	defer unix.Close(rootFD)
 +
@@ -81,7 +82,7 @@ index 0000000..4676488
 +
 +	var st unix.Stat_t
 +	if err := unix.Fstat(parentFD, &st); err != nil {
-+		return err
++		return er
 +	}
 +	if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != uint32(os.Geteuid()) || st.Gid != uint32(os.Getegid()) {
 +		return errors.New("C1 V24 custody parent must be real directory owned by receiver identity")
@@ -101,7 +102,7 @@ index 0000000..4676488
 +	var gpSt unix.Stat_t
 +	if grandparent == "/" {
 +		if err := unix.Fstat(rootFD, &gpSt); err != nil {
-+			return err
++			return er
 +		}
 +	} else {
 +		gpFD, err := unix.Openat2(rootFD, strings.TrimPrefix(grandparent, "/"), &unix.OpenHow{
@@ -113,7 +114,7 @@ index 0000000..4676488
 +		}
 +		defer unix.Close(gpFD)
 +		if err := unix.Fstat(gpFD, &gpSt); err != nil {
-+			return err
++			return er
 +		}
 +	}
 +	if gpSt.Mode&unix.S_IFMT != unix.S_IFDIR {
@@ -128,15 +129,21 @@ index 0000000..4676488
 +	return nil
 +}
 +
++func defaultV24ReceiverCustodyPolicy() V24ReceiverCustodyPolicy {
++	return V24ReceiverCustodyPolicy{
++		RequirePrivateParent: true,
++	}
++}
++
 +// receiveV24WithCustody enforces V24ReceiverCustodyPolicy before delegating to
 +// the FD-pinned V23 quarantined receiver.
 +func receiveV24WithCustody(dest string, manifest V15SealedManifest,
 +	policy V24ReceiverCustodyPolicy, receive func(string) error) error {
 +	if err := validateV24ProcessIdentity(policy); err != nil {
-+		return err
++		return er
 +	}
 +	if err := validateV24CustodyDirs(dest, policy); err != nil {
-+		return err
++		return er
 +	}
 +	return receiveV23QuarantinedWithParentSync(dest, manifest, receive, unix.Fsync)
 +}
@@ -178,17 +185,34 @@ index 0000000..4676488
 +		}
 +	}
 +	env := append([]string{"PATH=/usr/bin:/bin", "LC_ALL=C", "HOME=/nonexistent", "TMPDIR=/tmp"}, extraEnv...)
-+	cmd := exec.CommandContext(ctx, exe, args...)
-+	cmd.Env = env
-+	cmd.SysProcAttr = attr
-+	return cmd.CombinedOutput()
++	type subprocResult struct {
++		out []byte
++		err erro
++	}
++	ch := make(chan subprocResult, 1)
++	go func() {
++		runtime.LockOSThread()
++		// Intentionally omit UnlockOSThread so the Go runtime terminates this
++		// OS thread on exit rather than returning a NoNewPrivs-tainted thread.
++		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
++			ch <- subprocResult{err: fmt.Errorf("C1 V24 cannot enforce PR_SET_NO_NEW_PRIVS: %w", err)}
++			return
++		}
++		cmd := exec.CommandContext(ctx, exe, args...)
++		cmd.Env = env
++		cmd.SysProcAttr = att
++		out, err := cmd.CombinedOutput()
++		ch <- subprocResult{out: out, err: err}
++	}()
++	res := <-ch
++	return res.out, res.er
 +}
 diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
-new file mode 100644
-index 0000000..b09f5d7
+new file mode 100755
+index 0000000..8ded9ae
 --- /dev/null
 +++ b/session/filesync/sealed_custody_v24_linux_test.go
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,234 @@
 +//go:build linux
 +
 +package filesync
@@ -197,11 +221,15 @@ index 0000000..b09f5d7
 +	"context"
 +	"os"
 +	"path/filepath"
++	"runtime"
 +	"strings"
 +	"testing"
 +	"time"
 +
++	"github.com/moby/buildkit/session"
++	"github.com/moby/buildkit/session/testutil"
 +	"github.com/stretchr/testify/require"
++	"golang.org/x/sync/errgroup"
 +	"golang.org/x/sys/unix"
 +)
 +
@@ -290,16 +318,13 @@ index 0000000..b09f5d7
 +		if os.Getenv("VIRKI_SYNTHETIC_SECRET") != "" {
 +			t.Fatal("inherited secret env var leaked into isolated receiver subprocess")
 +		}
-+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-+			t.Fatalf("PR_SET_NO_NEW_PRIVS failed: %v", err)
-+		}
 +		unix.Umask(0077)
 +		status, err := os.ReadFile("/proc/self/status")
 +		if err != nil {
 +			t.Fatalf("read /proc/self/status: %v", err)
 +		}
 +		if !strings.Contains(string(status), "NoNewPrivs:\t1") {
-+			t.Fatalf("expected NoNewPrivs: 1 in /proc/self/status")
++			t.Fatalf("expected launcher-inherited NoNewPrivs: 1 in /proc/self/status")
 +		}
 +		dest := os.Getenv("VIRKI_V24_PROBE_DEST")
 +		if dest == "" {
@@ -322,6 +347,12 @@ index 0000000..b09f5d7
 +	}
 +	t.Setenv("TMPDIR", "/tmp")
 +	t.Setenv("VIRKI_SYNTHETIC_SECRET", "must-not-cross-process-boundary")
++
++	runtime.LockOSThread()
++	defer runtime.UnlockOSThread()
++	parentNNPBefore, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
++	require.NoError(t, err)
++	require.Equal(t, 0, parentNNPBefore, "expected parent thread to start with NoNewPrivs=0")
 +
 +	exe, err := os.Executable()
 +	require.NoError(t, err)
@@ -350,6 +381,10 @@ index 0000000..b09f5d7
 +	require.NoError(t, readErr)
 +	require.Equal(t, []byte("SAFE"), got)
 +
++	parentNNPAfter, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
++	require.NoError(t, err)
++	require.Equal(t, 0, parentNNPAfter, "launcher must not taint caller OS thread with NoNewPrivs")
++
 +	// Cross-UID separation from an unprivileged parent must fail closed.
 +	otherUID := uid + 1
 +	_, err = runV24IsolatedSubprocess(ctx, exe, []string{"-test.v"}, V24ReceiverCustodyPolicy{
@@ -358,12 +393,66 @@ index 0000000..b09f5d7
 +	})
 +	require.ErrorContains(t, err, "cross-UID credential separation requires privileged parent")
 +}
++
++func TestC1V24FSSyncSealedV15EnforcesCustodyPolicy(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged gRPC custody integration test requires non-root euid")
++	}
++	t.Setenv("TMPDIR", "/tmp")
++	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
++	defer cancel()
++
++	root := t.TempDir()
++	require.NoError(t, os.WriteFile(filepath.Join(root, "app.js"), []byte("SAFE"), 0600))
++	snapshot, err := NewLinuxSealedSnapshotV15(ctx, v15Request(root, "app.js"))
++	require.NoError(t, err)
++	m := snapshot.Manifest()
++	p, pub, ledger := v15SignedPermitFixture(t, m)
++
++	s, err := session.NewSession(ctx, "v24-custody-grpc")
++	require.NoError(t, err)
++	manager, err := session.NewManager()
++	require.NoError(t, err)
++	s.Allow(NewSealedFSSyncProviderV15(snapshot))
++
++	g, ctx := errgroup.WithContext(ctx)
++	g.Go(func() error {
++		return s.Run(ctx, session.Dialer(testutil.TestStream(testutil.Handler(manager.HandleConn))))
++	})
++	g.Go(func() (retErr error) {
++		defer func() {
++			if closeErr := s.Close(); retErr == nil {
++				retErr = closeEr
++			}
++		}()
++		caller, err := manager.Get(ctx, s.ID(), false)
++		if err != nil {
++			return er
++		}
++		nonPrivateParent := filepath.Join(t.TempDir(), "public-parent")
++		if err := os.Mkdir(nonPrivateParent, 0755); err != nil {
++			return er
++		}
++		dest := filepath.Join(nonPrivateParent, "published")
++		err = FSSyncSealedV15(ctx, caller, FSSendRequestOpt{
++			Name: "context", FollowPaths: []string{"app.js"}, DestDir: dest,
++		}, m, p, pub, ledger)
++		if err == nil || !strings.Contains(err.Error(), "must be 0700") {
++			return os.ErrInvalid
++		}
++		if _, statErr := os.Lstat(dest); !os.IsNotExist(statErr) {
++			return os.ErrExist
++		}
++		return nil
++	})
++	require.NoError(t, g.Wait())
++}
 diff --git a/session/filesync/sealed_custody_v24_other.go b/session/filesync/sealed_custody_v24_other.go
-new file mode 100644
-index 0000000..c918fb0
+new file mode 100755
+index 0000000..6226870
 --- /dev/null
 +++ b/session/filesync/sealed_custody_v24_other.go
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,24 @@
 +//go:build !linux
 +
 +package filesync
@@ -379,6 +468,79 @@ index 0000000..c918fb0
 +	ForbiddenPeerUIDs           []uint32
 +}
 +
++func defaultV24ReceiverCustodyPolicy() V24ReceiverCustodyPolicy {
++	return V24ReceiverCustodyPolicy{
++		RequirePrivateParent: true,
++	}
++}
++
 +func receiveV24WithCustody(_ string, _ V15SealedManifest, _ V24ReceiverCustodyPolicy, _ func(string) error) error {
 +	return errors.New("C1 V24 receiver custody requires Linux; non-Linux denied")
 +}
+diff --git a/session/filesync/sealed_protocol_v15.go b/session/filesync/sealed_protocol_v15.go
+index 566cf9e..a4137a7 100644
+--- a/session/filesync/sealed_protocol_v15.go
++++ b/session/filesync/sealed_protocol_v15.go
+@@ -134,13 +134,12 @@ func FSSyncSealedV15(ctx context.Context, c session.Caller, opt FSSendRequestOpt
+ 		!v15One(hdr, v15MDSession, m.SessionID) || !v15One(hdr, v15MDNonce, m.Nonce) {
+ 		return errors.New("C1 V15 sealed sender gave wrong or missing versioned manifest header")
+ 	}
+-	// C1 V22: never direct unverified gRPC DATA to the caller-visible
+-	// destination. A private quarantine owned by this Linux worker receives
+-	// all packets, is verified independently against the frozen manifest,
+-	// and is atomically published only after complete success. A bad DATA
+-	// hash, early EOF or hostile STAT must leave NO destination at all.
++	// C1 V22/V24: never direct unverified gRPC DATA to the caller-visible
++	// destination. Enforce V24 receiver custody invariants, receive into a
++	// private quarantine owned by this Linux worker, verify against the frozen
++	// manifest, and atomically publish only after complete success.
+ 	// This remains DEV-only and does not enable the V14 physical C1 path.
+-	if err := receiveV19Quarantined(opt.DestDir, m, func(stage string) error {
++	if err := receiveV24WithCustody(opt.DestDir, m, defaultV24ReceiverCustodyPolicy(), func(stage string) error {
+ 		return recvDiffCopy(newV15PacketGuard(stream, m), stage, nil,
+ 			nil, opt.Differ, nil, nil)
+ 	}); err != nil {
+diff --git a/session/filesync/sealed_snapshot_v15_linux_test.go b/session/filesync/sealed_snapshot_v15_linux_test.go
+index 3cd5f70..b338249 100644
+--- a/session/filesync/sealed_snapshot_v15_linux_test.go
++++ b/session/filesync/sealed_snapshot_v15_linux_test.go
+@@ -152,7 +152,11 @@ func TestC1V15PhysicalSessionOnlySealedProtocolAndFrozenBytes(t *testing.T) {
+ 		if err != nil {
+ 			return err
+ 		}
+-		dest := filepath.Join(t.TempDir(), "published-v22")
++		parent := t.TempDir()
++		if err := os.Chmod(parent, 0700); err != nil {
++			return err
++		}
++		dest := filepath.Join(parent, "published-v22")
+ 		opt := FSSendRequestOpt{Name: "context", FollowPaths: []string{"app.js"}, DestDir: dest}
+ 		if err := FSSyncSealedV15(ctx, caller, opt, manifest, permit, pub, ledger); err != nil {
+ 			return err
+diff --git a/session/filesync/sealed_staging_v22_integration_test.go b/session/filesync/sealed_staging_v22_integration_test.go
+index ef64f6f..698594c 100644
+--- a/session/filesync/sealed_staging_v22_integration_test.go
++++ b/session/filesync/sealed_staging_v22_integration_test.go
+@@ -107,6 +107,9 @@ func TestC1V22LiveGRPCBadSenderNeverPublishesPartialQuarantine(t *testing.T) {
+ 					return err
+ 				}
+ 				parent := t.TempDir()
++				if err := os.Chmod(parent, 0700); err != nil {
++					return err
++				}
+ 				dest := filepath.Join(parent, "published")
+ 				err = FSSyncSealedV15(ctx, caller, FSSendRequestOpt{
+ 					Name: "context", FollowPaths: []string{"app.js"}, DestDir: dest,
+@@ -201,7 +204,11 @@ func TestC1V22PublishedButObserverDeniedIsTerminalAndExplicit(t *testing.T) {
+ 		if err != nil {
+ 			return err
+ 		}
+-		dest := filepath.Join(t.TempDir(), "published")
++		parent := t.TempDir()
++		if err := os.Chmod(parent, 0700); err != nil {
++			return err
++		}
++		dest := filepath.Join(parent, "published")
+ 		callbackCount := 0
+ 		opt := FSSendRequestOpt{Name: "context", FollowPaths: []string{"app.js"}, DestDir: dest,
+ 			OnConsumed: func(_ context.Context, obs LocalContextObservation) error {
