@@ -1,0 +1,549 @@
+// Explicit opt-in LOCAL role-grant proof. This NEVER reaches an external host,
+// the Virki VM, production PostgreSQL, SMTP, SSH, or an integration env file.
+// It uses one new, UUID-owned network:none PostgreSQL with tmpfs PGDATA.
+import assert from "node:assert/strict";
+import { randomBytes, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, writeSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import { createEmailWorkerScramVerifier } from "./staging-email-worker-scram.mjs";
+import { assertPrivateLocalHolReceiptFile, ensurePrivateLocalHolReceiptDirectory,
+  privateLocalHolReceiptDirectory } from "./integration/local-worker-hol-receipt.mjs";
+
+if (process.env.VIRKI_STAGING_WORKER_ROLE_PROOF !== "local-disposable-only" ||
+    process.platform !== "win32") {
+  throw new Error("Worker role proof requires explicit local Windows disposable-only opt-in.");
+}
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const setup = path.join(root, "infra", "postgres-init", "11-virki-email-worker-role.sh");
+const setupInContainer = "/11-virki-email-worker-role.sh";
+const docker = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
+const engine = "npipe:////./pipe/dockerDesktopLinuxEngine";
+const pgImage = "postgres:18.6-alpine3.24";
+const expectedImageId = "sha256:57b23a0326ee442e83b3d3fa027c5a148be0a392d7c91d1ca4e1e70131ee859a";
+const database = "virki_worker_role_test";
+const ownerUuid = randomUUID();
+const owner = ownerUuid.replaceAll("-", "");
+const name = `virki-worker-role-local-${owner}`;
+const secrets = {
+  POSTGRES_PASSWORD: randomBytes(32).toString("hex"),
+  VIRKI_RUNTIME_DB_PASSWORD: randomBytes(32).toString("hex"),
+  VIRKI_MIGRATOR_DB_PASSWORD: randomBytes(32).toString("hex"),
+  VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD: randomBytes(32).toString("hex"),
+  VIRKI_EMAIL_WORKER_DB_PASSWORD: randomBytes(32).toString("hex")
+};
+secrets.VIRKI_EMAIL_WORKER_DB_SCRAM_VERIFIER = createEmailWorkerScramVerifier(secrets.VIRKI_EMAIL_WORKER_DB_PASSWORD);
+const processEnv = { ...process.env, ...secrets, DOCKER_HOST: engine };
+let containerId = null;
+let createIssued = false;
+let receiptFd = null;
+let receiptIdentity;
+let cleanupComplete = false;
+let cleanupActive = false;
+let proofSucceeded = false;
+const receiptPath = path.join(privateLocalHolReceiptDirectory(), `email-hol-${ownerUuid}.jsonl`);
+const failureMode = process.env.VIRKI_STAGING_WORKER_ROLE_FAILURE_MODE;
+if (failureMode !== undefined &&
+    !["simulate-create-ack-loss", "simulate-post-remove-inspect-error"].includes(failureMode)) {
+  throw new Error("Unknown local-only worker-role proof failure mode.");
+}
+
+function record(stage, id = null) {
+  if (receiptFd === null) {
+    ensurePrivateLocalHolReceiptDirectory();
+    receiptFd = openSync(receiptPath, "wx", 0o600);
+    receiptIdentity = fstatSync(receiptFd, { bigint: true });
+  }
+  ensurePrivateLocalHolReceiptDirectory();
+  assertPrivateLocalHolReceiptFile(receiptPath);
+  const disk = lstatSync(receiptPath, { bigint: true });
+  const opened = fstatSync(receiptFd, { bigint: true });
+  if (!disk.isFile() || disk.isSymbolicLink() || disk.nlink !== 1n ||
+      ["dev", "ino", "mode", "nlink"].some((key) =>
+        disk[key] !== receiptIdentity[key] || opened[key] !== receiptIdentity[key])) {
+    throw new Error("Worker role proof receipt identity changed.");
+  }
+  const bytes = Buffer.from(JSON.stringify({ stage, owner, name, id }) + "\n");
+  for (let written = 0; written < bytes.length;) {
+    const size = writeSync(receiptFd, bytes, written, bytes.length - written);
+    if (!Number.isSafeInteger(size) || size <= 0) throw new Error("Incomplete owner evidence receipt write.");
+    written += size;
+  }
+  fsyncSync(receiptFd);
+  assertPrivateLocalHolReceiptFile(receiptPath);
+}
+
+if (!existsSync(docker) || !existsSync(setup)) throw new Error("Pinned Docker CLI or reviewed role source absent.");
+
+function invoke(args, { allowFailure = false, input, env = processEnv, timeout = 20_000 } = {}) {
+  const call = spawnSync(docker, ["--host", engine, ...args], {
+    encoding: "utf8", windowsHide: true, timeout, input, env, maxBuffer: 2 * 1024 * 1024
+  });
+  const redact = (text) => Object.values(secrets).reduce(
+    (out, secret) => out.replaceAll(secret, "[synthetic-redacted]"), String(text ?? "")
+  ).slice(-1000);
+  if (call.error) throw new Error(`Isolated Docker call failed: ${call.error.code ?? "unknown"}`);
+  if (call.status !== 0 && !allowFailure) {
+    throw new Error(`Isolated Docker ${args[0]} failed (exit ${call.status}): ${redact(call.stderr)}`);
+  }
+  return { status: call.status, stdout: redact(call.stdout).trim(), stderr: redact(call.stderr).trim() };
+}
+
+function inspectOwned() {
+  assert.ok(containerId && /^([a-f0-9]{64})$/u.test(containerId), "exact owned container ID required");
+  const actual = invoke(["inspect", containerId, "--format",
+    '{{.Id}}|{{.Name}}|{{index .Config.Labels "virki.worker-role-test.owner"}}|{{.HostConfig.NetworkMode}}|{{.Image}}']).stdout;
+  assert.equal(actual, `${containerId}|/${name}|${owner}|none|${expectedImageId}`,
+    "refuse to operate on any container whose ID, image, label or isolation differs");
+}
+
+function requireExactDockerAbsence(result, target) {
+  assert.ok(target === name || /^[a-f0-9]{64}$/u.test(target), "Missing-resource target must be exact owned ID or name.");
+  // Docker Desktop 29.x may print [] on stdout together with a precise
+  // stderr No-such-object diagnostic for a removed container.
+  if (!Number.isInteger(result.status) || result.status <= 0 ||
+      (result.stdout !== "" && result.stdout !== "[]")) {
+    throw new Error("Docker absence not established; owner reconciliation required.");
+  }
+  const allowed = [
+    `Error: No such object: ${target}`,
+    `Error response from daemon: No such object: ${target}`,
+    `Error response from daemon: No such container: ${target}`,
+    `error: no such object: ${target}`
+  ];
+  if (!allowed.includes(result.stderr)) {
+    throw new Error("Docker inspection failed without exact missing-object proof; owner reconciliation required.");
+  }
+}
+
+function reconcileUnacknowledgedCreate() {
+  const observed = invoke(["inspect", name, "--format",
+    '{{.Id}}|{{.Name}}|{{index .Config.Labels "virki.worker-role-test.owner"}}|{{.HostConfig.NetworkMode}}|{{.Image}}'],
+  { allowFailure: true });
+  if (observed.status === 0) {
+    const [id, observedName, label, mode, image] = observed.stdout.split("|");
+    if (!/^[a-f0-9]{64}$/u.test(id) || observedName !== `/${name}` ||
+        label !== owner || mode !== "none" || image !== expectedImageId) {
+      throw new Error("Unacknowledged create identity does not belong to this proof; do not remove.");
+    }
+    containerId = id;
+    inspectOwned();
+    record("UNACKNOWLEDGED_CREATE_FOUND", containerId);
+    removeOwnedContainer();
+  } else {
+    requireExactDockerAbsence(observed, name);
+    record("UNACKNOWLEDGED_CREATE_NOT_FOUND");
+  }
+  // A command that was issued may complete AFTER this inspection. Even when
+  // cleanup removed a verified container, never publish a cleanup PASS.
+  throw new Error("Docker create was issued without a verified ACK; late completion requires reconciliation.");
+}
+
+function removeOwnedContainer() {
+  inspectOwned();
+  record("REMOVE_PENDING", containerId);
+  const removed = invoke(["rm", "--force", "--volumes", containerId], { timeout: 30_000 });
+  assert.equal(removed.stdout, containerId, "only the exact verified owned container may be removed");
+  const observed = failureMode === "simulate-post-remove-inspect-error"
+    ? { status: 1, stdout: "", stderr: "Error response from daemon: daemon unavailable" }
+    : invoke(["inspect", containerId], { allowFailure: true });
+  requireExactDockerAbsence(observed, containerId);
+  record("REMOVE_CONFIRMED", containerId);
+}
+
+function cleanup() {
+  if (cleanupComplete) return;
+  if (cleanupActive) throw new Error("Concurrent local cleanup; operator reconciliation required.");
+  cleanupActive = true;
+  try {
+    if (containerId) {
+      removeOwnedContainer();
+    } else if (createIssued) {
+      reconcileUnacknowledgedCreate();
+    }
+    record("CLEANUP_CONFIRMED");
+    cleanupComplete = true;
+    process.stdout.write("LOCAL_DISPOSABLE_WORKER_ROLE_CLEANUP=PASS\n");
+  } catch (error) {
+    try { record("RECONCILIATION_REQUIRED", containerId); } catch { /* preserve failure */ }
+    throw error;
+  } finally {
+    cleanupActive = false;
+  }
+}
+
+function psql(sql, options = {}) {
+  inspectOwned();
+  return invoke(["exec", "--interactive", containerId, "psql", "--no-psqlrc",
+    "--username", "virki_bootstrap", "--dbname", database, "--set", "ON_ERROR_STOP=1",
+    "--quiet", "--tuples-only", "--no-align"], { ...options, input: sql });
+}
+
+const roleGuardSource = readFileSync(path.join(root, "packages", "auth", "src", "email-worker-role.ts"), "utf8");
+const guardMatch = roleGuardSource.match(/database\.\$queryRaw<Array<\{ allowed: boolean \}>>`([\s\S]+?)`;/u);
+assert.ok(guardMatch && !guardMatch[1].includes("${"), "the staging role guard must be static SQL");
+
+function workerSql(sql = guardMatch[1], operatorCredential = secrets.VIRKI_EMAIL_WORKER_DB_PASSWORD, allowFailure = false) {
+  inspectOwned();
+  return invoke(["exec", "--interactive", "--env", "PGPASSWORD", containerId,
+    "psql", "--no-psqlrc", "--no-password", "--host", "127.0.0.1",
+    "--username", "virki_email_worker", "--dbname", database, "--set", "ON_ERROR_STOP=1",
+    "--quiet", "--tuples-only", "--no-align"], {
+    env: { ...processEnv, PGPASSWORD: operatorCredential }, input: sql, allowFailure
+  });
+}
+
+function assertDenied(statement, message) {
+  const outcome = psql(`SET ROLE virki_email_worker; ${statement}\n`, { allowFailure: true });
+  assert.notEqual(outcome.status, 0, message);
+  assert.match(outcome.stderr, /permission denied|must be owner|insufficient privilege/iu, message);
+}
+
+const migrationFixture = `
+CREATE ROLE virki_migrator LOGIN;
+CREATE ROLE virki_runtime LOGIN;
+CREATE ROLE virki_audit_maintenance LOGIN;
+CREATE TYPE public."OutboxMessageStatus" AS ENUM ('QUEUED','PROCESSING','SENT','RETRYABLE_FAILURE','TERMINAL_FAILURE');
+CREATE TYPE public."EmailMessageKind" AS ENUM ('EMAIL_TWO_FACTOR','ACCOUNT_RECOVERY');
+CREATE TYPE public."DeliveryAttemptStatus" AS ENUM ('SENT','FAILED');
+CREATE TABLE public."User" ("id" text PRIMARY KEY);
+CREATE TABLE public."Session" ("id" text PRIMARY KEY, "userId" text REFERENCES public."User"("id"));
+CREATE TABLE public."AuditLog" ("id" text PRIMARY KEY);
+CREATE TABLE public."EmailOutboxMessage" (
+  "id" text PRIMARY KEY, "idempotencyKey" text NOT NULL, "kind" public."EmailMessageKind" NOT NULL,
+  "recipientEmail" text NOT NULL, "locale" text NOT NULL, "payload" jsonb NOT NULL,
+  "status" public."OutboxMessageStatus" NOT NULL DEFAULT 'QUEUED',
+  "attemptCount" integer NOT NULL DEFAULT 0, "availableAt" timestamp NOT NULL DEFAULT now(),
+  "sentAt" timestamp, "terminalFailedAt" timestamp, "processingLeaseExpiresAt" timestamp,
+  "pendingSmtpHeaderMessageId" varchar(255), "createdAt" timestamp NOT NULL DEFAULT now(),
+  "updatedAt" timestamp NOT NULL DEFAULT now()
+);
+CREATE TABLE public."EmailDeliveryAttempt" (
+  "id" text PRIMARY KEY, "messageId" text NOT NULL REFERENCES public."EmailOutboxMessage"("id"),
+  "attempt" integer NOT NULL, "status" public."DeliveryAttemptStatus" NOT NULL,
+  "errorCode" text, "smtpHeaderMessageId" varchar(255),
+  "attemptedAt" timestamp NOT NULL DEFAULT now()
+);
+CREATE SCHEMA virki_security AUTHORIZATION virki_migrator;
+CREATE TABLE virki_security.role_probe (id text);
+CREATE FUNCTION virki_security.delete_expired_audit_logs() RETURNS integer
+  LANGUAGE sql SECURITY DEFINER AS 'SELECT 0';
+REVOKE EXECUTE ON FUNCTION virki_security.delete_expired_audit_logs() FROM PUBLIC;
+INSERT INTO public."User" ("id") VALUES ('test-person');
+INSERT INTO public."EmailOutboxMessage"
+  ("id","idempotencyKey","kind","recipientEmail","locale","payload")
+  VALUES ('mail-1','idempotent-1','EMAIL_TWO_FACTOR','owned@example.invalid','pt-BR','{}'::jsonb);
+`;
+
+let primaryFailure;
+let cleanupFailure;
+try {
+  const image = invoke(["image", "inspect", pgImage, "--format", "{{.Id}}"]).stdout;
+  assert.equal(image, expectedImageId, "refuse registry pull or unpinned local database image");
+  const version = invoke(["version", "--format", "{{.Server.Os}}|{{.Server.Arch}}"]).stdout;
+  assert.equal(version, "linux|amd64", "requires pinned local Linux/amd64 Docker endpoint");
+  record("CREATE_PENDING");
+  createIssued = true;
+  if (failureMode === "simulate-create-ack-loss") {
+    throw new Error("Synthetic unacknowledged worker-role container creation (no actual create sent).");
+  }
+  const created = invoke(["create", "--name", name, "--network", "none",
+    "--label", `virki.worker-role-test.owner=${owner}`,
+    "--security-opt", "no-new-privileges:true",
+    "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,size=512m",
+    "--tmpfs", "/var/run/postgresql:rw,nosuid,nodev,size=16m",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m",
+    "--env", "PGDATA=/var/lib/postgresql/data/pgdata",
+    "--env", `POSTGRES_DB=${database}`, "--env", "POSTGRES_USER=virki_bootstrap",
+    ...Object.keys(secrets).flatMap((key) => ["--env", key]),
+    pgImage]);
+  if (!/^[a-f0-9]{64}$/u.test(created.stdout)) {
+    throw new Error("Docker create returned no verified immutable container ID; reconciliation required.");
+  }
+  containerId = created.stdout;
+  inspectOwned();
+  record("CREATE_ACK", containerId);
+  invoke(["start", containerId]);
+  let ready = false;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    inspectOwned();
+    const status = invoke(["exec", containerId, "pg_isready", "--host", "/var/run/postgresql",
+      "--username", "virki_bootstrap", "--dbname", database], { allowFailure: true });
+    if (status.status === 0) { ready = true; break; }
+    await delay(300);
+  }
+  if (!ready) {
+    const diagnostic = invoke(["logs", "--tail", "20", containerId], { allowFailure: true });
+    throw new Error(`isolated local database was not ready: ${diagnostic.stderr || diagnostic.stdout}`);
+  }
+  inspectOwned();
+  // Docker cp into a tmpfs path may write to the underlying hidden overlay;
+  // keep the test-only script on the owned container's ephemeral rootfs.
+  invoke(["cp", setup, `${containerId}:${setupInContainer}`]);
+  invoke(["exec", containerId, "test", "-f", setupInContainer]);
+
+  const before = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+  assert.notEqual(before.status, 0, "a missing migration must fail closed");
+  assert.match(`${before.stderr} ${before.stdout}`, /requires the committed, migrated Virki schema/u,
+    "the pre-migration refusal must be caused by the SQL schema gate, not by a missing script");
+  assert.equal(psql("SELECT count(*)::integer FROM pg_roles WHERE rolname='virki_email_worker';").stdout, "0",
+    "pre-migration refusal must leave no login role");
+
+  psql(migrationFixture);
+  const poisonedLibpq = {
+    ...processEnv,
+    PGHOSTADDR: "127.0.0.1",
+    PGPORT: "1",
+    PGSERVICE: "virki-nonexistent-postgres-service",
+    PGOPTIONS: "-c statement_timeout=1",
+    PGUSER: "wrong_user",
+    PGDATABASE: "wrong_database"
+  };
+  const poisonedLibpqArgs = Object.keys(poisonedLibpq)
+    .filter((key) => /^PG(?:HOSTADDR|PORT|SERVICE|OPTIONS|USER|DATABASE)$/u.test(key))
+    .flatMap((key) => ["--env", key]);
+  const redLibpq = invoke(["exec", ...poisonedLibpqArgs, containerId, "psql", "--no-psqlrc",
+    "--no-password", "--host=/var/run/postgresql", "--username", "virki_bootstrap",
+    "--dbname", database, "--command", "SELECT 1"], { env: poisonedLibpq, allowFailure: true });
+  assert.notEqual(redLibpq.status, 0,
+    "live libpq poison must genuinely redirect or break the unsanitized control invocation");
+  const poisonedRole = invoke(["exec", ...poisonedLibpqArgs, containerId, "sh", setupInContainer],
+    { env: poisonedLibpq, allowFailure: true });
+  assert.notEqual(poisonedRole.status, 0, "unsafe PUBLIC baseline must still fail under poisoned libpq inputs");
+  assert.match(poisonedRole.stderr, /excess worker privileges/u,
+    "sanitized helper must reach its local database privilege gate, not the foreign port");
+  const unsafePublicDefaults = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+  assert.notEqual(unsafePublicDefaults.status, 0, "unsafe inherited PUBLIC TEMP privileges must fail closed");
+  assert.match(unsafePublicDefaults.stderr, /excess worker privileges/u);
+  assert.equal(psql("SELECT count(*)::integer FROM pg_roles WHERE rolname='virki_email_worker';").stdout, "0",
+    "a failed SQL grant transaction must roll back creation of the worker role");
+  psql(`REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE ${database} FROM PUBLIC;`);
+  inspectOwned();
+  invoke(["exec", containerId, "sh", setupInContainer]);
+  // Idempotence must not broaden permissions or break the required worker.
+  invoke(["exec", containerId, "sh", setupInContainer]);
+  // initdb can install a local-loopback TRUST rule before the later host
+  // SCRAM rule. Force SCRAM at the FIRST matching rule in this own tmpfs-only
+  // database; a wrong-password rejection is meaningless against TRUST.
+  inspectOwned();
+  invoke(["exec", "--user", "postgres", containerId, "sed", "-i",
+    "1i host all all 127.0.0.1/32 scram-sha-256",
+    "/var/lib/postgresql/data/pgdata/pg_hba.conf"]);
+  assert.equal(psql("SELECT pg_reload_conf();").stdout, "t");
+  assert.equal(psql(`SELECT auth_method FROM pg_hba_file_rules
+    WHERE type='host' AND address='127.0.0.1' ORDER BY line_number LIMIT 1;`).stdout,
+  "scram-sha-256", "the local-loopback HBA must genuinely enforce SCRAM before password oracles");
+  assert.equal(workerSql("SELECT current_user;").stdout, "virki_email_worker",
+    "the generated SCRAM verifier must authenticate as the actual scoped worker using TCP SCRAM");
+  const wrongPassword = workerSql("SELECT 1;", randomBytes(32).toString("hex"), true);
+  assert.notEqual(wrongPassword.status, 0, "an unrelated password cannot authenticate as the worker");
+  assert.equal(workerSql().stdout, "t", "live runtime guard must approve the original scoped role");
+  psql('GRANT SELECT ON public."User" TO PUBLIC;');
+  assert.equal(workerSql().stdout, "f", "runtime guard must reject PUBLIC identity access after provisioning");
+  const publicDataLeak = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+  assert.notEqual(publicDataLeak.status, 0, "unexpected PUBLIC identity-table grants must stop role reconciliation");
+  assert.match(publicDataLeak.stderr, /excess worker privileges/u);
+  psql('REVOKE SELECT ON public."User" FROM PUBLIC;');
+  invoke(["exec", containerId, "sh", setupInContainer]);
+  assert.equal(workerSql().stdout, "t", "runtime guard must recover once PUBLIC privileges are revoked");
+  psql('GRANT USAGE ON SCHEMA virki_security TO PUBLIC; GRANT EXECUTE ON FUNCTION virki_security.delete_expired_audit_logs() TO PUBLIC;');
+  assert.equal(workerSql().stdout, "f", "runtime guard must reject PUBLIC security-schema access added after provisioning");
+  assert.equal(psql(`SELECT has_schema_privilege('virki_email_worker','virki_security','USAGE')
+    AND has_function_privilege('virki_email_worker','virki_security.delete_expired_audit_logs()','EXECUTE');`).stdout,
+  "t", "protected audit deletion inherited-PUBLIC red oracle must be effective");
+  const publicAuditCapability = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+  assert.notEqual(publicAuditCapability.status, 0, "PUBLIC must not make SECURITY DEFINER audit deletion available to worker");
+  assert.match(publicAuditCapability.stderr, /excess worker privileges/u);
+  psql('REVOKE USAGE ON SCHEMA virki_security FROM PUBLIC; REVOKE EXECUTE ON FUNCTION virki_security.delete_expired_audit_logs() FROM PUBLIC;');
+  invoke(["exec", containerId, "sh", setupInContainer]);
+  assert.equal(workerSql().stdout, "t", "runtime guard must recover only after revoking dangerous grants");
+  for (const grantCase of [
+    {
+      grant: 'GRANT SELECT ON public."EmailOutboxMessage" TO PUBLIC;',
+      revoke: 'REVOKE SELECT ON public."EmailOutboxMessage" FROM PUBLIC;',
+      privilege: 'SELECT', column: null, relation: 'EmailOutboxMessage'
+    },
+    {
+      grant: 'GRANT UPDATE ("status") ON public."EmailOutboxMessage" TO PUBLIC;',
+      revoke: 'REVOKE UPDATE ("status") ON public."EmailOutboxMessage" FROM PUBLIC;',
+      privilege: 'UPDATE', column: 'status', relation: 'EmailOutboxMessage'
+    },
+    {
+      grant: 'GRANT INSERT ("messageId") ON public."EmailDeliveryAttempt" TO PUBLIC;',
+      revoke: 'REVOKE INSERT ("messageId") ON public."EmailDeliveryAttempt" FROM PUBLIC;',
+      privilege: 'INSERT', column: 'messageId', relation: 'EmailDeliveryAttempt'
+    }
+  ]) {
+    psql(grantCase.grant);
+    const check = grantCase.column === null
+      ? `has_table_privilege('virki_runtime','public."${grantCase.relation}"','${grantCase.privilege}')`
+      : `has_column_privilege('virki_runtime','public."${grantCase.relation}"','${grantCase.column}','${grantCase.privilege}')`;
+    assert.equal(psql(`SELECT ${check};`).stdout, "t",
+      "PUBLIC allowed-object grant must expose capability to an unrelated principal");
+    assert.equal(workerSql().stdout, "f", "runtime guard must reject PUBLIC grants even on worker-allowed objects");
+    const provision = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+    assert.notEqual(provision.status, 0, "role reconciliation must reject PUBLIC grants on allowed objects");
+    assert.match(provision.stderr, /excess worker privileges/u);
+    psql(grantCase.revoke);
+    invoke(["exec", containerId, "sh", setupInContainer]);
+    assert.equal(workerSql().stdout, "t", "worker must recover after the PUBLIC allowed-object grant is revoked");
+  }
+  for (const relation of ["User", "EmailOutboxMessage"]) {
+    psql(`GRANT MAINTAIN ON public."${relation}" TO virki_email_worker;`);
+    assert.equal(psql(`SELECT has_table_privilege('virki_email_worker', 'public."${relation}"', 'MAINTAIN');`).stdout,
+      "t", "PG18 MAINTAIN grant must be effective before testing its denial");
+    assert.equal(workerSql().stdout, "f", "MAINTAIN must not bypass runtime's exclusive privilege matrix");
+    invoke(["exec", containerId, "sh", setupInContainer]);
+    assert.equal(psql(`SELECT has_table_privilege('virki_email_worker', 'public."${relation}"', 'MAINTAIN');`).stdout,
+      "f", "provisioning must revoke direct MAINTAIN grants, including on worker-allowed tables");
+    assert.equal(workerSql().stdout, "t", "role must remain usable after removing stale MAINTAIN grant");
+  }
+  for (const protectedGrant of [
+    {
+      grant: 'GRANT MAINTAIN ON virki_security.role_probe TO virki_email_worker;',
+      revoke: 'REVOKE MAINTAIN ON virki_security.role_probe FROM virki_email_worker;',
+      check: "has_table_privilege('virki_email_worker','virki_security.role_probe','MAINTAIN')"
+    },
+    {
+      grant: 'GRANT SELECT (id) ON virki_security.role_probe TO virki_email_worker;',
+      revoke: 'REVOKE SELECT (id) ON virki_security.role_probe FROM virki_email_worker;',
+      check: "has_column_privilege('virki_email_worker','virki_security.role_probe','id','SELECT')"
+    }
+  ]) {
+    psql(protectedGrant.grant);
+    assert.equal(psql(`SELECT ${protectedGrant.check};`).stdout, "t",
+      "protected-schema grant must exist before attempting to prove its denial");
+    assert.equal(workerSql().stdout, "f", "runtime guard must reject latent protected-schema table or column capability");
+    const reconcile = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+    assert.notEqual(reconcile.status, 0, "provisioning must reject protected-schema direct capabilities");
+    assert.match(reconcile.stderr, /excess worker privileges/u);
+    psql(protectedGrant.revoke);
+    invoke(["exec", containerId, "sh", setupInContainer]);
+    assert.equal(workerSql().stdout, "t", "runtime guard must recover only after protected grant is revoked");
+  }
+  psql('GRANT SELECT ("id") ON public."User" TO PUBLIC; GRANT INSERT ("id") ON public."EmailOutboxMessage" TO PUBLIC;');
+  assert.equal(psql(`SELECT has_column_privilege('virki_email_worker','public."User"','id','SELECT')
+    AND has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','id','INSERT');`).stdout,
+  "t", "PUBLIC column-grant red oracle must expose extra privileges before reconciliation");
+  const publicColumnLeak = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+  assert.notEqual(publicColumnLeak.status, 0, "PUBLIC column-only identity/outbox grants must not be ignored");
+  assert.match(publicColumnLeak.stderr, /excess worker privileges/u);
+  psql('REVOKE SELECT ("id") ON public."User" FROM PUBLIC; REVOKE INSERT ("id") ON public."EmailOutboxMessage" FROM PUBLIC;');
+  invoke(["exec", containerId, "sh", setupInContainer]);
+  psql('GRANT SELECT ("id") ON public."User" TO virki_email_worker; GRANT UPDATE ("recipientEmail") ON public."EmailOutboxMessage" TO virki_email_worker;');
+  assert.equal(psql(`SELECT has_column_privilege('virki_email_worker','public."User"','id','SELECT')
+    AND has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','recipientEmail','UPDATE');`).stdout,
+  "t", "stale direct-column grant red oracle must be effective before role reconciliation");
+  invoke(["exec", containerId, "sh", setupInContainer]);
+  assert.equal(psql(`SELECT NOT has_column_privilege('virki_email_worker','public."User"','id','SELECT')
+    AND NOT has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','recipientEmail','UPDATE');`).stdout,
+  "t", "re-provisioning must revoke stale direct column grants on identity and recipient columns");
+  psql('CREATE FUNCTION public.worker_public_definer_probe() RETURNS integer LANGUAGE sql SECURITY DEFINER AS \'SELECT 1\';');
+  const publicDefiner = invoke(["exec", containerId, "sh", setupInContainer], { allowFailure: true });
+  assert.notEqual(publicDefiner.status, 0, "unexpected PUBLIC SECURITY DEFINER routines must block role reconciliation");
+  assert.match(publicDefiner.stderr, /excess worker privileges/u);
+  psql('DROP FUNCTION public.worker_public_definer_probe();');
+  invoke(["exec", containerId, "sh", setupInContainer]);
+  const grants = psql(`SELECT
+    (SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls AND NOT rolinherit
+     FROM pg_roles WHERE rolname = 'virki_email_worker')
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member
+                    WHERE r.rolname='virki_email_worker')
+    AND has_table_privilege('virki_email_worker','public."EmailOutboxMessage"','SELECT')
+    AND NOT has_table_privilege('virki_email_worker','public."EmailOutboxMessage"','UPDATE')
+    AND has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','status','UPDATE')
+    AND NOT has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','recipientEmail','UPDATE')
+    AND NOT has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','payload','UPDATE')
+    AND NOT has_table_privilege('virki_email_worker','public."EmailOutboxMessage"','INSERT')
+    AND NOT has_table_privilege('virki_email_worker','public."EmailOutboxMessage"','DELETE')
+    AND has_table_privilege('virki_email_worker','public."EmailDeliveryAttempt"','SELECT')
+    AND has_column_privilege('virki_email_worker','public."EmailDeliveryAttempt"','messageId','INSERT')
+    AND NOT has_table_privilege('virki_email_worker','public."EmailDeliveryAttempt"','UPDATE')
+    AND NOT has_table_privilege('virki_email_worker','public."User"','SELECT')
+    AND NOT has_table_privilege('virki_email_worker','public."Session"','SELECT')
+    AND NOT has_table_privilege('virki_email_worker','public."AuditLog"','SELECT')
+    AND NOT has_database_privilege('virki_email_worker',current_database(),'CREATE')
+    AND NOT has_database_privilege('virki_email_worker',current_database(),'TEMPORARY')
+    AND NOT has_schema_privilege('virki_email_worker','public','CREATE')
+    AND NOT has_schema_privilege('virki_email_worker','virki_security','USAGE');`).stdout;
+  if (grants !== "t") {
+    const diagnostics = psql(`SELECT json_build_object(
+      'roleSafe', (SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls AND NOT rolinherit FROM pg_roles WHERE rolname='virki_email_worker'),
+      'membershipAbsent', NOT EXISTS(SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member WHERE r.rolname='virki_email_worker'),
+      'outboxSelect',has_table_privilege('virki_email_worker','public."EmailOutboxMessage"','SELECT'),
+      'outboxTableUpdate',has_table_privilege('virki_email_worker','public."EmailOutboxMessage"','UPDATE'),
+      'outboxStatusUpdate',has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','status','UPDATE'),
+      'outboxRecipientUpdate',has_column_privilege('virki_email_worker','public."EmailOutboxMessage"','recipientEmail','UPDATE'),
+      'outboxInsert',has_table_privilege('virki_email_worker','public."EmailOutboxMessage"','INSERT'),
+      'deliverySelect',has_table_privilege('virki_email_worker','public."EmailDeliveryAttempt"','SELECT'),
+      'deliveryColumnInsert',has_column_privilege('virki_email_worker','public."EmailDeliveryAttempt"','messageId','INSERT'),
+      'deliveryTableUpdate',has_table_privilege('virki_email_worker','public."EmailDeliveryAttempt"','UPDATE'),
+      'userSelect',has_table_privilege('virki_email_worker','public."User"','SELECT'),
+      'sessionSelect',has_table_privilege('virki_email_worker','public."Session"','SELECT'),
+      'auditSelect',has_table_privilege('virki_email_worker','public."AuditLog"','SELECT'),
+      'databaseCreate',has_database_privilege('virki_email_worker',current_database(),'CREATE'),
+      'databaseTemp',has_database_privilege('virki_email_worker',current_database(),'TEMPORARY'),
+      'schemaCreate',has_schema_privilege('virki_email_worker','public','CREATE'),
+      'securitySchemaUsage',has_schema_privilege('virki_email_worker','virki_security','USAGE'))::text;`).stdout;
+    process.stderr.write(`WORKER_ROLE_ACL_DIAGNOSTIC=${diagnostics}\n`);
+  }
+  assert.equal(grants, "t", "actual PostgreSQL privilege matrix must match worker-only contract");
+
+  const allowed = psql(`SET ROLE virki_email_worker;
+    BEGIN;
+    SELECT "payload" FROM public."EmailOutboxMessage" WHERE "id"='mail-1';
+    UPDATE public."EmailOutboxMessage" SET "status"='PROCESSING', "attemptCount"=1,
+      "processingLeaseExpiresAt"=now(), "updatedAt"=now() WHERE "id"='mail-1';
+    INSERT INTO public."EmailDeliveryAttempt" ("id","messageId","attempt","status","attemptedAt")
+      VALUES ('attempt-1','mail-1',1,'SENT',now());
+    ROLLBACK;`).stdout;
+  assert.ok(allowed.includes("{}"), "actual scoped ciphertext read should succeed");
+
+  assertDenied('SELECT * FROM public."User";', "identity table SELECT must be denied");
+  assertDenied('SELECT * FROM public."Session";', "session SELECT must be denied");
+  assertDenied('SELECT * FROM public."AuditLog";', "audit SELECT must be denied");
+  assertDenied('UPDATE public."EmailOutboxMessage" SET "recipientEmail"=\'attacker@example.invalid\';',
+    "recipient alteration must be denied");
+  assertDenied('UPDATE public."EmailOutboxMessage" SET "payload"=\'{}\'::jsonb;',
+    "ciphertext alteration must be denied");
+  assertDenied('DELETE FROM public."EmailOutboxMessage";', "outbox DELETE must be denied");
+  assertDenied('INSERT INTO public."EmailOutboxMessage" ("id") VALUES (\'not-allowed\');',
+    "worker cannot enqueue independent messages");
+  assertDenied('UPDATE public."EmailDeliveryAttempt" SET "status"=\'FAILED\';',
+    "worker cannot rewrite delivery receipts");
+  assertDenied('CREATE TABLE public.worker_escalation("x" integer);', "worker cannot create schema objects");
+  assertDenied('CREATE TEMP TABLE worker_temp_probe("x" integer);', "worker cannot create temporary objects");
+
+  const invalid = invoke(["exec", "--env", "VIRKI_EMAIL_WORKER_DB_PASSWORD", containerId,
+    "sh", setupInContainer], {
+    env: { ...processEnv, VIRKI_EMAIL_WORKER_DB_PASSWORD: secrets.VIRKI_RUNTIME_DB_PASSWORD },
+    allowFailure: true
+  });
+  assert.notEqual(invalid.status, 0, "the worker credential cannot reuse the runtime password");
+  assert.equal(psql('SELECT has_table_privilege(\'virki_email_worker\',\'public."User"\',\'SELECT\');').stdout, "f",
+    "rejected credential rotation cannot broaden grants");
+  proofSucceeded = true;
+} catch (error) {
+  primaryFailure = error;
+} finally {
+  try { cleanup(); } catch (error) { cleanupFailure = error; }
+  try { if (receiptFd !== null) closeSync(receiptFd); }
+  catch (error) { cleanupFailure = cleanupFailure
+    ? new AggregateError([cleanupFailure, error], "Cleanup and private receipt close failed.")
+    : error; }
+  receiptFd = null;
+}
+if (primaryFailure && cleanupFailure) {
+  throw new AggregateError([primaryFailure, cleanupFailure],
+    `Worker-role proof failed (${primaryFailure instanceof Error ? primaryFailure.message : "unknown"}); cleanup also requires reconciliation.`,
+    { cause: primaryFailure });
+}
+if (primaryFailure) throw primaryFailure;
+if (cleanupFailure) throw cleanupFailure;
+if (!proofSucceeded || !cleanupComplete) {
+  throw new Error("Local worker-role proof cannot claim PASS without completed tests and owned Docker cleanup.");
+}
+process.stdout.write("LOCAL_DISPOSABLE_WORKER_ROLE_PROOF=PASS (scoped grant, negative ACL, idempotence, no external network)\n");

@@ -1,0 +1,53 @@
+# Disposable PR92 test services only. No host-published ports, production volumes or external networks.
+services:
+  public-site:
+    image: node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      VIRKI_PR92_MOCK_SERVICE: public-site
+      VIRKI_PR92_MOCK_HOST: ${VIRKI_PR92_PUBLIC_HOST:?}
+      VIRKI_PR92_MOCK_NONCE: ${VIRKI_PR92_MOCK_NONCE:?}
+      VIRKI_PR92_MOCK_ALLOW_QUICK: ${VIRKI_PR92_MOCK_ALLOW_QUICK:-false}
+    volumes:
+      - ./staging/mock-origin.mjs:/mock-origin.mjs:ro
+    command: ["node", "/mock-origin.mjs"]
+    networks: [staging]
+
+  hub:
+    image: node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      VIRKI_PR92_MOCK_SERVICE: hub
+      VIRKI_PR92_MOCK_HOST: ${VIRKI_PR92_HUB_HOST:?}
+      VIRKI_PR92_MOCK_NONCE: ${VIRKI_PR92_MOCK_NONCE:?}
+      VIRKI_PR92_MOCK_ALLOW_QUICK: ${VIRKI_PR92_MOCK_ALLOW_QUICK:-false}
+    volumes:
+      - ./staging/mock-origin.mjs:/mock-origin.mjs:ro
+    command: ["node", "/mock-origin.mjs"]
+    networks: [staging]
+
+  oidc-issuer:
+    image: node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      VIRKI_PR92_MOCK_SERVICE: oidc-issuer
+      VIRKI_PR92_MOCK_HOST: ${VIRKI_PR92_ISSUER_HOST:?}
+      VIRKI_PR92_MOCK_NONCE: ${VIRKI_PR92_MOCK_NONCE:?}
+      VIRKI_PR92_MOCK_ALLOW_QUICK: ${VIRKI_PR92_MOCK_ALLOW_QUICK:-false}
+    volumes:
+      - ./staging/mock-origin.mjs:/mock-origin.mjs:ro
+    command: ["node", "/mock-origin.mjs"]
+    networks: [staging]
+
+networks:
+  staging:
+    driver: bridge

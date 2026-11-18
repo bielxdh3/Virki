@@ -130,13 +130,14 @@ export function createDisposableDockerSession({
       containers.includes(network) || typeof spawn !== "function") refuse("invalid resource ownership");
 
   if (spawn === spawnSync) {
-    // Live calls originate only from the three reviewed disposable fixtures;
+    // Live calls originate only from the reviewed disposable fixtures;
     // a caller cannot borrow ambient Docker networks or foreign resource names.
-    const runtime = kind === "runtime" && containers.length === 3 &&
+    const runtime = kind === "runtime" && containers.length === 4 &&
       network === `virki-runtime-${owner}` &&
       containers[0] === `virki-runtime-public-${owner}` &&
       containers[1] === `virki-runtime-hub-${owner}` &&
-      containers[2] === `virki-runtime-issuer-${owner}`;
+      containers[2] === `virki-runtime-hub-native-${owner}` &&
+      containers[3] === `virki-runtime-issuer-${owner}`;
     const assertion = kind === "runtime" && containers.length === 1 &&
       network === `virki-image-assertion-unused-${owner}` &&
       containers[0] === `virki-image-assertion-${owner}`;
@@ -289,7 +290,8 @@ export function createDisposableDockerSession({
   function invoke(args, options = {}) {
     if (cleanupStarted || !Array.isArray(args)) refuse("unreviewed public Docker read after cleanup or invalid arguments");
     const portRead = kind === "runtime" && args.length === 3 && args[0] === "port" &&
-      containers.includes(args[1]) && ["3000/tcp", "3001/tcp"].includes(args[2]);
+      ((args[1] === containers[0] && args[2] === "3000/tcp") ||
+        ((args[1] === containers[1] || (containers.length === 4 && args[1] === containers[2])) && args[2] === "3001/tcp"));
     const readyArgs = ["exec", containers[0], "pg_isready", "-h", "127.0.0.1",
       "-U", "virki_bootstrap", "-d", "virki_validation"];
     const readyRead = kind === "migrator" && args.length === readyArgs.length &&
@@ -305,8 +307,10 @@ export function createDisposableDockerSession({
     if (!cleanupOperation) {
       const order = kind === "migrator"
         ? ["create-network", "create-database", "run-deploy", "run-status"]
-        : containers.length === 3
-          ? ["create-network", "create-public", "create-issuer", "create-hub"]
+        : containers.length === 4
+          ? ["create-network", "create-public", "create-issuer", "create-hub", "create-native-hub"]
+          : containers.length === 3
+            ? ["create-network", "create-public", "create-issuer", "create-hub"]
           : ["create-network", "run-assertion"];
       // A one-container assertion fixture runs without a network; an isolated
       // one-container mock may instead create one disposable network.

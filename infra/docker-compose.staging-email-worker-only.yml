@@ -1,0 +1,49 @@
+# Isolated, standalone staging mail-worker ONLY. Never combine this manifest
+# with docker-compose.prod.yml or point at a production Docker context/project.
+# An independent operator must approve target host, network, DB, relay,
+# recipients, quotas, immutable image and one attended send window. Worker OFF
+# until authorization; this manifest does not authorize a start or delivery.
+name: ${VIRKI_STAGING_COMPOSE_PROJECT:?approved isolated staging project required}
+
+services:
+  email-worker:
+    image: ${VIRKI_STAGING_EMAIL_WORKER_IMAGE:?approved immutable staging image digest required}
+    pull_policy: never
+    profiles: ["staging-email-worker-manual"]
+    restart: "no"
+    # Limits are mandatory and come from the signed staging resource policy;
+    # no implicit/unbounded worker CPU, memory or process budget is accepted.
+    mem_limit: ${VIRKI_STAGING_EMAIL_WORKER_MEMORY_LIMIT:?signed staging memory limit required}
+    cpus: ${VIRKI_STAGING_EMAIL_WORKER_CPUS_LIMIT:?signed staging CPU limit required}
+    pids_limit: ${VIRKI_STAGING_EMAIL_WORKER_PIDS_LIMIT:?signed staging PID limit required}
+    user: node:node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    networks: [staging-mail]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${VIRKI_STAGING_EMAIL_WORKER_DATABASE_URL:?scoped isolated staging PostgreSQL required}
+      VIRKI_EMAIL_WORKER_SCOPED_ROLE: required
+      VIRKI_EMAIL_TRANSPORT: smtp
+      VIRKI_EMAIL_OUTBOX_KEY: ${VIRKI_STAGING_EMAIL_OUTBOX_KEY:?isolated staging outbox key required}
+      VIRKI_EMAIL_SMTP_HOST: ${VIRKI_STAGING_EMAIL_SMTP_HOST:?isolated SMTP relay required}
+      VIRKI_EMAIL_SMTP_PORT: ${VIRKI_STAGING_EMAIL_SMTP_PORT:?approved SMTP port required}
+      VIRKI_EMAIL_SMTP_SECURE: ${VIRKI_STAGING_EMAIL_SMTP_SECURE:?approved SMTP TLS mode required}
+      VIRKI_EMAIL_SMTP_USER: ${VIRKI_STAGING_EMAIL_SMTP_USER:?staging SMTP identity required}
+      VIRKI_EMAIL_SMTP_PASSWORD: ${VIRKI_STAGING_EMAIL_SMTP_PASSWORD:?staging SMTP credential required}
+      # Exact single test mailbox; enforced before SMTP network I/O.
+      VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST: ${VIRKI_STAGING_EMAIL_RECIPIENT_ALLOWLIST:?approved single test recipient required}
+      VIRKI_EMAIL_MIN_SEND_INTERVAL_MS: ${VIRKI_STAGING_EMAIL_MIN_SEND_INTERVAL_MS:?approved staging interval required}
+      VIRKI_EMAIL_FROM: ${VIRKI_STAGING_EMAIL_FROM:?approved test sender required}
+      VIRKI_EMAIL_REPLY_TO: ${VIRKI_STAGING_EMAIL_REPLY_TO:-}
+    command: npm run email:worker --workspace @virki/auth
+
+# Pre-existing independently authorized external Docker network. Compose must
+# not create a project-default network or a database/volume through this file.
+networks:
+  staging-mail:
+    external: true
+    name: ${VIRKI_STAGING_EMAIL_WORKER_NETWORK:?pre-existing approved staging-only network required}

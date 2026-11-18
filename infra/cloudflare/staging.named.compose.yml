@@ -1,0 +1,14 @@
+# Loaded only by the guarded --named-edge runner; never combine with production Compose.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    depends_on: [public-site, hub, oidc-issuer]
+    environment:
+      TUNNEL_TOKEN: ${VIRKI_PR92_STAGING_TUNNEL_TOKEN:?isolated PR92 staging tunnel token required}
+    command: ["tunnel", "run"]
+    networks: [staging]

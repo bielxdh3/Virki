@@ -45,6 +45,12 @@ test("processing messages with no lease are reclaimed once and stale finalizers 
   assert.equal(current.status, "PROCESSING");
   assert.equal(current.attemptCount, 2);
   assert.ok(current.processingLeaseExpiresAt && current.processingLeaseExpiresAt > now);
+  // This deliberately stale synthetic row must not pollute later, unrelated
+  // benchmark batches. Delete ONLY the fixture created above in this DB.
+  await prisma.$transaction([
+    prisma.emailDeliveryAttempt.deleteMany({ where: { messageId: message.id } }),
+    prisma.emailOutboxMessage.delete({ where: { id: message.id } })
+  ]);
 });
 
 async function drainBatch(count: number) {

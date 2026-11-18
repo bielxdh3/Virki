@@ -5,7 +5,7 @@ import { withHubAuditRequest } from "../../../lib/audit-request";
 import { revokeOtherAccountSessions, SESSION_COOKIE_NAME, verifyPassword, writeAuditLogInTransaction } from "@virki/auth";
 import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { validateSessionCsrfTokenFor } from "../../../lib/session-csrf";
-import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt } from "@virki/auth/security";
+import { getAccountSecurityState, startTotpEnrollment, confirmTotpEnrollment, disableTotp, regenerateRecoveryCodes, listTrustedDevices, revokeTrustedDevice, consumeSecurityProofAttempt, type SecurityMutationSession } from "@virki/auth/security";
 import { prisma } from "@virki/database";
 import { revalidatePath } from "next/cache";
 import { forbidden, redirect } from "next/navigation";
@@ -15,8 +15,47 @@ import { getCurrentSession } from "../../../lib/auth";
 import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../../lib/cloudflare-access";
 import { getSurface, hasSameOrigin } from "../../../lib/surface";
 import { PASSWORD_INPUT_MAX_LENGTH, readBoundedFormString } from "../../../lib/action-input-limits";
+import { completeRecoveryEmailRebind, isRecoveryEmailRebindSession, startRecoveryEmailRebind } from "@virki/auth/recovery-email-rebind";
 
 export type AccountSecurityState = { status: "idle" | "error" | "started" | "complete"; secret?: string; recoveryCodes?: string[] };
+
+export type RecoveryEmailRebindState = { status: "idle" | "error" | "started" };
+
+export async function startRecoveryEmailRebindAction(_previous: RecoveryEmailRebindState, formData: FormData): Promise<RecoveryEmailRebindState> {
+  return withHubAuditRequest(async () => {
+    const session = await requireAccountMutation(formData, "account-recovery-email-rebind-start");
+    const proposed = readBoundedFormString(formData, "newEmail", 254);
+    if (!isRecoveryEmailRebindSession(session) || proposed === null) {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-start", "rejected", session);
+      return { status: "error" };
+    }
+    try {
+      await startRecoveryEmailRebind(session, proposed);
+      return { status: "started" };
+    } catch {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-start", "rejected", session);
+      return { status: "error" };
+    }
+  });
+}
+
+export async function confirmRecoveryEmailRebindAction(_previous: RecoveryEmailRebindState, formData: FormData): Promise<RecoveryEmailRebindState> {
+  return withHubAuditRequest(async () => {
+    const session = await requireAccountMutation(formData, "account-recovery-email-rebind-confirm");
+    if (!isRecoveryEmailRebindSession(session)) {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-confirm", "rejected", session);
+      return { status: "error" };
+    }
+    try {
+      await completeRecoveryEmailRebind(session, read(formData, "code"));
+    } catch {
+      await recordSecurityDenial(await headers(), "account-recovery-email-rebind-confirm", "rejected", session);
+      return { status: "error" };
+    }
+    (await cookies()).delete(SESSION_COOKIE_NAME);
+    redirect("/login?emailRebound=1");
+  });
+}
 
 export async function startTotpAction(_state: AccountSecurityState, formData: FormData): Promise<AccountSecurityState> {
   return withHubAuditRequest(async () => {
@@ -30,7 +69,7 @@ export async function startTotpAction(_state: AccountSecurityState, formData: Fo
     await consumeSecurityProofAttempt(session.user.id);
     const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { email: true, passwordHash: true, isActive: true } });
     if (!user?.isActive || !user.passwordHash || !await verifyPassword(user.passwordHash, password)) throw new Error("Rejected.");
-    const enrollment = await startTotpEnrollment(session.user.id, user.email);
+    const enrollment = await startTotpEnrollment(session.user.id, user.email, securityMutationSession(session));
     revalidatePath("/account/security");
     return { status: "started", secret: enrollment.secret };
   } catch { await recordSecurityDenial(await headers(), "account-security-proof", "rejected", session); return { status: "error" }; }
@@ -41,7 +80,7 @@ export async function confirmTotpAction(_state: AccountSecurityState, formData: 
   return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-totp-confirm");
   try {
-    const recoveryCodes = await confirmTotpEnrollment(session.user.id, read(formData, "code"));
+    const recoveryCodes = await confirmTotpEnrollment(session.user.id, read(formData, "code"), new Date(), securityMutationSession(session));
     revalidatePath("/account/security");
     return { status: "complete", recoveryCodes };
   } catch { await recordSecurityDenial(await headers(), "account-security-proof", "rejected", session); return { status: "error" }; }
@@ -51,7 +90,7 @@ export async function confirmTotpAction(_state: AccountSecurityState, formData: 
 export async function disableTotpAction(formData: FormData): Promise<void> {
   return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-totp-disable");
-  try { await disableTotp(session.user.id, read(formData, "code")); }
+  try { await disableTotp(session.user.id, read(formData, "code"), new Date(), securityMutationSession(session)); }
   catch { await recordSecurityDenial(await headers(), "account-totp-disable", "rejected", session); redirect("/account/security?error=totp"); }
   redirect("/login?security=changed");
   });
@@ -61,7 +100,7 @@ export async function regenerateRecoveryCodesAction(_state: AccountSecurityState
   return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-recovery-codes");
   try {
-    const recoveryCodes = await regenerateRecoveryCodes(session.user.id, read(formData, "code"));
+    const recoveryCodes = await regenerateRecoveryCodes(session.user.id, read(formData, "code"), new Date(), securityMutationSession(session));
     revalidatePath("/account/security");
     return { status: "complete", recoveryCodes };
   } catch { await recordSecurityDenial(await headers(), "account-security-proof", "rejected", session); return { status: "error" }; }
@@ -71,7 +110,7 @@ export async function regenerateRecoveryCodesAction(_state: AccountSecurityState
 export async function revokeTrustedDeviceAction(formData: FormData): Promise<void> {
   return withHubAuditRequest(async () => {
   const session = await requireAccountMutation(formData, "account-device-revoke");
-  try { await revokeTrustedDevice(session.user.id, read(formData, "deviceKey")); }
+  try { await revokeTrustedDevice(session.user.id, read(formData, "deviceKey"), securityMutationSession(session)); }
   catch { await recordSecurityDenial(await headers(), "account-device-revoke", "rejected", session); redirect("/account/security?error=device"); }
   revalidatePath("/account/security");
   redirect("/account/security?status=device");
@@ -184,6 +223,11 @@ async function requireAccountMutation(formData: FormData, source: string) {
   if (!session) { await recordSecurityDenial(requestHeaders, source, "role"); forbidden(); }
   if ((surface === "hub" && session.user.role !== "ADMIN") || (surface === "portal" && session.user.role !== "USER")) { await recordSecurityDenial(requestHeaders, source, "role", session); forbidden(); }
   return session;
+}
+
+function securityMutationSession(session: { id: string; user: { role: string } }): SecurityMutationSession {
+  if (session.user.role !== "USER" && session.user.role !== "ADMIN") forbidden();
+  return { id: session.id, role: session.user.role };
 }
 
 function read(formData: FormData, key: string): string { const value = formData.get(key); return typeof value === "string" ? value.trim() : ""; }
