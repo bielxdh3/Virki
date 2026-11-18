@@ -17,6 +17,7 @@ import { isCloudflareAccessAllowed, validateHubCloudflareAccess } from "../../..
 import { getSurface, getSurfaceBaseUrl, hasSameOrigin, requestHost } from "../../../lib/surface";
 import { readBoundedFormData } from "../../../lib/request-form";
 import { recordSecurityDenial, recordSessionCsrfDenial } from "../../../lib/audit-denial";
+import { isNativeHubPerimeterEnabled } from "../../../lib/hub-perimeter";
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +27,17 @@ export async function POST(request: NextRequest) {
   if (surface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(request.headers, "admin-logout-api"))) {
     return new NextResponse("Forbidden", { status: 403 });
   }
-  if (!hasSameOrigin(request.headers)) { await recordSecurityDenial(request.headers, "logout-origin", "csrf"); return new NextResponse("Forbidden", { status: 403 }); }
+  if (!hasSameOrigin(request.headers)) {
+    // A logout Origin denial happens before the normal session lookup. In
+    // native Hub mode, attribute a genuinely live cookie before deciding
+    // whether the denial may use the anonymous write budget.
+    if (surface === "hub" && isNativeHubPerimeterEnabled()) {
+      await recordSessionCsrfDenial(request.headers, "logout-origin", request.cookies.get(SESSION_COOKIE_NAME)?.value);
+    } else {
+      await recordSecurityDenial(request.headers, "logout-origin", "csrf");
+    }
+    return new NextResponse("Forbidden", { status: 403 });
+  }
 
   const formData = await readBoundedFormData(request, 8 * 1024);
   if (!formData) return new NextResponse("Bad Request", { status: 400 });

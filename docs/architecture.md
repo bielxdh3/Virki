@@ -10,7 +10,7 @@ Virki owns identity, authentication and SSO, security, project entry decisions, 
 |---|---|---|
 | `biel.dev.br` | Minimal public page with portal entry | Public |
 | `portal.biel.dev.br` | USER portal and OIDC endpoints | Public OIDC metadata and protocol endpoints; account pages require a Virki session |
-| `hub.biel.dev.br` | ADMIN control plane | Cloudflare Access JWT plus active Virki ADMIN session |
+| `hub.biel.dev.br` | ADMIN control plane | Target `native`: Virki login with mandatory ADMIN MFA, active session, ADMIN role and action-scoped elevation/CSRF; Tunnel is HTTPS transport only. Legacy `access` also verifies Cloudflare Access JWT until cutover. |
 
 The portal displays only enabled external connections with an active grant for the current USER. The admin routes are `/admin/accounts`, `/admin/access`, `/admin/security`, `/admin/audit`, and `/admin/connections`. `/admin` redirects to the account list.
 

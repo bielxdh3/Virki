@@ -10,7 +10,16 @@ type RegisteredSigningKey = { kid: string; privateKey: KeyObject };
 
 let registeredSigningKey: Promise<RegisteredSigningKey> | undefined;
 
-export async function addCloudflareAccessHeader(page: Page): Promise<void> {
+export async function addCloudflareAccessHeader(page: Page, options: { hubOnlyBrowserRedirects?: boolean } = {}): Promise<void> {
+  if (options.hubOnlyBrowserRedirects) {
+    // This option is restricted to the dedicated Hub reviewer page. A fixed,
+    // independently validated synthetic Access assertion lets Chromium handle
+    // the real form POST, 303, Set-Cookie and next GET without a route callback
+    // carrying stale request headers across navigation. Never use on a page
+    // that subsequently navigates to the public USER Portal.
+    await page.setExtraHTTPHeaders({ "cf-access-jwt-assertion": await createCloudflareAccessToken(900) });
+    return;
+  }
   await page.context().route(`${HUB_URL}/**`, async (route) => {
     const token = await createCloudflareAccessToken();
     await route.continue({
@@ -22,7 +31,7 @@ export async function addCloudflareAccessHeader(page: Page): Promise<void> {
   });
 }
 
-async function createCloudflareAccessToken(): Promise<string> {
+async function createCloudflareAccessToken(ttlSeconds = 120): Promise<string> {
   const audience = process.env.VIRKI_E2E_ACCESS_AUDIENCE;
   const issuer = process.env.VIRKI_E2E_ACCESS_ISSUER;
   if (!audience || !issuer) throw new Error("Synthetic E2E Cloudflare Access signing configuration is unavailable.");
@@ -35,7 +44,7 @@ async function createCloudflareAccessToken(): Promise<string> {
     .setAudience(audience)
     .setIssuedAt(issuedAt)
     .setNotBefore(issuedAt)
-    .setExpirationTime(issuedAt + 120)
+    .setExpirationTime(issuedAt + ttlSeconds)
     .sign(privateKey);
   const verification = await validateCloudflareAccessJwt(new Headers({ "cf-access-jwt-assertion": token }), {
     CLOUDFLARE_ACCESS_JWT_REQUIRED: "true",

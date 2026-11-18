@@ -11,6 +11,7 @@ import { revokeUserOidcArtifactsInTransaction } from "@virki/auth/security";
 import { prisma } from "@virki/database";
 import Provider from "oidc-provider";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
+import { OIDC_PROVIDER_SECURITY_CONFIGURATION } from "./provider-security-config";
 
 let server: Server;
 let provider: Provider;
@@ -32,8 +33,8 @@ before(async () => {
     clientDefaults: { grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "client_secret_basic", id_token_signed_response_alg: "ES256" },
     scopes: ["openid", "profile", "email"],
     claims: { openid: ["sub"], profile: ["name"], email: ["email", "email_verified"] },
-    features: { devInteractions: { enabled: false }, clientCredentials: { enabled: false }, registration: { enabled: false }, deviceFlow: { enabled: false }, introspection: { enabled: false }, revocation: { enabled: true } },
-    pkce: { methods: ["S256"], required: () => true },
+    features: { ...OIDC_PROVIDER_SECURITY_CONFIGURATION.features, devInteractions: { enabled: false }, clientCredentials: { enabled: false }, registration: { enabled: false }, deviceFlow: { enabled: false }, introspection: { enabled: false }, revocation: { enabled: true } },
+    pkce: OIDC_PROVIDER_SECURITY_CONFIGURATION.pkce,
     ttl: { AuthorizationCode: 90, AccessToken: 300 },
     cookies: { keys: [randomBytes(32).toString("base64url")] },
     jwks: { keys: [{ ...jwk, kid: "test", use: "sig", alg: "ES256" }] },

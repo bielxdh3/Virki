@@ -11,7 +11,9 @@ export const integrationEnabled = process.env.VIRKI_INTEGRATION_ENABLED === "tru
 export const integrationOptions = { skip: integrationEnabled ? false : "disposable integration database not configured" } as const;
 
 export function uniqueEmail(label: string): string {
-  return `${label}-${randomUUID()}@integration.invalid`;
+  // RFC mailbox local parts are at most 64 UTF-8 bytes. All fixture labels
+  // are ASCII; preserve the UUID's uniqueness while respecting that bound.
+  return `${label.slice(0, 27)}-${randomUUID()}@integration.invalid`;
 }
 
 export async function createTestUser(input: {

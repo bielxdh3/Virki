@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import * as elevationAuthorization from "./elevation-authorization";
 import {
   AdministrationMutationError,
   AdministrativePasswordReuseError,
@@ -70,6 +71,39 @@ test("administrative password reuse is a specific mutation rejection", () => {
   assert.equal(error.name, "AdministrativePasswordReuseError");
 });
 
+test("TOTP recovery of the separate ADMIN credential revokes old passkeys without disabling login TOTP", () => {
+  const source = readFileSync(new URL("./administration.ts", import.meta.url), "utf8");
+  const start = source.indexOf("export async function recoverAdministrativeCredentialWithTotp(");
+  const end = source.indexOf("/** Start a distinct ADMIN credential-recovery proof", start);
+  assert.ok(start >= 0 && end > start, "expected isolated administrative TOTP recovery method");
+  const method = source.slice(start, end);
+  assert.match(method, /transaction\.passkeyCredential\.updateMany\(/u);
+  assert.match(method, /where:\s*\{ userId: input\.actor\.id, revokedAt: null \}/u);
+  assert.match(method, /data:\s*\{ revokedAt: checkedAt \}/u);
+  assert.match(method, /transaction\.passkeyChallenge\.deleteMany\(/u);
+  assert.doesNotMatch(method, /transaction\.totpFactor\.(?:deleteMany|updateMany)\([^\n]*status:\s*"REVOKED"/u);
+});
+
+test("all three separate ADMIN-credential recovery methods revoke old passkey proofs", () => {
+  const source = readFileSync(new URL("./administration.ts", import.meta.url), "utf8");
+  for (const [startName, endName] of [
+    ["recoverAdministrativeCredential", "recoverAdministrativeCredentialWithTotp"],
+    ["recoverAdministrativeCredentialWithTotp", "startAdministrativeEmailRecovery"],
+    ["completeAdministrativeEmailRecovery", "createEmailElevationCeremony"]
+  ]) {
+    const start = source.indexOf(`export async function ${startName}(`);
+    const end = source.indexOf(endName === "createEmailElevationCeremony" ? `async function ${endName}(` : `export async function ${endName}(`, start);
+    assert.ok(start >= 0 && end > start, `${startName} source interval must exist`);
+    const method = source.slice(start, end);
+    assert.match(method, /transaction\.passkeyCredential\.updateMany\(/u, `${startName}: old passkeys must be revoked`);
+    assert.match(method, /revokedAt:\s*null/u, `${startName}: only active passkeys should be affected`);
+    assert.match(method, /transaction\.passkeyChallenge\.deleteMany\(/u, `${startName}: pending assertions must be invalidated`);
+    assert.match(method, /transaction\.session\.updateMany\(/u, `${startName}: sibling sessions must be revoked`);
+    assert.match(method, /revokeUserAuthenticationProofsInTransaction\(/u, `${startName}: trusted devices and pending challenges must be invalidated`);
+    assert.match(method, /revokeUserOidcArtifactsInTransaction\(/u, `${startName}: OIDC artifacts must be invalidated`);
+  }
+});
+
 for (const lockTarget of ["session", "elevation"] as const) test(`transactional elevation rechecks ${lockTarget} expiry after a lock wait`, async () => {
   const now = new Date();
   const expiresAt = new Date(Date.now() + 120);
@@ -125,4 +159,144 @@ for (const credentialState of ["current", "rotated", "revoked", "missing-version
   const authorization = requireSecurityElevationInTransaction(transaction as never, "admin-id", "session-id", "ADMIN_RECOVERY_REGENERATE", new Date());
   if (credentialState === "current") await authorization;
   else await assert.rejects(authorization, AdministrationMutationError);
+});
+
+test("ADMIN elevation must be rechecked with fresh DB time after blocking mutation writes", async () => {
+  type LateGuard = (tx: never, userId: string, sessionId: string, scope: string) => Promise<void>;
+  const guard = (elevationAuthorization as unknown as { assertSecurityElevationCurrentAfterWrite?: LateGuard })
+    .assertSecurityElevationCurrentAfterWrite;
+  assert.equal(typeof guard, "function", "a final live elevation guard must exist after potentially blocking writes");
+  if (!guard) return;
+  const queries: string[] = [];
+  const transaction = {
+    $queryRaw: async (parts: TemplateStringsArray) => {
+      const sql = parts.join("");
+      queries.push(sql);
+      if (sql.includes('FROM "User" u JOIN "Session"')) return [{ id: "session-id" }];
+      if (sql.includes('FROM "SecurityElevation"')) return [];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  await assert.rejects(guard(transaction as never, "admin-id", "session-id", "ACCOUNT_STATE_CHANGE"),
+    AdministrationMutationError, "an elevation expired during a blocked writer must roll back its mutation");
+  assert.ok(queries.some(sql => sql.includes("clock_timestamp()")),
+    "the post-write deadline must use PostgreSQL's current clock, not transaction-start now()");
+});
+
+test("initial elevation selects the live matching proof instead of an earlier expired same-scope proof", async () => {
+  const transaction = {
+    $queryRaw: async (parts: TemplateStringsArray) => {
+      const sql = parts.join("");
+      if (sql.includes('FROM "User" WHERE "id"')) return [{ id: "admin-id" }];
+      if (sql.includes('FROM "User" u JOIN "Session"')) return [{ id: "session-id" }];
+      if (sql.includes('FROM "AdministrativeCredential"')) return [{
+        passwordHash: "fixture", keyVersion: 3, status: "ACTIVE", revokedAt: null
+      }];
+      if (sql.includes('FROM "SecurityElevation"') && sql.includes("FOR UPDATE")) return [
+        { id: "expired-proof", credentialKeyVersion: 3 },
+        { id: "live-proof", credentialKeyVersion: 3 }
+      ];
+      if (sql.includes('FROM "SecurityElevation"')) return [{ id: "live-proof" }];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  assert.equal(await requireSecurityElevationInTransaction(transaction as never,
+    "admin-id", "session-id", "ADMIN_CREDENTIAL_CHANGE", new Date()), "live-proof");
+});
+
+test("late ADMIN elevation fence accepts a live locked proof, but rejects an expired consumed credential-change proof", async () => {
+  const queries: string[] = [];
+  let allow = true;
+  const transaction = {
+    $queryRaw: async (parts: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = parts.join("");
+      queries.push(sql);
+      if (sql.includes('FROM "User" u JOIN "Session"')) return [{ id: "session-id" }];
+      if (sql.includes('FROM "SecurityElevation"')) {
+        if (values.includes("proof-id")) {
+          assert.match(sql, /e\."id" =/u, "rotated proof must be pinned by its original ID");
+          assert.match(sql, /e\."credentialKeyVersion" \+ 1 = c\."keyVersion"/u,
+            "the administrative credential was legitimately rotated once");
+          assert.match(sql, /e\."status" = 'REVOKED'/u);
+        }
+        if (values.includes(600_000)) assert.match(sql, /e\."activatedAt" > .*clock_timestamp\(\)/u,
+          "late ADMIN passkey guard must recheck its ten-minute activation freshness");
+        return allow ? [{ id: "proof-id" }] : [];
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  await assert.doesNotReject(elevationAuthorization.assertSecurityElevationCurrentAfterWrite(
+    transaction as never, "admin-id", "session-id", "ADMIN_RECOVERY_REGENERATE"));
+  await assert.doesNotReject(elevationAuthorization.assertSecurityElevationCurrentAfterWrite(
+    transaction as never, "admin-id", "session-id", "ADMIN_CREDENTIAL_CHANGE", undefined, 600_000));
+  await assert.doesNotReject(elevationAuthorization.assertSecurityElevationCurrentAfterWrite(
+    transaction as never, "admin-id", "session-id", "ADMIN_CREDENTIAL_CHANGE", "proof-id"));
+  allow = false;
+  await assert.rejects(elevationAuthorization.assertSecurityElevationCurrentAfterWrite(
+    transaction as never, "admin-id", "session-id", "ADMIN_CREDENTIAL_CHANGE", "proof-id"), AdministrationMutationError);
+  assert.ok(queries.some(sql => sql.includes("clock_timestamp()")), "late check must use live database time");
+});
+
+test("ADMIN credential changes, recovery code rotation and recovery approvals recheck elevation after final audit", () => {
+  const scenarios = [
+    { file: "./administration.ts", start: "export async function changeAdministrativePassword(", end: "export async function regenerateAdministrativeRecoveryCodes(" },
+    { file: "./administration.ts", start: "export async function regenerateAdministrativeRecoveryCodes(", end: "export async function recoverAdministrativeCredential(" },
+    { file: "./security.ts", start: "export async function approveAccountRecovery(", end: "export async function consumeApprovedAccountRecovery(" },
+    { file: "./administration.ts", start: "export async function grantProjectAccess(", end: "export async function revokeProjectAccess(" },
+    { file: "./administration.ts", start: "export async function revokeProjectAccess(", end: "\n}" },
+    { file: "./account-invitation.ts", start: "export async function provisionInvitedUserAccount(", end: "\n}" }
+  ];
+  for (const { file, start, end } of scenarios) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    const startOffset = source.indexOf(start);
+    const endOffset = end === "\n}" ? source.indexOf(end, startOffset) : source.indexOf(end, startOffset);
+    const body = source.slice(startOffset, endOffset);
+    assert.ok(body.startsWith(start), `${start}: missing function`);
+    const lastAudit = body.lastIndexOf("await writeAuditLogInTransaction(");
+    const finalGuard = body.lastIndexOf("await assertSecurityElevationCurrentAfterWrite(");
+    assert.ok(finalGuard > lastAudit, `${start} must recheck expiration AFTER its last potentially blocking audit INSERT`);
+  }
+});
+
+test("ADMIN server actions and passkey mutations keep a late authorization fence", () => {
+  const source = readFileSync(new URL("../../../apps/hub/src/app/admin/actions.ts", import.meta.url), "utf8");
+  const actions = [
+    "setAccountStateAction", "createProjectConnectionAction",
+    "updateProjectConnectionAction", "rotateProjectClientSecretAction",
+    "setProjectConnectionEnabledAction", "deleteProjectConnectionAction"
+  ];
+  for (let i = 0; i < actions.length; i += 1) {
+    const start = source.indexOf(`export async function ${actions[i]}(`);
+    const end = i + 1 < actions.length
+      ? source.indexOf(`export async function ${actions[i + 1]}(`, start)
+      : source.indexOf("\nfunction ", start);
+    const segment = source.slice(start, end >= 0 ? end : undefined);
+    assert.ok(start >= 0 && segment.includes("await assertSecurityElevationCurrentAfterWrite("),
+      `${actions[i]} must recheck after its potentially blocking audit write`);
+    assert.ok(segment.lastIndexOf("await assertSecurityElevationCurrentAfterWrite(") >
+      segment.lastIndexOf("await writeAuditLogInTransaction("), actions[i]);
+  }
+  const passkeys = readFileSync(new URL("./passkeys.ts", import.meta.url), "utf8");
+  const guards = passkeys.match(/assertSecurityElevationCurrentAfterWrite\(tx, userId, sessionId, "ADMIN_CREDENTIAL_CHANGE", undefined, 10 \* 60_000\)/gu) ?? [];
+  assert.equal(guards.length, 2, "both ADMIN passkey registration and mutation must recheck proof freshness");
+});
+
+test("initial ADMIN credential setup, elevation activation and backup recovery recheck proofs after audit", () => {
+  const source = readFileSync(new URL("./administration.ts", import.meta.url), "utf8");
+  for (const [start, end, finalChecks] of [
+    ["export async function completeAdministrativeCredentialSetup(", "export async function startSecurityElevation(", ["assertAdminSessionCurrentInTransaction(", "isElevationCeremonyOpen("]],
+    ["export async function verifySecurityElevation(", "export async function listActiveSecurityElevations(", ["assertAdminSessionCurrentInTransaction(", "isElevationCeremonyOpen("]],
+    ["export async function recoverAdministrativeCredential(", "export async function recoverAdministrativeCredentialWithTotp(", ["assertAdminSessionCurrentInTransaction("]]
+  ] as const) {
+    const begin = source.indexOf(start);
+    const finish = source.indexOf(end, begin);
+    assert.ok(begin >= 0 && finish > begin, `${start}: missing source boundary`);
+    const body = source.slice(begin, finish);
+    const audit = body.lastIndexOf("await writeAuditLogInTransaction(");
+    assert.ok(audit >= 0, `${start}: required success audit missing`);
+    for (const check of finalChecks) {
+      assert.ok(body.lastIndexOf(check) > audit, `${start} must run ${check} AFTER the audit INSERT`);
+    }
+  }
 });
