@@ -3,7 +3,7 @@
 ## Boundaries
 
 - Unknown hosts and unauthenticated protected routes fail closed.
-- The ADMIN host requires Cloudflare Access and then validates the Access JWT and Virki ADMIN session server-side.
+- The ADMIN host has two explicitly selected modes: legacy `access` (Cloudflare Access JWT plus Virki authorization) and target `native` (Virki login, mandatory ADMIN MFA, session, role, elevation and CSRF with no external Access identity gate). Production remains in `access` until separate authorized cutover; Cloudflare Tunnel is HTTPS transport, not ADMIN authentication.
 - The USER portal does not require the ADMIN Access assertion.
 - Application ports bind to loopback. PostgreSQL and the OIDC issuer have no host-published ports.
 - A project receives its own OIDC result, never the Virki session cookie.
@@ -14,7 +14,7 @@
 - Session tokens are opaque, stored as hashes, rotated on authentication, and revocable.
 - Cookies are host-only, HttpOnly, SameSite=Lax, and Secure in production.
 - Password verification (Argon2id) runs outside database transactions: a short transaction reserves the attempt on the per-attempt and per-account counters, the hash is checked without holding locks, and only a verified password clears the counters. Unknown or ineligible accounts still verify against a dummy hash.
-- A browser becomes a trusted device only after the whole login ceremony succeeds: email proof for EMAIL accounts, email proof plus TOTP for TOTP accounts. A remembered-browser grant is created at that point and lasts at most seven days. It may skip a repeat USER login ceremony on that browser; ADMIN logins never use it and always complete a fresh second factor. It never substitutes for Cloudflare Access on the ADMIN host, an active ADMIN session, or action-scoped elevation. Remembered grants are revocable and are cleared by account recovery/deactivation.
+- A browser becomes a trusted device only after the whole login ceremony succeeds: email proof for EMAIL accounts, email proof plus TOTP for TOTP accounts. A remembered-browser grant is created at that point and lasts at most seven days. It may skip a repeat USER login ceremony on that browser; ADMIN logins never use it and always complete a fresh second factor. It never substitutes for Cloudflare Access when `access` mode is selected, an active ADMIN session, or action-scoped elevation. Remembered grants are revocable and are cleared by account recovery/deactivation.
 - Login ceremonies that mail a code are budgeted even after a correct password: six per 15 minutes per trusted device (or per account for untrusted browsers) and twenty per source address. A repeated start from the same browser within 60 seconds reuses the pending ceremony instead of mailing another code. Exhausted budgets produce the same generic login failure.
 - Emailed one-time codes are stored only as keyed (`h2:`) digests; unkeyed legacy digests are rejected.
 - TOTP seeds and protected email/OIDC payloads are encrypted at rest with environment-held keys.
@@ -26,7 +26,7 @@
 ## Authorization
 
 - Roles are ADMIN and USER only. Anonymous visitors have no stored authority.
-- Every protected ADMIN page checks Cloudflare Access, the current Virki session, and the current role on the server. Mutating actions also check request origin and CSRF; fresh proof is required when the action policy specifies it.
+- Every protected ADMIN page checks the selected perimeter (`access` requires Cloudflare Access; `native` does not), the current Virki session, and the current role on the server. Mutating actions also check request origin and CSRF; fresh proof is required when the action policy specifies it.
 - A USER receives only explicit project-entry grants. Disabled accounts, connections, or revoked grants deny authorization.
 - Redirect URIs are exact HTTPS allowlist matches. Wildcards, credentials, fragments, and noncanonical values are rejected.
 - Authorization state is rechecked by the issuer when it completes the OIDC interaction.

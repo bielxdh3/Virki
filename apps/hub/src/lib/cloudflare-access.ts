@@ -1,4 +1,5 @@
 import { validateCloudflareAccessJwt, type CloudflareAccessJwtResult } from "@virki/auth/cloudflare-access";
+import { isNativeHubPerimeterEnabled } from "./hub-perimeter";
 import {
   createAuditRequestMetadata,
   writeAuditLog,
@@ -11,6 +12,10 @@ export async function validateHubCloudflareAccess(
   headers: Pick<Headers, "get">,
   source: string
 ): Promise<CloudflareAccessJwtResult> {
+  // Native ADMIN authentication is performed solely by Virki without a second external Access gate.
+  if (isNativeHubPerimeterEnabled()) {
+    return { allowed: true, required: false, status: "disabled" };
+  }
   const result = await validateCloudflareAccessJwt(headers);
 
   if (!result.required || result.allowed) {

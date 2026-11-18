@@ -1,0 +1,34 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+
+test("anonymous recovery errors use the same public ID generator as real and synthetic requests", () => {
+  const source = readFileSync(new URL("./actions.ts", import.meta.url), "utf8");
+  assert.match(source, /\bgenerateRecoveryPublicRequestId\b/u);
+  assert.match(source, /\bstartMultiMethodRecovery\b/u);
+  assert.match(source, /requestId:\s*generateRecoveryPublicRequestId\(\)/u);
+  assert.doesNotMatch(source, /requestId:\s*`c\$\{/u);
+});
+
+test("indeterminate recovery validation preserves one-sided or paired cookies without authorizing a browser", () => {
+  const action = readFileSync(new URL("./actions.ts", import.meta.url), "utf8");
+  const backend = readFileSync(new URL("../../../../../packages/auth/src/recovery-methods.ts", import.meta.url), "utf8");
+  assert.match(backend, /if \(error === FAILURE\) return false;\s*throw error;/u);
+  assert.match(action, /catch \{[\s\S]*?retentionUnavailable = true;/u);
+  assert.match(action, /const hasExistingRecoveryCookies = Boolean\(activeKey \|\| activeBrowser\);/u,
+    "a single legacy key or orphaned modern browser token must block silent replacement");
+  assert.match(action, /!canRetain && !retentionUnavailable && !recoveredIntent && !retainedLegacyId &&\s*\(!hasExistingRecoveryCookies \|\| replaceConfirmed\)\) try \{/u,
+    "start must require explicit consent before replacing any existing cookie");
+  assert.match(action, /restoreProvenMultiMethodRecoveryBrowser\(activeKey, activeBrowser, expectedRole\)/u);
+  assert.match(action, /getAccountRecoveryRequestId\(activeKey, new Date\(\), expectedRole\)/u);
+  assert.match(action, /getAccountRecoveryState\(legacy\.id, activeKey, new Date\(\), expectedRole\)/u);
+  const denied = action.indexOf('if (retentionUnavailable) {');
+  const redirectToRetry = action.indexOf('redirect("/recover?error=1");', denied);
+  const mintNewCookies = action.indexOf("setMultiMethodRecoveryCookies(cookieStore, recovery.requestKey");
+  assert.ok(denied !== -1 && redirectToRetry > denied && mintNewCookies > redirectToRetry,
+    "unknown backend status must return a generic retry before any capability overwrite");
+  const consentDenial = action.indexOf('redirect("/recover?restart=1");');
+  assert.ok(consentDenial > redirectToRetry && consentDenial < mintNewCookies,
+    "unconsented restarts cannot overwrite a lone legacy key or a modern bearer pair");
+  assert.match(action, /if \(hasExistingRecoveryCookies && !replaceConfirmed\) \{/u);
+});

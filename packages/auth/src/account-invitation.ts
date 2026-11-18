@@ -4,7 +4,7 @@ import { enqueueEmailMessageForClient } from "./email";
 import { hashAuditEmail, hashAuditIdentifier, writeAuditLogInTransaction } from "./audit";
 import { hashOidcIdentifier } from "./oidc-secrets";
 import { getRecoveryActionBaseUrl, hashEmailAddress, hashRecoveryRequestKey, hashSecurityCode } from "./security";
-import { requireSecurityElevationInTransaction } from "./elevation-authorization";
+import { assertSecurityElevationCurrentAfterWrite, requireSecurityElevationInTransaction } from "./elevation-authorization";
 import { isSingleMailboxAddress } from "./email-address";
 
 export const ACCOUNT_INVITATION_TTL_MS = 72 * 60 * 60 * 1000;
@@ -75,6 +75,7 @@ export async function provisionInvitedUserAccount(
       message: "User account provisioned.",
       metadata: { targetRef: hashOidcIdentifier(user.id), emailRef: hashAuditEmail(email), invitationRef: hashAuditIdentifier(invitation.id) }
     });
+    await assertSecurityElevationCurrentAfterWrite(transaction, actor.id, sessionId, "ACCOUNT_STATE_CHANGE");
     return { userId: user.id };
   }, { isolationLevel: "Serializable" });
 }

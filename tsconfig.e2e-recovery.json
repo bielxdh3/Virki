@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "incremental": false
+  },
+  "include": [
+    "e2e/recovery-multimethod-browser.spec.mts",
+    "e2e/admin-passkey-recovery.spec.mts",
+    "e2e/admin-credential-totp-recovery.spec.mts",
+    "e2e/recovery-admin-totp-newmail-browser.spec.mts"
+  ]
+}

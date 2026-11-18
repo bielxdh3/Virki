@@ -13,7 +13,7 @@ const sha = /^[a-f0-9]{40}$/u;
 const exposedFunctions = new Set([
   "cleanup_failed_backup_verification", "create_verified_backup", "cleanup_deploy_staging",
   "maintenance_on", "stop_routed_services", "apply_production_migrations",
-  "resume_services", "activate_source",
+  "resume_services", "activate_source", "assert_production_mail_worker_ready",
   // Keep the rehearsal linked to real checkpoint/recovery functions rather
   // than masking new fail-closed dependencies with permissive no-op stubs.
   "assert_migration_guard_absent", "read_migration_guard", "assert_original_migration_backup",
@@ -55,6 +55,10 @@ compose() {
     printf 'disposable-postgres\n'
     return 0
   fi
+  if [[ "$1" == ps && "$2" == --all && "$3" == --quiet && "$4" == email-worker ]]; then
+    printf 'disposable-email-worker\n'
+    return 0
+  fi
   if [[ "$1" == exec && "$2" == -T && "$3" == postgres && "$4" == sh && "$5" == -lc ]]; then
     printf 'disposable-pgdump-data\n'
     return 0
@@ -67,6 +71,14 @@ compose() {
 }
 docker() {
   printf 'docker %s\n' "$*" >> "$operations_log"
+  if [[ "$1" == inspect && "$2" == --format ]]; then
+    if [[ "$failure" == worker-restarting ]]; then
+      printf 'virki-prod|email-worker|restarting|false|true|2\n'
+    else
+      printf 'virki-prod|email-worker|running|true|false|0\n'
+    fi
+    return 0
+  fi
   if [[ "$1" == exec && "$*" == *pg_restore* ]]; then cat >/dev/null; fi
   return 0
 }
@@ -116,7 +128,7 @@ export function runProductionShellRehearsal(f, names, expression, options = {}) 
   assert.ok(Array.isArray(names) && names.every((name) => exposedFunctions.has(name)));
   assert.ok(/^[a-zA-Z0-9_; ' -]+$/u.test(expression), "Only constant rehearsal commands allowed");
   const failure = options.failure ?? "none";
-  assert.ok(["none", "clone-migration", "production-migration", "health", "migration-status"].includes(failure));
+  assert.ok(["none", "clone-migration", "production-migration", "health", "migration-status", "worker-restarting"].includes(failure));
   const revision = options.revisions ?? candidate;
   assert.match(revision, sha);
   const operationsLog = path.join(root, "operations.log");

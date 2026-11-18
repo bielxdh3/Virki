@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -33,7 +34,7 @@ const serviceEnvironment = {
   "public-site": ["NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_PORTAL_URL"],
   hub: [
     "NODE_ENV", "NEXT_TELEMETRY_DISABLED", "VIRKI_HUB_HOSTNAME", "VIRKI_PORTAL_HOSTNAME",
-    "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED",
+    "VIRKI_HUB_URL", "VIRKI_PORTAL_URL", "DATABASE_URL", "CLOUDFLARE_ACCESS_JWT_REQUIRED", "VIRKI_HUB_PERIMETER_MODE",
     "CLOUDFLARE_ACCESS_AUDIENCE", "CLOUDFLARE_TEAM_DOMAIN", "VIRKI_E2E_ACCESS_DIAGNOSTICS", "VIRKI_E2E_LOW05_DIAGNOSTICS", "VIRKI_TOTP_ENCRYPTION_KEY", "VIRKI_RATE_LIMIT_HASH_SECRET", "VIRKI_AUDIT_HASH_SECRET", "VIRKI_OIDC_PROXY_URL", "VIRKI_E2E_TLS_KEY_PATH",
     "VIRKI_E2E_TLS_CERTIFICATE_PATH", "VIRKI_E2E_HUB_MODE", "VIRKI_CSRF_SIGNING_KEY", "NODE_EXTRA_CA_CERTS", "VIRKI_EMAIL_OUTBOX_KEY",
     "VIRKI_PASSKEYS_ENABLED", "VIRKI_PASSKEYS_LOCAL_TESTING"
@@ -60,6 +61,44 @@ export function buildServiceEnvironment(service, source = process.env, platform 
   }
   if (service === "hub" && (!result.DATABASE_URL || !result.VIRKI_OIDC_PROXY_URL || !result.VIRKI_E2E_TLS_KEY_PATH || !result.VIRKI_E2E_TLS_CERTIFICATE_PATH || !/^[a-f0-9]{64}$/iu.test(result.VIRKI_CSRF_SIGNING_KEY ?? "") || !result.NODE_EXTRA_CA_CERTS || !isAbsolute(result.NODE_EXTRA_CA_CERTS))) {
     throw new Error("Hub E2E configuration is incomplete.");
+  }
+  if (service === "hub") {
+    // The production-build browser test needs the positive approved-recovery
+    // outbox path, without importing any real SMTP credentials or connecting
+    // to an external relay. Port 1 is intentionally non-delivering: a separate
+    // physical SMTP wire gate proves STARTTLS, AUTH and delivery to localhost.
+    // This fixture does NOT attest real mailbox receipt or staging SMTP.
+    if (source.VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE !== undefined) {
+      if (source.VIRKI_E2E_OUTBOX_ONLY_SMTP_FIXTURE !== "required" ||
+          source.VIRKI_E2E_HUB_MODE !== "production" ||
+          source.VIRKI_HUB_HOSTNAME !== "hub.localhost" ||
+          source.VIRKI_PORTAL_HOSTNAME !== "portal.localhost" ||
+          source.VIRKI_CORE_TEST_DATABASE_CONFIRM !== "disposable") {
+        throw new Error("Outbox-only SMTP fixture requires isolated production-mode browser testing.");
+      }
+      Object.assign(result, {
+        VIRKI_EMAIL_TRANSPORT: "smtp",
+        VIRKI_EMAIL_SMTP_HOST: "127.0.0.1",
+        VIRKI_EMAIL_SMTP_PORT: "1",
+        VIRKI_EMAIL_SMTP_SECURE: "false",
+        VIRKI_EMAIL_SMTP_USER: "browser-only@e2e.invalid",
+        VIRKI_EMAIL_SMTP_PASSWORD: randomBytes(32).toString("hex"),
+        VIRKI_EMAIL_FROM: "browser-only@e2e.invalid"
+      });
+    }
+    // Never forward an ambient privileged-passkey flag to the Hub. A narrowly
+    // scoped development-only E2E opt-in is required in addition to the USER
+    // passkey fixture; production-mode tests must not auto-enable this feature.
+    if (source.VIRKI_ADMIN_PASSKEYS_ENABLED === "true") {
+      if (source.VIRKI_E2E_ADMIN_PASSKEYS !== "true" ||
+          source.VIRKI_E2E_PASSKEYS !== "true" ||
+          source.VIRKI_PASSKEYS_ENABLED !== "true" ||
+          source.VIRKI_PASSKEYS_LOCAL_TESTING !== "true" ||
+          source.VIRKI_E2E_HUB_MODE === "production" || result.NODE_ENV === "production") {
+        throw new Error("Privileged passkey E2E configuration is invalid.");
+      }
+      result.VIRKI_ADMIN_PASSKEYS_ENABLED = "true";
+    }
   }
   if (service === "issuer" && (!result.DATABASE_URL || !result.VIRKI_E2E_OIDC_PRIVATE_CONFIG_FILE || !result.VIRKI_OIDC_ISSUER || result.VIRKI_OIDC_BIND_ADDRESS !== "127.0.0.1" || !result.OIDC_ISSUER_PORT)) {
     throw new Error("OIDC issuer E2E configuration is incomplete.");

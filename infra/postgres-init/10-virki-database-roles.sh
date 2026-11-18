@@ -9,6 +9,25 @@ set -eu
 : "${VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD:?VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD is required}"
 AUDIT_LOG_RETENTION_DAYS=${AUDIT_LOG_RETENTION_DAYS:-180}
 
+# Do not let ambient libpq settings redirect role provisioning or weaken the
+# intended local bootstrap boundary. This script is only valid on the local
+# PostgreSQL host/container and never consumes a remote service or pass file.
+unset PGHOSTADDR PGHOST PGPORT PGSERVICE PGSERVICEFILE PGOPTIONS PGUSER PGDATABASE
+unset PGPASSWORD PGPASSFILE PGSSLMODE PGSSLCERT PGSSLKEY PGSSLROOTCERT PGSSLCRL
+unset PGSSLKEYLOGFILE SSLKEYLOGFILE
+unset PGSSLMINPROTOCOLVERSION PGSSLMAXPROTOCOLVERSION PGCHANNELBINDING
+unset PGCONNECT_TIMEOUT PGTARGETSESSIONATTRS PGAPPNAME PGCLIENTENCODING
+unset PGSSLNEGOTIATION PGREQUIREPEER PGGSSENCMODE PGGSSDELEGATION PGKRBSRVNAME
+unset PGREQUIRESSL PGSSLCOMPRESSION PGLOADBALANCEHOSTS
+unset PGREQUIREAUTH PGSSLCERTMODE PGSSLCRLDIR PGSSLSNI PGGSSLIB
+unset PGMINPROTOCOLVERSION PGMAXPROTOCOLVERSION PGSYSCONFDIR PGLOCALEDIR
+unset PGDATESTYLE PGTZ PGGEQO PGOAUTHDEBUG PGOAUTHCAFILE
+# Unsetting PGPASSFILE restores libpq's per-user ~/.pgpass default. Pin the
+# passfile to /dev/null so local peer authentication is the only credential.
+export PGPASSFILE=/dev/null
+export PGHOST=/var/run/postgresql
+export PGPORT=5432
+
 case "$AUDIT_LOG_RETENTION_DAYS" in
   ''|*[!0-9]*)
     echo 'AUDIT_LOG_RETENTION_DAYS must be an integer between 1 and 3650.' >&2
@@ -54,12 +73,21 @@ fi
 export VIRKI_RUNTIME_DB_PASSWORD VIRKI_MIGRATOR_DB_PASSWORD VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD
 export AUDIT_LOG_RETENTION_DAYS
 
-psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 <<'SQL'
+psql --no-psqlrc --no-password --host=/var/run/postgresql --port=5432 \
+  --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 <<'SQL'
 \getenv database_name POSTGRES_DB
 \getenv runtime_password VIRKI_RUNTIME_DB_PASSWORD
 \getenv migrator_password VIRKI_MIGRATOR_DB_PASSWORD
 \getenv audit_pwd VIRKI_AUDIT_MAINTENANCE_DB_PASSWORD
 \getenv audit_retention_days AUDIT_LOG_RETENTION_DAYS
+
+DO $$
+BEGIN
+  IF inet_server_addr() IS NOT NULL OR current_setting('port') <> '5432' THEN
+    RAISE EXCEPTION 'Database role provisioning requires the local PostgreSQL Unix socket on port 5432.';
+  END IF;
+END
+$$;
 
 DO $$
 BEGIN
@@ -73,7 +101,7 @@ BEGIN
         '_prisma_migrations', 'AccountRecoveryRequest', 'AdministrativeCredential',
         'AdministrativeRecoveryCode', 'AuditLog', 'DeviceChallenge', 'EmailDeliveryAttempt',
         'EmailOutboxMessage', 'LoginRateLimit', 'OidcArtifact', 'PasskeyChallenge',
-        'PasskeyCredential', 'ProjectConnection', 'RecoveryCode',
+        'PasskeyCredential', 'ProjectConnection', 'RecoveryCode', 'RecoveryEmailRebind',
         'SanitizedAuditReference', 'SecurityElevation', 'Session',
         'TotpFactor', 'TrustedDevice', 'User', 'UserProjectGrant'
       )
@@ -92,7 +120,7 @@ BEGIN
       AND type.typtype IN ('d', 'e', 'm', 'r')
       AND type.typname NOT IN (
         'AccountStatus', 'AdministrativeCredentialStatus', 'DeliveryAttemptStatus',
-        'DeviceChallengeStatus', 'EmailMessageKind', 'OutboxMessageStatus',
+        'DeviceChallengeStatus', 'EmailMessageKind', 'LoginChallengeFactor', 'OutboxMessageStatus',
         'RecoveryRequestPurpose', 'RecoveryRequestStatus', 'SecondFactorMethod', 'SecurityElevationStatus',
         'SecurityFactorStatus', 'TrustedDeviceStatus', 'UserRole'
       )
@@ -539,7 +567,8 @@ SQL
 case "${VIRKI_LOCAL_MIGRATOR_CREATEDB:-false}" in
   false) ;;
   true)
-    psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 \
+    psql --no-psqlrc --no-password --host=/var/run/postgresql --port=5432 \
+      --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 \
       --command 'ALTER ROLE virki_migrator CREATEDB'
     ;;
   *)

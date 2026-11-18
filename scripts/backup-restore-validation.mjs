@@ -264,6 +264,47 @@ async function seedRepresentativeData() {
       },
     },
   });
+  for (const message of [
+    { id: "backup-admin-verification-email", kind: "ADMIN_EMAIL_VERIFICATION", recipientEmail: admin.email },
+    { id: "backup-new-mailbox-email", kind: "RECOVERY_EMAIL_REBIND", recipientEmail: "replacement@backup.invalid" },
+    { id: "backup-old-mailbox-notice", kind: "RECOVERY_EMAIL_REBIND_NOTICE", recipientEmail: user.email },
+  ]) {
+    await sourceClient.emailOutboxMessage.create({ data: {
+      id: message.id,
+      idempotencyKey: `backup-validation:${message.id}`,
+      kind: message.kind,
+      recipientEmail: message.recipientEmail,
+      locale: "pt-BR",
+      payload: { version: 1, publicValues: { validation: true }, protectedValues: {
+        ciphertext: "opaque-fixture-ciphertext", iv: "fixture-iv", tag: "fixture-tag",
+      } },
+      status: "SENT",
+      attemptCount: 1,
+      sentAt: new Date("2026-11-11T00:00:00.000Z"),
+      deliveryAttempts: { create: [{
+        id: `${message.id}-attempt-1`, attempt: 1, status: "SENT",
+        smtpHeaderMessageId: `<${message.id}@backup.invalid>`,
+      }] },
+    } });
+  }
+  // An in-flight lease controls when an abandoned worker may retry an OTP.
+  // Include its actual non-null value, not only SENT/FAILED outbox records.
+  await sourceClient.emailOutboxMessage.create({ data: {
+    id: "backup-processing-lease-email",
+    idempotencyKey: "backup-validation:processing-lease",
+    kind: "EMAIL_TWO_FACTOR",
+    recipientEmail: user.email,
+    locale: "pt-BR",
+    payload: { version: 1, protectedValues: { ciphertext: "opaque-fixture", iv: "fixture-iv", tag: "fixture-tag" } },
+    status: "PROCESSING",
+    attemptCount: 2,
+    processingLeaseExpiresAt: new Date(Date.now() + 10 * 60_000),
+    pendingSmtpHeaderMessageId: "<backup-processing-lease@backup.invalid>",
+    availableAt: new Date("2026-11-11T00:00:00.000Z"),
+    deliveryAttempts: { create: [{
+      id: "backup-processing-lease-attempt-1", attempt: 1, status: "FAILED", errorCode: "worker-interrupted",
+    }] },
+  } });
 }
 
 async function verifyRestoredData() {
@@ -320,6 +361,14 @@ async function verifyRestoredData() {
     { attempt: 1, status: "FAILED", errorCode: "transport-failure" },
     { attempt: 2, status: "FAILED", errorCode: "transport-failure" },
   ]);
+  const [sourceOutbox, restoredOutbox] = await Promise.all([
+    sourceClient.emailOutboxMessage.findMany({ include: { deliveryAttempts: { orderBy: { attempt: "asc" } } }, orderBy: { id: "asc" } }),
+    restoredClient.emailOutboxMessage.findMany({ include: { deliveryAttempts: { orderBy: { attempt: "asc" } } }, orderBy: { id: "asc" } }),
+  ]);
+  for (const requiredKind of ["ACCOUNT_RECOVERY", "ADMIN_EMAIL_VERIFICATION", "RECOVERY_EMAIL_REBIND", "RECOVERY_EMAIL_REBIND_NOTICE", "EMAIL_TWO_FACTOR"]) {
+    assert.ok(sourceOutbox.some((message) => message.kind === requiredKind), `Source rollback fixture must exercise ${requiredKind}.`);
+  }
+  assert.deepEqual(restoredOutbox, sourceOutbox, "Backup restore must preserve all email kinds, delivery-attempt metadata and retry state, not just recovery OTP.");
 }
 
 async function migrate(prismaDirectory, databaseUrl, stage) {
