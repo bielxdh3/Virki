@@ -264,6 +264,7 @@ typedef struct {
   uint64_t sequence_floor;
   int ledger_fd;
   int dir_fd;
+  bool faulted;
 } owner_ledger_state_t;
 
 static owner_ledger_state_t g_ledger;
@@ -403,21 +404,30 @@ static bool ledger_init(const char *dir_path, bool allow_v9fs, owner_ledger_stat
 }
 
 static bool ledger_record_prepare(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint64_t *out_seq) {
-  if (!st || st->ledger_fd < 0 || st->sequence_floor == UINT64_MAX ||
+  if (!st || st->faulted || st->ledger_fd < 0 || st->sequence_floor == UINT64_MAX ||
       !ledger_can_append_v20(st->ledger_fd, 2)) return false;
 
   /* Check nonce uniqueness in ledger: any prior prepare, commit, or abort with same nonce rejects */
-  lseek(st->ledger_fd, strlen(VIRKI_LEDGER_MAGIC), SEEK_SET);
+  if (lseek(st->ledger_fd, strlen(VIRKI_LEDGER_MAGIC), SEEK_SET) < 0) {
+    st->faulted = true;
+    return false;
+  }
   ledger_record_t scan;
   ssize_t n;
   while ((n = read(st->ledger_fd, &scan, sizeof(scan))) == (ssize_t)sizeof(scan)) {
-    if (!ledger_record_shape_valid(&scan)) return false;
+    if (!ledger_record_shape_valid(&scan)) {
+      st->faulted = true;
+      return false;
+    }
     if (ledger_replay_hex_equal_v20(scan.nonce, nonce) ||
         strcmp(scan.scope_token, scope_token) == 0) {
       return false; /* Nonce replayed! */
     }
   }
-  if (n != 0) return false;
+  if (n != 0) {
+    st->faulted = true;
+    return false;
+  }
 
   /* Record prepare intent */
   uint64_t seq = st->sequence_floor + 1;
@@ -430,9 +440,12 @@ static bool ledger_record_prepare(owner_ledger_state_t *st, const char *scope_to
   snprintf(rec.scope_token, sizeof(rec.scope_token), "%s", scope_token);
   snprintf(rec.nonce, sizeof(rec.nonce), "%s", nonce);
 
-  if (lseek(st->ledger_fd, 0, SEEK_END) < 0) return false;
-  if (write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec)) return false;
-  if (fsync(st->ledger_fd) != 0 || fsync(st->dir_fd) != 0) return false;
+  if (lseek(st->ledger_fd, 0, SEEK_END) < 0 ||
+      write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec) ||
+      fsync(st->ledger_fd) != 0 || fsync(st->dir_fd) != 0) {
+    st->faulted = true;
+    return false;
+  }
 
   st->sequence_floor = seq;
   *out_seq = seq;
@@ -440,7 +453,7 @@ static bool ledger_record_prepare(owner_ledger_state_t *st, const char *scope_to
 }
 
 static bool ledger_record_commit(owner_ledger_state_t *st, const char *scope_token, const char *nonce, const char *image_id, uint64_t seq) {
-  if (!st || st->ledger_fd < 0 || !ledger_can_append_v20(st->ledger_fd, 2)) return false;
+  if (!st || st->faulted || st->ledger_fd < 0 || !ledger_can_append_v20(st->ledger_fd, 2)) return false;
 
   ledger_record_t rec = {
     .type = REC_TYPE_COMMITTED,
@@ -452,10 +465,12 @@ static bool ledger_record_commit(owner_ledger_state_t *st, const char *scope_tok
   snprintf(rec.nonce, sizeof(rec.nonce), "%s", nonce);
   snprintf(rec.image_id, sizeof(rec.image_id), "%s", image_id);
 
-  lseek(st->ledger_fd, 0, SEEK_END);
-  if (write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec)) return false;
-  if (fsync(st->ledger_fd) != 0) return false;
-  if (fsync(st->dir_fd) != 0) return false;
+  if (lseek(st->ledger_fd, 0, SEEK_END) < 0 ||
+      write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec) ||
+      fsync(st->ledger_fd) != 0 || fsync(st->dir_fd) != 0) {
+    st->faulted = true;
+    return false;
+  }
 
   return true;
 }
@@ -487,9 +502,9 @@ static int ledger_scope_state(owner_ledger_state_t *st, const char *scope_token,
 }
 
 static bool ledger_record_abort(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint32_t reason) {
-  if (!st || st->ledger_fd < 0 || st->sequence_floor == UINT64_MAX ||
+  if (!st || st->faulted || st->ledger_fd < 0 || st->sequence_floor == UINT64_MAX ||
       !ledger_can_append_v20(st->ledger_fd, 2)) return false;
-	if (ledger_scope_state(st,scope_token,nonce)!=1) return false;
+  if (ledger_scope_state(st, scope_token, nonce) != 1) return false;
 
   uint64_t next_seq = st->sequence_floor + 1;
   ledger_record_t rec = {
@@ -500,9 +515,12 @@ static bool ledger_record_abort(owner_ledger_state_t *st, const char *scope_toke
   };
   snprintf(rec.scope_token, sizeof(rec.scope_token), "%s", scope_token);
 
-  if (lseek(st->ledger_fd, 0, SEEK_END) < 0) return false;
-  if (write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec)) return false;
-  if (fsync(st->ledger_fd) != 0 || fsync(st->dir_fd) != 0) return false;
+  if (lseek(st->ledger_fd, 0, SEEK_END) < 0 ||
+      write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec) ||
+      fsync(st->ledger_fd) != 0 || fsync(st->dir_fd) != 0) {
+    st->faulted = true;
+    return false;
+  }
 
   st->sequence_floor = next_seq;
   return true;
@@ -776,7 +794,9 @@ static void process_client_connection(int client_fd) {
 
       uint64_t seq = 0;
       if (!ledger_record_prepare(&g_ledger, scope_token, req.nonce, &seq)) {
-        resp.status = VIRKI_OWNER_STATUS_ERR_NONCE_REPLAY;
+        resp.status = g_ledger.faulted
+            ? VIRKI_OWNER_STATUS_ERR_LEDGER_TAMPER
+            : VIRKI_OWNER_STATUS_ERR_NONCE_REPLAY;
         (void)owner_send_response_v21(client_fd, &resp);
         return;
       }

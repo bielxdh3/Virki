@@ -265,30 +265,35 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (s != (ssize_t)sizeof(req)) {
-    fprintf(stderr, "CLIENT_SEND_FAILED: %s\n", strerror(errno));
-    close(sock);
-    return 4;
-  }
-  if (!strcmp(action,"status-trailing") || !strcmp(action,"begin-trailing") ||
-      !strcmp(action,"status-delayed-tail")) {
+  bool send_failed = (s != (ssize_t)sizeof(req));
+  int send_errno = errno;
+  if (!send_failed && (!strcmp(action,"status-trailing") || !strcmp(action,"begin-trailing") ||
+      !strcmp(action,"status-delayed-tail"))) {
     if (!strcmp(action,"status-delayed-tail")) {
       const struct timespec pause={.tv_sec=0,.tv_nsec=45000000};
       nanosleep(&pause,NULL);
     }
     const char extra[]="EXTRA_FRAME_BYTES";
     if (send(sock,extra,sizeof(extra),MSG_NOSIGNAL)!=(ssize_t)sizeof(extra)) {
-      close(sock);
-      return 4;
+      send_failed = true;
+      send_errno = errno;
     }
   }
   const bool keep_writable = !strcmp(action,"status-no-fin") ||
                              !strcmp(action,"begin-no-fin");
-  if (!keep_writable && shutdown(sock,SHUT_WR)!=0) {
-    close(sock);
-    return 4;
+  if (!send_failed && !keep_writable && shutdown(sock,SHUT_WR)!=0) {
+    /* Peer may have already replied (e.g. ERR_PEERCRED) and closed. */
+    if (errno != ENOTCONN && errno != EPIPE) {
+      send_failed = true;
+      send_errno = errno;
+    }
   }
   if (!strcmp(action,"status-disconnect") || !strcmp(action,"begin-disconnect")) {
+    if (send_failed) {
+      fprintf(stderr, "CLIENT_SEND_FAILED: %s\n", strerror(send_errno));
+      close(sock);
+      return 4;
+    }
     /* For the SIGPIPE regression, closing the read half before the server
      * replies must not crash the owner daemon or release its ledger flock. */
     shutdown(sock,SHUT_RD);
@@ -297,7 +302,7 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  /* Receive response */
+  /* Receive response (including early ERR_PEERCRED queued before send/shutdown completed) */
   virki_owner_response_frame_t resp;
   memset(&resp, 0, sizeof(resp));
   struct timeval deadline={.tv_sec=4,.tv_usec=0};
@@ -314,6 +319,10 @@ int main(int argc, char **argv) {
   close(sock);
 
   if (received != sizeof(resp)) {
+    if (send_failed) {
+      fprintf(stderr, "CLIENT_SEND_FAILED: %s\n", strerror(send_errno));
+      return 4;
+    }
     fprintf(stderr, "CLIENT_RECV_FAILED: expected %zu bytes, got %zu\n", sizeof(resp), received);
     return 5;
   }
