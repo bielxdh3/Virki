@@ -322,6 +322,285 @@ static bool v3_verify_approval_fd(int fd, const virki_owner_request_frame_t *req
   return true;
 }
 
+static const char *v3_json_skip_ws(const char *p, const char *end) {
+  while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+  return p;
+}
+
+static const char *v3_json_skip_string(const char *p, const char *end) {
+  if (!p || p >= end || *p != '"') return NULL;
+  p++;
+  while (p < end) {
+    const unsigned char ch = (unsigned char)*p++;
+    if (ch < 0x20) return NULL;
+    if (ch == '"') return p;
+    if (ch == '\\') {
+      if (p >= end) return NULL;
+      const char esc = *p++;
+      if (esc == 'u') {
+        for (int i = 0; i < 4; i++) {
+          if (p >= end) return NULL;
+          const unsigned char hc = (unsigned char)*p;
+          if (!((hc >= '0' && hc <= '9') || (hc >= 'a' && hc <= 'f') || (hc >= 'A' && hc <= 'F'))) return NULL;
+          p++;
+        }
+      } else if (esc != '"' && esc != '\\' && esc != '/' && esc != 'b' &&
+                 esc != 'f' && esc != 'n' && esc != 'r' && esc != 't') {
+        return NULL;
+      }
+    }
+  }
+  return NULL;
+}
+
+static const char *v3_json_skip_value(const char *p, const char *end, int depth) {
+  if (!p || depth > 64) return NULL;
+  p = v3_json_skip_ws(p, end);
+  if (p >= end) return NULL;
+  if (*p == '"') return v3_json_skip_string(p, end);
+  if (*p == '{') {
+    p = v3_json_skip_ws(p + 1, end);
+    if (p < end && *p == '}') return p + 1;
+    while (p < end) {
+      p = v3_json_skip_ws(p, end);
+      p = v3_json_skip_string(p, end);
+      if (!p) return NULL;
+      p = v3_json_skip_ws(p, end);
+      if (p >= end || *p != ':') return NULL;
+      p = v3_json_skip_value(p + 1, end, depth + 1);
+      if (!p) return NULL;
+      p = v3_json_skip_ws(p, end);
+      if (p >= end) return NULL;
+      if (*p == '}') return p + 1;
+      if (*p != ',') return NULL;
+      p++;
+    }
+    return NULL;
+  }
+  if (*p == '[') {
+    p = v3_json_skip_ws(p + 1, end);
+    if (p < end && *p == ']') return p + 1;
+    while (p < end) {
+      p = v3_json_skip_value(p, end, depth + 1);
+      if (!p) return NULL;
+      p = v3_json_skip_ws(p, end);
+      if (p >= end) return NULL;
+      if (*p == ']') return p + 1;
+      if (*p != ',') return NULL;
+      p++;
+    }
+    return NULL;
+  }
+  if (end - p >= 4 && memcmp(p, "true", 4) == 0) return p + 4;
+  if (end - p >= 5 && memcmp(p, "false", 5) == 0) return p + 5;
+  if (end - p >= 4 && memcmp(p, "null", 4) == 0) return p + 4;
+  if (*p == '-' || (*p >= '0' && *p <= '9')) {
+    if (*p == '-') p++;
+    if (p >= end || *p < '0' || *p > '9') return NULL;
+    if (*p == '0') p++;
+    else while (p < end && *p >= '0' && *p <= '9') p++;
+    if (p < end && *p == '.') {
+      p++;
+      if (p >= end || *p < '0' || *p > '9') return NULL;
+      while (p < end && *p >= '0' && *p <= '9') p++;
+    }
+    if (p < end && (*p == 'e' || *p == 'E')) {
+      p++;
+      if (p < end && (*p == '+' || *p == '-')) p++;
+      if (p >= end || *p < '0' || *p > '9') return NULL;
+      while (p < end && *p >= '0' && *p <= '9') p++;
+    }
+    return p;
+  }
+  return NULL;
+}
+
+static bool v3_json_string_equals(const char *vs, const char *ve, const char *expected) {
+  if (!vs || !ve || !expected || ve - vs < 2 || *vs != '"' || *(ve - 1) != '"') return false;
+  const size_t elen = strlen(expected);
+  if ((size_t)(ve - vs - 2) != elen) return false;
+  if (memchr(vs + 1, '\\', elen) != NULL) return false;
+  return memcmp(vs + 1, expected, elen) == 0;
+}
+
+static bool v3_json_parse_uint64(const char *vs, const char *ve, uint64_t *out) {
+  if (!vs || !ve || vs >= ve || *vs < '0' || *vs > '9') return false;
+  uint64_t val = 0;
+  for (const char *p = vs; p < ve; p++) {
+    if (*p < '0' || *p > '9') return false;
+    const uint64_t digit = (uint64_t)(*p - '0');
+    if (val > (UINT64_MAX - digit) / 10) return false;
+    val = val * 10 + digit;
+  }
+  if (out) *out = val;
+  return true;
+}
+
+static bool v3_json_uint64_equals(const char *vs, const char *ve, uint64_t expected) {
+  uint64_t val = 0;
+  return v3_json_parse_uint64(vs, ve, &val) && val == expected;
+}
+
+static bool v3_json_find_field(const char *obj_start, const char *obj_end,
+    const char *key, const char **val_start, const char **val_end) {
+  if (!obj_start || !obj_end || obj_start >= obj_end || *obj_start != '{') return false;
+  const char *p = v3_json_skip_ws(obj_start + 1, obj_end);
+  if (p < obj_end && *p == '}') return false;
+  while (p < obj_end) {
+    p = v3_json_skip_ws(p, obj_end);
+    const char *ks = p;
+    const char *ke = v3_json_skip_string(ks, obj_end);
+    if (!ke) return false;
+    p = v3_json_skip_ws(ke, obj_end);
+    if (p >= obj_end || *p != ':') return false;
+    const char *vs = v3_json_skip_ws(p + 1, obj_end);
+    const char *ve = v3_json_skip_value(vs, obj_end, 1);
+    if (!ve) return false;
+    if (v3_json_string_equals(ks, ke, key)) {
+      *val_start = vs;
+      *val_end = ve;
+      return true;
+    }
+    p = v3_json_skip_ws(ve, obj_end);
+    if (p >= obj_end || *p == '}') return false;
+    if (*p != ',') return false;
+    p++;
+  }
+  return false;
+}
+
+static bool v3_json_verify_proof_digest(const char *obj_start, const char *obj_end,
+    const char *domain, size_t domain_len, const char expected_hex[65]) {
+  const char *vs = NULL, *ve = NULL;
+  if (!v3_json_find_field(obj_start, obj_end, "proofDigest", &vs, &ve)) return false;
+  char expected_prefixed[73];
+  snprintf(expected_prefixed, sizeof(expected_prefixed), "sha256:%s", expected_hex);
+  if (!v3_json_string_equals(vs, ve, expected_prefixed)) return false;
+  virki_abi_sha256_ctx ctx;
+  virki_abi_sha256_init(&ctx);
+  virki_abi_sha256_update(&ctx, (const uint8_t *)domain, domain_len);
+  /* Replace "sha256:<64 hex>" with "" to match Go's ProofDigest="" before json.Marshal. */
+  virki_abi_sha256_update(&ctx, (const uint8_t *)obj_start, (size_t)((vs + 1) - obj_start));
+  virki_abi_sha256_update(&ctx, (const uint8_t *)(ve - 1), (size_t)(obj_end - (ve - 1)));
+  uint8_t digest[32];
+  virki_abi_sha256_final(&ctx, digest);
+  char computed[65];
+  bytes_to_hex(digest, sizeof(digest), computed);
+  explicit_wipe(digest, sizeof(digest));
+  return strcmp(computed, expected_hex) == 0;
+}
+
+static bool v3_validate_evidence_payload(const char *payload, size_t len,
+    const virki_owner_candidate_evidence_v3_t *header,
+    const virki_owner_approval_envelope_v3_t *approval) {
+  if (!payload || len == 0 || memchr(payload, '\0', len) != NULL) return false;
+  const char *end = payload + len;
+  const char *p = v3_json_skip_ws(payload, end);
+  if (p >= end || *p != '{') return false;
+  const char *obj_end = v3_json_skip_value(p, end, 0);
+  if (!obj_end || v3_json_skip_ws(obj_end, end) != end) return false;
+
+  const char *vs = NULL, *ve = NULL;
+  /* Validate required "binding" object. */
+  const char *bind_s = NULL, *bind_e = NULL;
+  if (!v3_json_find_field(p, obj_end, "binding", &bind_s, &bind_e) || *bind_s != '{') return false;
+  if (!v3_json_find_field(bind_s, bind_e, "approvalId", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, approval->approval_id)) return false;
+  const char *exp_s = NULL, *exp_e = NULL;
+  if (!v3_json_find_field(bind_s, bind_e, "exporter", &exp_s, &exp_e) || *exp_s != '{') return false;
+  char exp_digest[73];
+  snprintf(exp_digest, sizeof(exp_digest), "sha256:%s", approval->exporter_intent_sha256);
+  if (!v3_json_find_field(exp_s, exp_e, "attributesDigest", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, exp_digest)) return false;
+  if (!v3_json_find_field(bind_s, bind_e, "jobId", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, approval->job_id) ||
+      !v3_json_find_field(bind_s, bind_e, "role", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, approval->role) ||
+      !v3_json_find_field(bind_s, bind_e, "nonce", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, approval->nonce)) return false;
+
+  /* Validate all 4 canonical contexts inside "contexts" array. */
+  const char *ctxs_s = NULL, *ctxs_e = NULL;
+  if (!v3_json_find_field(p, obj_end, "contexts", &ctxs_s, &ctxs_e) || *ctxs_s != '[') return false;
+  bool seen_ctx[VIRKI_OWNER_CONTEXT_COUNT] = {false, false, false, false};
+  size_t ctx_count = 0;
+  const char *cp = v3_json_skip_ws(ctxs_s + 1, ctxs_e);
+  if (cp >= ctxs_e || *cp == ']') return false;
+  while (cp < ctxs_e) {
+    const char *item_s = v3_json_skip_ws(cp, ctxs_e);
+    const char *item_e = v3_json_skip_value(item_s, ctxs_e, 1);
+    if (!item_e || *item_s != '{') return false;
+    if (!v3_json_find_field(item_s, item_e, "name", &vs, &ve)) return false;
+    ssize_t idx = -1;
+    for (size_t k = 0; k < VIRKI_OWNER_CONTEXT_COUNT; k++) {
+      if (v3_json_string_equals(vs, ve, VIRKI_OWNER_CONTEXT_NAMES[k])) { idx = (ssize_t)k; break; }
+    }
+    if (idx < 0 || seen_ctx[idx]) return false;
+    seen_ctx[idx] = true;
+    if (!v3_json_find_field(item_s, item_e, "workerId", &vs, &ve) ||
+        !v3_json_string_equals(vs, ve, approval->worker_id) ||
+        !v3_json_find_field(item_s, item_e, "treeDigest", &vs, &ve) ||
+        !v3_json_string_equals(vs, ve, approval->contexts[idx].tree_digest) ||
+        !v3_json_find_field(item_s, item_e, "streamDigest", &vs, &ve) ||
+        !v3_json_string_equals(vs, ve, approval->contexts[idx].stream_digest) ||
+        !v3_json_find_field(item_s, item_e, "streamLength", &vs, &ve) ||
+        !v3_json_uint64_equals(vs, ve, approval->contexts[idx].stream_length)) return false;
+    ctx_count++;
+    cp = v3_json_skip_ws(item_e, ctxs_e);
+    if (cp >= ctxs_e) return false;
+    if (*cp == ']') break;
+    if (*cp != ',') return false;
+    cp++;
+  }
+  if (ctx_count != VIRKI_OWNER_CONTEXT_COUNT) return false;
+
+  /* Validate "output" object: workerId, image, causality proof, and ociDag proof. */
+  const char *out_s = NULL, *out_e = NULL;
+  if (!v3_json_find_field(p, obj_end, "output", &out_s, &out_e) || *out_s != '{') return false;
+  if (!v3_json_find_field(out_s, out_e, "workerId", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, approval->worker_id)) return false;
+  const char *img_s = NULL, *img_e = NULL;
+  uint64_t img_size = 0;
+  if (!v3_json_find_field(out_s, out_e, "image", &img_s, &img_e) || *img_s != '{' ||
+      !v3_json_find_field(img_s, img_e, "digest", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, approval->output_image_id) ||
+      !v3_json_find_field(img_s, img_e, "size", &vs, &ve) ||
+      !v3_json_parse_uint64(vs, ve, &img_size) || img_size == 0) return false;
+
+  const char *cau_s = NULL, *cau_e = NULL;
+  if (!v3_json_find_field(out_s, out_e, "causality", &cau_s, &cau_e) || *cau_s != '{' ||
+      !v3_json_find_field(cau_s, cau_e, "schemaVersion", &vs, &ve) ||
+      !v3_json_uint64_equals(vs, ve, 3) ||
+      !v3_json_verify_proof_digest(cau_s, cau_e, "virki-c1-export-causality-v3\0", 29,
+          header->causality_proof_sha256)) return false;
+  const char *roots_s = NULL, *roots_e = NULL;
+  if (!v3_json_find_field(cau_s, cau_e, "roots", &roots_s, &roots_e) ||
+      *roots_s != '[' || v3_json_skip_ws(roots_s + 1, roots_e) >= roots_e - 1) return false;
+
+  const char *oci_s = NULL, *oci_e = NULL;
+  if (!v3_json_find_field(out_s, out_e, "ociDag", &oci_s, &oci_e) || *oci_s != '{' ||
+      !v3_json_find_field(oci_s, oci_e, "schemaVersion", &vs, &ve) ||
+      !v3_json_uint64_equals(vs, ve, 1) ||
+      !v3_json_verify_proof_digest(oci_s, oci_e, "virki-c1-oci-dag-v1\0", 20,
+          header->oci_dag_sha256)) return false;
+  const char *root_s = NULL, *root_e = NULL;
+  if (!v3_json_find_field(oci_s, oci_e, "root", &root_s, &root_e) || *root_s != '{' ||
+      !v3_json_find_field(root_s, root_e, "digest", &vs, &ve) ||
+      !v3_json_string_equals(vs, ve, approval->output_image_id)) return false;
+
+  /* Validate optional "frontendProof". */
+  const char *fe_s = NULL, *fe_e = NULL;
+  const bool has_fe = v3_json_find_field(p, obj_end, "frontendProof", &fe_s, &fe_e);
+  if (header->frontend_proof_sha256[0] == '\0') {
+    if (has_fe && !(fe_e - fe_s == 4 && memcmp(fe_s, "null", 4) == 0)) return false;
+  } else {
+    if (!has_fe || *fe_s != '{' ||
+        !v3_json_verify_proof_digest(fe_s, fe_e, "virki-c1-frontend-proof-v1\0", 27,
+            header->frontend_proof_sha256)) return false;
+  }
+  return true;
+}
+
 static bool v3_validate_evidence_fd(int fd,
     const virki_owner_request_frame_t *req,
     const virki_owner_approval_envelope_v3_t *approval,
@@ -374,6 +653,14 @@ static bool v3_validate_evidence_fd(int fd,
   char payload_sha[65];
   if (!v3_hash_fd_range(fd, (off_t)sizeof(header), header.evidence_payload_bytes, payload_sha) ||
       strcmp(payload_sha, header.evidence_payload_sha256) != 0) return false;
+  char *payload_buf = malloc(header.evidence_payload_bytes);
+  if (!payload_buf) return false;
+  const bool read_ok = v3_read_exact_at(fd, payload_buf, header.evidence_payload_bytes, (off_t)sizeof(header));
+  const bool semantic_ok = read_ok && v3_validate_evidence_payload(
+      payload_buf, header.evidence_payload_bytes, &header, approval);
+  explicit_wipe(payload_buf, header.evidence_payload_bytes);
+  free(payload_buf);
+  if (!semantic_ok) return false;
   memcpy(evidence_sha256, prefixed + 7, 65);
   return true;
 }

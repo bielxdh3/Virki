@@ -139,28 +139,58 @@ func sealedFD(t *testing.T, name string, data []byte) int {
 	return fd
 }
 
-func v3Evidence(t *testing.T, envelopeRaw []byte, input V3ApprovalInput) ([]byte, string) {
+func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInput, tamperProof bool) ([]byte, string) {
 	t.Helper()
 	approvalSHA := sha256.Sum256(envelopeRaw)
-	proofSHA := sha256.Sum256([]byte("synthetic-causality-proof-v3"))
-	ociSHA := sha256.Sum256([]byte("synthetic-oci-dag-v3"))
-	frontendSHA := sha256.Sum256([]byte("synthetic-builtin-frontend-proof-v3"))
-	payload := []byte(fmt.Sprintf(`{"causalityProofSha256":"%s","ociDagSha256":"%s","frontendProofSha256":"%s","outputImageId":"%s"}`,
-		hex.EncodeToString(proofSHA[:]), hex.EncodeToString(ociSHA[:]), hex.EncodeToString(frontendSHA[:]), input.OutputImageID))
+	causalityBase := fmt.Sprintf(`{"schemaVersion":3,"exporter":{"attributesDigest":"sha256:%s"},"roots":[{"workerId":"%s"}],"proofDigest":""}`,
+		input.ExporterIntentSHA256, input.WorkerID)
+	cSum := sha256.Sum256(append([]byte("virki-c1-export-causality-v3\x00"), causalityBase...))
+	cHex := hex.EncodeToString(cSum[:])
+	if tamperProof {
+		cHex = strings.Repeat("0", 64)
+	}
+	causalityJSON := strings.Replace(causalityBase, `"proofDigest":""`, `"proofDigest":"sha256:`+cHex+`"`, 1)
+
+	ociBase := fmt.Sprintf(`{"schemaVersion":1,"root":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"proofDigest":""}`,
+		input.OutputImageID)
+	oSum := sha256.Sum256(append([]byte("virki-c1-oci-dag-v1\x00"), ociBase...))
+	oHex := hex.EncodeToString(oSum[:])
+	ociJSON := strings.Replace(ociBase, `"proofDigest":""`, `"proofDigest":"sha256:`+oHex+`"`, 1)
+
+	feBase := `{"schemaVersion":1,"frontend":"dockerfile","proofDigest":""}`
+	fSum := sha256.Sum256(append([]byte("virki-c1-frontend-proof-v1\x00"), feBase...))
+	fHex := hex.EncodeToString(fSum[:])
+	feJSON := strings.Replace(feBase, `"proofDigest":""`, `"proofDigest":"sha256:`+fHex+`"`, 1)
+
+	var ctxParts []string
+	for _, c := range input.Contexts {
+		ctxParts = append(ctxParts, fmt.Sprintf(`{"name":"%s","workerId":"%s","treeDigest":"%s","streamDigest":"%s","streamLength":%d}`,
+			CString(c.Name[:]), input.WorkerID, CString(c.TreeDigest[:]), CString(c.StreamDigest[:]), c.StreamLength))
+	}
+	payload := []byte(fmt.Sprintf(
+		`{"schemaVersion":2,"binding":{"jobId":"%s","role":"%s","nonce":"%s","approvalId":"%s","exporter":{"attributesDigest":"sha256:%s"}},"contexts":[%s],"output":{"workerId":"%s","image":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"causality":%s,"ociDag":%s},"frontendProof":%s}`,
+		input.JobID, input.Role, input.Nonce, input.ApprovalID, input.ExporterIntentSHA256,
+		strings.Join(ctxParts, ","), input.WorkerID, input.OutputImageID,
+		causalityJSON, ociJSON, feJSON))
 	bundle, digest, err := EncodeV3Evidence(V3EvidenceInput{
 		ApprovalEnvelopeSHA256: hex.EncodeToString(approvalSHA[:]),
 		JobID:                  input.JobID, Role: input.Role, Nonce: input.Nonce, WorkerID: input.WorkerID,
 		OutputImageID: input.OutputImageID, ExporterIntentSHA256: input.ExporterIntentSHA256,
 		FileSyncManifestSHA256: input.FileSyncManifestSHA256,
-		CausalityProofSHA256:   hex.EncodeToString(proofSHA[:]),
-		OCIDAGSHA256:           hex.EncodeToString(ociSHA[:]),
-		FrontendProofSHA256:    hex.EncodeToString(frontendSHA[:]),
+		CausalityProofSHA256:   cHex,
+		OCIDAGSHA256:           oHex,
+		FrontendProofSHA256:    fHex,
 		Contexts:               input.Contexts, Payload: payload,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return bundle, digest
+}
+
+func v3Evidence(t *testing.T, envelopeRaw []byte, input V3ApprovalInput) ([]byte, string) {
+	t.Helper()
+	return v3EvidenceWithPayload(t, envelopeRaw, input, false)
 }
 
 func v3Begin(t *testing.T, daemon *v3Daemon, envelope V3ApprovalEnvelope, envelopeRaw []byte) (string, int) {
@@ -276,6 +306,28 @@ func TestV3NativeDaemonVerifiesSealedEvidenceAndKeepsReleaseDisabled(t *testing.
 			t.Fatalf("verify with mismatched approval envelope status=%d, want %d", mResp.Status, StatusErrProvenanceFail)
 		}
 		v3Abort(t, daemon, mEnv1.Epoch, mToken, mIn1.Nonce)
+
+		// Forged causality proofDigest (with valid header/payload SHA-256) must be rejected semantically.
+		tEnv, tRaw, tIn, tStreams := makeV3Fixture(t, ownerPublic, ownerPrivate)
+		tToken, tAppFD := v3Begin(t, daemon, tEnv, tRaw)
+		tEvBundle, _ := v3EvidenceWithPayload(t, tRaw, tIn, true)
+		var tFDs []int
+		for i, s := range tStreams {
+			tFDs = append(tFDs, sealedFD(t, fmt.Sprintf("v3-tamper-ctx-%d", i), s))
+		}
+		tFDs = append(tFDs, tAppFD, sealedFD(t, "v3-tamper-ev", tEvBundle))
+		tReq, err := BuildV3Request(tEnv, tRaw, CmdV3VerifyCandidate, tToken, tEvBundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tResp, err := SendC4Request(daemon.socket, tReq, tFDs, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tResp.Status != StatusErrProvenanceFail {
+			t.Fatalf("forged causality proofDigest status=%d, want %d", tResp.Status, StatusErrProvenanceFail)
+		}
+		v3Abort(t, daemon, tEnv.Epoch, tToken, tIn.Nonce)
 		// V2 SIGN_ACK remains hard-disabled even in the test build with an ephemeral key.
 		meta := syntheticMeta()
 		v2Req, err := BuildC4Request(meta, CmdSignAck, strings.Repeat("d", 64))
