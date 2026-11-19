@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import path from "node:path";
 
 export const OWNER_APPROVAL_DOMAIN = Buffer.from("VIRKI_C1_C4_OWNER_APPROVAL_V1\0", "utf8");
 export const CANONICAL_CONTEXT_NAMES = Object.freeze([
@@ -233,6 +234,16 @@ function anchorDigest(anchorSha) {
   return sha256Hex(Buffer.from(`VIRKI_C1_C4_ANCHOR:${anchorSha}`, "utf8"));
 }
 
+function fsyncParentDir(filePath) {
+  if (process.platform === "win32") return;
+  const dirFd = openSync(path.dirname(filePath), constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0));
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+}
+
 function writeAtomicState(filePath, nextState) {
   const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
@@ -248,6 +259,31 @@ function writeAtomicState(filePath, nextState) {
   }
   closeSync(fd);
   renameSync(tmpPath, filePath);
+  fsyncParentDir(filePath);
+}
+
+function isPidDead(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return Boolean(err && err.code === "ESRCH");
+  }
+}
+
+function tryReclaimStaleLock(lockPath) {
+  try {
+    const raw = readFileSync(lockPath, "utf8").trim();
+    const pid = Number(raw);
+    if (pid !== process.pid && isPidDead(pid)) {
+      unlinkSync(lockPath);
+      return true;
+    }
+  } catch (_err) {
+    void _err;
+  }
+  return false;
 }
 
 function withAuthStateLock(filePath, fn) {
@@ -258,8 +294,15 @@ function withAuthStateLock(filePath, fn) {
   while (lockFd < 0) {
     try {
       lockFd = openSync(lockPath, flags, 0o600);
+      const pidBytes = Buffer.from(`${process.pid}\n`, "utf8");
+      writeSync(lockFd, pidBytes, 0, pidBytes.length, 0);
     } catch (err) {
+      if (lockFd >= 0) {
+        closeSync(lockFd);
+        lockFd = -1;
+      }
       if (err && err.code === "EEXIST" && Date.now() < deadline) {
+        if (tryReclaimStaleLock(lockPath)) continue;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
         continue;
       }
@@ -295,6 +338,7 @@ export function initAnchoredAuthState(filePath, anchorSha) {
   } finally {
     closeSync(fd);
   }
+  fsyncParentDir(filePath);
   return initial;
 }
 

@@ -263,6 +263,7 @@ test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signatur
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxAbort), /no active PREPARED/);
 
     const fxFence = buildSyntheticFixture(tmpDir);
+    fs.writeFileSync(`${fxFence.stateFilePath}.lock`, "999999\n", { mode: 0o600 });
     const fenced = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
     assert.equal(fenced.currentEpoch, 2);
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxFence), /does not match active state epoch/);
