@@ -112,8 +112,30 @@ jobs:
       - name: Secret scan
         run: npm run secrets:scan
 
-      - name: Verify issue 90 experimental patch integrity
-        run: sha256sum --check docs/security/experiments/issue90-review-patches.sha256
+      - name: Verify issue 90 experimental patch integrity and static replay
+        run: |
+          set -euo pipefail
+          sha256sum --check docs/security/experiments/issue90-review-patches.sha256
+          scratch="$(mktemp -d "$RUNNER_TEMP/issue90-replay.XXXXXX")"
+          git init --quiet "$scratch"
+          git -C "$scratch" fetch --depth=1 https://github.com/moby/buildkit.git f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
+          test "$(git -C "$scratch" rev-parse FETCH_HEAD)" = f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
+          git -C "$scratch" read-tree FETCH_HEAD
+          expected=(
+            7eb9bfebb607c6795138b50d9bd9453b87c09b3d
+            d4b9e014f42deaa152bc7e3be3175080f1ddb271
+            b0bcf49bf41ece17080aeba5a4f218f0cb165fb1
+            1b0ad7d10b0ef7413a2a72b6bdff5c8b90f51d2f
+            932758801e6c0b47d3eceaef7aca96b1c5734e87
+          )
+          i=0
+          while read -r digest patch; do
+            git -C "$scratch" apply --cached --check "$GITHUB_WORKSPACE/$patch"
+            git -C "$scratch" apply --cached "$GITHUB_WORKSPACE/$patch"
+            test "$(git -C "$scratch" write-tree)" = "${expected[$i]}"
+            i=$((i + 1))
+          done < docs/security/experiments/issue90-review-patches.sha256
+          test "$i" -eq "${#expected[@]}"
 
       - name: Production control tests
         run: npm run test:production-revision

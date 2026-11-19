@@ -18,12 +18,12 @@ Apply in order over BuildKit upstream commit `f5b59a1f2fb25a0cb7072c398cab9aed78
 
 | Version | SHA-256 of patch | Tree |
 | --- | --- | --- |
-| V23 | `6B18C0817D315512AF4143A97BF36925A0CF31591B9F67C69654F02C2E524AE1` | Local baseline |
+| V23 | `6B18C0817D315512AF4143A97BF36925A0CF31591B9F67C69654F02C2E524AE1` | Published baseline |
 | V24 | `9CF15BCA430A121C1FD8722499BF8D587179B96855E6BBE6AE299A1C74DE3587` | `d4b9e014f42deaa152bc7e3be3175080f1ddb271` |
 | V25 | `32BE63C7D2265F3E477241AF44F78E20E5B5E37F20D3B89A743BCC222294A18D` | `b0bcf49bf41ece17080aeba5a4f218f0cb165fb1` |
 | V26 | `ED463CD7A1C0F45189A7FA17849DA199E64641A59CCD44F42B5D1906999AE3DB` | `1b0ad7d10b0ef7413a2a72b6bdff5c8b90f51d2f` |
 
-V23 is an unpublished prerequisite; the GitHub PR is not standalone. Local chain reconstruction was verified against the pinned upstream; the incremental V26 patch passed clean-index apply, tree equality, reverse check and scratch reverse check. No hosted Go reproduction claim.
+V23 was originally local; the review package now includes it (see the reproduction note). Local chain reconstruction was verified against the pinned upstream; the incremental V26 patch passed clean-index apply, tree equality, reverse check and scratch reverse check. No hosted Go reproduction claim.
 
 ## Evidence
 
@@ -37,6 +37,6 @@ Remaining: supervisor identity provisioning/exclusivity, independent review, com
 ## Reviewer checklist
 
 - Review the V24, V25 and V26 incremental patches in the PR's Files changed view; the patches are deliberately textual and byte-preserved.
-- The CI Validate job verifies the checked-in patch hashes using the review manifest. This checks artifact integrity only; it does not build or execute the experimental receiver.
-- V23 is an excluded local prerequisite. The published artifacts alone are not a standalone reconstruction of BuildKit.
+- The CI Validate job checks hashes and static patch replay using the review manifest. It does not build or execute the experimental receiver.
+- V23 is included as a byte-preserved prerequisite; see the complete reproduction note.
 - Review the explicit DEV custody contract and its ordinary positive tests, preserving all existing denial paths and production gates. The prior approval criteria are not claimed complete.
