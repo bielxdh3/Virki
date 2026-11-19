@@ -188,6 +188,19 @@ jobs:
       - name: C1->C4 defensive integration contract and daemon boundary tests
         run: npm run test:offline:c1-c4-integration
 
+      - name: Native Go-to-C4 VROA_V2 wire bridge tests
+        run: |
+          set -euo pipefail
+          toolchain="$(mktemp -d "$RUNNER_TEMP/virki-go.XXXXXX")"
+          trap 'rm -rf -- "$toolchain"' EXIT
+          curl --fail --silent --show-error --location --proto '=https' --retry 3 --max-time 180 \
+            https://go.dev/dl/go1.26.10.linux-amd64.tar.gz \
+            --output "$toolchain/go.tar.gz"
+          echo "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5  $toolchain/go.tar.gz" | sha256sum --check
+          tar -xzf "$toolchain/go.tar.gz" -C "$toolchain"
+          (cd infra/offline/c1-c4-native-bridge && GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local "$toolchain/go/bin/go" vet ./...)
+          VIRKI_GO_BIN="$toolchain/go/bin/go" npm run test:offline:c1-c4-native-bridge
+
       - name: Native owner authority (C4) cross-UID/GID SO_PEERCRED tests as root
         if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
         run: sudo bash infra/offline/native-owner-authority/owner-crossuid-v23.integration.sh
