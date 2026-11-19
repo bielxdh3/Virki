@@ -298,6 +298,11 @@ test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signatur
     const fxKey = buildSyntheticFixture(tmpDir);
     fxKey.custody.privateKeyPem = "forbidden";
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxKey), /private key material forbidden/);
+
+    // Mutating a custody GID post-approval must fail contract-digest / signature binding
+    const fxGidTamper = buildSyntheticFixture(tmpDir);
+    fxGidTamper.custody.buildkitDaemonGid = 25999;
+    assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxGidTamper), /approval\.contractSha256 mismatch/);
   }
 });
 

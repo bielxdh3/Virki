@@ -102,6 +102,8 @@ test("Owner Authority - full lifecycle, same-UID refusal, durable nonce reservat
     return result;
   }
 
+  const activeDaemons = new Set();
+
   // Helper to start daemon
   function startDaemon(allowSameUid = true, useKey = true, daemonGroup = false) {
     const args = [
@@ -117,6 +119,8 @@ test("Owner Authority - full lifecycle, same-UID refusal, durable nonce reservat
     }
 
     const proc = spawn(srvBin, args, { stdio: ["ignore", "pipe", "inherit"] });
+    activeDaemons.add(proc);
+    proc.once("exit", () => { activeDaemons.delete(proc); });
     return new Promise((resolve, reject) => {
       let stdoutBuf = "";
       let settled = false;
@@ -149,11 +153,28 @@ test("Owner Authority - full lifecycle, same-UID refusal, durable nonce reservat
   }
 
   async function stopDaemon(proc) {
-    if (proc.exitCode !== null || proc.signalCode !== null) return;
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      activeDaemons.delete(proc);
+      return;
+    }
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("owner daemon did not terminate")), 3000);
-      proc.once("exit", () => { clearTimeout(timeout); resolve(); });
-      if (!proc.kill("SIGTERM")) { clearTimeout(timeout); reject(new Error("SIGTERM failed")); }
+      const killTimer = setTimeout(() => {
+        proc.kill("SIGKILL");
+      }, 3000);
+      const failTimer = setTimeout(() => {
+        reject(new Error("owner daemon did not terminate"));
+      }, 5000);
+      proc.once("exit", () => {
+        clearTimeout(killTimer);
+        clearTimeout(failTimer);
+        activeDaemons.delete(proc);
+        resolve();
+      });
+      if (!proc.kill("SIGTERM")) {
+        clearTimeout(killTimer);
+        clearTimeout(failTimer);
+        reject(new Error("SIGTERM failed"));
+      }
     });
   }
 
@@ -622,6 +643,7 @@ test("Owner Authority - full lifecycle, same-UID refusal, durable nonce reservat
       assert.notEqual(overlongSock.status, 0, "overlong --socket path must fail closed without truncation");
     }
   } finally {
+    await Promise.allSettled([...activeDaemons].map((proc) => stopDaemon(proc)));
     fs.rmSync(testDir, { recursive: true, force: true });
   }
 });

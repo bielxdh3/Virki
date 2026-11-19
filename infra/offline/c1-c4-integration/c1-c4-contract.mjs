@@ -61,12 +61,22 @@ export function sha256Hex(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function hasUnsafePathChar(p) {
+  for (let i = 0; i < p.length; i++) {
+    const c = p.charCodeAt(i);
+    if (c < 32 || c === 127 || p[i] === "\\" || p[i] === "*" || p[i] === "?" || p[i] === "[" || p[i] === "]") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function validateRelPath(p, label) {
   demand(
     typeof p === "string" &&
       p.length > 0 &&
       p.length <= 512 &&
-      !/[\x00-\x1f\x7f\\*?[\]]/u.test(p) &&
+      !hasUnsafePathChar(p) &&
       !p.startsWith("/") &&
       !p.split("/").some((seg) => seg === "" || seg === "." || seg === ".."),
     `${label} contains invalid, wildcard, control, or traversal path`,
@@ -233,11 +243,35 @@ function writeAtomicState(filePath, nextState) {
     fsyncSync(fd);
   } catch (err) {
     closeSync(fd);
-    try { unlinkSync(tmpPath); } catch {}
+    try { unlinkSync(tmpPath); } catch (_cleanupErr) { void _cleanupErr; }
     throw err;
   }
   closeSync(fd);
   renameSync(tmpPath, filePath);
+}
+
+function withAuthStateLock(filePath, fn) {
+  const lockPath = `${filePath}.lock`;
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  const deadline = Date.now() + 5000;
+  let lockFd = -1;
+  while (lockFd < 0) {
+    try {
+      lockFd = openSync(lockPath, flags, 0o600);
+    } catch (err) {
+      if (err && err.code === "EEXIST" && Date.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        continue;
+      }
+      throw err;
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    closeSync(lockFd);
+    try { unlinkSync(lockPath); } catch (_cleanupErr) { void _cleanupErr; }
+  }
 }
 
 /** 5 & 6. Persistent hash-chained state, recovery fencing, and anti-rollback witness. */
@@ -323,53 +357,57 @@ export function loadAndVerifyAuthState(filePath) {
 }
 
 export function appendAuthStateTransition(filePath, { epoch, nonce, contractSha256, status }) {
-  const state = loadAndVerifyAuthState(filePath);
-  demand(!state.faulted, "auth state is faulted; mutations fenced");
-  demand(epoch === state.currentEpoch, "stale or future epoch");
-  demand(status === "PREPARED" || status === "ABORTED", "only non-authorizing PREPARED/ABORTED transitions permitted");
-  demand(NONCE_HEX.test(nonce ?? ""), "invalid nonce");
-  demand(SHA256_HEX.test(contractSha256 ?? ""), "invalid contractSha256");
+  return withAuthStateLock(filePath, () => {
+    const state = loadAndVerifyAuthState(filePath);
+    demand(!state.faulted, "auth state is faulted; mutations fenced");
+    demand(epoch === state.currentEpoch, "stale or future epoch");
+    demand(status === "PREPARED" || status === "ABORTED", "only non-authorizing PREPARED/ABORTED transitions permitted");
+    demand(NONCE_HEX.test(nonce ?? ""), "invalid nonce");
+    demand(SHA256_HEX.test(contractSha256 ?? ""), "invalid contractSha256");
 
-  if (status === "PREPARED") {
-    demand(!state.entries.some((e) => e.status === "PREPARED" && e.nonce === nonce), "auth state nonce replay");
-  } else {
-    const prepared = state.entries.some((e) => e.status === "PREPARED" && e.epoch === epoch && e.nonce === nonce && e.contractSha256 === contractSha256);
-    const alreadyAborted = state.entries.some((e) => e.status === "ABORTED" && e.epoch === epoch && e.nonce === nonce);
-    demand(prepared && !alreadyAborted, "ABORTED requires active matching PREPARED entry");
-  }
+    if (status === "PREPARED") {
+      demand(!state.entries.some((e) => e.status === "PREPARED" && e.nonce === nonce), "auth state nonce replay");
+    } else {
+      const prepared = state.entries.some((e) => e.status === "PREPARED" && e.epoch === epoch && e.nonce === nonce && e.contractSha256 === contractSha256);
+      const alreadyAborted = state.entries.some((e) => e.status === "ABORTED" && e.epoch === epoch && e.nonce === nonce);
+      demand(prepared && !alreadyAborted, "ABORTED requires active matching PREPARED entry");
+    }
 
-  const sequence = state.sequenceFloor + 1;
-  const prevEntrySha256 = state.headEntrySha256;
-  const entrySha256 = sha256Hex(canonicalJsonBytes({ prevEntrySha256, sequence, epoch, nonce, contractSha256, status }));
-  const nextState = {
-    ...state,
-    sequenceFloor: sequence,
-    headEntrySha256: entrySha256,
-    entries: [...state.entries, { prevEntrySha256, sequence, epoch, nonce, contractSha256, status, entrySha256 }],
-  };
-  writeAtomicState(filePath, nextState);
-  return nextState;
+    const sequence = state.sequenceFloor + 1;
+    const prevEntrySha256 = state.headEntrySha256;
+    const entrySha256 = sha256Hex(canonicalJsonBytes({ prevEntrySha256, sequence, epoch, nonce, contractSha256, status }));
+    const nextState = {
+      ...state,
+      sequenceFloor: sequence,
+      headEntrySha256: entrySha256,
+      entries: [...state.entries, { prevEntrySha256, sequence, epoch, nonce, contractSha256, status, entrySha256 }],
+    };
+    writeAtomicState(filePath, nextState);
+    return nextState;
+  });
 }
 
 export function recoverAuthStateWithEpochFence(filePath) {
-  const state = loadAndVerifyAuthState(filePath);
-  demand(!state.faulted, "faulted auth state cannot be recovered without operator reconciliation");
-  const nextEpoch = state.currentEpoch + 1;
-  const sequence = state.sequenceFloor + 1;
-  const prevEntrySha256 = state.headEntrySha256;
-  const nonce = "0".repeat(32);
-  const contractSha256 = "0".repeat(64);
-  const status = "EPOCH_ADVANCE";
-  const entrySha256 = sha256Hex(canonicalJsonBytes({ prevEntrySha256, sequence, epoch: nextEpoch, nonce, contractSha256, status }));
-  const fenced = {
-    ...state,
-    currentEpoch: nextEpoch,
-    sequenceFloor: sequence,
-    headEntrySha256: entrySha256,
-    entries: [...state.entries, { prevEntrySha256, sequence, epoch: nextEpoch, nonce, contractSha256, status, entrySha256 }],
-  };
-  writeAtomicState(filePath, fenced);
-  return fenced;
+  return withAuthStateLock(filePath, () => {
+    const state = loadAndVerifyAuthState(filePath);
+    demand(!state.faulted, "faulted auth state cannot be recovered without operator reconciliation");
+    const nextEpoch = state.currentEpoch + 1;
+    const sequence = state.sequenceFloor + 1;
+    const prevEntrySha256 = state.headEntrySha256;
+    const nonce = "0".repeat(32);
+    const contractSha256 = "0".repeat(64);
+    const status = "EPOCH_ADVANCE";
+    const entrySha256 = sha256Hex(canonicalJsonBytes({ prevEntrySha256, sequence, epoch: nextEpoch, nonce, contractSha256, status }));
+    const fenced = {
+      ...state,
+      currentEpoch: nextEpoch,
+      sequenceFloor: sequence,
+      headEntrySha256: entrySha256,
+      entries: [...state.entries, { prevEntrySha256, sequence, epoch: nextEpoch, nonce, contractSha256, status, entrySha256 }],
+    };
+    writeAtomicState(filePath, fenced);
+    return fenced;
+  });
 }
 
 export function verifyAntiRollbackWitness(state, witness) {
@@ -396,8 +434,11 @@ export function computeBoundContractDigest({ contract, output, custody }) {
     },
     custodyBinding: {
       ownerUid: custody.ownerUid,
+      ownerGid: custody.ownerGid,
       buildkitDaemonUid: custody.buildkitDaemonUid,
+      buildkitDaemonGid: custody.buildkitDaemonGid,
       workerUid: custody.workerUid,
+      workerGid: custody.workerGid,
       keyCustodyMode: custody.keyCustodyMode,
     },
   }));
