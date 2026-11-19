@@ -244,13 +244,22 @@ function fsyncParentDir(filePath) {
   }
 }
 
+function writeAllSync(fd, buf) {
+  let offset = 0;
+  while (offset < buf.length) {
+    const written = writeSync(fd, buf, offset, buf.length - offset);
+    demand(written > 0, "short write on auth state");
+    offset += written;
+  }
+}
+
 function writeAtomicState(filePath, nextState) {
   const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
   const fd = openSync(tmpPath, flags, 0o600);
   try {
     const data = canonicalJsonBytes(nextState);
-    writeSync(fd, data, 0, data.length, 0);
+    writeAllSync(fd, data);
     fsyncSync(fd);
   } catch (err) {
     closeSync(fd);
@@ -273,15 +282,26 @@ function isPidDead(pid) {
 }
 
 function tryReclaimStaleLock(lockPath) {
+  const reclaimPath = `${lockPath}.reclaim`;
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  let reclaimFd = -1;
   try {
-    const raw = readFileSync(lockPath, "utf8").trim();
-    const pid = Number(raw);
-    if (pid !== process.pid && isPidDead(pid)) {
+    const initialPid = Number(readFileSync(lockPath, "utf8").trim());
+    if (initialPid === process.pid || !isPidDead(initialPid)) return false;
+    reclaimFd = openSync(reclaimPath, flags, 0o600);
+    // Re-read after acquiring exclusive reclaim guard so we never unlink a replacement owner's lock.
+    const currentPid = Number(readFileSync(lockPath, "utf8").trim());
+    if (currentPid === initialPid && isPidDead(currentPid)) {
       unlinkSync(lockPath);
       return true;
     }
   } catch (_err) {
     void _err;
+  } finally {
+    if (reclaimFd >= 0) {
+      closeSync(reclaimFd);
+      try { unlinkSync(reclaimPath); } catch (_cleanupErr) { void _cleanupErr; }
+    }
   }
   return false;
 }
@@ -333,7 +353,7 @@ export function initAnchoredAuthState(filePath, anchorSha) {
   const fd = openSync(filePath, flags, 0o600);
   try {
     const data = canonicalJsonBytes(initial);
-    writeSync(fd, data, 0, data.length, 0);
+    writeAllSync(fd, data);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
