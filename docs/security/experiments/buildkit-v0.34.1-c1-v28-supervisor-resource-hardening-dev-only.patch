@@ -1,5 +1,5 @@
 diff --git a/session/filesync/sealed_custody_v24_independent_linux_test.go b/session/filesync/sealed_custody_v24_independent_linux_test.go
-index 3f2f025..85bfbc4 100644
+index 3f2f025..876e649 100644
 --- a/session/filesync/sealed_custody_v24_independent_linux_test.go
 +++ b/session/filesync/sealed_custody_v24_independent_linux_test.go
 @@ -58,6 +58,9 @@ func TestC1V24IndependentReceiverProcess(t *testing.T) {
@@ -12,7 +12,7 @@ index 3f2f025..85bfbc4 100644
  	}
  	if os.Getenv("VIRKI_V24_RUN_ROOT_FIXTURE") != "1" || os.Geteuid() != 0 {
  		t.Skip("opt-in synthetic multi-UID fixture requires a privileged DEV supervisor")
-@@ -253,3 +256,143 @@ func v24IndependentReceiver(t *testing.T) {
+@@ -253,3 +256,181 @@ func v24IndependentReceiver(t *testing.T) {
  		t.Fatal("session shutdown timed out")
  	}
  }
@@ -100,15 +100,42 @@ index 3f2f025..85bfbc4 100644
 +		ch <- procResult{out: out, err: err}
 +	}
 +	go launch("adversarial-peer", v28FixturePeerUID, nil, peerDone)
++	peerReady := filepath.Join(root, "peer", "ready")
++	deadline := time.Now().Add(10 * time.Second)
++	for time.Now().Before(deadline) {
++		if _, err := os.Stat(peerReady); err == nil {
++			break
++		}
++		select {
++		case pRes := <-peerDone:
++			t.Fatalf("adversarial peer exited before ready: %v (%s)", pRes.err, pRes.out)
++		default:
++			time.Sleep(5 * time.Millisecond)
++		}
++	}
++	_, readyErr := os.Stat(peerReady)
++	require.NoError(t, readyErr, "adversarial peer did not signal readiness before receiver start")
++
 +	go launch("receiver", v24FixtureReceiverUID, receiverFD, receiverDone)
 +	go launch("sender", v24FixtureSenderUID, senderFD, senderDone)
 +
 +	receiver := <-receiverDone
++	_ = receiverFD.Close()
++	if receiver.err != nil {
++		cancel()
++	}
++	_ = os.WriteFile(filepath.Join(root, "peer", "stop"), []byte("1"), 0644)
 +	sender := <-senderDone
++	_ = senderFD.Close()
 +	peer := <-peerDone
-+	require.NoError(t, peer.err, "adversarial peer: %s", peer.out)
 +	require.NoError(t, receiver.err, "receiver: %s", receiver.out)
 +	require.NoError(t, sender.err, "sender: %s", sender.out)
++	require.NoError(t, peer.err, "adversarial peer: %s", peer.out)
++	attemptsBytes, err := os.ReadFile(filepath.Join(root, "peer", "attempts"))
++	require.NoError(t, err)
++	attempts, err := strconv.Atoi(string(attemptsBytes))
++	require.NoError(t, err)
++	require.GreaterOrEqual(t, attempts, 10, "expected peer to race during receiver publication window")
 +
 +	publishedDir := filepath.Join(root, "receiver", "published")
 +	entries, err := os.ReadDir(publishedDir)
@@ -147,14 +174,25 @@ index 3f2f025..85bfbc4 100644
 +	publishedDir := filepath.Join(receiverDir, "published")
 +	evilTarget := filepath.Join(root, "peer", "evil")
 +	require.NoError(t, os.WriteFile(evilTarget, []byte("EVIL"), 0644))
-+	for i := 0; i < 200; i++ {
++	readyPath := filepath.Join(root, "peer", "ready")
++	stopPath := filepath.Join(root, "peer", "stop")
++	attemptsPath := filepath.Join(root, "peer", "attempts")
++	require.NoError(t, os.WriteFile(readyPath, []byte("1"), 0644))
++	attempts := 0
++	deadline := time.Now().Add(30 * time.Second)
++	for time.Now().Before(deadline) {
 +		require.Error(t, os.Symlink(evilTarget, publishedDir))
 +		require.Error(t, os.Mkdir(publishedDir, 0777))
 +		require.Error(t, os.WriteFile(filepath.Join(publishedDir, "app.js"), []byte("EVIL"), 0644))
 +		require.Error(t, os.Rename(evilTarget, publishedDir))
 +		require.Error(t, os.Symlink(evilTarget, filepath.Join(receiverDir, "swap")))
++		attempts++
++		if _, err := os.Stat(stopPath); err == nil && attempts >= 10 {
++			break
++		}
 +		time.Sleep(500 * time.Microsecond)
 +	}
++	require.NoError(t, os.WriteFile(attemptsPath, []byte(strconv.Itoa(attempts)), 0644))
 +}
 diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
 index e86f3c3..7dd01a6 100755
