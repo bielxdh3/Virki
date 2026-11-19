@@ -127,6 +127,7 @@ jobs:
             b0bcf49bf41ece17080aeba5a4f218f0cb165fb1
             1b0ad7d10b0ef7413a2a72b6bdff5c8b90f51d2f
             932758801e6c0b47d3eceaef7aca96b1c5734e87
+            2d3ddadc785dc2738c6b2175b7c9bd317d590961
           )
           i=0
           while read -r digest patch; do
@@ -148,7 +149,7 @@ jobs:
           export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
           "$toolchain/go/bin/go" version
           "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
-            -run '^TestC1V24(ReceiverCustodyIdentityContract|ReceiverCustodyParentAndGrandparentContract|IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs|FSSyncSealedV15EnforcesCustodyPolicy)$'
+            -run '^TestC1V2(4ReceiverCustodyIdentityContract|4ReceiverCustodyParentAndGrandparentContract|4IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs|4FSSyncSealedV15EnforcesCustodyPolicy|8LauncherResourceAndIdentityRefusals|8IndependentCustodyPolicyRefusals)$'
           setpriv --no-new-privs "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
             -run '^TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs$'
 

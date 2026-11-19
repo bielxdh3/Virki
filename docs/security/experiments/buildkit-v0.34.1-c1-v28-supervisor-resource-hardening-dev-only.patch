@@ -1,0 +1,187 @@
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+index e86f3c3..4db0442 100755
+--- a/session/filesync/sealed_custody_v24_linux.go
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -158,6 +158,9 @@ func validateV24IndependentCustody(dest string, policy V24ReceiverCustodyPolicy)
+ 		!slices.Contains(policy.ForbiddenPeerUIDs, *policy.ExpectedSenderUID) {
+ 		return errors.New("C1 V24 independent receiver requires explicit distinct sender ownership")
+ 	}
++	if policy.PrivateTempDir == "" || filepath.Clean(policy.PrivateTempDir) == filepath.Dir(dest) {
++		return errors.New("C1 V24 independent receiver requires PrivateTempDir distinct from destination custody parent")
++	}
+ 	if err := validateV24ProcessIdentity(policy); err != nil {
+ 		return err
+ 	}
+@@ -221,9 +224,27 @@ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []s
+ 	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe {
+ 		return nil, errors.New("C1 V24 helper executable must be canonical absolute path")
+ 	}
++	exeInfo, err := os.Lstat(exe)
++	if err != nil {
++		return nil, fmt.Errorf("C1 V24 cannot stat helper executable: %w", err)
++	}
++	if !exeInfo.Mode().IsRegular() {
++		return nil, errors.New("C1 V24 helper executable must be non-symlink regular file")
++	}
++	if exeInfo.Mode().Perm()&0022 != 0 {
++		return nil, errors.New("C1 V24 helper executable must not be group/world writable")
++	}
++	for _, f := range files {
++		if f == nil {
++			return nil, errors.New("C1 V24 launcher refuses nil inherited file")
++		}
++	}
+ 	if policy.RequireUnprivileged && policy.ExpectedReceiverUID != nil && *policy.ExpectedReceiverUID == 0 {
+ 		return nil, errors.New("C1 V24 refuses root ExpectedReceiverUID")
+ 	}
++	if policy.ExpectedReceiverUID != nil && policy.ExpectedSenderUID != nil && *policy.ExpectedReceiverUID == *policy.ExpectedSenderUID {
++		return nil, errors.New("C1 V24 launcher refuses identical receiver and sender UID")
++	}
+ 	if policy.ExpectedReceiverUID != nil {
+ 		for _, forbidden := range policy.ForbiddenPeerUIDs {
+ 			if *policy.ExpectedReceiverUID == forbidden {
+@@ -255,6 +276,13 @@ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []s
+ 		filepath.Clean(policy.PrivateTempDir) != policy.PrivateTempDir || policy.PrivateTempDir == "/" {
+ 		return nil, errors.New("C1 V24 launcher requires an explicit private temporary directory")
+ 	}
++	tmpInfo, err := os.Lstat(policy.PrivateTempDir)
++	if err != nil {
++		return nil, fmt.Errorf("C1 V24 launcher cannot stat private temporary directory: %w", err)
++	}
++	if !tmpInfo.Mode().IsDir() || tmpInfo.Mode().Perm() != 0700 {
++		return nil, errors.New("C1 V24 launcher requires real 0700 private temporary directory")
++	}
+ 	for _, entry := range extraEnv {
+ 		if strings.HasPrefix(entry, "TMPDIR=") {
+ 			return nil, errors.New("C1 V24 launcher refuses TMPDIR override")
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index 6f17a1e..cc93ce9 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -240,3 +240,126 @@ func TestC1V24FSSyncSealedV15EnforcesCustodyPolicy(t *testing.T) {
+ 	})
+ 	require.NoError(t, g.Wait())
+ }
++
++func TestC1V28LauncherResourceAndIdentityRefusals(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged launcher refusal test requires non-root euid")
++	}
++	t.Setenv("TMPDIR", "/tmp")
++	dir := t.TempDir()
++	require.NoError(t, os.Chmod(dir, 0700))
++
++	helper := filepath.Join(dir, "helper")
++	require.NoError(t, os.WriteFile(helper, []byte("#!/bin/sh\n"), 0700))
++	symlinkHelper := filepath.Join(dir, "helper-link")
++	require.NoError(t, os.Symlink(helper, symlinkHelper))
++
++	writableHelper := filepath.Join(dir, "helper-writable")
++	require.NoError(t, os.WriteFile(writableHelper, []byte("#!/bin/sh\n"), 0755))
++	require.NoError(t, os.Chmod(writableHelper, 0775))
++
++	privateTmp := filepath.Join(dir, "tmp")
++	require.NoError(t, os.Mkdir(privateTmp, 0700))
++	publicTmp := filepath.Join(dir, "public-tmp")
++	require.NoError(t, os.Mkdir(publicTmp, 0755))
++	symlinkTmp := filepath.Join(dir, "link-tmp")
++	require.NoError(t, os.Symlink(privateTmp, symlinkTmp))
++
++	uid := uint32(os.Geteuid())
++	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
++	defer cancel()
++
++	_, err := runV24IsolatedSubprocessWithFiles(ctx, symlinkHelper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, nil)
++	require.ErrorContains(t, err, "must be non-symlink regular file")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, writableHelper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, nil)
++	require.ErrorContains(t, err, "must not be group/world writable")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, []*os.File{nil})
++	require.ErrorContains(t, err, "refuses nil inherited file")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		ExpectedReceiverUID: &uid,
++		ExpectedSenderUID:   &uid,
++		PrivateTempDir:      privateTmp,
++	}, nil)
++	require.ErrorContains(t, err, "refuses identical receiver and sender UID")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      publicTmp,
++	}, nil)
++	require.ErrorContains(t, err, "real 0700 private temporary directory")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      symlinkTmp,
++	}, nil)
++	require.ErrorContains(t, err, "real 0700 private temporary directory")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, nil, "TMPDIR=/tmp")
++	require.ErrorContains(t, err, "refuses TMPDIR override")
++}
++
++func TestC1V28IndependentCustodyPolicyRefusals(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged independent custody policy test requires non-root euid")
++	}
++	uid := uint32(os.Geteuid())
++	gid := uint32(os.Getegid())
++	peer := uid + 1
++
++	base := t.TempDir()
++	require.NoError(t, os.Chmod(base, 0700))
++	dest := filepath.Join(base, "published")
++	privateTmp := filepath.Join(base, "tmp")
++	require.NoError(t, os.Mkdir(privateTmp, 0700))
++	t.Setenv("TMPDIR", privateTmp)
++
++	require.ErrorContains(t, validateV24IndependentCustody(dest, V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &gid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		PrivateTempDir:              privateTmp,
++	}), "explicit distinct sender ownership")
++
++	require.ErrorContains(t, validateV24IndependentCustody(dest, V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &gid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		ExpectedSenderUID:           &uid,
++		ExpectedSenderGID:           &peer,
++		PrivateTempDir:              privateTmp,
++	}), "explicit distinct sender ownership")
++
++	require.ErrorContains(t, validateV24IndependentCustody(filepath.Join(privateTmp, "published"), V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &gid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		ExpectedSenderUID:           &peer,
++		ExpectedSenderGID:           &peer,
++		PrivateTempDir:              privateTmp,
++	}), "PrivateTempDir distinct from destination custody parent")
++}
