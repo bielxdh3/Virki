@@ -37,6 +37,6 @@ Remaining: supervisor identity provisioning/exclusivity, independent review, com
 ## Reviewer checklist
 
 - Review the V24, V25 and V26 incremental patches in the PR's Files changed view; the patches are deliberately textual and byte-preserved.
-- The CI Validate job checks hashes and static patch replay using the review manifest. It does not build or execute the experimental receiver.
+- The CI Validate job checks hashes, static patch replay, and four ordinary unprivileged Go regression tests using the pinned source and vendored dependencies.
 - V23 is included as a byte-preserved prerequisite; see the complete reproduction note.
 - Review the explicit DEV custody contract and its ordinary positive tests, preserving all existing denial paths and production gates. The prior approval criteria are not claimed complete.

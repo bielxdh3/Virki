@@ -112,7 +112,7 @@ jobs:
       - name: Secret scan
         run: npm run secrets:scan
 
-      - name: Verify issue 90 experimental patch integrity and static replay
+      - name: Verify issue 90 experimental patch integrity, replay and ordinary tests
         run: |
           set -euo pipefail
           sha256sum --check docs/security/experiments/issue90-review-patches.sha256
@@ -136,6 +136,21 @@ jobs:
             i=$((i + 1))
           done < docs/security/experiments/issue90-review-patches.sha256
           test "$i" -eq "${#expected[@]}"
+          git -C "$scratch" checkout-index --all
+          toolchain="$(mktemp -d "$RUNNER_TEMP/issue90-go.XXXXXX")"
+          curl --fail --silent --show-error --location --max-time 180 \
+            https://go.dev/dl/go1.26.10.linux-amd64.tar.gz \
+            --output "$toolchain/go.tar.gz"
+          echo "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5  $toolchain/go.tar.gz" | sha256sum --check
+          tar -xzf "$toolchain/go.tar.gz" -C "$toolchain"
+          cd "$scratch"
+          test "$(id -u)" -ne 0
+          export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
+          "$toolchain/go/bin/go" version
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
+            -run '^TestC1V24(ReceiverCustodyIdentityContract|ReceiverCustodyParentAndGrandparentContract|IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs|FSSyncSealedV15EnforcesCustodyPolicy)$'
+          setpriv --no-new-privs "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
+            -run '^TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs$'
 
       - name: Production control tests
         run: npm run test:production-revision
