@@ -264,9 +264,22 @@ test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signatur
 
     const fxFence = buildSyntheticFixture(tmpDir);
     fs.writeFileSync(`${fxFence.stateFilePath}.lock`, "999999\n", { mode: 0o600 });
+    const past = new Date(Date.now() - 1000);
+    fs.writeFileSync(`${fxFence.stateFilePath}.lock.reclaim`, "999998\n", { mode: 0o600 });
+    fs.utimesSync(`${fxFence.stateFilePath}.lock.reclaim`, past, past);
     const fenced = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
     assert.equal(fenced.currentEpoch, 2);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), false);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock.reclaim`), false);
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxFence), /does not match active state epoch/);
+
+    // Empty abandoned .lock.reclaim (crash between O_CREAT and writeSync) also recovers cleanly.
+    fs.writeFileSync(`${fxFence.stateFilePath}.lock`, "999999\n", { mode: 0o600 });
+    fs.writeFileSync(`${fxFence.stateFilePath}.lock.reclaim`, "", { mode: 0o600 });
+    fs.utimesSync(`${fxFence.stateFilePath}.lock.reclaim`, past, past);
+    const fenced2 = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
+    assert.equal(fenced2.currentEpoch, 3);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock.reclaim`), false);
   }
 
   // 6. Anti-rollback witness regression & fork detection even when sequenceFloor > minSequence

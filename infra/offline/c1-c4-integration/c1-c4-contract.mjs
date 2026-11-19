@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export const OWNER_APPROVAL_DOMAIN = Buffer.from("VIRKI_C1_C4_OWNER_APPROVAL_V1\0", "utf8");
@@ -281,6 +281,23 @@ function isPidDead(pid) {
   }
 }
 
+function openReclaimGuard(reclaimPath, flags) {
+  try {
+    return openSync(reclaimPath, flags, 0o600);
+  } catch (err) {
+    if (!err || err.code !== "EEXIST") throw err;
+    const raw = readFileSync(reclaimPath, "utf8").trim();
+    const st = statSync(reclaimPath);
+    const ageMs = Date.now() - st.mtimeMs;
+    const reclaimPid = Number(raw);
+    const deadOwner = raw.length > 0 && reclaimPid !== process.pid && isPidDead(reclaimPid) && ageMs >= 50;
+    const abandonedEmpty = raw.length === 0 && ageMs >= 200;
+    if (!deadOwner && !abandonedEmpty) throw err;
+    unlinkSync(reclaimPath);
+    return openSync(reclaimPath, flags, 0o600);
+  }
+}
+
 function tryReclaimStaleLock(lockPath) {
   const reclaimPath = `${lockPath}.reclaim`;
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
@@ -288,7 +305,9 @@ function tryReclaimStaleLock(lockPath) {
   try {
     const initialPid = Number(readFileSync(lockPath, "utf8").trim());
     if (initialPid === process.pid || !isPidDead(initialPid)) return false;
-    reclaimFd = openSync(reclaimPath, flags, 0o600);
+    reclaimFd = openReclaimGuard(reclaimPath, flags);
+    const pidBytes = Buffer.from(`${process.pid}\n`, "utf8");
+    writeSync(reclaimFd, pidBytes, 0, pidBytes.length, 0);
     // Re-read after acquiring exclusive reclaim guard so we never unlink a replacement owner's lock.
     const currentPid = Number(readFileSync(lockPath, "utf8").trim());
     if (currentPid === initialPid && isPidDead(currentPid)) {

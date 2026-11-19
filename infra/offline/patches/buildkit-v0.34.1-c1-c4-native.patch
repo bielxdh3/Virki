@@ -15438,10 +15438,10 @@ index 0000000..202d36e
 +}
 diff --git a/util/localcontext/service_vroa_v3_linux.go b/util/localcontext/service_vroa_v3_linux.go
 new file mode 100644
-index 0000000..e2192bf
+index 0000000..a10154e
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux.go
-@@ -0,0 +1,829 @@
+@@ -0,0 +1,820 @@
 +//go:build linux
 +
 +package localcontext
@@ -15464,7 +15464,8 @@ index 0000000..e2192bf
 +	"sync"
 +	"syscall"
 +	"time"
-+	"unsafe"
++
++	"golang.org/x/sys/unix"
 +)
 +
 +const (
@@ -15484,12 +15485,6 @@ index 0000000..e2192bf
 +	vroaStatusErrStaleEpoch      = uint32(16)
 +	vroaStatusErrScopeAborted    = uint32(21)
 +	vroaStatusErrSigningDisabled = uint32(22)
-+
-+	sysMemfdCreateV3  = 319 // linux/amd64 __NR_memfd_create
-+	mfdCloexecV3      = 0x0001
-+	mfdAllowSealingV3 = 0x0002
-+	fcntlAddSealsV3   = 1033
-+	sealAllV3         = 0x0001 | 0x0002 | 0x0004 | 0x0008
 +)
 +
 +// VROAV3SigningDisabledError indicates that C4 verified the approval, sealed
@@ -16210,15 +16205,10 @@ index 0000000..e2192bf
 +}
 +
 +func createSealedMemfdV3(name string, data []byte) (int, error) {
-+	cname, err := syscall.BytePtrFromString(name)
++	rwFD, err := unix.MemfdCreate(name, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 +	if err != nil {
-+		return -1, err
++		return -1, fmt.Errorf("memfd_create(%s): %w", name, err)
 +	}
-+	fdRaw, _, errno := syscall.Syscall(sysMemfdCreateV3, uintptr(unsafe.Pointer(cname)), mfdCloexecV3|mfdAllowSealingV3, 0)
-+	if errno != 0 {
-+		return -1, fmt.Errorf("memfd_create(%s): %w", name, errno)
-+	}
-+	rwFD := int(fdRaw)
 +	defer func() { _ = syscall.Close(rwFD) }()
 +
 +	for off := 0; off < len(data); {
@@ -16234,8 +16224,9 @@ index 0000000..e2192bf
 +		}
 +		off += n
 +	}
-+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(rwFD), fcntlAddSealsV3, sealAllV3); errno != 0 {
-+		return -1, fmt.Errorf("F_ADD_SEALS(%s): %w", name, errno)
++	const sealAll = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
++	if _, err := unix.FcntlInt(uintptr(rwFD), unix.F_ADD_SEALS, sealAll); err != nil {
++		return -1, fmt.Errorf("F_ADD_SEALS(%s): %w", name, err)
 +	}
 +	roFD, err := syscall.Open(fmt.Sprintf("/proc/self/fd/%d", rwFD), syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 +	if err != nil {
