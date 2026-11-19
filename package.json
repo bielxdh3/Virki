@@ -99,7 +99,8 @@
   "overrides": {
     "prisma": "6.19.3",
     "@prisma/config": {
-      "deepmerge-ts": "8.0.2"
+      "deepmerge-ts": "8.0.2",
+      "effect": "3.22.5"
     },
     "minimatch": "11.0.4",
     "concurrently": {

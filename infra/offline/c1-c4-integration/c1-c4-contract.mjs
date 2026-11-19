@@ -309,7 +309,7 @@ function openReclaimGuard(reclaimPath, flags) {
     const info = inspectLockFile(reclaimPath);
     if (!isAbandonedLock(info, 50, 200)) throw err;
     unlinkSync(reclaimPath);
-    return openSync(reclaimPath, flags, 0o600);
+    return -1;
   }
 }
 
@@ -321,6 +321,7 @@ function tryReclaimStaleLock(lockPath) {
     const initial = inspectLockFile(lockPath);
     if (!isAbandonedLock(initial, 0, 200)) return false;
     reclaimFd = openReclaimGuard(reclaimPath, flags);
+    if (reclaimFd < 0) return false;
     const pidBytes = Buffer.from(`${process.pid}\n`, "utf8");
     writeSync(reclaimFd, pidBytes, 0, pidBytes.length, 0);
     // Re-read via FD after acquiring exclusive reclaim guard so we never unlink a live owner's lock.
