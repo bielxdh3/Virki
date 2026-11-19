@@ -291,8 +291,8 @@ static inline bool collect_tree_entries(const char *root, const char *sub,
       }
     } else if (S_ISLNK(st.st_mode)) {
       e->type = VIRKI_ABI_LINK;
-      ssize_t len = readlink(full, e->link_target, sizeof(e->link_target) - 1);
-      if (len < 0) {
+      ssize_t len = readlink(full, e->link_target, sizeof(e->link_target));
+      if (len < 0 || (size_t)len >= sizeof(e->link_target)) {
         free_entry_names(names, name_count);
         return false;
       }

@@ -165,11 +165,33 @@ static void test_nested_depth_first_traversal_matches_go(void) {
   printf("PASS: test_nested_depth_first_traversal_matches_go\n");
 }
 
+static void test_truncated_symlink_target_rejected(void) {
+  char tmpl[] = "/tmp/virki-abi-sym-XXXXXX";
+  char *root = mkdtemp(tmpl);
+  assert(root != NULL);
+
+  char long_target[1042];
+  memset(long_target, 'x', sizeof(long_target) - 1);
+  long_target[sizeof(long_target) - 1] = '\0';
+
+  char link_path[256];
+  snprintf(link_path, sizeof(link_path), "%s/longlink", root);
+  assert(symlink(long_target, link_path) == 0);
+
+  virki_buildkit_local_context_observation_t obs;
+  assert(!virki_observe_local_context_v2(root, "source", &obs));
+
+  unlink(link_path);
+  rmdir(root);
+  printf("PASS: test_truncated_symlink_target_rejected\n");
+}
+
 int main(void) {
   printf("=== Running Owner Authority Unit Tests ===\n");
   test_key_generation_and_signing_verification();
   test_protocol_frame_sizes_and_alignment();
   test_nested_depth_first_traversal_matches_go();
+  test_truncated_symlink_target_rejected();
   printf("=== All Owner Authority Unit Tests PASSED ===\n");
   return 0;
 }
