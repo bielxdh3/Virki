@@ -526,7 +526,7 @@ static bool ledger_record_candidate_verified(owner_ledger_state_t *st,
     uint64_t *out_seq) {
   if (!st || st->faulted || st->ledger_fd < 0 || !out_seq ||
       st->sequence_floor == UINT64_MAX ||
-      !ledger_can_append_v20(st->ledger_fd, 1) ||
+      !ledger_can_append_v20(st->ledger_fd, 2) ||
       ledger_v3_scope_state(st, scope_token, nonce, NULL) != 1) return false;
   ledger_record_t rec = {
     .type = REC_TYPE_CANDIDATE_VERIFIED,

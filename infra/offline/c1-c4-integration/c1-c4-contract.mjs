@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export const OWNER_APPROVAL_DOMAIN = Buffer.from("VIRKI_C1_C4_OWNER_APPROVAL_V1\0", "utf8");
@@ -281,18 +281,33 @@ function isPidDead(pid) {
   }
 }
 
+function inspectLockFile(targetPath) {
+  const roFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+  const fd = openSync(targetPath, roFlags);
+  try {
+    const st = fstatSync(fd);
+    const raw = readFileSync(fd, "utf8").trim();
+    return { raw, mtimeMs: st.mtimeMs };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function isAbandonedLock(info, deadMinAgeMs, emptyMinAgeMs) {
+  const ageMs = Date.now() - info.mtimeMs;
+  const pid = Number(info.raw);
+  const deadOwner = info.raw.length > 0 && pid !== process.pid && isPidDead(pid) && ageMs >= deadMinAgeMs;
+  const abandonedEmpty = info.raw.length === 0 && ageMs >= emptyMinAgeMs;
+  return deadOwner || abandonedEmpty;
+}
+
 function openReclaimGuard(reclaimPath, flags) {
   try {
     return openSync(reclaimPath, flags, 0o600);
   } catch (err) {
     if (!err || err.code !== "EEXIST") throw err;
-    const raw = readFileSync(reclaimPath, "utf8").trim();
-    const st = statSync(reclaimPath);
-    const ageMs = Date.now() - st.mtimeMs;
-    const reclaimPid = Number(raw);
-    const deadOwner = raw.length > 0 && reclaimPid !== process.pid && isPidDead(reclaimPid) && ageMs >= 50;
-    const abandonedEmpty = raw.length === 0 && ageMs >= 200;
-    if (!deadOwner && !abandonedEmpty) throw err;
+    const info = inspectLockFile(reclaimPath);
+    if (!isAbandonedLock(info, 50, 200)) throw err;
     unlinkSync(reclaimPath);
     return openSync(reclaimPath, flags, 0o600);
   }
@@ -303,14 +318,14 @@ function tryReclaimStaleLock(lockPath) {
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
   let reclaimFd = -1;
   try {
-    const initialPid = Number(readFileSync(lockPath, "utf8").trim());
-    if (initialPid === process.pid || !isPidDead(initialPid)) return false;
+    const initial = inspectLockFile(lockPath);
+    if (!isAbandonedLock(initial, 0, 200)) return false;
     reclaimFd = openReclaimGuard(reclaimPath, flags);
     const pidBytes = Buffer.from(`${process.pid}\n`, "utf8");
     writeSync(reclaimFd, pidBytes, 0, pidBytes.length, 0);
-    // Re-read after acquiring exclusive reclaim guard so we never unlink a replacement owner's lock.
-    const currentPid = Number(readFileSync(lockPath, "utf8").trim());
-    if (currentPid === initialPid && isPidDead(currentPid)) {
+    // Re-read via FD after acquiring exclusive reclaim guard so we never unlink a live owner's lock.
+    const current = inspectLockFile(lockPath);
+    if (current.raw === initial.raw && isAbandonedLock(current, 0, 200)) {
       unlinkSync(lockPath);
       return true;
     }
