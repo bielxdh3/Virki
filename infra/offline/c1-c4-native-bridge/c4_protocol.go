@@ -22,9 +22,15 @@ const (
 
 	StatusOK                 = uint32(0)
 	StatusErrBadFrame        = uint32(11)
+	StatusErrFDInvalid       = uint32(12)
+	StatusErrStreamMismatch  = uint32(13)
 	StatusErrNonceReplay     = uint32(15)
 	StatusErrStaleEpoch      = uint32(16)
+	StatusErrNoKey           = uint32(17)
+	StatusErrLedgerTamper    = uint32(18)
+	StatusErrProvenanceFail  = uint32(19)
 	StatusErrScopeNotFound   = uint32(20)
+	StatusErrScopeAborted    = uint32(21)
 	StatusErrSigningDisabled = uint32(22)
 )
 

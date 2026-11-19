@@ -130,7 +130,7 @@ static bool ledger_replay_verify_v20(int fd, off_t body_bytes,
     if (epoch == 0 || rec.epoch != epoch) {
       valid = false; break;
     }
-    if (rec.type == REC_TYPE_PREPARE) {
+    if (rec.type == REC_TYPE_PREPARE || rec.type == REC_TYPE_V3_PREPARE) {
       if (sequence == UINT64_MAX || rec.seq != sequence+1 ||
           ledger_replay_find_v20(scope_slots,capacity,scopes,rec.scope_token,false) != SIZE_MAX ||
           ledger_replay_find_v20(nonce_slots,capacity,scopes,rec.nonce,true) != SIZE_MAX ||
@@ -163,11 +163,13 @@ static bool ledger_replay_verify_v20(int fd, off_t body_bytes,
       }
       scopes[index].terminal = true;
       sequence = rec.seq;
-    } else if (rec.type == REC_TYPE_COMMITTED) {
+    } else if (rec.type == REC_TYPE_COMMITTED ||
+               rec.type == REC_TYPE_CANDIDATE_VERIFIED) {
       /* The original 0e22b29 SIGN_ACK writer allocated a NEW sequence for
        * COMMIT, not the PREPARE sequence. Preserve only this proven legacy
-       * transition: live prepared scope, same epoch/nonce, next sequence.
-       * V20 cannot produce a new COMMIT because SIGN_ACK stays OFF. */
+       * transition and the new non-authorizing candidate-verification
+       * terminal: live prepared scope, same epoch/nonce, next sequence.
+       * Neither record grants release authority. */
       if (sequence == UINT64_MAX || rec.seq != sequence+1 ||
           strcmp(rec.nonce,scopes[index].nonce) != 0) {
         valid = false; break;

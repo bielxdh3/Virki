@@ -64,11 +64,29 @@ func CreateSealedMemfd(name string, data []byte) (int, error) {
 
 func SendC4Request(socketPath string, req RequestFrame, fds []int, closeWrite bool) (ResponseFrame, error) {
 	var resp ResponseFrame
-	if req.Cmd == CmdSignAck && len(fds) != ContextCount {
-		return resp, fmt.Errorf("SIGN_ACK requires %d descriptors, got %d", ContextCount, len(fds))
-	}
-	if req.Cmd != CmdSignAck && len(fds) != 0 {
-		return resp, fmt.Errorf("command %d forbids SCM_RIGHTS descriptors", req.Cmd)
+	switch req.Version {
+	case ProtocolVersion:
+		if req.Cmd == CmdSignAck && len(fds) != ContextCount {
+			return resp, fmt.Errorf("SIGN_ACK requires %d descriptors, got %d", ContextCount, len(fds))
+		}
+		if req.Cmd != CmdSignAck && len(fds) != 0 {
+			return resp, fmt.Errorf("V2 command %d forbids SCM_RIGHTS descriptors", req.Cmd)
+		}
+	case ProtocolVersionV3:
+		want := -1
+		switch req.Cmd {
+		case CmdV3Begin:
+			want = 1
+		case CmdV3VerifyCandidate:
+			want = ContextCount + 2
+		case CmdV3Abort:
+			want = 0
+		}
+		if want < 0 || len(fds) != want {
+			return resp, fmt.Errorf("V3 command %d requires %d descriptors, got %d", req.Cmd, want, len(fds))
+		}
+	default:
+		return resp, fmt.Errorf("unsupported C4 protocol version %d", req.Version)
 	}
 	for _, fd := range fds {
 		if fd <= 2 {
@@ -139,6 +157,9 @@ func SendC4Request(socketPath string, req RequestFrame, fds []int, closeWrite bo
 			return resp, fmt.Errorf("peer closed early (%w) without response: %v", sendErr, err)
 		}
 		return resp, err
+	}
+	if req.Version == ProtocolVersionV3 {
+		return DecodeResponseFrameV3(respBuf)
 	}
 	return DecodeResponseFrame(respBuf)
 }

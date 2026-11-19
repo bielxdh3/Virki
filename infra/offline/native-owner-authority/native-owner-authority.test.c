@@ -38,6 +38,13 @@ void randombytes(unsigned char *ptr, unsigned long long length) {
 #include "tweetnacl.h"
 #include "tweetnacl.c"
 
+_Static_assert(sizeof(virki_owner_v3_context_claim_t) == 316,
+    "VROA_V3 context claim ABI drift");
+_Static_assert(sizeof(virki_owner_approval_envelope_v3_t) == 2669,
+    "VROA_V3 approval envelope ABI drift");
+_Static_assert(sizeof(virki_owner_candidate_evidence_v3_t) == 1347,
+    "VROA_V3 evidence header ABI drift");
+
 static void test_key_generation_and_signing_verification(void) {
   uint8_t pk[32];
   uint8_t sk[64];

@@ -6,7 +6,8 @@
  * Must be included exactly once in native-owner-authority.c after its
  * protocol type definitions. This is an exact-length reader with a TOTAL
  * CLOCK_MONOTONIC deadline (not a fresh 2-second window per fragment).
- * SCM_RIGHTS may accompany any fragment: handles above four are closed;
+ * SCM_RIGHTS may accompany any fragment: handles above the explicit V3
+ * transport ceiling are closed;
  * malformed, unexpected, duplicated or truncated control messages deny.
  */
 #ifndef VIRKI_OWNER_FRAME_V21_H
@@ -83,7 +84,7 @@ static bool owner_receive_exact_frame_v21(int fd,
         memcpy(&received,(const unsigned char *)CMSG_DATA(cmsg)+i*sizeof(int),sizeof(int));
         if (received<0) {
           valid=false;
-        } else if (received_fds < VIRKI_OWNER_CONTEXT_COUNT) {
+        } else if (received_fds < VIRKI_OWNER_MAX_FD_COUNT) {
           fds[received_fds]=received;
         } else {
           close(received);
