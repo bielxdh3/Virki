@@ -7,10 +7,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -139,7 +141,7 @@ func sealedFD(t *testing.T, name string, data []byte) int {
 	return fd
 }
 
-func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInput, tamperProof bool) ([]byte, string) {
+func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInput, tamperProof bool, mutations ...func(map[string]any)) ([]byte, string) {
 	t.Helper()
 	approvalSHA := sha256.Sum256(envelopeRaw)
 	exporterJSON := fmt.Sprintf(`{"schemaVersion":2,"id":0,"type":"image","destination":"virki-dev","attributesDigest":"sha256:%s"}`, input.ExporterIntentSHA256)
@@ -163,9 +165,9 @@ func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInp
 	}
 	causalityJSON := strings.Replace(causalityBase, `"proofDigest":""`, `"proofDigest":"sha256:`+cHex+`"`, 1)
 
-	ociBase := fmt.Sprintf(`{"schemaVersion":1,"root":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"nodes":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048,"role":"root"}],"proofDigest":""}`,
-		input.OutputImageID, input.OutputImageID)
-	oSum := sha256.Sum256(append([]byte("virki-c1-oci-dag-v1\x00"), ociBase...))
+	_, rootJSON, nodesJSON, _ := testV3OCIContent()
+	ociBase := fmt.Sprintf(`{"schemaVersion":2,"root":%s,"nodes":%s,"proofDigest":""}`, rootJSON, nodesJSON)
+	oSum := sha256.Sum256(append([]byte("virki-c1-oci-dag-v2\x00"), ociBase...))
 	oHex := hex.EncodeToString(oSum[:])
 	ociJSON := strings.Replace(ociBase, `"proofDigest":""`, `"proofDigest":"sha256:`+oHex+`"`, 1)
 
@@ -175,10 +177,41 @@ func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInp
 	feJSON := strings.Replace(feBase, `"proofDigest":""`, `"proofDigest":"sha256:`+fHex+`"`, 1)
 
 	payload := []byte(fmt.Sprintf(
-		`{"schemaVersion":2,"epoch":%d,"binding":{"jobId":"%s","role":"%s","nonce":"%s","approvalId":"%s","exporter":%s},"contexts":[%s],"output":{"workerId":"%s","image":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"causality":%s,"ociDag":%s},"frontendProof":%s}`,
+		`{"schemaVersion":2,"epoch":%d,"binding":{"jobId":"%s","role":"%s","nonce":"%s","approvalId":"%s","exporter":%s},"contexts":[%s],"output":{"workerId":"%s","image":%s,"causality":%s,"ociDag":%s},"frontendProof":%s}`,
 		input.Epoch, input.JobID, input.Role, input.Nonce, input.ApprovalID, exporterJSON,
-		strings.Join(ctxParts, ","), input.WorkerID, input.OutputImageID,
+		strings.Join(ctxParts, ","), input.WorkerID, rootJSON,
 		causalityJSON, ociJSON, feJSON))
+	if len(mutations) != 0 {
+		// Serialize each ordinary invalid fixture independently, so a digest
+		// error cannot conceal the semantic validation being tested.
+		var doc map[string]any
+		if err := json.Unmarshal(payload, &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, mutate := range mutations {
+			mutate(doc)
+		}
+		proofDigest := func(proof map[string]any, domain string) string {
+			proof["proofDigest"] = ""
+			raw, err := json.Marshal(proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(append([]byte(domain), raw...))
+			hexDigest := hex.EncodeToString(sum[:])
+			proof["proofDigest"] = "sha256:" + hexDigest
+			return hexDigest
+		}
+		out := doc["output"].(map[string]any)
+		cHex = proofDigest(out["causality"].(map[string]any), "virki-c1-export-causality-v3\x00")
+		oHex = proofDigest(out["ociDag"].(map[string]any), "virki-c1-oci-dag-v2\x00")
+		fHex = proofDigest(doc["frontendProof"].(map[string]any), "virki-c1-frontend-proof-v1\x00")
+		var err error
+		payload, err = json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	bundle, digest, err := EncodeV3Evidence(V3EvidenceInput{
 		ApprovalEnvelopeSHA256: hex.EncodeToString(approvalSHA[:]),
 		JobID:                  input.JobID, Role: input.Role, Nonce: input.Nonce, WorkerID: input.WorkerID,
@@ -225,12 +258,19 @@ func v3Verify(t *testing.T, daemon *v3Daemon, envelope V3ApprovalEnvelope, envel
 	input V3ApprovalInput, streams [][]byte, token string, approvalFD int) ResponseFrame {
 	t.Helper()
 	evidence, _ := v3Evidence(t, envelopeRaw, input)
+	_, _, _, archive := testV3OCIContent()
+	return v3VerifyEvidence(t, daemon, envelope, envelopeRaw, streams, token, approvalFD, evidence, archive)
+}
+
+func v3VerifyEvidence(t *testing.T, daemon *v3Daemon, envelope V3ApprovalEnvelope, envelopeRaw []byte,
+	streams [][]byte, token string, approvalFD int, evidence, archive []byte) ResponseFrame {
+	t.Helper()
 	evidenceFD := sealedFD(t, "v3-evidence", evidence)
-	fds := make([]int, 0, ContextCount+2)
+	fds := make([]int, 0, ContextCount+3)
 	for i, stream := range streams {
 		fds = append(fds, sealedFD(t, fmt.Sprintf("v3-context-%d", i), stream))
 	}
-	fds = append(fds, approvalFD, evidenceFD)
+	fds = append(fds, approvalFD, evidenceFD, sealedFD(t, "v3-oci-content", archive))
 	req, err := BuildV3Request(envelope, envelopeRaw, CmdV3VerifyCandidate, token, evidence)
 	if err != nil {
 		t.Fatal(err)
@@ -240,6 +280,58 @@ func v3Verify(t *testing.T, daemon *v3Daemon, envelope V3ApprovalEnvelope, envel
 		t.Fatal(err)
 	}
 	return resp
+}
+
+func v3InvalidEvidenceCases() []struct {
+	name  string
+	path  []any
+	value any
+} {
+	type testCase = struct {
+		name  string
+		path  []any
+		value any
+	}
+	var cases []testCase
+	add := func(prefix []any, label string, fields map[string]any) {
+		for field, value := range fields {
+			p := append(append([]any(nil), prefix...), field)
+			cases = append(cases, testCase{label + "/" + field, p, value})
+		}
+	}
+	add([]any{}, "payload", map[string]any{"schemaVersion": 1, "epoch": 0, "contexts": []any{}})
+	add([]any{"binding"}, "binding", map[string]any{"jobId": "", "role": "", "nonce": "", "approvalId": ""})
+	add([]any{"binding", "exporter"}, "exporter", map[string]any{"schemaVersion": 1, "id": 1, "type": "unsupported", "destination": "", "attributesDigest": ""})
+	add([]any{"contexts", 0}, "context", map[string]any{"name": "", "workerId": "", "sessionId": "", "contextIdentity": "", "generation": "", "snapshotId": "", "vertexDigest": "", "vertexOutputIndex": -1, "treeDigestSchema": "", "treeDigest": "", "streamDigest": "", "streamLength": 0})
+	add([]any{"output"}, "output", map[string]any{"workerId": ""})
+	add([]any{"output", "image"}, "image", map[string]any{"digest": "", "size": 0, "mediaType": "unsupported"})
+	causality := []any{"output", "causality"}
+	add(causality, "causality", map[string]any{"schemaVersion": 2, "roots": []any{}})
+	root := append(append([]any(nil), causality...), "roots", 0)
+	add(root, "root", map[string]any{"workerId": "", "refId": "", "vertexDigest": "", "outputIndex": -1, "contextPaths": []any{}})
+	contextPath := append(append([]any(nil), root...), "contextPaths", 0)
+	add(contextPath, "path", map[string]any{"name": "", "generation": "", "contextIdentity": "", "snapshotId": "", "treeDigest": "", "sourceVertexDigest": "", "sourceOutputIndex": -1, "edges": []any{}})
+	edge := append(append([]any(nil), contextPath...), "edges", 0)
+	add(edge, "edge", map[string]any{"parentVertexDigest": "", "parentOutputIndex": -1, "parentInputIndex": -1, "childVertexDigest": "", "childOutputIndex": -1})
+	oci := []any{"output", "ociDag"}
+	add(oci, "oci", map[string]any{"schemaVersion": 1, "nodes": []any{}})
+	add(append(append([]any(nil), oci...), "root"), "oci-root", map[string]any{"digest": "", "mediaType": "unsupported", "size": 0})
+	add(append(append([]any(nil), oci...), "nodes", 0), "oci-node", map[string]any{"digest": "", "mediaType": "unsupported", "size": -1, "role": ""})
+	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
+	return cases
+}
+
+func setV3FixtureField(doc map[string]any, path []any, value any) {
+	var current any = doc
+	for _, step := range path[:len(path)-1] {
+		switch key := step.(type) {
+		case string:
+			current = current.(map[string]any)[key]
+		case int:
+			current = current.([]any)[key]
+		}
+	}
+	current.(map[string]any)[path[len(path)-1].(string)] = value
 }
 
 func v3Abort(t *testing.T, daemon *v3Daemon, epoch uint64, token, nonce string) {
@@ -322,7 +414,8 @@ func TestV3NativeDaemonVerifiesSealedEvidenceAndKeepsReleaseDisabled(t *testing.
 		for i, s := range tStreams {
 			tFDs = append(tFDs, sealedFD(t, fmt.Sprintf("v3-tamper-ctx-%d", i), s))
 		}
-		tFDs = append(tFDs, tAppFD, sealedFD(t, "v3-tamper-ev", tEvBundle))
+		_, _, _, archive := testV3OCIContent()
+		tFDs = append(tFDs, tAppFD, sealedFD(t, "v3-tamper-ev", tEvBundle), sealedFD(t, "v3-oci-content", archive))
 		tReq, err := BuildV3Request(tEnv, tRaw, CmdV3VerifyCandidate, tToken, tEvBundle)
 		if err != nil {
 			t.Fatal(err)
@@ -363,6 +456,70 @@ func TestV3NativeDaemonVerifiesSealedEvidenceAndKeepsReleaseDisabled(t *testing.
 			t.Fatalf("valid V3 evidence status=%d, want 22", resp.Status)
 		}
 		v3Abort(t, daemon, envelope.Epoch, token, input.Nonce)
+
+		t.Run("serialized semantic fixture is accepted before release denial", func(t *testing.T) {
+			env, raw, in, streams := makeV3Fixture(t, ownerPublic, ownerPrivate)
+			token, approvalFD := v3Begin(t, daemon, env, raw)
+			evidence, _ := v3EvidenceWithPayload(t, raw, in, false, func(map[string]any) {})
+			_, _, _, archive := testV3OCIContent()
+			response := v3VerifyEvidence(t, daemon, env, raw, streams, token, approvalFD, evidence, archive)
+			if response.Status != StatusErrSigningDisabled {
+				t.Fatalf("valid fixture status=%d, want %d", response.Status, StatusErrSigningDisabled)
+			}
+			v3Abort(t, daemon, env.Epoch, token, in.Nonce)
+		})
+		// Each malformed semantic field has its own scope and explicit result.
+		for _, tc := range v3InvalidEvidenceCases() {
+			t.Run(tc.name, func(t *testing.T) {
+				env, raw, in, streams := makeV3Fixture(t, ownerPublic, ownerPrivate)
+				token, approvalFD := v3Begin(t, daemon, env, raw)
+				evidence, _ := v3EvidenceWithPayload(t, raw, in, false, func(doc map[string]any) { setV3FixtureField(doc, tc.path, tc.value) })
+				_, _, _, archive := testV3OCIContent()
+				response := v3VerifyEvidence(t, daemon, env, raw, streams, token, approvalFD, evidence, archive)
+				if response.Status != StatusErrProvenanceFail {
+					t.Fatalf("semantic rejection status=%d, want %d", response.Status, StatusErrProvenanceFail)
+				}
+				v3Abort(t, daemon, env.Epoch, token, in.Nonce)
+			})
+		}
+		t.Run("incomplete OCI content archive", func(t *testing.T) {
+			env, raw, in, streams := makeV3Fixture(t, ownerPublic, ownerPrivate)
+			token, approvalFD := v3Begin(t, daemon, env, raw)
+			evidence, _ := v3Evidence(t, raw, in)
+			_, _, _, archive := testV3OCIContent()
+			response := v3VerifyEvidence(t, daemon, env, raw, streams, token, approvalFD, evidence, archive[:len(archive)-1])
+			if response.Status != StatusErrProvenanceFail {
+				t.Fatalf("truncated content status=%d, want %d", response.Status, StatusErrProvenanceFail)
+			}
+			v3Abort(t, daemon, env.Epoch, token, in.Nonce)
+		})
+		t.Run("OCI archive missing a referenced layer", func(t *testing.T) {
+			env, raw, in, streams := makeV3Fixture(t, ownerPublic, ownerPrivate)
+			token, approvalFD := v3Begin(t, daemon, env, raw)
+			evidence, _ := v3EvidenceWithPayload(t, raw, in, false, func(doc map[string]any) {
+				dag := doc["output"].(map[string]any)["ociDag"].(map[string]any)
+				nodes := dag["nodes"].([]any)
+				dag["nodes"] = nodes[:len(nodes)-1]
+			})
+			_, _, _, archive := testV3OCIContent()
+			response := v3VerifyEvidence(t, daemon, env, raw, streams, token, approvalFD, evidence, archive[:len(archive)-1024])
+			if response.Status != StatusErrProvenanceFail {
+				t.Fatalf("incomplete graph status=%d, want %d", response.Status, StatusErrProvenanceFail)
+			}
+			v3Abort(t, daemon, env.Epoch, token, in.Nonce)
+		})
+		t.Run("OCI archive content differs from approved descriptor graph", func(t *testing.T) {
+			env, raw, in, streams := makeV3Fixture(t, ownerPublic, ownerPrivate)
+			token, approvalFD := v3Begin(t, daemon, env, raw)
+			evidence, _ := v3Evidence(t, raw, in)
+			_, _, _, archive := testV3OCIContent()
+			archive[len(archive)-1] = 1
+			response := v3VerifyEvidence(t, daemon, env, raw, streams, token, approvalFD, evidence, archive)
+			if response.Status != StatusErrProvenanceFail {
+				t.Fatalf("content verification status=%d, want %d", response.Status, StatusErrProvenanceFail)
+			}
+			v3Abort(t, daemon, env.Epoch, token, in.Nonce)
+		})
 
 		// A tampered stream is rejected BEFORE the production signing-disabled result.
 		envelope, envelopeRaw, input, streams = makeV3Fixture(t, ownerPublic, ownerPrivate)

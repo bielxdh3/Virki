@@ -78,7 +78,7 @@ func SendC4Request(socketPath string, req RequestFrame, fds []int, closeWrite bo
 		case CmdV3Begin:
 			want = 1
 		case CmdV3VerifyCandidate:
-			want = ContextCount + 2
+			want = ContextCount + 3
 		case CmdV3Abort:
 			want = 0
 		}

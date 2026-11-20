@@ -35,7 +35,7 @@ func testV3ApprovalInput(t *testing.T, publicKey ed25519.PublicKey) (V3ApprovalI
 	input.BuildPlanSHA256 = strings.Repeat("3", 64)
 	input.ExecutablePolicySHA256 = strings.Repeat("4", 64)
 	input.ExporterIntentSHA256 = strings.Repeat("5", 64)
-	input.OutputImageID = "sha256:" + strings.Repeat("6", 64)
+	input.OutputImageID, _, _, _ = testV3OCIContent()
 	input.FileSyncManifestSHA256 = strings.Repeat("7", 64)
 	input.IgnorePolicySHA256 = strings.Repeat("8", 64)
 	input.WorkerID = "worker-test-01"
@@ -67,6 +67,28 @@ func testV3ApprovalInput(t *testing.T, publicKey ed25519.PublicKey) (V3ApprovalI
 		ctx.StreamLength = uint64(len(data))
 	}
 	return input, streams
+}
+
+// A small real content-addressed index -> manifest -> config/layer graph.
+func testV3OCIContent() (imageID, rootJSON, nodesJSON string, archive []byte) {
+	descriptor := func(media string, blob []byte) (string, string) {
+		sum := sha256.Sum256(blob)
+		id := "sha256:" + hex.EncodeToString(sum[:])
+		return id, fmt.Sprintf(`{"mediaType":"%s","digest":"%s","size":%d}`, media, id, len(blob))
+	}
+	layer := make([]byte, 1024) // empty tar: two zero blocks
+	layerID, layerDesc := descriptor("application/vnd.oci.image.layer.v1.tar", layer)
+	config := []byte(fmt.Sprintf(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["%s"]}}`, layerID))
+	_, configDesc := descriptor("application/vnd.oci.image.config.v1+json", config)
+	manifest := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":%s,"layers":[%s]}`, configDesc, layerDesc))
+	_, manifestDesc := descriptor("application/vnd.oci.image.manifest.v1+json", manifest)
+	index := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[%s]}`, manifestDesc))
+	imageID, rootJSON = descriptor("application/vnd.oci.image.index.v1+json", index)
+	nodesJSON = "[" + strings.TrimSuffix(rootJSON, "}") + `,"role":"root"},` + manifestDesc + "," + configDesc + "," + layerDesc + "]"
+	for _, blob := range [][]byte{index, manifest, config, layer} {
+		archive = append(archive, blob...)
+	}
+	return
 }
 
 // Deterministic directory, file and symlink observations in the BuildKit stream ABI.

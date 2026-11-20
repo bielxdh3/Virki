@@ -12,6 +12,7 @@
 #define VIRKI_OWNER_MAX_FD_COUNT 8
 #define VIRKI_OWNER_MAX_PAYLOAD_BYTES (64 * 1024 * 1024) /* 64 MB max context size */
 #define VIRKI_OWNER_V3_EVIDENCE_MAX_BYTES (4 * 1024 * 1024)
+#define VIRKI_OWNER_V3_OCI_MAX_BYTES (64U * 1024U * 1024U)
 #define VIRKI_OWNER_V3_APPROVAL_DOMAIN "VIRKI_OFFLINE_OWNER_APPROVAL_V3"
 
 /* Standard context names in canonical order */

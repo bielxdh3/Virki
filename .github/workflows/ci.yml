@@ -188,11 +188,12 @@ jobs:
       - name: C1->C4 defensive integration contract and daemon boundary tests
         run: npm run test:offline:c1-c4-integration
 
-      - name: Native Go-to-C4 VROA_V2 and VROA_V3 wire bridge tests
+      - name: Native Go-to-C4 bridge and pinned BuildKit OCI content regressions
         run: |
           set -euo pipefail
           toolchain="$(mktemp -d "$RUNNER_TEMP/virki-go.XXXXXX")"
-          trap 'rm -rf -- "$toolchain"' EXIT
+          scratch="$(mktemp -d "$RUNNER_TEMP/virki-buildkit-bridge.XXXXXX")"
+          trap 'rm -rf -- "$toolchain" "$scratch"' EXIT
           curl --fail --silent --show-error --location --proto '=https' --retry 3 --max-time 180 \
             https://go.dev/dl/go1.26.10.linux-amd64.tar.gz \
             --output "$toolchain/go.tar.gz"
@@ -200,6 +201,21 @@ jobs:
           tar -xzf "$toolchain/go.tar.gz" -C "$toolchain"
           (cd infra/offline/c1-c4-native-bridge && GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local "$toolchain/go/bin/go" vet ./...)
           VIRKI_GO_BIN="$toolchain/go/bin/go" npm run test:offline:c1-c4-native-bridge
+          patch="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-c4-native.patch"
+          echo "660462d999e2d3c1a143a7b78577ecd95545cc4f82837f76fd7f8a9c392e696a  $patch" | sha256sum --check
+          git init --quiet "$scratch"
+          git -C "$scratch" fetch --depth=1 --no-tags https://github.com/moby/buildkit.git f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
+          test "$(git -C "$scratch" rev-parse FETCH_HEAD)" = f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
+          git -C "$scratch" read-tree FETCH_HEAD
+          git -C "$scratch" apply --cached --check "$patch"
+          git -C "$scratch" apply --cached "$patch"
+          test "$(git -C "$scratch" write-tree)" = 3cabbc82887e87a900eeb7b838196bef00374055
+          git -C "$scratch" checkout-index --all
+          export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
+          export VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority"
+          cd "$scratch"
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./util/localcontext -run '^TestVROAV3ServiceWithRealManagerAndNativeDaemon$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./solver/llbsolver -run '^TestLocalContext'
 
       - name: Native owner authority (C4) cross-UID/GID SO_PEERCRED tests as root
         if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}

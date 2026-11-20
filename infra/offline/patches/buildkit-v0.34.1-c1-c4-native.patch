@@ -883,10 +883,10 @@ index 0000000000000000000000000000000000000000..ab50639d8ce4692b249ad29bbab3f3ff
 +	}
 +}
 diff --git a/exporter/containerimage/export.go b/exporter/containerimage/export.go
-index 3303d5b62f25a4f805592a12ef19cf9c83d9c71d..7830b21d284677473c46b18a28ad0280bdb7dc3a 100644
+index 3303d5b62f25a4f805592a12ef19cf9c83d9c71d..11910a3ce001e1ca07be6e6f87c69871cb5453a1 100644
 --- a/exporter/containerimage/export.go
 +++ b/exporter/containerimage/export.go
-@@ -202,6 +202,26 @@ type imageExporterInstance struct {
+@@ -202,6 +202,35 @@ type imageExporterInstance struct {
  	meta                 map[string][]byte
  }
  
@@ -908,6 +908,15 @@ index 3303d5b62f25a4f805592a12ef19cf9c83d9c71d..7830b21d284677473c46b18a28ad0280
 +	return ok && !i.push && !i.pushByDigest && !i.store && !i.unpack &&
 +		!i.storeAllowIncomplete && !i.insecure && i.opts.ImageName != "*" &&
 +		i.danglingPrefix == "" && len(i.meta) == 0
++}
++
++// LocalContextContentStore exposes the actual anonymous exporter content, only
++// for the already restricted non-publishing local-context integration.
++func LocalContextContentStore(instance exporter.ExporterInstance) (content.Provider, error) {
++	if !IsNonPublishingExporterInstance(instance) {
++		return nil, errors.New("local-context OCI evidence requires a non-publishing image exporter")
++	}
++	return instance.(*imageExporterInstance).opt.ImageWriter.ContentStore(), nil
 +}
 +
  func (e *imageExporterInstance) ID() int {
@@ -6351,10 +6360,10 @@ index 0000000000000000000000000000000000000000..d0c034dcfcbcd18237365fbd7b9c8083
 +}
 diff --git a/solver/llbsolver/local_context_causality.go b/solver/llbsolver/local_context_causality.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..170a978ffd6452efa2d582ebfbcfb7ac0044f0f8
+index 0000000000000000000000000000000000000000..5a740c1f3272b2bdac8830b8c76a9ecc75f1059b
 --- /dev/null
 +++ b/solver/llbsolver/local_context_causality.go
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,350 @@
 +package llbsolver
 +
 +import (
@@ -6491,7 +6500,21 @@ index 0000000000000000000000000000000000000000..170a978ffd6452efa2d582ebfbcfb7ac
 +	if err != nil {
 +		return nil, err
 +	}
-+	ociDAG, err := localContextOCIDAGProof(image, response)
++	var ociDAG *localcontext.OCIDAGProof
++	if scope.RequiresNativeOCIContent() {
++		provider, err := containerimage.LocalContextContentStore(exp)
++		if err != nil {
++			return nil, err
++		}
++		ociDAG, err = localContextOCIDAGProof(ctx, provider, descrefs[0].Descriptor())
++	} else {
++		// Preserve legacy DEV metadata; this schema never proves OCI content.
++		ociDAG = &localcontext.OCIDAGProof{SchemaVersion: 1, Root: image, Nodes: []localcontext.OCIDAGNode{{MediaType: image.MediaType, Digest: image.Digest, Size: image.Size, Role: "root"}}}
++		if cfgDigest := response[exptypes.ExporterImageConfigDigestKey]; cfgDigest != "" {
++			ociDAG.Nodes = append(ociDAG.Nodes, localcontext.OCIDAGNode{MediaType: "application/vnd.oci.image.config.v1+json", Digest: cfgDigest, Role: "config"})
++		}
++		ociDAG.ProofDigest, err = localcontext.OCIDAGProofDigest(*ociDAG)
++	}
 +	if err != nil {
 +		return nil, err
 +	}
@@ -6501,35 +6524,6 @@ index 0000000000000000000000000000000000000000..170a978ffd6452efa2d582ebfbcfb7ac
 +		Causality: proof,
 +		OCIDAG:    ociDAG,
 +	}, nil
-+}
-+
-+func localContextOCIDAGProof(image localcontext.ImageDescriptor, response map[string]string) (*localcontext.OCIDAGProof, error) {
-+	nodes := []localcontext.OCIDAGNode{
-+		{
-+			MediaType: image.MediaType,
-+			Digest:    image.Digest,
-+			Size:      image.Size,
-+			Role:      "root",
-+		},
-+	}
-+	if cfgDigest := response[exptypes.ExporterImageConfigDigestKey]; cfgDigest != "" {
-+		nodes = append(nodes, localcontext.OCIDAGNode{
-+			MediaType: "application/vnd.oci.image.config.v1+json",
-+			Digest:    cfgDigest,
-+			Role:      "config",
-+		})
-+	}
-+	dag := &localcontext.OCIDAGProof{
-+		SchemaVersion: 1,
-+		Root:          image,
-+		Nodes:         nodes,
-+	}
-+	digest, err := localcontext.OCIDAGProofDigest(*dag)
-+	if err != nil {
-+		return nil, err
-+	}
-+	dag.ProofDigest = digest
-+	return dag, nil
 +}
 +
 +func localContextImageDescriptor(response map[string]string, ref exporter.DescriptorReference) (localcontext.ImageDescriptor, error) {
@@ -7145,6 +7139,231 @@ index 0000000000000000000000000000000000000000..9a0773f13312e9cf6a769b827039fd06
 +		return false
 +	}
 +	return visit(root)
++}
+diff --git a/solver/llbsolver/local_context_oci_dag.go b/solver/llbsolver/local_context_oci_dag.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..25beff50b07d7edb51c7546c7cf74c76d57b2dc9
+--- /dev/null
++++ b/solver/llbsolver/local_context_oci_dag.go
+@@ -0,0 +1,150 @@
++package llbsolver
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++
++	"github.com/containerd/containerd/v2/core/content"
++	"github.com/moby/buildkit/util/localcontext"
++	"github.com/opencontainers/go-digest"
++	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
++)
++
++// Only ordinary OCI/Docker image descriptor graphs are admitted by V3 DEV.
++// Unknown artifact/subject graphs must not be silently treated as leaves.
++func localContextOCIKind(media string) string {
++	switch media {
++	case ocispec.MediaTypeImageManifest, "application/vnd.docker.distribution.manifest.v2+json":
++		return "manifest"
++	case ocispec.MediaTypeImageIndex, "application/vnd.docker.distribution.manifest.list.v2+json":
++		return "index"
++	case ocispec.MediaTypeImageConfig, "application/vnd.docker.container.image.v1+json":
++		return "config"
++	case "application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.oci.image.layer.v1.tar+zstd",
++		"application/vnd.oci.image.layer.nondistributable.v1.tar", "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip", "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd",
++		"application/vnd.docker.image.rootfs.diff.tar", "application/vnd.docker.image.rootfs.diff.tar.gzip", "application/vnd.docker.image.rootfs.diff.tar.zstd",
++		"application/vnd.docker.image.rootfs.foreign.diff.tar", "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip":
++		return "layer"
++	default:
++		return ""
++	}
++}
++
++func localContextOCIDAGProof(ctx context.Context, provider content.Provider, root ocispec.Descriptor) (*localcontext.OCIDAGProof, error) {
++	dag := &localcontext.OCIDAGProof{SchemaVersion: 2, Root: localcontext.ImageDescriptor{MediaType: root.MediaType, Digest: root.Digest.String(), Size: root.Size}}
++	seen := make(map[digest.Digest]localcontext.OCIDAGNode)
++	active := make(map[digest.Digest]bool)
++	edges := 0
++	var visit func(ocispec.Descriptor, int) error
++	visit = func(desc ocispec.Descriptor, depth int) error {
++		if depth > 0 {
++			edges++
++			if edges > localcontext.OCIDAGMaxEdges {
++				return fmt.Errorf("OCI DEV evidence exceeds edge budget")
++			}
++		}
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		kind := localContextOCIKind(desc.MediaType)
++		if depth > 64 || kind == "" || desc.Size <= 0 || desc.Digest.Validate() != nil || desc.Digest.Algorithm() != digest.SHA256 || active[desc.Digest] {
++			return fmt.Errorf("invalid or unsupported OCI descriptor %s", desc.Digest)
++		}
++		if previous, ok := seen[desc.Digest]; ok {
++			if previous.Size != desc.Size || previous.MediaType != desc.MediaType {
++				return fmt.Errorf("conflicting OCI descriptor %s", desc.Digest)
++			}
++			return nil
++		}
++		if len(dag.Nodes) >= localcontext.OCIDAGMaxNodes || desc.Size > int64(localcontext.OCIDAGArchiveMaxBytes-len(dag.BlobBytes)) ||
++			((kind == "manifest" || kind == "index") && (desc.Size == 0 || desc.Size > 4*1024*1024)) {
++			return fmt.Errorf("OCI DEV evidence exceeds bounded archive limits")
++		}
++		reader, err := provider.ReaderAt(ctx, desc)
++		if err != nil {
++			return err
++		}
++		if reader.Size() != desc.Size {
++			_ = reader.Close()
++			return fmt.Errorf("OCI stored size differs for %s", desc.Digest)
++		}
++		start := len(dag.BlobBytes)
++		dag.BlobBytes = append(dag.BlobBytes, make([]byte, int(desc.Size))...)
++		blob := dag.BlobBytes[start:]
++		_, err = io.ReadFull(io.NewSectionReader(reader, 0, desc.Size), blob)
++		closeErr := reader.Close()
++		if err != nil {
++			return err
++		}
++		if closeErr != nil {
++			return closeErr
++		}
++		if digest.FromBytes(blob) != desc.Digest {
++			return fmt.Errorf("OCI stored digest differs for %s", desc.Digest)
++		}
++		node := localcontext.OCIDAGNode{MediaType: desc.MediaType, Digest: desc.Digest.String(), Size: desc.Size}
++		if depth == 0 {
++			node.Role = "root"
++		}
++		dag.Nodes = append(dag.Nodes, node)
++		seen[desc.Digest] = node
++		active[desc.Digest] = true
++		defer delete(active, desc.Digest)
++		switch kind {
++		case "manifest":
++			var manifest ocispec.Manifest
++			if err := json.Unmarshal(blob, &manifest); err != nil {
++				return err
++			}
++			if manifest.SchemaVersion != 2 || (manifest.MediaType != "" && manifest.MediaType != desc.MediaType) || manifest.Subject != nil || manifest.ArtifactType != "" || manifest.Layers == nil || localContextOCIKind(manifest.Config.MediaType) != "config" {
++				return fmt.Errorf("unsupported OCI image manifest")
++			}
++			if len(manifest.Layers) > localcontext.OCIDAGMaxNodes {
++				return fmt.Errorf("OCI manifest has too many layers")
++			}
++			if err := visit(manifest.Config, depth+1); err != nil {
++				return err
++			}
++			for _, layer := range manifest.Layers {
++				if localContextOCIKind(layer.MediaType) != "layer" {
++					return fmt.Errorf("unsupported OCI image layer")
++				}
++				if err := visit(layer, depth+1); err != nil {
++					return err
++				}
++			}
++		case "index":
++			var index ocispec.Index
++			if err := json.Unmarshal(blob, &index); err != nil {
++				return err
++			}
++			if index.SchemaVersion != 2 || (index.MediaType != "" && index.MediaType != desc.MediaType) || index.Subject != nil || index.ArtifactType != "" || len(index.Manifests) == 0 {
++				return fmt.Errorf("unsupported OCI image index")
++			}
++			if len(index.Manifests) > localcontext.OCIDAGMaxNodes {
++				return fmt.Errorf("OCI index has too many manifests")
++			}
++			for _, child := range index.Manifests {
++				kind := localContextOCIKind(child.MediaType)
++				if kind != "index" && kind != "manifest" {
++					return fmt.Errorf("unsupported OCI index member")
++				}
++				if err := visit(child, depth+1); err != nil {
++					return err
++				}
++			}
++		}
++		return nil
++	}
++	if provider == nil || (localContextOCIKind(root.MediaType) != "index" && localContextOCIKind(root.MediaType) != "manifest") {
++		return nil, fmt.Errorf("missing OCI image root or content provider")
++	}
++	if err := visit(root, 0); err != nil {
++		return nil, err
++	}
++	var err error
++	dag.ProofDigest, err = localcontext.OCIDAGProofDigest(*dag)
++	return dag, err
++}
+diff --git a/solver/llbsolver/local_context_oci_dag_test.go b/solver/llbsolver/local_context_oci_dag_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3bff3b5f73bf21ae28e26823d998132a1b03bc6a
+--- /dev/null
++++ b/solver/llbsolver/local_context_oci_dag_test.go
+@@ -0,0 +1,63 @@
++package llbsolver
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"testing"
++
++	"github.com/containerd/containerd/v2/core/content"
++	"github.com/containerd/containerd/v2/plugins/content/local"
++	"github.com/opencontainers/go-digest"
++	specs "github.com/opencontainers/image-spec/specs-go"
++	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
++)
++
++func TestLocalContextOCIDAGReadsStoredContent(t *testing.T) {
++	ctx := context.Background()
++	store, err := local.NewStore(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	var stored = map[digest.Digest][]byte{}
++	put := func(media string, raw []byte) ocispec.Descriptor {
++		d := ocispec.Descriptor{MediaType: media, Digest: digest.FromBytes(raw), Size: int64(len(raw))}
++		if err := content.WriteBlob(ctx, store, d.Digest.String(), bytes.NewReader(raw), d); err != nil {
++			t.Fatal(err)
++		}
++		stored[d.Digest] = raw
++		return d
++	}
++	encode := func(value any) []byte {
++		raw, err := json.Marshal(value)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return raw
++	}
++	layer := put(ocispec.MediaTypeImageLayer, make([]byte, 1024))
++	config := put(ocispec.MediaTypeImageConfig, []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["`+layer.Digest.String()+`"]}}`))
++	manifest := put(ocispec.MediaTypeImageManifest, encode(ocispec.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageManifest, Config: config, Layers: []ocispec.Descriptor{layer}}))
++	index := put(ocispec.MediaTypeImageIndex, encode(ocispec.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageIndex, Manifests: []ocispec.Descriptor{manifest, manifest}}))
++	proof, err := localContextOCIDAGProof(ctx, store, index)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(proof.Nodes) != 4 || proof.Root.Digest != index.Digest.String() || proof.SchemaVersion != 2 || proof.ProofDigest == "" {
++		t.Fatal("incomplete OCI content graph")
++	}
++	var expected []byte
++	for _, node := range proof.Nodes {
++		expected = append(expected, stored[digest.Digest(node.Digest)]...)
++	}
++	if !bytes.Equal(expected, proof.BlobBytes) {
++		t.Fatal("OCI evidence does not contain the exact stored content")
++	}
++	// Normal content-store failure must not produce partial proof.
++	if err := store.Delete(ctx, layer.Digest); err != nil {
++		t.Fatal(err)
++	}
++	if incomplete, err := localContextOCIDAGProof(ctx, store, index); err == nil || incomplete != nil {
++		t.Fatal("missing stored content did not fail closed")
++	}
 +}
 diff --git a/solver/llbsolver/local_context_platform_v4.go b/solver/llbsolver/local_context_platform_v4.go
 new file mode 100644
@@ -12067,10 +12286,10 @@ index 0000000000000000000000000000000000000000..144ff76999d1ee4a9f477b74a337ce37
 +}
 diff --git a/util/localcontext/observer.go b/util/localcontext/observer.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..1df112c712f37ce56dfe3929cdf8b751e8ee8b06
+index 0000000000000000000000000000000000000000..604dc2c072e62280c446f01e018ba8035dc7bf5d
 --- /dev/null
 +++ b/util/localcontext/observer.go
-@@ -0,0 +1,1076 @@
+@@ -0,0 +1,1097 @@
 +// Package localcontext carries non-authorizing worker observations to a
 +// separately controlled owner service. It does not sign receipts or grant
 +// execution authority.
@@ -12275,7 +12494,14 @@ index 0000000000000000000000000000000000000000..1df112c712f37ce56dfe3929cdf8b751
 +	Root          ImageDescriptor `json:"root"`
 +	Nodes         []OCIDAGNode    `json:"nodes,omitempty"`
 +	ProofDigest   string          `json:"proofDigest"`
++	// Concatenated unique content blobs in Nodes order, transferred separately
++	// to the native verifier. Never serialize image bytes into JSON or logs.
++	BlobBytes []byte `json:"-"`
 +}
++
++const OCIDAGArchiveMaxBytes = 64 * 1024 * 1024
++const OCIDAGMaxNodes = 4096
++const OCIDAGMaxEdges = 16384
 +
 +// Output identifies the actual typed image descriptor and solver causality.
 +type Output struct {
@@ -12437,6 +12663,16 @@ index 0000000000000000000000000000000000000000..1df112c712f37ce56dfe3929cdf8b751
 +	closed                                  bool
 +	completionAttempted                     bool
 +	abortRequested                          bool
++}
++
++// RequiresNativeOCIContent is a local service-selection property, not a
++// caller-controlled request attribute. V2/legacy DEV evidence stays unchanged.
++func (s *SolveScope) RequiresNativeOCIContent() bool {
++	if s == nil || s.manager == nil {
++		return false
++	}
++	_, ok := s.manager.service.(*VROAV3Service)
++	return ok
 +}
 +
 +// NewManager refuses required operation without an owner-controlled service.
@@ -13128,13 +13364,13 @@ index 0000000000000000000000000000000000000000..1df112c712f37ce56dfe3929cdf8b751
 +
 +// OCIDAGProofDigest computes the canonical SHA-256 digest of an OCIDAGProof.
 +func OCIDAGProofDigest(dag OCIDAGProof) (string, error) {
-+	if dag.SchemaVersion != 1 {
++	if dag.SchemaVersion != 1 && dag.SchemaVersion != 2 {
 +		return "", errors.New("unsupported OCI DAG proof schema version")
 +	}
 +	if err := validateImageDescriptor(dag.Root); err != nil {
 +		return "", err
 +	}
-+	if len(dag.Nodes) == 0 {
++	if len(dag.Nodes) == 0 || len(dag.Nodes) > OCIDAGMaxNodes {
 +		return "", errors.New("OCI DAG proof requires at least one node")
 +	}
 +	dag.ProofDigest = ""
@@ -13143,7 +13379,11 @@ index 0000000000000000000000000000000000000000..1df112c712f37ce56dfe3929cdf8b751
 +		return "", err
 +	}
 +	h := sha256.New()
-+	_, _ = h.Write([]byte("virki-c1-oci-dag-v1\x00"))
++	if dag.SchemaVersion == 2 {
++		_, _ = h.Write([]byte("virki-c1-oci-dag-v2\x00"))
++	} else {
++		_, _ = h.Write([]byte("virki-c1-oci-dag-v1\x00"))
++	}
 +	_, _ = h.Write(raw)
 +	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 +}
@@ -15438,10 +15678,10 @@ index 0000000000000000000000000000000000000000..202d36e7711147d2a6d4129dc0935744
 +}
 diff --git a/util/localcontext/service_vroa_v3_linux.go b/util/localcontext/service_vroa_v3_linux.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..a10154ee9e3a83bd21d5087013c2c5bf43f2f691
+index 0000000000000000000000000000000000000000..712544cfe6cb0954b83c994ad415067e0d5d0582
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux.go
-@@ -0,0 +1,820 @@
+@@ -0,0 +1,819 @@
 +//go:build linux
 +
 +package localcontext
@@ -15834,7 +16074,7 @@ index 0000000000000000000000000000000000000000..a10154ee9e3a83bd21d5087013c2c5bf
 +		byName[item.Name] = item
 +	}
 +
-+	var fds [6]int
++	var fds [7]int
 +	for i := range fds {
 +		fds[i] = -1
 +	}
@@ -15866,21 +16106,15 @@ index 0000000000000000000000000000000000000000..a10154ee9e3a83bd21d5087013c2c5bf
 +	if err := vroaSetFixedString(header.CausalityProofSHA256[:], causalityHex); err != nil {
 +		return err
 +	}
-+	var ociHex string
-+	if completion.Output.OCIDAG != nil {
-+		expectedOCIDigest, err := OCIDAGProofDigest(*completion.Output.OCIDAG)
-+		if err != nil || completion.Output.OCIDAG.ProofDigest != expectedOCIDigest {
-+			return errors.New("VROA_V3 OCI DAG proof digest mismatch")
-+		}
-+		ociHex = strings.TrimPrefix(completion.Output.OCIDAG.ProofDigest, "sha256:")
-+	} else {
-+		rawImg, err := json.Marshal(completion.Output.Image)
-+		if err != nil {
-+			return err
-+		}
-+		sum := sha256.Sum256(rawImg)
-+		ociHex = hex.EncodeToString(sum[:])
++	dag := completion.Output.OCIDAG
++	if dag == nil || dag.SchemaVersion != 2 || len(dag.BlobBytes) == 0 || len(dag.BlobBytes) > OCIDAGArchiveMaxBytes || dag.Root != completion.Output.Image {
++		return errors.New("VROA_V3 requires bounded OCI content bytes and matching root")
 +	}
++	expectedOCIDigest, err := OCIDAGProofDigest(*dag)
++	if err != nil || dag.ProofDigest != expectedOCIDigest {
++		return errors.New("VROA_V3 OCI DAG proof digest mismatch")
++	}
++	ociHex := strings.TrimPrefix(dag.ProofDigest, "sha256:")
 +	if err := vroaSetFixedString(header.OCIDAGSHA256[:], ociHex); err != nil {
 +		return err
 +	}
@@ -15953,6 +16187,11 @@ index 0000000000000000000000000000000000000000..a10154ee9e3a83bd21d5087013c2c5bf
 +		return err
 +	}
 +	fds[5] = evidenceFD
++	ociFD, err := createSealedMemfdV3("virki-v3-oci-content", dag.BlobBytes)
++	if err != nil {
++		return err
++	}
++	fds[6] = ociFD
 +
 +	var totalBytes uint64
 +	for _, l := range header.ContextStreamLengths {
@@ -16264,10 +16503,10 @@ index 0000000000000000000000000000000000000000..a10154ee9e3a83bd21d5087013c2c5bf
 +}
 diff --git a/util/localcontext/service_vroa_v3_linux_test.go b/util/localcontext/service_vroa_v3_linux_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01d14a38a9
+index 0000000000000000000000000000000000000000..3d18c22fbbe03716925f5910f8d0eb721649bf03
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux_test.go
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,572 @@
 +//go:build linux
 +
 +package localcontext
@@ -16282,6 +16521,7 @@ index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01
 +	"encoding/binary"
 +	"encoding/hex"
 +	"errors"
++	"fmt"
 +	"net"
 +	"os"
 +	"os/exec"
@@ -16299,6 +16539,9 @@ index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01
 +		filepath.Join("..", "..", "..", "virki-c1-c4-native-bridge-20261119", "infra", "offline", "native-owner-authority"),
 +		filepath.Join("..", "..", "infra", "offline", "native-owner-authority"),
 +	}
++	if explicit := os.Getenv("VIRKI_C4_TEST_SOURCE_DIR"); explicit != "" {
++		candidates = []string{explicit}
++	}
 +	var root string
 +	for _, c := range candidates {
 +		abs, err := filepath.Abs(c)
@@ -16310,6 +16553,9 @@ index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01
 +		}
 +	}
 +	if root == "" {
++		if os.Getenv("VIRKI_C4_TEST_SOURCE_DIR") != "" {
++			t.Fatal("configured C4 test source is missing")
++		}
 +		t.Skip("native-owner-authority C source not present adjacent to BuildKit worktree")
 +	}
 +	out := filepath.Join(t.TempDir(), "native-owner-authority-v3")
@@ -16414,6 +16660,30 @@ index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01
 +	return stream.Bytes(), "sha256:" + hex.EncodeToString(treeSum[:]), int64(len(data))
 +}
 +
++func testVROAV3OCIProof() *OCIDAGProof {
++	desc := func(media string, blob []byte) ImageDescriptor {
++		sum := sha256.Sum256(blob)
++		return ImageDescriptor{MediaType: media, Digest: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(blob))}
++	}
++	layer := make([]byte, 1024)
++	ld := desc("application/vnd.oci.image.layer.v1.tar", layer)
++	config := []byte(fmt.Sprintf(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["%s"]}}`, ld.Digest))
++	cd := desc("application/vnd.oci.image.config.v1+json", config)
++	manifest := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"%s","digest":"%s","size":%d},"layers":[{"mediaType":"%s","digest":"%s","size":%d}]}`, cd.MediaType, cd.Digest, cd.Size, ld.MediaType, ld.Digest, ld.Size))
++	md := desc("application/vnd.oci.image.manifest.v1+json", manifest)
++	proof := &OCIDAGProof{SchemaVersion: 2, Root: md}
++	for i, blob := range [][]byte{manifest, config, layer} {
++		d := []ImageDescriptor{md, cd, ld}[i]
++		node := OCIDAGNode{MediaType: d.MediaType, Digest: d.Digest, Size: d.Size}
++		if i == 0 {
++			node.Role = "root"
++		}
++		proof.Nodes = append(proof.Nodes, node)
++		proof.BlobBytes = append(proof.BlobBytes, blob...)
++	}
++	return proof
++}
++
 +func TestVROAV3ServiceWithRealManagerAndNativeDaemon(t *testing.T) {
 +	for _, testBuild := range []bool{true, false} {
 +		name := "production-signing-disabled"
@@ -16449,11 +16719,8 @@ index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01
 +			if err != nil {
 +				t.Fatal(err)
 +			}
-+			imageDesc := ImageDescriptor{
-+				MediaType: "application/vnd.oci.image.manifest.v1+json",
-+				Digest:    "sha256:" + strings.Repeat("2", 64),
-+				Size:      2048,
-+			}
++			ociDAG := testVROAV3OCIProof()
++			imageDesc := ociDAG.Root
 +			var streams [4][]byte
 +			var treeDigests [4]string
 +			var regularBytes [4]int64
@@ -16619,13 +16886,6 @@ index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01
 +			proof.ProofDigest, err = CausalityProofDigest(proof)
 +			if err != nil {
 +				t.Fatal(err)
-+			}
-+			ociDAG := &OCIDAGProof{
-+				SchemaVersion: 1,
-+				Root:          imageDesc,
-+				Nodes: []OCIDAGNode{
-+					{MediaType: imageDesc.MediaType, Digest: imageDesc.Digest, Size: imageDesc.Size, Role: "root"},
-+				},
 +			}
 +			ociDAG.ProofDigest, err = OCIDAGProofDigest(*ociDAG)
 +			if err != nil {

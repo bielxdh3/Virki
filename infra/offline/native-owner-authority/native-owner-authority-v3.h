@@ -645,7 +645,9 @@ static bool v3_json_verify_proof_digest(const char *obj_start, const char *obj_e
   return strcmp(computed, expected_hex) == 0;
 }
 
-static bool v3_validate_evidence_payload(const char *payload, size_t len,
+#include "native-owner-oci-dag-v3.h"
+
+static bool v3_validate_evidence_payload(const char *payload, size_t len, int oci_fd, uint64_t oci_bytes,
     const virki_owner_candidate_evidence_v3_t *header,
     const virki_owner_approval_envelope_v3_t *approval) {
   if (!payload || len == 0 || memchr(payload, '\0', len) != NULL) return false;
@@ -763,8 +765,8 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
   const char *oci_s = NULL, *oci_e = NULL;
   if (!v3_json_find_field(out_s, out_e, "ociDag", &oci_s, &oci_e) || *oci_s != '{' ||
       !v3_json_find_field(oci_s, oci_e, "schemaVersion", &vs, &ve) ||
-      !v3_json_uint64_equals(vs, ve, 1) ||
-      !v3_json_verify_proof_digest(oci_s, oci_e, "virki-c1-oci-dag-v1\0", 20,
+      !v3_json_uint64_equals(vs, ve, 2) ||
+      !v3_json_verify_proof_digest(oci_s, oci_e, "virki-c1-oci-dag-v2\0", 20,
           header->oci_dag_sha256)) return false;
   const char *root_s = NULL, *root_e = NULL;
   if (!v3_json_find_field(oci_s, oci_e, "root", &root_s, &root_e) || *root_s != '{' ||
@@ -789,6 +791,7 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
     }
   }
   if (root_nodes != 1 || v3_json_skip_ws(node_cursor, nodes_e) != nodes_e - 1) return false;
+  if (!v3_verify_oci_archive(oci_fd, oci_bytes, (v3_json_span){root_s, root_e}, (v3_json_span){nodes_s, nodes_e})) return false;
 
   /* Validate optional "frontendProof". */
   const char *fe_s = NULL, *fe_e = NULL;
@@ -803,7 +806,7 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
   return true;
 }
 
-static bool v3_validate_evidence_fd(int fd,
+static bool v3_validate_evidence_fd(int fd, int oci_fd, uint64_t oci_bytes,
     const virki_owner_request_frame_t *req,
     const virki_owner_approval_envelope_v3_t *approval,
     const char approval_sha256[65], char evidence_sha256[65],
@@ -859,7 +862,7 @@ static bool v3_validate_evidence_fd(int fd,
   if (!payload_buf) return false;
   const bool read_ok = v3_read_exact_at(fd, payload_buf, header.evidence_payload_bytes, (off_t)sizeof(header));
   const bool semantic_ok = read_ok && v3_validate_evidence_payload(
-      payload_buf, header.evidence_payload_bytes, &header, approval);
+      payload_buf, header.evidence_payload_bytes, oci_fd, oci_bytes, &header, approval);
   explicit_wipe(payload_buf, header.evidence_payload_bytes);
   free(payload_buf);
   if (!semantic_ok) return false;
@@ -1043,7 +1046,7 @@ static int v3_process_command(int client_fd, const virki_owner_request_frame_t *
   }
 
   if (req->cmd == VIRKI_OWNER_CMD_V3_VERIFY_CANDIDATE) {
-    if (fd_count != 6 || req->epoch != g_ledger.current_epoch ||
+    if (fd_count != 7 || req->epoch != g_ledger.current_epoch ||
         strlen(req->scope_token) != 64 || !is_canonical_lower_hex_v20(req->scope_token, 64) ||
         strlen(req->nonce) != 32 || !is_canonical_lower_hex_v20(req->nonce, 32) ||
         !v3_digest_valid(req->transcript_sha256, false) || !g_cfg.has_approval_key) {
@@ -1091,16 +1094,25 @@ static int v3_process_command(int client_fd, const virki_owner_request_frame_t *
     }
     char evidence_sha[65];
     struct stat evidence_stat;
-    if (!v3_validate_evidence_fd(fds[5], req, &approval, approval_sha,
+    struct stat oci_stat;
+    char oci_digest[73];
+    if (!v3_validate_sealed_payload_fd(fds[6], 1, VIRKI_OWNER_V3_OCI_MAX_BYTES, UINT64_MAX, &oci_stat, oci_digest)) {
+      close_fds(fds);
+      resp->status = VIRKI_OWNER_STATUS_ERR_FD_INVALID;
+      (void)owner_send_response_v21(client_fd, resp);
+      return (int)resp->status;
+    }
+    if (!v3_validate_evidence_fd(fds[5], fds[6], (uint64_t)oci_stat.st_size, req, &approval, approval_sha,
         evidence_sha, &evidence_stat)) {
       close_fds(fds);
       resp->status = VIRKI_OWNER_STATUS_ERR_PROVENANCE_FAIL;
       (void)owner_send_response_v21(client_fd, resp);
       return (int)resp->status;
     }
-    for (size_t i = 0; i < VIRKI_OWNER_CONTEXT_COUNT + 1; i++) {
-      const struct stat *left = i < VIRKI_OWNER_CONTEXT_COUNT ? &context_stats[i] : &approval_stat;
-      if (left->st_dev == evidence_stat.st_dev && left->st_ino == evidence_stat.st_ino) {
+    for (size_t i = 0; i < VIRKI_OWNER_CONTEXT_COUNT + 2; i++) {
+      const struct stat *left = i < VIRKI_OWNER_CONTEXT_COUNT ? &context_stats[i] : (i == VIRKI_OWNER_CONTEXT_COUNT ? &approval_stat : &evidence_stat);
+      if ((i != VIRKI_OWNER_CONTEXT_COUNT + 1 && left->st_dev == evidence_stat.st_dev && left->st_ino == evidence_stat.st_ino) ||
+          (left->st_dev == oci_stat.st_dev && left->st_ino == oci_stat.st_ino)) {
         close_fds(fds);
         resp->status = VIRKI_OWNER_STATUS_ERR_FD_INVALID;
         (void)owner_send_response_v21(client_fd, resp);
@@ -1230,7 +1242,7 @@ static void process_v3_command(int client_fd, const virki_owner_request_frame_t 
     close_fds(fds); resp->status = VIRKI_OWNER_STATUS_ERR_BAD_FRAME;
     (void)owner_send_response_v21(client_fd, resp); return;
   }
-  if (req->cmd == VIRKI_OWNER_CMD_V3_VERIFY_CANDIDATE && fd_count != 6) {
+  if (req->cmd == VIRKI_OWNER_CMD_V3_VERIFY_CANDIDATE && fd_count != 7) {
     close_fds(fds); resp->status = VIRKI_OWNER_STATUS_ERR_BAD_FRAME;
     (void)owner_send_response_v21(client_fd, resp); return;
   }

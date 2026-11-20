@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -182,6 +183,40 @@ test("C1->C4 state serializes independent writers and retains its Linux lock ino
   const lockAfter = fs.statSync(`${statePath}.lock`);
   assert.equal(lockAfter.ino, lockBefore.ino);
   assert.equal(lockAfter.dev, lockBefore.dev);
+});
+
+test("C1->C4 Linux lock bounds contention and releases on owner exit before epoch recovery", { skip: process.platform !== "linux", timeout: 20000 }, async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-lock-exit-"));
+  const statePath = path.join(tmpDir, "state.json");
+  initAnchoredAuthState(statePath, "a".repeat(40));
+  // A disposable owner holds the same open-file-description lock as the contract.
+  const script = 'import fs from "node:fs"; import { execFileSync } from "node:child_process"; const fd = fs.openSync(process.argv[1], "a+", 0o600); execFileSync("/usr/bin/flock", ["--exclusive", "3"], { stdio: ["ignore", "ignore", "pipe", fd] }); process.stdout.write("locked\\n"); setInterval(() => {}, 1000);';
+  const owner = spawn(process.execPath, ["--input-type=module", "-e", script, `${statePath}.lock`], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = once(owner, "exit");
+  t.after(async () => {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL");
+    await exited;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+  const ready = new Promise((resolve, reject) => {
+    let output = "";
+    owner.stdout.setEncoding("utf8");
+    owner.stdout.on("data", (chunk) => { output += chunk; if (output.trim() === "locked") resolve(); });
+    owner.once("error", reject);
+    owner.once("exit", () => reject(new Error("lock owner exited before readiness")));
+  });
+  await ready;
+  const inode = fs.statSync(`${statePath}.lock`);
+  const started = performance.now();
+  assert.throws(() => recoverAuthStateWithEpochFence(statePath));
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 4500 && elapsed < 9000, `unexpected contention duration: ${elapsed} ms`);
+  assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 1);
+  assert.equal(owner.kill("SIGKILL"), true);
+  assert.deepEqual(await exited, [null, "SIGKILL"]);
+  assert.equal(recoverAuthStateWithEpochFence(statePath).currentEpoch, 2);
+  assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 2);
+  assert.equal(fs.statSync(`${statePath}.lock`).ino, inode.ino);
 });
 
 test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signature, state, rollback, and custody violations", (t) => {
