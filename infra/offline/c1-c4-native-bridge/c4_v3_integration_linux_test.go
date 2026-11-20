@@ -142,8 +142,20 @@ func sealedFD(t *testing.T, name string, data []byte) int {
 func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInput, tamperProof bool) ([]byte, string) {
 	t.Helper()
 	approvalSHA := sha256.Sum256(envelopeRaw)
-	causalityBase := fmt.Sprintf(`{"schemaVersion":3,"exporter":{"attributesDigest":"sha256:%s"},"roots":[{"workerId":"%s"}],"proofDigest":""}`,
-		input.ExporterIntentSHA256, input.WorkerID)
+	exporterJSON := fmt.Sprintf(`{"schemaVersion":2,"id":0,"type":"image","destination":"virki-dev","attributesDigest":"sha256:%s"}`, input.ExporterIntentSHA256)
+	rootVertex := "sha256:" + strings.Repeat("a", 64)
+	var ctxParts, pathParts []string
+	for i, c := range input.Contexts {
+		name, identity, session := CString(c.Name[:]), CString(c.Identity[:]), CString(c.SessionID[:])
+		vertex := "sha256:" + strings.Repeat(fmt.Sprintf("%x", i+1), 64)
+		snapshot := fmt.Sprintf("snapshot-%d", i)
+		ctxParts = append(ctxParts, fmt.Sprintf(`{"name":"%s","generation":"%s","contextIdentity":"%s","workerId":"%s","sessionId":"%s","vertexDigest":"%s","vertexOutputIndex":0,"snapshotId":"%s","treeDigestSchema":"buildkit-worker-local-context-v2","treeDigest":"%s","streamDigest":"%s","streamLength":%d}`,
+			name, input.Nonce, identity, input.WorkerID, session, vertex, snapshot, CString(c.TreeDigest[:]), CString(c.StreamDigest[:]), c.StreamLength))
+		pathParts = append(pathParts, fmt.Sprintf(`{"name":"%s","generation":"%s","contextIdentity":"%s","snapshotId":"%s","treeDigest":"%s","sourceVertexDigest":"%s","sourceOutputIndex":0,"edges":[{"parentVertexDigest":"%s","parentOutputIndex":0,"parentInputIndex":%d,"childVertexDigest":"%s","childOutputIndex":0}]}`,
+			name, input.Nonce, identity, snapshot, CString(c.TreeDigest[:]), vertex, rootVertex, i, vertex))
+	}
+	causalityBase := fmt.Sprintf(`{"schemaVersion":3,"exporter":%s,"roots":[{"workerId":"%s","refId":"result-1","vertexDigest":"%s","outputIndex":0,"contextPaths":[%s]}],"proofDigest":""}`,
+		exporterJSON, input.WorkerID, rootVertex, strings.Join(pathParts, ","))
 	cSum := sha256.Sum256(append([]byte("virki-c1-export-causality-v3\x00"), causalityBase...))
 	cHex := hex.EncodeToString(cSum[:])
 	if tamperProof {
@@ -151,8 +163,8 @@ func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInp
 	}
 	causalityJSON := strings.Replace(causalityBase, `"proofDigest":""`, `"proofDigest":"sha256:`+cHex+`"`, 1)
 
-	ociBase := fmt.Sprintf(`{"schemaVersion":1,"root":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"proofDigest":""}`,
-		input.OutputImageID)
+	ociBase := fmt.Sprintf(`{"schemaVersion":1,"root":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"nodes":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048,"role":"root"}],"proofDigest":""}`,
+		input.OutputImageID, input.OutputImageID)
 	oSum := sha256.Sum256(append([]byte("virki-c1-oci-dag-v1\x00"), ociBase...))
 	oHex := hex.EncodeToString(oSum[:])
 	ociJSON := strings.Replace(ociBase, `"proofDigest":""`, `"proofDigest":"sha256:`+oHex+`"`, 1)
@@ -162,14 +174,9 @@ func v3EvidenceWithPayload(t *testing.T, envelopeRaw []byte, input V3ApprovalInp
 	fHex := hex.EncodeToString(fSum[:])
 	feJSON := strings.Replace(feBase, `"proofDigest":""`, `"proofDigest":"sha256:`+fHex+`"`, 1)
 
-	var ctxParts []string
-	for _, c := range input.Contexts {
-		ctxParts = append(ctxParts, fmt.Sprintf(`{"name":"%s","workerId":"%s","treeDigest":"%s","streamDigest":"%s","streamLength":%d}`,
-			CString(c.Name[:]), input.WorkerID, CString(c.TreeDigest[:]), CString(c.StreamDigest[:]), c.StreamLength))
-	}
 	payload := []byte(fmt.Sprintf(
-		`{"schemaVersion":2,"binding":{"jobId":"%s","role":"%s","nonce":"%s","approvalId":"%s","exporter":{"attributesDigest":"sha256:%s"}},"contexts":[%s],"output":{"workerId":"%s","image":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"causality":%s,"ociDag":%s},"frontendProof":%s}`,
-		input.JobID, input.Role, input.Nonce, input.ApprovalID, input.ExporterIntentSHA256,
+		`{"schemaVersion":2,"epoch":%d,"binding":{"jobId":"%s","role":"%s","nonce":"%s","approvalId":"%s","exporter":%s},"contexts":[%s],"output":{"workerId":"%s","image":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","size":2048},"causality":%s,"ociDag":%s},"frontendProof":%s}`,
+		input.Epoch, input.JobID, input.Role, input.Nonce, input.ApprovalID, exporterJSON,
 		strings.Join(ctxParts, ","), input.WorkerID, input.OutputImageID,
 		causalityJSON, ociJSON, feJSON))
 	bundle, digest, err := EncodeV3Evidence(V3EvidenceInput{

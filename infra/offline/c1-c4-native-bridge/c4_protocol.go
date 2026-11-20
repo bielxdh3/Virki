@@ -21,9 +21,11 @@ const (
 	CmdScopeAbort = uint32(0x04)
 
 	StatusOK                 = uint32(0)
+	StatusErrPeerCred        = uint32(10)
 	StatusErrBadFrame        = uint32(11)
 	StatusErrFDInvalid       = uint32(12)
 	StatusErrStreamMismatch  = uint32(13)
+	StatusErrTreeMismatch    = uint32(14)
 	StatusErrNonceReplay     = uint32(15)
 	StatusErrStaleEpoch      = uint32(16)
 	StatusErrNoKey           = uint32(17)

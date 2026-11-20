@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
@@ -271,104 +272,39 @@ function writeAtomicState(filePath, nextState) {
   fsyncParentDir(filePath);
 }
 
-function isPidDead(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (err) {
-    return Boolean(err && err.code === "ESRCH");
-  }
-}
-
-function inspectLockFile(targetPath) {
-  const roFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
-  const fd = openSync(targetPath, roFlags);
-  try {
-    const st = fstatSync(fd);
-    const raw = readFileSync(fd, "utf8").trim();
-    return { raw, mtimeMs: st.mtimeMs };
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function isAbandonedLock(info, deadMinAgeMs, emptyMinAgeMs) {
-  const ageMs = Date.now() - info.mtimeMs;
-  const pid = Number(info.raw);
-  const deadOwner = info.raw.length > 0 && pid !== process.pid && isPidDead(pid) && ageMs >= deadMinAgeMs;
-  const abandonedEmpty = info.raw.length === 0 && ageMs >= emptyMinAgeMs;
-  return deadOwner || abandonedEmpty;
-}
-
-function openReclaimGuard(reclaimPath, flags) {
-  try {
-    return openSync(reclaimPath, flags, 0o600);
-  } catch (err) {
-    if (!err || err.code !== "EEXIST") throw err;
-    const info = inspectLockFile(reclaimPath);
-    if (!isAbandonedLock(info, 50, 200)) throw err;
-    unlinkSync(reclaimPath);
-    return -1;
-  }
-}
-
-function tryReclaimStaleLock(lockPath) {
-  const reclaimPath = `${lockPath}.reclaim`;
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
-  let reclaimFd = -1;
-  try {
-    const initial = inspectLockFile(lockPath);
-    if (!isAbandonedLock(initial, 0, 200)) return false;
-    reclaimFd = openReclaimGuard(reclaimPath, flags);
-    if (reclaimFd < 0) return false;
-    const pidBytes = Buffer.from(`${process.pid}\n`, "utf8");
-    writeSync(reclaimFd, pidBytes, 0, pidBytes.length, 0);
-    // Re-read via FD after acquiring exclusive reclaim guard so we never unlink a live owner's lock.
-    const current = inspectLockFile(lockPath);
-    if (current.raw === initial.raw && isAbandonedLock(current, 0, 200)) {
-      unlinkSync(lockPath);
-      return true;
-    }
-  } catch (_err) {
-    void _err;
-  } finally {
-    if (reclaimFd >= 0) {
-      closeSync(reclaimFd);
-      try { unlinkSync(reclaimPath); } catch (_cleanupErr) { void _cleanupErr; }
-    }
-  }
-  return false;
-}
-
 function withAuthStateLock(filePath, fn) {
   const lockPath = `${filePath}.lock`;
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
-  const deadline = Date.now() + 5000;
-  let lockFd = -1;
-  while (lockFd < 0) {
+  if (process.platform === "linux") {
+    // Keep one stable inode; the kernel releases the lock when the last FD closes.
+    const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
     try {
-      lockFd = openSync(lockPath, flags, 0o600);
-      const pidBytes = Buffer.from(`${process.pid}\n`, "utf8");
-      writeSync(lockFd, pidBytes, 0, pidBytes.length, 0);
+      const st = fstatSync(fd);
+      demand(st.isFile() && st.nlink === 1 && st.uid === process.getuid() && (st.mode & 0o077) === 0, "auth state lock must be a private regular file");
+      execFileSync("/usr/bin/flock", ["--exclusive", "--timeout", "5", "3"], { stdio: ["ignore", "ignore", "pipe", fd], timeout: 6000 });
+      return fn();
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  // Non-Linux development has no kernel flock; refuse abandoned locks rather than guess ownership.
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  const deadline = performance.now() + 5000;
+  let fd;
+  for (;;) {
+    try {
+      fd = openSync(lockPath, flags, 0o600);
+      break;
     } catch (err) {
-      if (lockFd >= 0) {
-        closeSync(lockFd);
-        lockFd = -1;
-      }
-      if (err && err.code === "EEXIST" && Date.now() < deadline) {
-        if (tryReclaimStaleLock(lockPath)) continue;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-        continue;
-      }
-      throw err;
+      if (err?.code !== "EEXIST" || performance.now() >= deadline) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
   }
   try {
     return fn();
   } finally {
-    closeSync(lockFd);
-    try { unlinkSync(lockPath); } catch (_cleanupErr) { void _cleanupErr; }
+    closeSync(fd);
+    unlinkSync(lockPath);
   }
 }
 

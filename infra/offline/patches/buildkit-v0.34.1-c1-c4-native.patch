@@ -1,5 +1,5 @@
 diff --git a/cmd/buildkitd/config/config.go b/cmd/buildkitd/config/config.go
-index e363b3e..0557168 100644
+index e363b3e1a155c1b661bf17c4bd83ca2f0b921241..055716837a66cbfd9c7d19ded978555895950c63 100644
 --- a/cmd/buildkitd/config/config.go
 +++ b/cmd/buildkitd/config/config.go
 @@ -1,6 +1,9 @@
@@ -96,7 +96,7 @@ index e363b3e..0557168 100644
  	IdleTimeout            *Duration `toml:"idleTimeout"`
 diff --git a/cmd/buildkitd/config/local_context_observer_test.go b/cmd/buildkitd/config/local_context_observer_test.go
 new file mode 100644
-index 0000000..8070289
+index 0000000000000000000000000000000000000000..8070289d4f2054f2151f3b9b01a2ee58f94ef427
 --- /dev/null
 +++ b/cmd/buildkitd/config/local_context_observer_test.go
 @@ -0,0 +1,57 @@
@@ -159,7 +159,7 @@ index 0000000..8070289
 +}
 diff --git a/cmd/buildkitd/local_context_observer_test.go b/cmd/buildkitd/local_context_observer_test.go
 new file mode 100644
-index 0000000..5e1d323
+index 0000000000000000000000000000000000000000..5e1d323c41d626530c6693bf447d76d26c130a7b
 --- /dev/null
 +++ b/cmd/buildkitd/local_context_observer_test.go
 @@ -0,0 +1,81 @@
@@ -245,7 +245,7 @@ index 0000000..5e1d323
 +	}
 +}
 diff --git a/cmd/buildkitd/main.go b/cmd/buildkitd/main.go
-index 60301da..f935d7f 100644
+index 60301da09a5816cf622566e7437e746414159582..f935d7f7d32f6de626c37960db8691fcaf913a4b 100644
 --- a/cmd/buildkitd/main.go
 +++ b/cmd/buildkitd/main.go
 @@ -55,6 +55,7 @@ import (
@@ -447,7 +447,7 @@ index 60301da..f935d7f 100644
  	return resolver.NewRegistryConfig(cfg.Registries)
  }
 diff --git a/cmd/buildkitd/main_containerd_worker.go b/cmd/buildkitd/main_containerd_worker.go
-index d849a49..af8e5c5 100644
+index d849a49cc828d75c4bcbadd7eb9e45e5fd4bde1e..af8e5c5b8da1279efaf8f8b53edff4e8b337b386 100644
 --- a/cmd/buildkitd/main_containerd_worker.go
 +++ b/cmd/buildkitd/main_containerd_worker.go
 @@ -290,6 +290,9 @@ func containerdWorkerInitializer(c *cli.Command, common workerInitializerOpt) ([
@@ -471,7 +471,7 @@ index d849a49..af8e5c5 100644
  	opt.BuildkitVersion = getBuildkitVersion()
  	opt.RegistryHosts = resolverFunc(common.config)
 diff --git a/cmd/buildkitd/main_oci_worker.go b/cmd/buildkitd/main_oci_worker.go
-index 620e6d2..9162200 100644
+index 620e6d237522260d988a3db17cc1ffb4d492ef15..9162200594d58626cd7088fb7034b073bce53b49 100644
 --- a/cmd/buildkitd/main_oci_worker.go
 +++ b/cmd/buildkitd/main_oci_worker.go
 @@ -276,6 +276,9 @@ func ociWorkerInitializer(c *cli.Command, common workerInitializerOpt) ([]worker
@@ -495,7 +495,7 @@ index 620e6d2..9162200 100644
  	opt.BuildkitVersion = getBuildkitVersion()
  	opt.RegistryHosts = hosts
 diff --git a/control/control.go b/control/control.go
-index 78adaad..ab9421d 100644
+index 78adaadd8fbc61aed3f06a78f16e330eee3c3dc8..ab9421d28d8af7fdb35767afed86ab5cdb67fc65 100644
 --- a/control/control.go
 +++ b/control/control.go
 @@ -46,6 +46,7 @@ import (
@@ -652,7 +652,7 @@ index 78adaad..ab9421d 100644
  	}, nil
 diff --git a/control/local_context_causality_test.go b/control/local_context_causality_test.go
 new file mode 100644
-index 0000000..384aebf
+index 0000000000000000000000000000000000000000..384aebf1e425ffbae1ba1a36e7c44460a6e47e59
 --- /dev/null
 +++ b/control/local_context_causality_test.go
 @@ -0,0 +1,84 @@
@@ -742,7 +742,7 @@ index 0000000..384aebf
 +}
 diff --git a/control/local_context_observer.go b/control/local_context_observer.go
 new file mode 100644
-index 0000000..e3fc529
+index 0000000000000000000000000000000000000000..e3fc529f3a166d862535f1b6d7c0d440a4df50e5
 --- /dev/null
 +++ b/control/local_context_observer.go
 @@ -0,0 +1,61 @@
@@ -809,7 +809,7 @@ index 0000000..e3fc529
 +}
 diff --git a/control/local_context_observer_test.go b/control/local_context_observer_test.go
 new file mode 100644
-index 0000000..ab50639
+index 0000000000000000000000000000000000000000..ab50639d8ce4692b249ad29bbab3f3ffa35a8111
 --- /dev/null
 +++ b/control/local_context_observer_test.go
 @@ -0,0 +1,69 @@
@@ -883,7 +883,7 @@ index 0000000..ab50639
 +	}
 +}
 diff --git a/exporter/containerimage/export.go b/exporter/containerimage/export.go
-index 3303d5b..7830b21 100644
+index 3303d5b62f25a4f805592a12ef19cf9c83d9c71d..7830b21d284677473c46b18a28ad0280bdb7dc3a 100644
 --- a/exporter/containerimage/export.go
 +++ b/exporter/containerimage/export.go
 @@ -202,6 +202,26 @@ type imageExporterInstance struct {
@@ -914,7 +914,7 @@ index 3303d5b..7830b21 100644
  	return e.id
  }
 diff --git a/frontend/dockerfile/builder/build.go b/frontend/dockerfile/builder/build.go
-index 1804c69..3cf2df4 100644
+index 1804c69abd22a5b7a8bbf2acb1a493263cedba8a..3cf2df4f1b003706da248f5abca08c15aa4725a0 100644
 --- a/frontend/dockerfile/builder/build.go
 +++ b/frontend/dockerfile/builder/build.go
 @@ -24,6 +24,7 @@ import (
@@ -971,7 +971,7 @@ index 1804c69..3cf2df4 100644
  			Reference: ref,
 diff --git a/frontend/dockerfile/builder/frontend_events_v4_test.go b/frontend/dockerfile/builder/frontend_events_v4_test.go
 new file mode 100644
-index 0000000..019d430
+index 0000000000000000000000000000000000000000..019d43056ead22b28057d8b748223d9932386479
 --- /dev/null
 +++ b/frontend/dockerfile/builder/frontend_events_v4_test.go
 @@ -0,0 +1,43 @@
@@ -1019,7 +1019,7 @@ index 0000000..019d430
 +	}
 +}
 diff --git a/frontend/dockerfile/dockerfile2llb/convert.go b/frontend/dockerfile/dockerfile2llb/convert.go
-index 4c9f0a4..03287e8 100644
+index 4c9f0a4c8f476dda962491f6e79175762a9e55d4..03287e87841a6792c998bf66a1795369d92208d6 100644
 --- a/frontend/dockerfile/dockerfile2llb/convert.go
 +++ b/frontend/dockerfile/dockerfile2llb/convert.go
 @@ -20,6 +20,7 @@ import (
@@ -1131,7 +1131,7 @@ index 4c9f0a4..03287e8 100644
  		var ignoreMatcher *patternmatcher.PatternMatcher
  		if len(cmd.sources) != 0 {
 diff --git a/frontend/dockerfile/dockerfile2llb/epoch.go b/frontend/dockerfile/dockerfile2llb/epoch.go
-index 07fd63d..98e4c73 100644
+index 07fd63dc16d793e87ea4e8b2eabde679a07770e7..98e4c7367cd6ab17ef0bbfeef639fd44337f4d02 100644
 --- a/frontend/dockerfile/dockerfile2llb/epoch.go
 +++ b/frontend/dockerfile/dockerfile2llb/epoch.go
 @@ -22,6 +22,7 @@ import (
@@ -1154,7 +1154,7 @@ index 07fd63d..98e4c73 100644
  		}
 diff --git a/frontend/dockerfile/dockerfile2llb/main_follow_paths_v13_test.go b/frontend/dockerfile/dockerfile2llb/main_follow_paths_v13_test.go
 new file mode 100644
-index 0000000..f0b837d
+index 0000000000000000000000000000000000000000..f0b837d4733d5f63ef5b4ee0aa1e62b08f88204f
 --- /dev/null
 +++ b/frontend/dockerfile/dockerfile2llb/main_follow_paths_v13_test.go
 @@ -0,0 +1,64 @@
@@ -1223,7 +1223,7 @@ index 0000000..f0b837d
 +	}
 +}
 diff --git a/frontend/dockerui/config.go b/frontend/dockerui/config.go
-index 09f8e51..8b6d433 100644
+index 09f8e51a4b4a948a4d36a3fff76e2595aa823123..8b6d4331e388d0acf6297c0f73ade1b8ee021868 100644
 --- a/frontend/dockerui/config.go
 +++ b/frontend/dockerui/config.go
 @@ -18,6 +18,7 @@ import (
@@ -1421,7 +1421,7 @@ index 09f8e51..8b6d433 100644
  	return excludes, nil
  }
 diff --git a/frontend/gateway/forwarder/forward.go b/frontend/gateway/forwarder/forward.go
-index 2c40846..e117a82 100644
+index 2c40846cccc02ca8466edced66463133b3e931ed..e117a82d3ec619bc96bb87a601c11d3c614abc11 100644
 --- a/frontend/gateway/forwarder/forward.go
 +++ b/frontend/gateway/forwarder/forward.go
 @@ -23,6 +23,7 @@ import (
@@ -1508,7 +1508,7 @@ index 2c40846..e117a82 100644
  	r.resultProxy = s1
 diff --git a/frontend/gateway/forwarder/loaded_ref_v6_test.go b/frontend/gateway/forwarder/loaded_ref_v6_test.go
 new file mode 100644
-index 0000000..b8fb481
+index 0000000000000000000000000000000000000000..b8fb48145170dbee612791cff4fd6c0a38b2425b
 --- /dev/null
 +++ b/frontend/gateway/forwarder/loaded_ref_v6_test.go
 @@ -0,0 +1,151 @@
@@ -1664,7 +1664,7 @@ index 0000000..b8fb481
 +	})
 +}
 diff --git a/session/filesync/filesync.go b/session/filesync/filesync.go
-index 7ebef4a..3c0cbd4 100644
+index 7ebef4aa140d40cfb80a348a3a16618718d72b99..3c0cbd4410540ce2c60e4c8437eb47354ae60812 100644
 --- a/session/filesync/filesync.go
 +++ b/session/filesync/filesync.go
 @@ -188,6 +188,7 @@ type FSSendRequestOpt struct {
@@ -1698,7 +1698,7 @@ index 7ebef4a..3c0cbd4 100644
  
  type FSSyncTarget interface {
 diff --git a/session/filesync/filesync_test.go b/session/filesync/filesync_test.go
-index 255a17b..6580624 100644
+index 255a17bc4084186e15f8c1186e3410e4e460c7c8..6580624667d0538106e23c5a4e141da699d3ebb9 100644
 --- a/session/filesync/filesync_test.go
 +++ b/session/filesync/filesync_test.go
 @@ -5,6 +5,7 @@ import (
@@ -1904,7 +1904,7 @@ index 255a17b..6580624 100644
 +}
 diff --git a/session/filesync/link_preflight_v14.go b/session/filesync/link_preflight_v14.go
 new file mode 100644
-index 0000000..6cf7c19
+index 0000000000000000000000000000000000000000..6cf7c197ee42ac33041c8a143276f7b6854da262
 --- /dev/null
 +++ b/session/filesync/link_preflight_v14.go
 @@ -0,0 +1,75 @@
@@ -1985,7 +1985,7 @@ index 0000000..6cf7c19
 +}
 diff --git a/session/filesync/link_preflight_v14_test.go b/session/filesync/link_preflight_v14_test.go
 new file mode 100644
-index 0000000..1eeb582
+index 0000000000000000000000000000000000000000..1eeb582d76a272a145b345881154d2fd0ddc7c5f
 --- /dev/null
 +++ b/session/filesync/link_preflight_v14_test.go
 @@ -0,0 +1,86 @@
@@ -2077,7 +2077,7 @@ index 0000000..1eeb582
 +}
 diff --git a/session/filesync/localcontext.go b/session/filesync/localcontext.go
 new file mode 100644
-index 0000000..076ebb4
+index 0000000000000000000000000000000000000000..076ebb45b46c6ab95a467dc579de6626a8a9717a
 --- /dev/null
 +++ b/session/filesync/localcontext.go
 @@ -0,0 +1,225 @@
@@ -2308,7 +2308,7 @@ index 0000000..076ebb4
 +}
 diff --git a/session/filesync/localcontext_open_linux.go b/session/filesync/localcontext_open_linux.go
 new file mode 100644
-index 0000000..da1f0d9
+index 0000000000000000000000000000000000000000..da1f0d9ac4d96a391ff024ebf797e3d695bed3d6
 --- /dev/null
 +++ b/session/filesync/localcontext_open_linux.go
 @@ -0,0 +1,42 @@
@@ -2356,7 +2356,7 @@ index 0000000..da1f0d9
 +}
 diff --git a/session/filesync/localcontext_open_linux_test.go b/session/filesync/localcontext_open_linux_test.go
 new file mode 100644
-index 0000000..1cbf820
+index 0000000000000000000000000000000000000000..1cbf8200afbae7e973f81264e7ca0bd591a26fc2
 --- /dev/null
 +++ b/session/filesync/localcontext_open_linux_test.go
 @@ -0,0 +1,108 @@
@@ -2470,7 +2470,7 @@ index 0000000..1cbf820
 +}
 diff --git a/session/filesync/localcontext_open_other.go b/session/filesync/localcontext_open_other.go
 new file mode 100644
-index 0000000..d4c2608
+index 0000000000000000000000000000000000000000..d4c26085aab1f631b548d953d74a19ce541704c3
 --- /dev/null
 +++ b/session/filesync/localcontext_open_other.go
 @@ -0,0 +1,13 @@
@@ -2489,7 +2489,7 @@ index 0000000..d4c2608
 +}
 diff --git a/session/filesync/sealed_custody_v24_independent_linux_test.go b/session/filesync/sealed_custody_v24_independent_linux_test.go
 new file mode 100644
-index 0000000..876e649
+index 0000000000000000000000000000000000000000..876e6499f6494c6c64276603d7d0c544813543d3
 --- /dev/null
 +++ b/session/filesync/sealed_custody_v24_independent_linux_test.go
 @@ -0,0 +1,436 @@
@@ -2931,7 +2931,7 @@ index 0000000..876e649
 +}
 diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
 new file mode 100644
-index 0000000..7dd01a6
+index 0000000000000000000000000000000000000000..7dd01a603bb168e0379b51f0c793d2428ef6469b
 --- /dev/null
 +++ b/session/filesync/sealed_custody_v24_linux.go
 @@ -0,0 +1,335 @@
@@ -3272,7 +3272,7 @@ index 0000000..7dd01a6
 +}
 diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
 new file mode 100644
-index 0000000..ec33fb4
+index 0000000000000000000000000000000000000000..ec33fb42a7f277f24cbd61243f9b0045a9df01d8
 --- /dev/null
 +++ b/session/filesync/sealed_custody_v24_linux_test.go
 @@ -0,0 +1,427 @@
@@ -3705,7 +3705,7 @@ index 0000000..ec33fb4
 +}
 diff --git a/session/filesync/sealed_custody_v24_other.go b/session/filesync/sealed_custody_v24_other.go
 new file mode 100644
-index 0000000..4551201
+index 0000000000000000000000000000000000000000..4551201ae4e887f5c83eb8ff15f2ae894391eb9b
 --- /dev/null
 +++ b/session/filesync/sealed_custody_v24_other.go
 @@ -0,0 +1,31 @@
@@ -3742,7 +3742,7 @@ index 0000000..4551201
 +}
 diff --git a/session/filesync/sealed_guard_v15.go b/session/filesync/sealed_guard_v15.go
 new file mode 100644
-index 0000000..c4811cb
+index 0000000000000000000000000000000000000000..c4811cb6791d551955860daf2eda86df5025072f
 --- /dev/null
 +++ b/session/filesync/sealed_guard_v15.go
 @@ -0,0 +1,159 @@
@@ -3907,7 +3907,7 @@ index 0000000..c4811cb
 +}
 diff --git a/session/filesync/sealed_guard_v15_test.go b/session/filesync/sealed_guard_v15_test.go
 new file mode 100644
-index 0000000..3557f29
+index 0000000000000000000000000000000000000000..3557f29dbe8464a3fc830297f9b2fe3e9d96ee90
 --- /dev/null
 +++ b/session/filesync/sealed_guard_v15_test.go
 @@ -0,0 +1,112 @@
@@ -4025,7 +4025,7 @@ index 0000000..3557f29
 +}
 diff --git a/session/filesync/sealed_owner_v15.go b/session/filesync/sealed_owner_v15.go
 new file mode 100644
-index 0000000..fabec0c
+index 0000000000000000000000000000000000000000..fabec0cfaed0ac015d52e59e68df1fee8b5cf774
 --- /dev/null
 +++ b/session/filesync/sealed_owner_v15.go
 @@ -0,0 +1,80 @@
@@ -4111,7 +4111,7 @@ index 0000000..fabec0c
 +}
 diff --git a/session/filesync/sealed_postcommit_v22.go b/session/filesync/sealed_postcommit_v22.go
 new file mode 100644
-index 0000000..ce01534
+index 0000000000000000000000000000000000000000..ce0153418111126acb3ddb65c63754e48c60a698
 --- /dev/null
 +++ b/session/filesync/sealed_postcommit_v22.go
 @@ -0,0 +1,36 @@
@@ -4153,7 +4153,7 @@ index 0000000..ce01534
 +}
 diff --git a/session/filesync/sealed_protocol_v15.go b/session/filesync/sealed_protocol_v15.go
 new file mode 100644
-index 0000000..cf970bb
+index 0000000000000000000000000000000000000000..cf970bbfb8f221e1c13028e607ce715ef41a89f1
 --- /dev/null
 +++ b/session/filesync/sealed_protocol_v15.go
 @@ -0,0 +1,173 @@
@@ -4332,7 +4332,7 @@ index 0000000..cf970bb
 +var _ fsutil.FS = (*V15SealedSnapshot)(nil)
 diff --git a/session/filesync/sealed_snapshot_v15.go b/session/filesync/sealed_snapshot_v15.go
 new file mode 100644
-index 0000000..9fe475e
+index 0000000000000000000000000000000000000000..9fe475e97454949ff9283c2eb30ee768eeac42a4
 --- /dev/null
 +++ b/session/filesync/sealed_snapshot_v15.go
 @@ -0,0 +1,231 @@
@@ -4569,7 +4569,7 @@ index 0000000..9fe475e
 +var _ fsutil.FS = (*V15SealedSnapshot)(nil)
 diff --git a/session/filesync/sealed_snapshot_v15_linux.go b/session/filesync/sealed_snapshot_v15_linux.go
 new file mode 100644
-index 0000000..8456069
+index 0000000000000000000000000000000000000000..845606957bad46e33604e0fe5cfc6e9a94125272
 --- /dev/null
 +++ b/session/filesync/sealed_snapshot_v15_linux.go
 @@ -0,0 +1,101 @@
@@ -4676,7 +4676,7 @@ index 0000000..8456069
 +}
 diff --git a/session/filesync/sealed_snapshot_v15_linux_test.go b/session/filesync/sealed_snapshot_v15_linux_test.go
 new file mode 100644
-index 0000000..b338249
+index 0000000000000000000000000000000000000000..b3382496d389478ff459607cabf69d2550402836
 --- /dev/null
 +++ b/session/filesync/sealed_snapshot_v15_linux_test.go
 @@ -0,0 +1,304 @@
@@ -4986,7 +4986,7 @@ index 0000000..b338249
 +}
 diff --git a/session/filesync/sealed_snapshot_v15_other.go b/session/filesync/sealed_snapshot_v15_other.go
 new file mode 100644
-index 0000000..c42047d
+index 0000000000000000000000000000000000000000..c42047db58cbe535d755c50e7c99e72d1122137f
 --- /dev/null
 +++ b/session/filesync/sealed_snapshot_v15_other.go
 @@ -0,0 +1,14 @@
@@ -5006,7 +5006,7 @@ index 0000000..c42047d
 +}
 diff --git a/session/filesync/sealed_stage_tree_v23_linux.go b/session/filesync/sealed_stage_tree_v23_linux.go
 new file mode 100644
-index 0000000..b213276
+index 0000000000000000000000000000000000000000..b2132769f1a4e203bf5eb4505067d08016c45f16
 --- /dev/null
 +++ b/session/filesync/sealed_stage_tree_v23_linux.go
 @@ -0,0 +1,198 @@
@@ -5210,7 +5210,7 @@ index 0000000..b213276
 +}
 diff --git a/session/filesync/sealed_stage_tree_v23_linux_test.go b/session/filesync/sealed_stage_tree_v23_linux_test.go
 new file mode 100644
-index 0000000..148a1a7
+index 0000000000000000000000000000000000000000..148a1a78698a297cb1097a994140a633d2b890fb
 --- /dev/null
 +++ b/session/filesync/sealed_stage_tree_v23_linux_test.go
 @@ -0,0 +1,167 @@
@@ -5383,7 +5383,7 @@ index 0000000..148a1a7
 +}
 diff --git a/session/filesync/sealed_stage_verify_v22_linux.go b/session/filesync/sealed_stage_verify_v22_linux.go
 new file mode 100644
-index 0000000..b98fd93
+index 0000000000000000000000000000000000000000..b98fd936da9fba3f543bd4bbf30fab85eecb9b16
 --- /dev/null
 +++ b/session/filesync/sealed_stage_verify_v22_linux.go
 @@ -0,0 +1,167 @@
@@ -5556,7 +5556,7 @@ index 0000000..b98fd93
 +}
 diff --git a/session/filesync/sealed_staging_v19_linux.go b/session/filesync/sealed_staging_v19_linux.go
 new file mode 100644
-index 0000000..12074e0
+index 0000000000000000000000000000000000000000..12074e0d83b037f0fb1fc166d6ad9802340fe48a
 --- /dev/null
 +++ b/session/filesync/sealed_staging_v19_linux.go
 @@ -0,0 +1,175 @@
@@ -5737,7 +5737,7 @@ index 0000000..12074e0
 +}
 diff --git a/session/filesync/sealed_staging_v19_linux_test.go b/session/filesync/sealed_staging_v19_linux_test.go
 new file mode 100644
-index 0000000..c6cd7a8
+index 0000000000000000000000000000000000000000..c6cd7a804f68a0cddee16480452e0f07cd7b125e
 --- /dev/null
 +++ b/session/filesync/sealed_staging_v19_linux_test.go
 @@ -0,0 +1,113 @@
@@ -5856,7 +5856,7 @@ index 0000000..c6cd7a8
 +}
 diff --git a/session/filesync/sealed_staging_v19_other.go b/session/filesync/sealed_staging_v19_other.go
 new file mode 100644
-index 0000000..ddf7fdb
+index 0000000000000000000000000000000000000000..ddf7fdb24e0c5402d8175f32191543f20f9e0f12
 --- /dev/null
 +++ b/session/filesync/sealed_staging_v19_other.go
 @@ -0,0 +1,9 @@
@@ -5871,7 +5871,7 @@ index 0000000..ddf7fdb
 +}
 diff --git a/session/filesync/sealed_staging_v22_integration_test.go b/session/filesync/sealed_staging_v22_integration_test.go
 new file mode 100644
-index 0000000..698594c
+index 0000000000000000000000000000000000000000..698594c0dd51430f69777bcae7c3fde4caf38e62
 --- /dev/null
 +++ b/session/filesync/sealed_staging_v22_integration_test.go
 @@ -0,0 +1,242 @@
@@ -6119,7 +6119,7 @@ index 0000000..698594c
 +}
 diff --git a/session/filesync/sealed_verify_v15.go b/session/filesync/sealed_verify_v15.go
 new file mode 100644
-index 0000000..665d812
+index 0000000000000000000000000000000000000000..665d8126df77b4f342c94f123b5f81397a31b64f
 --- /dev/null
 +++ b/session/filesync/sealed_verify_v15.go
 @@ -0,0 +1,71 @@
@@ -6195,7 +6195,7 @@ index 0000000..665d812
 +	return nil
 +}
 diff --git a/solver/jobs.go b/solver/jobs.go
-index 5dec5da..5b72f87 100644
+index 5dec5daa7fad42224ff78521b166333b567577c4..5b72f87cb8bde7fd06738b0f2fc9339245454411 100644
 --- a/solver/jobs.go
 +++ b/solver/jobs.go
 @@ -826,6 +826,10 @@ type withProvenance struct {
@@ -6211,7 +6211,7 @@ index 5dec5da..5b72f87 100644
  		return nil
 diff --git a/solver/llbsolver/frontend_source_session_v7_test.go b/solver/llbsolver/frontend_source_session_v7_test.go
 new file mode 100644
-index 0000000..d0c034d
+index 0000000000000000000000000000000000000000..d0c034dcfcbcd18237365fbd7b9c8083bd173358
 --- /dev/null
 +++ b/solver/llbsolver/frontend_source_session_v7_test.go
 @@ -0,0 +1,134 @@
@@ -6351,7 +6351,7 @@ index 0000000..d0c034d
 +}
 diff --git a/solver/llbsolver/local_context_causality.go b/solver/llbsolver/local_context_causality.go
 new file mode 100644
-index 0000000..170a978
+index 0000000000000000000000000000000000000000..170a978ffd6452efa2d582ebfbcfb7ac0044f0f8
 --- /dev/null
 +++ b/solver/llbsolver/local_context_causality.go
 @@ -0,0 +1,365 @@
@@ -6722,7 +6722,7 @@ index 0000000..170a978
 +}
 diff --git a/solver/llbsolver/local_context_causality_test.go b/solver/llbsolver/local_context_causality_test.go
 new file mode 100644
-index 0000000..9a0773f
+index 0000000000000000000000000000000000000000..9a0773f13312e9cf6a769b827039fd067e4953e8
 --- /dev/null
 +++ b/solver/llbsolver/local_context_causality_test.go
 @@ -0,0 +1,420 @@
@@ -7148,7 +7148,7 @@ index 0000000..9a0773f
 +}
 diff --git a/solver/llbsolver/local_context_platform_v4.go b/solver/llbsolver/local_context_platform_v4.go
 new file mode 100644
-index 0000000..0854c77
+index 0000000000000000000000000000000000000000..0854c77ed1eac2b9e42600a8d0ee1fa1611fb0c6
 --- /dev/null
 +++ b/solver/llbsolver/local_context_platform_v4.go
 @@ -0,0 +1,117 @@
@@ -7271,7 +7271,7 @@ index 0000000..0854c77
 +}
 diff --git a/solver/llbsolver/local_context_platform_v4_test.go b/solver/llbsolver/local_context_platform_v4_test.go
 new file mode 100644
-index 0000000..9dda19d
+index 0000000000000000000000000000000000000000..9dda19d9596310f75aeeec3f70c85f5048ba61a8
 --- /dev/null
 +++ b/solver/llbsolver/local_context_platform_v4_test.go
 @@ -0,0 +1,75 @@
@@ -7351,7 +7351,7 @@ index 0000000..9dda19d
 +	})
 +}
 diff --git a/solver/llbsolver/result.go b/solver/llbsolver/result.go
-index ccce9e6..11d5294 100644
+index ccce9e6af747a71a7b0a591ac8d1dc6b699e7506..11d529479cb108b7b5a3c96c05c12ac29837aa36 100644
 --- a/solver/llbsolver/result.go
 +++ b/solver/llbsolver/result.go
 @@ -45,6 +45,8 @@ type resultProxy struct {
@@ -7394,7 +7394,7 @@ index ccce9e6..11d5294 100644
  	defer func() {
  		err = rp.wrapError(err)
 diff --git a/solver/llbsolver/solver.go b/solver/llbsolver/solver.go
-index 971bc60..5e11052 100644
+index 971bc60648c3bf370bde19a751d1120df8cee1f4..5e110524971163b0e77efb4c3b36afb91f5f5a6d 100644
 --- a/solver/llbsolver/solver.go
 +++ b/solver/llbsolver/solver.go
 @@ -26,6 +26,7 @@ import (
@@ -7466,7 +7466,7 @@ index 971bc60..5e11052 100644
  }
  
 diff --git a/solver/result.go b/solver/result.go
-index 5216972..afe92bb 100644
+index 5216972ea24ed80cda74966fe09e621dd45e13a4..afe92bba0d7cfc532be3784a4b63ee21336e2da9 100644
 --- a/solver/result.go
 +++ b/solver/result.go
 @@ -127,6 +127,14 @@ func (r *splitResultProxy) Release(ctx context.Context) error {
@@ -7485,7 +7485,7 @@ index 5216972..afe92bb 100644
  	var sem atomic.Int64
  	return &splitResultProxy{ResultProxy: res, sem: &sem}, &splitResultProxy{ResultProxy: res, sem: &sem}
 diff --git a/solver/types.go b/solver/types.go
-index ef9320b..35ed397 100644
+index ef9320b399b1f28b7d49c54371793f16ec4be7f3..35ed3970a3cc50907e49b34e452a265a3d91b176 100644
 --- a/solver/types.go
 +++ b/solver/types.go
 @@ -84,6 +84,14 @@ type CachedResultWithProvenance interface {
@@ -7519,7 +7519,7 @@ index ef9320b..35ed397 100644
  
 diff --git a/source/local/auxiliary_root_ignore_v10_test.go b/source/local/auxiliary_root_ignore_v10_test.go
 new file mode 100644
-index 0000000..5c28cc5
+index 0000000000000000000000000000000000000000..5c28cc569613917d1f401346abb680aa764d8dee
 --- /dev/null
 +++ b/source/local/auxiliary_root_ignore_v10_test.go
 @@ -0,0 +1,159 @@
@@ -7684,7 +7684,7 @@ index 0000000..5c28cc5
 +}
 diff --git a/source/local/consumption.go b/source/local/consumption.go
 new file mode 100644
-index 0000000..ba9110f
+index 0000000000000000000000000000000000000000..ba9110fed795460ae4fc5936eb5b5c0ca2a79272
 --- /dev/null
 +++ b/source/local/consumption.go
 @@ -0,0 +1,70 @@
@@ -7760,7 +7760,7 @@ index 0000000..ba9110f
 +}
 diff --git a/source/local/consumption_test.go b/source/local/consumption_test.go
 new file mode 100644
-index 0000000..98733f4
+index 0000000000000000000000000000000000000000..98733f4c9ba36bab503b08e5c5b3db540485a723
 --- /dev/null
 +++ b/source/local/consumption_test.go
 @@ -0,0 +1,57 @@
@@ -7822,7 +7822,7 @@ index 0000000..98733f4
 +	}
 +}
 diff --git a/source/local/identifier.go b/source/local/identifier.go
-index 0222a65..e7a0320 100644
+index 0222a654e579b7c0547bcb94a9570de129f28db6..e7a032003a51bfd6293057d1a0d5eb6c9ab0779a 100644
 --- a/source/local/identifier.go
 +++ b/source/local/identifier.go
 @@ -18,6 +18,11 @@ type LocalIdentifier struct {
@@ -7839,7 +7839,7 @@ index 0222a65..e7a0320 100644
  func NewLocalIdentifier(str string) (*LocalIdentifier, error) {
 diff --git a/source/local/main_context_alias_v9_test.go b/source/local/main_context_alias_v9_test.go
 new file mode 100644
-index 0000000..95dd3e8
+index 0000000000000000000000000000000000000000..95dd3e8e831137e87a9956d34af9b1b2dcc29184
 --- /dev/null
 +++ b/source/local/main_context_alias_v9_test.go
 @@ -0,0 +1,246 @@
@@ -8091,7 +8091,7 @@ index 0000000..95dd3e8
 +}
 diff --git a/source/local/main_follow_paths_v13_test.go b/source/local/main_follow_paths_v13_test.go
 new file mode 100644
-index 0000000..4a24a5b
+index 0000000000000000000000000000000000000000..4a24a5b4c83903cfe55337acecb5035a3bb5ec91
 --- /dev/null
 +++ b/source/local/main_follow_paths_v13_test.go
 @@ -0,0 +1,145 @@
@@ -8242,7 +8242,7 @@ index 0000000..4a24a5b
 +}
 diff --git a/source/local/preferred_dockerignore_v12_test.go b/source/local/preferred_dockerignore_v12_test.go
 new file mode 100644
-index 0000000..bc6d012
+index 0000000000000000000000000000000000000000..bc6d012cedd1db6b52860ba1b9a3dab665f16d0f
 --- /dev/null
 +++ b/source/local/preferred_dockerignore_v12_test.go
 @@ -0,0 +1,86 @@
@@ -8334,7 +8334,7 @@ index 0000000..bc6d012
 +}
 diff --git a/source/local/root_ignore_excludes_v11_test.go b/source/local/root_ignore_excludes_v11_test.go
 new file mode 100644
-index 0000000..582384e
+index 0000000000000000000000000000000000000000..582384ea99fd2b45efe34716f356b07be3a6ade4
 --- /dev/null
 +++ b/source/local/root_ignore_excludes_v11_test.go
 @@ -0,0 +1,146 @@
@@ -8486,7 +8486,7 @@ index 0000000..582384e
 +}
 diff --git a/source/local/scoped_observer_v8_test.go b/source/local/scoped_observer_v8_test.go
 new file mode 100644
-index 0000000..af31b30
+index 0000000000000000000000000000000000000000..af31b3057f635b68a0ccf2dd9d568f313bf5cd3d
 --- /dev/null
 +++ b/source/local/scoped_observer_v8_test.go
 @@ -0,0 +1,68 @@
@@ -8560,7 +8560,7 @@ index 0000000..af31b30
 +}
 diff --git a/source/local/session_strict_v7_test.go b/source/local/session_strict_v7_test.go
 new file mode 100644
-index 0000000..f82ed88
+index 0000000000000000000000000000000000000000..f82ed882155d01a79dc23fc2c81e545ad3d3fd00
 --- /dev/null
 +++ b/source/local/session_strict_v7_test.go
 @@ -0,0 +1,87 @@
@@ -8652,7 +8652,7 @@ index 0000000..f82ed88
 +	require.ErrorIs(t, err, context.DeadlineExceeded)
 +}
 diff --git a/source/local/source.go b/source/local/source.go
-index 71af585..870e2d5 100644
+index 71af585a9ca8da6b6fdca5bce02b79c2c5e98d27..870e2d549d177e5eea0b2bb181a24ec2a625a165 100644
 --- a/source/local/source.go
 +++ b/source/local/source.go
 @@ -4,6 +4,8 @@ import (
@@ -9137,7 +9137,7 @@ index 71af585..870e2d5 100644
  
 diff --git a/util/localcontext/auxiliary_root_ignore_v10.go b/util/localcontext/auxiliary_root_ignore_v10.go
 new file mode 100644
-index 0000000..a0380b6
+index 0000000000000000000000000000000000000000..a0380b62e0b5ca8b51f4c4075b07b7a3dc2be6e8
 --- /dev/null
 +++ b/util/localcontext/auxiliary_root_ignore_v10.go
 @@ -0,0 +1,235 @@
@@ -9378,7 +9378,7 @@ index 0000000..a0380b6
 +}
 diff --git a/util/localcontext/auxiliary_root_ignore_v10_test.go b/util/localcontext/auxiliary_root_ignore_v10_test.go
 new file mode 100644
-index 0000000..dbd027d
+index 0000000000000000000000000000000000000000..dbd027db6a62a8a673ac17e5df4bfa7053826a0d
 --- /dev/null
 +++ b/util/localcontext/auxiliary_root_ignore_v10_test.go
 @@ -0,0 +1,252 @@
@@ -9636,7 +9636,7 @@ index 0000000..dbd027d
 +}
 diff --git a/util/localcontext/filtered_transfer_gate_v14.go b/util/localcontext/filtered_transfer_gate_v14.go
 new file mode 100644
-index 0000000..60cd226
+index 0000000000000000000000000000000000000000..60cd226f4fdcb3fdf4bb95e4d911f866827a00ee
 --- /dev/null
 +++ b/util/localcontext/filtered_transfer_gate_v14.go
 @@ -0,0 +1,35 @@
@@ -9677,7 +9677,7 @@ index 0000000..60cd226
 +}
 diff --git a/util/localcontext/filtered_transfer_gate_v14_test.go b/util/localcontext/filtered_transfer_gate_v14_test.go
 new file mode 100644
-index 0000000..924071f
+index 0000000000000000000000000000000000000000..924071ff9d4220e100e28797e2c34c2a7a9bbdd4
 --- /dev/null
 +++ b/util/localcontext/filtered_transfer_gate_v14_test.go
 @@ -0,0 +1,46 @@
@@ -9729,7 +9729,7 @@ index 0000000..924071f
 +}
 diff --git a/util/localcontext/frontend_events_v4.go b/util/localcontext/frontend_events_v4.go
 new file mode 100644
-index 0000000..3b17f48
+index 0000000000000000000000000000000000000000..3b17f481f90c964cd0e90a3df773e44481326bb5
 --- /dev/null
 +++ b/util/localcontext/frontend_events_v4.go
 @@ -0,0 +1,531 @@
@@ -10266,7 +10266,7 @@ index 0000000..3b17f48
 +}
 diff --git a/util/localcontext/frontend_events_v4_test.go b/util/localcontext/frontend_events_v4_test.go
 new file mode 100644
-index 0000000..d943ecd
+index 0000000000000000000000000000000000000000..d943ecd8e5c1ef7c0f558a981eec0bce703ae4a2
 --- /dev/null
 +++ b/util/localcontext/frontend_events_v4_test.go
 @@ -0,0 +1,238 @@
@@ -10510,7 +10510,7 @@ index 0000000..d943ecd
 +}
 diff --git a/util/localcontext/frontend_loaded_ref_v6.go b/util/localcontext/frontend_loaded_ref_v6.go
 new file mode 100644
-index 0000000..739b69a
+index 0000000000000000000000000000000000000000..739b69a7b81a4378902718d4b4e945f8c70a5e1d
 --- /dev/null
 +++ b/util/localcontext/frontend_loaded_ref_v6.go
 @@ -0,0 +1,159 @@
@@ -10675,7 +10675,7 @@ index 0000000..739b69a
 +}
 diff --git a/util/localcontext/frontend_loaded_ref_v6_test.go b/util/localcontext/frontend_loaded_ref_v6_test.go
 new file mode 100644
-index 0000000..b744188
+index 0000000000000000000000000000000000000000..b744188adb3b580a46a7ca5629616728830606e2
 --- /dev/null
 +++ b/util/localcontext/frontend_loaded_ref_v6_test.go
 @@ -0,0 +1,191 @@
@@ -10872,7 +10872,7 @@ index 0000000..b744188
 +}
 diff --git a/util/localcontext/frontend_transform_v4.go b/util/localcontext/frontend_transform_v4.go
 new file mode 100644
-index 0000000..33f1854
+index 0000000000000000000000000000000000000000..33f1854e0b9a913941909e62578da2351685561b
 --- /dev/null
 +++ b/util/localcontext/frontend_transform_v4.go
 @@ -0,0 +1,248 @@
@@ -11126,7 +11126,7 @@ index 0000000..33f1854
 +}
 diff --git a/util/localcontext/frontend_transform_v4_test.go b/util/localcontext/frontend_transform_v4_test.go
 new file mode 100644
-index 0000000..e508ed5
+index 0000000000000000000000000000000000000000..e508ed562bc363a9143ea6502ddeb50ac21c3172
 --- /dev/null
 +++ b/util/localcontext/frontend_transform_v4_test.go
 @@ -0,0 +1,177 @@
@@ -11309,7 +11309,7 @@ index 0000000..e508ed5
 +}
 diff --git a/util/localcontext/loaded_worker_source_v8.go b/util/localcontext/loaded_worker_source_v8.go
 new file mode 100644
-index 0000000..f0383be
+index 0000000000000000000000000000000000000000..f0383be9ea0765a5924e54b95a4ac645d64cbc62
 --- /dev/null
 +++ b/util/localcontext/loaded_worker_source_v8.go
 @@ -0,0 +1,97 @@
@@ -11412,7 +11412,7 @@ index 0000000..f0383be
 +}
 diff --git a/util/localcontext/loaded_worker_source_v8_test.go b/util/localcontext/loaded_worker_source_v8_test.go
 new file mode 100644
-index 0000000..092f040
+index 0000000000000000000000000000000000000000..092f0400e14b9b187adbefefde74be2b79580aa6
 --- /dev/null
 +++ b/util/localcontext/loaded_worker_source_v8_test.go
 @@ -0,0 +1,170 @@
@@ -11588,7 +11588,7 @@ index 0000000..092f040
 +}
 diff --git a/util/localcontext/main_follow_paths_v13.go b/util/localcontext/main_follow_paths_v13.go
 new file mode 100644
-index 0000000..4bd39e7
+index 0000000000000000000000000000000000000000..4bd39e790000b8979d21c9be7f5b3fa4301776ed
 --- /dev/null
 +++ b/util/localcontext/main_follow_paths_v13.go
 @@ -0,0 +1,244 @@
@@ -11838,7 +11838,7 @@ index 0000000..4bd39e7
 +}
 diff --git a/util/localcontext/main_follow_paths_v13_test.go b/util/localcontext/main_follow_paths_v13_test.go
 new file mode 100644
-index 0000000..144ff76
+index 0000000000000000000000000000000000000000..144ff76999d1ee4a9f477b74a337ce371b64dcd7
 --- /dev/null
 +++ b/util/localcontext/main_follow_paths_v13_test.go
 @@ -0,0 +1,223 @@
@@ -12067,7 +12067,7 @@ index 0000000..144ff76
 +}
 diff --git a/util/localcontext/observer.go b/util/localcontext/observer.go
 new file mode 100644
-index 0000000..1df112c
+index 0000000000000000000000000000000000000000..1df112c712f37ce56dfe3929cdf8b751e8ee8b06
 --- /dev/null
 +++ b/util/localcontext/observer.go
 @@ -0,0 +1,1076 @@
@@ -13149,7 +13149,7 @@ index 0000000..1df112c
 +}
 diff --git a/util/localcontext/observer_test.go b/util/localcontext/observer_test.go
 new file mode 100644
-index 0000000..b7d8fdf
+index 0000000000000000000000000000000000000000..b7d8fdfd2b3fbfa80b55dd9bc0334381da815835
 --- /dev/null
 +++ b/util/localcontext/observer_test.go
 @@ -0,0 +1,653 @@
@@ -13808,7 +13808,7 @@ index 0000000..b7d8fdf
 +}
 diff --git a/util/localcontext/preferred_dockerignore_v12.go b/util/localcontext/preferred_dockerignore_v12.go
 new file mode 100644
-index 0000000..68f4c85
+index 0000000000000000000000000000000000000000..68f4c856e17604190bd436b3fefbf6535dc9ac57
 --- /dev/null
 +++ b/util/localcontext/preferred_dockerignore_v12.go
 @@ -0,0 +1,152 @@
@@ -13966,7 +13966,7 @@ index 0000000..68f4c85
 +}
 diff --git a/util/localcontext/preferred_dockerignore_v12_test.go b/util/localcontext/preferred_dockerignore_v12_test.go
 new file mode 100644
-index 0000000..c740a89
+index 0000000000000000000000000000000000000000..c740a8988df89ac1cd942bdef930fbb91aa1624f
 --- /dev/null
 +++ b/util/localcontext/preferred_dockerignore_v12_test.go
 @@ -0,0 +1,356 @@
@@ -14328,7 +14328,7 @@ index 0000000..c740a89
 +}
 diff --git a/util/localcontext/root_ignore_excludes_v11.go b/util/localcontext/root_ignore_excludes_v11.go
 new file mode 100644
-index 0000000..86d2d64
+index 0000000000000000000000000000000000000000..86d2d64ac6aad3be31f0a107e46c4988d81c5123
 --- /dev/null
 +++ b/util/localcontext/root_ignore_excludes_v11.go
 @@ -0,0 +1,156 @@
@@ -14490,7 +14490,7 @@ index 0000000..86d2d64
 +}
 diff --git a/util/localcontext/root_ignore_excludes_v11_test.go b/util/localcontext/root_ignore_excludes_v11_test.go
 new file mode 100644
-index 0000000..c16cb84
+index 0000000000000000000000000000000000000000..c16cb84c8cd7a75d9348cf750da6e9d66e2c2dee
 --- /dev/null
 +++ b/util/localcontext/root_ignore_excludes_v11_test.go
 @@ -0,0 +1,244 @@
@@ -14740,7 +14740,7 @@ index 0000000..c16cb84
 +}
 diff --git a/util/localcontext/service_linux.go b/util/localcontext/service_linux.go
 new file mode 100644
-index 0000000..6e8a0d2
+index 0000000000000000000000000000000000000000..6e8a0d21f6e6faf2195e9fb30d012b0347dc1ffc
 --- /dev/null
 +++ b/util/localcontext/service_linux.go
 @@ -0,0 +1,306 @@
@@ -15052,7 +15052,7 @@ index 0000000..6e8a0d2
 +}
 diff --git a/util/localcontext/service_linux_test.go b/util/localcontext/service_linux_test.go
 new file mode 100644
-index 0000000..60cd0c9
+index 0000000000000000000000000000000000000000..60cd0c9ace3dda5804ee36fec3fcc4ee0c7df0ac
 --- /dev/null
 +++ b/util/localcontext/service_linux_test.go
 @@ -0,0 +1,316 @@
@@ -15374,7 +15374,7 @@ index 0000000..60cd0c9
 +}
 diff --git a/util/localcontext/service_other.go b/util/localcontext/service_other.go
 new file mode 100644
-index 0000000..202d36e
+index 0000000000000000000000000000000000000000..202d36e7711147d2a6d4129dc09357444eee3149
 --- /dev/null
 +++ b/util/localcontext/service_other.go
 @@ -0,0 +1,58 @@
@@ -15438,7 +15438,7 @@ index 0000000..202d36e
 +}
 diff --git a/util/localcontext/service_vroa_v3_linux.go b/util/localcontext/service_vroa_v3_linux.go
 new file mode 100644
-index 0000000..a10154e
+index 0000000000000000000000000000000000000000..a10154ee9e3a83bd21d5087013c2c5bf43f2f691
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux.go
 @@ -0,0 +1,820 @@
@@ -16264,15 +16264,16 @@ index 0000000..a10154e
 +}
 diff --git a/util/localcontext/service_vroa_v3_linux_test.go b/util/localcontext/service_vroa_v3_linux_test.go
 new file mode 100644
-index 0000000..dc1c5c4
+index 0000000000000000000000000000000000000000..e2d6e7d5ac52a8cf53c5f6c6686c8d01d14a38a9
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux_test.go
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,551 @@
 +//go:build linux
 +
 +package localcontext
 +
 +import (
++	"bytes"
 +	"context"
 +	"crypto/ed25519"
 +	"crypto/rand"
@@ -16383,6 +16384,36 @@ index 0000000..dc1c5c4
 +	return raw, pinHex
 +}
 +
++// Match the deterministic FileSync stream and tree encodings used by the
++// immutable worker observation; this fixture does not use a real build worker.
++func testVROAV3ContextStream(name string) ([]byte, string, int64) {
++	var stream, tree bytes.Buffer
++	stream.WriteString("virki-context-stream-v1\x00")
++	tree.WriteString("buildkit-worker-local-context-v2\x00")
++	writeUint := func(b *bytes.Buffer, value uint64) {
++		var encoded [8]byte
++		binary.BigEndian.PutUint64(encoded[:], value)
++		b.Write(encoded[:])
++	}
++	writeSized := func(b *bytes.Buffer, value string) {
++		writeUint(b, uint64(len(value)))
++		b.WriteString(value)
++	}
++	writeSized(&stream, name)
++	data := []byte("DEV fixture for " + name + "\n")
++	for _, b := range []*bytes.Buffer{&stream, &tree} {
++		b.WriteByte('F')
++		writeSized(b, "evidence.txt")
++		writeUint(b, 0644)
++		writeUint(b, uint64(len(data)))
++	}
++	stream.Write(data)
++	sum := sha256.Sum256(data)
++	tree.Write(sum[:])
++	treeSum := sha256.Sum256(tree.Bytes())
++	return stream.Bytes(), "sha256:" + hex.EncodeToString(treeSum[:]), int64(len(data))
++}
++
 +func TestVROAV3ServiceWithRealManagerAndNativeDaemon(t *testing.T) {
 +	for _, testBuild := range []bool{true, false} {
 +		name := "production-signing-disabled"
@@ -16425,10 +16456,9 @@ index 0000000..dc1c5c4
 +			}
 +			var streams [4][]byte
 +			var treeDigests [4]string
++			var regularBytes [4]int64
 +			for i, ctxName := range requiredContexts {
-+				streams[i] = []byte("stream-" + ctxName + "-payload")
-+				sum := sha256.Sum256([]byte("tree-" + ctxName))
-+				treeDigests[i] = "sha256:" + hex.EncodeToString(sum[:])
++				streams[i], treeDigests[i], regularBytes[i] = testVROAV3ContextStream(ctxName)
 +			}
 +			nonceRaw := make([]byte, 16)
 +			_, _ = rand.Read(nonceRaw)
@@ -16543,7 +16573,7 @@ index 0000000..dc1c5c4
 +					StreamDigest:      "sha256:" + hex.EncodeToString(sum[:]),
 +					StreamLength:      int64(len(streams[i])),
 +					StreamBytes:       streams[i],
-+					RegularFileBytes:  int64(len(streams[i])),
++					RegularFileBytes:  regularBytes[i],
 +					EntryCount:        1,
 +				}); err != nil {
 +					t.Fatalf("ContextConsumed(%s): %v", ctxName, err)
@@ -16790,7 +16820,7 @@ index 0000000..dc1c5c4
 +	}
 +}
 diff --git a/worker/base/worker.go b/worker/base/worker.go
-index b25fd68..5e044d5 100644
+index b25fd685ab895fa13a34e56f678dafb9cb18525c..5e044d5ec48b443b2e72a6539d68e0372892548f 100644
 --- a/worker/base/worker.go
 +++ b/worker/base/worker.go
 @@ -70,30 +70,32 @@ const labelCreatedAt = "buildkit/createdat"

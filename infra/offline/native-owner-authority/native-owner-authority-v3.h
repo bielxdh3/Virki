@@ -446,6 +446,7 @@ static bool v3_json_find_field(const char *obj_start, const char *obj_end,
   if (!obj_start || !obj_end || obj_start >= obj_end || *obj_start != '{') return false;
   const char *p = v3_json_skip_ws(obj_start + 1, obj_end);
   if (p < obj_end && *p == '}') return false;
+  bool found = false;
   while (p < obj_end) {
     p = v3_json_skip_ws(p, obj_end);
     const char *ks = p;
@@ -457,16 +458,170 @@ static bool v3_json_find_field(const char *obj_start, const char *obj_end,
     const char *ve = v3_json_skip_value(vs, obj_end, 1);
     if (!ve) return false;
     if (v3_json_string_equals(ks, ke, key)) {
+      if (found) return false;
       *val_start = vs;
       *val_end = ve;
-      return true;
+      found = true;
     }
     p = v3_json_skip_ws(ve, obj_end);
-    if (p >= obj_end || *p == '}') return false;
+    if (p >= obj_end) return false;
+    if (*p == '}') return found;
     if (*p != ',') return false;
     p++;
   }
   return false;
+}
+
+typedef struct { const char *s; const char *e; } v3_json_span;
+
+static bool v3_json_field(v3_json_span obj, const char *key, v3_json_span *value) {
+  return v3_json_find_field(obj.s, obj.e, key, &value->s, &value->e);
+}
+
+static bool v3_json_same_span(v3_json_span a, v3_json_span b) {
+  return a.e - a.s == b.e - b.s && memcmp(a.s, b.s, (size_t)(a.e - a.s)) == 0;
+}
+
+static int v3_json_string_order(v3_json_span a, v3_json_span b) {
+  const size_t na = (size_t)(a.e - a.s - 2), nb = (size_t)(b.e - b.s - 2);
+  const int order = memcmp(a.s + 1, b.s + 1, na < nb ? na : nb);
+  return order != 0 ? order : (na > nb) - (na < nb);
+}
+
+static bool v3_json_same_field(v3_json_span a, const char *ak, v3_json_span b, const char *bk) {
+  v3_json_span x, y;
+  return v3_json_field(a, ak, &x) && v3_json_field(b, bk, &y) && v3_json_same_span(x, y);
+}
+
+static bool v3_json_field_uint(v3_json_span obj, const char *key, uint64_t *out) {
+  v3_json_span value;
+  return v3_json_field(obj, key, &value) && v3_json_parse_uint64(value.s, value.e, out);
+}
+
+static bool v3_json_plain_nonempty(v3_json_span value) {
+  return value.e - value.s > 2 && *value.s == '"' && *(value.e - 1) == '"' &&
+      memchr(value.s + 1, '\\', (size_t)(value.e - value.s - 2)) == NULL;
+}
+
+static bool v3_json_digest(v3_json_span value) {
+  if (value.e - value.s != 73 || memcmp(value.s, "\"sha256:", 8) != 0 || *(value.e - 1) != '"') return false;
+  for (const char *p = value.s + 8; p < value.e - 1; p++) {
+    if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'))) return false;
+  }
+  return true;
+}
+
+/* The enclosing JSON is already syntax-checked; walk its array values in order. */
+static bool v3_json_array_item(const char **cursor, const char *end, v3_json_span *item) {
+  const char *p = v3_json_skip_ws(*cursor, end);
+  if (p >= end || *p == ']') return false;
+  item->s = p;
+  item->e = v3_json_skip_value(p, end, 1);
+  if (!item->e) return false;
+  p = v3_json_skip_ws(item->e, end);
+  if (p >= end || (*p != ',' && *p != ']')) return false;
+  *cursor = *p == ',' ? p + 1 : p;
+  return true;
+}
+
+static int v3_json_digest_cmp(const void *a, const void *b) {
+  return memcmp(((const v3_json_span *)a)->s, ((const v3_json_span *)b)->s, 73);
+}
+
+static bool v3_json_validate_path(v3_json_span path, v3_json_span record,
+    v3_json_span root_vertex, uint64_t root_output) {
+  v3_json_span source_vertex, edges;
+  uint64_t source_output;
+  if (*path.s != '{' ||
+      !v3_json_same_field(path, "name", record, "name") ||
+      !v3_json_same_field(path, "generation", record, "generation") ||
+      !v3_json_same_field(path, "contextIdentity", record, "contextIdentity") ||
+      !v3_json_same_field(path, "snapshotId", record, "snapshotId") ||
+      !v3_json_same_field(path, "treeDigest", record, "treeDigest") ||
+      !v3_json_same_field(path, "sourceVertexDigest", record, "vertexDigest") ||
+      !v3_json_same_field(path, "sourceOutputIndex", record, "vertexOutputIndex") ||
+      !v3_json_field(path, "sourceVertexDigest", &source_vertex) ||
+      !v3_json_field_uint(path, "sourceOutputIndex", &source_output) ||
+      !v3_json_field(path, "edges", &edges)) return false;
+  if (edges.e - edges.s == 4 && memcmp(edges.s, "null", 4) == 0) {
+    return v3_json_same_span(root_vertex, source_vertex) && root_output == source_output;
+  }
+  if (*edges.s != '[') return false;
+  /* Each edge contains a full child digest, so this bounds allocation by payload size. */
+  const size_t capacity = (size_t)(edges.e - edges.s) / 73 + 1;
+  v3_json_span *visited = malloc(capacity * sizeof(*visited));
+  if (!visited) return false;
+  size_t count = 1;
+  visited[0] = root_vertex;
+  v3_json_span parent = root_vertex, edge;
+  uint64_t output = root_output;
+  bool valid = true;
+  const char *cursor = edges.s + 1;
+  while (v3_json_array_item(&cursor, edges.e, &edge)) {
+    v3_json_span edge_parent, child;
+    uint64_t parent_output, input_index, child_output;
+    if (*edge.s != '{' || count >= capacity ||
+        !v3_json_field(edge, "parentVertexDigest", &edge_parent) || !v3_json_same_span(edge_parent, parent) ||
+        !v3_json_field_uint(edge, "parentOutputIndex", &parent_output) || parent_output != output ||
+        !v3_json_field_uint(edge, "parentInputIndex", &input_index) || input_index > INT64_MAX ||
+        !v3_json_field(edge, "childVertexDigest", &child) || !v3_json_digest(child) ||
+        !v3_json_field_uint(edge, "childOutputIndex", &child_output) || child_output > INT64_MAX) {
+      valid = false;
+      break;
+    }
+    visited[count++] = child;
+    parent = child;
+    output = child_output;
+  }
+  valid = valid && v3_json_skip_ws(cursor, edges.e) == edges.e - 1 &&
+      v3_json_same_span(parent, source_vertex) && output == source_output;
+  if (valid) {
+    qsort(visited, count, sizeof(*visited), v3_json_digest_cmp);
+    for (size_t i = 1; i < count; i++) {
+      if (v3_json_same_span(visited[i - 1], visited[i])) { valid = false; break; }
+    }
+  }
+  free(visited);
+  return valid;
+}
+
+static bool v3_json_validate_roots(v3_json_span roots, const char *worker_id,
+    const v3_json_span records[VIRKI_OWNER_CONTEXT_COUNT]) {
+  if (*roots.s != '[') return false;
+  size_t root_count = 0;
+  const char *cursor = roots.s + 1;
+  v3_json_span root;
+  v3_json_span previous_ref = {0}, previous_vertex = {0};
+  uint64_t previous_output = 0;
+  while (v3_json_array_item(&cursor, roots.e, &root)) {
+    v3_json_span worker, ref, vertex, paths, path;
+    uint64_t output;
+    if (*root.s != '{' ||
+        !v3_json_field(root, "workerId", &worker) || !v3_json_string_equals(worker.s, worker.e, worker_id) ||
+        !v3_json_field(root, "refId", &ref) || !v3_json_plain_nonempty(ref) ||
+        !v3_json_field(root, "vertexDigest", &vertex) || !v3_json_digest(vertex) ||
+        !v3_json_field_uint(root, "outputIndex", &output) || output > INT64_MAX ||
+        !v3_json_field(root, "contextPaths", &paths) || *paths.s != '[') return false;
+    if (root_count != 0) {
+      const int ref_order = v3_json_string_order(previous_ref, ref);
+      const int vertex_order = v3_json_string_order(previous_vertex, vertex);
+      if (ref_order > 0 || (ref_order == 0 && (vertex_order > 0 ||
+          (vertex_order == 0 && previous_output >= output)))) return false;
+    }
+    previous_ref = ref;
+    previous_vertex = vertex;
+    previous_output = output;
+    const char *path_cursor = paths.s + 1;
+    size_t path_count = 0;
+    while (v3_json_array_item(&path_cursor, paths.e, &path)) {
+      if (path_count >= VIRKI_OWNER_CONTEXT_COUNT ||
+          !v3_json_validate_path(path, records[path_count], vertex, output)) return false;
+      path_count++;
+    }
+    if (path_count != VIRKI_OWNER_CONTEXT_COUNT || v3_json_skip_ws(path_cursor, paths.e) != paths.e - 1) return false;
+    root_count++;
+  }
+  return root_count > 0 && v3_json_skip_ws(cursor, roots.e) == roots.e - 1;
 }
 
 static bool v3_json_verify_proof_digest(const char *obj_start, const char *obj_end,
@@ -501,6 +656,8 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
   if (!obj_end || v3_json_skip_ws(obj_end, end) != end) return false;
 
   const char *vs = NULL, *ve = NULL;
+  if (!v3_json_find_field(p, obj_end, "schemaVersion", &vs, &ve) || !v3_json_uint64_equals(vs, ve, 2) ||
+      !v3_json_find_field(p, obj_end, "epoch", &vs, &ve) || !v3_json_uint64_equals(vs, ve, approval->epoch)) return false;
   /* Validate required "binding" object. */
   const char *bind_s = NULL, *bind_e = NULL;
   if (!v3_json_find_field(p, obj_end, "binding", &bind_s, &bind_e) || *bind_s != '{') return false;
@@ -512,6 +669,11 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
   snprintf(exp_digest, sizeof(exp_digest), "sha256:%s", approval->exporter_intent_sha256);
   if (!v3_json_find_field(exp_s, exp_e, "attributesDigest", &vs, &ve) ||
       !v3_json_string_equals(vs, ve, exp_digest)) return false;
+  if (!v3_json_find_field(exp_s, exp_e, "schemaVersion", &vs, &ve) || !v3_json_uint64_equals(vs, ve, 2) ||
+      !v3_json_find_field(exp_s, exp_e, "id", &vs, &ve) || !v3_json_uint64_equals(vs, ve, 0) ||
+      !v3_json_find_field(exp_s, exp_e, "type", &vs, &ve) || !v3_json_string_equals(vs, ve, "image") ||
+      !v3_json_find_field(exp_s, exp_e, "destination", &vs, &ve) ||
+      !v3_json_plain_nonempty((v3_json_span){vs, ve}) || v3_json_string_equals(vs, ve, "*")) return false;
   if (!v3_json_find_field(bind_s, bind_e, "jobId", &vs, &ve) ||
       !v3_json_string_equals(vs, ve, approval->job_id) ||
       !v3_json_find_field(bind_s, bind_e, "role", &vs, &ve) ||
@@ -523,6 +685,7 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
   const char *ctxs_s = NULL, *ctxs_e = NULL;
   if (!v3_json_find_field(p, obj_end, "contexts", &ctxs_s, &ctxs_e) || *ctxs_s != '[') return false;
   bool seen_ctx[VIRKI_OWNER_CONTEXT_COUNT] = {false, false, false, false};
+  v3_json_span records[VIRKI_OWNER_CONTEXT_COUNT];
   size_t ctx_count = 0;
   const char *cp = v3_json_skip_ws(ctxs_s + 1, ctxs_e);
   if (cp >= ctxs_e || *cp == ']') return false;
@@ -537,8 +700,22 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
     }
     if (idx < 0 || seen_ctx[idx]) return false;
     seen_ctx[idx] = true;
+    records[idx] = (v3_json_span){item_s, item_e};
+    uint64_t vertex_output;
     if (!v3_json_find_field(item_s, item_e, "workerId", &vs, &ve) ||
         !v3_json_string_equals(vs, ve, approval->worker_id) ||
+        !v3_json_find_field(item_s, item_e, "sessionId", &vs, &ve) ||
+        !v3_json_string_equals(vs, ve, approval->contexts[idx].session_id) ||
+        !v3_json_find_field(item_s, item_e, "contextIdentity", &vs, &ve) ||
+        !v3_json_string_equals(vs, ve, approval->contexts[idx].identity) ||
+        !v3_json_find_field(item_s, item_e, "generation", &vs, &ve) ||
+        !v3_json_string_equals(vs, ve, approval->nonce) ||
+        !v3_json_find_field(item_s, item_e, "snapshotId", &vs, &ve) ||
+        !v3_json_plain_nonempty((v3_json_span){vs, ve}) ||
+        !v3_json_find_field(item_s, item_e, "vertexDigest", &vs, &ve) || !v3_json_digest((v3_json_span){vs, ve}) ||
+        !v3_json_field_uint(records[idx], "vertexOutputIndex", &vertex_output) || vertex_output > INT64_MAX ||
+        !v3_json_find_field(item_s, item_e, "treeDigestSchema", &vs, &ve) ||
+        !v3_json_string_equals(vs, ve, "buildkit-worker-local-context-v2") ||
         !v3_json_find_field(item_s, item_e, "treeDigest", &vs, &ve) ||
         !v3_json_string_equals(vs, ve, approval->contexts[idx].tree_digest) ||
         !v3_json_find_field(item_s, item_e, "streamDigest", &vs, &ve) ||
@@ -565,7 +742,12 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
       !v3_json_find_field(img_s, img_e, "digest", &vs, &ve) ||
       !v3_json_string_equals(vs, ve, approval->output_image_id) ||
       !v3_json_find_field(img_s, img_e, "size", &vs, &ve) ||
-      !v3_json_parse_uint64(vs, ve, &img_size) || img_size == 0) return false;
+      !v3_json_parse_uint64(vs, ve, &img_size) || img_size == 0 || img_size > INT64_MAX ||
+      !v3_json_find_field(img_s, img_e, "mediaType", &vs, &ve) ||
+      !(v3_json_string_equals(vs, ve, "application/vnd.oci.image.manifest.v1+json") ||
+        v3_json_string_equals(vs, ve, "application/vnd.oci.image.index.v1+json") ||
+        v3_json_string_equals(vs, ve, "application/vnd.docker.distribution.manifest.v2+json") ||
+        v3_json_string_equals(vs, ve, "application/vnd.docker.distribution.manifest.list.v2+json"))) return false;
 
   const char *cau_s = NULL, *cau_e = NULL;
   if (!v3_json_find_field(out_s, out_e, "causality", &cau_s, &cau_e) || *cau_s != '{' ||
@@ -575,7 +757,8 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
           header->causality_proof_sha256)) return false;
   const char *roots_s = NULL, *roots_e = NULL;
   if (!v3_json_find_field(cau_s, cau_e, "roots", &roots_s, &roots_e) ||
-      *roots_s != '[' || v3_json_skip_ws(roots_s + 1, roots_e) >= roots_e - 1) return false;
+      !v3_json_same_field((v3_json_span){cau_s, cau_e}, "exporter", (v3_json_span){bind_s, bind_e}, "exporter") ||
+      !v3_json_validate_roots((v3_json_span){roots_s, roots_e}, approval->worker_id, records)) return false;
 
   const char *oci_s = NULL, *oci_e = NULL;
   if (!v3_json_find_field(out_s, out_e, "ociDag", &oci_s, &oci_e) || *oci_s != '{' ||
@@ -586,7 +769,26 @@ static bool v3_validate_evidence_payload(const char *payload, size_t len,
   const char *root_s = NULL, *root_e = NULL;
   if (!v3_json_find_field(oci_s, oci_e, "root", &root_s, &root_e) || *root_s != '{' ||
       !v3_json_find_field(root_s, root_e, "digest", &vs, &ve) ||
-      !v3_json_string_equals(vs, ve, approval->output_image_id)) return false;
+      !v3_json_string_equals(vs, ve, approval->output_image_id) ||
+      !v3_json_same_field((v3_json_span){root_s, root_e}, "size", (v3_json_span){img_s, img_e}, "size") ||
+      !v3_json_same_field((v3_json_span){root_s, root_e}, "mediaType", (v3_json_span){img_s, img_e}, "mediaType")) return false;
+  const char *nodes_s = NULL, *nodes_e = NULL;
+  if (!v3_json_find_field(oci_s, oci_e, "nodes", &nodes_s, &nodes_e) || *nodes_s != '[') return false;
+  const char *node_cursor = nodes_s + 1;
+  v3_json_span node;
+  size_t root_nodes = 0;
+  while (v3_json_array_item(&node_cursor, nodes_e, &node)) {
+    v3_json_span digest, media, role;
+    uint64_t size;
+    if (*node.s != '{' || !v3_json_field(node, "digest", &digest) || !v3_json_digest(digest) ||
+        !v3_json_field(node, "mediaType", &media) || !v3_json_plain_nonempty(media) ||
+        !v3_json_field_uint(node, "size", &size) || size > INT64_MAX) return false;
+    if (v3_json_field(node, "role", &role) && v3_json_string_equals(role.s, role.e, "root")) {
+      if (++root_nodes != 1 || !v3_json_string_equals(digest.s, digest.e, approval->output_image_id) ||
+          !v3_json_same_field(node, "mediaType", (v3_json_span){root_s, root_e}, "mediaType") || size != img_size) return false;
+    }
+  }
+  if (root_nodes != 1 || v3_json_skip_ws(node_cursor, nodes_e) != nodes_e - 1) return false;
 
   /* Validate optional "frontendProof". */
   const char *fe_s = NULL, *fe_e = NULL;
@@ -665,6 +867,88 @@ static bool v3_validate_evidence_fd(int fd,
   return true;
 }
 
+static bool v3_stream_read(int fd, uint64_t length, uint64_t *offset, void *out, size_t size) {
+  if (*offset > length || (uint64_t)size > length - *offset ||
+      !v3_read_exact_at(fd, out, size, (off_t)*offset)) return false;
+  *offset += (uint64_t)size;
+  return true;
+}
+
+static bool v3_stream_uint(int fd, uint64_t length, uint64_t *offset, uint64_t *value) {
+  uint8_t bytes[8];
+  if (!v3_stream_read(fd, length, offset, bytes, sizeof(bytes))) return false;
+  *value = 0;
+  for (size_t i = 0; i < sizeof(bytes); i++) *value = (*value << 8) | bytes[i];
+  return true;
+}
+
+static bool v3_stream_hash_bytes(int fd, uint64_t length, uint64_t *offset,
+    uint64_t size, virki_abi_sha256_ctx *hash, bool text) {
+  uint8_t buf[16384];
+  if (*offset > length || size > length - *offset) return false;
+  while (size > 0) {
+    const size_t chunk = size > sizeof(buf) ? sizeof(buf) : (size_t)size;
+    if (!v3_stream_read(fd, length, offset, buf, chunk) || (text && memchr(buf, '\0', chunk))) {
+      explicit_wipe(buf, sizeof(buf));
+      return false;
+    }
+    virki_abi_sha256_update(hash, buf, chunk);
+    size -= chunk;
+  }
+  explicit_wipe(buf, sizeof(buf));
+  return true;
+}
+
+/* Recompute the canonical tree hash from the sealed linear stream, without
+ * materializing its paths or trusting a separately supplied tree digest. */
+static bool v3_verify_context_stream_tree(int fd, uint64_t length,
+    const char *name, const char *expected_tree) {
+  static const char prefix[] = "virki-context-stream-v1\0";
+  uint8_t actual_prefix[sizeof(prefix) - 1];
+  char actual_name[32];
+  uint64_t offset = 0, name_len;
+  if (!v3_stream_read(fd, length, &offset, actual_prefix, sizeof(actual_prefix)) ||
+      memcmp(actual_prefix, prefix, sizeof(actual_prefix)) != 0 ||
+      !v3_stream_uint(fd, length, &offset, &name_len) || name_len != strlen(name) || name_len >= sizeof(actual_name) ||
+      !v3_stream_read(fd, length, &offset, actual_name, (size_t)name_len) ||
+      memcmp(actual_name, name, (size_t)name_len) != 0) return false;
+
+  virki_abi_sha256_ctx tree;
+  virki_abi_sha256_init(&tree);
+  virki_abi_sha256_update(&tree, (const uint8_t *)VIRKI_BUILDKIT_TREE_PREFIX_V2, VIRKI_BUILDKIT_TREE_PREFIX_V2_LEN);
+  while (offset < length) {
+    uint8_t kind;
+    uint64_t path_len, mode, size;
+    if (!v3_stream_read(fd, length, &offset, &kind, 1) || (kind != 'D' && kind != 'L' && kind != 'F') ||
+        !v3_stream_uint(fd, length, &offset, &path_len) || path_len == 0) return false;
+    virki_abi_sha256_update(&tree, &kind, 1);
+    virki_abi_write_uint64(&tree, path_len);
+    if (!v3_stream_hash_bytes(fd, length, &offset, path_len, &tree, true) ||
+        !v3_stream_uint(fd, length, &offset, &mode) || mode > 07777) return false;
+    virki_abi_write_uint64(&tree, mode);
+    if (kind == 'D') continue;
+    if (!v3_stream_uint(fd, length, &offset, &size)) return false;
+    virki_abi_write_uint64(&tree, size);
+    if (kind == 'L') {
+      if (size == 0 || !v3_stream_hash_bytes(fd, length, &offset, size, &tree, true)) return false;
+    } else {
+      virki_abi_sha256_ctx content;
+      uint8_t content_digest[32];
+      virki_abi_sha256_init(&content);
+      if (!v3_stream_hash_bytes(fd, length, &offset, size, &content, false)) return false;
+      virki_abi_sha256_final(&content, content_digest);
+      virki_abi_sha256_update(&tree, content_digest, sizeof(content_digest));
+      explicit_wipe(content_digest, sizeof(content_digest));
+    }
+  }
+  uint8_t digest[32];
+  char hex[65];
+  virki_abi_sha256_final(&tree, digest);
+  bytes_to_hex(digest, sizeof(digest), hex);
+  explicit_wipe(digest, sizeof(digest));
+  return strncmp(expected_tree, "sha256:", 7) == 0 && strcmp(expected_tree + 7, hex) == 0;
+}
+
 static int v3_validate_context_fds(const int fds[VIRKI_OWNER_MAX_FD_COUNT],
     const virki_owner_request_frame_t *req, struct stat stats[6],
     char observed[VIRKI_OWNER_CONTEXT_COUNT][65]) {
@@ -673,6 +957,8 @@ static int v3_validate_context_fds(const int fds[VIRKI_OWNER_MAX_FD_COUNT],
     if (!v3_validate_sealed_payload_fd(fds[i], 1, VIRKI_OWNER_MAX_PAYLOAD_BYTES,
         req->expected_stream_lengths[i], &stats[i], prefixed)) return VIRKI_OWNER_STATUS_ERR_FD_INVALID;
     if (strcmp(prefixed, req->expected_stream_digests[i]) != 0) return VIRKI_OWNER_STATUS_ERR_STREAM_MISMATCH;
+    if (!v3_verify_context_stream_tree(fds[i], req->expected_stream_lengths[i],
+        VIRKI_OWNER_CONTEXT_NAMES[i], req->expected_tree_digests[i])) return VIRKI_OWNER_STATUS_ERR_TREE_MISMATCH;
     memcpy(observed[i], prefixed + 7, 65);
     for (size_t j = 0; j < i; j++) {
       if (stats[i].st_dev == stats[j].st_dev && stats[i].st_ino == stats[j].st_ino)

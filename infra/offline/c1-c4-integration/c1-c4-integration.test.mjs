@@ -15,6 +15,7 @@ import {
   computeBoundContractDigest,
   evaluateC1ToC4IntegrationCandidate,
   initAnchoredAuthState,
+  loadAndVerifyAuthState,
   recoverAuthStateWithEpochFence,
   sha256Hex,
 } from "./c1-c4-contract.mjs";
@@ -161,6 +162,28 @@ test("C1->C4 integration contract accepts valid synthetic runtime and migrator c
   }
 });
 
+test("C1->C4 state serializes independent writers and retains its Linux lock inode", { skip: process.platform !== "linux" }, async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-writers-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const statePath = path.join(tmpDir, "state.json");
+  initAnchoredAuthState(statePath, "a".repeat(40));
+  const runWriter = (nonce) => new Promise((resolve, reject) => {
+    const script = 'import { appendAuthStateTransition } from "./c1-c4-contract.mjs"; appendAuthStateTransition(process.argv[1], { epoch: 1, nonce: process.argv[2], contractSha256: "b".repeat(64), status: "PREPARED" });';
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script, statePath, nonce], { cwd: THIS_DIR, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`writer exited: ${code}/${signal}`)));
+  });
+  await runWriter("1".repeat(32));
+  const lockBefore = fs.statSync(`${statePath}.lock`);
+  await Promise.all(["2", "3", "4", "5"].map((n) => runWriter(n.repeat(32))));
+  const state = loadAndVerifyAuthState(statePath);
+  assert.equal(state.sequenceFloor, 5);
+  assert.equal(new Set(state.entries.map((entry) => entry.nonce)).size, 5);
+  const lockAfter = fs.statSync(`${statePath}.lock`);
+  assert.equal(lockAfter.ino, lockBefore.ino);
+  assert.equal(lockAfter.dev, lockBefore.dev);
+});
+
 test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signature, state, rollback, and custody violations", (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-neg-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
@@ -263,30 +286,20 @@ test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signatur
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxAbort), /no active PREPARED/);
 
     const fxFence = buildSyntheticFixture(tmpDir);
-    fs.writeFileSync(`${fxFence.stateFilePath}.lock`, "999999\n", { mode: 0o600 });
-    const past = new Date(Date.now() - 1000);
-    fs.writeFileSync(`${fxFence.stateFilePath}.lock.reclaim`, "999998\n", { mode: 0o600 });
-    fs.utimesSync(`${fxFence.stateFilePath}.lock.reclaim`, past, past);
     const fenced = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
     assert.equal(fenced.currentEpoch, 2);
-    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), false);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), process.platform === "linux");
     assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock.reclaim`), false);
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxFence), /does not match active state epoch/);
 
-    // Empty abandoned .lock.reclaim (crash between O_CREAT and writeSync) also recovers cleanly.
-    fs.writeFileSync(`${fxFence.stateFilePath}.lock`, "999999\n", { mode: 0o600 });
-    fs.writeFileSync(`${fxFence.stateFilePath}.lock.reclaim`, "", { mode: 0o600 });
-    fs.utimesSync(`${fxFence.stateFilePath}.lock.reclaim`, past, past);
+    // Repeated recovery uses the same lock across epochs.
     const fenced2 = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
     assert.equal(fenced2.currentEpoch, 3);
     assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock.reclaim`), false);
 
-    // Empty abandoned primary .lock (crash between O_CREAT and writeSync) also recovers cleanly.
-    fs.writeFileSync(`${fxFence.stateFilePath}.lock`, "", { mode: 0o600 });
-    fs.utimesSync(`${fxFence.stateFilePath}.lock`, past, past);
     const fenced3 = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
     assert.equal(fenced3.currentEpoch, 4);
-    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), false);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), process.platform === "linux");
   }
 
   // 6. Anti-rollback witness regression & fork detection even when sequenceFloor > minSequence

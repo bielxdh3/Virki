@@ -1,6 +1,7 @@
 package c1c4bridge
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -44,7 +45,7 @@ func testV3ApprovalInput(t *testing.T, publicKey ed25519.PublicKey) (V3ApprovalI
 	input.IgnoreSource = "none"
 	streams := make([][]byte, ContextCount)
 	for i, name := range CanonicalContextNames {
-		data := []byte(fmt.Sprintf("sealed-context-%s-v3", name))
+		data, treeDigest := testV3CanonicalStream(name)
 		streams[i] = data
 		sum := sha256.Sum256(data)
 		ctx := &input.Contexts[i]
@@ -57,7 +58,7 @@ func testV3ApprovalInput(t *testing.T, publicKey ed25519.PublicKey) (V3ApprovalI
 		if err := fixedString(ctx.Identity[:], fmt.Sprintf("uid:%d:gid:%d", input.WorkerUID, input.WorkerGID)); err != nil {
 			t.Fatal(err)
 		}
-		if err := fixedString(ctx.TreeDigest[:], "sha256:"+strings.Repeat(fmt.Sprintf("%x", i+1), 64)[:64]); err != nil {
+		if err := fixedString(ctx.TreeDigest[:], treeDigest); err != nil {
 			t.Fatal(err)
 		}
 		if err := fixedString(ctx.StreamDigest[:], "sha256:"+hex.EncodeToString(sum[:])); err != nil {
@@ -66,6 +67,44 @@ func testV3ApprovalInput(t *testing.T, publicKey ed25519.PublicKey) (V3ApprovalI
 		ctx.StreamLength = uint64(len(data))
 	}
 	return input, streams
+}
+
+// Deterministic directory, file and symlink observations in the BuildKit stream ABI.
+func testV3CanonicalStream(name string) ([]byte, string) {
+	var stream, tree bytes.Buffer
+	stream.WriteString("virki-context-stream-v1\x00")
+	tree.WriteString("buildkit-worker-local-context-v2\x00")
+	writeUint := func(b *bytes.Buffer, value uint64) {
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], value)
+		b.Write(encoded[:])
+	}
+	writeSized := func(b *bytes.Buffer, value string) {
+		writeUint(b, uint64(len(value)))
+		b.WriteString(value)
+	}
+	writeSized(&stream, name)
+	content := []byte("DEV fixture for " + name + "\n")
+	for _, b := range []*bytes.Buffer{&stream, &tree} {
+		b.WriteByte('D')
+		writeSized(b, "sub")
+		writeUint(b, 0755)
+		b.WriteByte('F')
+		writeSized(b, "sub/evidence.txt")
+		writeUint(b, 0644)
+		writeUint(b, uint64(len(content)))
+	}
+	stream.Write(content)
+	sum := sha256.Sum256(content)
+	tree.Write(sum[:])
+	for _, b := range []*bytes.Buffer{&stream, &tree} {
+		b.WriteByte('L')
+		writeSized(b, "zz-link")
+		writeUint(b, 0777)
+		writeSized(b, "sub/evidence.txt")
+	}
+	treeSum := sha256.Sum256(tree.Bytes())
+	return stream.Bytes(), "sha256:" + hex.EncodeToString(treeSum[:])
 }
 
 func TestV3BinaryLayoutsAndOwnerApprovalSignature(t *testing.T) {
