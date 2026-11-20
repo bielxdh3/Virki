@@ -324,7 +324,17 @@ test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signatur
     const fenced = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
     assert.equal(fenced.currentEpoch, 2);
     assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), process.platform === "linux");
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock.reclaim`), false);
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxFence), /does not match active state epoch/);
+
+    // Repeated recovery uses the same lock across epochs.
+    const fenced2 = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
+    assert.equal(fenced2.currentEpoch, 3);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock.reclaim`), false);
+
+    const fenced3 = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
+    assert.equal(fenced3.currentEpoch, 4);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), process.platform === "linux");
   }
 
   // 6. Anti-rollback witness regression & fork detection even when sequenceFloor > minSequence

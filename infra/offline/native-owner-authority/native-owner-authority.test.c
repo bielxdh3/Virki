@@ -38,6 +38,13 @@ void randombytes(unsigned char *ptr, unsigned long long length) {
 #include "tweetnacl.h"
 #include "tweetnacl.c"
 
+_Static_assert(sizeof(virki_owner_v3_context_claim_t) == 316,
+    "VROA_V3 context claim ABI drift");
+_Static_assert(sizeof(virki_owner_approval_envelope_v3_t) == 2669,
+    "VROA_V3 approval envelope ABI drift");
+_Static_assert(sizeof(virki_owner_candidate_evidence_v3_t) == 1347,
+    "VROA_V3 evidence header ABI drift");
+
 static void test_key_generation_and_signing_verification(void) {
   uint8_t pk[32];
   uint8_t sk[64];
@@ -85,10 +92,155 @@ static void test_protocol_frame_sizes_and_alignment(void) {
          sizeof(req), sizeof(resp));
 }
 
+static void hash_dfs_dir_entry(virki_abi_sha256_ctx *ctx, const char *rel, uint64_t mode) {
+  const uint8_t tag = 'D';
+  virki_abi_sha256_update(ctx, &tag, 1);
+  virki_abi_write_sized(ctx, (const uint8_t *)rel, strlen(rel));
+  virki_abi_write_uint64(ctx, mode);
+}
+
+static void hash_dfs_file_entry(virki_abi_sha256_ctx *ctx, const char *rel, uint64_t mode, const uint8_t *content, size_t len) {
+  const uint8_t tag = 'F';
+  virki_abi_sha256_update(ctx, &tag, 1);
+  virki_abi_write_sized(ctx, (const uint8_t *)rel, strlen(rel));
+  virki_abi_write_uint64(ctx, mode);
+  virki_abi_write_uint64(ctx, (uint64_t)len);
+  virki_abi_sha256_ctx fctx;
+  virki_abi_sha256_init(&fctx);
+  virki_abi_sha256_update(&fctx, content, len);
+  uint8_t fsha[32];
+  virki_abi_sha256_final(&fctx, fsha);
+  virki_abi_sha256_update(ctx, fsha, 32);
+}
+
+static void test_nested_depth_first_traversal_matches_go(void) {
+  char tmpl[] = "/tmp/virki-abi-dfs-XXXXXX";
+  char *root = mkdtemp(tmpl);
+  assert(root != NULL);
+
+  char dir_a[256], file_ax[256], file_ab[256];
+  snprintf(dir_a, sizeof(dir_a), "%s/a", root);
+  snprintf(file_ax, sizeof(file_ax), "%s/a/x", root);
+  snprintf(file_ab, sizeof(file_ab), "%s/a-b", root);
+  assert(mkdir(dir_a, 0755) == 0);
+  assert(chmod(dir_a, 0755) == 0);
+
+  const uint8_t data_x[] = "x-data";
+  const uint8_t data_ab[] = "ab-data";
+  int fd = open(file_ax, O_WRONLY | O_CREAT | O_EXCL, 0644);
+  assert(fd >= 0);
+  assert(write(fd, data_x, sizeof(data_x) - 1) == (ssize_t)(sizeof(data_x) - 1));
+  close(fd);
+  assert(chmod(file_ax, 0644) == 0);
+
+  fd = open(file_ab, O_WRONLY | O_CREAT | O_EXCL, 0644);
+  assert(fd >= 0);
+  assert(write(fd, data_ab, sizeof(data_ab) - 1) == (ssize_t)(sizeof(data_ab) - 1));
+  close(fd);
+  assert(chmod(file_ab, 0644) == 0);
+
+  virki_buildkit_local_context_observation_t obs;
+  assert(virki_observe_local_context_v2(root, "source", &obs));
+
+  /* Expected order from Go filepath.WalkDir: "a" -> "a/x" -> "a-b". */
+  virki_abi_sha256_ctx expected_ctx;
+  virki_abi_sha256_init(&expected_ctx);
+  virki_abi_sha256_update(&expected_ctx, (const uint8_t *)VIRKI_BUILDKIT_TREE_PREFIX_V2, VIRKI_BUILDKIT_TREE_PREFIX_V2_LEN);
+  hash_dfs_dir_entry(&expected_ctx, "a", 0755);
+  hash_dfs_file_entry(&expected_ctx, "a/x", 0644, data_x, sizeof(data_x) - 1);
+  hash_dfs_file_entry(&expected_ctx, "a-b", 0644, data_ab, sizeof(data_ab) - 1);
+  uint8_t expected_sha[32];
+  virki_abi_sha256_final(&expected_ctx, expected_sha);
+  char expected_digest[73];
+  snprintf(expected_digest, sizeof(expected_digest), "sha256:");
+  for (int i = 0; i < 32; i++) {
+    snprintf(expected_digest + 7 + (size_t)i * 2, 3, "%02x", expected_sha[i]);
+  }
+  assert(strcmp(obs.digest, expected_digest) == 0);
+
+  unlink(file_ax);
+  unlink(file_ab);
+  rmdir(dir_a);
+  rmdir(root);
+  printf("PASS: test_nested_depth_first_traversal_matches_go\n");
+}
+
+static void test_truncated_symlink_target_rejected(void) {
+  char tmpl[] = "/tmp/virki-abi-sym-XXXXXX";
+  char *root = mkdtemp(tmpl);
+  assert(root != NULL);
+
+  char long_target[1042];
+  memset(long_target, 'x', sizeof(long_target) - 1);
+  long_target[sizeof(long_target) - 1] = '\0';
+
+  char link_path[256];
+  snprintf(link_path, sizeof(link_path), "%s/longlink", root);
+  assert(symlink(long_target, link_path) == 0);
+
+  virki_buildkit_local_context_observation_t obs;
+  assert(!virki_observe_local_context_v2(root, "source", &obs));
+
+  unlink(link_path);
+  rmdir(root);
+  printf("PASS: test_truncated_symlink_target_rejected\n");
+}
+
+static void test_truncated_rel_path_rejected(void) {
+  char tmpl[] = "/tmp/virki-abi-path-XXXXXX";
+  char *root = mkdtemp(tmpl);
+  assert(root != NULL);
+
+  char seg[201];
+  char dir_paths[4][1024];
+  const char chars[4] = {'a', 'b', 'c', 'd'};
+  for (int i = 0; i < 4; i++) {
+    memset(seg, chars[i], 200);
+    seg[200] = '\0';
+    snprintf(dir_paths[i], sizeof(dir_paths[i]), "%s/%s",
+             i == 0 ? root : dir_paths[i - 1], seg);
+    assert(mkdir(dir_paths[i], 0700) == 0);
+  }
+
+  /* 4 * 201 = 804 bytes prefix; 219-byte leaf gives 1,023-byte rel, 220 gives 1,024 */
+  char leaf1023[220];
+  memset(leaf1023, 'e', 219);
+  leaf1023[219] = '\0';
+  char leaf1024[221];
+  memset(leaf1024, 'e', 220);
+  leaf1024[220] = '\0';
+
+  char file1023[1280], file1024[1280];
+  snprintf(file1023, sizeof(file1023), "%s/%s", dir_paths[3], leaf1023);
+  snprintf(file1024, sizeof(file1024), "%s/%s", dir_paths[3], leaf1024);
+
+  FILE *f1 = fopen(file1023, "wb");
+  assert(f1 != NULL);
+  fwrite("ok", 1, 2, f1);
+  fclose(f1);
+
+  FILE *f2 = fopen(file1024, "wb");
+  assert(f2 != NULL);
+  fwrite("over", 1, 4, f2);
+  fclose(f2);
+
+  virki_buildkit_local_context_observation_t obs;
+  assert(!virki_observe_local_context_v2(root, "source", &obs));
+
+  unlink(file1024);
+  unlink(file1023);
+  for (int i = 3; i >= 0; i--) rmdir(dir_paths[i]);
+  rmdir(root);
+  printf("PASS: test_truncated_rel_path_rejected\n");
+}
+
 int main(void) {
   printf("=== Running Owner Authority Unit Tests ===\n");
   test_key_generation_and_signing_verification();
   test_protocol_frame_sizes_and_alignment();
+  test_nested_depth_first_traversal_matches_go();
+  test_truncated_symlink_target_rejected();
+  test_truncated_rel_path_rejected();
   printf("=== All Owner Authority Unit Tests PASSED ===\n");
   return 0;
 }

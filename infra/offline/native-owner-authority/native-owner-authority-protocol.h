@@ -6,8 +6,14 @@
 
 #define VIRKI_OWNER_PROTOCOL_VERSION 2
 #define VIRKI_OWNER_PROTOCOL_MAGIC "VROA_V2\0"
+#define VIRKI_OWNER_PROTOCOL_VERSION_V3 3
+#define VIRKI_OWNER_PROTOCOL_MAGIC_V3 "VROA_V3\0"
 #define VIRKI_OWNER_CONTEXT_COUNT 4
+#define VIRKI_OWNER_MAX_FD_COUNT 8
 #define VIRKI_OWNER_MAX_PAYLOAD_BYTES (64 * 1024 * 1024) /* 64 MB max context size */
+#define VIRKI_OWNER_V3_EVIDENCE_MAX_BYTES (4 * 1024 * 1024)
+#define VIRKI_OWNER_V3_OCI_MAX_BYTES (64U * 1024U * 1024U)
+#define VIRKI_OWNER_V3_APPROVAL_DOMAIN "VIRKI_OFFLINE_OWNER_APPROVAL_V3"
 
 /* Standard context names in canonical order */
 static const char *const VIRKI_OWNER_CONTEXT_NAMES[VIRKI_OWNER_CONTEXT_COUNT] = {
@@ -23,6 +29,9 @@ enum virki_owner_cmd {
   VIRKI_OWNER_CMD_SCOPE_BEGIN  = 0x02,
   VIRKI_OWNER_CMD_SIGN_ACK     = 0x03,
   VIRKI_OWNER_CMD_SCOPE_ABORT  = 0x04,
+  VIRKI_OWNER_CMD_V3_BEGIN = 0x11,
+  VIRKI_OWNER_CMD_V3_VERIFY_CANDIDATE = 0x12,
+  VIRKI_OWNER_CMD_V3_ABORT = 0x13,
 };
 
 /* Response status codes */
@@ -84,5 +93,74 @@ typedef struct {
   uint32_t ack_json_len;         /* length of canonical ACK JSON payload */
   char ack_json[4096];           /* canonical ACK JSON payload */
 } __attribute__((packed)) virki_owner_response_frame_t;
+
+/* VROA_V3 is a distinct, non-authorizing candidate-verification protocol.
+ * It reuses the fixed request/response frame layout above but carries a
+ * signed, fixed-layout owner approval envelope and a sealed evidence bundle.
+ * The V3 verifier may acknowledge a DEV candidate; it never enables SIGN_ACK
+ * or release authorization. */
+typedef struct {
+  char name[32];
+  char session_id[65];
+  char identity[65];
+  char tree_digest[73];
+  char stream_digest[73];
+  uint64_t stream_length;
+} __attribute__((packed)) virki_owner_v3_context_claim_t;
+
+typedef struct {
+  char magic[8];
+  uint32_t version;
+  uint64_t epoch;
+  uint64_t expires_unix;
+  char key_id[65];
+  char public_key_pin_sha256[65];
+  char approval_id[65];
+  char approval_serial[65];
+  char job_id[65];
+  char role[16];
+  char nonce[33];
+  char source_commit[41];
+  char build_plan_sha256[65];
+  char executable_policy_sha256[65];
+  char exporter_intent_sha256[65];
+  char output_image_id[73];
+  char file_sync_manifest_sha256[65];
+  char ignore_policy_sha256[65];
+  char worker_id[65];
+  uint32_t worker_uid;
+  uint32_t worker_gid;
+  char dockerfile_sha256[65];
+  char ignore_path[257];
+  char ignore_sha256[65];
+  uint32_t ignore_present;
+  char ignore_source[32];
+  uint32_t context_count;
+  virki_owner_v3_context_claim_t contexts[VIRKI_OWNER_CONTEXT_COUNT];
+  uint8_t signature[64];
+} __attribute__((packed)) virki_owner_approval_envelope_v3_t;
+
+typedef struct {
+  char magic[8];
+  uint32_t version;
+  char approval_envelope_sha256[65];
+  char job_id[65];
+  char role[16];
+  char nonce[33];
+  char worker_id[65];
+  char output_image_id[73];
+  char exporter_intent_sha256[65];
+  char file_sync_manifest_sha256[65];
+  char causality_proof_sha256[65];
+  char oci_dag_sha256[65];
+  char frontend_proof_sha256[65];
+  char context_tree_digests[VIRKI_OWNER_CONTEXT_COUNT][73];
+  char context_stream_digests[VIRKI_OWNER_CONTEXT_COUNT][73];
+  uint64_t context_stream_lengths[VIRKI_OWNER_CONTEXT_COUNT];
+  uint32_t deploy_authorized;
+  uint32_t worker_receipt_pair_admitted;
+  uint32_t evidence_payload_bytes;
+  char evidence_payload_sha256[65];
+} __attribute__((packed)) virki_owner_candidate_evidence_v3_t;
 
 #endif

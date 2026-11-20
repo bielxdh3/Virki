@@ -371,30 +371,37 @@ test("Owner Authority - full lifecycle, same-UID refusal, durable nonce reservat
     assert.equal(runClient("status").SEQ, beforeSign.SEQ,
       "refused SIGN_ACK must not consume a COMMIT/ledger sequence");
 
+    const denySignWithStatus = (result, expectedStatus, label) => {
+      assert.equal(result.STATUS, expectedStatus, `${label}: expected status ${expectedStatus}`);
+      assert.equal(result.SIG_B64, "", `${label}: no Ed25519 signature`);
+      assert.equal(result.ACK_SHA, "", `${label}: no signed ACK digest`);
+      assert.equal(result.ACK_JSON, undefined, `${label}: no ACK payload`);
+    };
+
     // 5. Adversarial FD Tests:
     // A: Missing descriptor seal
     const nonceMissingSeal = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const beginSeal = runClient("begin", nonceMissingSeal, "", activeEpoch);
     const signMissingSeal = runClient("sign-missing-seal", nonceMissingSeal, beginSeal.SCOPE_TOKEN, activeEpoch);
-    denySign(signMissingSeal, "missing FD seal");
+    denySignWithStatus(signMissingSeal, "12", "missing FD seal");
 
     // B: Duplicate descriptor (aliased inode)
     const nonceDup = "cccccccccccccccccccccccccccccccc";
     const beginDup = runClient("begin", nonceDup, "", activeEpoch);
     const signDup = runClient("sign-duplicate-fd", nonceDup, beginDup.SCOPE_TOKEN, activeEpoch);
-    denySign(signDup, "duplicate descriptor");
+    denySignWithStatus(signDup, "12", "duplicate descriptor");
 
     // C: Stream digest corruption
     const nonceCorrupt = "dddddddddddddddddddddddddddddddd";
     const beginCorrupt = runClient("begin", nonceCorrupt, "", activeEpoch);
     const signCorrupt = runClient("sign-corrupt-stream", nonceCorrupt, beginCorrupt.SCOPE_TOKEN, activeEpoch);
-    denySign(signCorrupt, "corrupted stream digest");
+    denySignWithStatus(signCorrupt, "13", "corrupted stream digest");
 
     // D: Forged image ID
     const nonceBadImg = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const beginBadImg = runClient("begin", nonceBadImg, "", activeEpoch);
     const signBadImg = runClient("sign-bad-image", nonceBadImg, beginBadImg.SCOPE_TOKEN, activeEpoch);
-    denySign(signBadImg, "forged output image");
+    denySignWithStatus(signBadImg, "19", "forged output image");
 
     // 6. Test Scope Abort
     const nonceAbort = "ffffffffffffffffffffffffffffffff";
@@ -426,9 +433,9 @@ test("Owner Authority - full lifecycle, same-UID refusal, durable nonce reservat
     const newEpoch = Number(restartStatus.EPOCH);
     assert.equal(newEpoch, activeEpoch + 1, "Epoch must increment on restart");
 
-    // Signing-disabled gate dominates even a stale or fabricated epoch.
+    // Stale epoch SIGN_ACK fails epoch check before signing-disabled gate.
     const staleEpochRes = runClient("sign", "99999999999999999999999999999999", "dummy_token", activeEpoch);
-    denySign(staleEpochRes, "stale epoch SIGN_ACK");
+    denySignWithStatus(staleEpochRes, "16", "stale epoch SIGN_ACK");
 
     // Replay of previously committed nonce1 across restart MUST FAIL
     const replayAfterRestart = runClient("begin", nonce1, "", newEpoch);

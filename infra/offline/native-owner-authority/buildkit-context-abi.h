@@ -185,59 +185,108 @@ typedef struct {
   uint8_t file_sha[32];
 } virki_abi_entry_t;
 
-static inline int compare_entries(const void *a, const void *b) {
-  const virki_abi_entry_t *ea = (const virki_abi_entry_t *)a;
-  const virki_abi_entry_t *eb = (const virki_abi_entry_t *)b;
-  return strcmp(ea->rel_path, eb->rel_path);
+static inline int compare_entry_names(const void *a, const void *b) {
+  const char *na = *(const char *const *)a;
+  const char *nb = *(const char *const *)b;
+  return strcmp(na, nb);
 }
 
-/* Recursive traversal collecting entries */
+static inline void free_entry_names(char **names, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    free(names[i]);
+  }
+  free(names);
+}
+
+/* Depth-first traversal sorting each directory's basenames lexically, matching Go filepath.WalkDir. */
 static inline bool collect_tree_entries(const char *root, const char *sub,
                                         virki_abi_entry_t **entries, size_t *count, size_t *cap) {
   char current_dir[2048];
+  int dir_n;
   if (sub && sub[0]) {
-    snprintf(current_dir, sizeof(current_dir), "%s/%s", root, sub);
+    dir_n = snprintf(current_dir, sizeof(current_dir), "%s/%s", root, sub);
   } else {
-    snprintf(current_dir, sizeof(current_dir), "%s", root);
+    dir_n = snprintf(current_dir, sizeof(current_dir), "%s", root);
   }
+  if (dir_n < 0 || (size_t)dir_n >= sizeof(current_dir)) return false;
 
   DIR *d = opendir(current_dir);
   if (!d) return false;
 
+  char **names = NULL;
+  size_t name_count = 0;
+  size_t name_cap = 0;
   struct dirent *de;
   while ((de = readdir(d)) != NULL) {
     if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+    if (name_count >= name_cap) {
+      size_t next_cap = (name_cap == 0) ? 16 : (name_cap * 2);
+      char **next_names = realloc(names, next_cap * sizeof(char *));
+      if (!next_names) {
+        free_entry_names(names, name_count);
+        closedir(d);
+        return false;
+      }
+      names = next_names;
+      name_cap = next_cap;
+    }
+    size_t dlen = strlen(de->d_name);
+    char *copy = malloc(dlen + 1);
+    if (!copy) {
+      free_entry_names(names, name_count);
+      closedir(d);
+      return false;
+    }
+    memcpy(copy, de->d_name, dlen + 1);
+    names[name_count++] = copy;
+  }
+  closedir(d);
 
+  if (name_count > 1) {
+    qsort(names, name_count, sizeof(char *), compare_entry_names);
+  }
+
+  for (size_t i = 0; i < name_count; i++) {
     char rel[1024];
+    int rel_n;
     if (sub && sub[0]) {
-      snprintf(rel, sizeof(rel), "%s/%s", sub, de->d_name);
+      rel_n = snprintf(rel, sizeof(rel), "%s/%s", sub, names[i]);
     } else {
-      snprintf(rel, sizeof(rel), "%s", de->d_name);
+      rel_n = snprintf(rel, sizeof(rel), "%s", names[i]);
+    }
+    if (rel_n < 0 || (size_t)rel_n >= sizeof(rel)) {
+      free_entry_names(names, name_count);
+      return false;
     }
 
     char full[2048];
-    snprintf(full, sizeof(full), "%s/%s", root, rel);
+    int full_n = snprintf(full, sizeof(full), "%s/%s", root, rel);
+    if (full_n < 0 || (size_t)full_n >= sizeof(full)) {
+      free_entry_names(names, name_count);
+      return false;
+    }
 
     struct stat st;
     if (lstat(full, &st) != 0) {
-      closedir(d);
+      free_entry_names(names, name_count);
       return false;
     }
 
     if (*count >= *cap) {
       *cap = (*cap == 0) ? 64 : (*cap * 2);
-      *entries = realloc(*entries, *cap * sizeof(virki_abi_entry_t));
-      if (!*entries) {
-        closedir(d);
+      virki_abi_entry_t *next_entries = realloc(*entries, *cap * sizeof(virki_abi_entry_t));
+      if (!next_entries) {
+        free_entry_names(names, name_count);
         return false;
       }
+      *entries = next_entries;
     }
 
     virki_abi_entry_t *e = &(*entries)[*count];
     memset(e, 0, sizeof(*e));
     size_t rel_len = strlen(rel);
     if (rel_len >= sizeof(e->rel_path)) {
-      closedir(d);
+      free_entry_names(names, name_count);
       return false;
     }
     memcpy(e->rel_path, rel, rel_len);
@@ -248,14 +297,14 @@ static inline bool collect_tree_entries(const char *root, const char *sub,
       e->type = VIRKI_ABI_DIR;
       (*count)++;
       if (!collect_tree_entries(root, rel, entries, count, cap)) {
-        closedir(d);
+        free_entry_names(names, name_count);
         return false;
       }
     } else if (S_ISLNK(st.st_mode)) {
       e->type = VIRKI_ABI_LINK;
-      ssize_t len = readlink(full, e->link_target, sizeof(e->link_target) - 1);
-      if (len < 0) {
-        closedir(d);
+      ssize_t len = readlink(full, e->link_target, sizeof(e->link_target));
+      if (len < 0 || (size_t)len >= sizeof(e->link_target)) {
+        free_entry_names(names, name_count);
         return false;
       }
       e->link_target[len] = '\0';
@@ -266,7 +315,7 @@ static inline bool collect_tree_entries(const char *root, const char *sub,
 
       int fd = open(full, O_RDONLY | O_CLOEXEC);
       if (fd < 0) {
-        closedir(d);
+        free_entry_names(names, name_count);
         return false;
       }
       virki_abi_sha256_ctx fctx;
@@ -278,18 +327,18 @@ static inline bool collect_tree_entries(const char *root, const char *sub,
       }
       close(fd);
       if (n < 0) {
-        closedir(d);
+        free_entry_names(names, name_count);
         return false;
       }
       virki_abi_sha256_final(&fctx, e->file_sha);
       (*count)++;
     } else {
       /* Unsupported file type */
-      closedir(d);
+      free_entry_names(names, name_count);
       return false;
     }
   }
-  closedir(d);
+  free_entry_names(names, name_count);
   return true;
 }
 
@@ -314,11 +363,6 @@ static inline bool virki_observe_local_context_v2(const char *root, const char *
   if (!collect_tree_entries(root, "", &entries, &count, &cap)) {
     free(entries);
     return false;
-  }
-
-  /* Sort canonically in lexical order */
-  if (count > 1) {
-    qsort(entries, count, sizeof(virki_abi_entry_t), compare_entries);
   }
 
   /* Tree hash initialized with v2 prefix */
@@ -398,10 +442,6 @@ static inline bool virki_observe_local_context_v1(const char *root, const char *
   if (!collect_tree_entries(root, "", &entries, &count, &cap)) {
     free(entries);
     return false;
-  }
-
-  if (count > 1) {
-    qsort(entries, count, sizeof(virki_abi_entry_t), compare_entries);
   }
 
   virki_abi_sha256_ctx tree_ctx;

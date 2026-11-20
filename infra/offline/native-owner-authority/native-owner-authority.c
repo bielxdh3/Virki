@@ -114,6 +114,11 @@ typedef struct {
   uint8_t public_key[32];
   bool has_key;
   char owner_key_id[65];
+  char approval_public_key_file[1024];
+  uint8_t approval_public_key[32];
+  bool has_approval_key;
+  char approval_key_id[65];
+  char approval_pin_sha256[65];
 } virki_owner_config_t;
 
 static virki_owner_config_t g_cfg;
@@ -247,6 +252,8 @@ typedef enum {
   REC_TYPE_PREPARE   = 1,
   REC_TYPE_COMMITTED = 2,
   REC_TYPE_ABORTED   = 3,
+  REC_TYPE_CANDIDATE_VERIFIED = 4,
+  REC_TYPE_V3_PREPARE = 5,
 } ledger_rec_type_t;
 
 typedef struct {
@@ -294,7 +301,8 @@ static bool ledger_record_shape_valid(const ledger_record_t *rec) {
            rec->image_id[0] == '\0';
   }
   if (strlen(rec->scope_token) != 64 || !is_canonical_lower_hex_v20(rec->scope_token, 64)) return false;
-  if (rec->type == REC_TYPE_PREPARE || rec->type == REC_TYPE_COMMITTED) {
+  if (rec->type == REC_TYPE_PREPARE || rec->type == REC_TYPE_V3_PREPARE ||
+      rec->type == REC_TYPE_COMMITTED || rec->type == REC_TYPE_CANDIDATE_VERIFIED) {
     /* Older V17 DEV ledgers could legitimately store upper-case hex nonces.
      * Preserve those records on recovery, but normalize semantic replay
      * identity in V20 and refuse any new noncanonical nonce at BEGIN. */
@@ -403,9 +411,16 @@ static bool ledger_init(const char *dir_path, bool allow_v9fs, owner_ledger_stat
   return true;
 }
 
-static bool ledger_record_prepare(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint64_t *out_seq) {
-  if (!st || st->faulted || st->ledger_fd < 0 || st->sequence_floor == UINT64_MAX ||
+static bool ledger_record_prepare_impl(owner_ledger_state_t *st,
+    ledger_rec_type_t rec_type, const char *scope_token, const char *nonce,
+    const char *approval_sha256, uint64_t *out_seq) {
+  if (!st || st->faulted || st->ledger_fd < 0 || !out_seq ||
+      st->sequence_floor == UINT64_MAX ||
       !ledger_can_append_v20(st->ledger_fd, 2)) return false;
+  if (rec_type == REC_TYPE_V3_PREPARE &&
+      (!approval_sha256 || strlen(approval_sha256) != 64 || !is_valid_hex(approval_sha256, 64))) {
+    return false;
+  }
 
   /* Check nonce uniqueness in ledger: any prior prepare, commit, or abort with same nonce rejects */
   if (lseek(st->ledger_fd, strlen(VIRKI_LEDGER_MAGIC), SEEK_SET) < 0) {
@@ -432,13 +447,16 @@ static bool ledger_record_prepare(owner_ledger_state_t *st, const char *scope_to
   /* Record prepare intent */
   uint64_t seq = st->sequence_floor + 1;
   ledger_record_t rec = {
-    .type = REC_TYPE_PREPARE,
+    .type = (uint32_t)rec_type,
     .epoch = st->current_epoch,
     .seq = seq,
     .status = 0,
   };
   snprintf(rec.scope_token, sizeof(rec.scope_token), "%s", scope_token);
   snprintf(rec.nonce, sizeof(rec.nonce), "%s", nonce);
+  if (rec_type == REC_TYPE_V3_PREPARE) {
+    snprintf(rec.image_id, sizeof(rec.image_id), "sha256:%s", approval_sha256);
+  }
 
   if (lseek(st->ledger_fd, 0, SEEK_END) < 0 ||
       write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec) ||
@@ -450,6 +468,14 @@ static bool ledger_record_prepare(owner_ledger_state_t *st, const char *scope_to
   st->sequence_floor = seq;
   *out_seq = seq;
   return true;
+}
+
+static bool ledger_record_prepare(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint64_t *out_seq) {
+  return ledger_record_prepare_impl(st, REC_TYPE_PREPARE, scope_token, nonce, NULL, out_seq);
+}
+
+static bool ledger_record_prepare_v3(owner_ledger_state_t *st, const char *scope_token, const char *nonce, const char *approval_sha256, uint64_t *out_seq) {
+  return ledger_record_prepare_impl(st, REC_TYPE_V3_PREPARE, scope_token, nonce, approval_sha256, out_seq);
 }
 
 static bool ledger_record_commit(owner_ledger_state_t *st, const char *scope_token, const char *nonce, const char *image_id, uint64_t seq) {
@@ -475,24 +501,83 @@ static bool ledger_record_commit(owner_ledger_state_t *st, const char *scope_tok
   return true;
 }
 
+static int ledger_scope_state_impl(owner_ledger_state_t *st,
+    const char *scope_token, const char *expected_nonce, bool require_v3,
+    char out_approval_sha[65]);
+
+static int ledger_scope_state(owner_ledger_state_t *st,
+    const char *scope_token, const char *expected_nonce) {
+  return ledger_scope_state_impl(st, scope_token, expected_nonce, false, NULL);
+}
+
+static int ledger_v3_scope_state(owner_ledger_state_t *st,
+    const char *scope_token, const char *expected_nonce,
+    char out_approval_sha[65]) {
+  return ledger_scope_state_impl(st, scope_token, expected_nonce, true, out_approval_sha);
+}
+
+/* A verified DEV candidate is a terminal evidence receipt, NOT a release
+ * commit. The existing image_id slot stores the evidence-bundle digest so
+ * replay recovery can fence the exact candidate without changing the V2
+ * ledger record layout. This writer exists only in the explicit test build. */
+#ifdef VIRKI_OWNER_TEST_BUILD
+static bool ledger_record_candidate_verified(owner_ledger_state_t *st,
+    const char *scope_token, const char *nonce, const char *evidence_sha256,
+    uint64_t *out_seq) {
+  if (!st || st->faulted || st->ledger_fd < 0 || !out_seq ||
+      st->sequence_floor == UINT64_MAX ||
+      !ledger_can_append_v20(st->ledger_fd, 2) ||
+      ledger_v3_scope_state(st, scope_token, nonce, NULL) != 1) return false;
+  ledger_record_t rec = {
+    .type = REC_TYPE_CANDIDATE_VERIFIED,
+    .epoch = st->current_epoch,
+    .seq = st->sequence_floor + 1,
+    .status = 0,
+  };
+  snprintf(rec.scope_token, sizeof(rec.scope_token), "%s", scope_token);
+  snprintf(rec.nonce, sizeof(rec.nonce), "%s", nonce);
+  snprintf(rec.image_id, sizeof(rec.image_id), "sha256:%s", evidence_sha256);
+  if (lseek(st->ledger_fd, 0, SEEK_END) < 0 ||
+      write(st->ledger_fd, &rec, sizeof(rec)) != (ssize_t)sizeof(rec) ||
+      fsync(st->ledger_fd) != 0 || fsync(st->dir_fd) != 0) {
+    st->faulted = true;
+    return false;
+  }
+  st->sequence_floor = rec.seq;
+  *out_seq = rec.seq;
+  return true;
+}
+#endif
+
 /* Diagnostic-only scope-state lookup. A reservation is NOT C4 signing
  * authority. Unknown, stale, committed, aborted or truncated records must
  * never appear as a live prepared scope. */
-static int ledger_scope_state(owner_ledger_state_t *st, const char *scope_token, const char *expected_nonce) {
+static int ledger_scope_state_impl(owner_ledger_state_t *st,
+    const char *scope_token, const char *expected_nonce, bool require_v3,
+    char out_approval_sha[65]) {
   if (!st || st->ledger_fd < 0) return -1;
+  if (out_approval_sha) out_approval_sha[0] = '\0';
   if (lseek(st->ledger_fd, strlen(VIRKI_LEDGER_MAGIC), SEEK_SET) < 0) return -1;
   ledger_record_t rec;
   int state = 0;
   ssize_t n;
+  const uint32_t want_prepare = require_v3 ? REC_TYPE_V3_PREPARE : REC_TYPE_PREPARE;
   while ((n = read(st->ledger_fd, &rec, sizeof(rec))) > 0) {
     if (n != (ssize_t)sizeof(rec) || !ledger_record_shape_valid(&rec)) return -1;
     if (strcmp(rec.scope_token, scope_token) != 0) continue;
     if (rec.epoch != st->current_epoch) return 2;
-    if (rec.type == REC_TYPE_PREPARE) {
-      if (state != 0) return -1;
+    if (rec.type == REC_TYPE_PREPARE || rec.type == REC_TYPE_V3_PREPARE) {
+      if (state != 0 || rec.type != want_prepare) {
+        if (state == 0 && rec.type != want_prepare) return 0; /* V2 vs V3 scope isolation */
+        return -1;
+      }
       if (!expected_nonce || strcmp(rec.nonce, expected_nonce) != 0) return -1;
+      if (out_approval_sha && rec.type == REC_TYPE_V3_PREPARE) {
+        memcpy(out_approval_sha, rec.image_id + 7, 65);
+      }
       state = 1;
-    } else if (rec.type == REC_TYPE_ABORTED || rec.type == REC_TYPE_COMMITTED) {
+    } else if (rec.type == REC_TYPE_ABORTED || rec.type == REC_TYPE_COMMITTED ||
+               rec.type == REC_TYPE_CANDIDATE_VERIFIED) {
       if (state != 1) return -1;
       state = 2;
     } else return -1;
@@ -501,10 +586,10 @@ static int ledger_scope_state(owner_ledger_state_t *st, const char *scope_token,
   return state;
 }
 
-static bool ledger_record_abort(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint32_t reason) {
+static bool ledger_record_abort_impl(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint32_t reason, bool require_v3) {
   if (!st || st->faulted || st->ledger_fd < 0 || st->sequence_floor == UINT64_MAX ||
       !ledger_can_append_v20(st->ledger_fd, 2)) return false;
-  if (ledger_scope_state(st, scope_token, nonce) != 1) return false;
+  if (ledger_scope_state_impl(st, scope_token, nonce, require_v3, NULL) != 1) return false;
 
   uint64_t next_seq = st->sequence_floor + 1;
   ledger_record_t rec = {
@@ -524,6 +609,14 @@ static bool ledger_record_abort(owner_ledger_state_t *st, const char *scope_toke
 
   st->sequence_floor = next_seq;
   return true;
+}
+
+static bool ledger_record_abort(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint32_t reason) {
+  return ledger_record_abort_impl(st, scope_token, nonce, reason, false);
+}
+
+static bool ledger_record_abort_v3(owner_ledger_state_t *st, const char *scope_token, const char *nonce, uint32_t reason) {
+  return ledger_record_abort_impl(st, scope_token, nonce, reason, true);
 }
 
 static bool read_exact_key_bytes(int fd, uint8_t out[64]) {
@@ -591,8 +684,8 @@ static bool load_signing_key(virki_owner_config_t *cfg) {
   return false;
 }
 
-static void close_fds(int fds[VIRKI_OWNER_CONTEXT_COUNT]) {
-  for (int i = 0; i < VIRKI_OWNER_CONTEXT_COUNT; i++) {
+static void close_fds(int fds[VIRKI_OWNER_MAX_FD_COUNT]) {
+  for (int i = 0; i < VIRKI_OWNER_MAX_FD_COUNT; i++) {
     if (fds[i] >= 0) {
       close(fds[i]);
       fds[i] = -1;
@@ -669,6 +762,8 @@ static int format_canonical_ack_json_v2(const virki_owner_request_frame_t *req,
   );
 }
 
+#include "native-owner-authority-v3.h"
+
 /*
  * Process incoming client connection
  */
@@ -735,15 +830,16 @@ static void process_client_connection(int client_fd) {
 
   /* 2. Receive Request Frame & Optional SCM_RIGHTS FDs */
   virki_owner_request_frame_t req = {0};
-  int fds[VIRKI_OWNER_CONTEXT_COUNT] = {-1, -1, -1, -1};
+  int fds[VIRKI_OWNER_MAX_FD_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
   size_t extracted_fd_count=0;
   const bool complete_frame=owner_receive_exact_frame_v21(
       client_fd,&req,fds,&extracted_fd_count,2000);
-  if (!complete_frame ||
-      (req.cmd != VIRKI_OWNER_CMD_SIGN_ACK && extracted_fd_count != 0) ||
-      memcmp(req.magic, VIRKI_OWNER_PROTOCOL_MAGIC, sizeof(req.magic)) != 0 ||
-      req.version != VIRKI_OWNER_PROTOCOL_VERSION ||
+  const bool is_v2 = memcmp(req.magic, VIRKI_OWNER_PROTOCOL_MAGIC, sizeof(req.magic)) == 0 &&
+      req.version == VIRKI_OWNER_PROTOCOL_VERSION;
+  const bool is_v3 = memcmp(req.magic, VIRKI_OWNER_PROTOCOL_MAGIC_V3, sizeof(req.magic)) == 0 &&
+      req.version == VIRKI_OWNER_PROTOCOL_VERSION_V3;
+  if (!complete_frame || (!is_v2 && !is_v3) ||
       !memchr(req.nonce, '\0', sizeof(req.nonce)) ||
       !memchr(req.scope_token, '\0', sizeof(req.scope_token)) ||
       !memchr(req.job_id, '\0', sizeof(req.job_id)) ||
@@ -759,6 +855,30 @@ static void process_client_connection(int client_fd) {
       !memchr(req.approval_id, '\0', sizeof(req.approval_id)) ||
       !memchr(req.approval_serial, '\0', sizeof(req.approval_serial)) ||
       !memchr(req.approval_envelope_sha256, '\0', sizeof(req.approval_envelope_sha256))) {
+    close_fds(fds);
+    resp.status = VIRKI_OWNER_STATUS_ERR_BAD_FRAME;
+    (void)owner_send_response_v21(client_fd, &resp);
+    return;
+  }
+
+  if (is_v3) {
+    memcpy(resp.magic, VIRKI_OWNER_PROTOCOL_MAGIC_V3, sizeof(resp.magic));
+    resp.version = VIRKI_OWNER_PROTOCOL_VERSION_V3;
+    process_v3_command(client_fd, &req, fds, extracted_fd_count, &resp, &peer);
+    return;
+  }
+
+  if (req.cmd != VIRKI_OWNER_CMD_SIGN_ACK && extracted_fd_count != 0) {
+    close_fds(fds);
+    resp.status = VIRKI_OWNER_STATUS_ERR_BAD_FRAME;
+    (void)owner_send_response_v21(client_fd, &resp);
+    return;
+  }
+  /* V2 transport shares the V3 eight-FD receive buffer, but V2 SIGN_ACK is
+   * strictly four-context only. Reject surplus descriptors before dispatch;
+   * otherwise the legacy disabled-signing gate could hide a malformed frame. */
+  if (req.cmd == VIRKI_OWNER_CMD_SIGN_ACK &&
+      extracted_fd_count > VIRKI_OWNER_CONTEXT_COUNT) {
     close_fds(fds);
     resp.status = VIRKI_OWNER_STATUS_ERR_BAD_FRAME;
     (void)owner_send_response_v21(client_fd, &resp);
@@ -843,30 +963,6 @@ static void process_client_connection(int client_fd) {
     }
 
     case VIRKI_OWNER_CMD_SIGN_ACK: {
-      /* HARD RELEASE GATE — V16: the v2 frame has no authenticated BuildKit
-       * session/source refs, typed OCI descriptor/DAG, selected ignore and
-       * filtered FileSync V15 manifest, verified independently by this
-       * authority. Scope BEGIN merely reserves a nonce and is NOT an
-       * authorization to sign. Therefore *all* signature requests are
-       * denied, even with valid keys, sealed FDs and a prepared scope.
-       *
-       * This cannot be overridden by a CLI/env flag or a caller header.
-       * Leave the old signer body unreachable for forensic provenance while
-       * redesigning the native protocol and durable verified transaction.
-       */
-      const bool native_c4_verified_signer_ready = false;
-      if (!native_c4_verified_signer_ready) {
-        close_fds(fds);
-        resp.status = VIRKI_OWNER_STATUS_ERR_SIGNING_DISABLED;
-        (void)owner_send_response_v21(client_fd, &resp);
-        return;
-      }
-      if (!g_cfg.has_key) {
-        close_fds(fds);
-        resp.status = VIRKI_OWNER_STATUS_ERR_NO_KEY;
-        (void)owner_send_response_v21(client_fd, &resp);
-        return;
-      }
       if (req.epoch != g_ledger.current_epoch) {
         close_fds(fds);
         resp.status = VIRKI_OWNER_STATUS_ERR_STALE_EPOCH;
@@ -952,6 +1048,23 @@ static void process_client_connection(int client_fd) {
         return;
       }
 
+      /* HARD RELEASE GATE — V2 has no authenticated BuildKit session/source
+       * refs, typed OCI descriptor/DAG, selected ignore or independently
+       * verified FileSync manifest. It therefore cannot sign. Crucially, this
+       * denial is reached ONLY AFTER the exact four sealed descriptors and
+       * their actual bytes have been validated above. */
+      const bool native_c4_verified_signer_ready = false;
+      if (!native_c4_verified_signer_ready) {
+        resp.status = VIRKI_OWNER_STATUS_ERR_SIGNING_DISABLED;
+        (void)owner_send_response_v21(client_fd, &resp);
+        return;
+      }
+      if (!g_cfg.has_key) {
+        resp.status = VIRKI_OWNER_STATUS_ERR_NO_KEY;
+        (void)owner_send_response_v21(client_fd, &resp);
+        return;
+      }
+
       /* Monotonic sequence for this commitment */
       uint64_t seq = ++g_ledger.sequence_floor;
 
@@ -1032,6 +1145,9 @@ static void print_preview(const virki_owner_config_t *cfg) {
   printf("Dev Same-UID Allowed: %s\n", cfg->allow_same_uid_dev ? "YES (DEV-ONLY TEST HARNESS)" : "NO (FAIL CLOSED)");
   printf("Key Custody: %s\n", cfg->has_key ? "VALID KEY LOADED" : "NO KEY SPECIFIED");
   printf("Key ID: %s\n", cfg->owner_key_id);
+  printf("VROA_V3 Approval Verification: %s\n", cfg->has_approval_key ? "PINNED PUBLIC KEY LOADED" : "NOT CONFIGURED (V3 BEGIN REFUSES)");
+  printf("VROA_V3 Approval Key ID: %s\n", cfg->approval_key_id[0] ? cfg->approval_key_id : "NOT CONFIGURED");
+  printf("VROA_V3 Release Signing: DISABLED (candidate receipts are test-build only)");
   printf("=== END INSTALL PREVIEW ===\n");
 }
 
@@ -1103,6 +1219,24 @@ int main(int argc, char **argv) {
         fputs("Error: --key-id too long\n", stderr);
         return 2;
       }
+    } else if (!strcmp(argv[i], "--approval-public-key-file") && i + 1 < argc) {
+      int n = snprintf(g_cfg.approval_public_key_file, sizeof(g_cfg.approval_public_key_file), "%s", argv[++i]);
+      if (n < 0 || (size_t)n >= sizeof(g_cfg.approval_public_key_file)) {
+        fputs("Error: --approval-public-key-file path too long\n", stderr);
+        return 2;
+      }
+    } else if (!strcmp(argv[i], "--approval-key-id") && i + 1 < argc) {
+      int n = snprintf(g_cfg.approval_key_id, sizeof(g_cfg.approval_key_id), "%s", argv[++i]);
+      if (n < 0 || (size_t)n >= sizeof(g_cfg.approval_key_id)) {
+        fputs("Error: --approval-key-id too long\n", stderr);
+        return 2;
+      }
+    } else if (!strcmp(argv[i], "--approval-pin-sha256") && i + 1 < argc) {
+      int n = snprintf(g_cfg.approval_pin_sha256, sizeof(g_cfg.approval_pin_sha256), "%s", argv[++i]);
+      if (n < 0 || (size_t)n >= sizeof(g_cfg.approval_pin_sha256)) {
+        fputs("Error: --approval-pin-sha256 too long\n", stderr);
+        return 2;
+      }
     } else if (!strcmp(argv[i], "--preview-only")) {
       g_cfg.preview_only = true;
     } else {
@@ -1142,6 +1276,23 @@ int main(int argc, char **argv) {
   if ((g_cfg.key_fd >= 0 || g_cfg.key_file[0] != '\0') && !load_signing_key(&g_cfg)) {
     explicit_wipe(g_cfg.secret_key, sizeof(g_cfg.secret_key));
     fputs("Error: failed to load owner signing key from --key-fd/--key-file\n", stderr);
+    return 2;
+  }
+
+  const bool any_approval_key_option = g_cfg.approval_public_key_file[0] != '\0' ||
+      g_cfg.approval_key_id[0] != '\0' || g_cfg.approval_pin_sha256[0] != '\0';
+  if (any_approval_key_option && !load_approval_public_key(&g_cfg)) {
+    explicit_wipe(g_cfg.secret_key, sizeof(g_cfg.secret_key));
+    explicit_wipe(g_cfg.approval_public_key, sizeof(g_cfg.approval_public_key));
+    fputs("Error: invalid VROA_V3 approval public key file, key ID or SPKI pin\n", stderr);
+    return 2;
+  }
+  if (g_cfg.has_key && g_cfg.has_approval_key &&
+      (memcmp(g_cfg.public_key, g_cfg.approval_public_key, 32) == 0 ||
+       strcmp(g_cfg.owner_key_id, g_cfg.approval_key_id) == 0)) {
+    explicit_wipe(g_cfg.secret_key, sizeof(g_cfg.secret_key));
+    explicit_wipe(g_cfg.approval_public_key, sizeof(g_cfg.approval_public_key));
+    fputs("Error: receipt key and owner approval key must be cryptographically distinct\n", stderr);
     return 2;
   }
 
@@ -1266,6 +1417,7 @@ int main(int argc, char **argv) {
 
   /* Wipe key from memory */
   explicit_wipe(g_cfg.secret_key, sizeof(g_cfg.secret_key));
+  explicit_wipe(g_cfg.approval_public_key, sizeof(g_cfg.approval_public_key));
 
   return 0;
 }
