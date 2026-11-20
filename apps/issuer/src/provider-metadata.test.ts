@@ -34,6 +34,7 @@ test("OIDC discovery advertises supported ACR values and essential claims", asyn
       code_challenge_methods_supported?: unknown;
       request_parameter_supported?: unknown;
       request_uri_parameter_supported?: unknown;
+      response_types_supported?: unknown;
     };
 
     assert.deepEqual(metadata.acr_values_supported, [...OIDC_SUPPORTED_ACR_VALUES]);
@@ -42,6 +43,7 @@ test("OIDC discovery advertises supported ACR values and essential claims", asyn
     assert.ok(metadata.claims_supported.includes("acr"));
     assert.ok(metadata.claims_supported.includes("amr"));
     assert.deepEqual(metadata.code_challenge_methods_supported, ["S256"]);
+    assert.deepEqual(metadata.response_types_supported, ["code"]);
     assert.equal(metadata.request_parameter_supported, undefined);
     assert.equal(metadata.request_uri_parameter_supported, false);
   } finally {
