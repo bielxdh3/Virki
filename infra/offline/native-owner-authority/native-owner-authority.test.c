@@ -186,12 +186,61 @@ static void test_truncated_symlink_target_rejected(void) {
   printf("PASS: test_truncated_symlink_target_rejected\n");
 }
 
+static void test_truncated_rel_path_rejected(void) {
+  char tmpl[] = "/tmp/virki-abi-path-XXXXXX";
+  char *root = mkdtemp(tmpl);
+  assert(root != NULL);
+
+  char seg[201];
+  char dir_paths[4][1024];
+  const char chars[4] = {'a', 'b', 'c', 'd'};
+  for (int i = 0; i < 4; i++) {
+    memset(seg, chars[i], 200);
+    seg[200] = '\0';
+    snprintf(dir_paths[i], sizeof(dir_paths[i]), "%s/%s",
+             i == 0 ? root : dir_paths[i - 1], seg);
+    assert(mkdir(dir_paths[i], 0700) == 0);
+  }
+
+  /* 4 * 201 = 804 bytes prefix; 219-byte leaf gives 1,023-byte rel, 220 gives 1,024 */
+  char leaf1023[220];
+  memset(leaf1023, 'e', 219);
+  leaf1023[219] = '\0';
+  char leaf1024[221];
+  memset(leaf1024, 'e', 220);
+  leaf1024[220] = '\0';
+
+  char file1023[1280], file1024[1280];
+  snprintf(file1023, sizeof(file1023), "%s/%s", dir_paths[3], leaf1023);
+  snprintf(file1024, sizeof(file1024), "%s/%s", dir_paths[3], leaf1024);
+
+  FILE *f1 = fopen(file1023, "wb");
+  assert(f1 != NULL);
+  fwrite("ok", 1, 2, f1);
+  fclose(f1);
+
+  FILE *f2 = fopen(file1024, "wb");
+  assert(f2 != NULL);
+  fwrite("over", 1, 4, f2);
+  fclose(f2);
+
+  virki_buildkit_local_context_observation_t obs;
+  assert(!virki_observe_local_context_v2(root, "source", &obs));
+
+  unlink(file1024);
+  unlink(file1023);
+  for (int i = 3; i >= 0; i--) rmdir(dir_paths[i]);
+  rmdir(root);
+  printf("PASS: test_truncated_rel_path_rejected\n");
+}
+
 int main(void) {
   printf("=== Running Owner Authority Unit Tests ===\n");
   test_key_generation_and_signing_verification();
   test_protocol_frame_sizes_and_alignment();
   test_nested_depth_first_traversal_matches_go();
   test_truncated_symlink_target_rejected();
+  test_truncated_rel_path_rejected();
   printf("=== All Owner Authority Unit Tests PASSED ===\n");
   return 0;
 }

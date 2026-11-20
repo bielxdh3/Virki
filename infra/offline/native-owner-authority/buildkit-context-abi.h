@@ -202,11 +202,13 @@ static inline void free_entry_names(char **names, size_t count) {
 static inline bool collect_tree_entries(const char *root, const char *sub,
                                         virki_abi_entry_t **entries, size_t *count, size_t *cap) {
   char current_dir[2048];
+  int dir_n;
   if (sub && sub[0]) {
-    snprintf(current_dir, sizeof(current_dir), "%s/%s", root, sub);
+    dir_n = snprintf(current_dir, sizeof(current_dir), "%s/%s", root, sub);
   } else {
-    snprintf(current_dir, sizeof(current_dir), "%s", root);
+    dir_n = snprintf(current_dir, sizeof(current_dir), "%s", root);
   }
+  if (dir_n < 0 || (size_t)dir_n >= sizeof(current_dir)) return false;
 
   DIR *d = opendir(current_dir);
   if (!d) return false;
@@ -246,14 +248,23 @@ static inline bool collect_tree_entries(const char *root, const char *sub,
 
   for (size_t i = 0; i < name_count; i++) {
     char rel[1024];
+    int rel_n;
     if (sub && sub[0]) {
-      snprintf(rel, sizeof(rel), "%s/%s", sub, names[i]);
+      rel_n = snprintf(rel, sizeof(rel), "%s/%s", sub, names[i]);
     } else {
-      snprintf(rel, sizeof(rel), "%s", names[i]);
+      rel_n = snprintf(rel, sizeof(rel), "%s", names[i]);
+    }
+    if (rel_n < 0 || (size_t)rel_n >= sizeof(rel)) {
+      free_entry_names(names, name_count);
+      return false;
     }
 
     char full[2048];
-    snprintf(full, sizeof(full), "%s/%s", root, rel);
+    int full_n = snprintf(full, sizeof(full), "%s/%s", root, rel);
+    if (full_n < 0 || (size_t)full_n >= sizeof(full)) {
+      free_entry_names(names, name_count);
+      return false;
+    }
 
     struct stat st;
     if (lstat(full, &st) != 0) {
