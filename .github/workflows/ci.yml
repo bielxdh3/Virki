@@ -188,7 +188,7 @@ jobs:
       - name: C1->C4 defensive integration contract and daemon boundary tests
         run: npm run test:offline:c1-c4-integration
 
-      - name: Native Go-to-C4 VROA_V2 wire bridge tests
+      - name: Native Go-to-C4 VROA_V2 and VROA_V3 wire bridge tests
         run: |
           set -euo pipefail
           toolchain="$(mktemp -d "$RUNNER_TEMP/virki-go.XXXXXX")"

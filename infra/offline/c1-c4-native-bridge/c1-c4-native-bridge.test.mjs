@@ -30,7 +30,7 @@ function resolveGoBinary() {
   return null;
 }
 
-test("Native BuildKit Go-to-C4 bridge executes live VROA_V2 + sealed memfd lifecycle with SIGN_ACK=22", { skip: LINUX_NATIVE_SKIP }, async (t) => {
+test("Native BuildKit Go-to-C4 bridge executes VROA_V2 and VROA_V3 regressions with release disabled", { skip: LINUX_NATIVE_SKIP }, async (t) => {
   const goBin = resolveGoBinary();
   assert.ok(goBin, "Go 1.26+ toolchain must be available (set VIRKI_GO_BIN or install /usr/local/go/bin/go)");
 
@@ -96,4 +96,7 @@ test("Native BuildKit Go-to-C4 bridge executes live VROA_V2 + sealed memfd lifec
   assert.match(goOut, /PASS:\s+TestVROAV2ABISizes/);
   assert.match(goOut, /PASS:\s+TestBuildC4RequestPositiveAndRejections/);
   assert.match(goOut, /PASS:\s+TestLiveGoToNativeC4DaemonBridge/);
+  assert.match(goOut, /PASS:\s+TestV3BinaryLayoutsAndOwnerApprovalSignature\s+\(/);
+  assert.match(goOut, /PASS:\s+TestV3EvidenceAndRequestBinding\s+\(/);
+  assert.match(goOut, /PASS:\s+TestV3NativeDaemonVerifiesSealedEvidenceAndKeepsReleaseDisabled\s+\(/);
 });
