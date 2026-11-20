@@ -1,0 +1,503 @@
+diff --git a/session/filesync/sealed_custody_v24_independent_linux_test.go b/session/filesync/sealed_custody_v24_independent_linux_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0604734cda79abb0392d36f20c960239ff96cd0
+--- /dev/null
++++ b/session/filesync/sealed_custody_v24_independent_linux_test.go
+@@ -0,0 +1,247 @@
++//go:build linux
++
++package filesync
++
++import (
++	"bytes"
++	"context"
++	"crypto/ed25519"
++	"encoding/binary"
++	"encoding/json"
++	"io"
++	"net"
++	"os"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"testing"
++	"time"
++
++	"github.com/moby/buildkit/session"
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// This is an opt-in, ordinary positive DEV integration fixture. It uses
++// synthetic content and temporary numeric identities, not host accounts,
++// persistent configuration or protected FileSync.
++const (
++	v24FixtureReceiverUID uint32 = 60001
++	v24FixtureSenderUID   uint32 = 60002
++)
++
++type v24IndependentFixture struct {
++	Manifest V15SealedManifest
++	Permit   V15OwnerPermit
++	Public   ed25519.PublicKey
++}
++
++func v24FixturePolicy(uid, peer uint32) V24ReceiverCustodyPolicy {
++	return V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &uid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		ExpectedSenderUID:           &peer,
++		ExpectedSenderGID:           &peer,
++	}
++}
++
++func TestC1V24IndependentReceiverProcess(t *testing.T) {
++	switch os.Getenv("VIRKI_V24_INDEPENDENT_ROLE") {
++	case "sender":
++		v24IndependentSender(t)
++		return
++	case "receiver":
++		v24IndependentReceiver(t)
++		return
++	}
++	if os.Getenv("VIRKI_V24_RUN_ROOT_FIXTURE") != "1" || os.Geteuid() != 0 {
++		t.Skip("opt-in synthetic multi-UID fixture requires a privileged DEV supervisor")
++	}
++	for _, uid := range []uint32{v24FixtureReceiverUID, v24FixtureSenderUID} {
++		id := strconv.FormatUint(uint64(uid), 10)
++		_, err := user.LookupId(id)
++		if err == nil {
++			t.Skipf("fixture UID %s is already assigned", id)
++		}
++		require.IsType(t, user.UnknownUserIdError(0), err)
++		_, err = user.LookupGroupId(id)
++		if err == nil {
++			t.Skipf("fixture GID %s is already assigned", id)
++		}
++		require.IsType(t, user.UnknownGroupIdError(""), err)
++	}
++	root, err := os.MkdirTemp("/tmp", "virki-v24-custody-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(root)) })
++	require.NoError(t, os.Chmod(root, 0711))
++	for name, uid := range map[string]uint32{"sender": v24FixtureSenderUID, "receiver": v24FixtureReceiverUID} {
++		dir := filepath.Join(root, name)
++		require.NoError(t, os.Mkdir(dir, 0700))
++		require.NoError(t, os.Chown(dir, int(uid), int(uid)))
++	}
++	src := filepath.Join(root, "sender", "app.js")
++	require.NoError(t, os.WriteFile(src, []byte("SAFE"), 0600))
++	require.NoError(t, os.Chown(src, int(v24FixtureSenderUID), int(v24FixtureSenderUID)))
++	m := v15PacketManifest()
++	permit, pub, _ := v15SignedPermitFixture(t, m)
++	data, err := json.Marshal(v24IndependentFixture{Manifest: m, Permit: permit, Public: pub})
++	require.NoError(t, err)
++	require.NoError(t, os.WriteFile(filepath.Join(root, "fixture.json"), data, 0444))
++
++	// Both children execute the same root-owned, read-only fixture binary.
++	self, err := os.Executable()
++	require.NoError(t, err)
++	input, err := os.Open(self)
++	require.NoError(t, err)
++	defer input.Close()
++	helper := filepath.Join(root, "fixture")
++	output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	require.NoError(t, err)
++	_, copyErr := io.Copy(output, input)
++	closeErr := output.Close()
++	require.NoError(t, copyErr)
++	require.NoError(t, closeErr)
++	require.NoError(t, os.Chmod(helper, 0555))
++
++	// The existing session runs over a private, inherited socketpair.
++	// No listening service or external network is involved.
++	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
++	require.NoError(t, err)
++	senderFD := os.NewFile(uintptr(fds[0]), "sender-session")
++	receiverFD := os.NewFile(uintptr(fds[1]), "receiver-session")
++	defer senderFD.Close()
++	defer receiverFD.Close()
++
++	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
++	defer cancel()
++	type result struct {
++		out []byte
++		err error
++	}
++	senderDone := make(chan result, 1)
++	receiverDone := make(chan result, 1)
++	launch := func(role string, fd *os.File, uid, peer uint32, done chan<- result) {
++		out, err := runV24IsolatedSubprocessWithFiles(ctx, helper,
++			[]string{"-test.run=^TestC1V24IndependentReceiverProcess$", "-test.v"},
++			v24FixturePolicy(uid, peer), []*os.File{fd},
++			"VIRKI_V24_INDEPENDENT_ROLE="+role, "VIRKI_V24_FIXTURE_ROOT="+root)
++		done <- result{out, err}
++	}
++	go launch("sender", senderFD, v24FixtureSenderUID, v24FixtureReceiverUID, senderDone)
++	go launch("receiver", receiverFD, v24FixtureReceiverUID, v24FixtureSenderUID, receiverDone)
++	receiver := <-receiverDone
++	// Release the supervisor's copies only after the receiver has finished.
++	// This lets the sender observe EOF and terminate its existing session.
++	require.NoError(t, receiverFD.Close())
++	if receiver.err != nil {
++		cancel()
++	}
++	sender := <-senderDone
++	require.NoError(t, receiver.err, "receiver: %s", receiver.out)
++	require.NoError(t, sender.err, "sender: %s", sender.out)
++	published := filepath.Join(root, "receiver", "published", "app.js")
++	got, err := os.ReadFile(published)
++	require.NoError(t, err)
++	require.Equal(t, []byte("SAFE"), got)
++	var st unix.Stat_t
++	require.NoError(t, unix.Stat(published, &st))
++	require.Equal(t, v24FixtureReceiverUID, st.Uid)
++	t.Log("positive sealed FileSync completed across two unprivileged process identities")
++}
++
++func v24FixtureInputs(t *testing.T, uid uint32) (string, v24IndependentFixture, net.Conn) {
++	t.Helper()
++	require.Equal(t, uid, uint32(os.Geteuid()))
++	require.Equal(t, uid, uint32(os.Getegid()))
++	groups, err := os.Getgroups()
++	require.NoError(t, err)
++	require.Empty(t, groups)
++	nnp, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
++	require.NoError(t, err)
++	require.Equal(t, 1, nnp)
++	root := os.Getenv("VIRKI_V24_FIXTURE_ROOT")
++	require.NotEmpty(t, root)
++	data, err := os.ReadFile(filepath.Join(root, "fixture.json"))
++	require.NoError(t, err)
++	var fixture v24IndependentFixture
++	require.NoError(t, json.Unmarshal(data, &fixture))
++	fd := os.NewFile(3, "fixture-session")
++	require.NotNil(t, fd)
++	conn, err := net.FileConn(fd)
++	require.NoError(t, err)
++	require.NoError(t, fd.Close())
++	t.Cleanup(func() { _ = conn.Close() })
++	return root, fixture, conn
++}
++
++// Only fixture transport glue: existing session.Dialer metadata is carried
++// once over the inherited socket before passing it to Manager.HandleConn.
++func v24IndependentSender(t *testing.T) {
++	root, f, conn := v24FixtureInputs(t, v24FixtureSenderUID)
++	ctx, cancel := context.WithTimeout(t.Context(), 35*time.Second)
++	defer cancel()
++	m := f.Manifest
++	snapshot, err := NewLinuxSealedSnapshotV15(ctx, V15SnapshotRequest{
++		Root: filepath.Join(root, "sender"), ContextName: m.ContextName,
++		WorkerID: m.WorkerID, SessionID: m.SessionID, Nonce: m.Nonce, Files: m.Files,
++	})
++	require.NoError(t, err)
++	require.Equal(t, m.Digest, snapshot.Manifest().Digest)
++	s, err := session.NewSession(ctx, "v24-independent-fixture")
++	require.NoError(t, err)
++	s.Allow(NewSealedFSSyncProviderV15(snapshot))
++	require.NoError(t, s.Run(ctx, func(_ context.Context, _ string, meta map[string][]string) (net.Conn, error) {
++		header, err := json.Marshal(meta)
++		if err != nil {
++			return nil, err
++		}
++		if err := binary.Write(conn, binary.BigEndian, uint32(len(header))); err != nil {
++			return nil, err
++		}
++		if _, err := io.Copy(conn, bytes.NewReader(header)); err != nil {
++			return nil, err
++		}
++		return conn, nil
++	}))
++}
++
++func v24IndependentReceiver(t *testing.T) {
++	root, f, conn := v24FixtureInputs(t, v24FixtureReceiverUID)
++	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
++	defer cancel()
++	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
++	var length uint32
++	require.NoError(t, binary.Read(conn, binary.BigEndian, &length))
++	require.Positive(t, length)
++	require.LessOrEqual(t, length, uint32(65536))
++	header := make([]byte, length)
++	_, err := io.ReadFull(conn, header)
++	require.NoError(t, err)
++	require.NoError(t, conn.SetReadDeadline(time.Time{}))
++	var meta map[string][]string
++	require.NoError(t, json.Unmarshal(header, &meta))
++	ids := meta["X-Docker-Expose-Session-Uuid"]
++	require.Len(t, ids, 1)
++	manager, err := session.NewManager()
++	require.NoError(t, err)
++	done := make(chan error, 1)
++	go func() { done <- manager.HandleConn(ctx, conn, meta) }()
++	caller, err := manager.Get(ctx, ids[0], false)
++	require.NoError(t, err)
++	m := f.Manifest
++	dest := filepath.Join(root, "receiver", "published")
++	require.NoError(t, FSSyncSealedV24(ctx, caller, FSSendRequestOpt{
++		Name: m.ContextName, FollowPaths: []string{"app.js"}, DestDir: dest,
++	}, m, f.Permit, f.Public, NewV15LocalReplayLedger(f.Permit.Epoch), v24FixturePolicy(v24FixtureReceiverUID, v24FixtureSenderUID)))
++	cancel()
++	_ = conn.Close()
++	select {
++	case <-done:
++	case <-time.After(5 * time.Second):
++		t.Fatal("session shutdown timed out")
++	}
++}
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+index eda554aaf4ffae2507b649387185a8b397d2c095..d7432b7ad8510521994e9f279f7e4388f9342527 100755
+--- a/session/filesync/sealed_custody_v24_linux.go
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -10,6 +10,7 @@ import (
+ 	"os/exec"
+ 	"path/filepath"
+ 	"runtime"
++	"slices"
+ 	"strings"
+ 	"syscall"
+ 
+@@ -27,6 +28,8 @@ type V24ReceiverCustodyPolicy struct {
+ 	ExpectedReceiverUID         *uint32
+ 	ExpectedReceiverGID         *uint32
+ 	ForbiddenPeerUIDs           []uint32
++	ExpectedSenderUID           *uint32
++	ExpectedSenderGID           *uint32
+ }
+ 
+ func validateV24ProcessIdentity(policy V24ReceiverCustodyPolicy) error {
+@@ -117,12 +120,50 @@ func validateV24CustodyDirs(dest string, policy V24ReceiverCustodyPolicy) error
+ 	if gpSt.Uid == uint32(os.Geteuid()) {
+ 		return errors.New("C1 V24 custody grandparent must not be owned by receiver UID")
+ 	}
++	if gpSt.Uid != 0 {
++		return errors.New("C1 V24 custody grandparent must be controlled by the trusted root supervisor")
++	}
+ 	if gpSt.Mode&0022 != 0 {
+ 		return errors.New("C1 V24 custody grandparent must not be group/world writable")
+ 	}
+ 	return nil
+ }
+ 
++// validateV24IndependentCustody checks the explicit DEV supervisor contract.
++// The caller is responsible for independent trusted provisioning of identities
++// and the enclosing filesystem. Local checks are not an owner attestation.
++func validateV24IndependentCustody(dest string, policy V24ReceiverCustodyPolicy) error {
++	if !policy.RequireUnprivileged || !policy.RequirePrivateParent || !policy.RequireImmutableGrandparent ||
++		policy.ExpectedReceiverUID == nil || policy.ExpectedReceiverGID == nil || len(policy.ForbiddenPeerUIDs) == 0 {
++		return errors.New("C1 V24 independent receiver custody requires explicit supervisor identity and private namespace policy")
++	}
++	if policy.ExpectedSenderUID == nil || policy.ExpectedSenderGID == nil ||
++		*policy.ExpectedSenderUID == 0 || *policy.ExpectedSenderGID == 0 ||
++		*policy.ExpectedSenderUID == *policy.ExpectedReceiverUID ||
++		*policy.ExpectedSenderGID == *policy.ExpectedReceiverGID ||
++		!slices.Contains(policy.ForbiddenPeerUIDs, *policy.ExpectedSenderUID) {
++		return errors.New("C1 V24 independent receiver requires explicit distinct sender ownership")
++	}
++	if err := validateV24ProcessIdentity(policy); err != nil {
++		return err
++	}
++	groups, err := os.Getgroups()
++	if err != nil {
++		return err
++	}
++	if len(groups) != 0 {
++		return errors.New("C1 V24 independent receiver refuses supplementary groups")
++	}
++	nnp, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
++	if err != nil {
++		return err
++	}
++	if nnp != 1 {
++		return errors.New("C1 V24 independent receiver requires NoNewPrivs")
++	}
++	return validateV24CustodyDirs(dest, policy)
++}
++
+ func defaultV24ReceiverCustodyPolicy() V24ReceiverCustodyPolicy {
+ 	return V24ReceiverCustodyPolicy{
+ 		RequirePrivateParent: true,
+@@ -148,6 +189,12 @@ func receiveV24WithCustody(dest string, manifest V15SealedManifest,
+ // Credential separation (which requires CAP_SETUID/CAP_SETGID in the caller).
+ func runV24IsolatedSubprocess(ctx context.Context, exe string, args []string,
+ 	policy V24ReceiverCustodyPolicy, extraEnv ...string) ([]byte, error) {
++	return runV24IsolatedSubprocessWithFiles(ctx, exe, args, policy, nil, extraEnv...)
++}
++
++// Inherited files are supplied by the trusted DEV supervisor, not peer input.
++func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []string,
++	policy V24ReceiverCustodyPolicy, files []*os.File, extraEnv ...string) ([]byte, error) {
+ 	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe {
+ 		return nil, errors.New("C1 V24 helper executable must be canonical absolute path")
+ 	}
+@@ -168,14 +215,17 @@ func runV24IsolatedSubprocess(ctx context.Context, exe string, args []string,
+ 		if os.Geteuid() != 0 {
+ 			return nil, errors.New("C1 V24 cross-UID credential separation requires privileged parent")
+ 		}
+-		gid := uint32(os.Getegid())
+-		if policy.ExpectedReceiverGID != nil {
+-			gid = *policy.ExpectedReceiverGID
++		if policy.ExpectedReceiverGID == nil {
++			return nil, errors.New("C1 V24 cross-UID separation requires an explicit receiver GID")
++		}
++		gid := *policy.ExpectedReceiverGID
++		if policy.RequireUnprivileged && gid == 0 {
++			return nil, errors.New("C1 V24 refuses root receiver GID")
+ 		}
+ 		attr.Credential = &syscall.Credential{
+-			Uid:         *policy.ExpectedReceiverUID,
+-			Gid:         gid,
+-			NoSetGroups: true,
++			Uid:    *policy.ExpectedReceiverUID,
++			Gid:    gid,
++			Groups: []uint32{},
+ 		}
+ 	}
+ 	env := append([]string{"PATH=/usr/bin:/bin", "LC_ALL=C", "HOME=/nonexistent", "TMPDIR=/tmp"}, extraEnv...)
+@@ -195,6 +245,7 @@ func runV24IsolatedSubprocess(ctx context.Context, exe string, args []string,
+ 		cmd := exec.CommandContext(ctx, exe, args...)
+ 		cmd.Env = env
+ 		cmd.SysProcAttr = attr
++		cmd.ExtraFiles = files
+ 		out, err := cmd.CombinedOutput()
+ 		ch <- subprocResult{out: out, err: err}
+ 	}()
+diff --git a/session/filesync/sealed_custody_v24_other.go b/session/filesync/sealed_custody_v24_other.go
+index 622687021efcea455b80640caf6531c6bd935313..8df34a2bf50aa1f6b36ad981b0048a2c560faaf0 100755
+--- a/session/filesync/sealed_custody_v24_other.go
++++ b/session/filesync/sealed_custody_v24_other.go
+@@ -11,6 +11,12 @@ type V24ReceiverCustodyPolicy struct {
+ 	ExpectedReceiverUID         *uint32
+ 	ExpectedReceiverGID         *uint32
+ 	ForbiddenPeerUIDs           []uint32
++	ExpectedSenderUID           *uint32
++	ExpectedSenderGID           *uint32
++}
++
++func validateV24IndependentCustody(_ string, _ V24ReceiverCustodyPolicy) error {
++	return errors.New("C1 V24 independent receiver custody requires Linux")
+ }
+ 
+ func defaultV24ReceiverCustodyPolicy() V24ReceiverCustodyPolicy {
+diff --git a/session/filesync/sealed_guard_v15.go b/session/filesync/sealed_guard_v15.go
+index 02a1ca2acebb909c4b178dea3c822b1d5fc5a2fc..c4811cb6791d551955860daf2eda86df5025072f 100644
+--- a/session/filesync/sealed_guard_v15.go
++++ b/session/filesync/sealed_guard_v15.go
+@@ -22,14 +22,18 @@ import (
+ // unapproved bytes to the worker's network stack before it can reject them.
+ type v15PacketGuard struct {
+ 	grpc.ClientStream
+-	mu        sync.Mutex
+-	expected  []v15ExpectedStat
+-	files     map[uint32]*v15PendingFile
+-	statCount uint32
+-	endStats  bool
+-	finished  bool
+-	total     int64
+-	maximum   int64
++	mu          sync.Mutex
++	expected    []v15ExpectedStat
++	files       map[uint32]*v15PendingFile
++	statCount   uint32
++	endStats    bool
++	finished    bool
++	total       int64
++	maximum     int64
++	senderUID   uint32
++	senderGID   uint32
++	receiverUID uint32
++	receiverGID uint32
+ }
+ 
+ type v15ExpectedStat struct {
+@@ -47,7 +51,15 @@ type v15PendingFile struct {
+ 	sha    string
+ }
+ 
++// The legacy DEV path retains its same-identity metadata contract.
+ func newV15PacketGuard(stream grpc.ClientStream, m V15SealedManifest) *v15PacketGuard {
++	return newV15PacketGuardWithOwner(stream, m, uint32(os.Getuid()), uint32(os.Getgid()))
++}
++
++// The independently supervised DEV path validates the configured sender's
++// exact wire ownership before mapping it to the receiver's own identity.
++// Wire UID/GID values alone are not sender authentication.
++func newV15PacketGuardWithOwner(stream grpc.ClientStream, m V15SealedManifest, senderUID, senderGID uint32) *v15PacketGuard {
+ 	nodes := make(map[string]v15ExpectedStat)
+ 	for _, pin := range m.Files {
+ 		parts := strings.Split(pin.Path, "/")
+@@ -57,7 +69,8 @@ func newV15PacketGuard(stream grpc.ClientStream, m V15SealedManifest) *v15Packet
+ 		}
+ 		nodes[pin.Path] = v15ExpectedStat{path: pin.Path, mode: 0644, size: pin.Size, sha: pin.SHA256}
+ 	}
+-	g := &v15PacketGuard{ClientStream: stream, files: make(map[uint32]*v15PendingFile), maximum: m.Bytes}
++	g := &v15PacketGuard{ClientStream: stream, files: make(map[uint32]*v15PendingFile), maximum: m.Bytes,
++		senderUID: senderUID, senderGID: senderGID, receiverUID: uint32(os.Getuid()), receiverGID: uint32(os.Getgid())}
+ 	for _, node := range nodes {
+ 		g.expected = append(g.expected, node)
+ 	}
+@@ -95,9 +108,13 @@ func (g *v15PacketGuard) RecvMsg(dst any) error {
+ 		if st.Path != want.path || path.Clean(st.Path) != st.Path ||
+ 			st.Mode != want.mode || st.Size != want.size || st.Linkname != "" ||
+ 			len(st.Xattrs) != 0 || st.Devmajor != 0 || st.Devminor != 0 ||
+-			st.Uid != uint32(os.Getuid()) || st.Gid != uint32(os.Getgid()) || st.ModTime != 0 {
++			st.Uid != g.senderUID || st.Gid != g.senderGID || st.ModTime != 0 {
+ 			return fmt.Errorf("C1 V15 unapproved sender STAT path/mode/owner/size: %q", st.Path)
+ 		}
++		// The disk writer receives only receiver-owned metadata. The sender
++		// ownership was checked above against trusted DEV configuration.
++		st.Uid = g.receiverUID
++		st.Gid = g.receiverGID
+ 		if want.sha != "" {
+ 			g.files[g.statCount] = &v15PendingFile{path: want.path, max: want.size, sum: sha256.New(), sha: want.sha}
+ 		}
+diff --git a/session/filesync/sealed_protocol_v15.go b/session/filesync/sealed_protocol_v15.go
+index a4137a7d292d91aa378060e7701dbb9669258cf6..cf970bbfb8f221e1c13028e607ce715ef41a89f1 100644
+--- a/session/filesync/sealed_protocol_v15.go
++++ b/session/filesync/sealed_protocol_v15.go
+@@ -87,6 +87,24 @@ func (p *sealedProviderV15) DiffCopySealedV15(stream grpc.ServerStream) error {
+ // future trusted client must validate selected Dockerfile ignore semantics.
+ func FSSyncSealedV15(ctx context.Context, c session.Caller, opt FSSendRequestOpt, m V15SealedManifest,
+ 	permit V15OwnerPermit, trustedOwnerPub ed25519.PublicKey, ledger *V15LocalReplayLedger) error {
++	return fsSyncSealedWithCustody(ctx, c, opt, m, permit, trustedOwnerPub, ledger, defaultV24ReceiverCustodyPolicy())
++}
++
++// FSSyncSealedV24 is a DEV-only entry point for a receiver already started
++// under a trusted supervisor's independently provisioned identity. It does
++// not start a privileged process, enable C1, or authorize native C4.
++func FSSyncSealedV24(ctx context.Context, c session.Caller, opt FSSendRequestOpt, m V15SealedManifest,
++	permit V15OwnerPermit, trustedOwnerPub ed25519.PublicKey, ledger *V15LocalReplayLedger,
++	policy V24ReceiverCustodyPolicy) error {
++	if err := validateV24IndependentCustody(opt.DestDir, policy); err != nil {
++		return err
++	}
++	return fsSyncSealedWithCustody(ctx, c, opt, m, permit, trustedOwnerPub, ledger, policy)
++}
++
++func fsSyncSealedWithCustody(ctx context.Context, c session.Caller, opt FSSendRequestOpt, m V15SealedManifest,
++	permit V15OwnerPermit, trustedOwnerPub ed25519.PublicKey, ledger *V15LocalReplayLedger,
++	policy V24ReceiverCustodyPolicy) error {
+ 	if c == nil || m.Schema != "virki-c1-v15-memory-fs-1" ||
+ 		m.Digest == "" || v15ManifestDigest(m) != m.Digest ||
+ 		opt.Name != m.ContextName || len(opt.IncludePatterns) != 0 ||
+@@ -139,8 +157,12 @@ func FSSyncSealedV15(ctx context.Context, c session.Caller, opt FSSendRequestOpt
+ 	// private quarantine owned by this Linux worker, verify against the frozen
+ 	// manifest, and atomically publish only after complete success.
+ 	// This remains DEV-only and does not enable the V14 physical C1 path.
+-	if err := receiveV24WithCustody(opt.DestDir, m, defaultV24ReceiverCustodyPolicy(), func(stage string) error {
+-		return recvDiffCopy(newV15PacketGuard(stream, m), stage, nil,
++	guard := newV15PacketGuard(stream, m)
++	if policy.ExpectedSenderUID != nil && policy.ExpectedSenderGID != nil {
++		guard = newV15PacketGuardWithOwner(stream, m, *policy.ExpectedSenderUID, *policy.ExpectedSenderGID)
++	}
++	if err := receiveV24WithCustody(opt.DestDir, m, policy, func(stage string) error {
++		return recvDiffCopy(guard, stage, nil,
+ 			nil, opt.Differ, nil, nil)
+ 	}); err != nil {
+ 		return err

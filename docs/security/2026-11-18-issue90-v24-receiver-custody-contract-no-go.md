@@ -1,0 +1,33 @@
+# Virki #90 — C1 V24 Defensive Receiver Custody Contract (DEV-only, NO-GO)
+
+- **Date:** 2026-11-18
+- **Isolated local branch:** `exp/issue90-receiver-custody-20261118`
+- **Parent baseline:** `5fdcb5e0e147f99c1c443a01729539113f1f17d4` (on top of V23 `d12eeaacf9358ed6e099c369c3f45fe1789507e8`)
+- **Pinned BuildKit v0.34.1 Git HEAD:** `f5b59a1f2fb25a0cb7072c398cab9aed7835da4e`
+- **Incremental V24 custody patch:** `docs/security/experiments/buildkit-v0.34.1-c1-v24-receiver-custody-dev-only.patch`
+
+**Disposition:** DEV-only defensive custody contract and synthetic permission-contract tests. Protected C1 FileSync remains disabled (`NO-GO` for merge, release, or production).
+
+## Implemented defensive separation
+
+- `session/filesync/sealed_custody_v24_linux.go` (`//go:build linux`) and `session/filesync/sealed_custody_v24_other.go` (`//go:build !linux`):
+  - `V24ReceiverCustodyPolicy` and `validateV24ProcessIdentity`: fail-closed checks rejecting setuid/setgid transitions (`uid != euid || gid != egid`), root execution (`RequireUnprivileged`), UID/GID mismatches, and overlap with `ForbiddenPeerUIDs`.
+  - `validateV24CustodyDirs`: `openat2` (`RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS`) verification requiring a receiver-owned `0700` parent directory (`RequirePrivateParent`) and, when `RequireImmutableGrandparent` is enabled, a non-receiver-owned, non-group/world-writable grandparent directory.
+  - `receiveV24WithCustody`: enforces `V24ReceiverCustodyPolicy` before delegating to `receiveV23QuarantinedWithParentSync`. Integrated into `FSSyncSealedV15` (`session/filesync/sealed_protocol_v15.go`) via `defaultV24ReceiverCustodyPolicy()`.
+  - `runV24IsolatedSubprocess`: launches a receiver helper on a dedicated OS thread with `PR_SET_NO_NEW_PRIVS` enabled prior to `exec` (never returning the tainted thread to Go's pool), a stripped environment (`PATH`, `LC_ALL`, `HOME=/nonexistent`, `TMPDIR=/tmp`), `Pdeathsig: unix.SIGKILL`, optional `Credential` separation (failing closed if cross-UID separation is requested without privilege), and canonical absolute executable validation.
+- `session/filesync/sealed_custody_v24_linux_test.go`: ordinary synthetic positive and permission-contract tests (`TestC1V24ReceiverCustodyIdentityContract`, `TestC1V24ReceiverCustodyParentAndGrandparentContract`, `TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs`, `TestC1V24FSSyncSealedV15EnforcesCustodyPolicy`).
+
+## Limits and unmet acceptance criteria
+
+- Ordinary synthetic tests on WSL/Linux without root do not prove multi-UID kernel isolation under active concurrent scheduling, mount-namespace isolation, or privileged `Credential` transitions.
+- In environments where the parent test runner already starts with `NoNewPrivs: 1` (such as WSL), `NoNewPrivs: 1` in the child is consistent with launcher enforcement, while non-tainting of a `NoNewPrivs: 0` parent thread pool requires a host starting at `0`.
+- `scripts/experiments/issue90-receiver-custody.test.sh` continues to skip (`exit 77`) when run unprivileged.
+- Does **not** satisfy adversarial same-UID race closure, native C4 `SIGN_ACK`, durable owner rollback floor, or production admission.
+
+## Compilation repair and verification (2026-11-18)
+
+- Corrected truncated Go identifiers in the V24 Linux implementation and test without changing custody policy, privilege boundaries, or test intent.
+- Regenerated the patch against a fresh temporary Git index seeded with the pinned upstream and V23 patch. Forward and reverse index application and reverse check against the scratch passed.
+- Corrected V24 SHA-256: `9CF15BCA430A121C1FD8722499BF8D587179B96855E6BBE6AE299A1C74DE3587`.
+- WSL Go 1.26.10, `GOPROXY=off GOTOOLCHAIN=local`: four targeted V24 tests passed; targeted V24 race detector passed; Linux and Windows-target vet passed with `-copylocks=false` (preexisting V15 copylocks finding excluded). gofmt reported no affected files requiring formatting.
+- The subprocess launcher remains a test-only component. The integrated DEV path uses the private-parent policy, not an independently isolated receiver identity. No claim of complete issue #90 closure or authorization to publish, merge, activate protected FileSync, or deploy. C4 release/signing and production admission are separate gates, not additional issue #90 completion criteria. No independent external review of this repair or cross-UID concurrent publication validation was performed.

@@ -1,0 +1,483 @@
+diff --git a/session/filesync/sealed_custody_v24_independent_linux_test.go b/session/filesync/sealed_custody_v24_independent_linux_test.go
+index 3f2f025..876e649 100644
+--- a/session/filesync/sealed_custody_v24_independent_linux_test.go
++++ b/session/filesync/sealed_custody_v24_independent_linux_test.go
+@@ -58,6 +58,9 @@ func TestC1V24IndependentReceiverProcess(t *testing.T) {
+ 	case "receiver":
+ 		v24IndependentReceiver(t)
+ 		return
++	case "adversarial-peer":
++		v28AdversarialPeerRacer(t)
++		return
+ 	}
+ 	if os.Getenv("VIRKI_V24_RUN_ROOT_FIXTURE") != "1" || os.Geteuid() != 0 {
+ 		t.Skip("opt-in synthetic multi-UID fixture requires a privileged DEV supervisor")
+@@ -253,3 +256,181 @@ func v24IndependentReceiver(t *testing.T) {
+ 		t.Fatal("session shutdown timed out")
+ 	}
+ }
++
++const v28FixturePeerUID uint32 = 60003
++
++func TestC1V28AdversarialMultiProcessCustodyAndSwapRace(t *testing.T) {
++	if os.Getenv("VIRKI_V24_RUN_ROOT_FIXTURE") != "1" || os.Geteuid() != 0 {
++		t.Skip("adversarial multi-UID race fixture requires a privileged DEV supervisor")
++	}
++	for _, uid := range []uint32{v24FixtureReceiverUID, v24FixtureSenderUID, v28FixturePeerUID} {
++		id := strconv.FormatUint(uint64(uid), 10)
++		if _, err := user.LookupId(id); err == nil {
++			t.Skipf("fixture UID %s is already assigned", id)
++		}
++		if _, err := user.LookupGroupId(id); err == nil {
++			t.Skipf("fixture GID %s is already assigned", id)
++		}
++	}
++	root, err := os.MkdirTemp("/tmp", "virki-v28-adv-race-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(root)) })
++	require.NoError(t, os.Chmod(root, 0711))
++	for name, uid := range map[string]uint32{"sender": v24FixtureSenderUID, "receiver": v24FixtureReceiverUID, "peer": v28FixturePeerUID} {
++		dir := filepath.Join(root, name)
++		require.NoError(t, os.Mkdir(dir, 0700))
++		require.NoError(t, os.Chown(dir, int(uid), int(uid)))
++		tmp := filepath.Join(dir, "tmp")
++		require.NoError(t, os.Mkdir(tmp, 0700))
++		require.NoError(t, os.Chown(tmp, int(uid), int(uid)))
++	}
++	src := filepath.Join(root, "sender", "app.js")
++	require.NoError(t, os.WriteFile(src, []byte("SAFE"), 0600))
++	require.NoError(t, os.Chown(src, int(v24FixtureSenderUID), int(v24FixtureSenderUID)))
++	m := v15PacketManifest()
++	permit, pub, _ := v15SignedPermitFixture(t, m)
++	data, err := json.Marshal(v24IndependentFixture{Manifest: m, Permit: permit, Public: pub})
++	require.NoError(t, err)
++	require.NoError(t, os.WriteFile(filepath.Join(root, "fixture.json"), data, 0444))
++
++	self, err := os.Executable()
++	require.NoError(t, err)
++	input, err := os.Open(self)
++	require.NoError(t, err)
++	defer input.Close()
++	helper := filepath.Join(root, "fixture")
++	output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	require.NoError(t, err)
++	_, copyErr := io.Copy(output, input)
++	closeErr := output.Close()
++	require.NoError(t, copyErr)
++	require.NoError(t, closeErr)
++	require.NoError(t, os.Chmod(helper, 0555))
++
++	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
++	require.NoError(t, err)
++	senderFD := os.NewFile(uintptr(fds[0]), "sender-session")
++	receiverFD := os.NewFile(uintptr(fds[1]), "receiver-session")
++	defer senderFD.Close()
++	defer receiverFD.Close()
++
++	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
++	defer cancel()
++	type procResult struct {
++		out []byte
++		err error
++	}
++	receiverDone := make(chan procResult, 1)
++	senderDone := make(chan procResult, 1)
++	peerDone := make(chan procResult, 1)
++	launch := func(role string, uid uint32, fd *os.File, ch chan<- procResult) {
++		u, g := uid, uid
++		var files []*os.File
++		if fd != nil {
++			files = []*os.File{fd}
++		}
++		out, err := runV24IsolatedSubprocessWithFiles(ctx, helper,
++			[]string{"-test.run=^TestC1V24IndependentReceiverProcess$", "-test.v"},
++			V24ReceiverCustodyPolicy{
++				RequireUnprivileged: true,
++				ExpectedReceiverUID: &u,
++				ExpectedReceiverGID: &g,
++				PrivateTempDir:      filepath.Join(root, roleName(role), "tmp"),
++			}, files, "VIRKI_V24_INDEPENDENT_ROLE="+role, "VIRKI_V24_FIXTURE_ROOT="+root)
++		ch <- procResult{out: out, err: err}
++	}
++	go launch("adversarial-peer", v28FixturePeerUID, nil, peerDone)
++	peerReady := filepath.Join(root, "peer", "ready")
++	deadline := time.Now().Add(10 * time.Second)
++	for time.Now().Before(deadline) {
++		if _, err := os.Stat(peerReady); err == nil {
++			break
++		}
++		select {
++		case pRes := <-peerDone:
++			t.Fatalf("adversarial peer exited before ready: %v (%s)", pRes.err, pRes.out)
++		default:
++			time.Sleep(5 * time.Millisecond)
++		}
++	}
++	_, readyErr := os.Stat(peerReady)
++	require.NoError(t, readyErr, "adversarial peer did not signal readiness before receiver start")
++
++	go launch("receiver", v24FixtureReceiverUID, receiverFD, receiverDone)
++	go launch("sender", v24FixtureSenderUID, senderFD, senderDone)
++
++	receiver := <-receiverDone
++	_ = receiverFD.Close()
++	if receiver.err != nil {
++		cancel()
++	}
++	_ = os.WriteFile(filepath.Join(root, "peer", "stop"), []byte("1"), 0644)
++	sender := <-senderDone
++	_ = senderFD.Close()
++	peer := <-peerDone
++	require.NoError(t, receiver.err, "receiver: %s", receiver.out)
++	require.NoError(t, sender.err, "sender: %s", sender.out)
++	require.NoError(t, peer.err, "adversarial peer: %s", peer.out)
++	attemptsBytes, err := os.ReadFile(filepath.Join(root, "peer", "attempts"))
++	require.NoError(t, err)
++	attempts, err := strconv.Atoi(string(attemptsBytes))
++	require.NoError(t, err)
++	require.GreaterOrEqual(t, attempts, 10, "expected peer to race during receiver publication window")
++
++	publishedDir := filepath.Join(root, "receiver", "published")
++	entries, err := os.ReadDir(publishedDir)
++	require.NoError(t, err)
++	require.Len(t, entries, 1)
++	require.Equal(t, "app.js", entries[0].Name())
++	published := filepath.Join(publishedDir, "app.js")
++	got, err := os.ReadFile(published)
++	require.NoError(t, err)
++	require.Equal(t, []byte("SAFE"), got)
++	var st unix.Stat_t
++	require.NoError(t, unix.Lstat(published, &st))
++	require.Equal(t, v24FixtureReceiverUID, st.Uid)
++	require.Equal(t, uint32(unix.S_IFREG), st.Mode&unix.S_IFMT)
++}
++
++func roleName(role string) string {
++	if role == "adversarial-peer" {
++		return "peer"
++	}
++	return role
++}
++
++func v28AdversarialPeerRacer(t *testing.T) {
++	t.Helper()
++	ruid, euid, suid := unix.Getresuid()
++	for _, id := range []int{ruid, euid, suid} {
++		require.Equal(t, v28FixturePeerUID, uint32(id))
++	}
++	nnp, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
++	require.NoError(t, err)
++	require.Equal(t, 1, nnp)
++	root := os.Getenv("VIRKI_V24_FIXTURE_ROOT")
++	require.NotEmpty(t, root)
++	receiverDir := filepath.Join(root, "receiver")
++	publishedDir := filepath.Join(receiverDir, "published")
++	evilTarget := filepath.Join(root, "peer", "evil")
++	require.NoError(t, os.WriteFile(evilTarget, []byte("EVIL"), 0644))
++	readyPath := filepath.Join(root, "peer", "ready")
++	stopPath := filepath.Join(root, "peer", "stop")
++	attemptsPath := filepath.Join(root, "peer", "attempts")
++	require.NoError(t, os.WriteFile(readyPath, []byte("1"), 0644))
++	attempts := 0
++	deadline := time.Now().Add(30 * time.Second)
++	for time.Now().Before(deadline) {
++		require.Error(t, os.Symlink(evilTarget, publishedDir))
++		require.Error(t, os.Mkdir(publishedDir, 0777))
++		require.Error(t, os.WriteFile(filepath.Join(publishedDir, "app.js"), []byte("EVIL"), 0644))
++		require.Error(t, os.Rename(evilTarget, publishedDir))
++		require.Error(t, os.Symlink(evilTarget, filepath.Join(receiverDir, "swap")))
++		attempts++
++		if _, err := os.Stat(stopPath); err == nil && attempts >= 10 {
++			break
++		}
++		time.Sleep(500 * time.Microsecond)
++	}
++	require.NoError(t, os.WriteFile(attemptsPath, []byte(strconv.Itoa(attempts)), 0644))
++}
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+index e86f3c3..7dd01a6 100755
+--- a/session/filesync/sealed_custody_v24_linux.go
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -158,6 +158,15 @@ func validateV24IndependentCustody(dest string, policy V24ReceiverCustodyPolicy)
+ 		!slices.Contains(policy.ForbiddenPeerUIDs, *policy.ExpectedSenderUID) {
+ 		return errors.New("C1 V24 independent receiver requires explicit distinct sender ownership")
+ 	}
++	cleanTmp := filepath.Clean(policy.PrivateTempDir)
++	cleanDest := filepath.Clean(dest)
++	cleanDestDir := filepath.Dir(cleanDest)
++	if policy.PrivateTempDir == "" || cleanTmp == cleanDestDir ||
++		strings.HasPrefix(cleanDestDir+"/", cleanTmp+"/") ||
++		cleanTmp == cleanDest ||
++		strings.HasPrefix(cleanTmp+"/", cleanDest+"/") {
++		return errors.New("C1 V24 independent receiver requires PrivateTempDir distinct from destination custody parent")
++	}
+ 	if err := validateV24ProcessIdentity(policy); err != nil {
+ 		return err
+ 	}
+@@ -221,9 +230,27 @@ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []s
+ 	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe {
+ 		return nil, errors.New("C1 V24 helper executable must be canonical absolute path")
+ 	}
++	exeInfo, err := os.Lstat(exe)
++	if err != nil {
++		return nil, fmt.Errorf("C1 V24 cannot stat helper executable: %w", err)
++	}
++	if !exeInfo.Mode().IsRegular() {
++		return nil, errors.New("C1 V24 helper executable must be non-symlink regular file")
++	}
++	if exeInfo.Mode().Perm()&0022 != 0 {
++		return nil, errors.New("C1 V24 helper executable must not be group/world writable")
++	}
++	for _, f := range files {
++		if f == nil {
++			return nil, errors.New("C1 V24 launcher refuses nil inherited file")
++		}
++	}
+ 	if policy.RequireUnprivileged && policy.ExpectedReceiverUID != nil && *policy.ExpectedReceiverUID == 0 {
+ 		return nil, errors.New("C1 V24 refuses root ExpectedReceiverUID")
+ 	}
++	if policy.ExpectedReceiverUID != nil && policy.ExpectedSenderUID != nil && *policy.ExpectedReceiverUID == *policy.ExpectedSenderUID {
++		return nil, errors.New("C1 V24 launcher refuses identical receiver and sender UID")
++	}
+ 	if policy.ExpectedReceiverUID != nil {
+ 		for _, forbidden := range policy.ForbiddenPeerUIDs {
+ 			if *policy.ExpectedReceiverUID == forbidden {
+@@ -234,6 +261,9 @@ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []s
+ 	attr := &syscall.SysProcAttr{
+ 		Pdeathsig: unix.SIGKILL,
+ 	}
++	if policy.RequireUnprivileged && os.Geteuid() == 0 && policy.ExpectedReceiverUID == nil {
++		return nil, errors.New("C1 V24 refuses unprivileged launch as root without ExpectedReceiverUID")
++	}
+ 	if policy.ExpectedReceiverUID != nil && uint32(os.Geteuid()) != *policy.ExpectedReceiverUID {
+ 		if os.Geteuid() != 0 {
+ 			return nil, errors.New("C1 V24 cross-UID credential separation requires privileged parent")
+@@ -250,14 +280,33 @@ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []s
+ 			Gid:    gid,
+ 			Groups: []uint32{},
+ 		}
++	} else if policy.ExpectedReceiverUID != nil && policy.ExpectedReceiverGID != nil && uint32(os.Getegid()) != *policy.ExpectedReceiverGID {
++		return nil, fmt.Errorf("C1 V24 receiver GID %d does not match expected %d", os.Getegid(), *policy.ExpectedReceiverGID)
+ 	}
+ 	if policy.PrivateTempDir == "" || !filepath.IsAbs(policy.PrivateTempDir) ||
+ 		filepath.Clean(policy.PrivateTempDir) != policy.PrivateTempDir || policy.PrivateTempDir == "/" {
+ 		return nil, errors.New("C1 V24 launcher requires an explicit private temporary directory")
+ 	}
++	tmpInfo, err := os.Lstat(policy.PrivateTempDir)
++	if err != nil {
++		return nil, fmt.Errorf("C1 V24 launcher cannot stat private temporary directory: %w", err)
++	}
++	if !tmpInfo.Mode().IsDir() || tmpInfo.Mode().Perm() != 0700 {
++		return nil, errors.New("C1 V24 launcher requires real 0700 private temporary directory")
++	}
++	expectedTmpUID := uint32(os.Geteuid())
++	if policy.ExpectedReceiverUID != nil {
++		expectedTmpUID = *policy.ExpectedReceiverUID
++	}
++	if tmpStat, ok := tmpInfo.Sys().(*syscall.Stat_t); !ok || tmpStat.Uid != expectedTmpUID {
++		return nil, errors.New("C1 V24 launcher requires PrivateTempDir owned by receiver identity")
++	}
+ 	for _, entry := range extraEnv {
+-		if strings.HasPrefix(entry, "TMPDIR=") {
+-			return nil, errors.New("C1 V24 launcher refuses TMPDIR override")
++		key, _, ok := strings.Cut(entry, "=")
++		if !ok || strings.ContainsRune(entry, 0) || key == "" ||
++			key == "TMPDIR" || key == "PATH" || key == "HOME" || key == "LC_ALL" ||
++			strings.HasPrefix(key, "LD_") {
++			return nil, fmt.Errorf("C1 V24 launcher refuses unsafe env override %q", key)
+ 		}
+ 	}
+ 	env := append([]string{"PATH=/usr/bin:/bin", "LC_ALL=C", "HOME=/nonexistent", "TMPDIR=" + policy.PrivateTempDir}, extraEnv...)
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index 6f17a1e..ec33fb4 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -240,3 +240,188 @@ func TestC1V24FSSyncSealedV15EnforcesCustodyPolicy(t *testing.T) {
+ 	})
+ 	require.NoError(t, g.Wait())
+ }
++
++func TestC1V28LauncherResourceAndIdentityRefusals(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged launcher refusal test requires non-root euid")
++	}
++	t.Setenv("TMPDIR", "/tmp")
++	dir := t.TempDir()
++	require.NoError(t, os.Chmod(dir, 0700))
++
++	helper := filepath.Join(dir, "helper")
++	require.NoError(t, os.WriteFile(helper, []byte("#!/bin/sh\n"), 0700))
++	symlinkHelper := filepath.Join(dir, "helper-link")
++	require.NoError(t, os.Symlink(helper, symlinkHelper))
++
++	writableHelper := filepath.Join(dir, "helper-writable")
++	require.NoError(t, os.WriteFile(writableHelper, []byte("#!/bin/sh\n"), 0755))
++	require.NoError(t, os.Chmod(writableHelper, 0775))
++
++	privateTmp := filepath.Join(dir, "tmp")
++	require.NoError(t, os.Mkdir(privateTmp, 0700))
++	publicTmp := filepath.Join(dir, "public-tmp")
++	require.NoError(t, os.Mkdir(publicTmp, 0755))
++	symlinkTmp := filepath.Join(dir, "link-tmp")
++	require.NoError(t, os.Symlink(privateTmp, symlinkTmp))
++
++	uid := uint32(os.Geteuid())
++	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
++	defer cancel()
++
++	_, err := runV24IsolatedSubprocessWithFiles(ctx, symlinkHelper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, nil)
++	require.ErrorContains(t, err, "must be non-symlink regular file")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, writableHelper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, nil)
++	require.ErrorContains(t, err, "must not be group/world writable")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, []*os.File{nil})
++	require.ErrorContains(t, err, "refuses nil inherited file")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		ExpectedReceiverUID: &uid,
++		ExpectedSenderUID:   &uid,
++		PrivateTempDir:      privateTmp,
++	}, nil)
++	require.ErrorContains(t, err, "refuses identical receiver and sender UID")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      publicTmp,
++	}, nil)
++	require.ErrorContains(t, err, "real 0700 private temporary directory")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      symlinkTmp,
++	}, nil)
++	require.ErrorContains(t, err, "real 0700 private temporary directory")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, nil, "TMPDIR=/tmp")
++	require.ErrorContains(t, err, "refuses unsafe env override")
++
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		PrivateTempDir:      privateTmp,
++	}, nil, "LD_PRELOAD=/tmp/evil.so")
++	require.ErrorContains(t, err, "refuses unsafe env override")
++
++	wrongGID := uint32(os.Getegid()) + 1
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helper, nil, V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		ExpectedReceiverUID: &uid,
++		ExpectedReceiverGID: &wrongGID,
++		PrivateTempDir:      privateTmp,
++	}, nil)
++	require.ErrorContains(t, err, "receiver GID")
++}
++
++func TestC1V28IndependentCustodyPolicyRefusals(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged independent custody policy test requires non-root euid")
++	}
++	uid := uint32(os.Geteuid())
++	gid := uint32(os.Getegid())
++	peer := uid + 1
++
++	base := t.TempDir()
++	require.NoError(t, os.Chmod(base, 0700))
++	dest := filepath.Join(base, "published")
++	privateTmp := filepath.Join(base, "tmp")
++	require.NoError(t, os.Mkdir(privateTmp, 0700))
++	t.Setenv("TMPDIR", privateTmp)
++
++	require.ErrorContains(t, validateV24IndependentCustody(dest, V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &gid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		PrivateTempDir:              privateTmp,
++	}), "explicit distinct sender ownership")
++
++	require.ErrorContains(t, validateV24IndependentCustody(dest, V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &gid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		ExpectedSenderUID:           &uid,
++		ExpectedSenderGID:           &peer,
++		PrivateTempDir:              privateTmp,
++	}), "explicit distinct sender ownership")
++
++	require.ErrorContains(t, validateV24IndependentCustody(filepath.Join(privateTmp, "published"), V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &gid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		ExpectedSenderUID:           &peer,
++		ExpectedSenderGID:           &peer,
++		PrivateTempDir:              privateTmp,
++	}), "PrivateTempDir distinct from destination custody parent")
++
++	require.ErrorContains(t, validateV24IndependentCustody(filepath.Join(privateTmp, "nested", "published"), V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequirePrivateParent:        true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         &uid,
++		ExpectedReceiverGID:         &gid,
++		ForbiddenPeerUIDs:           []uint32{peer},
++		ExpectedSenderUID:           &peer,
++		ExpectedSenderGID:           &peer,
++		PrivateTempDir:              privateTmp,
++	}), "PrivateTempDir distinct from destination custody parent")
++}
++
++func TestC1V28AdversarialCustodyBoundaryRefusals(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("unprivileged custody boundary refusal test requires non-root euid")
++	}
++	base := t.TempDir()
++	require.NoError(t, os.Chmod(base, 0700))
++
++	realParent := filepath.Join(base, "real-parent")
++	require.NoError(t, os.Mkdir(realParent, 0700))
++	symParent := filepath.Join(base, "sym-parent")
++	require.NoError(t, os.Symlink(realParent, symParent))
++	err := validateV24CustodyDirs(filepath.Join(symParent, "published"), V24ReceiverCustodyPolicy{
++		RequirePrivateParent: true,
++	})
++	require.Error(t, err)
++
++	publicParent := filepath.Join(base, "public-parent")
++	require.NoError(t, os.Mkdir(publicParent, 0755))
++	err = validateV24CustodyDirs(filepath.Join(publicParent, "published"), V24ReceiverCustodyPolicy{
++		RequirePrivateParent: true,
++	})
++	require.ErrorContains(t, err, "must be 0700")
++
++	m := v15PacketManifest()
++	destSymlink := filepath.Join(realParent, "published-link")
++	require.NoError(t, os.Symlink(filepath.Join(base, "outside"), destSymlink))
++	called := false
++	err = receiveV24WithCustody(destSymlink, m, V24ReceiverCustodyPolicy{RequirePrivateParent: true}, func(stage string) error {
++		called = true
++		return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++	})
++	require.Error(t, err)
++	require.False(t, called, "stage callback must not run when destination custody fails or already exists")
++}
