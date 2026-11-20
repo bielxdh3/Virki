@@ -15,6 +15,7 @@ import {
   computeBoundContractDigest,
   evaluateC1ToC4IntegrationCandidate,
   initAnchoredAuthState,
+  loadAndVerifyAuthState,
   recoverAuthStateWithEpochFence,
   sha256Hex,
 } from "./c1-c4-contract.mjs";
@@ -161,6 +162,28 @@ test("C1->C4 integration contract accepts valid synthetic runtime and migrator c
   }
 });
 
+test("C1->C4 state serializes independent writers and retains its Linux lock inode", { skip: process.platform !== "linux" }, async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-writers-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const statePath = path.join(tmpDir, "state.json");
+  initAnchoredAuthState(statePath, "a".repeat(40));
+  const runWriter = (nonce) => new Promise((resolve, reject) => {
+    const script = 'import { appendAuthStateTransition } from "./c1-c4-contract.mjs"; appendAuthStateTransition(process.argv[1], { epoch: 1, nonce: process.argv[2], contractSha256: "b".repeat(64), status: "PREPARED" });';
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script, statePath, nonce], { cwd: THIS_DIR, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`writer exited: ${code}/${signal}`)));
+  });
+  await runWriter("1".repeat(32));
+  const lockBefore = fs.statSync(`${statePath}.lock`);
+  await Promise.all(["2", "3", "4", "5"].map((n) => runWriter(n.repeat(32))));
+  const state = loadAndVerifyAuthState(statePath);
+  assert.equal(state.sequenceFloor, 5);
+  assert.equal(new Set(state.entries.map((entry) => entry.nonce)).size, 5);
+  const lockAfter = fs.statSync(`${statePath}.lock`);
+  assert.equal(lockAfter.ino, lockBefore.ino);
+  assert.equal(lockAfter.dev, lockBefore.dev);
+});
+
 test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signature, state, rollback, and custody violations", (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-neg-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
@@ -263,9 +286,9 @@ test("C1->C4 integration rejects provenance, FileSync ignore, exporter, signatur
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxAbort), /no active PREPARED/);
 
     const fxFence = buildSyntheticFixture(tmpDir);
-    fs.writeFileSync(`${fxFence.stateFilePath}.lock`, "999999\n", { mode: 0o600 });
     const fenced = recoverAuthStateWithEpochFence(fxFence.stateFilePath);
     assert.equal(fenced.currentEpoch, 2);
+    assert.equal(fs.existsSync(`${fxFence.stateFilePath}.lock`), process.platform === "linux");
     assert.throws(() => evaluateC1ToC4IntegrationCandidate(fxFence), /does not match active state epoch/);
   }
 
