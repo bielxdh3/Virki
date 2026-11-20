@@ -226,6 +226,9 @@ jobs:
       - name: Native owner authority (C4) unit, ELF, framing, and ledger tests
         run: npm run test:offline:owner-authority
 
+      - name: C1->C4 defensive integration contract and daemon boundary tests
+        run: npm run test:offline:c1-c4-integration
+
       - name: Native owner authority (C4) cross-UID/GID SO_PEERCRED tests as root
         if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
         run: sudo bash infra/offline/native-owner-authority/owner-crossuid-v23.integration.sh
