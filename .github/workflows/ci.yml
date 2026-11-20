@@ -223,6 +223,13 @@ jobs:
         # neither changes /etc/machine-id nor authorizes production admission.
         run: sudo "$(command -v node)" --test infra/offline/trusted-owner-machine-id-race.test.mjs
 
+      - name: Native owner authority (C4) unit, ELF, framing, and ledger tests
+        run: npm run test:offline:owner-authority
+
+      - name: Native owner authority (C4) cross-UID/GID SO_PEERCRED tests as root
+        if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && github.repository == 'bielxdh3/Virki' }}
+        run: sudo bash infra/offline/native-owner-authority/owner-crossuid-v23.integration.sh
+
       - name: Read-only backup inventory tests
         run: npm run test:backup:inventory
 
