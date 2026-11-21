@@ -48,7 +48,10 @@ function actualScriptNonce(tag) {
     }
     // Parse whole attribute names: data-nonce, x-nonce or a quoted string
     // containing ' nonce=' are never the script element's nonce attribute.
-    if (name === 'nonce') return value || null;
+    // A CSP nonce is a Base64/Base64url token. Reject entity-encoded or
+    // malformed attribute values instead of comparing raw HTML source to a
+    // browser-decoded value and accidentally approving a broken handshake.
+    if (name === 'nonce') return value && /^[A-Za-z0-9+/_-]+={0,2}$/.test(value) ? value : null;
   }
   return null;
 }
@@ -78,6 +81,13 @@ function hasUnsafeInline(sources) {
 export function classifyIssue119Response(target, response) {
   const headers = response.headers;
   const csp = headers.get('content-security-policy') ?? '';
+  const mime = headers.get('content-type') ?? '';
+  // Multiple enforced CSP response headers are combined with a comma by
+  // Fetch's Headers API. The browser intersects ALL such policies; checking
+  // only the first could falsely approve a 200/404 page whose second policy
+  // blocks its scripts. Until we evaluate each policy independently, refuse
+  // any comma-separated/ambiguous policy list rather than claiming hydration.
+  const singleCsp = csp !== '' && !csp.includes(',');
   const hsts = headers.get('strict-transport-security') ?? '';
   const hasPoweredBy = headers.has('x-powered-by');
   const isAccessRedirect = target.surface === 'access-protected' && response.status === 302;
@@ -100,7 +110,7 @@ export function classifyIssue119Response(target, response) {
   const attributeSources = directiveSources(csp, 'script-src-attr');
   // A more permissive element/attribute directive overrides script-src for
   // that execution type. Checking only script-src would be a false PASS.
-  const nonceSources = sources.filter((source) => /^'nonce-[^']+'$/i.test(source));
+  const nonceSources = sources.filter((source) => /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source));
   const tags = htmlScriptNonces(response.body ?? '');
   const inlineScriptTags = (response.body ?? '').match(/<script\b[^>]*>[^<]+<\/script\s*>/gi) ?? [];
   const inlineHaveNonce = inlineScriptTags.every((tag) => {
@@ -110,13 +120,17 @@ export function classifyIssue119Response(target, response) {
   const nonceValues = new Set(nonceSources.map((source) => source.slice(7, -1)));
   const nonceMatches = tags.length > 0 && tags.every((nonce) => nonce !== null && nonceValues.has(nonce));
   const subdirectiveUnsafe = hasUnsafeInline(elementSources) || hasUnsafeInline(attributeSources);
-  const accepted = response.status === target.expected && !hasPoweredBy && hstsPresent &&
+  const htmlDocument = /^text\/html(?:\s*;|\s*$)/i.test(mime) && /<html\b/i.test(response.body ?? '');
+  const accepted = response.status === target.expected && htmlDocument &&
+    !hasPoweredBy && hstsPresent && singleCsp &&
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
     (elementSources.length === 0 || elementSources.some((source) =>
-      /^'nonce-[^']+'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
+      /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
     nonceSources.length === 1 && nonceMatches && inlineHaveNonce;
 
   return { ...common, csp: csp ? 'present' : 'missing',
+    htmlDocument: htmlDocument ? 'confirmed' : 'not-confirmed',
+    cspPolicy: singleCsp ? 'single' : 'multiple-or-missing',
     scriptNonce: nonceMatches ? 'matched' : 'missing-or-mismatched',
     unsafeInlineScript: hasUnsafeInline(sources) || subdirectiveUnsafe,
     result: accepted ? 'pass' : 'fail' };
