@@ -13,6 +13,7 @@ export const OIDC_PROVIDER_CLAIMS = {
 };
 export const OIDC_DISCOVERY_CONFIGURATION = {
   acrValues: [...OIDC_SUPPORTED_ACR_VALUES],
+  responseTypes: ["code"] as const,
   features: { claimsParameter: { enabled: true } }
 };
 

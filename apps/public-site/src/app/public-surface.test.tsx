@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import PublicLandingPage from "./page";
+import { buildPublicContentSecurityPolicy } from "../public-csp";
 
 test("public landing omits the portal link until an explicit URL is configured", () => {
   const previous = process.env.VIRKI_PORTAL_URL;
@@ -37,15 +38,16 @@ test("public landing rejects unsafe portal URLs", () => {
   assert.doesNotMatch(markup, /href=/u);
 });
 
-test("public site CSP is strict: no framing, plugins, base rewriting or form posts, and eval only in development", async () => {
-  // @ts-expect-error -- plain .mjs config module without type declarations
-  const { buildPublicContentSecurityPolicy } = (await import("../../next.config.mjs")) as { buildPublicContentSecurityPolicy: (nodeEnv?: string) => string };
-  const production = buildPublicContentSecurityPolicy("production");
-  for (const directive of ["default-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'", "upgrade-insecure-requests"]) {
+test("public site CSP authorizes its framework scripts with a nonce and retains the existing restrictions", () => {
+  const production = buildPublicContentSecurityPolicy("production", "testNonce123");
+  assert.equal(production.split("; ").find((directive) => directive.startsWith("script-src ")), "script-src 'self' 'nonce-testNonce123'");
+  for (const directive of ["default-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data:", "font-src 'self'", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'", "upgrade-insecure-requests"]) {
     assert.ok(production.split("; ").includes(directive), directive);
   }
   assert.doesNotMatch(production, /unsafe-eval/u);
-  assert.match(buildPublicContentSecurityPolicy("development"), /'unsafe-eval'/u);
+  const development = buildPublicContentSecurityPolicy("development", "testNonce123");
+  assert.equal(development.split("; ").find((directive) => directive.startsWith("script-src ")), "script-src 'self' 'nonce-testNonce123' 'unsafe-eval'");
+  assert.doesNotMatch(development, /upgrade-insecure-requests/u);
 });
 
 test("robots safely falls back for empty, malformed or non-origin public URL configuration", () => {

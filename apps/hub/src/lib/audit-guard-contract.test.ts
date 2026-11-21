@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const recovery = readFileSync(new URL("../app/recover/actions.ts", import.meta.url), "utf8");
+const recoveryAccess = readFileSync(new URL("../app/recover/recovery-access.ts", import.meta.url), "utf8");
 const accountSecurity = readFileSync(new URL("../app/account/security/actions.ts", import.meta.url), "utf8");
 const adminMutation = readFileSync(new URL("./admin-mutation.ts", import.meta.url), "utf8");
 const logout = readFileSync(new URL("../app/api/logout/route.ts", import.meta.url), "utf8");
@@ -30,18 +31,33 @@ test("recovery approval checks Hub/Access before origin, CSRF, and session autho
 test("Hub recovery actions check Cloudflare Access before origin and anonymous CSRF", () => {
   const guard = guardBranch(recovery, "async function requireRecoveryAccess", "function read(");
   assertInOrder(guard, [
-    "getSurface(requestHeaders)",
-    "expectedSurface === \"hub\" && !isCloudflareAccessAllowed",
+    "resolveRecoveryExpectedRole(requestHeaders, requiredSurface)",
+    "expectedRole === \"ADMIN\" && !isCloudflareAccessAllowed",
     "validateHubCloudflareAccess(requestHeaders, \"account-recovery\")",
-    "hasSameOrigin(requestHeaders)",
+    "hasValidRecoveryActionCsrf(requestHeaders, formData, csrfScope)"
+  ]);
+  const surfaceRejection = guard.indexOf("if (!expectedRole)");
+  const hubAccessCheck = guard.indexOf("if (expectedRole === \"ADMIN\"");
+  assert.ok(surfaceRejection !== -1 && surfaceRejection < hubAccessCheck, "disallowed recovery surfaces must be rejected before Hub Access and request CSRF checks");
+  assert.match(guard, /if \(!expectedRole\)[\s\S]*recordSecurityDenial\(requestHeaders, "account-recovery-access", "role"\)[\s\S]*forbidden\(\)/u);
+  assert.match(guard, /if \(expectedRole === "ADMIN" && !isCloudflareAccessAllowed[\s\S]*recordSecurityDenial\(requestHeaders, "account-recovery-access", "role"\)[\s\S]*forbidden\(\)/u);
+  assert.match(guard, /if \(!hasValidRecoveryActionCsrf\([\s\S]*recordSecurityDenial\(requestHeaders, "account-recovery-access", "csrf"\)[\s\S]*forbidden\(\)/u);
+  assertInOrder(recoveryAccess, [
+    "const surface = getSurface(requestHeaders, env);",
+    "expectedSurface === \"unknown\"",
+    "if (!hasSameOrigin(requestHeaders)) return false;",
     "validateCsrfToken("
   ]);
-  const surfaceRejection = guard.indexOf("if (!recoverySurfaceAllowed)");
-  const hubAccessCheck = guard.indexOf("expectedSurface === \"hub\"");
-  assert.ok(surfaceRejection !== -1 && surfaceRejection < hubAccessCheck, "disallowed recovery surfaces must be rejected before Hub Access and request CSRF checks");
-  assert.match(guard, /if \(!recoverySurfaceAllowed\)[\s\S]*recordSecurityDenial\(requestHeaders, "account-recovery-access", "role"\)[\s\S]*forbidden\(\)/u);
-  assert.match(guard, /if \(expectedSurface === "hub" && !isCloudflareAccessAllowed[\s\S]*recordSecurityDenial\(requestHeaders, "account-recovery-access", "role"\)[\s\S]*forbidden\(\)/u);
-  assert.match(guard, /if \(!hasSameOrigin\(requestHeaders\)[\s\S]*recordSecurityDenial\(requestHeaders, "account-recovery-access", "csrf"\)[\s\S]*forbidden\(\)/u);
+});
+
+test("public recovery rejects Origin/CSRF before parsing email or calling the recovery backend", () => {
+  const action = guardBranch(recovery, "export async function requestRecoveryAction", "export async function requestAdministrativeRecoveryAction");
+  assertInOrder(action, [
+    'requireRecoveryAccess(formData, "recovery-request", "portal")',
+    'readBoundedFormString(formData, "email", EMAIL_INPUT_MAX_LENGTH)',
+    "requestAccountRecovery("
+  ]);
+  assert.match(recoveryAccess, /if \(!hasSameOrigin\(requestHeaders\)\) return false;/u);
 });
 
 test("account security mutation guard checks surface/Access, origin, CSRF, and session/role in order", () => {

@@ -132,8 +132,8 @@ export function RecoveryRequestForm({ action, resumeAction, csrf, csrfFieldName,
 }
 
 function RecoveryMethodChoice({ option, selected, disabled, onSelect }: { option: RecoveryMethodOption; selected: boolean; disabled: boolean; onSelect: () => void }) {
-  return <label style={{ display: "flex", alignItems: "flex-start", gap: "0.65rem", marginTop: "0.7rem", cursor: "pointer" }}>
-    <input type="radio" name="method" value={option.value} checked={selected} disabled={disabled} onChange={onSelect} style={{ width: "1.15rem", minHeight: "1.15rem", height: "1.15rem", padding: 0, marginTop: "0.2rem", flexShrink: 0 }} />
-    <span><strong style={{ display: "block", color: "var(--text)" }}>{option.title}</strong><small>{option.description}</small></span>
+  return <label className="recovery-method-choice">
+    <input type="radio" name="method" value={option.value} checked={selected} disabled={disabled} onChange={onSelect} />
+    <span><strong>{option.title}</strong><small>{option.description}</small></span>
   </label>;
 }

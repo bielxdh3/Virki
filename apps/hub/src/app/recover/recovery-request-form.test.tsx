@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { parseRecoveryStartMethod, recoveryMethodFromPolicy, recoveryPolicyFromMethod, RECOVERY_RESTART_METHOD_SUFFIX } from "./recovery-method-selection";
 import { RecoveryRequestForm, truncateRecoveryComment, type RecoveryRequestMethod } from "./recovery-request-form";
+import { RecoveryCompletionForm } from "./recovery-completion-form";
 
 function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdmin: boolean, initialMethod?: RecoveryRequestMethod, hasExistingBrowserRecovery = false): string {
   const original = Object.getOwnPropertyDescriptor(globalThis, "React");
@@ -18,6 +20,23 @@ function renderForm(availableMethods: RecoveryRequestMethod[], hasOtherActiveAdm
       hasOtherActiveAdmin={hasOtherActiveAdmin}
       initialMethod={initialMethod}
       hasExistingBrowserRecovery={hasExistingBrowserRecovery}
+    />);
+  } finally {
+    if (original) Object.defineProperty(globalThis, "React", original);
+    else Reflect.deleteProperty(globalThis, "React");
+  }
+}
+
+function renderCompletionForm(): string {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "React");
+  Object.defineProperty(globalThis, "React", { configurable: true, value: React });
+  try {
+    return renderToStaticMarkup(<RecoveryCompletionForm
+      csrf="csrf-test"
+      csrfFieldName="csrfToken"
+      requestId="recovery-request"
+      expectedRole="USER"
+      purpose="RECOVERY"
     />);
   } finally {
     if (original) Object.defineProperty(globalThis, "React", original);
@@ -102,6 +121,24 @@ test("server capability list hides unsupported proof combinations", () => {
   const html = renderForm(["TOTP_EMAIL"], true);
   assert.match(html, /value="TOTP_EMAIL"/u);
   assert.doesNotMatch(html, /PASSKEY_|_ADMIN|name="comment"/u);
+});
+
+test("recovery method choices use stylesheet classes instead of CSP-blocked inline styles", () => {
+  const html = renderForm(["TOTP_EMAIL"], false);
+  assert.match(html, /class="recovery-method-choice"/u);
+  assert.doesNotMatch(html, /\sstyle=/u);
+});
+
+test("recovery completion waits for hydration and shares the cross-tab cookie mutation lock", () => {
+  const html = renderCompletionForm();
+  assert.match(html, /name="csrfToken" value="csrf-test"/u);
+  assert.match(html, /name="requestId" value="recovery-request"/u);
+  const submit = html.match(/<button\b[^>]*type="submit"[^>]*>/u)?.[0];
+  assert.ok(submit, "completion submit control must exist");
+  assert.match(submit, /\bdisabled=""/u, "SSR must not submit before the cross-tab lock handler hydrates");
+  const source = readFileSync(new URL("./recovery-completion-form.tsx", import.meta.url), "utf8");
+  assert.match(source, /if \(!navigator\.locks\?\.request\)/u);
+  assert.match(source, /navigator\.locks\.request\("virki-recovery-start-v1"/u);
 });
 
 test("server-facing policies bind each selected method to exactly its required independent proofs", () => {

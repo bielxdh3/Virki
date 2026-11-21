@@ -44,6 +44,20 @@ test("Windows runs browser E2E in isolated Linux Docker and carries filters as J
   assert.deepEqual(JSON.parse(command.environment.VIRKI_E2E_PLAYWRIGHT_ARGUMENTS_JSON), playwrightArguments);
 });
 
+test("isolated browser runner pins the official image to the locked Playwright version and Chromium revision", () => {
+  const lock = JSON.parse(readFileSync(resolve(repositoryRoot, "package-lock.json"), "utf8"));
+  const playwrightVersion = lock.packages["node_modules/playwright-core"]?.version;
+  assert.equal(lock.packages["node_modules/@playwright/test"]?.version, playwrightVersion);
+  const browsers = JSON.parse(readFileSync(resolve(repositoryRoot, "node_modules/playwright-core/browsers.json"), "utf8"));
+  const chromium = browsers.browsers.find((browser) => browser.name === "chromium-headless-shell");
+  assert.ok(playwrightVersion && chromium?.revision, "the lockfile and installed browser manifest must be available");
+  const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
+  assert.match(runner, /\$playwrightBrowserImage = 'mcr\.microsoft\.com\/playwright@sha256:[a-f0-9]{64}'/u);
+  assert.ok(runner.includes(`$script:playwrightVersion -ne 'Version ${playwrightVersion}'`), "the runner rejects a Playwright package version that differs from the lockfile");
+  assert.ok(runner.includes(`$script:browserRevision -ne '${chromium.revision}'`), "the runner rejects a Chromium revision that differs from Playwright's manifest");
+  assert.ok(runner.includes(`/ms-playwright/chromium_headless_shell-${chromium.revision}/`), "the browser volume must mount the exact locked Chromium revision");
+});
+
 test("optional PG18 Chromium fixture pins version, image digest, local-only identities and cleanup evidence", () => {
   const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
   assert.match(runner, /\$env:VIRKI_E2E_POSTGRES_MAJOR -cne '18'/u);
@@ -876,7 +890,7 @@ test("isolated runner journals reviewed Docker create operations and removes ver
   assert.match(script, /Write-DockerMutationJournal 'RECONCILIATION_REQUIRED'/u);
   assert.match(script, /Assert-OwnedDockerIdentity \$Kind \$name \$id \$id/u);
   assert.match(script, /Invoke-PinnedDocker container rm --force --volumes \$id/u);
-  assert.match(script, /type=volume,target=\/ms-playwright\/chromium_headless_shell-1243/u);
+  assert.match(script, /type=volume,target=\/ms-playwright\/chromium_headless_shell-1254/u);
   assert.match(script, /Docker-managed anonymous browser volume was not removed/u);
   assert.doesNotMatch(script, /Invoke-PinnedDocker volume rm/u,
     "Docker volume names are mutable; cleanup must use the owned seed's immutable ID");

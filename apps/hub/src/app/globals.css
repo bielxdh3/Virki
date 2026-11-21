@@ -62,6 +62,9 @@ details > summary.button-danger:hover { border-color: var(--danger); }
 .form-stack label { display: grid; gap: 0.4rem; color: var(--muted); }
 .form-stack input, .form-stack select, .form-stack textarea { width: 100%; min-height: 44px; padding: 0.6rem; color: var(--text); border: 1px solid var(--control-border); border-radius: 0.3rem; background: #0d1113; }
 .form-stack textarea { min-height: 88px; }
+.form-stack .recovery-method-choice { display: flex; align-items: flex-start; gap: 0.65rem; margin-top: 0.7rem; cursor: pointer; }
+.form-stack .recovery-method-choice input[type="radio"] { width: 1.15rem; min-height: 1.15rem; height: 1.15rem; padding: 0; margin-top: 0.2rem; flex: 0 0 1.15rem; }
+.recovery-method-choice strong { display: block; color: var(--text); }
 .password-control { display: grid; gap: 0.4rem; }
 .password-field { display: flex; align-items: stretch; gap: 0.5rem; }
 .password-field input { flex: 1; min-width: 0; }

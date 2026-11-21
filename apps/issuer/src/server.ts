@@ -8,7 +8,7 @@ import { installAuditResponseGate, requireAuditBeforeResponse, useNativeOidcResp
 import { readInteractionDetailsOrRespond } from "./interaction-error";
 import { createProviderEventAudit } from "./provider-audit";
 import { OIDC_PROVIDER_SECURITY_CONFIGURATION } from "./provider-security-config";
-import { setIssuerSecurityHeaders, setIssuerSensitiveResponseCachePolicy } from "./http-security";
+import { issuerCorsResponsePolicyMiddleware, issuerSensitiveResponseCachePolicyMiddleware, setIssuerSecurityHeaders } from "./http-security";
 import { readIssuer, readSigningJwks } from "./issuer-config";
 import { OIDC_RATE_LIMIT_RETRY_AFTER_SECONDS, getPublicOidcRateLimitEndpoint, isInteractionPath, isNonCanonicalOidcEndpointPath, isTokenEndpoint, parseBasicClientId, parseBearerToken, selectAuthRateLimits, selectInteractionRateLimits, selectPublicOidcRateLimits, selectRateLimitAudit, selectTokenRateLimits, type RateLimitCheck } from "./rate-limit-policy";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
@@ -90,6 +90,7 @@ consentPrompt.checks.add(new interactionPolicy.Check(
 
 const provider = new Provider(issuer, {
   ...OIDC_DISCOVERY_CONFIGURATION,
+  clientBasedCORS: OIDC_PROVIDER_SECURITY_CONFIGURATION.clientBasedCORS,
   adapter: (model) => new PrismaOidcAdapter(model),
   clients: [],
   clientDefaults: {
@@ -168,11 +169,12 @@ const securityDataCleanupTimer = setInterval(() => void cleanupExpiredSecurityDa
 securityDataCleanupTimer.unref();
 
 provider.proxy = true;
+provider.use(issuerCorsResponsePolicyMiddleware);
+provider.use(issuerSensitiveResponseCachePolicyMiddleware);
 const authorizationRequestStartedAt = new WeakMap<object, number>();
 let lastRateLimitStorageOutageLogMs = 0;
 provider.use(async (rawContext, next) => {
   const context = rawContext as KoaContextWithOIDC;
-  setIssuerSensitiveResponseCachePolicy(context.res, context.path);
   if (isNonCanonicalOidcEndpointPath(context.path)) {
     context.status = 404;
     context.body = { error: "invalid_request" };

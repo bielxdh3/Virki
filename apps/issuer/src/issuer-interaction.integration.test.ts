@@ -560,6 +560,50 @@ function authorization(clientId: string, extra: Record<string, string> = {}, req
     code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", ...extra })}`;
 }
 
+test("actual issuer round-trips state and binds the issued ID token to the request nonce", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  const state = randomBytes(24).toString("base64url");
+  const nonce = randomBytes(24).toString("base64url");
+
+  const callback = await client.follow(authorization(fixture.clientId, { state, nonce }));
+  assert.equal(callback.origin, "https://project.integration.invalid");
+  assert.equal(callback.searchParams.get("state"), state, "the provider must return the exact client state");
+  const code = callback.searchParams.get("code");
+  assert.ok(code, "the registered client receives an authorization code");
+
+  const token = await exchange(fixture.clientId, code);
+  assert.equal(token.status, 200);
+  assert.ok(token.body.id_token);
+  const claims = JSON.parse(Buffer.from(token.body.id_token.split(".")[1], "base64url").toString("utf8")) as { nonce?: string };
+  assert.equal(claims.nonce, nonce, "the ID token must bind to the exact nonce from this authorization request");
+});
+
+test("actual issuer rejects missing or duplicated state and nonce before creating an Interaction", integrationOptions, async () => {
+  const fixture = await seed();
+  const client = browser();
+  client.setSession((await createSession(fixture.userId)).token);
+  const before = await prisma.oidcArtifact.count({ where: { model: "Interaction", clientIdHash: hashOidcIdentifier(fixture.clientId) } });
+  const malformed: Array<{ name: string; mutate: (url: URL) => void }> = [
+    { name: "missing state", mutate: (url) => url.searchParams.delete("state") },
+    { name: "missing OpenID nonce", mutate: (url) => url.searchParams.delete("nonce") },
+    { name: "duplicated state", mutate: (url) => url.searchParams.append("state", "second-state-value-1234") },
+    { name: "duplicated nonce", mutate: (url) => url.searchParams.append("nonce", "second-nonce-value-1234") }
+  ];
+
+  for (const item of malformed) {
+    const url = new URL(authorization(fixture.clientId));
+    item.mutate(url);
+    const response = await client.request(url.href);
+    assert.equal(response.status, 400, item.name);
+    assert.equal(response.headers.get("location"), null, item.name);
+  }
+
+  const after = await prisma.oidcArtifact.count({ where: { model: "Interaction", clientIdHash: hashOidcIdentifier(fixture.clientId) } });
+  assert.equal(after, before, "invalid authorization parameters must be rejected before persisting an Interaction");
+});
+
 function safeIssuerPath(pathname: string): string {
   return pathname.replace(/^\/interaction\/[A-Za-z0-9_-]{8,80}$/u, "/interaction/:id");
 }
