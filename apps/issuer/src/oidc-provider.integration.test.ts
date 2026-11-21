@@ -11,7 +11,9 @@ import { revokeUserOidcArtifactsInTransaction } from "@virki/auth/security";
 import { prisma } from "@virki/database";
 import Provider from "oidc-provider";
 import { deleteExpiredOidcArtifacts, PrismaOidcAdapter } from "./adapter";
+import { OIDC_DISCOVERY_CONFIGURATION, OIDC_PROVIDER_CLAIMS } from "./authorization-policy";
 import { OIDC_PROVIDER_SECURITY_CONFIGURATION } from "./provider-security-config";
+import { issuerCorsResponsePolicyMiddleware } from "./http-security";
 
 let server: Server;
 let provider: Provider;
@@ -28,18 +30,22 @@ before(async () => {
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const jwk = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" });
   provider = new Provider(origin, {
+    ...OIDC_DISCOVERY_CONFIGURATION,
     adapter: (model) => new PrismaOidcAdapter(model),
+    clientBasedCORS: OIDC_PROVIDER_SECURITY_CONFIGURATION.clientBasedCORS,
     clients: [],
     clientDefaults: { grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "client_secret_basic", id_token_signed_response_alg: "ES256" },
     scopes: ["openid", "profile", "email"],
-    claims: { openid: ["sub"], profile: ["name"], email: ["email", "email_verified"] },
-    features: { ...OIDC_PROVIDER_SECURITY_CONFIGURATION.features, devInteractions: { enabled: false }, clientCredentials: { enabled: false }, registration: { enabled: false }, deviceFlow: { enabled: false }, introspection: { enabled: false }, revocation: { enabled: true } },
+    claims: OIDC_PROVIDER_CLAIMS,
+    features: { ...OIDC_PROVIDER_SECURITY_CONFIGURATION.features, devInteractions: { enabled: false }, clientCredentials: { enabled: false }, registration: { enabled: false }, registrationManagement: { enabled: false }, ...OIDC_DISCOVERY_CONFIGURATION.features, deviceFlow: { enabled: false }, introspection: { enabled: false }, revocation: { enabled: true } },
     pkce: OIDC_PROVIDER_SECURITY_CONFIGURATION.pkce,
     ttl: { AuthorizationCode: 90, AccessToken: 300 },
     cookies: { keys: [randomBytes(32).toString("base64url")] },
     jwks: { keys: [{ ...jwk, kid: "test", use: "sig", alg: "ES256" }] },
     findAccount: async (_context, id) => ({ accountId: id, claims: async () => ({ sub: id }) })
   });
+  provider.proxy = true;
+  provider.use(issuerCorsResponsePolicyMiddleware);
   provider.on("server_error", () => undefined);
 });
 
@@ -80,8 +86,19 @@ async function exchange(clientId: string, code: string, codeVerifier: string | n
   return { status: response.status, json };
 }
 
-const userinfo = (accessToken: string) => fetch(`${origin}/me`, { headers: { authorization: `Bearer ${accessToken}` } });
+const userinfo = (accessToken: string, requestOrigin?: string) => fetch(`${origin}/me`, {
+  headers: { authorization: `Bearer ${accessToken}`, ...(requestOrigin ? { Origin: requestOrigin } : {}) }
+});
 const purge = (userId: string) => prisma.$transaction((transaction) => revokeUserOidcArtifactsInTransaction(transaction, userId));
+
+test("production-equivalent discovery advertises only authorization_code and code", integrationOptions, async () => {
+  const response = await fetch(`${origin}/.well-known/openid-configuration`);
+  assert.equal(response.status, 200);
+  const metadata = await response.json() as { grant_types_supported?: string[]; response_types_supported?: string[]; scopes_supported?: string[] };
+  assert.deepEqual(metadata.grant_types_supported, ["authorization_code"]);
+  assert.deepEqual(metadata.response_types_supported, ["code"]);
+  assert.deepEqual(metadata.scopes_supported, ["openid", "profile", "email"]);
+});
 
 test("artifact storage removes nonpositive TTL rewrites and cleanup includes the exact expiry boundary", integrationOptions, async () => {
   const fixture = await seed();
@@ -105,15 +122,37 @@ test("artifact storage removes nonpositive TTL rewrites and cleanup includes the
   await adapter.destroy(identifiers[2]);
 });
 
-test("positive control: a valid exchange succeeds and the opaque access token reaches /me", integrationOptions, async () => {
+test("positive control: registered client CORS allows only its redirect origin at /me", integrationOptions, async () => {
   const seeded = await seed();
   const { code } = await issueCode(seeded);
   const result = await exchange(seeded.clientId, code);
   assert.equal(result.status, 200);
   assert.ok(result.json.access_token);
-  const me = await userinfo(result.json.access_token);
+  const allowedOrigin = "https://project.integration.invalid";
+  const me = await userinfo(result.json.access_token, allowedOrigin);
   assert.equal(me.status, 200);
+  assert.equal(me.headers.get("access-control-allow-origin"), allowedOrigin);
+  assert.equal(me.headers.get("access-control-allow-credentials"), null);
   assert.equal(((await me.json()) as { sub: string }).sub, seeded.userId);
+
+  const attackerOrigin = "https://attacker.example";
+  const denied = await userinfo(result.json.access_token, attackerOrigin);
+  assert.equal(denied.status, 400);
+  assert.equal(denied.headers.get("access-control-allow-origin"), null);
+  assert.equal(denied.headers.get("access-control-allow-credentials"), null);
+
+  const preflight = await fetch(`${origin}/me`, {
+    method: "OPTIONS",
+    headers: { Origin: attackerOrigin, "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization" }
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), attackerOrigin);
+  assert.equal(preflight.headers.get("access-control-allow-credentials"), null);
+
+  const invalid = await userinfo("invalid", attackerOrigin);
+  assert.equal(invalid.status, 401);
+  assert.equal(invalid.headers.get("access-control-allow-origin"), null);
+  assert.equal(invalid.headers.get("access-control-allow-credentials"), null);
 });
 
 test("a redirect removed after authorization-code issuance cannot redeem the older code", integrationOptions, async () => {

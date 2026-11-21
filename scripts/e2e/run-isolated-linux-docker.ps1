@@ -117,9 +117,9 @@ $networkName = 'virki-e2e-' + $runId
 $bootstrapNetworkName = 'virki-e2e-bootstrap-' + $runId
 $databaseName = 'virki-e2e-postgres-' + $runId
 $runnerName = 'virki-e2e-runner-' + $runId
-$playwrightBrowserImage = 'mcr.microsoft.com/playwright@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27'
+$playwrightBrowserImage = 'mcr.microsoft.com/playwright@sha256:9beb546099e11f52d62e505537914870e01a67e0e6b00ae41da4775324e73dbe'
 $browserSeedName = 'virki-e2e-browser-seed-' + $runId
-$browserExecutablePath = '/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell'
+$browserExecutablePath = '/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-linux64/chrome-headless-shell'
 $browserVolumeMount = $null
 $script:dockerOwnerLabel = 'org.virki.e2e.owner=' + $runId
 $script:dockerResourceNames = @{
@@ -423,6 +423,8 @@ try {
     'scripts/legacy-data-inventory.ts',
     'apps/hub/src/app/admin/accounts/account-state-policy.ts',
     'apps/hub/src/app/recover/recovery-completion-form.tsx',
+    'apps/hub/src/app/recover/recovery-access.test.ts',
+    'apps/hub/src/app/recover/recovery-access.ts',
     'apps/hub/src/app/protected-page-lifecycle.tsx',
     'apps/hub/src/lib/login-redirect.test.ts',
     'apps/hub/src/lib/login-redirect.ts',
@@ -437,6 +439,7 @@ try {
     'apps/public-site/src/app/public-origin.ts',
     'docs/gate-closure-report.md',
     'docs/final-local-security-gates-report.md',
+    'docs/security/issue119-defensive-maintenance-20261120.md',
     'docs/index-query-plan-evidence.md',
     'docs/legacy-data-closure-plan.md',
     'docs/security-triage-a21-review-2026-10-20.md',
@@ -485,17 +488,17 @@ try {
     # after the runner is removed; we never delete any named volume.
     $browserSeedName = Invoke-CreateOwnedDockerResource 'browserSeed' $browserSeedName @(
       'create', '--name', $browserSeedName, '--network', 'none', '--label', $script:dockerOwnerLabel,
-      '--mount', 'type=volume,target=/ms-playwright/chromium_headless_shell-1243',
+      '--mount', 'type=volume,target=/ms-playwright/chromium_headless_shell-1254',
       '--entrypoint', '/bin/bash', $playwrightBrowserImage, '-lc', 'sleep infinity')
     $seedRecord = Assert-OwnedDockerIdentity 'browserSeed' $script:dockerResourceNames.browserSeed $browserSeedName $browserSeedName
     $seedMounts = @($seedRecord.Mounts)
     if ($seedMounts.Count -ne 1 -or $seedMounts[0].Type -cne 'volume' -or
-        $seedMounts[0].Destination -cne '/ms-playwright/chromium_headless_shell-1243' -or
+        $seedMounts[0].Destination -cne '/ms-playwright/chromium_headless_shell-1254' -or
         $seedMounts[0].Name -cnotmatch '^[a-f0-9]{64}$') {
       throw 'Disposable browser image failed anonymous volume mount ownership verification.'
     }
     $script:browserAnonymousVolume = $seedMounts[0].Name
-    $browserVolumeMount = 'type=volume,source=' + $script:browserAnonymousVolume + ',target=/ms-playwright/chromium_headless_shell-1243'
+    $browserVolumeMount = 'type=volume,source=' + $script:browserAnonymousVolume + ',target=/ms-playwright/chromium_headless_shell-1254'
     Invoke-PinnedDocker start $browserSeedName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the temporary Chromium cache volume.' }
     Invoke-PinnedDocker exec $browserSeedName test -x $browserExecutablePath
@@ -643,9 +646,9 @@ try {
   Invoke-LoggedStage 'tooling-policy-tests' 'tooling-policy' 'node scripts/tooling-audit-policy.mjs && node --test scripts/tooling-audit-policy.test.mjs'
   if (-not $IntegrationOnly -and -not $UnitOnly) {
     $script:playwrightVersion = (Invoke-PinnedDocker exec --workdir /workspace $runnerName npx playwright --version).Trim()
-    if ($LASTEXITCODE -ne 0 -or $script:playwrightVersion -ne 'Version 1.63.0') { throw 'The installed Playwright package does not match the preinstalled browser image.' }
+    if ($LASTEXITCODE -ne 0 -or $script:playwrightVersion -ne 'Version 1.65.0') { throw 'The installed Playwright package does not match the preinstalled browser image.' }
     $script:browserRevision = (Invoke-PinnedDocker exec --workdir /workspace $runnerName node -e "const b=require('./node_modules/playwright-core/browsers.json').browsers.find((x)=>x.name==='chromium-headless-shell');if(!b)process.exit(1);process.stdout.write(String(b.revision))").Trim()
-    if ($LASTEXITCODE -ne 0 -or $script:browserRevision -ne '1243') { throw 'The locked Playwright browser revision does not match the preinstalled image.' }
+    if ($LASTEXITCODE -ne 0 -or $script:browserRevision -ne '1254') { throw 'The locked Playwright browser revision does not match the preinstalled image.' }
     Invoke-LoggedStage 'chromium-dependencies' 'chromium-dependencies' 'npx playwright install-deps chromium'
     if ($script:ownedResources.browserSeed -and $script:browserAnonymousVolume) {
       $script:browserVersion = (Invoke-PinnedDocker exec $runnerName $browserExecutablePath --version).Trim()

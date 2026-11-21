@@ -1,5 +1,52 @@
 import type { ServerResponse } from "node:http";
 
+const PUBLIC_CORS_ROUTES = new Set(["discovery", "jwks", "openid_credential_issuer"]);
+const CLIENT_CORS_ROUTES = new Set([
+  "userinfo", "token", "revocation", "introspection", "device_authorization",
+  "pushed_authorization_request", "credential", "challenge"
+]);
+
+type IssuerCorsContext = {
+  method: string;
+  oidc?: { route?: string; client?: unknown };
+  response: {
+    headerSent: boolean;
+    remove(name: string): unknown;
+  };
+  res: {
+    setHeader(name: string, value: string): unknown;
+    removeHeader(name: string): unknown;
+  };
+};
+
+/**
+ * oidc-provider intentionally enables CORS for public discovery/JWKS resources.
+ * Use a wildcard there (without credentials), and never reflect an Origin on
+ * client-bound error responses when no client was authenticated/assigned.
+ */
+export async function issuerCorsResponsePolicyMiddleware(
+  context: IssuerCorsContext,
+  next: () => Promise<unknown>
+): Promise<void> {
+  // Clear credentials before any provider route can end the response directly.
+  context.response.remove("Access-Control-Allow-Credentials");
+  try {
+    await next();
+  } finally {
+    // Koa's response.remove() is guarded once headers have been sent. Some
+    // interaction paths call res.end() directly instead of returning a body.
+    if (!context.response.headerSent) {
+      const route = context.oidc?.route?.replace(/^cors\./u, "") ?? "";
+      if (PUBLIC_CORS_ROUTES.has(route)) {
+        context.res.setHeader("Access-Control-Allow-Origin", "*");
+      } else if (context.method !== "OPTIONS" && CLIENT_CORS_ROUTES.has(route) && !context.oidc?.client) {
+        context.response.remove("Access-Control-Allow-Origin");
+      }
+      context.response.remove("Access-Control-Allow-Credentials");
+    }
+  }
+}
+
 /**
  * Issuer responses are JSON, redirects and the oidc-provider default HTML pages (error, logout confirmation,
  * post-logout success). Those pages carry one inline <style> block and no scripts, so style-src needs
@@ -48,7 +95,24 @@ export function setIssuerSensitiveResponseCachePolicy(
   response: Pick<ServerResponse, "setHeader">,
   pathname: string
 ): void {
-  if (pathname === "/auth" || /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u.test(pathname)) {
+  if (
+    pathname === "/auth" ||
+    pathname === "/token" ||
+    pathname === "/token/revocation" ||
+    pathname === "/me" ||
+    /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u.test(pathname)
+  ) {
     response.setHeader("Cache-Control", "no-store");
   }
+  // RFC 6749 §5.1 requires both headers on token responses. oidc-provider
+  // supplies Cache-Control: no-store, but does not add the legacy Pragma field.
+  if (pathname === "/token") response.setHeader("Pragma", "no-cache");
+}
+
+export async function issuerSensitiveResponseCachePolicyMiddleware(
+  context: { path: string; res: ServerResponse },
+  next: () => Promise<unknown>
+): Promise<void> {
+  setIssuerSensitiveResponseCachePolicy(context.res, context.path);
+  await next();
 }

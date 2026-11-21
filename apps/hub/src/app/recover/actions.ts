@@ -6,7 +6,7 @@ import { withHubAuditRequest } from "../../lib/audit-request";
 import { SESSION_COOKIE_NAME, getSessionCookieOptions } from "@virki/auth";
 import { approveAccountRecovery, consumeApprovedAccountRecovery, getAccountRecoveryRequestId, getAccountRecoveryState, isAcceptableRecoveryPassword, requestAccountRecovery, requestAdministrativeAccountRecovery, verifyAccountRecoveryEmail } from "@virki/auth/security";
 import { requireSecurityElevation } from "@virki/auth/administration";
-import { CSRF_FORM_FIELD_NAME, validateCsrfToken } from "@virki/auth/csrf";
+import { CSRF_FORM_FIELD_NAME } from "@virki/auth/csrf";
 import { validateSessionCsrfTokenFor } from "../../lib/session-csrf";
 import { cookies, headers } from "next/headers";
 import { forbidden, redirect } from "next/navigation";
@@ -30,6 +30,7 @@ import {
 import { EMAIL_INPUT_MAX_LENGTH, readBoundedFormString } from "../../lib/action-input-limits";
 import { parseRecoveryStartMethod, recoveryMethodFromPolicy, recoveryPolicyFromMethod, type RecoveryRequestMethod } from "./recovery-method-selection";
 import { hasRecoveryRestartConsent } from "./recovery-restart-consent";
+import { hasValidRecoveryActionCsrf, resolveRecoveryExpectedRole } from "./recovery-access";
 import type { RecoveryPasskeyStartState, RecoveryProofActionState } from "./recovery-proof-stage";
 
 export async function requestRecoveryAction(formData: FormData) {
@@ -470,17 +471,11 @@ export async function approveRecoveryAction(formData: FormData) {
 
 async function requireRecoveryAccess(formData: FormData, csrfScope: string, requiredSurface?: "hub" | "portal"): Promise<{ requestHeaders: Headers; expectedRole: "ADMIN" | "USER" }> {
   const requestHeaders = await headers();
-  const surface = getSurface(requestHeaders);
-  const expectedSurface = surface === "portal" || surface === "hub"
-    ? surface
-    : surface === "local" && process.env.NODE_ENV !== "production"
-      ? "portal"
-      : "unknown";
-  const recoverySurfaceAllowed = expectedSurface !== "unknown" && (!requiredSurface || expectedSurface === requiredSurface);
-  if (!recoverySurfaceAllowed) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); forbidden(); }
-  if (expectedSurface === "hub" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery"))) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); forbidden(); }
-  if (!hasSameOrigin(requestHeaders) || !validateCsrfToken(read(formData, CSRF_FORM_FIELD_NAME), { scope: csrfScope }).valid) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "csrf"); forbidden(); }
-  return { requestHeaders, expectedRole: expectedSurface === "hub" ? "ADMIN" : "USER" };
+  const expectedRole = resolveRecoveryExpectedRole(requestHeaders, requiredSurface);
+  if (!expectedRole) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); forbidden(); }
+  if (expectedRole === "ADMIN" && !isCloudflareAccessAllowed(await validateHubCloudflareAccess(requestHeaders, "account-recovery"))) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "role"); forbidden(); }
+  if (!hasValidRecoveryActionCsrf(requestHeaders, formData, csrfScope)) { await recordSecurityDenial(requestHeaders, "account-recovery-access", "csrf"); forbidden(); }
+  return { requestHeaders, expectedRole };
 }
 
 function read(formData: FormData, key: string): string {
