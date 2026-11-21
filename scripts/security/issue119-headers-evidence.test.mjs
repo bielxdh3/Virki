@@ -9,7 +9,7 @@ const goodCSP = "default-src 'self'; script-src 'self' 'nonce-SAFE' 'strict-dyna
 
 function response(status, csp = goodCSP, html = goodHTML, extraHeaders = {}) {
   return { status, headers: new Headers({ 'content-security-policy': csp,
-    'strict-transport-security': 'max-age=2592000', ...extraHeaders }), body: html };
+    'strict-transport-security': 'max-age=2592000', 'content-type': 'text/html; charset=utf-8', ...extraHeaders }), body: html };
 }
 
 test('HTTP evidence stays bounded to four exact requests; Access and redirects are explicitly not origin proof', async () => {
@@ -39,9 +39,14 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, `${goodCSP}; script-src-attr 'UNSAFE-INLINE'`),
     response(200, `${goodCSP}; script-src-elem 'UnSaFe-InLiNe'`),
     response(200, "script-src 'NONCE-SAFE' 'UNSAFE-INLINE'", goodHTML),
+    response(200, `${goodCSP}, script-src 'none'`),
+    response(200, `${goodCSP}, script-src 'nonce-SAFE'`),
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=1e6' }),
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000junk' }),
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000; max-age=3000' }),
+    response(200, goodCSP, goodHTML, { 'content-type': 'application/json' }),
+    response(200, goodCSP, '<script nonce="SAFE">boot()</script>'),
+    response(200, "script-src 'nonce-SA&#70;E'", '<html><script nonce="SA&#70;E">boot()</script></html>'),
     response(200, goodCSP, '<html><script nonce="EVIL">boot()</script></html>'),
     { status: 200, headers: new Headers({ 'content-security-policy': goodCSP }), body: goodHTML },
     response(302),
@@ -50,6 +55,15 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
   const result = await collectIssue119HeaderEvidence((target) => Promise.resolve(
     target.surface === 'public-404' ? response(200) : response(target.expected ?? 302)));
   assert.equal(result.passed, false);
+});
+
+test('two independent CSP headers are not mistaken for one passing hydration policy', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const value = response(200);
+  value.headers.append('content-security-policy', "script-src 'none'");
+  const result = classifyIssue119Response(base, value);
+  assert.equal(result.result, 'fail');
+  assert.equal(result.cspPolicy, 'multiple-or-missing');
 });
 
 test('actual nonce attributes and quoted decimal HSTS are recognized without lowercasing nonce values', () => {
