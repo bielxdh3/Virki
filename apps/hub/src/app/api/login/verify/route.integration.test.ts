@@ -3,9 +3,11 @@ import { randomBytes, randomInt } from "node:crypto";
 import { after, test } from "node:test";
 import { prisma } from "@virki/database";
 import { CSRF_FORM_FIELD_NAME, createCsrfToken } from "@virki/auth/csrf";
+import { getSessionByToken, SESSION_COOKIE_NAME } from "@virki/auth";
 import { createTotpSecret, DEVICE_COOKIE_NAME, hashDeviceToken, LOGIN_EMAIL_CEREMONY_ACCOUNT_LIMIT, LOGIN_EMAIL_CEREMONY_SOURCE_LIMIT, startLoginCeremony, type LoginCeremonyStart } from "@virki/auth/security";
 import { createTestUser, integrationOptions, queuedEmails } from "../../../../../../../packages/auth/src/integration-fixtures";
 import { POST } from "./route";
+import { POST as loginPost } from "../route";
 
 after(() => prisma.$disconnect());
 
@@ -131,5 +133,78 @@ test("trusted TOTP recovery email reopenings share the per-source quota across a
   } finally {
     if (previousPortalUrl === undefined) delete process.env.VIRKI_PORTAL_URL;
     else process.env.VIRKI_PORTAL_URL = previousPortalUrl;
+  }
+});
+
+test("authenticated login rotates an attacker-supplied pre-auth session cookie after email proof", integrationOptions, async () => {
+  const previousHostname = process.env.VIRKI_PORTAL_HOSTNAME;
+  const previousUrl = process.env.VIRKI_PORTAL_URL;
+  process.env.VIRKI_PORTAL_HOSTNAME = "portal.session-fixation.invalid";
+  process.env.VIRKI_PORTAL_URL = "http://portal.session-fixation.invalid";
+
+  try {
+    const user = await createTestUser({ label: "session-fixation" });
+    const attackerSuppliedSessionToken = randomBytes(32).toString("base64url");
+    const loginForm = new FormData();
+    loginForm.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "login" }));
+    loginForm.set("email", user.email);
+    loginForm.set("password", user.password);
+
+    const loginResponse = await loginPost(new Request("http://portal.session-fixation.invalid/api/login", {
+      method: "POST",
+      headers: {
+        host: "portal.session-fixation.invalid",
+        origin: "http://portal.session-fixation.invalid",
+        "cf-connecting-ip": "2001:db8::1234",
+        cookie: `${SESSION_COOKIE_NAME}=${attackerSuppliedSessionToken}`
+      },
+      body: loginForm
+    }));
+
+    assert.equal(loginResponse.status, 303);
+    const loginLocation = loginResponse.headers.get("location");
+    assert.ok(loginLocation);
+    const ceremonyId = new URL(loginLocation).searchParams.get("ceremony");
+    assert.ok(ceremonyId);
+    const deviceToken = loginResponse.cookies.get(DEVICE_COOKIE_NAME)?.value;
+    assert.ok(deviceToken, "the login ceremony must issue its own device token");
+    assert.equal(loginResponse.cookies.get(SESSION_COOKIE_NAME), undefined,
+      "a password-only response must not issue an authenticated session before the second factor");
+
+    const code = (await queuedEmails(user.email))
+      .filter((message) => message.kind === "NEW_DEVICE_VERIFICATION" || message.kind === "EMAIL_TWO_FACTOR")
+      .at(-1)?.code;
+    assert.ok(code, "the new-device email proof must be available in the disposable outbox");
+
+    const verificationForm = new FormData();
+    verificationForm.set(CSRF_FORM_FIELD_NAME, createCsrfToken({ scope: "login-verification" }));
+    verificationForm.set("ceremony", ceremonyId);
+    verificationForm.set("factor", "email");
+    verificationForm.set("code", code);
+    const verificationResponse = await POST(new Request("http://portal.session-fixation.invalid/api/login/verify", {
+      method: "POST",
+      headers: {
+        host: "portal.session-fixation.invalid",
+        origin: "http://portal.session-fixation.invalid",
+        "cf-connecting-ip": "2001:db8::1234",
+        cookie: `${DEVICE_COOKIE_NAME}=${deviceToken}; ${SESSION_COOKIE_NAME}=${attackerSuppliedSessionToken}`
+      },
+      body: verificationForm
+    }));
+
+    assert.equal(verificationResponse.status, 303);
+    const authenticatedSessionToken = verificationResponse.cookies.get(SESSION_COOKIE_NAME)?.value;
+    assert.ok(authenticatedSessionToken, "successful second-factor verification must issue a new session cookie");
+    assert.notEqual(authenticatedSessionToken, attackerSuppliedSessionToken,
+      "the server must never promote or reuse a caller-supplied pre-auth session identifier");
+    assert.equal((await getSessionByToken(attackerSuppliedSessionToken)), null,
+      "the attacker-supplied identifier must not resolve to an authenticated session");
+    assert.equal((await getSessionByToken(authenticatedSessionToken))?.user.id, user.id,
+      "the newly issued session must resolve to the authenticated account");
+  } finally {
+    if (previousHostname === undefined) delete process.env.VIRKI_PORTAL_HOSTNAME;
+    else process.env.VIRKI_PORTAL_HOSTNAME = previousHostname;
+    if (previousUrl === undefined) delete process.env.VIRKI_PORTAL_URL;
+    else process.env.VIRKI_PORTAL_URL = previousUrl;
   }
 });

@@ -178,6 +178,21 @@ test("missing or wrong code_verifier is rejected and the code stays usable", int
   assert.equal((await exchange(seeded.clientId, code)).status, 200);
 });
 
+test("an expired authorization code is rejected by the real token endpoint", integrationOptions, async () => {
+  const seeded = await seed();
+  const { code } = await issueCode(seeded);
+  const expired = await prisma.oidcArtifact.updateMany({
+    where: { model: "AuthorizationCode", idHash: hashOidcIdentifier(code) },
+    data: { expiresAt: new Date(Date.now() - 60_000) }
+  });
+  assert.equal(expired.count, 1, "the issued code must be present before its expiry is advanced");
+
+  const result = await exchange(seeded.clientId, code);
+  assert.equal(result.status, 400);
+  assert.equal(result.json.error, "invalid_grant");
+  assert.equal(result.json.access_token, undefined);
+});
+
 test("concurrent exchanges issue at most one token, and every replay is rejected", integrationOptions, async () => {
   for (let round = 0; round < 36; round += 1) {
     const seeded = await seed();

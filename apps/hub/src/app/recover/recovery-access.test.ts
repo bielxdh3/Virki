@@ -35,3 +35,10 @@ test("recovery actions require same-origin and a valid scope-specific CSRF token
   assert.equal(hasValidRecoveryActionCsrf(new Headers({ host: "portal.example.test", origin: "null" }), formWithToken(token), "recovery-request", env), false);
   assert.equal(hasValidRecoveryActionCsrf(new Headers({ host: "portal.example.test:8443", origin: "https://portal.example.test" }), formWithToken(token), "recovery-request", env), false);
 });
+
+test("an external Origin is rejected even when the recovery request has no email or CSRF field", () => {
+  const emptyForm = new FormData();
+  const external = new Headers({ host: "portal.example.test", origin: "https://attacker.invalid" });
+
+  assert.equal(hasValidRecoveryActionCsrf(external, emptyForm, "recovery-request", env), false);
+});

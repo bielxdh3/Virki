@@ -42,9 +42,9 @@ The connected Cloudflare account was inspected with GET-only API calls. No Acces
 - PR #132 already implemented powered-by-header suppression; its hosted evidence should not be repeated without cause.
 - The fresh Cloudflare API read still reports minimum TLS 1.0 and SSL mode `flexible`. TLS 1.2 minimum and compatibility validation remain a separate authorized-infrastructure decision; this task's no-Cloudflare-change boundary was respected.
 - Historical scan observations are not a complete security assessment; specialist validation and any required controlled authenticated assurance remain open. Do not attach raw reports or credentials. No live probing was performed.
-- The historical main CodeQL run `44688261830` remains a hosted policy FAIL. A separate SARIF review is documented in `docs/security/codeql-reviewed-20261120.md`; its two test-harness dispositions are now mechanically restricted to the original `javascript.sarif` raw-byte SHA-256 `a3dd05e5c9557495963f946f5d5bb70df6bff3f8ef9dd0245f29f8ab8379137d`, each capped at one occurrence. Local policy evaluation accepts the original 55-result SARIF with zero violations; a different artifact with the same fingerprints is rejected. This does not retroactively change the hosted run or establish hosted CodeQL success for a new SHA.
+- The historical main CodeQL run `44688261830` remains a hosted policy FAIL. A separate SARIF review is documented in `docs/security/codeql-reviewed-20261120.md`; its two test-harness dispositions are mechanically restricted to the original `javascript.sarif` raw-byte SHA-256 `a3dd05e5c9557495963f946f5d5bb70df6bff3f8ef9dd0245f29f8ab8379137d`, each capped at one occurrence. Local policy evaluation accepts the original 55-result SARIF with zero violations; a different SARIF byte payload (different SHA-256) with the same fingerprints is rejected. A byte-identical copy has the same content digest and is intentionally indistinguishable to this content-addressed policy. This does not retroactively change the hosted run or establish hosted CodeQL success for a new SHA.
 - The separate security note `Revisão de segurança PR.txt` requested removal of a polynomial ReDoS and preservation of the SARIF artifact on policy failure. Both are already present on the current main: `decodeBase32()` no longer uses the trailing-padding regex, and the CodeQL artifact upload step uses `if: ${{ !cancelled() }}` so it runs after a policy failure. No redundant micro-PR is needed for those two items.
-- Issue #90 is excluded. This revision does not modify its artifacts or operational controls.
+- Issue #90 is explicitly separate from issue #119 and from PR #139. PR #139 documents a different VROA exporter-intent P2 inherited from PR #136; it does not implement or claim the same-UID receiver-custody acceptance criteria in issue #90. No issue #90, PR #133, or C1-C4 scope is included here.
 
 ## Validation snapshot
 
@@ -93,3 +93,36 @@ The issuer authorization response policy now starts with `script-src 'none'`, no
 The issuer test extracts the emitted script using ASCII-only case folding over the original UTF-16 string, preserving offsets even when Unicode characters precede the tag. It asserts that the final `script-src` source list contains exactly `'none'` plus the emitted script's SHA-256 hash, with no `'self'` or other source.
 
 Validation of this follow-up: focused issuer HTTP/CORS and provider-metadata tests `12/12 PASS`; workspace `npm run typecheck` PASS; `git diff --check` PASS. A disposable Playwright 1.65.0 Chromium proof used `script-src 'none' 'sha256-...'`: the exact hashed inline script executed, an unhashed inline script was blocked, and a same-origin external script was blocked. The browser emitted the expected CSP violations for the blocked scripts. This is local browser evidence; hosted CI/CodeQL and review receipts must be checked against the exact current PR head and are not implied by this note.
+
+## Validation update — 2026-11-21 (follow-up)
+
+- Focused recovery/OIDC/CSP/CORS unit suites: `55/55 PASS` under Node 22.23.5.
+- PostgreSQL-backed issuer interaction, OIDC provider, login and logout suites: `58/58 PASS` against the existing disposable PostgreSQL 17.11 container. This includes real-client state round-trip, nonce binding in the ID token, rejection of missing/duplicated state and nonce before Interaction persistence, expired authorization-code rejection, pre-auth session rotation, and persisted logout revocation.
+- Workspace `npm run typecheck`, `npm run lint`, `npm run build`, `npm run secrets:scan`, `npm run prisma:validate`, and `git diff --check`: PASS.
+- The existing PostgreSQL container and temporary environment file were not changed. The test process received an in-memory override for the container's current mapped port and test-role credential; no secret was written to tracked files.
+
+These results validate the repository-owned application work only. The Cloudflare minimum TLS version remains 1.0, and no Cloudflare/TLS, production, deployment, or cutover change was made.
+
+## Published PR #137 head reconciliation — 2026-11-21
+
+The currently published head is `ef03213e5255cbbffeb410fd8e612bb3484d1cde`:
+
+- CI run `44879133951`: Validate, authenticated browser E2E, mandatory ADMIN recovery PG18 proofs, exclusive email-worker HOL/CAS PostgreSQL tests, Prisma tooling policy, production dependency audit, and Virki identity all PASS.
+- CodeQL run `44879134034`: SUCCESS. The downloaded SARIF has 48 results, zero `js/bad-tag-filter`, zero `js/shell-command-injection-from-environment`, and the reviewed-SARIF policy accepts 48/48 with zero violations.
+- GitHub Codex review of the exact `ef03213e52` head completed without major findings.
+- `Build tested production images` is SKIPPED, not PASS.
+
+These hosted results apply only to the published SHA above. The additional local regression tests and read-only edge/DNS snapshot recorded in this worktree are not yet part of that published SHA; their local results are recorded separately above. Any commit/push of those additions requires fresh exact-SHA hosted checks and review.
+
+## Public edge and DNS read-only snapshot — 2026-11-21
+
+One low-rate read-only HEAD/GET request was made to each named public host; no authenticated session, account, mutation, scanner, or challenge bypass was used.
+
+- `biel.dev.br`: `/` returned 200. The currently deployed edge response still contains `script-src 'self' 'unsafe-inline'` and `X-Powered-By: Next.js`; this is the pre-PR deployment, not the PR #137 branch. HSTS is `max-age=2592000` (30 days), without `includeSubDomains` or `preload`. `/.well-known/security.txt` returned 404.
+- `hub.biel.dev.br`: `/` and `/.well-known/security.txt` both returned Cloudflare Access 302. The application response and a public security contact could not be observed without Access; HSTS at the Access edge is `max-age=2592000` (30 days).
+- `portal.biel.dev.br`: `/` returned a login redirect with a per-response nonce CSP and no observed `X-Powered-By`; HSTS is `max-age=2592000` (30 days). `/.well-known/security.txt` returned 404.
+- CAA queries returned no records for `biel.dev.br`, `dev.br`, or `br`; there is no observed CAA issuer restriction to inherit.
+- `_dmarc.biel.dev.br` currently publishes `p=none` with an aggregate-report destination. This is monitoring-only policy, not quarantine/reject enforcement.
+- DNSSEC: the `br` and `dev.br` parent zones return authenticated DS/DNSKEY records. `biel.dev.br` publishes DNSKEY records, but the authenticated DS query for `biel.dev.br` returns no DS record. The child zone therefore lacks a secure delegation from `dev.br`; a DNSKEY alone does not establish a validated chain.
+
+No `security.txt` was added because the repository contains no verified public vulnerability-reporting mailbox or policy URL; inventing a contact would publish an unverified destination. CAA, DMARC, DNSSEC, HSTS edge policy, TLS minimum, and Access settings are DNS/Cloudflare production configuration and were not changed. The existing 30-day HSTS and public-site legacy headers are live-edge observations only; the branch's application headers require a separately authorized deployment before they can be observed at the edge.

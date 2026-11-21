@@ -50,6 +50,16 @@ test("Hub recovery actions check Cloudflare Access before origin and anonymous C
   ]);
 });
 
+test("public recovery rejects Origin/CSRF before parsing email or calling the recovery backend", () => {
+  const action = guardBranch(recovery, "export async function requestRecoveryAction", "export async function requestAdministrativeRecoveryAction");
+  assertInOrder(action, [
+    'requireRecoveryAccess(formData, "recovery-request", "portal")',
+    'readBoundedFormString(formData, "email", EMAIL_INPUT_MAX_LENGTH)',
+    "requestAccountRecovery("
+  ]);
+  assert.match(recoveryAccess, /if \(!hasSameOrigin\(requestHeaders\)\) return false;/u);
+});
+
 test("account security mutation guard checks surface/Access, origin, CSRF, and session/role in order", () => {
   const guard = guardBranch(accountSecurity, "async function requireAccountMutation", "function read(");
   assertInOrder(guard, ["getSurface(requestHeaders)", "validateHubCloudflareAccess(requestHeaders, source)", "hasSameOrigin(requestHeaders)", "validateSessionCsrfTokenFor(", "recordSessionCsrfDenial(", "getCurrentSession()"]);
