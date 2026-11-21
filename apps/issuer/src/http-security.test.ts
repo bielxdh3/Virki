@@ -10,6 +10,19 @@ const formPostModule = require("../../../node_modules/oidc-provider/lib/response
 };
 const formPost = formPostModule.default;
 
+function indexOfAsciiCaseInsensitive(value: string, needle: string, fromIndex = 0): number {
+  for (let start = Math.max(0, fromIndex); start <= value.length - needle.length; start += 1) {
+    let offset = 0;
+    for (; offset < needle.length; offset += 1) {
+      const actual = value.charCodeAt(start + offset);
+      const folded = actual >= 0x41 && actual <= 0x5a ? actual + 0x20 : actual;
+      if (folded !== needle.charCodeAt(offset)) break;
+    }
+    if (offset === needle.length) return start;
+  }
+  return -1;
+}
+
 function headersFor(url: string | undefined, production = true) {
   const values = new Map<string, string>();
   const response = { req: { url }, setHeader: (name: string, value: string) => values.set(name.toLowerCase(), value) } as never;
@@ -53,6 +66,15 @@ test("authorization responses allow the provider's hashed form_post script and t
   assert.doesNotMatch(issuerContentSecurityPolicy("/authx"), /script-src/u);
 });
 
+test("HTML script tag lookup is ASCII-case-insensitive and preserves UTF-16 offsets across Unicode", () => {
+  const html = "\u0130😀<ScRiPt>exact()</sCrIpT>";
+  const scriptStart = indexOfAsciiCaseInsensitive(html, "<script>");
+  const scriptContentStart = scriptStart + "<script>".length;
+  const scriptEnd = indexOfAsciiCaseInsensitive(html, "</script>", scriptContentStart);
+  assert.equal(scriptStart, "\u0130😀".length);
+  assert.equal(html.slice(scriptContentStart, scriptEnd), "exact()");
+});
+
 test("oidc-provider form_post hashes its exact inline script into the issuer authorization CSP", () => {
   const headers = new Map([["content-security-policy", issuerContentSecurityPolicy("/auth")]]);
   const context = {
@@ -62,12 +84,14 @@ test("oidc-provider form_post hashes its exact inline script into the issuer aut
   };
   formPost(context as never, "https://relying-party.example/callback", { code: "synthetic-code" });
   const html = (context as unknown as { body: string }).body;
-  // oidc-provider emits literal lowercase tags; search the original string so
-  // the UTF-16 offsets remain valid even if earlier HTML contains Unicode.
-  const scriptStart = html.indexOf("<script>");
-  const scriptContentStart = scriptStart + "<script>".length;
-  const scriptEnd = html.indexOf("</script>", scriptContentStart);
-  const script = scriptStart >= 0 && scriptEnd >= scriptContentStart
+  // Fold only ASCII tag characters while searching the original string. This
+  // is HTML-case-insensitive and keeps UTF-16 offsets stable across Unicode.
+  const scriptStart = indexOfAsciiCaseInsensitive(html, "<script>");
+  const scriptContentStart = scriptStart >= 0 ? scriptStart + "<script>".length : -1;
+  const scriptEnd = scriptContentStart >= 0
+    ? indexOfAsciiCaseInsensitive(html, "</script>", scriptContentStart)
+    : -1;
+  const script = scriptContentStart >= 0 && scriptEnd >= scriptContentStart
     ? html.slice(scriptContentStart, scriptEnd)
     : undefined;
   assert.ok(script, "form_post emits its auto-submit script");
