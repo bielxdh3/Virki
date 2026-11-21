@@ -18,9 +18,61 @@ function directiveSources(csp, directiveName) {
   return directive ? directive.split(/\s+/).slice(1) : [];
 }
 
+function actualScriptNonce(tag) {
+  const opening = /^<script\b/i.exec(tag);
+  if (!opening) return null;
+  let pos = opening[0].length;
+  while (pos < tag.length) {
+    while (/\s/.test(tag[pos] ?? '')) pos++;
+    if (tag[pos] === '>' || tag[pos] === '/') break;
+    const start = pos;
+    while (pos < tag.length && !/[\s=/>]/.test(tag[pos])) pos++;
+    if (pos === start) return null;
+    const name = tag.slice(start, pos).toLowerCase();
+    while (/\s/.test(tag[pos] ?? '')) pos++;
+    let value = null;
+    if (tag[pos] === '=') {
+      pos++;
+      while (/\s/.test(tag[pos] ?? '')) pos++;
+      if (tag[pos] === '"' || tag[pos] === "'") {
+        const quote = tag[pos++];
+        const end = tag.indexOf(quote, pos);
+        if (end < 0) return null;
+        value = tag.slice(pos, end);
+        pos = end + 1;
+      } else {
+        const valueStart = pos;
+        while (pos < tag.length && !/[\s>]/.test(tag[pos])) pos++;
+        value = tag.slice(valueStart, pos);
+      }
+    }
+    // Parse whole attribute names: data-nonce, x-nonce or a quoted string
+    // containing ' nonce=' are never the script element's nonce attribute.
+    if (name === 'nonce') return value || null;
+  }
+  return null;
+}
+
 function htmlScriptNonces(html) {
   const tags = html.match(/<script\b[^>]*>/gi) ?? [];
-  return tags.map((tag) => /\bnonce\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1] ?? null);
+  return tags.map(actualScriptNonce);
+}
+
+function hasValidHstsAge(value) {
+  const maxAge = value.split(';').map((part) => part.trim())
+    .filter((part) => /^max-age\s*=/i.test(part));
+  if (maxAge.length !== 1) return false;
+  // RFC 6797 permits a decimal age either unquoted or within double quotes.
+  // Never accept only the numeric prefix of malformed values like 1e6.
+  const match = /^max-age\s*=\s*(?:"([0-9]+)"|([0-9]+))\s*$/i.exec(maxAge[0]);
+  if (!match) return false;
+  const seconds = Number(match[1] ?? match[2]);
+  return Number.isSafeInteger(seconds) && seconds > 0;
+}
+
+function hasUnsafeInline(sources) {
+  // CSP keywords are ASCII case-insensitive; nonce *values* are not.
+  return sources.some((source) => source.toLowerCase() === "'unsafe-inline'");
 }
 
 export function classifyIssue119Response(target, response) {
@@ -29,7 +81,7 @@ export function classifyIssue119Response(target, response) {
   const hsts = headers.get('strict-transport-security') ?? '';
   const hasPoweredBy = headers.has('x-powered-by');
   const isAccessRedirect = target.surface === 'access-protected' && response.status === 302;
-  const hstsPresent = /(?:^|;)\s*max-age\s*=\s*[1-9]\d*/i.test(hsts);
+  const hstsPresent = hasValidHstsAge(hsts);
   const common = { host: target.host, path: target.path, status: response.status,
     hsts: hstsPresent ? 'present' : 'missing', poweredBy: hasPoweredBy ? 'exposed' : 'absent' };
 
@@ -48,22 +100,25 @@ export function classifyIssue119Response(target, response) {
   const attributeSources = directiveSources(csp, 'script-src-attr');
   // A more permissive element/attribute directive overrides script-src for
   // that execution type. Checking only script-src would be a false PASS.
-  const subdirectiveUnsafe = elementSources.includes("'unsafe-inline'") ||
-    attributeSources.includes("'unsafe-inline'");
-  const nonceSources = sources.filter((source) => /^'nonce-[^']+'$/.test(source));
+  const nonceSources = sources.filter((source) => /^'nonce-[^']+'$/i.test(source));
   const tags = htmlScriptNonces(response.body ?? '');
   const inlineScriptTags = (response.body ?? '').match(/<script\b[^>]*>[^<]+<\/script\s*>/gi) ?? [];
-  const inlineHaveNonce = inlineScriptTags.every((tag) => /<script\b[^>]*\bnonce\s*=/i.test(tag));
+  const inlineHaveNonce = inlineScriptTags.every((tag) => {
+    const opening = /^<script\b[^>]*>/i.exec(tag)?.[0] ?? '';
+    return actualScriptNonce(opening) !== null;
+  });
   const nonceValues = new Set(nonceSources.map((source) => source.slice(7, -1)));
   const nonceMatches = tags.length > 0 && tags.every((nonce) => nonce !== null && nonceValues.has(nonce));
+  const subdirectiveUnsafe = hasUnsafeInline(elementSources) || hasUnsafeInline(attributeSources);
   const accepted = response.status === target.expected && !hasPoweredBy && hstsPresent &&
-    sources.length > 0 && !sources.includes("'unsafe-inline'") && !subdirectiveUnsafe &&
-    (elementSources.length === 0 || elementSources.some((source) => nonceSources.includes(source))) &&
+    sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
+    (elementSources.length === 0 || elementSources.some((source) =>
+      /^'nonce-[^']+'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
     nonceSources.length === 1 && nonceMatches && inlineHaveNonce;
 
   return { ...common, csp: csp ? 'present' : 'missing',
     scriptNonce: nonceMatches ? 'matched' : 'missing-or-mismatched',
-    unsafeInlineScript: sources.includes("'unsafe-inline'") || subdirectiveUnsafe,
+    unsafeInlineScript: hasUnsafeInline(sources) || subdirectiveUnsafe,
     result: accepted ? 'pass' : 'fail' };
 }
 
