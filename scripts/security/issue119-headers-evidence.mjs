@@ -133,6 +133,24 @@ function inspectHtmlDocument(body, mime) {
       else if (inert.pop() !== tag) return fail();
       continue;
     }
+    // Raw-text tags must be consumed BEFORE deciding whether their parent is
+    // inert. Otherwise a literal `</template>` inside <style> or <script>
+    // could pop the real template and make the next inert script look live.
+    if (['script', 'style', 'title', 'textarea', 'xmp', 'plaintext'].includes(tag) && !closing) {
+      if (tag === 'plaintext') return fail();
+      if (tag === 'script' && !inert.length) {
+        if (phase !== 2 && phase !== 4) return fail();
+        const script = inspectScriptTag(raw);
+        if (!script.valid) return fail();
+        if (script.executable) nonces.push(script.nonce);
+      }
+      const regex = new RegExp(`</${tag}\\s*>`, 'gi');
+      regex.lastIndex = at;
+      const matchEnd = regex.exec(body);
+      if (!matchEnd) return fail();
+      at = regex.lastIndex;
+      continue;
+    }
     if (inert.length) continue;
     if (tag === 'html' && ((phase === 0 && !closing) || (phase === 5 && closing))) {
       phase = phase === 0 ? 1 : 6;
@@ -141,20 +159,7 @@ function inspectHtmlDocument(body, mime) {
     } else if (tag === 'body' && ((phase === 3 && !closing) || (phase === 4 && closing))) {
       phase = phase === 3 ? 4 : 5;
     } else if (['html', 'head', 'body'].includes(tag)) return fail();
-    if (tag === 'script' && !closing) {
-      if (phase !== 2 && phase !== 4) return fail();
-      const script = inspectScriptTag(raw);
-      if (!script.valid) return fail();
-      if (script.executable) nonces.push(script.nonce);
-    }
-    if (['script', 'style', 'title', 'textarea', 'xmp', 'plaintext'].includes(tag) && !closing) {
-      if (tag === 'plaintext') return fail();
-      const regex = new RegExp(`</${tag}\\s*>`, 'gi');
-      regex.lastIndex = at;
-      const matchEnd = regex.exec(body);
-      if (!matchEnd) return fail();
-      at = regex.lastIndex;
-    } else if (tag === 'script' && closing) return fail();
+    if (tag === 'script' && closing) return fail();
   }
   return phase === 6 && inert.length === 0 && body.slice(at).trim() === ''
     ? { valid: true, nonces } : fail();

@@ -62,6 +62,12 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/json">{"not":"JS"}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="importmap">{}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="speculationrules">{}</script>')),
+    response(200, goodCSP, htmlDoc('<template><style>body{content:"</template>"}</style>' +
+      '<script nonce="SAFE">boot()</script></template>')),
+    response(200, goodCSP, htmlDoc('<template><script>const x="</template>";</script>' +
+      '<script nonce="SAFE">boot()</script></template>')),
+    response(200, goodCSP, htmlDoc('<template><style>body{content:"</template>"}</style>' +
+      '<script nonce="SAFE">boot()</script><template></template>')),
     response(200, "script-src 'nonce-SA&#70;E'", htmlDoc('<script nonce="SA&#70;E">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="EVIL">boot()</script>')),
     { status: 200, headers: new Headers({ 'content-security-policy': goodCSP }), body: goodHTML },
@@ -113,6 +119,16 @@ test('inert JSON data scripts do not prove hydration or require nonce if real sc
   assert.equal(result.scriptNonce, 'matched');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
     htmlDoc('<script type="module" data-nonce="SAFE">boot()</script>'))).result, 'fail');
+});
+
+test('raw-text false template closures cannot transform inert scripts into executable evidence', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const inner = '<template><style>body::after{content:"</template>"}</style>' +
+    '<script nonce="EVIL">ignored</script></template>';
+  const actual = htmlDoc(`${inner}<script nonce="SAFE">boot()</script>`);
+  const result = classifyIssue119Response(base, response(200, goodCSP, actual));
+  assert.equal(result.result, 'pass', 'only the final outside script may count');
+  assert.equal(result.scriptNonce, 'matched');
 });
 
 test('network failure is inconclusive and CLI refuses network without explicit --live', async () => {
