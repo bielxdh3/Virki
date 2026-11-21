@@ -34,6 +34,14 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, `${goodCSP}; script-src-elem 'unsafe-inline'`),
     response(200, `${goodCSP}; script-src-attr 'unsafe-inline'`),
     response(200, `${goodCSP}; script-src-elem 'nonce-EVIL'`),
+    response(200, goodCSP, '<html><script data-nonce="SAFE">boot()</script></html>'),
+    response(200, goodCSP, `<html><script data-test=" nonce='SAFE' ">boot()</script></html>`),
+    response(200, `${goodCSP}; script-src-attr 'UNSAFE-INLINE'`),
+    response(200, `${goodCSP}; script-src-elem 'UnSaFe-InLiNe'`),
+    response(200, "script-src 'NONCE-SAFE' 'UNSAFE-INLINE'", goodHTML),
+    response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=1e6' }),
+    response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000junk' }),
+    response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000; max-age=3000' }),
     response(200, goodCSP, '<html><script nonce="EVIL">boot()</script></html>'),
     { status: 200, headers: new Headers({ 'content-security-policy': goodCSP }), body: goodHTML },
     response(302),
@@ -42,6 +50,16 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
   const result = await collectIssue119HeaderEvidence((target) => Promise.resolve(
     target.surface === 'public-404' ? response(200) : response(target.expected ?? 302)));
   assert.equal(result.passed, false);
+});
+
+test('actual nonce attributes and quoted decimal HSTS are recognized without lowercasing nonce values', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const quoted = response(200, "script-src 'nonce-SAFE'", goodHTML,
+    { 'strict-transport-security': 'max-age="2592000"' });
+  assert.equal(classifyIssue119Response(base, quoted).result, 'pass');
+  assert.equal(classifyIssue119Response(base, response(200, "script-src 'nonce-safe'", goodHTML)).result, 'fail');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    '<html><script data-nonce="SAFE" nonce="SAFE">boot()</script></html>')).result, 'pass');
 });
 
 test('network failure is inconclusive and CLI refuses network without explicit --live', async () => {
