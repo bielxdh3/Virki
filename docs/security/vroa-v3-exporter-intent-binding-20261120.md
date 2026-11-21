@@ -28,7 +28,7 @@ The BuildKit patch carries a Linux regression test that signs an approval for ex
 
 ## Reproduction and validation
 
-The reproduction used a disposable BuildKit worktree at upstream base `f5b59a1f2fb25a0cb7072c398cab9aed7835da4e`, with the BuildKit integration patch from the current Virki main (`669e897d0adf3d0457d18ff680b7cf2123a2885d`) applied. The updated Virki patch SHA-256 is `77dbbc1e575608fcc7a7c89f644f87c66349a44569f480b3472c2ea7f1f05277`.
+The reproduction used a disposable BuildKit worktree at upstream base `f5b59a1f2fb25a0cb7072c398cab9aed7835da4e`, with the BuildKit integration patch from the current Virki main (`669e897d0adf3d0457d18ff680b7cf2123a2885d`) applied. The canonical Git-blob SHA-256 of the updated patch is `bd1c476af409290ef18769a5f18ea1a1704d584435dd88bd1b91ac68c8f99ccf`. On the Windows worktree, `core.autocrlf=true` converts the text patch to CRLF, so hashing the working-tree bytes yields `77dbbc1e575608fcc7a7c89f644f87c66349a44569f480b3472c2ea7f1f05277`; that is not the blob digest consumed by the Linux hosted workflow.
 
 - RED/GREEN reproduction: a Go `-overlay` outside the worktree removed only the signed approval-to-binding exporter-digest comparison. The mismatch regression then reached the deliberately missing owner socket and failed with `dial unix .../missing-owner.sock: connect: no such file or directory`; the normal source passed the same targeted test. The overlay and map are preserved at `E:\Temp\virki-vroa-p2-red-overlay-20261121.go` and `E:\Temp\virki-vroa-p2-red-overlay-20261121.json` (SHA-256: `154b6a7bd7075b77f341ce62a4bd57b967a6f0ad5bf0b98bba97a4184ef5f219` and `4c0ef34ba7c0eb9ff71c17b0aa7b2d21c4148cef6a0ff5daefdac8462116e26f`, respectively).
 - `go test ./util/localcontext -count=1`: PASS.
@@ -40,6 +40,17 @@ The reproduction used a disposable BuildKit worktree at upstream base `f5b59a1f2
 - `git apply --reverse --check` passed from the Windows BuildKit scratch worktree, confirming the updated patch matches the applied source tree. `git diff --check` passed in both the Virki patch worktree and the BuildKit scratch worktree.
 
 Validation ran with Go 1.26.10 from `E:\Tools\Go1.26.10-linux` under WSL, GCC/CC 15.2.0, `GOPROXY=off`, and the Go build cache at `E:\Tools\go-cache`. The native C4 daemon integration test was therefore executed locally rather than skipped. An independent read-only review confirmed the signed approval-A vs binding-B comparison occurs before `V3_BEGIN`, and confirmed RED/GREEN plus patch/scratch parity. That review is limited to this narrow P2; it does not attest overall C1-C4 readiness or full end-to-end integration. Publication is limited to this downstream patch artifact in Virki: the BuildKit scratch tree contains the broader 73-change C1-C4 integration and remains a local verification tree, not a publishable source branch. The upstream `moby/buildkit` remote is not writable by this account, and publishing the full scratch tree would exceed this P2 scope. C1-C4 therefore remain NO-GO. Hosted CI/CodeQL on the exact Virki PR commit remain pending.
+
+## Hosted pin and tree reconciliation — 2026-11-21
+
+The historical and updated Git objects were checked directly, not inferred from the Windows working copy:
+
+- Before the VROA patch change (`7d3a8e1685abbb1fd5be5b93e2d735cdddb5f331^`), the patch blob SHA-256 was `660462d999e2d3c1a143a7b78577ecd95545cc4f82837f76fd7f8a9c392e696a`, and the historical workflow expected tree was `3cabbc82887e87a900eeb7b838196bef00374055`.
+- After the VROA exporter-intent patch change (`7d3a8e1685abbb1fd5be5b93e2d735cdddb5f331`), the patch blob SHA-256 became `bd1c476af409290ef18769a5f18ea1a1704d584435dd88bd1b91ac68c8f99ccf`. The first commit intentionally exposed the old workflow pin; the subsequent pin-refresh commit `af9c9012f2ae56926c177ed394db3cbd53b9949c` changed the workflow digest to this exact blob SHA and the expected patched tree to `f88abcec589b1fa111124d7c94053d1a7830a3c7`.
+- Hosted Validate run `44865501539` on `af9c9012f2ae56926c177ed394db3cbd53b9949c` executed the patch `sha256sum --check` (`...patch: OK`), applied it to upstream base `f5b59a1f2fb25a0cb7072c398cab9aed7835da4e`, asserted the exact `write-tree` value `f88abcec...`, and passed the native Go-to-C4 bridge test.
+- A fresh local temporary Git index, independent of the preserved historical index, also applied the exact Git-blob bytes to the pinned base and produced `f88abcec589b1fa111124d7c94053d1a7830a3c7`. The pre-existing expected-tree index independently continued to report the same tree. Neither operation changed the BuildKit scratch working tree.
+
+This reconciles the apparent `77db...` versus `bd1c...` difference as Windows CRLF conversion, not a remote pin mismatch. The old `660462...` / `3cabbc...` pair is preserved as historical provenance. PR #139 remains OPEN/Draft; this evidence does not authorize C1-C4 integration or production activation.
 
 ## Safety boundary
 
