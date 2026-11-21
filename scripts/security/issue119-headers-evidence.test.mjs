@@ -71,6 +71,20 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/json">{"not":"JS"}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="importmap">{}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="speculationrules">{}</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<script type="text/jscript" nonce="EVIL">bad()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<script type="text/javascript1.5" nonce="EVIL">bad()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<script type="application/x-ecmascript" nonce="EVIL">bad()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<!--><script nonce="EVIL">bad()</script><!-- -->')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<!---><script nonce="EVIL">bad()</script><!-- -->')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<svg><title><script nonce="EVIL">bad()</script></title></svg>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<math><mtext><script nonce="EVIL">bad()</script></mtext></math>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="text/javascript; charset=utf-8">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/javascript; charset=utf-8">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="module; charset=utf-8">boot()</script>')),
@@ -187,6 +201,45 @@ test('HTML script type is a MIME essence, not Content-Type with parameters', () 
     assert.equal(classifyIssue119Response(base, response(200, goodCSP,
       htmlDoc(`<script type="${value}" nonce="SAFE">boot()</script>`))).result, 'pass', value);
   }
+});
+
+test('legacy WHATWG JavaScript MIME essences cannot hide wrong-nonce executable scripts', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const essence of [
+    'application/ecmascript', 'application/javascript', 'application/x-ecmascript',
+    'application/x-javascript', 'text/ecmascript', 'text/javascript',
+    'text/javascript1.0', 'text/javascript1.1', 'text/javascript1.2',
+    'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5',
+    'text/jscript', 'text/livescript', 'text/x-ecmascript', 'text/x-javascript',
+  ]) {
+    const body = htmlDoc('<script nonce="SAFE">good()</script>' +
+      `<script type="${essence}" nonce="EVIL">bad()</script>`);
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, body)).result,
+      'fail', essence);
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`<script type="${essence}" nonce="SAFE">good()</script>`))).result,
+    'pass', `valid alias ${essence}`);
+  }
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script type="text/jscript; charset=utf-8" nonce="SAFE">data()</script>'))).result,
+  'fail', 'the MIME essence cannot be matched by allowing additional MIME parameters');
+});
+
+test('abrupt HTML comment closure and foreign namespaces cannot create false nonce success', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const invalidHTML of [
+    '<!--><script nonce="EVIL">bad()</script><!-- -->',
+    '<!---><script nonce="EVIL">bad()</script><!-- -->',
+    '<svg><title><script nonce="EVIL">bad()</script></title></svg>',
+    '<math><mtext><script nonce="EVIL">bad()</script></mtext></math>',
+  ]) {
+    const body = htmlDoc(`<script nonce="SAFE">good()</script>${invalidHTML}`);
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, body)).result,
+      'fail', invalidHTML);
+  }
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<!-- safe ordinary comment -->' + '<script nonce="SAFE">good()</script>'))).result,
+  'pass', 'well-formed ordinary comments retain their existing behavior');
 });
 
 test('enforced CSP sandbox without allow-scripts prevents executable nonce receipt', () => {

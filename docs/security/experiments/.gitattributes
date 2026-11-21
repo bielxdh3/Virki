@@ -12,3 +12,4 @@ buildkit-v0.34.1-c1-v33-positive-controls-postcommit-dev-only.patch -text diff -
 buildkit-v0.34.1-c1-v34-ptrace-thread-pinning-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v35-final-published-identity-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v36-root-owned-broker-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v37-peercred-scmrights-broker-dev-only.patch -text diff -whitespace

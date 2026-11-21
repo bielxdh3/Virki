@@ -10,6 +10,17 @@ const TARGETS = Object.freeze([
   { host: 'portal.biel.dev.br', path: '/', method: 'HEAD', surface: 'portal' },
 ]);
 
+// WHATWG MIME Sniffing: JavaScript MIME type essence match. HTML <script>
+// `type` is compared by its whole essence, NOT by parsing Content-Type
+// parameters. Omitting the legacy aliases can hide a live, wrong-nonce script.
+const JAVASCRIPT_MIME_ESSENCES = new Set([
+  'application/ecmascript', 'application/javascript', 'application/x-ecmascript',
+  'application/x-javascript', 'text/ecmascript', 'text/javascript',
+  'text/javascript1.0', 'text/javascript1.1', 'text/javascript1.2',
+  'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5',
+  'text/jscript', 'text/livescript', 'text/x-ecmascript', 'text/x-javascript',
+]);
+
 export const ISSUE119_HEADER_TARGETS = TARGETS;
 
 function directiveSources(csp, directiveName) {
@@ -70,8 +81,7 @@ function inspectScriptTag(tag) {
   // executable classic/module script may establish a nonce-bearing receipt.
   // Do NOT mistake data-nomodule, x-nomodule or no-module for this attribute.
   const moduleScript = kind === 'module';
-  const classicScript = kind === '' ||
-    /^(?:text|application)\/(?:javascript|ecmascript|x-javascript)$/.test(kind);
+  const classicScript = kind === '' || JAVASCRIPT_MIME_ESSENCES.has(kind);
   const executable = moduleScript || (classicScript && !seen.has('nomodule'));
   return { valid: true, executable, nonce };
 }
@@ -144,6 +154,11 @@ function inspectHtmlDocument(body, mime) {
     if (lt < 0) break;
     if (phase === 6 && body.slice(at).trim()) return fail();
     if (body.startsWith('<!--', lt)) {
+      // WHATWG HTML treats `<!-->` and `<!--->` as immediately closed,
+      // not as comments extending to a later `-->`. A string search could
+      // swallow executable scripts between the true and imaginary closures.
+      // Malformed syntax is rejected rather than creating a false PASS.
+      if (body.startsWith('<!-->', lt) || body.startsWith('<!--->', lt)) return fail();
       const end = body.indexOf('-->', lt + 4);
       if (end < 0) return fail();
       at = end + 3;
@@ -165,6 +180,12 @@ function inspectHtmlDocument(body, mime) {
     if (!match) return fail();
     const closing = match[1] === '/';
     const tag = match[2].toLowerCase();
+    // This bounded receipt does not implement SVG/MathML namespaces. In
+    // particular SVG <title> is an HTML integration point; HTML <title>
+    // raw-text semantics there would conceal executable child scripts.
+    // Fail closed on foreign-content elements rather than making incorrect
+    // security claims using namespace-blind tag-name heuristics.
+    if (tag === 'svg' || tag === 'math') return fail();
     // With scripting enabled, HTML5 treats <noscript> as raw text until its
     // first actual closing tag. Do not interpret apparent <style>/<script>
     // start tags inside it: doing so could skip the real </noscript>, hide
