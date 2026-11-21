@@ -58,6 +58,9 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<!-- <script nonce="SAFE">boot()</script> -->')),
     response(200, goodCSP, htmlDoc('<template><script nonce="SAFE">boot()</script></template>')),
     response(200, goodCSP, htmlDoc('<noscript><script nonce="SAFE">boot()</script></noscript>')),
+    response(200, goodCSP, htmlDoc('<iframe><script nonce="SAFE">boot()</script></iframe>')),
+    response(200, goodCSP, htmlDoc('<noembed><script nonce="SAFE">boot()</script></noembed>')),
+    response(200, goodCSP, htmlDoc('<noframes><script nonce="SAFE">boot()</script></noframes>')),
     response(200, goodCSP, htmlDoc('<div data-html="<script nonce=\'SAFE\'>">not an executable script</div>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/json">{"not":"JS"}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="importmap">{}</script>')),
@@ -142,6 +145,17 @@ test('noscript raw text cannot conceal a subsequent executable script with wrong
   const legitimate = htmlDoc('<noscript><script nonce="EVIL">ignored()</script></noscript>' +
     '<script nonce="SAFE">real()</script>');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP, legitimate)).result, 'pass');
+});
+
+test('iframe, noembed and noframes fallback content does not count as executable nonce evidence', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const tag of ['iframe', 'noembed', 'noframes']) {
+    const fallbackOnly = htmlDoc(`<${tag}><script nonce="SAFE">boot()</script></${tag}>`);
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, fallbackOnly)).result, 'fail', tag);
+    const actual = htmlDoc(`<${tag}><script nonce="EVIL">ignored()</script></${tag}>` +
+      '<script nonce="SAFE">boot()</script>');
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, actual)).result, 'pass', tag);
+  }
 });
 
 test('network failure is inconclusive and CLI refuses network without explicit --live', async () => {

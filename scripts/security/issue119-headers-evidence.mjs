@@ -148,7 +148,10 @@ function inspectHtmlDocument(body, mime) {
     // Raw-text tags must be consumed BEFORE deciding whether their parent is
     // inert. Otherwise a literal `</template>` inside <style> or <script>
     // could pop the real template and make the next inert script look live.
-    if (['script', 'style', 'title', 'textarea', 'xmp', 'plaintext'].includes(tag) && !closing) {
+    // HTML5 also treats iframe/noembed/noframes contents as raw fallback
+    // text, not executable descendant elements. A fake <script nonce=...>
+    // inside such text must never satisfy the live hydration evidence gate.
+    if (['script', 'style', 'title', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext'].includes(tag) && !closing) {
       if (tag === 'plaintext') return fail();
       if (tag === 'script' && !inert.length) {
         if (phase !== 2 && phase !== 4) return fail();
