@@ -4,3 +4,4 @@ buildkit-v0.34.1-c1-v25-independent-receiver-dev-only.patch -text diff -whitespa
 buildkit-v0.34.1-c1-v26-receiver-credentials-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v27-nnp-test-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v28-supervisor-resource-hardening-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v29-trusted-ancestor-custody-dev-only.patch -text diff -whitespace

@@ -4,3 +4,4 @@
 ed463cd7a1c0f45189a7fa17849da199e64641a59ccd44f42b5d1906999ae3db  docs/security/experiments/buildkit-v0.34.1-c1-v26-receiver-credentials-dev-only.patch
 c273b310ed366c188030004cf416fb5b6020fc63cb073320c72fe8cf6ef877a7  docs/security/experiments/buildkit-v0.34.1-c1-v27-nnp-test-dev-only.patch
 0cdf12e672acf0c2b405aec34737476c7b567f44487f63ebd0903eed7087b244  docs/security/experiments/buildkit-v0.34.1-c1-v28-supervisor-resource-hardening-dev-only.patch
+b85225c7756ee736c20da1df34c9e07c3bea074951aadc0bcd370bee36eda292  docs/security/experiments/buildkit-v0.34.1-c1-v29-trusted-ancestor-custody-dev-only.patch
