@@ -6,3 +6,4 @@ c273b310ed366c188030004cf416fb5b6020fc63cb073320c72fe8cf6ef877a7  docs/security/
 0cdf12e672acf0c2b405aec34737476c7b567f44487f63ebd0903eed7087b244  docs/security/experiments/buildkit-v0.34.1-c1-v28-supervisor-resource-hardening-dev-only.patch
 b85225c7756ee736c20da1df34c9e07c3bea074951aadc0bcd370bee36eda292  docs/security/experiments/buildkit-v0.34.1-c1-v29-trusted-ancestor-custody-dev-only.patch
 0d418e9fb5faa172b91514daa86522144be707b9724c5c16c257c81ece4a7d8b  docs/security/experiments/buildkit-v0.34.1-c1-v30-helper-exec-fd-dev-only.patch
+b316fc8eff47ff2b2fe6e58978fd312992e675769eeb40e82e5b2926c8c49431  docs/security/experiments/buildkit-v0.34.1-c1-v31-cross-uid-launcher-dev-only.patch

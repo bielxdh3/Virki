@@ -1,0 +1,77 @@
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+index 9b9abb3..4340bf9 100755
+--- a/session/filesync/sealed_custody_v24_linux.go
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -317,7 +317,13 @@ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []s
+ 	if exeStat.Mode&0022 != 0 {
+ 		return nil, errors.New("C1 V24 helper executable must not be group/world writable")
+ 	}
+-	if policy.RequireImmutableGrandparent {
++	// A privileged supervisor must authenticate the executable whenever it
++	// downgrades to a distinct receiver UID, even if a caller accidentally
++	// omitted the independent-custody flag. Otherwise a sender-owned helper
++	// could be pinned and run with the receiver's inherited credentials/FDs.
++	rootCrossUIDLaunch := os.Geteuid() == 0 && policy.ExpectedReceiverUID != nil &&
++		*policy.ExpectedReceiverUID != 0
++	if policy.RequireImmutableGrandparent || rootCrossUIDLaunch {
+ 		// The isolated receiver must not execute a helper whose pathname can
+ 		// be replaced by the receiver/peer between Lstat and execve. File mode
+ 		// checks alone do not protect a root-owned file in a user-owned parent.
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index 9ae8aa1..68ab5c4 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -539,3 +539,53 @@ func TestC1V30PinnedHelperExecSurvivesAdversarialRename(t *testing.T) {
+ 	require.NoError(t, err)
+ 	require.Equal(t, "SAFE", string(out), "substituted path must never execute unverified bytes")
+ }
++
++func TestC1V31PrivilegedCrossUIDLaunchRequiresTrustedHelperWithoutFlag(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("synthetic privileged cross-UID launcher fixture")
++	}
++	base, err := os.MkdirTemp("/tmp", "virki-v31-launch-")
++	require.NoError(t, err)
++	defer os.RemoveAll(base)
++	require.NoError(t, os.Chmod(base, 0711))
++	const receiverUID uint32 = 60001
++	tmp := filepath.Join(base, "receiver-tmp")
++	require.NoError(t, os.Mkdir(tmp, 0700))
++	require.NoError(t, os.Chown(tmp, int(receiverUID), int(receiverUID)))
++	policy := V24ReceiverCustodyPolicy{
++		RequireUnprivileged: true,
++		// Deliberately omit RequireImmutableGrandparent to prove this is
++		// not an optional prerequisite of privileged credential downgrade.
++		ExpectedReceiverUID: ptrV30(receiverUID),
++		ExpectedReceiverGID: ptrV30(receiverUID),
++		PrivateTempDir:      tmp,
++	}
++	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
++	defer cancel()
++	trusted := filepath.Join(base, "root-owned-helper")
++	require.NoError(t, os.WriteFile(trusted, []byte("#!/bin/sh\nexit 0\n"), 0555))
++	require.NoError(t, os.Chmod(trusted, 0555))
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, trusted, nil, policy, nil)
++	require.NoError(t, err, "root-owned helper under protected ancestor chain must still run")
++
++	untrustedDir := filepath.Join(base, "receiver-owned-parent")
++	require.NoError(t, os.Mkdir(untrustedDir, 0700))
++	helperInUntrustedDir := filepath.Join(untrustedDir, "unsafe-helper")
++	require.NoError(t, os.WriteFile(helperInUntrustedDir, []byte("#!/bin/sh\nexit 9\n"), 0555))
++	require.NoError(t, os.Chmod(helperInUntrustedDir, 0555))
++	require.NoError(t, os.Chown(untrustedDir, int(receiverUID), int(receiverUID)))
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, helperInUntrustedDir, nil, policy, nil)
++	require.ErrorContains(t, err, "untrusted isolated helper executable ancestry")
++
++	receiverOwnedHelper := filepath.Join(base, "receiver-owned-helper")
++	require.NoError(t, os.WriteFile(receiverOwnedHelper, []byte("#!/bin/sh\nexit 9\n"), 0555))
++	require.NoError(t, os.Chown(receiverOwnedHelper, int(receiverUID), int(receiverUID)))
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, receiverOwnedHelper, nil, policy, nil)
++	require.ErrorContains(t, err, "must be owned by trusted root supervisor")
++
++	// The credential boundary, not a user-supplied RequireUnprivileged flag,
++	// determines whether an executable must be trusted.
++	policy.RequireUnprivileged = false
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, receiverOwnedHelper, nil, policy, nil)
++	require.ErrorContains(t, err, "must be owned by trusted root supervisor")
++}
