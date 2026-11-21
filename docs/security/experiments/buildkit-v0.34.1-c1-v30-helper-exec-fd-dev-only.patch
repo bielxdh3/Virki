@@ -1,0 +1,165 @@
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+index 6bded6e..9b9abb3 100755
+--- a/session/filesync/sealed_custody_v24_linux.go
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -285,22 +285,58 @@ func runV24IsolatedSubprocess(ctx context.Context, exe string, args []string,
+ 	return runV24IsolatedSubprocessWithFiles(ctx, exe, args, policy, nil, extraEnv...)
+ }
+ 
++// The validated executable must be inherited after all existing socket FDs.
++// /proc/self/fd in the child resolves the already-open inode, not a mutable
++// pathname which may have been renamed after the supervisor opened it.
++func v30PinnedHelperCommand(ctx context.Context, exeFile *os.File, files []*os.File, args []string) *exec.Cmd {
++	childFD := 3 + len(files)
++	cmd := exec.CommandContext(ctx, fmt.Sprintf("/proc/self/fd/%d", childFD), args...)
++	cmd.ExtraFiles = append(append([]*os.File(nil), files...), exeFile)
++	return cmd
++}
++
+ // Inherited files are supplied by the trusted DEV supervisor, not peer input.
+ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []string,
+ 	policy V24ReceiverCustodyPolicy, files []*os.File, extraEnv ...string) ([]byte, error) {
+ 	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe {
+ 		return nil, errors.New("C1 V24 helper executable must be canonical absolute path")
+ 	}
+-	exeInfo, err := os.Lstat(exe)
++	exeFD, err := unix.Open(exe, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+ 	if err != nil {
+-		return nil, fmt.Errorf("C1 V24 cannot stat helper executable: %w", err)
++		return nil, fmt.Errorf("C1 V30 cannot pin helper executable: %w", err)
++	}
++	exeFile := os.NewFile(uintptr(exeFD), "pinned-helper-executable")
++	defer exeFile.Close()
++	var exeStat unix.Stat_t
++	if err := unix.Fstat(exeFD, &exeStat); err != nil {
++		return nil, fmt.Errorf("C1 V30 cannot inspect pinned helper executable: %w", err)
+ 	}
+-	if !exeInfo.Mode().IsRegular() {
++	if exeStat.Mode&unix.S_IFMT != unix.S_IFREG {
+ 		return nil, errors.New("C1 V24 helper executable must be non-symlink regular file")
+ 	}
+-	if exeInfo.Mode().Perm()&0022 != 0 {
++	if exeStat.Mode&0022 != 0 {
+ 		return nil, errors.New("C1 V24 helper executable must not be group/world writable")
+ 	}
++	if policy.RequireImmutableGrandparent {
++		// The isolated receiver must not execute a helper whose pathname can
++		// be replaced by the receiver/peer between Lstat and execve. File mode
++		// checks alone do not protect a root-owned file in a user-owned parent.
++		if exeStat.Uid != 0 {
++			return nil, errors.New("C1 V30 isolated helper executable must be owned by trusted root supervisor")
++		}
++		rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		if err != nil {
++			return nil, err
++		}
++		ancestorErr := validateV24TrustedSupervisorAncestors(rootFD, filepath.Dir(exe))
++		closeErr := unix.Close(rootFD)
++		if ancestorErr != nil {
++			return nil, fmt.Errorf("C1 V30 untrusted isolated helper executable ancestry: %w", ancestorErr)
++		}
++		if closeErr != nil {
++			return nil, closeErr
++		}
++	}
+ 	for _, f := range files {
+ 		if f == nil {
+ 			return nil, errors.New("C1 V24 launcher refuses nil inherited file")
+@@ -384,10 +420,15 @@ func runV24IsolatedSubprocessWithFiles(ctx context.Context, exe string, args []s
+ 			ch <- subprocResult{err: fmt.Errorf("C1 V24 cannot enforce PR_SET_NO_NEW_PRIVS: %w", err)}
+ 			return
+ 		}
+-		cmd := exec.CommandContext(ctx, exe, args...)
++		// Keep the validated inode open and execute it through the child's
++		// inherited FD. A pathname lookup at exec time would reopen the
++		// original Lstat->exec race even after validating its ownership.
++		// Append the helper AFTER session FDs so existing fd=3 transport
++		// contracts remain unchanged. The kernel sees a stable /proc/self/fd
++		// reference inherited across exec, not the mutable caller pathname.
++		cmd := v30PinnedHelperCommand(ctx, exeFile, files, args)
+ 		cmd.Env = env
+ 		cmd.SysProcAttr = attr
+-		cmd.ExtraFiles = files
+ 		out, err := cmd.CombinedOutput()
+ 		ch <- subprocResult{out: out, err: err}
+ 	}()
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index 827d8dc..9ae8aa1 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -467,3 +467,75 @@ func TestC1V29SupervisorAncestorRejectsWritableRootPath(t *testing.T) {
+ 	require.NoError(t, os.Chmod(base, 0777|os.ModeSticky))
+ 	require.NoError(t, validateV24TrustedSupervisorAncestors(rootFD, child))
+ }
++
++func TestC1V30RootSupervisorExecutableCustody(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("synthetic root-supervised receiver executable custody fixture")
++	}
++	root, err := os.MkdirTemp("/tmp", "virki-v30-helper-")
++	require.NoError(t, err)
++	defer os.RemoveAll(root)
++	require.NoError(t, os.Chmod(root, 0711))
++	const receiverUID uint32 = 60001
++	tmp := filepath.Join(root, "private-tmp")
++	require.NoError(t, os.Mkdir(tmp, 0700))
++	require.NoError(t, os.Chown(tmp, int(receiverUID), int(receiverUID)))
++	policy := V24ReceiverCustodyPolicy{
++		RequireUnprivileged:         true,
++		RequireImmutableGrandparent: true,
++		ExpectedReceiverUID:         ptrV30(receiverUID),
++		ExpectedReceiverGID:         ptrV30(receiverUID),
++		PrivateTempDir:              tmp,
++	}
++	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
++	defer cancel()
++
++	trusted := filepath.Join(root, "trusted-helper")
++	require.NoError(t, os.WriteFile(trusted, []byte("#!/bin/sh\nexit 0\n"), 0555))
++	require.NoError(t, os.Chmod(trusted, 0555))
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, trusted, nil, policy, nil)
++	require.NoError(t, err, "root-owned helper under a root-owned immutable chain must run")
++
++	// This is a root-owned, read-only helper under a receiver-UID owned
++	// directory. The receiver UID can rename the executable by PATH even
++	// though it cannot write the original file's bytes. Fail before launch.
++	unsafeParent := filepath.Join(root, "receiver-writable")
++	require.NoError(t, os.Mkdir(unsafeParent, 0700))
++	unsafeHelper := filepath.Join(unsafeParent, "unsafe-helper")
++	require.NoError(t, os.WriteFile(unsafeHelper, []byte("#!/bin/sh\nexit 9\n"), 0555))
++	require.NoError(t, os.Chmod(unsafeHelper, 0555))
++	require.NoError(t, os.Chown(unsafeParent, int(receiverUID), int(receiverUID)))
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, unsafeHelper, nil, policy, nil)
++	require.ErrorContains(t, err, "untrusted isolated helper executable ancestry")
++
++	// Directory safety is not sufficient if the helper inode is owned by a
++	// less-trusted identity that can replace bytes or chmod it separately.
++	foreign := filepath.Join(root, "foreign-owned-helper")
++	require.NoError(t, os.WriteFile(foreign, []byte("#!/bin/sh\nexit 9\n"), 0555))
++	require.NoError(t, os.Chown(foreign, int(receiverUID), int(receiverUID)))
++	_, err = runV24IsolatedSubprocessWithFiles(ctx, foreign, nil, policy, nil)
++	require.ErrorContains(t, err, "must be owned by trusted root supervisor")
++}
++
++func ptrV30(v uint32) *uint32 { return &v }
++
++func TestC1V30PinnedHelperExecSurvivesAdversarialRename(t *testing.T) {
++	// This fixture simulates the EXACT pre-exec pathname swap. The helper
++	// inode was opened while SAFE, then the original name was renamed and
++	// replaced with EVIL before execution. The inherited FD executes SAFE.
++	parent := t.TempDir()
++	help := filepath.Join(parent, "helper")
++	require.NoError(t, os.WriteFile(help, []byte("#!/bin/sh\nprintf SAFE\n"), 0555))
++	require.NoError(t, os.Chmod(help, 0555))
++	exeFD, err := unix.Open(help, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	require.NoError(t, err)
++	exeFile := os.NewFile(uintptr(exeFD), "verified-helper")
++	defer exeFile.Close()
++	require.NoError(t, os.Rename(help, help+"-original"))
++	require.NoError(t, os.WriteFile(help, []byte("#!/bin/sh\nprintf EVIL\n"), 0555))
++	require.NoError(t, os.Chmod(help, 0555))
++	cmd := v30PinnedHelperCommand(t.Context(), exeFile, nil, nil)
++	out, err := cmd.Output()
++	require.NoError(t, err)
++	require.Equal(t, "SAFE", string(out), "substituted path must never execute unverified bytes")
++}
