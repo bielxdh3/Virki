@@ -1,6 +1,6 @@
 import { rmSync } from "node:fs";
 import { CANONICAL_VIRKI_REPOSITORY, normalizeRevision, ProductionRevisionError } from "./production-revision.mjs";
-import { evaluateCodeqlSarif, readSarifDirectory } from "../codeql-sarif-policy.mjs";
+import { evaluateCodeqlSarif, readSarifDirectoryEvidence } from "../codeql-sarif-policy.mjs";
 import { downloadGhcrEvidence, evidenceDigestFromRunLog, evidenceTag } from "./ghcr-evidence.mjs";
 import { selectCodeqlEvidenceRun } from "./codeql-evidence-selection.mjs";
 
@@ -99,7 +99,8 @@ function verifyExactShaSarifArtifact({ revision, runId, logRunId, execute, repos
   let evidence;
   try {
     evidence = retrieveEvidence({ revision, runId, logRunId, kind: "codeql", execute, repositoryRoot });
-    const policy = evaluateCodeqlSarif(readSarifDirectory(evidence.contents));
+    const sarif = readSarifDirectoryEvidence(evidence.contents);
+    const policy = evaluateCodeqlSarif(sarif.documents, { artifactSha256: sarif.artifactSha256 });
     return policy.ok
       ? { status: "PASS", artifactName: `virki-evidence:${evidenceTag(revision, runId, "codeql")}`, totalResults: policy.totalResults, violations: 0 }
       : { status: "FAIL" };

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { evaluateCodeqlSarif } from "./codeql-sarif-policy.mjs";
+import { evaluateCodeqlSarif, readSarifDirectoryEvidence } from "./codeql-sarif-policy.mjs";
 import { codeqlDocument, codeqlHostedCliDocument } from "./fixtures/codeql-documented-sarif.mjs";
 
 const sarif = codeqlDocument;
@@ -70,6 +73,96 @@ const publicHostedFindings = [
     lineFingerprint: "a7bddb165db5ff66:1", columnFingerprint: "4" }
 ];
 const publicReviewedLedger = readFileSync(new URL("../docs/security/codeql-reviewed-public-20261112.md", import.meta.url), "utf8");
+
+// Exact historical main PUSH findings from CodeQL run 44688261830 on SHA
+// 669e897. Their test-harness source has since been changed to pass the same
+// process.execPath as Bash argv ($0), not interpolate it into shell source.
+const mainPushShellFindings = [
+  { ruleId: "js/shell-command-injection-from-environment", path: "scripts/staging-runbook-lifecycle.test.mjs",
+    lineFingerprint: "2d350a82d76eabf3:1", columnFingerprint: "15", sourceLine: 403 },
+  { ruleId: "js/shell-command-injection-from-environment", path: "scripts/staging-runbook-lifecycle.test.mjs",
+    lineFingerprint: "fbff554d652a47c5:1", columnFingerprint: "15", sourceLine: 623 }
+];
+const mainPushShellLedger = readFileSync(new URL("../docs/security/codeql-reviewed-20261120.md", import.meta.url), "utf8");
+const historicalSarifSha256 = "a3dd05e5c9557495963f946f5d5bb70df6bff3f8ef9dd0245f29f8ab8379137d";
+
+test("historical main PUSH shell findings are accepted only for the exact original SARIF SHA-256", () => {
+  assert.equal(mainPushShellFindings.length, 2);
+  assert.deepEqual(mainPushShellFindings.map((entry) => entry.sourceLine), [403, 623]);
+  assert.equal(new Set(mainPushShellFindings.map(({ ruleId, path, lineFingerprint, columnFingerprint }) =>
+    JSON.stringify([ruleId, path, lineFingerprint, columnFingerprint]))).size, 2);
+  for (const { ruleId, path, lineFingerprint, columnFingerprint } of mainPushShellFindings) {
+    assert.ok(mainPushShellLedger.includes(`\`${ruleId}|${path}|${lineFingerprint}|${columnFingerprint}\``),
+      `missing exact historical review: ${path} ${lineFingerprint}`);
+  }
+  const result = evaluateCodeqlSarif([codeqlHostedCliDocument(mainPushShellFindings)], {
+    artifactSha256: historicalSarifSha256
+  });
+  assert.deepEqual(result, { ok: true, totalResults: 2, acceptedResults: 2, violations: [] });
+
+  const withoutArtifactIdentity = evaluateCodeqlSarif([codeqlHostedCliDocument(mainPushShellFindings)]);
+  assert.equal(withoutArtifactIdentity.ok, false);
+  assert.equal(withoutArtifactIdentity.acceptedResults, 0);
+  assert.equal(withoutArtifactIdentity.violations.length, 2);
+
+  const differentSarif = codeqlHostedCliDocument(mainPushShellFindings);
+  const differentBytesSha256 = createHash("sha256").update(JSON.stringify(differentSarif)).digest("hex");
+  assert.notEqual(differentBytesSha256, historicalSarifSha256);
+  const sameFingerprintsDifferentArtifact = evaluateCodeqlSarif([differentSarif], {
+    artifactSha256: differentBytesSha256
+  });
+  assert.equal(sameFingerprintsDifferentArtifact.ok, false);
+  assert.equal(sameFingerprintsDifferentArtifact.acceptedResults, 0);
+});
+
+test("historical main PUSH shell dispositions reject changed fingerprints and duplicate counts", () => {
+  for (const entry of mainPushShellFindings) {
+    for (const changed of [
+      { ...entry, ruleId: `${entry.ruleId}-unreviewed` },
+      { ...entry, path: "scripts/unreviewed/staging-runbook-lifecycle.test.mjs" },
+      { ...entry, lineFingerprint: `f${entry.lineFingerprint}` },
+      { ...entry, columnFingerprint: String(Number(entry.columnFingerprint) + 1) },
+      { ...entry, lineFingerprint: undefined },
+      { ...entry, columnFingerprint: undefined }
+    ]) {
+      const result = evaluateCodeqlSarif([codeqlHostedCliDocument([changed])], {
+        artifactSha256: historicalSarifSha256
+      });
+      assert.equal(result.ok, false, `changed historical finding unexpectedly accepted: ${entry.sourceLine}`);
+      assert.equal(result.violations[0]?.reason, "unreviewed-finding");
+    }
+    const duplicate = evaluateCodeqlSarif([codeqlHostedCliDocument([entry, entry])], {
+      artifactSha256: historicalSarifSha256
+    });
+    assert.deepEqual(duplicate.violations, [{
+      ruleId: entry.ruleId, path: entry.path, reason: "accepted-finding-count-exceeded"
+    }]);
+  }
+  const originalCidRace = evaluateCodeqlSarif([codeqlHostedCliDocument([
+    ...mainPushShellFindings, fixedFdRace
+  ])], { artifactSha256: historicalSarifSha256 });
+  assert.deepEqual(originalCidRace.violations, [{
+    ruleId: fixedFdRace.ruleId, path: fixedFdRace.path, reason: "unreviewed-finding"
+  }]);
+});
+
+test("SARIF directory evidence hashes the exact raw bytes and does not assign a single-file identity to multiple files", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "virki-codeql-sarif-evidence-"));
+  try {
+    const bytes = Buffer.from(JSON.stringify(codeqlHostedCliDocument(mainPushShellFindings)), "utf8");
+    writeFileSync(path.join(directory, "javascript.sarif"), bytes);
+    const evidence = readSarifDirectoryEvidence(directory);
+    assert.equal(evidence.documents.length, 1);
+    assert.equal(evidence.artifactSha256, createHash("sha256").update(bytes).digest("hex"));
+
+    writeFileSync(path.join(directory, "other.sarif"), bytes);
+    const multiple = readSarifDirectoryEvidence(directory);
+    assert.equal(multiple.documents.length, 2);
+    assert.equal(multiple.artifactSha256, undefined);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("public hosted CodeQL findings require two individually documented exact dispositions", () => {
   assert.equal(publicHostedFindings.length, 2);

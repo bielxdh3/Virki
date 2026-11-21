@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,6 +71,15 @@ const acceptedFindings = new Map([
   // suppressions. See docs/security/codeql-reviewed-public-20261112.md.
   ["js/file-system-race|scripts/staging-otp-preflight.mjs|1a5be53b7e24b39c:1|5", 1],
   ["js/user-controlled-bypass|scripts/integration/loopback-smtp-sink.mjs|a7bddb165db5ff66:1|4", 1],
+]);
+
+// These two dispositions are valid only for the exact historical SARIF bytes
+// emitted by CodeQL run 44688261830. They must never become global allowlist
+// entries for a later run that happens to reproduce the same fingerprints.
+const historicalSarifSha256 = "a3dd05e5c9557495963f946f5d5bb70df6bff3f8ef9dd0245f29f8ab8379137d";
+const historicalAcceptedFindings = new Map([
+  ["js/shell-command-injection-from-environment|scripts/staging-runbook-lifecycle.test.mjs|2d350a82d76eabf3:1|15", 1],
+  ["js/shell-command-injection-from-environment|scripts/staging-runbook-lifecycle.test.mjs|fbff554d652a47c5:1|15", 1],
 ]);
 
 function invalidSarif(message) {
@@ -212,7 +222,13 @@ function validateCodeqlRun(run) {
   }
 }
 
-export function evaluateCodeqlSarif(documents) {
+export function evaluateCodeqlSarif(documents, options = {}) {
+  if (!isObject(options)) invalidSarif("evaluation options must be an object.");
+  const artifactSha256 = options.artifactSha256;
+  if (artifactSha256 !== undefined && (typeof artifactSha256 !== "string"
+    || !/^[a-f0-9]{64}$/u.test(artifactSha256))) {
+    invalidSarif("artifact SHA-256 must be a lowercase 64-character digest.");
+  }
   if (!Array.isArray(documents) || documents.length !== 1) {
     throw new Error("Invalid SARIF: expected one JavaScript/TypeScript SARIF document.");
   }
@@ -238,7 +254,8 @@ export function evaluateCodeqlSarif(documents) {
         const key = hasFingerprint
           ? `${ruleId}|${artifactPath}|${lineFingerprint}|${columnFingerprint}`
           : `${ruleId}|${artifactPath}|missing-fingerprint`;
-        const maximum = acceptedFindings.get(key);
+        const maximum = acceptedFindings.get(key)
+          ?? (artifactSha256 === historicalSarifSha256 ? historicalAcceptedFindings.get(key) : undefined);
         if (maximum === undefined) {
           violations.push({ ruleId, path: artifactPath, reason: "unreviewed-finding" });
           continue;
@@ -282,11 +299,25 @@ function normalizeArtifactPath(uri) {
   return value;
 }
 
-export function readSarifDirectory(directory) {
+export function readSarifDirectoryEvidence(directory) {
   const absolute = path.resolve(directory);
   const files = collectSarifFiles(absolute);
   if (files.length === 0) throw new Error("CodeQL SARIF policy found no SARIF files.");
-  return files.map((file) => JSON.parse(readFileSync(file, "utf8")));
+  const artifacts = files.map((file) => {
+    const bytes = readFileSync(file);
+    return {
+      document: JSON.parse(bytes.toString("utf8")),
+      sha256: createHash("sha256").update(bytes).digest("hex")
+    };
+  });
+  return {
+    documents: artifacts.map((artifact) => artifact.document),
+    artifactSha256: artifacts.length === 1 ? artifacts[0].sha256 : undefined
+  };
+}
+
+export function readSarifDirectory(directory) {
+  return readSarifDirectoryEvidence(directory).documents;
 }
 
 function collectSarifFiles(directory) {
@@ -307,7 +338,8 @@ if (isMainModule()) {
   try {
     const directory = process.argv[2];
     if (!directory || process.argv.length !== 3) throw new Error("Usage: node scripts/codeql-sarif-policy.mjs <sarif-directory>");
-    const result = evaluateCodeqlSarif(readSarifDirectory(directory));
+    const evidence = readSarifDirectoryEvidence(directory);
+    const result = evaluateCodeqlSarif(evidence.documents, { artifactSha256: evidence.artifactSha256 });
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 1;
   } catch (error) {

@@ -142,6 +142,20 @@ const reviewedSarif = codeqlDocument([{
   ruleId: "js/file-access-to-http", path: "scripts/e2e/access-token.mts",
   lineFingerprint: "90e07734df8b1ab3:1", columnFingerprint: "6"
 }]);
+const historicalShellFindingsWithDifferentBytes = codeqlDocument([
+  {
+    ruleId: "js/shell-command-injection-from-environment",
+    path: "scripts/staging-runbook-lifecycle.test.mjs",
+    lineFingerprint: "2d350a82d76eabf3:1",
+    columnFingerprint: "15"
+  },
+  {
+    ruleId: "js/shell-command-injection-from-environment",
+    path: "scripts/staging-runbook-lifecycle.test.mjs",
+    lineFingerprint: "fbff554d652a47c5:1",
+    columnFingerprint: "15"
+  }
+]);
 const fakeEvidence = (document = reviewedSarif) => () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "virki-test-ghcr-evidence-"));
   const contents = path.join(directory, "contents");
@@ -357,6 +371,23 @@ test("the exact CodeQL artifact must be retrievable and pass the reviewed SARIF 
       : { status: 0, stdout: runsResponse(args) }
   });
   assert.deepEqual(rejected, {
+    ok: false,
+    status: "FAIL",
+    lines: ["Reviewed exact-SHA CodeQL SARIF policy did not pass."]
+  });
+});
+
+test("exact-SHA production verification rejects historical shell fingerprints from different SARIF bytes", () => {
+  const runsResponse = (args) => JSON.stringify(githubRunResponse(args));
+  const result = verifyExactShaCi({
+    revision,
+    repositoryRoot: "/repo",
+    retrieveEvidence: fakeEvidence(historicalShellFindingsWithDifferentBytes),
+    execute: (_command, args) => args[0] === "run" && args[1] === "view"
+      ? { status: 0, stdout: publisherLog }
+      : { status: 0, stdout: runsResponse(args) }
+  });
+  assert.deepEqual(result, {
     ok: false,
     status: "FAIL",
     lines: ["Reviewed exact-SHA CodeQL SARIF policy did not pass."]
