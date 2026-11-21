@@ -128,6 +128,7 @@ jobs:
             1b0ad7d10b0ef7413a2a72b6bdff5c8b90f51d2f
             932758801e6c0b47d3eceaef7aca96b1c5734e87
             c7234b862c991a940c3047f05a6f2752d7fd1e6f
+            9607e2d13c28168f2f00a9370737b622b080ccc9
           )
           i=0
           while read -r digest patch; do
@@ -149,9 +150,17 @@ jobs:
           export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
           "$toolchain/go/bin/go" version
           "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
-            -run '^TestC1V2(4ReceiverCustodyIdentityContract|4ReceiverCustodyParentAndGrandparentContract|4IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs|4FSSyncSealedV15EnforcesCustodyPolicy|8LauncherResourceAndIdentityRefusals|8IndependentCustodyPolicyRefusals|8AdversarialCustodyBoundaryRefusals)$'
+            -run '^TestC1V2(4ReceiverCustodyIdentityContract|4ReceiverCustodyParentAndGrandparentContract|4IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs|4FSSyncSealedV15EnforcesCustodyPolicy|8LauncherResourceAndIdentityRefusals|8IndependentCustodyPolicyRefusals|8AdversarialCustodyBoundaryRefusals|9SupervisorAncestorChainRejectsUntrustedPaths)$'
           setpriv --no-new-privs "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
             -run '^TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs$'
+          # The peer runs under separate synthetic UIDs inside an isolated,
+          # root-supervised fixture. No listener, production data or deploy.
+          sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+            VIRKI_V24_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test \
+            -mod=vendor -count=1 -timeout 120s -v ./session/filesync \
+            -run '^TestC1V(24IndependentReceiverProcess|28AdversarialMultiProcessCustodyAndSwapRace|29SupervisorAncestorRejectsWritableRootPath)$' \
+            | tee "$RUNNER_TEMP/issue90-privileged-fixture.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-privileged-fixture.log"
 
       - name: Production control tests
         run: npm run test:production-revision

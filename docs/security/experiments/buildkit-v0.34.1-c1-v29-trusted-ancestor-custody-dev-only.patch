@@ -1,0 +1,150 @@
+diff --git a/session/filesync/sealed_custody_v24_independent_linux_test.go b/session/filesync/sealed_custody_v24_independent_linux_test.go
+index 876e649..76cb5b8 100644
+--- a/session/filesync/sealed_custody_v24_independent_linux_test.go
++++ b/session/filesync/sealed_custody_v24_independent_linux_test.go
+@@ -418,6 +418,14 @@ func v28AdversarialPeerRacer(t *testing.T) {
+ 	stopPath := filepath.Join(root, "peer", "stop")
+ 	attemptsPath := filepath.Join(root, "peer", "attempts")
+ 	require.NoError(t, os.WriteFile(readyPath, []byte("1"), 0644))
++	// The adversarial identity must not be able to enumerate quarantine
++	// stage names, nor bind-mount a substitute tree over the trusted receiver
++	// namespace. These are actual syscalls from the third OS process, not
++	// only a synthetic rename failure in the supervisor.
++	_, listErr := os.ReadDir(receiverDir)
++	require.Error(t, listErr)
++	require.Error(t, unix.Mount(evilTarget, receiverDir, "", unix.MS_BIND, ""))
++	require.Error(t, unix.Mount("tmpfs", receiverDir, "tmpfs", 0, "size=4096"))
+ 	attempts := 0
+ 	deadline := time.Now().Add(30 * time.Second)
+ 	for time.Now().Before(deadline) {
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+index 7dd01a6..6bded6e 100755
+--- a/session/filesync/sealed_custody_v24_linux.go
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -56,6 +56,67 @@ func validateV24ProcessIdentity(policy V24ReceiverCustodyPolicy) error {
+ 	return nil
+ }
+ 
++// validateV24TrustedSupervisorAncestors verifies the WHOLE ancestor chain of
++// the root-owned grandparent, not merely its immediate inode. Otherwise an
++// attacker can rename a root-owned grandparent from a writable untrusted
++// ancestor and redirect a later pathname-based lookup. A root-owned sticky
++// directory (for example /tmp) protects its root-owned child from rename by
++// unprivileged users; a non-sticky group/world-writable ancestor does not.
++// This deliberately refuses user-owned ancestors even if mode 0700: the
++// trusted receiver UID could otherwise rename a root-owned child there.
++func validateV24TrustedSupervisorAncestors(rootFD int, grandparent string) error {
++	if !filepath.IsAbs(grandparent) || filepath.Clean(grandparent) != grandparent {
++		return errors.New("C1 V24 supervisor ancestor must be canonical absolute path")
++	}
++	currentFD := rootFD
++	var rootStat unix.Stat_t
++	if err := unix.Fstat(currentFD, &rootStat); err != nil {
++		return err
++	}
++	validate := func(st unix.Stat_t) error {
++		if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != 0 ||
++			(st.Mode&0022 != 0 && st.Mode&unix.S_ISVTX == 0) {
++			return errors.New("C1 V24 supervisor ancestor is not root-owned and protected from untrusted rename")
++		}
++		return nil
++	}
++	if err := validate(rootStat); err != nil {
++		return err
++	}
++	if grandparent == "/" {
++		return nil
++	}
++	for _, component := range strings.Split(strings.TrimPrefix(grandparent, "/"), "/") {
++		fd, err := unix.Openat2(currentFD, component, &unix.OpenHow{
++			Flags:   uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
++		})
++		if err != nil {
++			if currentFD != rootFD {
++				_ = unix.Close(currentFD)
++			}
++			return fmt.Errorf("C1 V24 supervisor ancestor resolution refused: %w", err)
++		}
++		var stat unix.Stat_t
++		statErr := unix.Fstat(fd, &stat)
++		if statErr == nil {
++			statErr = validate(stat)
++		}
++		if currentFD != rootFD {
++			_ = unix.Close(currentFD)
++		}
++		if statErr != nil {
++			_ = unix.Close(fd)
++			return statErr
++		}
++		currentFD = fd
++	}
++	if currentFD != rootFD {
++		return unix.Close(currentFD)
++	}
++	return nil
++}
++
+ func validateV24CustodyDirs(dest string, policy V24ReceiverCustodyPolicy) error {
+ 	if !filepath.IsAbs(dest) || filepath.Clean(dest) != dest || dest == "/" {
+ 		return errors.New("C1 V24 destination must be canonical absolute non-root Linux pathname")
+@@ -125,7 +186,7 @@ func validateV24CustodyDirs(dest string, policy V24ReceiverCustodyPolicy) error
+ 	if gpSt.Mode&0022 != 0 {
+ 		return errors.New("C1 V24 custody grandparent must not be group/world writable")
+ 	}
+-	return nil
++	return validateV24TrustedSupervisorAncestors(rootFD, grandparent)
+ }
+ 
+ // validateV24IndependentCustody checks the explicit DEV supervisor contract.
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index ec33fb4..827d8dc 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -425,3 +425,45 @@ func TestC1V28AdversarialCustodyBoundaryRefusals(t *testing.T) {
+ 	require.Error(t, err)
+ 	require.False(t, called, "stage callback must not run when destination custody fails or already exists")
+ }
++
++func TestC1V29SupervisorAncestorChainRejectsUntrustedPaths(t *testing.T) {
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	require.NoError(t, err)
++	defer unix.Close(rootFD)
++	require.NoError(t, validateV24TrustedSupervisorAncestors(rootFD, "/"))
++	require.NoError(t, validateV24TrustedSupervisorAncestors(rootFD, "/tmp"))
++
++	// Restricting only the grandparent inode is insufficient: an untrusted
++	// ancestor can rename the supposedly trusted root-owned grandparent.
++	untrusted := t.TempDir()
++	child := filepath.Join(untrusted, "child")
++	require.NoError(t, os.Mkdir(child, 0700))
++	require.ErrorContains(t,
++		validateV24TrustedSupervisorAncestors(rootFD, child),
++		"not root-owned and protected from untrusted rename")
++
++	link := filepath.Join(untrusted, "symlink")
++	require.NoError(t, os.Symlink("/tmp", link))
++	require.Error(t, validateV24TrustedSupervisorAncestors(rootFD, link))
++}
++
++func TestC1V29SupervisorAncestorRejectsWritableRootPath(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("root-supervised, synthetic negative ancestor fixture")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	require.NoError(t, err)
++	defer unix.Close(rootFD)
++	base, err := os.MkdirTemp("/tmp", "virki-v29-ancestor-")
++	require.NoError(t, err)
++	defer os.RemoveAll(base)
++	child := filepath.Join(base, "root-controlled-child")
++	require.NoError(t, os.Mkdir(child, 0700))
++	require.NoError(t, os.Chmod(base, 0777))
++	require.ErrorContains(t, validateV24TrustedSupervisorAncestors(rootFD, child),
++		"not root-owned and protected from untrusted rename")
++	// Sticky root-owned ancestors protect root-owned children in /tmp-like
++	// namespaces; ordinary writable ancestors do not.
++	require.NoError(t, os.Chmod(base, 0777|os.ModeSticky))
++	require.NoError(t, validateV24TrustedSupervisorAncestors(rootFD, child))
++}
