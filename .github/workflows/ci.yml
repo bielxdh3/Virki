@@ -112,6 +112,9 @@ jobs:
       - name: Secret scan
         run: npm run secrets:scan
 
+      - name: Verify issue 119 edge TLS evidence classifier (offline, no live probe)
+        run: node --test scripts/security/issue119-edge-evidence.test.mjs
+
       - name: Verify issue 90 experimental patch integrity, replay and ordinary tests
         run: |
           set -euo pipefail

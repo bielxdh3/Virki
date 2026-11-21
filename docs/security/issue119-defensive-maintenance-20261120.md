@@ -39,6 +39,12 @@ The connected Cloudflare account was inspected with GET-only API calls. No Acces
 
 ## Acceptance boundaries
 
+### Reproducible Cloudflare TLS edge gate (DEV-only evidence, 2026-11-21)
+
+The read-only, opt-in checker `scripts/security/issue119-edge-evidence.mjs` has no network side effects unless explicitly invoked with `--live`. That invocation makes 12 bounded unauthenticated TLS handshakes, one for TLS 1.0, 1.1, 1.2 and 1.3 on each of `biel.dev.br`, `hub.biel.dev.br` and `portal.biel.dev.br`, and prints sanitized JSON without cookies, bodies or credentials. The default command refuses to probe. Its offline regression is mandatory in Validate and treats local OpenSSL protocol/cipher errors and ambiguous handshakes as **inconclusive, not security success**. In particular, failure to establish a TLS 1.0 connection does not by itself prove that the Cloudflare edge rejected it; only an explicit peer `protocol version` TLS alert is accepted as evidence of rejection.
+
+For authorized post-change attestation (not performed during this code task), run `node scripts/security/issue119-edge-evidence.mjs --live` from an independently provisioned environment with OpenSSL capable of TLS 1.0/1.1 probes; retain the sanitized output plus tool version and the timestamp. Require TLS 1.0 and 1.1 rejection **and** TLS 1.2/1.3 success for all three hosts. An `inconclusive` result requires independent OpenSSL/provider investigation, not a waiver. The separately versioned `docs/security/issue119-external-acceptance-20261121.md` enumerates additional Hub/Portal, DNS/Cloudflare and credentialed tests needed to close this issue; its procedures are not instructions to change production.
+
 - PR #132 already implemented powered-by-header suppression; its hosted evidence should not be repeated without cause.
 - The fresh Cloudflare API read still reports minimum TLS 1.0 and SSL mode `flexible`. TLS 1.2 minimum and compatibility validation remain a separate authorized-infrastructure decision; this task's no-Cloudflare-change boundary was respected.
 - Historical scan observations are not a complete security assessment; specialist validation and any required controlled authenticated assurance remain open. Do not attach raw reports or credentials. No live probing was performed.
