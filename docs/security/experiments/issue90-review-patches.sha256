@@ -11,3 +11,4 @@ b316fc8eff47ff2b2fe6e58978fd312992e675769eeb40e82e5b2926c8c49431  docs/security/
 1ab73615a3b3140dfc8ca757f6476642046bbdaf8e792ea3b1af6b1b0ac4ead8  docs/security/experiments/buildkit-v0.34.1-c1-v33-positive-controls-postcommit-dev-only.patch
 fb7f15e571c11ed553905c05fa433d6d740a64036fd64f2ef0c0a3ec15d642fc  docs/security/experiments/buildkit-v0.34.1-c1-v34-ptrace-thread-pinning-dev-only.patch
 f7c691d5ea9ec1f12a4b1b1a0d98cf3d6dca95e4c5ef4c5853b3eb0e310ee362  docs/security/experiments/buildkit-v0.34.1-c1-v35-final-published-identity-dev-only.patch
+fac7bd7a03845a24f8f22de89b862bce1662b4c19b932cb57bb4fc430edfc7a0  docs/security/experiments/buildkit-v0.34.1-c1-v36-root-owned-broker-dev-only.patch
