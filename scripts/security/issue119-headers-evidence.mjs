@@ -194,6 +194,13 @@ function inspectHtmlDocument(body, mime) {
     if (!match) return fail();
     const closing = match[1] === '/';
     const tag = match[2].toLowerCase();
+    // A meta CSP can add a second enforced policy AFTER the response headers
+    // were parsed. Browser semantics intersect policies, so a seemingly valid
+    // nonce-bearing response header alone could falsely pass if a meta CSP
+    // disables script execution. This bounded tokenizer does not reconcile
+    // HTML meta CSP and header policies: reject any real http-equiv meta tag
+    // (including encoded values) instead of silently ignoring its policy.
+    if (tag === 'meta' && !closing && /\shttp-equiv(?=\s|=|\/>|>)/i.test(raw)) return fail();
     // This bounded receipt does not implement SVG/MathML namespaces. In
     // particular SVG <title> is an HTML integration point; HTML <title>
     // raw-text semantics there would conceal executable child scripts.

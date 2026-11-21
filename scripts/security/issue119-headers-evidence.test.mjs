@@ -260,6 +260,26 @@ test('HTML character references in script type attributes cannot hide executable
     htmlDoc('<script type="text/javascript" nonce="SAFE">good()</script>'))).result, 'pass');
 });
 
+test('CSP meta policies cannot silently override an otherwise passing header nonce receipt', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const head of [
+    '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'">',
+    '<meta HTTP-EQUIV=content-security-policy content="script-src \'nonce-EVIL\'">',
+    '<meta http-equiv="Content-Security-Policy" content="script-src &#39;none&#39;">',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc('<script nonce="SAFE">boot()</script>', head))).result, 'fail', head);
+  }
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE">boot()</script>',
+      '<meta charset="utf-8"><meta name="viewport" content="width=device-width">'))).result,
+  'pass', 'ordinary metadata does not create a second enforced CSP');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE">boot()</script>',
+      '<meta data-http-equiv="Content-Security-Policy" content="script-src \'none\'">'))).result,
+  'pass', 'data-http-equiv is not a real meta policy');
+});
+
 test('enforced CSP sandbox without allow-scripts prevents executable nonce receipt', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   for (const policy of ['sandbox', 'sandbox allow-same-origin',
