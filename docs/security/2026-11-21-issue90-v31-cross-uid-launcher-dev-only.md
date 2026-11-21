@@ -1,0 +1,13 @@
+# Issue #90 — V31 mandatory trusted executable on root cross-UID launch (DEV-only)
+
+## Independent P2 and fix
+
+An independent review of the published V30 SHA `3b0d2543711914adc1f5e5a83e6d263014aaa564` found a real narrow P2: root-owner and protected executable ancestor checks were conditional on `RequireImmutableGrandparent`. The root supervisor could still request execution as another UID with that policy flag false. An attacker-controlled executable would be **pinned** by `O_PATH` (preventing a later name swap), but the pinned contents could themselves be untrusted and would execute with the receiver credentials and inherited descriptors. The previous V28 root-supervised fixture legitimately omits the flag, so this is a reachable policy path, not hypothetical unreachable code.
+
+V31 retains the V30 FD-pinned `exec.CommandContext("/proc/self/fd/N")` path and adds an unconditional gate for `os.Geteuid()==0` plus a nonzero `ExpectedReceiverUID` (privileged root -> distinct unprivileged target). Root inode ownership and a trusted full executable ancestor chain must hold regardless of the caller's `RequireImmutableGrandparent` or `RequireUnprivileged` flag. Normal same-UID unprivileged launcher tests remain untouched. The root-supervised positive receiver/sender and three-UID adversarial publication fixtures remain compatible.
+
+`TestC1V31PrivilegedCrossUIDLaunchRequiresTrustedHelperWithoutFlag` explicitly omits the policy flag, checks positive launch of a root-owned helper, rejects a read-only root-owned helper inside a receiver-owned parent directory, rejects a receiver-owned helper inside a root-owned parent, and confirms setting `RequireUnprivileged=false` cannot bypass root-to-other-UID executable authentication.
+
+Pinned BuildKit parent: `f5b59a1f2fb25a0cb7072c398cab9aed7835da4e`. V30 prerequisite tree: `c8f6df12b47ef2540bf2553ac5a9ecc9ce892971`. Incremental V31 patch SHA-256 (raw LF): `b316fc8eff47ff2b2fe6e58978fd312992e675769eeb40e82e5b2926c8c49431`. V31 resulting tree: `c8d30aca6c0df02cd49b5746d414194496fa72ff`. Local Go 1.26.10 focused root-supervised tests, independent-UID actual receiver, three-UID adversarial swap/mount and unprivileged tests PASS; `go vet -copylocks=false ./session/filesync` PASS (pre-existing copylocks exception). Exact-head CI and fresh independent review receipts must be checked for the final published SHA.
+
+**Boundary:** no production identities, mounts, Cloudflare, DNS, C1/C4 activation, merge or deployment changed. Synthetic root-supervised Linux tests do not certify exclusive receiver ownership or authenticated peer identity for the lifetime of a real production transfer; issue #90 remains OPEN until independent operational evidence is authorized and obtained.
