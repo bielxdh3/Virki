@@ -15678,10 +15678,10 @@ index 0000000000000000000000000000000000000000..202d36e7711147d2a6d4129dc0935744
 +}
 diff --git a/util/localcontext/service_vroa_v3_linux.go b/util/localcontext/service_vroa_v3_linux.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..712544cfe6cb0954b83c994ad415067e0d5d0582
+index 0000000000000000000000000000000000000000..d22d32023c292ed9d5d56f06efd1c625729904ab
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux.go
-@@ -0,0 +1,819 @@
+@@ -0,0 +1,834 @@
 +//go:build linux
 +
 +package localcontext
@@ -16320,6 +16320,21 @@ index 0000000000000000000000000000000000000000..712544cfe6cb0954b83c994ad415067e
 +		vroaCString(env.Nonce[:]) != binding.Nonce || vroaCString(env.ApprovalID[:]) != binding.ApprovalID {
 +		return env, errors.New("VROA_AP3 envelope does not match solve binding")
 +	}
++	if err := validateExporterIntent(binding.Exporter); err != nil {
++		return env, fmt.Errorf("VROA_AP3 solve binding has an invalid exporter intent: %w", err)
++	}
++	expectedExporterIntent := strings.TrimPrefix(binding.Exporter.AttributesDigest, "sha256:")
++	if vroaCString(env.ExporterIntentSHA256[:]) != expectedExporterIntent {
++		return env, errors.New("VROA_AP3 exporter intent does not match solve binding")
++	}
++	if s.opt.ExporterPolicy.Type != "" {
++		if err := validateExporterIntent(s.opt.ExporterPolicy); err != nil {
++			return env, fmt.Errorf("VROA_V3 configured exporter policy is invalid: %w", err)
++		}
++		if s.opt.ExporterPolicy != binding.Exporter {
++			return env, errors.New("VROA_V3 configured exporter policy does not match solve binding")
++		}
++	}
 +	return env, nil
 +}
 +
@@ -16503,10 +16518,10 @@ index 0000000000000000000000000000000000000000..712544cfe6cb0954b83c994ad415067e
 +}
 diff --git a/util/localcontext/service_vroa_v3_linux_test.go b/util/localcontext/service_vroa_v3_linux_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d18c22fbbe03716925f5910f8d0eb721649bf03
+index 0000000000000000000000000000000000000000..0103561305024ec9e1f6a571bec139d28bf28268
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux_test.go
-@@ -0,0 +1,572 @@
+@@ -0,0 +1,648 @@
 +//go:build linux
 +
 +package localcontext
@@ -16682,6 +16697,82 @@ index 0000000000000000000000000000000000000000..3d18c22fbbe03716925f5910f8d0eb72
 +		proof.BlobBytes = append(proof.BlobBytes, blob...)
 +	}
 +	return proof
++}
++
++func TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer(t *testing.T) {
++	ownerPub, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	approvedExporter, err := NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/approved:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	requestedExporter, err := NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/unapproved:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	imageDesc := testVROAV3OCIProof().Root
++	var streams [4][]byte
++	var treeDigests [4]string
++	for i, name := range requiredContexts {
++		streams[i], treeDigests[i], _ = testVROAV3ContextStream(name)
++	}
++	nonceRaw := make([]byte, 16)
++	if _, err := rand.Read(nonceRaw); err != nil {
++		t.Fatal(err)
++	}
++	nonceHex := hex.EncodeToString(nonceRaw)
++	rawEnv, pinHex := buildSignedV3Approval(t, ownerPub, ownerPriv, nonceHex, streams, treeDigests, approvedExporter, imageDesc)
++
++	service := &VROAV3Service{
++		socketPath:      filepath.Join(t.TempDir(), "missing-owner.sock"),
++		devAllowSameUID: true,
++		scopes:          make(map[string]vroaV3ScopeState),
++		opt: VROAV3Options{
++			Epoch:             1,
++			ApprovalPublicKey: ownerPub,
++			ApprovalKeyID:     "owner-test-key",
++			ApprovalPinSHA256: pinHex,
++			ExpectedImage:     imageDesc,
++		},
++	}
++	_, err = service.Begin(context.Background(), Binding{
++		JobID:            "job-buildkit-v3",
++		Role:             "runtime",
++		Nonce:            nonceHex,
++		ApprovalID:       "apr-buildkit-v3",
++		ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++		Exporter:         requestedExporter,
++	})
++	if err == nil || !strings.Contains(err.Error(), "exporter intent") {
++		t.Fatalf("Begin must reject a binding whose exporter differs from the signed approval before native transfer; got %v", err)
++	}
++
++	configuredService := &VROAV3Service{
++		socketPath:      filepath.Join(t.TempDir(), "missing-configured-owner.sock"),
++		devAllowSameUID: true,
++		scopes:          make(map[string]vroaV3ScopeState),
++		opt: VROAV3Options{
++			Epoch:             1,
++			ApprovalPublicKey: ownerPub,
++			ApprovalKeyID:     "owner-test-key",
++			ApprovalPinSHA256: pinHex,
++			ExpectedImage:     imageDesc,
++			ExporterPolicy:    requestedExporter,
++		},
++	}
++	_, err = configuredService.Begin(context.Background(), Binding{
++		JobID:            "job-buildkit-v3",
++		Role:             "runtime",
++		Nonce:            nonceHex,
++		ApprovalID:       "apr-buildkit-v3",
++		ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++		Exporter:         approvedExporter,
++	})
++	if err == nil || !strings.Contains(err.Error(), "configured exporter policy") {
++		t.Fatalf("Begin must reject a configured exporter policy that differs from the solve binding; got %v", err)
++	}
 +}
 +
 +func TestVROAV3ServiceWithRealManagerAndNativeDaemon(t *testing.T) {
