@@ -69,6 +69,8 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<template><style>body{content:"</template>"}</style>' +
       '<script nonce="SAFE">boot()</script><template></template>')),
     response(200, goodCSP, htmlDoc('<template><script></template><script nonce="SAFE"></script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<noscript><style></noscript><script nonce="EVIL">boot()</script></style></noscript>')),
     response(200, "script-src 'nonce-SA&#70;E'", htmlDoc('<script nonce="SA&#70;E">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="EVIL">boot()</script>')),
     { status: 200, headers: new Headers({ 'content-security-policy': goodCSP }), body: goodHTML },
@@ -130,6 +132,16 @@ test('raw-text false template closures cannot transform inert scripts into execu
   const result = classifyIssue119Response(base, response(200, goodCSP, actual));
   assert.equal(result.result, 'pass', 'only the final outside script may count');
   assert.equal(result.scriptNonce, 'matched');
+});
+
+test('noscript raw text cannot conceal a subsequent executable script with wrong nonce', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const forged = htmlDoc('<script nonce="SAFE">safe()</script>' +
+    '<noscript><style></noscript><script nonce="EVIL">boot()</script></style></noscript>');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP, forged)).result, 'fail');
+  const legitimate = htmlDoc('<noscript><script nonce="EVIL">ignored()</script></noscript>' +
+    '<script nonce="SAFE">real()</script>');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP, legitimate)).result, 'pass');
 });
 
 test('network failure is inconclusive and CLI refuses network without explicit --live', async () => {

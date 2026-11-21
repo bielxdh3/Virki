@@ -128,7 +128,19 @@ function inspectHtmlDocument(body, mime) {
     if (!match) return fail();
     const closing = match[1] === '/';
     const tag = match[2].toLowerCase();
-    if (tag === 'template' || tag === 'noscript') {
+    // With scripting enabled, HTML5 treats <noscript> as raw text until its
+    // first actual closing tag. Do not interpret apparent <style>/<script>
+    // start tags inside it: doing so could skip the real </noscript>, hide
+    // a later executable script with the wrong nonce, and return false PASS.
+    if (tag === 'noscript' && !closing) {
+      const closeNoscript = /<\/noscript\s*>/gi;
+      closeNoscript.lastIndex = at;
+      if (!closeNoscript.exec(body)) return fail();
+      at = closeNoscript.lastIndex;
+      continue;
+    }
+    if (tag === 'noscript' && closing) return fail();
+    if (tag === 'template') {
       if (!closing) inert.push(tag);
       else if (inert.pop() !== tag) return fail();
       continue;
