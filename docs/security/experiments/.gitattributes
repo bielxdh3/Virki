@@ -7,3 +7,4 @@ buildkit-v0.34.1-c1-v28-supervisor-resource-hardening-dev-only.patch -text diff 
 buildkit-v0.34.1-c1-v29-trusted-ancestor-custody-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v30-helper-exec-fd-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v31-cross-uid-launcher-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v32-nondumpable-receiver-dev-only.patch -text diff -whitespace
