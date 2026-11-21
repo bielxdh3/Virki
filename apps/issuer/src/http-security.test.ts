@@ -62,7 +62,14 @@ test("oidc-provider form_post hashes its exact inline script into the issuer aut
   };
   formPost(context as never, "https://relying-party.example/callback", { code: "synthetic-code" });
   const html = (context as unknown as { body: string }).body;
-  const script = /<script>([\s\S]*?)<\/script>/u.exec(html)?.[1];
+  // oidc-provider emits literal lowercase tags; search the original string so
+  // the UTF-16 offsets remain valid even if earlier HTML contains Unicode.
+  const scriptStart = html.indexOf("<script>");
+  const scriptContentStart = scriptStart + "<script>".length;
+  const scriptEnd = html.indexOf("</script>", scriptContentStart);
+  const script = scriptStart >= 0 && scriptEnd >= scriptContentStart
+    ? html.slice(scriptContentStart, scriptEnd)
+    : undefined;
   assert.ok(script, "form_post emits its auto-submit script");
   const digest = createHash("sha256").update(script).digest("base64");
   assert.ok(headers.get("content-security-policy")?.includes(`'sha256-${digest}'`), "CSP permits the exact emitted script only by hash");
