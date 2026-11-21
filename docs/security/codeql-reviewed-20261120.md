@@ -19,12 +19,13 @@ The SARIF code flows point from `process.execPath` into a JavaScript template st
 
 ## Source hardening
 
-The test harness was changed to preserve the exact current Node executable without interpolating it into shell source:
+The test harness was changed to preserve the exact current Node executable without interpolating it into shell source or passing the absolute path in shell command arguments:
 
-- The shell source now assigns `node_bin="$0"`.
-- `process.execPath` is passed as the `name` positional argument to `bash -c`; the other positional arguments retain their intended meanings.
+- The shell source reads `node_bin` from standard input with `IFS= read -r -d ''`, using NUL as the delimiter.
+- `process.execPath` (or the metacharacter-bearing symlink path in the adversarial test) is sent as NUL-terminated stdin data, not shell source, an environment override, or a command argument.
+- Bash receives a fixed dummy `$0` plus only helper-specific positional values (the two IPs where applicable); the extracted helper invokes the exact path read from stdin.
 - The same pattern is used by both affected test paths. It does not fall back to PATH lookup or a generic `node` command.
-- A Linux-only regression creates a symlink whose path contains the literal command-substitution text `$(touch${IFS}injected)`, passes it as `$0`, executes the extracted helper, and asserts that the marker file was not created.
+- Linux-only regressions create symlinks whose paths contain literal `$(touch${IFS}...)` command-substitution payloads, pass them as NUL-delimited stdin data through both affected shell-helper paths, execute the exact symlinked Node binary, and assert that the marker file was not created.
 
 This change removes the shell-source interpolation while retaining the same absolute Node binary. It does not modify the staging runbook's production instructions or authorize staging activity.
 

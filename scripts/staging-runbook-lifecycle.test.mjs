@@ -399,11 +399,11 @@ testBash("both staging and rollback compare IPv6 addresses canonically, without 
       ["127.0.0.1", "::1", 1],
       ["example.com", "example.com", 1],
     ]) {
-      // Pass the exact current Node executable as Bash's $0. Do not interpolate
-      // an absolute path into shell source, where metacharacters could be parsed.
-      const sh = `node_bin="$0"\n${helper}\nsame_ip_address "$1" "$2"\n`;
-      const result = spawnSync(bash, ["-c", sh, process.execPath, left, right], {
-        encoding: "utf8", timeout: 5000,
+      // Pass the exact current Node executable as NUL-delimited stdin data.
+      // Bash reads it literally; it never enters shell source or command argv.
+      const sh = `IFS= read -r -d '' node_bin || exit 97\n${helper}\nsame_ip_address "$1" "$2"\n`;
+      const result = spawnSync(bash, ["-c", sh, "_", left, right], {
+        input: `${process.execPath}\0`, encoding: "utf8", timeout: 5000,
       });
       assert.ifError(result.error);
       assert.equal(result.status === 0 ? 0 : 1, expected, `${left} vs ${right}: ${result.stderr}`);
@@ -411,7 +411,7 @@ testBash("both staging and rollback compare IPv6 addresses canonically, without 
   }
 });
 
-testBash("runbook shell helper treats a metacharacter-bearing Node path as an argv value", () => {
+testBash("runbook shell helper treats a metacharacter-bearing Node path as literal stdin data", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "virki-node-path-"));
   const marker = path.join(directory, "injected");
   const executableDirectory = path.join(directory, "$(touch${IFS}injected)");
@@ -421,9 +421,9 @@ testBash("runbook shell helper treats a metacharacter-bearing Node path as an ar
     symlinkSync(process.execPath, executable);
     const helper = [...runbook.matchAll(/same_ip_address\(\) \{([\s\S]*?)\n\}/gu)][0]?.[1];
     assert.ok(helper, "the runbook's IP comparison helper must exist");
-    const script = `node_bin="$0"\nsame_ip_address() {${helper}\n}\nsame_ip_address "$1" "$2"\n`;
-    const result = spawnSync(bash, ["-c", script, executable, "127.0.0.1", "127.0.0.1"], {
-      cwd: directory, encoding: "utf8", timeout: 5000
+    const script = `IFS= read -r -d '' node_bin || exit 97\nsame_ip_address() {${helper}\n}\nsame_ip_address "$1" "$2"\n`;
+    const result = spawnSync(bash, ["-c", script, "_", "127.0.0.1", "127.0.0.1"], {
+      cwd: directory, input: `${executable}\0`, encoding: "utf8", timeout: 5000
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -542,6 +542,13 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
   const nonceFile = path.join(dir, "nonce.txt");
   const pollCounter = path.join(dir, "poll-count.txt");
   try {
+    const marker = path.join(dir, "injected");
+    // Use an absolute marker in the command-substitution payload because the
+    // extracted runbook helper intentionally runs from the repository root.
+    const executableDirectory = path.join(dir, "$(touch${IFS}" + marker + ")");
+    mkdirSync(executableDirectory, { recursive: true });
+    const executable = path.join(executableDirectory, "node");
+    symlinkSync(process.execPath, executable);
     mkdirSync(caDir);
     chmodSync(caDir, 0o755);
     const pem = rootCertificates[0].trimEnd() + "\n";
@@ -575,9 +582,8 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
       writeFileSync(pollCounter, "0");
       const shell = `set -euo pipefail
         ctx=mock
-        # Bash's $0 carries the exact current Node executable without parsing
-        # its path as shell source.
-        node_bin="$0"
+        # Read the exact Node executable as NUL-delimited data, never shell source or argv.
+        IFS= read -r -d '' node_bin || exit 97
         VIRKI_STAGING_APPROVED_SOURCE_SHA="${"0".repeat(40)}"
         VIRKI_STAGING_APPROVED_DB_CA_SHA256="$MOCK_CA_DIGEST"
         timeout() {
@@ -646,8 +652,8 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
       assert.ok(mockDockerBody, "the disposable Docker mock must remain present");
       assert.doesNotMatch(mockDockerBody, /\breturn(?=\s*(?:;|\n|\}))/u,
         "successful mock branches require explicit return 0, including during EXIT cleanup");
-      const result = spawnSync(bash, ["-c", shell, process.execPath], {
-        encoding: "utf8", timeout: 10000,
+      const result = spawnSync(bash, ["-c", shell, "_"], {
+        input: `${executable}\0`, encoding: "utf8", timeout: 10000,
         env: { PATH: "/usr/bin:/bin", MOCK_CA_DIGEST: caDigest,
           MOCK_VOLUME: volume, MOCK_FAIL: failure, MOCK_TAR: archive,
           MOCK_DOCKER_LOG: dockerLog, MOCK_CREATED: createdFlag,
@@ -684,6 +690,7 @@ testBash("OCI CA inspection never executes image binaries and fails shut on byte
         assert.doesNotMatch(calls, / create /u, "a pre-existing container must never be replaced");
       }
     }
+    assert.equal(existsSync(marker), false, "the Node path's command-substitution text must never execute");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
