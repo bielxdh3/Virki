@@ -70,7 +70,15 @@ function inspectScriptTag(tag) {
     // malformed attribute values instead of comparing raw HTML source to a
     // browser-decoded value and accidentally approving a broken handshake.
     if (name === 'nonce') nonce = value && /^[A-Za-z0-9+/_-]+={0,2}$/.test(value) ? value : null;
-    if (name === 'type') type = value;
+    // HTML attribute character references are decoded by the browser, so
+    // `text&#47;javascript` is executable despite looking unlike a raw MIME
+    // essence. This deliberately bounded scanner cannot fully decode HTML5
+    // entities; refuse encoded type values rather than silently classifying
+    // a potentially live script as inert. Do not weaken the nonce check.
+    if (name === 'type') {
+      if (value !== null && value.includes('&')) return invalid();
+      type = value;
+    }
   }
   if (type !== null && typeof type !== 'string') return invalid();
   const kind = (type ?? '').trim().toLowerCase();
@@ -161,6 +169,12 @@ function inspectHtmlDocument(body, mime) {
       if (body.startsWith('<!-->', lt) || body.startsWith('<!--->', lt)) return fail();
       const end = body.indexOf('-->', lt + 4);
       if (end < 0) return fail();
+      // HTML5 also closes comments at the comment-end-bang sequence `--!>`.
+      // If that boundary occurs first, a later `-->` must not swallow a live
+      // script. Fail closed because this minimal tokenizer does not implement
+      // every malformed-comment parser state.
+      const endBang = body.indexOf('--!>', lt + 4);
+      if (endBang !== -1 && endBang < end) return fail();
       at = end + 3;
       continue;
     }

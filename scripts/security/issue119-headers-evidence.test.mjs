@@ -82,6 +82,11 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
       '<!---><script nonce="EVIL">bad()</script><!-- -->')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<!-- boundary --!><script nonce="EVIL">bad()</script><!-- later -->')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
+      '<script type="text&#47;javascript" nonce="EVIL">bad()</script>')),
+    response(200, goodCSP, htmlDoc('<script type="text&#47;javascript" nonce="SAFE">bad()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
       '<svg><title><script nonce="EVIL">bad()</script></title></svg>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
       '<math><mtext><script nonce="EVIL">bad()</script></mtext></math>')),
@@ -230,6 +235,7 @@ test('abrupt HTML comment closure and foreign namespaces cannot create false non
   for (const invalidHTML of [
     '<!--><script nonce="EVIL">bad()</script><!-- -->',
     '<!---><script nonce="EVIL">bad()</script><!-- -->',
+    '<!-- ordinary text --!><script nonce="EVIL">bad()</script><!-- ordinary -->',
     '<svg><title><script nonce="EVIL">bad()</script></title></svg>',
     '<math><mtext><script nonce="EVIL">bad()</script></mtext></math>',
   ]) {
@@ -240,6 +246,18 @@ test('abrupt HTML comment closure and foreign namespaces cannot create false non
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
     htmlDoc('<!-- safe ordinary comment -->' + '<script nonce="SAFE">good()</script>'))).result,
   'pass', 'well-formed ordinary comments retain their existing behavior');
+});
+
+test('HTML character references in script type attributes cannot hide executable scripts', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const attr of ['text&#47;javascript', 'text&#x2f;javascript',
+    'text&#x2F;javascript', 'text&sol;javascript']) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`<script nonce="SAFE">good()</script><script type="${attr}" nonce="EVIL">bad()</script>`))).result,
+    'fail', attr);
+  }
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script type="text/javascript" nonce="SAFE">good()</script>'))).result, 'pass');
 });
 
 test('enforced CSP sandbox without allow-scripts prevents executable nonce receipt', () => {
