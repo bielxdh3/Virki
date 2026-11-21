@@ -79,6 +79,16 @@ function hasUnsafeInline(sources) {
   return sources.some((source) => source.toLowerCase() === "'unsafe-inline'");
 }
 
+// A header saying text/html is not by itself proof that a response is an
+// HTML *document*. Require the minimal HTML5 skeleton in document order;
+// otherwise a plain-text/fragment fixture with a forged <script> tag can
+// falsely satisfy our hydration acceptance. This is a conservative gate,
+// not an HTML parser or a browser hydration test.
+function hasHtmlDocumentSkeleton(body, mime) {
+  if (!/^text\/html(?:\s*;\s*charset\s*=\s*(?:[\w-]+|"[\w-]+")\s*)?$/i.test(mime.trim())) return false;
+  return /^\s*<!doctype\s+html\s*>\s*<html\b[^>]*>\s*<head\b[^>]*>[\s\S]*?<\/head\s*>\s*<body\b[^>]*>[\s\S]*?<\/body\s*>\s*<\/html\s*>\s*$/i.test(body);
+}
+
 export function classifyIssue119Response(target, response) {
   const headers = response.headers;
   const csp = headers.get('content-security-policy') ?? '';
@@ -124,7 +134,7 @@ export function classifyIssue119Response(target, response) {
   const nonceValues = new Set(nonceSources.map((source) => source.slice(7, -1)));
   const nonceMatches = tags.length > 0 && tags.every((nonce) => nonce !== null && nonceValues.has(nonce));
   const subdirectiveUnsafe = hasUnsafeInline(elementSources) || hasUnsafeInline(attributeSources);
-  const htmlDocument = /^text\/html(?:\s*;|\s*$)/i.test(mime) && /<html\b/i.test(response.body ?? '');
+  const htmlDocument = hasHtmlDocumentSkeleton(response.body ?? '', mime);
   const accepted = response.status === target.expected && htmlDocument &&
     !hasPoweredBy && hstsPresent && singleCsp &&
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&

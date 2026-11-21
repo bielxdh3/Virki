@@ -4,7 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { ISSUE119_HEADER_TARGETS, classifyIssue119Response,
   collectIssue119HeaderEvidence } from './issue119-headers-evidence.mjs';
 
-const goodHTML = '<html><script nonce="SAFE" src="/_next/static/app.js"></script><script nonce="SAFE">boot()</script></html>';
+const htmlDoc = (body, head = '') => `<!doctype html><html lang="pt-BR"><head>${head}</head><body>${body}</body></html>`;
+const goodHTML = htmlDoc('<script nonce="SAFE" src="/_next/static/app.js"></script><script nonce="SAFE">boot()</script>');
 const goodCSP = "default-src 'self'; script-src 'self' 'nonce-SAFE' 'strict-dynamic'; object-src 'none'";
 
 function response(status, csp = goodCSP, html = goodHTML, extraHeaders = {}) {
@@ -36,8 +37,8 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, `${goodCSP}; script-src-elem 'nonce-EVIL'`),
     response(200, `${goodCSP}; script-src-elem`),
     response(200, `${goodCSP}; SCRIPT-SRC-ELEM   `),
-    response(200, goodCSP, '<html><script data-nonce="SAFE">boot()</script></html>'),
-    response(200, goodCSP, `<html><script data-test=" nonce='SAFE' ">boot()</script></html>`),
+    response(200, goodCSP, htmlDoc('<script data-nonce="SAFE">boot()</script>')),
+    response(200, goodCSP, htmlDoc(`<script data-test=" nonce='SAFE' ">boot()</script>`)),
     response(200, `${goodCSP}; script-src-attr 'UNSAFE-INLINE'`),
     response(200, `${goodCSP}; script-src-elem 'UnSaFe-InLiNe'`),
     response(200, "script-src 'NONCE-SAFE' 'UNSAFE-INLINE'", goodHTML),
@@ -47,9 +48,15 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000junk' }),
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000; max-age=3000' }),
     response(200, goodCSP, goodHTML, { 'content-type': 'application/json' }),
+    response(200, goodCSP, goodHTML, { 'content-type': 'text/plain' }),
+    response(200, goodCSP, goodHTML, { 'content-type': 'text/html; boundary=forged' }),
     response(200, goodCSP, '<script nonce="SAFE">boot()</script>'),
-    response(200, "script-src 'nonce-SA&#70;E'", '<html><script nonce="SA&#70;E">boot()</script></html>'),
-    response(200, goodCSP, '<html><script nonce="EVIL">boot()</script></html>'),
+    response(200, goodCSP, '<html><script nonce="SAFE">boot()</script></html>'),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">boot()</script>').replace('<head>', '')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">boot()</script>').replace('</body>', '')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">boot()</script>').replace('<!doctype html>', '')),
+    response(200, "script-src 'nonce-SA&#70;E'", htmlDoc('<script nonce="SA&#70;E">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="EVIL">boot()</script>')),
     { status: 200, headers: new Headers({ 'content-security-policy': goodCSP }), body: goodHTML },
     response(302),
   ];
@@ -75,7 +82,7 @@ test('actual nonce attributes and quoted decimal HSTS are recognized without low
   assert.equal(classifyIssue119Response(base, quoted).result, 'pass');
   assert.equal(classifyIssue119Response(base, response(200, "script-src 'nonce-safe'", goodHTML)).result, 'fail');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
-    '<html><script data-nonce="SAFE" nonce="SAFE">boot()</script></html>')).result, 'pass');
+    htmlDoc('<script data-nonce="SAFE" nonce="SAFE">boot()</script>'))).result, 'pass');
 });
 
 test('network failure is inconclusive and CLI refuses network without explicit --live', async () => {
