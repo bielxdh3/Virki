@@ -59,6 +59,9 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<template><script nonce="SAFE">boot()</script></template>')),
     response(200, goodCSP, htmlDoc('<noscript><script nonce="SAFE">boot()</script></noscript>')),
     response(200, goodCSP, htmlDoc('<div data-html="<script nonce=\'SAFE\'>">not an executable script</div>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/json">{"not":"JS"}</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="importmap">{}</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="speculationrules">{}</script>')),
     response(200, "script-src 'nonce-SA&#70;E'", htmlDoc('<script nonce="SA&#70;E">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="EVIL">boot()</script>')),
     { status: 200, headers: new Headers({ 'content-security-policy': goodCSP }), body: goodHTML },
@@ -99,6 +102,17 @@ test('a real executable script is required even with valid HTML5 skeleton, comme
   assert.equal(result.htmlDocument, 'confirmed');
   assert.equal(result.scriptNonce, 'matched');
   assert.equal(result.result, 'pass');
+});
+
+test('inert JSON data scripts do not prove hydration or require nonce if real script exists', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const document = htmlDoc('<script type="application/json">{"hydration":false}</script>' +
+    '<script type="module" nonce="SAFE">boot()</script>');
+  const result = classifyIssue119Response(base, response(200, goodCSP, document));
+  assert.equal(result.result, 'pass');
+  assert.equal(result.scriptNonce, 'matched');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script type="module" data-nonce="SAFE">boot()</script>'))).result, 'fail');
 });
 
 test('network failure is inconclusive and CLI refuses network without explicit --live', async () => {

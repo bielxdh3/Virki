@@ -19,17 +19,23 @@ function directiveSources(csp, directiveName) {
     sources: directive === undefined ? [] : directive.split(/\s+/).slice(1) };
 }
 
-function actualScriptNonce(tag) {
+function inspectScriptTag(tag) {
+  const invalid = () => ({ valid: false, executable: false, nonce: null });
   const opening = /^<script\b/i.exec(tag);
-  if (!opening) return null;
+  if (!opening) return invalid();
   let pos = opening[0].length;
+  let nonce = null;
+  let type = null;
+  const seen = new Set();
   while (pos < tag.length) {
     while (/\s/.test(tag[pos] ?? '')) pos++;
     if (tag[pos] === '>' || tag[pos] === '/') break;
     const start = pos;
     while (pos < tag.length && !/[\s=/>]/.test(tag[pos])) pos++;
-    if (pos === start) return null;
+    if (pos === start) return invalid();
     const name = tag.slice(start, pos).toLowerCase();
+    if (seen.has(name)) return invalid();
+    seen.add(name);
     while (/\s/.test(tag[pos] ?? '')) pos++;
     let value = null;
     if (tag[pos] === '=') {
@@ -38,7 +44,7 @@ function actualScriptNonce(tag) {
       if (tag[pos] === '"' || tag[pos] === "'") {
         const quote = tag[pos++];
         const end = tag.indexOf(quote, pos);
-        if (end < 0) return null;
+        if (end < 0) return invalid();
         value = tag.slice(pos, end);
         pos = end + 1;
       } else {
@@ -52,9 +58,17 @@ function actualScriptNonce(tag) {
     // A CSP nonce is a Base64/Base64url token. Reject entity-encoded or
     // malformed attribute values instead of comparing raw HTML source to a
     // browser-decoded value and accidentally approving a broken handshake.
-    if (name === 'nonce') return value && /^[A-Za-z0-9+/_-]+={0,2}$/.test(value) ? value : null;
+    if (name === 'nonce') nonce = value && /^[A-Za-z0-9+/_-]+={0,2}$/.test(value) ? value : null;
+    if (name === 'type') type = value;
   }
-  return null;
+  if (type !== null && typeof type !== 'string') return invalid();
+  const kind = (type ?? '').trim().toLowerCase();
+  // HTML script data blocks (JSON, LD+JSON, importmaps, speculation rules or
+  // unknown MIME types) do not execute. They must neither prove hydration nor
+  // require a script nonce. A real executable classic/module script must.
+  const executable = kind === '' || kind === 'module' ||
+    /^(?:text|application)\/(?:javascript|ecmascript|x-javascript)(?:\s*;.*)?$/.test(kind);
+  return { valid: true, executable, nonce };
 }
 
 function hasValidHstsAge(value) {
@@ -129,7 +143,9 @@ function inspectHtmlDocument(body, mime) {
     } else if (['html', 'head', 'body'].includes(tag)) return fail();
     if (tag === 'script' && !closing) {
       if (phase !== 2 && phase !== 4) return fail();
-      nonces.push(actualScriptNonce(raw));
+      const script = inspectScriptTag(raw);
+      if (!script.valid) return fail();
+      if (script.executable) nonces.push(script.nonce);
     }
     if (['script', 'style', 'title', 'textarea', 'xmp', 'plaintext'].includes(tag) && !closing) {
       if (tag === 'plaintext') return fail();
