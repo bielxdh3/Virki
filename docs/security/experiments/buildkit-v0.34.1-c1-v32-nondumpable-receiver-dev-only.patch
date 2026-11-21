@@ -1,0 +1,112 @@
+diff --git a/session/filesync/sealed_custody_v24_independent_linux_test.go b/session/filesync/sealed_custody_v24_independent_linux_test.go
+index 76cb5b8..1ad6624 100644
+--- a/session/filesync/sealed_custody_v24_independent_linux_test.go
++++ b/session/filesync/sealed_custody_v24_independent_linux_test.go
+@@ -248,6 +248,11 @@ func v24IndependentReceiver(t *testing.T) {
+ 	require.NoError(t, FSSyncSealedV24(ctx, caller, FSSendRequestOpt{
+ 		Name: m.ContextName, FollowPaths: []string{"app.js"}, DestDir: dest,
+ 	}, m, f.Permit, f.Public, NewV15LocalReplayLedger(f.Permit.Epoch), v24FixturePolicy(v24FixtureReceiverUID, v24FixtureSenderUID, filepath.Join(root, "receiver", "tmp"))))
++	// V32 must be applied inside the real receiver child, after exec:
++	// NoNewPrivs alone does not remove same-UID ptrace/procfd access.
++	dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
++	require.NoError(t, err)
++	require.Zero(t, dumpable, "independent receiver must not be ptraceable by a same-UID peer")
+ 	cancel()
+ 	_ = conn.Close()
+ 	select {
+diff --git a/session/filesync/sealed_custody_v24_linux.go b/session/filesync/sealed_custody_v24_linux.go
+index 4340bf9..f66fe79 100755
+--- a/session/filesync/sealed_custody_v24_linux.go
++++ b/session/filesync/sealed_custody_v24_linux.go
+@@ -254,7 +254,25 @@ func validateV24IndependentCustody(dest string, policy V24ReceiverCustodyPolicy)
+ 	if err := validateV24CustodyDirs(filepath.Join(policy.PrivateTempDir, "tmp-probe"), V24ReceiverCustodyPolicy{RequirePrivateParent: true}); err != nil {
+ 		return err
+ 	}
+-	return validateV24CustodyDirs(dest, policy)
++	if err := validateV24CustodyDirs(dest, policy); err != nil {
++		return err
++	}
++	return enforceV32NonDumpableReceiver()
++}
++
++// V32: NoNewPrivs does not prevent an untrusted same-UID process from
++// attaching with ptrace or inspecting /proc/<pid>/fd. Must execute AFTER
++// execve, because Linux may reset dumpability during that transition.
++// This does not establish unique UID ownership or remove pathname races.
++func enforceV32NonDumpableReceiver() error {
++	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
++		return fmt.Errorf("C1 V32 cannot disable receiver ptrace access: %w", err)
++	}
++	dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
++	if err != nil || dumpable != 0 {
++		return fmt.Errorf("C1 V32 receiver dumpability invariant failed: value=%d error=%v", dumpable, err)
++	}
++	return nil
+ }
+ 
+ func defaultV24ReceiverCustodyPolicy() V24ReceiverCustodyPolicy {
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index 68ab5c4..d580454 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -3,8 +3,12 @@
+ package filesync
+ 
+ import (
++	"bufio"
+ 	"context"
++	"fmt"
++	"io"
+ 	"os"
++	"os/exec"
+ 	"path/filepath"
+ 	"runtime"
+ 	"strings"
+@@ -18,6 +22,47 @@ import (
+ 	"golang.org/x/sys/unix"
+ )
+ 
++// Same-UID peers may share filesystem authority, but must at least be unable
++// to read the independent receiver's live file descriptors or change its
++// memory through ptrace. The child test process isolates PR_SET_DUMPABLE from
++// the main Go test runner, and tests the real Linux permission boundary.
++func TestC1V32SameUIDPeerCannotPtraceReceiver(t *testing.T) {
++	if os.Getenv("VIRKI_V32_PTRACE_CHILD") == "1" {
++		require.NoError(t, enforceV32NonDumpableReceiver())
++		fmt.Fprintln(os.Stdout, "ready")
++		_, _ = io.Copy(io.Discard, os.Stdin)
++		return
++	}
++	if os.Geteuid() == 0 {
++		t.Skip("same-UID ptrace denial must be tested as an unprivileged UID")
++	}
++	cmd := exec.Command(os.Args[0], "-test.run=^TestC1V32SameUIDPeerCannotPtraceReceiver$")
++	cmd.Env = append(os.Environ(), "VIRKI_V32_PTRACE_CHILD=1")
++	stdin, err := cmd.StdinPipe()
++	require.NoError(t, err)
++	stdout, err := cmd.StdoutPipe()
++	require.NoError(t, err)
++	require.NoError(t, cmd.Start())
++	t.Cleanup(func() {
++		_ = stdin.Close()
++		if cmd.ProcessState == nil {
++			_ = cmd.Process.Kill()
++			_ = cmd.Wait()
++		}
++	})
++	ready, err := bufio.NewReader(stdout).ReadString('\n')
++	require.NoError(t, err)
++	require.Equal(t, "ready\n", ready)
++	if err := unix.PtraceAttach(cmd.Process.Pid); err == nil {
++		_ = unix.PtraceDetach(cmd.Process.Pid)
++		t.Fatal("same-UID peer attached to protected receiver")
++	}
++	_, err = os.Readlink(fmt.Sprintf("/proc/%d/fd/1", cmd.Process.Pid))
++	require.Error(t, err, "same-UID peer must not inspect receiver file descriptors")
++	require.NoError(t, stdin.Close())
++	require.NoError(t, cmd.Wait())
++}
++
+ func TestC1V24ReceiverCustodyIdentityContract(t *testing.T) {
+ 	if os.Geteuid() == 0 {
+ 		t.Skip("unprivileged identity contract test requires non-root euid")
