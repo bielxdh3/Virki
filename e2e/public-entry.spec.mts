@@ -21,6 +21,19 @@ async function expectPublicDocumentScripts(page: Page, response: Response | null
   return nonce;
 }
 
+function expectHubDocumentSecurityHeaders(response: Response | null): void {
+  if (!response) throw new Error("Expected a Hub document response.");
+  const headers = response.headers();
+  expect(headers["x-powered-by"]).toBeUndefined();
+  const scriptPolicy = headers["content-security-policy"]?.split(";")
+    .map((value) => value.trim())
+    .find((value) => value.startsWith("script-src "));
+  expect(scriptPolicy).toBeTruthy();
+  expect(scriptPolicy).toMatch(/'nonce-[A-Za-z0-9+/=]+'/u);
+  expect(scriptPolicy).toContain("'strict-dynamic'");
+  expect(scriptPolicy).not.toContain("'unsafe-inline'");
+}
+
 for (const viewport of [
   { name: "desktop", width: 1365, height: 900 },
   { name: "mobile", width: 375, height: 812 }
@@ -56,7 +69,7 @@ for (const viewport of [
       const page = await context.newPage();
       const portalResponse = await page.goto(`${portalUrl}/`);
       expect(portalResponse?.status()).toBe(200);
-      expect(portalResponse?.headers()["x-powered-by"]).toBeUndefined();
+      expectHubDocumentSecurityHeaders(portalResponse);
 
       await expect(page).toHaveURL(`${portalUrl}/login?returnTo=%2F`);
       await expect(page.getByRole("heading", { level: 1, name: "Entrar", exact: true })).toBeVisible();
@@ -76,9 +89,11 @@ for (const viewport of [
       page.on("response", (response) => {
         if (response.url() === `${hubUrl}/admin/accounts` && response.request().method() === "GET") adminResponse = response;
       });
-      await page.goto(`${hubUrl}/admin/accounts`);
+      const loginResponse = await page.goto(`${hubUrl}/admin/accounts`);
 
       expect(Boolean(adminResponse?.request().headers()["cf-access-jwt-assertion"])).toBe(true);
+      expect(adminResponse?.headers()["x-powered-by"]).toBeUndefined();
+      expectHubDocumentSecurityHeaders(loginResponse);
       const accessReason = adminResponse?.headers()["x-virki-e2e-access-reason"] ?? "not-reported";
       const accessKid = adminResponse?.headers()["x-virki-e2e-access-kid"] ?? "not-reported";
       await expect.soft(adminResponse?.status(), `Cloudflare Access rejected the E2E assertion (${accessReason}; kid=${accessKid}).`).toBe(307);
