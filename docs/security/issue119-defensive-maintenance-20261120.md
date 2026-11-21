@@ -82,6 +82,14 @@ The WSL run used Linux-native esbuild, Argon2, and Prisma binaries added only to
 
 The independent #119 review was static and reported no confirmed P1/P2 finding in the then-current local delta. The subsequent token-cache header correction was covered by the local 11/11 HTTP/CORS tests but has not yet received a second independent review. The live Cloudflare Access configuration was read-only inspected; no CDN/TLS handshake or origin/Tunnel edge behavior was re-probed.
 
-The published PR #137 SHA remains `96a86d0ecd05a083223a1bf5eb59dfe21ce45f89`; the additional changes described in this worktree are uncommitted and unpublished, and have no hosted CI/CodeQL result. No Cloudflare/TLS changes, production credential changes, deploy, cutover, merge, or production activation occurred.
+At the time this historical snapshot was written, the published PR #137 SHA was `96a86d0ecd05a083223a1bf5eb59dfe21ce45f89`; the then-current additional changes were local and unpublished. The later 2026-11-21 follow-up below supersedes that publication state. No Cloudflare/TLS changes, production credential changes, deploy, cutover, merge, or production activation occurred.
 
 Retain issue #119 until all applicable acceptance requirements and authorizations have been satisfied. Hosted check and review receipts must identify the exact published revision.
+
+## Authorization form_post CSP — hash-only script source (2026-11-21)
+
+The issuer authorization response policy now starts with `script-src 'none'`, not `script-src 'self'`. The installed `oidc-provider` `pushScriptSrcSha` helper appends the SHA-256 source expression for the exact inline `form_post` auto-submit script to the existing directive. CSP ignores `'none'` when another source expression is present, so the resulting policy allows the exact hash while refusing arbitrary same-origin external scripts and unrelated inline scripts. This avoids granting every same-origin script execution merely to support the provider's one inline script.
+
+The issuer test extracts the emitted script using ASCII-only case folding over the original UTF-16 string, preserving offsets even when Unicode characters precede the tag. It asserts that the final `script-src` source list contains exactly `'none'` plus the emitted script's SHA-256 hash, with no `'self'` or other source.
+
+Validation of this follow-up: focused issuer HTTP/CORS and provider-metadata tests `12/12 PASS`; workspace `npm run typecheck` PASS; `git diff --check` PASS. A disposable Playwright 1.65.0 Chromium proof used `script-src 'none' 'sha256-...'`: the exact hashed inline script executed, an unhashed inline script was blocked, and a same-origin external script was blocked. The browser emitted the expected CSP violations for the blocked scripts. This is local browser evidence; hosted CI/CodeQL and review receipts must be checked against the exact current PR head and are not implied by this note.

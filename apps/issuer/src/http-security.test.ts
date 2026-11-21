@@ -59,7 +59,7 @@ test("issuer keeps the other hardening headers", () => {
 test("authorization responses allow the provider's hashed form_post script and the post to the registered redirect URI", () => {
   for (const path of ["/auth", "/auth/abcdefghijklmnop"]) {
     const csp = issuerContentSecurityPolicy(path);
-    assert.match(csp, /script-src 'self'/u);
+    assert.match(csp, /script-src 'none'/u);
     assert.doesNotMatch(csp, /form-action|unsafe-inline'[^;]*script|unsafe-eval/u);
     assert.match(csp, /default-src 'none'/u);
   }
@@ -96,7 +96,15 @@ test("oidc-provider form_post hashes its exact inline script into the issuer aut
     : undefined;
   assert.ok(script, "form_post emits its auto-submit script");
   const digest = createHash("sha256").update(script).digest("base64");
-  assert.ok(headers.get("content-security-policy")?.includes(`'sha256-${digest}'`), "CSP permits the exact emitted script only by hash");
+  const scriptDirective = headers.get("content-security-policy")?.split(";")
+    .map((directive) => directive.trim())
+    .find((directive) => directive.startsWith("script-src "));
+  assert.ok(scriptDirective, "authorization response has an explicit script-src directive");
+  assert.deepEqual(
+    scriptDirective.split(/\s+/u).slice(1).sort(),
+    ["'none'", `'sha256-${digest}'`].sort(),
+    "CSP permits the exact emitted script by hash and does not permit arbitrary same-origin scripts"
+  );
   assert.match(html, /action="https:\/\/relying-party\.example\/callback"/u);
   assert.doesNotMatch(headers.get("content-security-policy") ?? "", /unsafe-inline'[^;]*script|unsafe-eval/u);
 });
