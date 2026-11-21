@@ -15,7 +15,7 @@ Both findings use `js/shell-command-injection-from-environment` (warning; securi
 | `:403` | `js/shell-command-injection-from-environment|scripts/staging-runbook-lifecycle.test.mjs|2d350a82d76eabf3:1|15` |
 | `:623` | `js/shell-command-injection-from-environment|scripts/staging-runbook-lifecycle.test.mjs|fbff554d652a47c5:1|15` |
 
-The SARIF code flows point from `process.execPath` into a JavaScript template string and then into the source string passed to `spawnSync(bash, ["-c", ...])`. The test harness extracts shell helpers from the staging runbook and uses the exact absolute path of the Node executable that is running the test. These are test-only paths, not production request handlers or production runbook inputs. However, interpolating an absolute path into shell source is a real quoting boundary: shell metacharacters in an unusual or attacker-controlled runtime installation path could be interpreted. The finding is therefore not dismissed merely because it occurs in a test.
+The SARIF primary locations are `:403` and `:623`; the corresponding `spawnSync` call sites are `:405` and `:649`. In the baseline, `process.execPath` was passed as the argument immediately after the `-c` script, which Bash exposes as `$0`; the static shell script assigned `node_bin="$0"` and later invoked `"$node_bin"` quoted. It was not interpolated into the JavaScript template or shell source, and the quoted expansion did not re-parse metacharacters in the path. CodeQL nevertheless traced the absolute executable path through Bash's argument vector as `js/shell-command-injection-from-environment`. These are test-only paths, not production request handlers or production runbook inputs. The correction removes that tainted path from Bash argv entirely rather than relying on the distinction between `$0` data and shell source.
 
 ## Source hardening
 
@@ -27,7 +27,7 @@ The test harness was changed to preserve the exact current Node executable witho
 - The same pattern is used by both affected test paths. It does not fall back to PATH lookup or a generic `node` command.
 - Linux-only regressions create symlinks whose paths contain literal `$(touch${IFS}...)` command-substitution payloads, pass them as NUL-delimited stdin data through both affected shell-helper paths, execute the exact symlinked Node binary, and assert that the marker file was not created.
 
-This change removes the shell-source interpolation while retaining the same absolute Node binary. It does not modify the staging runbook's production instructions or authorize staging activity.
+This change removes the absolute executable path from Bash's argument vector while retaining the same exact Node binary as literal NUL-delimited stdin data. It does not modify the staging runbook's production instructions or authorize staging activity.
 
 ## Narrow historical dispositions
 
