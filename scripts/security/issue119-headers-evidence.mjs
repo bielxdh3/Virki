@@ -57,11 +57,6 @@ function actualScriptNonce(tag) {
   return null;
 }
 
-function htmlScriptNonces(html) {
-  const tags = html.match(/<script\b[^>]*>/gi) ?? [];
-  return tags.map(actualScriptNonce);
-}
-
 function hasValidHstsAge(value) {
   const maxAge = value.split(';').map((part) => part.trim())
     .filter((part) => /^max-age\s*=/i.test(part));
@@ -79,14 +74,74 @@ function hasUnsafeInline(sources) {
   return sources.some((source) => source.toLowerCase() === "'unsafe-inline'");
 }
 
-// A header saying text/html is not by itself proof that a response is an
-// HTML *document*. Require the minimal HTML5 skeleton in document order;
-// otherwise a plain-text/fragment fixture with a forged <script> tag can
-// falsely satisfy our hydration acceptance. This is a conservative gate,
-// not an HTML parser or a browser hydration test.
-function hasHtmlDocumentSkeleton(body, mime) {
-  if (!/^text\/html(?:\s*;\s*charset\s*=\s*(?:[\w-]+|"[\w-]+")\s*)?$/i.test(mime.trim())) return false;
-  return /^\s*<!doctype\s+html\s*>\s*<html\b[^>]*>\s*<head\b[^>]*>[\s\S]*?<\/head\s*>\s*<body\b[^>]*>[\s\S]*?<\/body\s*>\s*<\/html\s*>\s*$/i.test(body);
+// Strict, small acceptance tokenizer: this is *not* a replacement for a
+// browser E2E hydration test. It recognizes real tags without matching fake
+// <script> text inside comments, attribute quotes, inert <template>/<noscript>
+// subtrees, script raw text or other raw-text elements. Malformed/ambiguous
+// markup fails closed rather than manufacturing a passing nonce receipt.
+function inspectHtmlDocument(body, mime) {
+  const fail = () => ({ valid: false, nonces: [] });
+  if (!/^text\/html(?:\s*;\s*charset\s*=\s*(?:[\w-]+|"[\w-]+")\s*)?$/i.test(mime.trim())) return fail();
+  const start = /^\s*<!doctype\s+html\s*>/i.exec(body);
+  if (!start) return fail();
+  let at = start[0].length;
+  let phase = 0; // html open, head open/closed, body open/closed, html closed
+  const inert = [];
+  const nonces = [];
+  while (at < body.length) {
+    const lt = body.indexOf('<', at);
+    if (lt < 0) break;
+    if (phase === 6 && body.slice(at).trim()) return fail();
+    if (body.startsWith('<!--', lt)) {
+      const end = body.indexOf('-->', lt + 4);
+      if (end < 0) return fail();
+      at = end + 3;
+      continue;
+    }
+    let quote = null;
+    let end = lt + 1;
+    for (; end < body.length; end++) {
+      const char = body[end];
+      if (quote) {
+        if (char === quote) quote = null;
+      } else if (char === '"' || char === "'") quote = char;
+      else if (char === '>') break;
+    }
+    if (end === body.length) return fail();
+    const raw = body.slice(lt, end + 1);
+    at = end + 1;
+    const match = /^<\s*(\/?)\s*([a-z][a-z0-9:-]*)\b/i.exec(raw);
+    if (!match) return fail();
+    const closing = match[1] === '/';
+    const tag = match[2].toLowerCase();
+    if (tag === 'template' || tag === 'noscript') {
+      if (!closing) inert.push(tag);
+      else if (inert.pop() !== tag) return fail();
+      continue;
+    }
+    if (inert.length) continue;
+    if (tag === 'html' && ((phase === 0 && !closing) || (phase === 5 && closing))) {
+      phase = phase === 0 ? 1 : 6;
+    } else if (tag === 'head' && ((phase === 1 && !closing) || (phase === 2 && closing))) {
+      phase = phase === 1 ? 2 : 3;
+    } else if (tag === 'body' && ((phase === 3 && !closing) || (phase === 4 && closing))) {
+      phase = phase === 3 ? 4 : 5;
+    } else if (['html', 'head', 'body'].includes(tag)) return fail();
+    if (tag === 'script' && !closing) {
+      if (phase !== 2 && phase !== 4) return fail();
+      nonces.push(actualScriptNonce(raw));
+    }
+    if (['script', 'style', 'title', 'textarea', 'xmp', 'plaintext'].includes(tag) && !closing) {
+      if (tag === 'plaintext') return fail();
+      const regex = new RegExp(`</${tag}\\s*>`, 'gi');
+      regex.lastIndex = at;
+      const matchEnd = regex.exec(body);
+      if (!matchEnd) return fail();
+      at = regex.lastIndex;
+    } else if (tag === 'script' && closing) return fail();
+  }
+  return phase === 6 && inert.length === 0 && body.slice(at).trim() === ''
+    ? { valid: true, nonces } : fail();
 }
 
 export function classifyIssue119Response(target, response) {
@@ -125,22 +180,18 @@ export function classifyIssue119Response(target, response) {
   // A more permissive element/attribute directive overrides script-src for
   // that execution type. Checking only script-src would be a false PASS.
   const nonceSources = sources.filter((source) => /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source));
-  const tags = htmlScriptNonces(response.body ?? '');
-  const inlineScriptTags = (response.body ?? '').match(/<script\b[^>]*>[^<]+<\/script\s*>/gi) ?? [];
-  const inlineHaveNonce = inlineScriptTags.every((tag) => {
-    const opening = /^<script\b[^>]*>/i.exec(tag)?.[0] ?? '';
-    return actualScriptNonce(opening) !== null;
-  });
+  const document = inspectHtmlDocument(response.body ?? '', mime);
+  const tags = document.nonces;
   const nonceValues = new Set(nonceSources.map((source) => source.slice(7, -1)));
   const nonceMatches = tags.length > 0 && tags.every((nonce) => nonce !== null && nonceValues.has(nonce));
   const subdirectiveUnsafe = hasUnsafeInline(elementSources) || hasUnsafeInline(attributeSources);
-  const htmlDocument = hasHtmlDocumentSkeleton(response.body ?? '', mime);
+  const htmlDocument = document.valid;
   const accepted = response.status === target.expected && htmlDocument &&
     !hasPoweredBy && hstsPresent && singleCsp &&
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
     (!element.present || elementSources.some((source) =>
       /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
-    nonceSources.length === 1 && nonceMatches && inlineHaveNonce;
+    nonceSources.length === 1 && nonceMatches;
 
   return { ...common, csp: csp ? 'present' : 'missing',
     htmlDocument: htmlDocument ? 'confirmed' : 'not-confirmed',
