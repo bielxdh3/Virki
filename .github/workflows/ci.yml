@@ -243,19 +243,19 @@ jobs:
           (cd infra/offline/c1-c4-native-bridge && GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local "$toolchain/go/bin/go" vet ./...)
           VIRKI_GO_BIN="$toolchain/go/bin/go" npm run test:offline:c1-c4-native-bridge
           patch="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-c4-native.patch"
-          echo "bd1c476af409290ef18769a5f18ea1a1704d584435dd88bd1b91ac68c8f99ccf  $patch" | sha256sum --check
+          echo "986b8d974e064840959e04fa746798072f9f795327d088d936524b363c235dc9  $patch" | sha256sum --check
           git init --quiet "$scratch"
           git -C "$scratch" fetch --depth=1 --no-tags https://github.com/moby/buildkit.git f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
           test "$(git -C "$scratch" rev-parse FETCH_HEAD)" = f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
           git -C "$scratch" read-tree FETCH_HEAD
           git -C "$scratch" apply --cached --check "$patch"
           git -C "$scratch" apply --cached "$patch"
-          test "$(git -C "$scratch" write-tree)" = f88abcec589b1fa111124d7c94053d1a7830a3c7
+          test "$(git -C "$scratch" write-tree)" = a8620ea2ddadbe7125168d8edef8c58cc1b4ddb1
           git -C "$scratch" checkout-index --all
           export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
           export VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority"
           cd "$scratch"
-          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./util/localcontext -run '^TestVROAV3ServiceWithRealManagerAndNativeDaemon$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./util/localcontext -run '^(TestVROAV3ServiceWithRealManagerAndNativeDaemon|TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer)$'
           "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./solver/llbsolver -run '^TestLocalContext'
 
       - name: Native owner authority (C4) cross-UID/GID SO_PEERCRED tests as root

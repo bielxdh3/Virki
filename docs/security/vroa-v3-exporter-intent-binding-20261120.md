@@ -72,3 +72,15 @@ DeployAuthorized = false
 WorkerReceiptPairAdmitted = false
 ReleaseSignature = false
 ```
+
+## Begin-path negative coverage completion — 2026-11-21
+
+An independent review of the published PR found that the exporter-intent negative regression existed in the downstream BuildKit patch but was not selected by the hosted Validate command. It also identified that malformed caller-supplied `Binding.Exporter` values did not have service-path coverage. Both gaps are corrected in the current working revision:
+
+- `TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer` now also exercises six malformed binding shapes: unsupported schema version, nonzero exporter ID, non-image exporter type, empty destination, wildcard destination, and malformed attributes digest. Each case calls `VROAV3Service.Begin` with a valid signed approval and asserts the invalid exporter-intent error occurs before the deliberately missing native socket can be reached.
+- The hosted CI Go test selector now executes both `TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer` and `TestVROAV3ServiceWithRealManagerAndNativeDaemon`; the latter still runs both DEV candidate-receipt and production-signing-disabled subtests.
+- The updated patch Git-blob SHA-256 is `986b8d974e064840959e04fa746798072f9f795327d088d936524b363c235dc9`. Applying its LF bytes to BuildKit base `f5b59a1f2fb25a0cb7072c398cab9aed7835da4e` reproduces tree `a8620ea2ddadbe7125168d8edef8c58cc1b4ddb1`. The CI pins were updated together.
+- Local isolated BuildKit validation: patch `git apply --check` PASS; expected tree reproduced; Go 1.26.10 `go test -mod=vendor -count=1 -v ./util/localcontext -run '^(TestVROAV3ServiceWithRealManagerAndNativeDaemon|TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer)$'` PASS. The negative test passed all six malformed-binding subtests; the native-daemon test passed both existing subtests.
+- The full corresponding local workflow segment also passed: `go vet ./...` for `infra/offline/c1-c4-native-bridge`, `npm run test:offline:c1-c4-native-bridge` (1/1), and `go test -mod=vendor -count=1 -v ./solver/llbsolver -run '^TestLocalContext'`.
+
+These are local results only. The updated patch digest/tree and newly selected test must pass on the next exact PR head in hosted CI and CodeQL before this change is considered Build Ready. The PR remains Draft; no merge, release, image publication, or production action is authorized.

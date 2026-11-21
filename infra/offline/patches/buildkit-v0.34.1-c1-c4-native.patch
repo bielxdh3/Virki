@@ -16521,7 +16521,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..0103561305024ec9e1f6a571bec139d28bf28268
 --- /dev/null
 +++ b/util/localcontext/service_vroa_v3_linux_test.go
-@@ -0,0 +1,648 @@
+@@ -0,0 +1,678 @@
 +//go:build linux
 +
 +package localcontext
@@ -16772,6 +16772,36 @@ index 0000000000000000000000000000000000000000..0103561305024ec9e1f6a571bec139d2
 +	})
 +	if err == nil || !strings.Contains(err.Error(), "configured exporter policy") {
 +		t.Fatalf("Begin must reject a configured exporter policy that differs from the solve binding; got %v", err)
++	}
++
++	// Exercise the validation branch with malformed caller-supplied bindings,
++	// not only a structurally valid intent whose signed digest differs.
++	for _, tc := range []struct {
++		name   string
++		mutate func(*ExporterIntent)
++	}{
++		{"schema-version", func(intent *ExporterIntent) { intent.SchemaVersion = 1 }},
++		{"exporter-id", func(intent *ExporterIntent) { intent.ID = 1 }},
++		{"exporter-type", func(intent *ExporterIntent) { intent.Type = "local" }},
++		{"empty-destination", func(intent *ExporterIntent) { intent.Destination = "" }},
++		{"wildcard-destination", func(intent *ExporterIntent) { intent.Destination = "*" }},
++		{"malformed-attributes-digest", func(intent *ExporterIntent) { intent.AttributesDigest = "sha256:not-a-digest" }},
++	} {
++		t.Run("invalid-binding-"+tc.name, func(t *testing.T) {
++			invalidBindingExporter := approvedExporter
++			tc.mutate(&invalidBindingExporter)
++			_, err := service.Begin(context.Background(), Binding{
++				JobID:            "job-buildkit-v3",
++				Role:             "runtime",
++				Nonce:            nonceHex,
++				ApprovalID:       "apr-buildkit-v3",
++				ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++				Exporter:         invalidBindingExporter,
++			})
++			if err == nil || !strings.Contains(err.Error(), "invalid exporter intent") {
++				t.Fatalf("Begin must reject malformed binding exporter intent before native transfer; got %v", err)
++			}
++		})
 +	}
 +}
 +
