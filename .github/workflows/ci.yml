@@ -243,14 +243,14 @@ jobs:
           (cd infra/offline/c1-c4-native-bridge && GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local "$toolchain/go/bin/go" vet ./...)
           VIRKI_GO_BIN="$toolchain/go/bin/go" npm run test:offline:c1-c4-native-bridge
           patch="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-c4-native.patch"
-          echo "660462d999e2d3c1a143a7b78577ecd95545cc4f82837f76fd7f8a9c392e696a  $patch" | sha256sum --check
+          echo "bd1c476af409290ef18769a5f18ea1a1704d584435dd88bd1b91ac68c8f99ccf  $patch" | sha256sum --check
           git init --quiet "$scratch"
           git -C "$scratch" fetch --depth=1 --no-tags https://github.com/moby/buildkit.git f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
           test "$(git -C "$scratch" rev-parse FETCH_HEAD)" = f5b59a1f2fb25a0cb7072c398cab9aed7835da4e
           git -C "$scratch" read-tree FETCH_HEAD
           git -C "$scratch" apply --cached --check "$patch"
           git -C "$scratch" apply --cached "$patch"
-          test "$(git -C "$scratch" write-tree)" = 3cabbc82887e87a900eeb7b838196bef00374055
+          test "$(git -C "$scratch" write-tree)" = f88abcec589b1fa111124d7c94053d1a7830a3c7
           git -C "$scratch" checkout-index --all
           export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
           export VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority"
