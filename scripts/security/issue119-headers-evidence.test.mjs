@@ -71,6 +71,13 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/json">{"not":"JS"}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="importmap">{}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="speculationrules">{}</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="text/javascript; charset=utf-8">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/javascript; charset=utf-8">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="module; charset=utf-8">boot()</script>')),
+    response(200, `${goodCSP}; sandbox`),
+    response(200, `${goodCSP}; sandbox allow-same-origin`),
+    response(200, `${goodCSP}; sandbox allow-popups`),
+    response(200, `${goodCSP}; sandbox allow-scripts; sandbox`),
     response(200, goodCSP, htmlDoc('<script nomodule nonce="SAFE">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script NOMODULE="false" nonce="SAFE">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script type="text/javascript" nomodule nonce="SAFE">boot()</script>')),
@@ -167,6 +174,31 @@ test('nomodule boolean is exact and ignored for classic scripts in modern module
   assert.equal(classifyIssue119Response(base, response(200, goodCSP, modernWithLegacy)).result, 'pass');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
     htmlDoc('<script type="module" nonce="SAFE">modern()</script>'))).result, 'pass');
+});
+
+test('HTML script type is a MIME essence, not Content-Type with parameters', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const value of ['text/javascript; charset=utf-8', 'application/javascript; charset=UTF-8',
+    'module; charset=utf-8', 'application/ecmascript;version=6']) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`<script type="${value}" nonce="SAFE">boot()</script>`))).result, 'fail', value);
+  }
+  for (const value of ['module', 'text/javascript', 'application/javascript']) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`<script type="${value}" nonce="SAFE">boot()</script>`))).result, 'pass', value);
+  }
+});
+
+test('enforced CSP sandbox without allow-scripts prevents executable nonce receipt', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const policy of ['sandbox', 'sandbox allow-same-origin',
+    'sandbox allow-popups', 'SANDBOX allow-forms', 'sandbox allow-scripts; sandbox']) {
+    assert.equal(classifyIssue119Response(base, response(200, `${goodCSP}; ${policy}`)).result,
+      'fail', policy);
+  }
+  assert.equal(classifyIssue119Response(base, response(200,
+    `${goodCSP}; sandbox allow-scripts`)).result, 'pass',
+  'sandbox with allow-scripts permits code execution, not guaranteed hydration');
 });
 
 test('raw-text false template closures cannot transform inert scripts into executable evidence', () => {

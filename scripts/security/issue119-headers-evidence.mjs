@@ -71,7 +71,7 @@ function inspectScriptTag(tag) {
   // Do NOT mistake data-nomodule, x-nomodule or no-module for this attribute.
   const moduleScript = kind === 'module';
   const classicScript = kind === '' ||
-    /^(?:text|application)\/(?:javascript|ecmascript|x-javascript)(?:\s*;.*)?$/.test(kind);
+    /^(?:text|application)\/(?:javascript|ecmascript|x-javascript)$/.test(kind);
   const executable = moduleScript || (classicScript && !seen.has('nomodule'));
   return { valid: true, executable, nonce };
 }
@@ -91,6 +91,20 @@ function hasValidHstsAge(value) {
 function hasUnsafeInline(sources) {
   // CSP keywords are ASCII case-insensitive; nonce *values* are not.
   return sources.some((source) => source.toLowerCase() === "'unsafe-inline'");
+}
+
+// Enforced CSP sandbox can disable all script execution, independently of
+// script-src nonces. Reject missing allow-scripts, duplicated/ambiguous
+// sandbox directives and case variants that fail to grant script execution.
+// This conservatively tests executability; it does NOT prove browser hydration
+// or full origin/cookie/session behavior of a sandboxed document.
+function cspSandboxAllowsScripts(csp) {
+  const sandbox = csp.split(';').map((part) => part.trim())
+    .filter((part) => /^sandbox(?:\s|$)/i.test(part));
+  if (sandbox.length === 0) return true;
+  if (sandbox.length !== 1) return false;
+  return sandbox[0].split(/\s+/).slice(1)
+    .some((token) => token.toLowerCase() === 'allow-scripts');
 }
 
 // Return the FIRST appropriate raw-text end-tag candidate, or reject the
@@ -243,7 +257,7 @@ export function classifyIssue119Response(target, response) {
   const subdirectiveUnsafe = hasUnsafeInline(elementSources) || hasUnsafeInline(attributeSources);
   const htmlDocument = document.valid;
   const accepted = response.status === target.expected && htmlDocument &&
-    !hasPoweredBy && hstsPresent && singleCsp &&
+    !hasPoweredBy && hstsPresent && singleCsp && cspSandboxAllowsScripts(csp) &&
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
     (!element.present || elementSources.some((source) =>
       /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
