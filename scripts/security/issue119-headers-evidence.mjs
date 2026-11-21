@@ -88,6 +88,24 @@ function hasUnsafeInline(sources) {
   return sources.some((source) => source.toLowerCase() === "'unsafe-inline'");
 }
 
+// Return the FIRST appropriate raw-text end-tag candidate, or reject the
+// document. HTML5 browsers may consume `</noscript attr="...">` as a closing
+// tag; skipping it to search for a later plain `</noscript>` could hide a
+// wrong-nonce executable script. Until full HTML5 parsing is available,
+// refuse any extra attributes/ambiguous end-tag syntax rather than skipping
+// the actual boundary and claiming hydration passed.
+function rawTextCloseOffset(body, afterStartTag, name) {
+  const start = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
+  start.lastIndex = afterStartTag;
+  const match = start.exec(body);
+  if (!match) return -1;
+  const end = body.indexOf('>', start.lastIndex);
+  if (end < 0) return -1;
+  const token = body.slice(match.index, end + 1);
+  const simpleEndTag = new RegExp(`^</${name}\\s*>$`, 'i');
+  return simpleEndTag.test(token) ? end + 1 : -1;
+}
+
 // Strict, small acceptance tokenizer: this is *not* a replacement for a
 // browser E2E hydration test. It recognizes real tags without matching fake
 // <script> text inside comments, attribute quotes, inert <template>/<noscript>
@@ -133,10 +151,9 @@ function inspectHtmlDocument(body, mime) {
     // start tags inside it: doing so could skip the real </noscript>, hide
     // a later executable script with the wrong nonce, and return false PASS.
     if (tag === 'noscript' && !closing) {
-      const closeNoscript = /<\/noscript\s*>/gi;
-      closeNoscript.lastIndex = at;
-      if (!closeNoscript.exec(body)) return fail();
-      at = closeNoscript.lastIndex;
+      const after = rawTextCloseOffset(body, at, 'noscript');
+      if (after < 0) return fail();
+      at = after;
       continue;
     }
     if (tag === 'noscript' && closing) return fail();
@@ -159,11 +176,9 @@ function inspectHtmlDocument(body, mime) {
         if (!script.valid) return fail();
         if (script.executable) nonces.push(script.nonce);
       }
-      const regex = new RegExp(`</${tag}\\s*>`, 'gi');
-      regex.lastIndex = at;
-      const matchEnd = regex.exec(body);
-      if (!matchEnd) return fail();
-      at = regex.lastIndex;
+      const after = rawTextCloseOffset(body, at, tag);
+      if (after < 0) return fail();
+      at = after;
       continue;
     }
     if (inert.length) continue;

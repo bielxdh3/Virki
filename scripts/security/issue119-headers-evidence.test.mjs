@@ -58,6 +58,12 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<!-- <script nonce="SAFE">boot()</script> -->')),
     response(200, goodCSP, htmlDoc('<template><script nonce="SAFE">boot()</script></template>')),
     response(200, goodCSP, htmlDoc('<noscript><script nonce="SAFE">boot()</script></noscript>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">safe()</script>' +
+      '<noscript>fallback</noscript data-note="end"><script nonce="EVIL">bad()</script>' +
+      '<noscript>second</noscript>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">safe()</script>' +
+      '<iframe>fallback</iframe data-note="end"><script nonce="EVIL">bad()</script>' +
+      '<iframe>second</iframe>')),
     response(200, goodCSP, htmlDoc('<iframe><script nonce="SAFE">boot()</script></iframe>')),
     response(200, goodCSP, htmlDoc('<noembed><script nonce="SAFE">boot()</script></noembed>')),
     response(200, goodCSP, htmlDoc('<noframes><script nonce="SAFE">boot()</script></noframes>')),
@@ -145,6 +151,16 @@ test('noscript raw text cannot conceal a subsequent executable script with wrong
   const legitimate = htmlDoc('<noscript><script nonce="EVIL">ignored()</script></noscript>' +
     '<script nonce="SAFE">real()</script>');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP, legitimate)).result, 'pass');
+});
+
+test('attributed raw-text end tags cannot hide wrong-nonce executable scripts', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const tag of ['noscript', 'iframe', 'noembed', 'noframes', 'style', 'script']) {
+    const document = htmlDoc('<script nonce="SAFE">safe()</script>' +
+      `<${tag}>some raw text</${tag} data-note="end">` +
+      '<script nonce="EVIL">bad()</script>' + `<${tag}>again</${tag}>`);
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, document)).result, 'fail', tag);
+  }
 });
 
 test('iframe, noembed and noframes fallback content does not count as executable nonce evidence', () => {
