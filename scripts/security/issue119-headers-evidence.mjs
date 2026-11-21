@@ -64,10 +64,15 @@ function inspectScriptTag(tag) {
   if (type !== null && typeof type !== 'string') return invalid();
   const kind = (type ?? '').trim().toLowerCase();
   // HTML script data blocks (JSON, LD+JSON, importmaps, speculation rules or
-  // unknown MIME types) do not execute. They must neither prove hydration nor
-  // require a script nonce. A real executable classic/module script must.
-  const executable = kind === '' || kind === 'module' ||
+  // unknown MIME types) do not execute. Likewise modern module-capable
+  // browsers skip classic scripts with the exact boolean `nomodule` HTML
+  // attribute, regardless of whether it has an assigned value. Only a real
+  // executable classic/module script may establish a nonce-bearing receipt.
+  // Do NOT mistake data-nomodule, x-nomodule or no-module for this attribute.
+  const moduleScript = kind === 'module';
+  const classicScript = kind === '' ||
     /^(?:text|application)\/(?:javascript|ecmascript|x-javascript)(?:\s*;.*)?$/.test(kind);
+  const executable = moduleScript || (classicScript && !seen.has('nomodule'));
   return { valid: true, executable, nonce };
 }
 

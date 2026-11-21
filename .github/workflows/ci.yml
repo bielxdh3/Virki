@@ -143,6 +143,7 @@ jobs:
             fcecd3d1c3d9810bb3060310f822fcb7f6da5305
             8f1537fd0132eeb12108a7faed4657ad019c8b41
             a411d348f5946769f97a7c28dc169abc7b374384
+            4da0f43bfcdad770f4a1bf5786ec6df79f6f4a97
           )
           i=0
           while read -r digest patch; do
@@ -171,6 +172,8 @@ jobs:
             -run '^TestC1V32SameUIDPeerCannotPtraceReceiver$'
           "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
             -run '^TestC1V33Published(SameInodeFileMutation|NewEntry)NeverReportsAdmission$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
+            -run '^TestC1V35(Published.*NeverReportsAdmission|PinnedStageReceiverWritesSurviveStageNameSwap|ParentPathSwapAfterFsyncNeverReportsAdmission)$'
           setpriv --no-new-privs "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
             -run '^TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs$'
           # The peer runs under separate synthetic UIDs inside an isolated,

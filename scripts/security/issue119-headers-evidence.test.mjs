@@ -71,6 +71,11 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/json">{"not":"JS"}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="importmap">{}</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="speculationrules">{}</script>')),
+    response(200, goodCSP, htmlDoc('<script nomodule nonce="SAFE">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script NOMODULE="false" nonce="SAFE">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script type="text/javascript" nomodule nonce="SAFE">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script type="application/ld+json" nonce="SAFE">{}</script>' +
+      '<script nomodule nonce="SAFE">boot()</script>')),
     response(200, goodCSP, htmlDoc('<template><style>body{content:"</template>"}</style>' +
       '<script nonce="SAFE">boot()</script></template>')),
     response(200, goodCSP, htmlDoc('<template><script>const x="</template>";</script>' +
@@ -131,6 +136,37 @@ test('inert JSON data scripts do not prove hydration or require nonce if real sc
   assert.equal(result.scriptNonce, 'matched');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
     htmlDoc('<script type="module" data-nonce="SAFE">boot()</script>'))).result, 'fail');
+});
+
+test('nomodule boolean is exact and ignored for classic scripts in modern module-capable browsers', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const opening of [
+    '<script nomodule nonce="SAFE">',
+    '<script NOMODULE="false" nonce="SAFE">',
+    '<script type="text/javascript" nomodule nonce="SAFE">',
+    '<script data-nomodule="anything" nomodule nonce="SAFE">',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`${opening}boot()</script>`))).result, 'fail', opening);
+  }
+  for (const opening of [
+    '<script data-nomodule="true" nonce="SAFE">',
+    '<script x-nomodule nonce="SAFE">',
+    '<script no-module nonce="SAFE">',
+    '<script type="module" nomodule nonce="SAFE">',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`${opening}boot()</script>`))).result, 'pass', opening);
+  }
+  // Fallback and data-only are insufficient without an actual module script.
+  const fallbackOnly = htmlDoc('<script nomodule nonce="SAFE">legacy()</script>' +
+    '<script type="application/json">{"data":true}</script>');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP, fallbackOnly)).result, 'fail');
+  const modernWithLegacy = htmlDoc('<script nomodule nonce="EVIL">legacy()</script>' +
+    '<script type="module" nonce="SAFE">modern()</script>');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP, modernWithLegacy)).result, 'pass');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script type="module" nonce="SAFE">modern()</script>'))).result, 'pass');
 });
 
 test('raw-text false template closures cannot transform inert scripts into executable evidence', () => {
