@@ -9,3 +9,4 @@ b85225c7756ee736c20da1df34c9e07c3bea074951aadc0bcd370bee36eda292  docs/security/
 b316fc8eff47ff2b2fe6e58978fd312992e675769eeb40e82e5b2926c8c49431  docs/security/experiments/buildkit-v0.34.1-c1-v31-cross-uid-launcher-dev-only.patch
 9940bb8aae77f727761bc9872e5e5170b331969b056052ec90a1c950f707144b  docs/security/experiments/buildkit-v0.34.1-c1-v32-nondumpable-receiver-dev-only.patch
 1ab73615a3b3140dfc8ca757f6476642046bbdaf8e792ea3b1af6b1b0ac4ead8  docs/security/experiments/buildkit-v0.34.1-c1-v33-positive-controls-postcommit-dev-only.patch
+fb7f15e571c11ed553905c05fa433d6d740a64036fd64f2ef0c0a3ec15d642fc  docs/security/experiments/buildkit-v0.34.1-c1-v34-ptrace-thread-pinning-dev-only.patch

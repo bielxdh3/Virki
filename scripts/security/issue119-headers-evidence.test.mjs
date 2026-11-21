@@ -68,6 +68,7 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
       '<script nonce="SAFE">boot()</script></template>')),
     response(200, goodCSP, htmlDoc('<template><style>body{content:"</template>"}</style>' +
       '<script nonce="SAFE">boot()</script><template></template>')),
+    response(200, goodCSP, htmlDoc('<template><script></template><script nonce="SAFE"></script>')),
     response(200, "script-src 'nonce-SA&#70;E'", htmlDoc('<script nonce="SA&#70;E">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="EVIL">boot()</script>')),
     { status: 200, headers: new Headers({ 'content-security-policy': goodCSP }), body: goodHTML },
