@@ -15,7 +15,8 @@ export const ISSUE119_HEADER_TARGETS = TARGETS;
 function directiveSources(csp, directiveName) {
   const expression = new RegExp(`^${directiveName}(?:\\s|$)`, 'i');
   const directive = csp.split(';').map((item) => item.trim()).find((item) => expression.test(item));
-  return directive ? directive.split(/\s+/).slice(1) : [];
+  return { present: directive !== undefined,
+    sources: directive === undefined ? [] : directive.split(/\s+/).slice(1) };
 }
 
 function actualScriptNonce(tag) {
@@ -105,9 +106,12 @@ export function classifyIssue119Response(target, response) {
       note: 'Redirect response does not prove Portal origin, authenticated headers or recovery' };
   }
 
-  const sources = directiveSources(csp, 'script-src');
-  const elementSources = directiveSources(csp, 'script-src-elem');
-  const attributeSources = directiveSources(csp, 'script-src-attr');
+  const script = directiveSources(csp, 'script-src');
+  const element = directiveSources(csp, 'script-src-elem');
+  const attribute = directiveSources(csp, 'script-src-attr');
+  const sources = script.sources;
+  const elementSources = element.sources;
+  const attributeSources = attribute.sources;
   // A more permissive element/attribute directive overrides script-src for
   // that execution type. Checking only script-src would be a false PASS.
   const nonceSources = sources.filter((source) => /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source));
@@ -124,7 +128,7 @@ export function classifyIssue119Response(target, response) {
   const accepted = response.status === target.expected && htmlDocument &&
     !hasPoweredBy && hstsPresent && singleCsp &&
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
-    (elementSources.length === 0 || elementSources.some((source) =>
+    (!element.present || elementSources.some((source) =>
       /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
     nonceSources.length === 1 && nonceMatches && inlineHaveNonce;
 

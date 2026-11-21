@@ -34,6 +34,8 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, `${goodCSP}; script-src-elem 'unsafe-inline'`),
     response(200, `${goodCSP}; script-src-attr 'unsafe-inline'`),
     response(200, `${goodCSP}; script-src-elem 'nonce-EVIL'`),
+    response(200, `${goodCSP}; script-src-elem`),
+    response(200, `${goodCSP}; SCRIPT-SRC-ELEM   `),
     response(200, goodCSP, '<html><script data-nonce="SAFE">boot()</script></html>'),
     response(200, goodCSP, `<html><script data-test=" nonce='SAFE' ">boot()</script></html>`),
     response(200, `${goodCSP}; script-src-attr 'UNSAFE-INLINE'`),
