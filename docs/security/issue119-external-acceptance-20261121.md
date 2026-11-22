@@ -44,4 +44,35 @@ passed RED→GREEN. This corrects a false *CSS acceptance receipt*, not an
 application XSS or privilege escalation; real deployed styling and transport
 still require separately authorized production/browser verification.
 
+**2026-11-22 CSP stylesheet fallback correction (PR #141, not deployed):**
+A second independent reproduction showed that checking `style-src-elem` only
+when explicitly present was insufficient. With an external same-origin
+`/_next/static/css/site.css` link, the prior receipt falsely returned PASS
+for `style-src 'none'`, a foreign-only `style-src`, and `default-src 'none'`
+when no stylesheet override existed. The fixed evaluator resolves the
+effective stylesheet sources in CSP3 order: `style-src-elem`, otherwise
+`style-src`, otherwise `default-src`; it requires a single `'self'` source
+and refuses missing, blocked or foreign-only policies. It preserves the
+separate restrictions on inline styles and style attributes. RED→GREEN
+fixtures exercise both public 200 and 404 plus legitimate same-origin
+controls. Neither a static green receipt nor a local browser demonstration
+proves the deployed public site has been upgraded.
+
+**Independent follow-up: stylesheet markup evidence (same DEV-only PR):**
+The CSS source policy alone cannot show that the response actually references
+an applicable stylesheet. A second RED→GREEN case now requires at least one
+live `<link rel="stylesheet">` in `<head>` with a bounded same-origin
+`/_next/static/css/<name>.css` path. It refuses alternate/disabled/print-only,
+foreign and non-Next links, ambiguous duplicate or entity-bearing attributes,
+unexpected stylesheet SRI, and document `<base>` changes. Active inline
+`<style>` elements and `style=` attributes also fail: production `style-src
+'self'` would block them. Comments, inert templates and ordinary quoted
+attribute contents are not misclassified as active CSS. The fixture helper
+models the real Next stylesheet in all positive control documents, and both
+production Next 200 and 404 still passed independently in headless Edge with
+their external CSS applied and zero CSP console violations. This static
+receipt **does not fetch or hash the stylesheet** and cannot prove the asset
+exists: actual resource delivery/hydration still requires the separate real
+browser/HTTP/OCI runtime gates. No live deployment is attested.
+
 **Explicit boundary:** These documents and offline CI classifiers have no credentials and never modify Cloudflare, DNS, Tunnel, services or production state. Neither opt-in `--live` probe runs from CI or by default. A successful public-header probe does not certify TLS, Access, authenticated OIDC, session security or a live origin release.

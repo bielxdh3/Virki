@@ -187,6 +187,49 @@ function rawTextCloseRange(body, afterStartTag, name) {
   return simpleEndTag.test(token) ? { start: match.index, after: end + 1 } : null;
 }
 
+// Parse only the attributes needed to approve an external stylesheet. Refuse
+// duplicate/ambiguous names and HTML entity references rather than guessing
+// how the browser will resolve a URL, media condition, or disabled flag.
+function readLinkAttributes(raw) {
+  const opening = /^<link(?=[\t\n\f\r />])/i.exec(raw);
+  if (!opening) return null;
+  const attrs = new Map();
+  let pos = opening[0].length;
+  while (pos < raw.length) {
+    while (/[\t\n\f\r ]/.test(raw[pos] ?? '')) pos++;
+    if (raw[pos] === '>') return attrs;
+    if (raw[pos] === '/' && raw[pos + 1] === '>') return attrs;
+    // Nonterminal slashes are reprocessed by HTML5; reject unsupported syntax.
+    if (raw[pos] === '/') return null;
+    const start = pos;
+    while (pos < raw.length && !/[\t\n\f\r =/>]/.test(raw[pos])) pos++;
+    if (pos === start) return null;
+    const name = raw.slice(start, pos).toLowerCase();
+    if (attrs.has(name) || /["'<&]/.test(name)) return null;
+    while (/[\t\n\f\r ]/.test(raw[pos] ?? '')) pos++;
+    let value = null;
+    if (raw[pos] === '=') {
+      pos++;
+      while (/[\t\n\f\r ]/.test(raw[pos] ?? '')) pos++;
+      if (raw[pos] === '"' || raw[pos] === "'") {
+        const quote = raw[pos++];
+        const end = raw.indexOf(quote, pos);
+        if (end < 0) return null;
+        value = raw.slice(pos, end);
+        pos = end + 1;
+      } else {
+        const valueStart = pos;
+        while (pos < raw.length && !/[\t\n\f\r >]/.test(raw[pos])) pos++;
+        if (valueStart === pos) return null;
+        value = raw.slice(valueStart, pos);
+        if (/["'<=]/.test(value)) return null;
+      }
+    }
+    attrs.set(name, value);
+  }
+  return null;
+}
+
 // Strict, small acceptance tokenizer: this is *not* a replacement for a
 // browser E2E hydration test. It recognizes real tags without matching fake
 // <script> text inside comments, attribute quotes, inert <template>/<noscript>
@@ -207,6 +250,7 @@ function inspectHtmlDocument(body, mime) {
   const inert = [];
   const nonces = [];
   let inlineExecutableScripts = 0;
+  let stylesheets = 0;
   while (at < body.length) {
     const lt = body.indexOf('<', at);
     if (lt < 0) break;
@@ -322,6 +366,37 @@ function inspectHtmlDocument(body, mime) {
       else if (inert.pop() !== tag) return fail();
       continue;
     }
+    if (!inert.length) {
+      // This public app's production HTML uses an external Next CSS asset.
+      // Inline style tags/attributes are blocked by its strict CSP; never
+      // attest successful presentation for HTML that depends on them.
+      if (tag === 'style' && !closing) return fail();
+      const unquotedAttributes = raw.replace(/"[^"]*"|'[^']*'/g, '""');
+      if (/(?:[\t\n\f\r /])style(?=[\t\n\f\r =/>])/i.test(unquotedAttributes)) return fail();
+      // A document base can redirect root-relative stylesheet URLs to a
+      // foreign origin, despite a superficially acceptable /_next CSS href.
+      if (tag === 'base') return fail();
+      if (tag === 'link' && !closing) {
+        const attrs = readLinkAttributes(raw);
+        if (!attrs) return fail();
+        const rel = attrs.get('rel') ?? '';
+        if (rel.includes('&')) return fail();
+        const relTokens = asciiTrim(rel).toLowerCase().split(asciiSpaces);
+        if (relTokens.includes('stylesheet')) {
+          const href = attrs.get('href');
+          const media = attrs.get('media');
+          const type = attrs.get('type');
+          if (phase !== 2 || asciiTrim(rel).toLowerCase() !== 'stylesheet' ||
+            typeof href !== 'string' ||
+            !/^\/_next\/static\/css\/[A-Za-z0-9_-]+\.css$/.test(href) ||
+            attrs.has('disabled') || attrs.has('integrity') ||
+            (media !== undefined && (typeof media !== 'string' ||
+              !['', 'all', 'screen'].includes(asciiTrim(media).toLowerCase()))) ||
+            (type !== undefined && type?.toLowerCase() !== 'text/css')) return fail();
+          stylesheets++;
+        }
+      }
+    }
     // Raw-text tags must be consumed BEFORE deciding whether their parent is
     // inert. Otherwise a literal `</template>` inside <style> or <script>
     // could pop the real template and make the next inert script look live.
@@ -373,7 +448,7 @@ function inspectHtmlDocument(body, mime) {
     if (tag === 'script' && closing) return fail();
   }
   return phase === 6 && inert.length === 0 && asciiTrim(body.slice(at)) === ''
-    ? { valid: true, nonces, inlineExecutableScripts } : fail();
+    ? { valid: true, nonces, inlineExecutableScripts, stylesheets } : fail();
 }
 
 export function classifyIssue119Response(target, response) {
@@ -412,16 +487,20 @@ export function classifyIssue119Response(target, response) {
   const style = directiveSources(csp, 'style-src');
   const styleElement = directiveSources(csp, 'style-src-elem');
   const styleAttribute = directiveSources(csp, 'style-src-attr');
+  const defaultSources = directiveSources(csp, 'default-src');
   const inlineStyleAllowed = hasUnsafeInline(style.sources) ||
     hasUnsafeInline(styleElement.sources) || hasUnsafeInline(styleAttribute.sources) ||
-    (!style.present && hasUnsafeInline(directiveSources(csp, 'default-src').sources));
-  // style-src-elem overrides style-src. A page with style-src 'self' but
-  // style-src-elem 'none' (or a foreign-only source) cannot load its external
-  // stylesheet, yet the old static receipt reported PASS. Require only the
-  // same-origin stylesheet source when overridden; style attributes may be
-  // separately disabled, but never given an inline/hash escape hatch.
-  const stylesheetPolicySafe = (!styleElement.present ||
-    (styleElement.sources.length === 1 && styleElement.sources[0].toLowerCase() === "'self'")) &&
+    (!style.present && hasUnsafeInline(defaultSources.sources));
+  // CSP3 stylesheet fetches use the FIRST PRESENT source directive in order:
+  // style-src-elem → style-src → default-src. A missing style-src-elem is NOT
+  // an allow-all: if its fallback is 'none', foreign-only, or absent, our
+  // same-origin /_next CSS cannot load. Restrict this receipt to 'self' alone
+  // (not hashes, nonces or foreign hosts), including when the override exists.
+  // This is intentionally more conservative than the full CSP grammar.
+  const stylesheetSources = styleElement.present ? styleElement.sources :
+    style.present ? style.sources : defaultSources.sources;
+  const stylesheetPolicySafe =
+    stylesheetSources.length === 1 && stylesheetSources[0].toLowerCase() === "'self'" &&
     (!styleAttribute.present ||
     (styleAttribute.sources.length === 1 && styleAttribute.sources[0].toLowerCase() === "'none'"));
   const sources = script.sources;
@@ -442,7 +521,8 @@ export function classifyIssue119Response(target, response) {
     !inlineStyleAllowed && stylesheetPolicySafe &&
     (!element.present || elementSources.some((source) =>
       /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
-    nonceSources.length === 1 && nonceMatches && document.inlineExecutableScripts > 0;
+    nonceSources.length === 1 && nonceMatches && document.inlineExecutableScripts > 0 &&
+    document.stylesheets > 0;
 
   return { ...common, csp: csp ? 'present' : 'missing',
     htmlDocument: htmlDocument ? 'confirmed' : 'not-confirmed',

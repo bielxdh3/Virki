@@ -4,7 +4,9 @@ import { spawnSync } from 'node:child_process';
 import { ISSUE119_HEADER_TARGETS, classifyIssue119Response,
   collectIssue119HeaderEvidence } from './issue119-headers-evidence.mjs';
 
-const htmlDoc = (body, head = '') => `<!doctype html><html lang="pt-BR"><head>${head}</head><body>${body}</body></html>`;
+const stylesheet = '<link rel="stylesheet" href="/_next/static/css/site.css">';
+const htmlDoc = (body, head = '', includeStylesheet = true) =>
+  `<!doctype html><html lang="pt-BR"><head>${includeStylesheet ? stylesheet : ''}${head}</head><body>${body}</body></html>`;
 const goodHTML = htmlDoc('<script nonce="SAFE" src="/_next/static/app.js"></script><script nonce="SAFE">boot()</script>');
 const goodCSP = "default-src 'self'; script-src 'self' 'nonce-SAFE' 'strict-dynamic'; object-src 'none'";
 
@@ -199,6 +201,73 @@ test('CSS subdirectives cannot defeat the public external stylesheet acceptance 
   }
 });
 
+test('effective CSP style-src and default-src fallback must permit the same-origin external stylesheet', () => {
+  const html = htmlDoc('<script nonce="SAFE">boot()</script>',
+    '<link rel="stylesheet" href="/_next/static/css/site.css">');
+  for (const target of ISSUE119_HEADER_TARGETS.slice(0, 2)) {
+    for (const csp of [
+      `${goodCSP}; style-src 'none'`,
+      `${goodCSP}; style-src https://attacker.invalid`,
+      `${goodCSP}; style-src`,
+      `${goodCSP}; style-src 'self' https://attacker.invalid`,
+      goodCSP.replace("default-src 'self'", "default-src 'none'"),
+      goodCSP.replace("default-src 'self'", 'default-src https://attacker.invalid'),
+      goodCSP.replace("default-src 'self'; ", ''),
+    ]) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, csp, html)).result, 'fail',
+      `${target.surface} must refuse effective stylesheet sources: ${csp}`);
+    }
+    for (const csp of [
+      `${goodCSP}; style-src 'self'`,
+      `${goodCSP}; style-src 'none'; style-src-elem 'self'`,
+      `${goodCSP}; style-src https://attacker.invalid; style-src-elem 'self'`,
+      goodCSP,
+    ]) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, csp, html)).result, 'pass',
+      `${target.surface} should accept effective self-only stylesheet: ${csp}`);
+    }
+  }
+});
+
+test('public 200/404 CSS receipt requires an applicable real same-origin Next stylesheet and no live inline styles', () => {
+  const script = '<script nonce="SAFE">boot()</script>';
+  const badDocuments = [
+    htmlDoc(script, '', false),
+    htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/site.css" disabled>', false),
+    htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/site.css" disabled="false">', false),
+    htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/site.css" media="print">', false),
+    htmlDoc(script, '<link rel="alternate stylesheet" href="/_next/static/css/site.css">', false),
+    htmlDoc(script, '<link rel="stylesheet" href="https://attacker.invalid/site.css">', false),
+    htmlDoc(script, '<link rel="stylesheet" href="/missing.css">', false),
+    htmlDoc(script, '<base href="https://attacker.invalid/">'),
+    htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/site.css" type="text/plain">', false),
+    htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/site.css" integrity="sha256-invalid">', false),
+    htmlDoc('<style>body{color:red}</style>' + script),
+    htmlDoc('<div style="color:red">live inline style</div>' + script),
+    htmlDoc('<div /style="color:red">live HTML5 slash attribute</div>' + script),
+    htmlDoc(script, '<style>body{color:red}</style>'),
+  ];
+  for (const target of ISSUE119_HEADER_TARGETS.slice(0, 2)) {
+    for (const [index, html] of badDocuments.entries()) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, `${goodCSP}; style-src 'self'`, html)).result,
+      'fail', `public ${target.expected} must reject invalid CSS document #${index}`);
+    }
+    for (const html of [
+      htmlDoc(script),
+      htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/next42.css" nonce="SAFE" data-precedence="next">'),
+      htmlDoc('<!-- <style>inert</style> --><template><style>inert</style></template>' + script),
+      htmlDoc('<div data-note="not a style= attribute">text</div>' + script),
+    ]) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, `${goodCSP}; style-src 'self'`, html)).result,
+      'pass', `public ${target.expected} valid stylesheet and inert content must pass`);
+    }
+  }
+});
+
 test('quoted attribute values may contain > and fake scripts without hiding real nonce evidence', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   const valid = htmlDoc('<div data-note="> <script nonce=EVIL>fake</script>">safe</div>' +
@@ -270,13 +339,13 @@ test('script-data double escaping cannot fabricate a later executable script non
 
 test('actual nonce attributes and quoted decimal HSTS are recognized without lowercasing nonce values', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
-  const quoted = response(200, "script-src 'nonce-SAFE'", goodHTML,
+  const quoted = response(200, "default-src 'self'; script-src 'nonce-SAFE'", goodHTML,
     { 'strict-transport-security': 'max-age="2592000"' });
   assert.equal(classifyIssue119Response(base, quoted).result, 'pass');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP, goodHTML,
     { 'strict-transport-security': 'max-age \t= \t2592000' })).result, 'pass',
   'HTTP SP and HTAB remain valid optional whitespace');
-  assert.equal(classifyIssue119Response(base, response(200, "script-src 'nonce-safe'", goodHTML)).result, 'fail');
+  assert.equal(classifyIssue119Response(base, response(200, "default-src 'self'; script-src 'nonce-safe'", goodHTML)).result, 'fail');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
     htmlDoc('<script data-nonce="SAFE" nonce="SAFE">boot()</script>'))).result, 'pass');
 });
