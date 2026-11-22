@@ -119,7 +119,17 @@ test("public not-found document renders normally with fresh script nonces", asyn
   });
   const response = await page.goto(`${publicUrl}/missing-public-page`);
   expect(response?.status()).toBe(404);
+  expect(response?.headers()["x-powered-by"]).toBeUndefined();
+  const cspDirectives = response?.headers()["content-security-policy"]?.split(";").map((value) => value.trim());
+  // The custom 404 uses the external public stylesheet; do not reintroduce
+  // the inline-CSS exception previously required by Next's fallback page.
+  expect(cspDirectives).toContain("style-src 'self'");
+  expect(cspDirectives?.some((directive) => directive.includes("'unsafe-inline'"))).toBe(false);
   await expect(page.getByRole("heading", { name: "Virki", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { level: 1, name: "404", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Voltar ao início", exact: true })).toHaveAttribute("href", "/");
+  expect(await page.locator('link[rel~="stylesheet"]').count()).toBeGreaterThan(0);
+  expect(await page.locator("body").evaluate((body) => getComputedStyle(body).fontFamily)).toContain("Inter");
   await expect(page.locator("body")).toBeVisible();
   const nonce = await expectPublicDocumentScripts(page, response);
   const reloaded = await page.reload();
