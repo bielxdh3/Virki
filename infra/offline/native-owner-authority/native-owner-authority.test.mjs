@@ -35,6 +35,15 @@ test("Owner Authority - V3 native stream parser requires canonical WalkDir paths
   assert.match(execFileSync(binPath, { encoding: "utf8" }), /C4_NATIVE_CANONICAL_WALK_STREAM_PASS/);
 });
 
+test("Owner Authority - V3 JSON keys cannot hide escaped aliases from C4", { skip: LINUX_NATIVE_SKIP }, (t) => {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-owner-json-canonical-"));
+  t.after(() => fs.rmSync(binDir, { recursive: true, force: true }));
+  const binPath = path.join(binDir, "owner-json-v3");
+  execFileSync("/usr/bin/gcc", [...GCC_HARDEN, ...GCC_PIE,
+    path.join(SRC_DIR, "native-owner-v3-json-adversarial.test.c"), "-o", binPath]);
+  assert.match(execFileSync(binPath, { encoding: "utf8" }), /C4_NATIVE_JSON_KEY_CANONICAL_PASS/);
+});
+
 test("Owner Authority - static binary has zero PT_INTERP and zero PT_DYNAMIC", { skip: LINUX_NATIVE_SKIP }, (t) => {
   const authoritySrc = path.join(SRC_DIR, "native-owner-authority.c");
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-owner-static-"));

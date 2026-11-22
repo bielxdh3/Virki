@@ -144,6 +144,36 @@ boundary are tested, without relaxing any test or gate. This addresses a
 legitimate build-context **availability** defect, not a signature bypass or
 permission to sign, publish, merge, deploy, or provision owner authority.
 
+**PR #141 additional C4 JSON semantic-identity correction (DEV-only, post-`f10c7b1`):**
+Independent native review reproduced a conflicting JSON interpretation with a
+complete V3 candidate evidence/OCI fixture: a `binding` containing both
+`"role":"runtime"` and `"Role":"migrator"` passed the C4 parser with
+`runtime`, although Go `encoding/json` accepts case-insensitive struct keys
+and can decode the latter occurrence as `migrator`. A separate native RED
+showed an escaped `\u0072ole` alias diverging from JSON consumers. The C4
+evidence tokenizer now fails closed for escaped/non-ASCII object-key names and
+case-insensitive duplicate keys **at every object nesting level**, before
+interpreting any signed evidence. It limits each object to 128 distinct keys
+to bound adversarial comparison work; ordinary string **values** retain JSON
+escape support. The new test compiles the actual production C verifier and
+confirms valid canonical fields, rejected duplicate/escaped/case-aliased keys,
+and nested aliases. RED was reproduced before the relevant patches; GREEN,
+Linux native integration and ASan/UBSan passed. These are provenance-contract
+fixes, **not** live signed-owner authority or deployment proof.
+
+**PR #141 PostgreSQL/OIDC regrant deadlock correction (DEV-only):**
+`grantProjectAccess` previously locked `User` before `ProjectConnection`,
+opposite the OIDC adapter's `ProjectConnection`-first token issuance. On a
+disposable PostgreSQL instance, a repeat administrative grant and overlapping
+connection-first OIDC lock sequence produced SQLSTATE `40P01` (RED), which can
+fail the visible ADMIN grant action/token issuance. The admin transaction now
+locks `ProjectConnection` before `User`, preserving active-account checks,
+late elevation fencing, audit and grant upsert. The bounded concurrent
+PostgreSQL regression requires both physical transactions to complete and
+the grant to remain active; it passed (GREEN) alongside the adjacent
+revocation, connection-deletion and adapter tests. No owner identity,
+Cloudflare configuration or production database was modified.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)

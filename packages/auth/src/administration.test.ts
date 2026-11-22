@@ -259,6 +259,23 @@ test("ADMIN credential changes, recovery code rotation and recovery approvals re
   }
 });
 
+test("project grant locks ProjectConnection before User to match OIDC token issuance", () => {
+  // The OIDC adapter materializes its ProjectConnection FOR UPDATE lock
+  // before locking the grant and User. Reversing this order in an ADMIN
+  // regrant creates a physical PostgreSQL 40P01 deadlock with token issuance.
+  const admin = readFileSync(new URL("./administration.ts", import.meta.url), "utf8");
+  const start = admin.indexOf("export async function grantProjectAccess(");
+  const end = admin.indexOf("export async function revokeProjectAccess(", start);
+  assert.ok(start >= 0 && end > start);
+  const grant = admin.slice(start, end);
+  const connectionLock = grant.indexOf('FROM "ProjectConnection"');
+  const userLock = grant.indexOf('FROM "User"');
+  assert.ok(connectionLock >= 0 && userLock >= 0 && connectionLock < userLock,
+    "grant must take the connection lock before the account lock, matching issuer adapter's lock order");
+  const adapter = readFileSync(new URL("../../../apps/issuer/src/adapter.ts", import.meta.url), "utf8");
+  assert.match(adapter, /WITH connection_record AS MATERIALIZED \([\s\S]*?FROM "ProjectConnection"[\s\S]*?FOR UPDATE\s*\)/u);
+});
+
 test("ADMIN server actions and passkey mutations keep a late authorization fence", () => {
   const source = readFileSync(new URL("../../../apps/hub/src/app/admin/actions.ts", import.meta.url), "utf8");
   const actions = [

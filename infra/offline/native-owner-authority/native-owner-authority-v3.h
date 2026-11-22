@@ -353,6 +353,36 @@ static const char *v3_json_skip_string(const char *p, const char *end) {
   return NULL;
 }
 
+/* Native evidence verification compares JSON field names as raw bytes. JSON
+ * consumers decode escaped names and may apply last-wins semantics, so an
+ * escaped alias (e.g. \u0072ole alongside role) would make the same evidence
+ * mean different things to the C4 verifier and a downstream JSON consumer.
+ * Require literal, canonical object keys at every nesting level. Value strings
+ * may still use ordinary JSON escapes. */
+static bool v3_json_canonical_key(const char *start, const char *end) {
+  if (!start || !end || end - start < 2 || *start != '"' || *(end - 1) != '"') return false;
+  /* Bound object-key interpretation to the ASCII field grammar consumed by
+   * C4 and Go's VROA JSON structs. Non-ASCII Unicode folding and escaped
+   * aliases otherwise give another parser a different semantic key. */
+  for (const char *p = start + 1; p < end - 1; p++) {
+    const uint8_t ch = (uint8_t)*p;
+    if (ch < 0x21 || ch > 0x7e || ch == '\\') return false;
+  }
+  return true;
+}
+
+static bool v3_json_keys_fold_equal(
+    const char *a, size_t a_len, const char *b, size_t b_len) {
+  if (a_len != b_len) return false;
+  for (size_t i = 0; i < a_len; i++) {
+    uint8_t ca = (uint8_t)a[i], cb = (uint8_t)b[i];
+    if (ca >= 'A' && ca <= 'Z') ca = (uint8_t)(ca + 'a' - 'A');
+    if (cb >= 'A' && cb <= 'Z') cb = (uint8_t)(cb + 'a' - 'A');
+    if (ca != cb) return false;
+  }
+  return true;
+}
+
 static const char *v3_json_skip_value(const char *p, const char *end, int depth) {
   if (!p || depth > 64) return NULL;
   p = v3_json_skip_ws(p, end);
@@ -361,10 +391,25 @@ static const char *v3_json_skip_value(const char *p, const char *end, int depth)
   if (*p == '{') {
     p = v3_json_skip_ws(p + 1, end);
     if (p < end && *p == '}') return p + 1;
+    /* A Go decoder may bind both "role" and "Role" to the same tagged struct
+     * member, choosing the LAST entry; this C verifier chooses the literal
+     * field. Reject collisions before interpreting any signed evidence.
+     * Cap each object's keys to avoid quadratic work on untrusted metadata. */
+    struct { const char *name; size_t length; } keys[128];
+    size_t key_count = 0;
     while (p < end) {
       p = v3_json_skip_ws(p, end);
+      const char *key_start = p;
       p = v3_json_skip_string(p, end);
-      if (!p) return NULL;
+      if (!v3_json_canonical_key(key_start, p)) return NULL;
+      const size_t key_length = (size_t)(p - key_start - 2);
+      if (key_count >= sizeof(keys) / sizeof(keys[0])) return NULL;
+      for (size_t i = 0; i < key_count; i++) {
+        if (v3_json_keys_fold_equal(
+            keys[i].name, keys[i].length, key_start + 1, key_length)) return NULL;
+      }
+      keys[key_count].name = key_start + 1;
+      keys[key_count++].length = key_length;
       p = v3_json_skip_ws(p, end);
       if (p >= end || *p != ':') return NULL;
       p = v3_json_skip_value(p + 1, end, depth + 1);
@@ -451,7 +496,7 @@ static bool v3_json_find_field(const char *obj_start, const char *obj_end,
     p = v3_json_skip_ws(p, obj_end);
     const char *ks = p;
     const char *ke = v3_json_skip_string(ks, obj_end);
-    if (!ke) return false;
+    if (!v3_json_canonical_key(ks, ke)) return false;
     p = v3_json_skip_ws(ke, obj_end);
     if (p >= obj_end || *p != ':') return false;
     const char *vs = v3_json_skip_ws(p + 1, obj_end);

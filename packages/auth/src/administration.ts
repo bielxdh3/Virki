@@ -705,12 +705,15 @@ export async function grantProjectAccess(actor: { id: string; role: string }, se
   if (actor.role !== "ADMIN") throw new AdministrationMutationError();
   await prisma.$transaction(async (transaction) => {
     await requireSecurityElevationInTransaction(transaction, actor.id, sessionId, "PROJECT_ACCESS_CHANGE", now);
+    // Match issuer adapter and connection disable/deletion: acquire the
+    // ProjectConnection row before account/grant rows. The old User-first
+    // lock order deadlocked against concurrent OIDC artifact issuance (40P01).
+    const connections = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "ProjectConnection" WHERE "id" = ${connectionId} AND "enabled" = TRUE FOR UPDATE
+    `;
     const users = await transaction.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "User" WHERE "id" = ${userId} AND "role" = 'USER'::"UserRole"
         AND "isActive" = TRUE AND "accountStatus" = 'ACTIVE'::"AccountStatus" FOR UPDATE
-    `;
-    const connections = await transaction.$queryRaw<Array<{ id: string }>>`
-      SELECT "id" FROM "ProjectConnection" WHERE "id" = ${connectionId} AND "enabled" = TRUE FOR UPDATE
     `;
     if (users.length !== 1 || connections.length !== 1) throw new AdministrationMutationError();
     await transaction.userProjectGrant.upsert({ where: { userId_connectionId: { userId, connectionId } }, create: { userId, connectionId, grantedByUserId: actor.id }, update: { revokedAt: null, grantedByUserId: actor.id } });
