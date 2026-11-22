@@ -22,3 +22,4 @@ f180f1af520eed9ba34fd52987b7ea58cc4799f51905856eac9a6a9e2ec9f71c  docs/security/
 cb02a52d42bcba6d31c5c4e3520c787ebe9c752151fee6dc3e806c146dfcff22  docs/security/experiments/buildkit-v0.34.1-c1-v44-c4-domain-refusal-dev-only.patch
 63a4f9f0b3f68ae58a44ec529b48e2d216e4816a93b5e2dbd765cb48d00c5200  docs/security/experiments/buildkit-v0.34.1-c1-v45-protobuf-fixture-copylocks-dev-only.patch
 d3b8743900bac1de7a1f28fecd5927d0d4df6117b134d987613abc8d7003baed  docs/security/experiments/buildkit-v0.34.1-c1-v46-cross-process-crash-fence-dev-only.patch
+c411f76f15e0a73871030b264280cbb641e54f3faa829010c89957a26ab88465  docs/security/experiments/buildkit-v0.34.1-c1-v47-recovery-observer-no-xdev-dev-only.patch

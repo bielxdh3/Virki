@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline V23–V46 integrity replay. Uses a temporary Git index only; never
+# Offline V23–V47 integrity replay. Uses a temporary Git index only; never
 # checks out, resets, cleans, commits, or changes the caller's worktree/index.
 set -euo pipefail
 
@@ -36,6 +36,7 @@ expected=(
   a3e5add39cd2ac188314ba4b79294a391cc7fc4c
   7952e6dc2599b447fa97b86dda77e27416de8c7e
   4e8440c77a86e009685717e86194bb4e6a83ff81
+  5de9120c20a35c8b0dee8a85e47973471759c315
 )
 
 test -f "$manifest"
@@ -64,5 +65,5 @@ while read -r digest patch; do
   printf 'V%d: %s OK\n' "$((i + 23))" "$actual"
   i=$((i + 1))
 done < "$manifest"
-test "$i" -eq 24
-printf 'ISSUE90_REPLAY_V23_TO_V46=PASS\n'
+test "$i" -eq 25
+printf 'ISSUE90_REPLAY_V23_TO_V47=PASS\n'

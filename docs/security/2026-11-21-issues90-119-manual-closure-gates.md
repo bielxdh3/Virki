@@ -63,6 +63,8 @@ Offline reconstruction: `bash scripts/security/issue90-replay-index.sh <pinned-b
 
 **V46 cross-process and crash-state proof:** an incremental test-only root fixture launches six separate Go test processes against the same synthetic V40 permit and ledger and requires exactly one durable acceptance, five refusals and a verified one-record HMAC checkpoint. A separate durably persisted in-flight marker before any log append refuses valid claims across restarts without modifying the empty ledger or trusted genesis checkpoint. WSL `-race` and unrestricted vet passed. The hosted no-skip privileged matrix now selects V46. This is **24/24 immutable patches (V23–V46)**, with no new production release authority or auto-recovery.
 
+**V47 recovery-path mount parity:** the read-only V38 recovery inspector now explicitly uses `RESOLVE_NO_XDEV` for both its protected parent and the final snapshot name, like the root publication broker and independently protected V40 ledger. Root-only tests include a genuine cross-filesystem mount and a **same-device bind mount inside a disposable mount namespace**. An independent Go-overlay experiment confirmed earlier V24 ancestor validation already rejected `/dev/shm` and `/tmp`, but the original V38 final-name open did accept an identical bind-mounted snapshot as `present-requires-owner-reauthorization` (still **not** a release admission). V47 makes the observation's provenance fail closed under the same trust boundary. The patch does not change V23–V46 hashes; replay covers **25/25 (V23–V47)**. No automatic owner reauthorization, signed release or production activation was added. See the V47 experiment document.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)

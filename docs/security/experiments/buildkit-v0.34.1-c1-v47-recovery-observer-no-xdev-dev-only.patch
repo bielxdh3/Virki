@@ -1,0 +1,165 @@
+diff --git a/session/filesync/sealed_publication_recovery_v38_linux.go b/session/filesync/sealed_publication_recovery_v38_linux.go
+index 63f76e2..d8e7a80 100644
+--- a/session/filesync/sealed_publication_recovery_v38_linux.go
++++ b/session/filesync/sealed_publication_recovery_v38_linux.go
+@@ -23,6 +23,18 @@ const (
+ 	v38PresentNeedsOwnerReauthorization V38RootPublicationObservation = "present-requires-owner-reauthorization"
+ )
+ 
++// The observer shares the publisher's NO_XDEV path boundary at BOTH the
++// parent and the final snapshot entry. A bind mount can replace an otherwise
++// private, root-owned final directory without changing its device or bytes.
++// Although V38 cannot authorize a release, accepting this alias would claim
++// to observe V36 provenance that the pathname itself does not establish.
++func v38OpenRootRecoveryDirectory(fromFD int, relativePath string) (int, error) {
++	return unix.Openat2(fromFD, strings.TrimPrefix(relativePath, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
++	})
++}
++
+ // inspectV38RootPublishedSnapshot verifies a potential prior V36/V37 output
+ // under independently root-owned custody after an ambiguous fsync or crash.
+ // It never repairs, deletes, renames, signs or makes the snapshot available
+@@ -48,10 +60,7 @@ func inspectV38RootPublishedSnapshot(dest string, manifest V15SealedManifest) (V
+ 	if err := validateV24TrustedSupervisorAncestors(rootFD, parent); err != nil {
+ 		return "", fmt.Errorf("C1 V38 untrusted recovery ancestor: %w", err)
+ 	}
+-	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
+-		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
+-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+-	})
++	parentFD, err := v38OpenRootRecoveryDirectory(rootFD, parent)
+ 	if err != nil {
+ 		return "", fmt.Errorf("C1 V38 untrusted recovery parent: %w", err)
+ 	}
+@@ -73,7 +82,7 @@ func inspectV38RootPublishedSnapshot(dest string, manifest V15SealedManifest) (V
+ 	if entryStat.Mode&unix.S_IFMT != unix.S_IFDIR || entryStat.Uid != 0 || entryStat.Mode&0777 != 0700 {
+ 		return "", errors.New("C1 V38 recovered destination not protected root 0700 directory")
+ 	}
+-	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	fd, err := v38OpenRootRecoveryDirectory(parentFD, name)
+ 	if err != nil {
+ 		return "", fmt.Errorf("C1 V38 recovered destination cannot be pinned: %w", err)
+ 	}
+diff --git a/session/filesync/sealed_publication_recovery_v47_linux_test.go b/session/filesync/sealed_publication_recovery_v47_linux_test.go
+new file mode 100644
+index 0000000..0e03246
+--- /dev/null
++++ b/session/filesync/sealed_publication_recovery_v47_linux_test.go
+@@ -0,0 +1,115 @@
++//go:build linux
++
++package filesync
++
++import (
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// This is DEV-only path-resolution hardening for the non-authorizing V38
++// recovery observer. Every case is a disposable local filesystem operation;
++// no release approval, C4 signature, publication or network endpoint exists.
++func TestC1V47RecoveryObserverRejectsCrossMountBeforeInspection(t *testing.T) {
++	if os.Getenv("VIRKI_V47_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("opt-in root-only V47 recovery mount-boundary fixture")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	require.NoError(t, err)
++	defer unix.Close(rootFD)
++	var rootStat unix.Stat_t
++	require.NoError(t, unix.Fstat(rootFD, &rootStat))
++
++	var candidateRoot string
++	for _, parent := range []string{"/var/tmp", "/root"} {
++		var stat unix.Stat_t
++		if unix.Stat(parent, &stat) == nil && stat.Mode&unix.S_IFMT == unix.S_IFDIR && stat.Dev == rootStat.Dev {
++			candidateRoot = parent
++			break
++		}
++	}
++	require.NotEmpty(t, candidateRoot, "fixture requires a disposable directory on the root mount")
++	base, err := os.MkdirTemp(candidateRoot, "virki-v47-recovery-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++	protected := filepath.Join(base, "protected")
++	require.NoError(t, os.Mkdir(protected, 0700))
++	controlFD, err := v38OpenRootRecoveryDirectory(rootFD, protected)
++	require.NoError(t, err, "root-owned same-mount parent remains inspectable")
++	require.NoError(t, unix.Close(controlFD))
++
++	var crossMount string
++	for _, parent := range []string{"/dev/shm", "/tmp", "/run"} {
++		var stat unix.Stat_t
++		if unix.Stat(parent, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Dev == rootStat.Dev {
++			continue
++		}
++		// Show the old openat2 policy actually could cross this mount: a
++		// skipped/inaccessible mount would not prove the V47 restriction.
++		prior, openErr := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
++			Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
++		})
++		if openErr == nil {
++			require.NoError(t, unix.Close(prior))
++			crossMount = parent
++			break
++		}
++	}
++	require.NotEmpty(t, crossMount, "fixture requires a real accessible foreign mount for a non-skipping assertion")
++	foreignFD, err := v38OpenRootRecoveryDirectory(rootFD, crossMount)
++	if foreignFD >= 0 {
++		_ = unix.Close(foreignFD)
++	}
++	require.ErrorIs(t, err, unix.EXDEV, "V38 must refuse a mount crossed by the old policy")
++}
++
++// A same-device bind mount at the FINAL component bypassed a parent-only
++// NO_XDEV check: its mode, uid, inode, manifest and bytes can all match a
++// genuine publication even though it is an alias introduced by a mount.
++// Run inside a disposable mount namespace, never the host's mount namespace.
++func TestC1V47RecoveryObserverRejectsFinalBindMount(t *testing.T) {
++	if os.Getenv("VIRKI_V47_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("opt-in root-only V47 bind-mount fixture")
++	}
++	if os.Getenv("VIRKI_V47_CHILD") == "bind-mount" {
++		base, err := os.MkdirTemp("/var/tmp", "virki-v47-bind-")
++		require.NoError(t, err)
++		t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++		require.NoError(t, os.Chmod(base, 0711))
++		private := filepath.Join(base, "protected")
++		source := filepath.Join(private, "source")
++		dest := filepath.Join(private, "published")
++		for _, directory := range []string{private, source, dest} {
++			require.NoError(t, os.Mkdir(directory, 0700))
++		}
++		require.NoError(t, os.WriteFile(filepath.Join(source, "app.js"), []byte("SAFE"), 0600))
++		manifest := v15PacketManifest()
++		control, err := inspectV38RootPublishedSnapshot(source, manifest)
++		require.NoError(t, err, "genuine same-mount snapshot must still be inspectable")
++		require.Equal(t, v38PresentNeedsOwnerReauthorization, control)
++		require.NoError(t, unix.Mount(source, dest, "", unix.MS_BIND, ""))
++		t.Cleanup(func() { require.NoError(t, unix.Unmount(dest, unix.MNT_DETACH)) })
++		state, err := inspectV38RootPublishedSnapshot(dest, manifest)
++		require.Empty(t, state)
++		require.ErrorIs(t, err, unix.EXDEV, "a bind-mount of identical trusted bytes is not a V36 publication")
++		fmt.Println("V47_FINAL_BIND_MOUNT_REFUSED")
++		return
++	}
++	self, err := os.Executable()
++	require.NoError(t, err)
++	cmd := exec.Command("unshare", "--mount", "--propagation", "private", self,
++		"-test.run=^TestC1V47RecoveryObserverRejectsFinalBindMount$")
++	cmd.Env = append(os.Environ(), "VIRKI_V47_CHILD=bind-mount")
++	output, err := cmd.CombinedOutput()
++	require.NoError(t, err, "isolated mount namespace and bind-mount regression must execute: %s", output)
++	require.Contains(t, string(output), "V47_FINAL_BIND_MOUNT_REFUSED",
++		"an unexecuted or skipped child is not a mount-boundary proof")
++}
