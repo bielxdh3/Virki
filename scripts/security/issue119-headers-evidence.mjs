@@ -79,6 +79,11 @@ function inspectScriptTag(tag) {
       if (value !== null && value.includes('&')) return invalid();
       type = value;
     }
+    // An omitted type does not always mean JavaScript: a nonempty HTML
+    // `language` attribute is used as a legacy type fallback. We cannot
+    // browser-decode arbitrary attribute values here, so refuse this syntax
+    // instead of treating an inert text/python block as a hydration receipt.
+    if (name === 'language' && value !== null && value.trim() !== '') return invalid();
   }
   if (type !== null && typeof type !== 'string') return invalid();
   const kind = (type ?? '').trim().toLowerCase();
@@ -190,7 +195,10 @@ function inspectHtmlDocument(body, mime) {
     if (end === body.length) return fail();
     const raw = body.slice(lt, end + 1);
     at = end + 1;
-    const match = /^<\s*(\/?)\s*([a-z][a-z0-9:-]*)\b/i.exec(raw);
+    // HTML5 never accepts whitespace after `<` or `</` as a tag opener.
+    // Normalizing `< style>` to `<style>` would incorrectly consume a real
+    // following script as raw text and hide a CSP nonce mismatch.
+    const match = /^<(\/?)([a-z][a-z0-9:-]*)\b/i.exec(raw);
     if (!match) return fail();
     const closing = match[1] === '/';
     const tag = match[2].toLowerCase();
@@ -200,7 +208,9 @@ function inspectHtmlDocument(body, mime) {
     // disables script execution. This bounded tokenizer does not reconcile
     // HTML meta CSP and header policies: reject any real http-equiv meta tag
     // (including encoded values) instead of silently ignoring its policy.
-    if (tag === 'meta' && !closing && /\shttp-equiv(?=\s|=|\/>|>)/i.test(raw)) return fail();
+    // Slash in the self-closing-start-tag state is reprocessed by HTML5 as
+    // an attribute boundary (`<meta/http-equiv=...>` is real http-equiv).
+    if (tag === 'meta' && !closing && /[\s/]http-equiv(?=\s|=|\/>|>)/i.test(raw)) return fail();
     // This bounded receipt does not implement SVG/MathML namespaces. In
     // particular SVG <title> is an HTML integration point; HTML <title>
     // raw-text semantics there would conceal executable child scripts.

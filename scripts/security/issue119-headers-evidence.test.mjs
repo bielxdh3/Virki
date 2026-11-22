@@ -91,6 +91,9 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script>' +
       '<math><mtext><script nonce="EVIL">bad()</script></mtext></math>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="text/javascript; charset=utf-8">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script language="python" nonce="SAFE">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script language="text&#47;javascript" nonce="SAFE">boot()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">safe()</script>< style><script nonce="EVIL">bad()</script></style>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="application/javascript; charset=utf-8">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="module; charset=utf-8">boot()</script>')),
     response(200, `${goodCSP}; sandbox`),
@@ -266,6 +269,8 @@ test('CSP meta policies cannot silently override an otherwise passing header non
     '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'">',
     '<meta HTTP-EQUIV=content-security-policy content="script-src \'nonce-EVIL\'">',
     '<meta http-equiv="Content-Security-Policy" content="script-src &#39;none&#39;">',
+    '<meta/http-equiv="Content-Security-Policy" content="script-src \'none\'">',
+    '<meta /http-equiv="Content-Security-Policy" content="script-src \'none\'">',
   ]) {
     assert.equal(classifyIssue119Response(base, response(200, goodCSP,
       htmlDoc('<script nonce="SAFE">boot()</script>', head))).result, 'fail', head);
@@ -278,6 +283,9 @@ test('CSP meta policies cannot silently override an otherwise passing header non
     htmlDoc('<script nonce="SAFE">boot()</script>',
       '<meta data-http-equiv="Content-Security-Policy" content="script-src \'none\'">'))).result,
   'pass', 'data-http-equiv is not a real meta policy');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script language="" nonce="SAFE">boot()</script>'))).result, 'pass',
+  'empty legacy language fallback is not an inert non-JavaScript MIME');
 });
 
 test('enforced CSP sandbox without allow-scripts prevents executable nonce receipt', () => {

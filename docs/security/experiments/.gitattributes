@@ -14,3 +14,4 @@ buildkit-v0.34.1-c1-v35-final-published-identity-dev-only.patch -text diff -whit
 buildkit-v0.34.1-c1-v36-root-owned-broker-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v37-peercred-scmrights-broker-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v38-recovery-inspector-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v39-durable-test-permit-dev-only.patch -text diff -whitespace
