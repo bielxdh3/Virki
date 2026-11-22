@@ -16,3 +16,4 @@ fac7bd7a03845a24f8f22de89b862bce1662b4c19b932cb57bb4fc430edfc7a0  docs/security/
 df73e0d4fcf75aba4db6a86ee05f354bfc1f023f08d13050e983190c61464250  docs/security/experiments/buildkit-v0.34.1-c1-v38-recovery-inspector-dev-only.patch
 c5741043a56ce70c48a2cfab8481924a0773dad925fa31d7d3df8ece5040ddc9  docs/security/experiments/buildkit-v0.34.1-c1-v39-durable-test-permit-dev-only.patch
 a20084bcced441d2604e11f8436979ee5db11df720f5d2cf344e01e4e5cadf46  docs/security/experiments/buildkit-v0.34.1-c1-v40-authenticated-rollback-fence-dev-only.patch
+a3b00cd447c0bc5b1628e7575997a72cbadc63a623fd76b0ada34120ef96242b  docs/security/experiments/buildkit-v0.34.1-c1-v41-peer-preflight-dev-only.patch

@@ -1,0 +1,114 @@
+diff --git a/session/filesync/sealed_publication_ledger_v39_linux.go b/session/filesync/sealed_publication_ledger_v39_linux.go
+index 824b8fa..50e93a2 100644
+--- a/session/filesync/sealed_publication_ledger_v39_linux.go
++++ b/session/filesync/sealed_publication_ledger_v39_linux.go
+@@ -40,6 +40,13 @@ func publishV39FromAuthorizedTestPeer(ledgerDir string, conn *net.UnixConn,
+ 	if conn == nil || expectedPID <= 1 || expectedUID == 0 || expectedGID == 0 {
+ 		return errors.New("C1 V39 requires a preaccepted peer and trusted nonroot identity")
+ 	}
++	// Preflight kernel identity without reading any attacker-controlled bytes or
++	// rights. Otherwise an untrusted accepted connection could permanently
++	// consume an authentic owner's one-time V15 permit (denial of service).
++	// V37 independently authenticates again while receiving the descriptor.
++	if err := v41AuthenticatePeerBeforeClaim(conn, expectedPID, expectedUID, expectedGID); err != nil {
++		return fmt.Errorf("C1 V41 refused untrusted peer before permit claim: %w", err)
++	}
+ 	if err := claimV39DurableTestOwnerPermit(ledgerDir, manifest, permit, trustedPub, minimumEpoch, maximumEpoch); err != nil {
+ 		return fmt.Errorf("C1 V39 refused publication before descriptor admission: %w", err)
+ 	}
+diff --git a/session/filesync/sealed_publication_ledger_v39_linux_test.go b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+index 44631c2..01557aa 100644
+--- a/session/filesync/sealed_publication_ledger_v39_linux_test.go
++++ b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+@@ -229,6 +229,16 @@ func TestC1V39DurableTestPermitAndAuthenticatedPublication(t *testing.T) {
+ 			dest, manifest, unauthorized, pub, 7, 8))
+ 		_, err := os.Lstat(dest)
+ 		require.ErrorIs(t, err, os.ErrNotExist)
++		// Kernel peer validation must precede consuming even a VALID permit.
++		// Rejection of a forged accepted connection cannot burn owner approval.
++		untrustedSocketPermit := sign("untrusted-peer", 7)
++		require.ErrorContains(t, publishV39FromAuthorizedTestPeer(dir, &net.UnixConn{},
++			42, uid, uid, filepath.Join(private, "peer-refused"), manifest,
++			untrustedSocketPermit, pub, 7, 8), "before permit claim")
++		require.NoError(t, claim(dir, untrustedSocketPermit),
++			"peer preflight must leave a valid signed permit unclaimed")
++		_, err = os.Lstat(filepath.Join(private, "peer-refused"))
++		require.ErrorIs(t, err, os.ErrNotExist)
+ 
+ 		self, err := os.Executable()
+ 		require.NoError(t, err)
+@@ -266,15 +276,23 @@ func TestC1V39DurableTestPermitAndAuthenticatedPublication(t *testing.T) {
+ 		require.NoError(t, err)
+ 		defer conn.Close()
+ 		permit := sign("published-once", 7)
++		// The child has already connected and sent a directory FD. A wrong
++		// supervisor-pinned PID must be rejected WITHOUT consuming this permit
++		// or reading the queued SCM_RIGHTS message. The same connection and
++		// permit must still allow the correct authenticated caller below.
++		require.ErrorContains(t, publishV39FromAuthorizedTestPeer(dir, conn,
++			cmd.Process.Pid+1, uid, uid, filepath.Join(private, "wrong-peer"),
++			manifest, permit, pub, 7, 8), "before permit claim")
++		_, err = os.Lstat(filepath.Join(private, "wrong-peer"))
++		require.ErrorIs(t, err, os.ErrNotExist)
+ 		require.NoError(t, publishV39FromAuthorizedTestPeer(dir, conn, cmd.Process.Pid,
+ 			uid, uid, dest, manifest, permit, pub, 7, 8))
+ 		require.NoError(t, cmd.Wait())
+ 		got, err := os.ReadFile(filepath.Join(dest, "app.js"))
+ 		require.NoError(t, err)
+ 		require.Equal(t, []byte("SAFE"), got)
+-		require.ErrorContains(t, publishV39FromAuthorizedTestPeer(dir, &net.UnixConn{},
+-			cmd.Process.Pid, uid, uid, filepath.Join(private, "replayed"),
+-			manifest, permit, pub, 7, 8), "replayed")
++		require.ErrorContains(t, claim(dir, permit), "replayed",
++			"a published permit stays consumed across new ledger opens")
+ 		_, err = os.Lstat(filepath.Join(private, "replayed"))
+ 		require.ErrorIs(t, err, os.ErrNotExist)
+ 	})
+diff --git a/session/filesync/sealed_publication_preflight_v41_linux.go b/session/filesync/sealed_publication_preflight_v41_linux.go
+new file mode 100644
+index 0000000..ca2d483
+--- /dev/null
++++ b/session/filesync/sealed_publication_preflight_v41_linux.go
+@@ -0,0 +1,42 @@
++//go:build linux
++
++package filesync
++
++import (
++	"errors"
++	"fmt"
++	"net"
++	"os"
++
++	"golang.org/x/sys/unix"
++)
++
++// v41AuthenticatePeerBeforeClaim is a DEV-only preflight on the already
++// accepted Unix socket. It must never receive application bytes or SCM_RIGHTS:
++// an unrelated caller cannot exhaust one-time signed permits merely by
++// presenting a socket with the wrong kernel identity. The V37 receiver still
++// verifies these kernel credentials both before AND after receiving a single
++// source FD. A matching SO_PEERCRED is not itself a C4 owner authorization.
++func v41AuthenticatePeerBeforeClaim(conn *net.UnixConn, expectedPID int,
++	expectedUID, expectedGID uint32) error {
++	if conn == nil || os.Getuid() != 0 || os.Geteuid() != 0 ||
++		expectedPID <= 1 || expectedUID == 0 || expectedGID == 0 {
++		return errors.New("C1 V41 requires trusted root broker and pinned nonroot peer identity")
++	}
++	raw, err := conn.SyscallConn()
++	if err != nil {
++		return fmt.Errorf("C1 V41 cannot inspect accepted Unix peer: %w", err)
++	}
++	var peer *unix.Ucred
++	var peerErr error
++	if err := raw.Control(func(fd uintptr) {
++		peer, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
++	}); err != nil {
++		return fmt.Errorf("C1 V41 peer credential control refused: %w", err)
++	}
++	if peerErr != nil || peer == nil || peer.Pid != int32(expectedPID) ||
++		peer.Uid != expectedUID || peer.Gid != expectedGID {
++		return fmt.Errorf("C1 V41 refused untrusted socket peer before durable permit claim: %w", peerErr)
++	}
++	return nil
++}
