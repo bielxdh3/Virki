@@ -1,5 +1,18 @@
 # Issue #119 — external acceptance evidence to collect after separate owner approval
 
+**Status update — 2026-11-22:** The visitor TLS remediation described in historical
+step 1 has **already been performed under separate owner authorization**.
+The Cloudflare minimum was raised to TLS 1.2 on 2026-11-21 and an independent
+read-only setting GET plus 12 version-specific OpenSSL handshakes confirmed
+TLS 1.0/1.1 refusal and TLS 1.2/1.3 acceptance on all three hosts (issue #119,
+receipt `#issuecomment-7069964883`). Do **not** repeat the configuration write.
+The unchanged `ssl=flexible` setting does not establish the private
+Tunnel-to-origin trust boundary. The 2026-11-22 read-only HTTP probe still
+returns FAIL for **both public 200 and 404**: legacy `unsafe-inline` script
+CSP, missing matching nonce, and exposed `X-Powered-By`. No production
+deployment, authenticated Access/OIDC check or origin transport attestation
+has occurred in PR #141; items 2–5 remain acceptance gates.
+
 **Status: NOT performed and NOT authorized by this PR.** The repository-owned application code has local/hosted CSP, OIDC, CSRF, session, logout, HTTP header and E2E coverage in `issue119-defensive-maintenance-20261120.md`. No Terraform/Cloudflare write, DNS write, account creation, production deployment or authenticated scan is part of this change. Never commit raw ZAP reports, Access tokens, passwords, cookies, client secrets, or issuer responses containing personal data.
 
 1. **Cloudflare visitor TLS.** Current read-only API settings: `min_tls_version=1.0`, SSL mode `flexible`. After a separately authorized compatibility impact review, change the minimum **to at least 1.2** by the authorized infrastructure owner. A different SSL mode cannot be prescribed safely without establishing the actual Cloudflare Tunnel/origin transport; do not assume `flexible` proves plaintext over Tunnel. Collect a Cloudflare settings GET readback and supply its JSON securely, without committing it, to `node scripts/security/issue119-cloudflare-settings.mjs --stdin`; the script is offline and prints a whitelisted assessment only. Collect separately the sanitized JSON from `node scripts/security/issue119-edge-evidence.mjs --live` in a compatible OpenSSL environment. For each of the three exact public hosts, reject TLSv1 and TLSv1.1 by verifiable **remote** version alert, and negotiate TLSv1.2 and TLSv1.3. Unavailable local ciphers, unsupported protocols and timeouts are INCONCLUSIVE, not PASS. Do not store account IDs, zone IDs or secrets in this repo.

@@ -175,16 +175,16 @@ function cspSandboxAllowsScripts(csp) {
 // wrong-nonce executable script. Until full HTML5 parsing is available,
 // refuse any extra attributes/ambiguous end-tag syntax rather than skipping
 // the actual boundary and claiming hydration passed.
-function rawTextCloseOffset(body, afterStartTag, name) {
+function rawTextCloseRange(body, afterStartTag, name) {
   const start = new RegExp(`</${name}(?=${ASCII_SPACE}|[/>])`, 'gi');
   start.lastIndex = afterStartTag;
   const match = start.exec(body);
-  if (!match) return -1;
+  if (!match) return null;
   const end = body.indexOf('>', start.lastIndex);
-  if (end < 0) return -1;
+  if (end < 0) return null;
   const token = body.slice(match.index, end + 1);
   const simpleEndTag = new RegExp(`^</${name}${ASCII_SPACE}*>$`, 'i');
-  return simpleEndTag.test(token) ? end + 1 : -1;
+  return simpleEndTag.test(token) ? { start: match.index, after: end + 1 } : null;
 }
 
 // Strict, small acceptance tokenizer: this is *not* a replacement for a
@@ -311,9 +311,9 @@ function inspectHtmlDocument(body, mime) {
     // start tags inside it: doing so could skip the real </noscript>, hide
     // a later executable script with the wrong nonce, and return false PASS.
     if (tag === 'noscript' && !closing) {
-      const after = rawTextCloseOffset(body, at, 'noscript');
-      if (after < 0) return fail();
-      at = after;
+      const close = rawTextCloseRange(body, at, 'noscript');
+      if (!close) return fail();
+      at = close.after;
       continue;
     }
     if (tag === 'noscript' && closing) return fail();
@@ -330,17 +330,18 @@ function inspectHtmlDocument(body, mime) {
     // inside such text must never satisfy the live hydration evidence gate.
     if (['script', 'style', 'title', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext'].includes(tag) && !closing) {
       if (tag === 'plaintext') return fail();
+      let inlineNonceCandidate = false;
       if (tag === 'script' && !inert.length) {
         if (phase !== 2 && phase !== 4) return fail();
         const script = inspectScriptTag(raw);
         if (!script.valid) return fail();
         if (script.executable) {
           nonces.push(script.nonce);
-          if (script.inline) inlineExecutableScripts++;
+          inlineNonceCandidate = script.inline;
         }
       }
-      const after = rawTextCloseOffset(body, at, tag);
-      if (after < 0) return fail();
+      const close = rawTextCloseRange(body, at, tag);
+      if (!close) return fail();
       if (tag === 'script') {
         // Script-data double escaping differs from ordinary raw-text: after
         // `<!--<script>` the first apparent `</script>` does NOT end the
@@ -348,12 +349,17 @@ function inspectHtmlDocument(body, mime) {
         // search would count a later fake nonce-bearing <script> as executable.
         // This bounded parser cannot model every script tokenizer state; reject
         // potential double-escape sequences instead of issuing false PASS.
-        const contentThroughClose = body.slice(at, after);
+        const contentThroughClose = body.slice(at, close.after);
         const escapedStart = contentThroughClose.indexOf('<!--');
         if (escapedStart >= 0 && /<script(?=[\t\n\f\r \x2f>])/i.test(
           contentThroughClose.slice(escapedStart + 4))) return fail();
+        // Correct CSP nonce on an empty/JS-whitespace-only inline tag is not
+        // evidence of bootstrap code; another nonempty inline tag must exist.
+        if (inlineNonceCandidate && body.slice(at, close.start).trim() !== '') {
+          inlineExecutableScripts++;
+        }
       }
-      at = after;
+      at = close.after;
       continue;
     }
     if (inert.length) continue;

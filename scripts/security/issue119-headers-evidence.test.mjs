@@ -260,6 +260,21 @@ test('external script tags never attest executable hydration without a real inli
   'an external wrong-nonce script must still be rejected even with inline evidence');
 });
 
+test('empty inline nonce tags cannot fabricate a positive executable bootstrap receipt', () => {
+  const target = ISSUE119_HEADER_TARGETS[0];
+  for (const empty of ['', ' ', String.fromCharCode(9, 10), String.fromCharCode(13, 10, 32, 32),
+    String.fromCharCode(0xa0), String.fromCharCode(0xfeff)]) {
+    for (const type of ['', ' type="module"']) {
+      const html = htmlDoc(`<script nonce="SAFE"${type}>${empty}</script>`);
+      assert.equal(classifyIssue119Response(target, response(200, goodCSP, html)).result,
+        'fail', `no inline JavaScript bytes execute in ${JSON.stringify(empty)}`);
+    }
+  }
+  assert.equal(classifyIssue119Response(target, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE"></script><script nonce="SAFE">boot()</script>'))).result,
+  'pass', 'an empty tag does not disqualify a separate actual inline bootstrap');
+});
+
 test('CSP3 nonceable rejects script attributes containing script/style/link start-token sequences', () => {
   const target = ISSUE119_HEADER_TARGETS[0];
   for (const suspicious of [
