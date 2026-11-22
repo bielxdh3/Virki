@@ -935,13 +935,58 @@ static bool v3_walk_path_follows(const v3_walk_state *walk, const char *path, si
   return false;
 }
 
+/* The Node C1 provenance parser uses a fatal UTF-8 decoder before accepting
+ * filenames. Mirror that grammar in C4, including overlong/surrogate/too-high
+ * scalar rejection; never allow a forged sealed stream to bypass the stricter
+ * producer-to-approver contract through arbitrary raw pathname octets. */
+static bool v3_walk_valid_utf8(const uint8_t *bytes, size_t length) {
+  size_t utf16_units = 0;
+  for (size_t i = 0; i < length;) {
+    const uint8_t lead = bytes[i];
+    if (lead < 0x80) {
+      if (++utf16_units > 512) return false;
+      i++;
+      continue;
+    }
+    size_t count;
+    uint8_t second_min = 0x80, second_max = 0xbf;
+    if (lead >= 0xc2 && lead <= 0xdf) count = 1;
+    else if (lead >= 0xe0 && lead <= 0xef) {
+      count = 2;
+      if (lead == 0xe0) second_min = 0xa0;
+      else if (lead == 0xed) second_max = 0x9f;
+    } else if (lead >= 0xf0 && lead <= 0xf4) {
+      count = 3;
+      if (lead == 0xf0) second_min = 0x90;
+      else if (lead == 0xf4) second_max = 0x8f;
+    } else return false;
+    if (count >= length - i || bytes[i + 1] < second_min || bytes[i + 1] > second_max)
+      return false;
+    for (size_t j = 2; j <= count; j++) {
+      if (bytes[i + j] < 0x80 || bytes[i + j] > 0xbf) return false;
+    }
+    /* Node validateRelPath caps JS UTF-16 string length at 512, not
+     * UTF-8 octet count. Supplementary code points occupy two units. */
+    utf16_units += count == 3 ? 2 : 1;
+    if (utf16_units > 512) return false;
+    i += count + 1;
+  }
+  return true;
+}
+
 static bool v3_walk_accept_path(v3_walk_state *walk, const char *path, size_t length, uint8_t kind) {
   if (!walk || !path || length == 0 || length >= sizeof(walk->previous) ||
-      path[0] == '/' || path[length - 1] == '/') return false;
+      path[0] == '/' || path[length - 1] == '/' ||
+      !v3_walk_valid_utf8((const uint8_t *)path, length)) return false;
   size_t segment_start = 0, parent_length = 0;
   for (size_t i = 0; i <= length; i++) {
     const char c = i == length ? '/' : path[i];
-    if (c == '\0' || c == '\\') return false;
+    const uint8_t octet = (uint8_t)c;
+    /* Match the upstream C1->C4 Node canonical path admission. Hash agreement
+     * alone must never let the native signer accept control characters or
+     * wildcard names rejected by the non-authorizing provenance contract. */
+    if (octet < 32 || octet == 127 || c == '\\' || c == '*' || c == '?' ||
+        c == '[' || c == ']') return false;
     if (c != '/') continue;
     const size_t segment_length = i - segment_start;
     if (segment_length == 0 ||

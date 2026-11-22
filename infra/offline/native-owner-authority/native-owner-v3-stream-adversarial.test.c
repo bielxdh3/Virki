@@ -80,10 +80,27 @@ int main(void) {
   static const stream_entry_fixture reversed[] = {{'F', "z", 0644, "z"}, {'F', "a", 0644, "a"}};
   static const stream_entry_fixture forged_traversal[] = {{'F', "../outside", 0644, "x"}};
   static const stream_entry_fixture repeated[] = {{'F', "same", 0644, "x"}, {'F', "same", 0644, "y"}};
+  /* Node's C1->C4 canonical context parser rejects wildcard/ASCII control
+   * names; C4 must not authorize the same hash-consistent divergent stream. */
+  static const stream_entry_fixture wildcard[] = {{'F', "payload[1]*.txt", 0644, "x"}};
+  static const stream_entry_fixture control[] = {{'F', "audit\nrecord", 0644, "x"}};
+  static const stream_entry_fixture valid_utf8[] = {{'F', "dados-\xc3\xa1.txt", 0644, "x"}};
+  static const stream_entry_fixture invalid_utf8[] = {{'F', "payload-\xff", 0644, "x"}};
+  static const stream_entry_fixture invalid_surrogate[] = {{'F', "payload-\xed\xa0\x80", 0644, "x"}};
   if (fixture_native_accepts(missing_parent, 1)) { puts("FAIL: missing parent accepted"); return 3; }
   if (fixture_native_accepts(reversed, 2)) { puts("FAIL: unsorted entries accepted"); return 4; }
   if (fixture_native_accepts(forged_traversal, 1)) { puts("FAIL: traversal path accepted"); return 5; }
   if (fixture_native_accepts(repeated, 2)) { puts("FAIL: duplicate path accepted"); return 6; }
+  if (fixture_native_accepts(wildcard, 1)) { puts("FAIL: wildcard name accepted"); return 7; }
+  if (fixture_native_accepts(control, 1)) { puts("FAIL: control-character name accepted"); return 8; }
+  if (!fixture_native_accepts(valid_utf8, 1)) { puts("FAIL: valid UTF-8 name rejected"); return 9; }
+  if (fixture_native_accepts(invalid_utf8, 1)) { puts("FAIL: invalid UTF-8 name accepted"); return 10; }
+  if (fixture_native_accepts(invalid_surrogate, 1)) { puts("FAIL: UTF-8 encoded surrogate accepted"); return 11; }
+  char too_long[514];
+  memset(too_long, 'x', sizeof(too_long) - 1);
+  too_long[sizeof(too_long) - 1] = '\0';
+  const stream_entry_fixture long_path[] = {{'F', too_long, 0644, "x"}};
+  if (fixture_native_accepts(long_path, 1)) { puts("FAIL: path over 512 UTF-16 code units accepted"); return 12; }
   puts("C4_NATIVE_CANONICAL_WALK_STREAM_PASS");
   return 0;
 }

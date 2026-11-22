@@ -96,6 +96,18 @@ bytes without a second trusted source or a supplied hash shortcut. This is a
 real defensive parser correction, **not** a signed-owner approval, independent
 anti-root rollback guarantee or operationally provisioned C1→C4 publication.
 
+**Native C4 path-parity follow-up (after `4a7dff6`, DEV only):** The native
+stream parser was still more permissive than the Node C1 provenance verifier:
+it accepted a self-consistent sealed stream containing filenames with glob
+metacharacters, ASCII control characters, malformed UTF-8 sequences (including
+surrogate encodings), or paths beyond the 512 UTF-16-unit canonical admission
+limit. Independent native C regressions reproduced these extra admissions
+before the correction and passed afterward; a valid non-ASCII UTF-8 filename
+remains accepted. The C4 validator now enforces the same fail-closed path
+grammar with a bounded UTF-8 decoder. This improves native/Node consistency;
+it does **not** create signing authority, key custody, protected publication,
+or trusted monotonic host state, and no live C1/C4 release was activated.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)
