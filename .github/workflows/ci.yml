@@ -156,6 +156,7 @@ jobs:
             7952e6dc2599b447fa97b86dda77e27416de8c7e
             4e8440c77a86e009685717e86194bb4e6a83ff81
             5de9120c20a35c8b0dee8a85e47973471759c315
+            d63d46e43eedca0203cf555611b27c3cf03c49d0
           )
           i=0
           while read -r digest patch; do
