@@ -240,6 +240,26 @@ test('actual nonce attributes and quoted decimal HSTS are recognized without low
     htmlDoc('<script data-nonce="SAFE" nonce="SAFE">boot()</script>'))).result, 'pass');
 });
 
+test('external script tags never attest executable hydration without a real inline nonce', () => {
+  const target = ISSUE119_HEADER_TARGETS[0];
+  for (const src of ['', ' ', '\t', '/unavailable.js', 'https://example.invalid/missing.js']) {
+    const html = htmlDoc(`<script nonce="SAFE" src="${src}">window.__hit=true</script>`);
+    assert.equal(classifyIssue119Response(target, response(200, goodCSP, html)).result,
+      'fail', `external script src=${JSON.stringify(src)} must not attest execution`);
+  }
+  assert.equal(classifyIssue119Response(target, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE" src>window.__hit=true</script>'))).result, 'fail');
+  assert.equal(classifyIssue119Response(target, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE">window.__hit=true</script>'))).result, 'pass',
+  'genuine nonce-bound inline script remains valid');
+  assert.equal(classifyIssue119Response(target, response(200, goodCSP, goodHTML)).result, 'pass',
+    'real Next-like external assets and inline bootstrap remain valid together');
+  assert.equal(classifyIssue119Response(target, response(200, goodCSP,
+    htmlDoc('<script nonce="EVIL" src="/_next/bad.js"></script>' +
+      '<script nonce="SAFE">window.__hit=true</script>'))).result, 'fail',
+  'an external wrong-nonce script must still be rejected even with inline evidence');
+});
+
 test('CSP3 nonceable rejects script attributes containing script/style/link start-token sequences', () => {
   const target = ISSUE119_HEADER_TARGETS[0];
   for (const suspicious of [

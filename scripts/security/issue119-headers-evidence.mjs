@@ -38,12 +38,13 @@ function directiveSources(csp, directiveName) {
 }
 
 function inspectScriptTag(tag) {
-  const invalid = () => ({ valid: false, executable: false, nonce: null });
+  const invalid = () => ({ valid: false, executable: false, inline: false, nonce: null });
   const opening = /^<script(?=[\t\n\f\r />])/i.exec(tag);
   if (!opening) return invalid();
   let pos = opening[0].length;
   let nonce = null;
   let type = null;
+  let external = false;
   const seen = new Set();
   while (pos < tag.length) {
     while (/[\t\n\f\r ]/.test(tag[pos] ?? '')) pos++;
@@ -91,6 +92,14 @@ function inspectScriptTag(tag) {
     // malformed attribute values instead of comparing raw HTML source to a
     // browser-decoded value and accidentally approving a broken handshake.
     if (name === 'nonce') nonce = value && /^[A-Za-z0-9+/_-]+={0,2}$/.test(value) ? value : null;
+    // A nonce on an external script permits its fetch under CSP but does NOT
+    // attest that the resource exists, loads or executes. In particular an
+    // empty/whitespace src suppresses the inline body in Chromium. Never let
+    // an external script be the only positive executable hydration receipt.
+    if (name === 'src') {
+      if (value === null || asciiTrim(value) === '') return invalid();
+      external = true;
+    }
     // HTML attribute character references are decoded by the browser, so
     // `text&#47;javascript` is executable despite looking unlike a raw MIME
     // essence. This deliberately bounded scanner cannot fully decode HTML5
@@ -123,7 +132,7 @@ function inspectScriptTag(tag) {
   const moduleScript = rawType.toLowerCase() === 'module';
   const classicScript = rawType === '' || JAVASCRIPT_MIME_ESSENCES.has(mimeEssence);
   const executable = moduleScript || (classicScript && !seen.has('nomodule'));
-  return { valid: true, executable, nonce };
+  return { valid: true, executable, inline: !external, nonce };
 }
 
 function hasValidHstsAge(value) {
@@ -197,6 +206,7 @@ function inspectHtmlDocument(body, mime) {
   let phase = 0; // html open, head open/closed, body open/closed, html closed
   const inert = [];
   const nonces = [];
+  let inlineExecutableScripts = 0;
   while (at < body.length) {
     const lt = body.indexOf('<', at);
     if (lt < 0) break;
@@ -324,7 +334,10 @@ function inspectHtmlDocument(body, mime) {
         if (phase !== 2 && phase !== 4) return fail();
         const script = inspectScriptTag(raw);
         if (!script.valid) return fail();
-        if (script.executable) nonces.push(script.nonce);
+        if (script.executable) {
+          nonces.push(script.nonce);
+          if (script.inline) inlineExecutableScripts++;
+        }
       }
       const after = rawTextCloseOffset(body, at, tag);
       if (after < 0) return fail();
@@ -354,7 +367,7 @@ function inspectHtmlDocument(body, mime) {
     if (tag === 'script' && closing) return fail();
   }
   return phase === 6 && inert.length === 0 && asciiTrim(body.slice(at)) === ''
-    ? { valid: true, nonces } : fail();
+    ? { valid: true, nonces, inlineExecutableScripts } : fail();
 }
 
 export function classifyIssue119Response(target, response) {
@@ -404,7 +417,7 @@ export function classifyIssue119Response(target, response) {
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
     (!element.present || elementSources.some((source) =>
       /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
-    nonceSources.length === 1 && nonceMatches;
+    nonceSources.length === 1 && nonceMatches && document.inlineExecutableScripts > 0;
 
   return { ...common, csp: csp ? 'present' : 'missing',
     htmlDocument: htmlDocument ? 'confirmed' : 'not-confirmed',
