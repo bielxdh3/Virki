@@ -307,6 +307,22 @@ test('HTML script type is a MIME essence, not Content-Type with parameters', () 
   }
 });
 
+test('script type distinguishes truly empty, module exactness and MIME whitespace', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  // These are nonempty HTML type strings. Neither is a JavaScript MIME
+  // essence, and the second is not the exact module keyword in HTML5.
+  for (const inertType of [' ', '\t', '\n\f ', ' module ', '\tMoDuLe', 'module\n']) {
+    const receipt = classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`<script nonce="SAFE" type="${inertType}">boot()</script>`)));
+    assert.equal(receipt.result, 'fail', `non-executable type must never attest hydration: ${JSON.stringify(inertType)}`);
+  }
+  for (const executableType of ['', 'module', 'MoDuLe', 'text/javascript', ' text/javascript ', '\tapplication/javascript\n']) {
+    const receipt = classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`<script nonce="SAFE" type="${executableType}">boot()</script>`)));
+    assert.equal(receipt.result, 'pass', `valid classic/module type stays executable: ${JSON.stringify(executableType)}`);
+  }
+});
+
 test('legacy WHATWG JavaScript MIME essences cannot hide wrong-nonce executable scripts', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   for (const essence of [

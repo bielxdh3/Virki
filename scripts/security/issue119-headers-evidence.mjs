@@ -98,15 +98,20 @@ function inspectScriptTag(tag) {
     if (name === 'language' && value !== null && value !== '') return invalid();
   }
   if (type !== null && typeof type !== 'string') return invalid();
-  const kind = asciiTrim(type ?? '').toLowerCase();
+  const rawType = type ?? '';
+  const mimeEssence = asciiTrim(rawType).toLowerCase();
   // HTML script data blocks (JSON, LD+JSON, importmaps, speculation rules or
   // unknown MIME types) do not execute. Likewise modern module-capable
   // browsers skip classic scripts with the exact boolean `nomodule` HTML
   // attribute, regardless of whether it has an assigned value. Only a real
   // executable classic/module script may establish a nonce-bearing receipt.
   // Do NOT mistake data-nomodule, x-nomodule or no-module for this attribute.
-  const moduleScript = kind === 'module';
-  const classicScript = kind === '' || JAVASCRIPT_MIME_ESSENCES.has(kind);
+  // HTML script preparation distinguishes an actually empty attribute from
+  // whitespace-only text. The `module` keyword is exact (ASCII case-insensitive)
+  // without trimming. Only JavaScript MIME essences can use surrounding ASCII
+  // whitespace normalization; otherwise inert types could attest fake hydration.
+  const moduleScript = rawType.toLowerCase() === 'module';
+  const classicScript = rawType === '' || JAVASCRIPT_MIME_ESSENCES.has(mimeEssence);
   const executable = moduleScript || (classicScript && !seen.has('nomodule'));
   return { valid: true, executable, nonce };
 }
