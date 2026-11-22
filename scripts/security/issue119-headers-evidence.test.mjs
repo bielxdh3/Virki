@@ -158,6 +158,21 @@ test('two independent CSP headers are not mistaken for one passing hydration pol
   assert.equal(result.cspPolicy, 'multiple-or-missing');
 });
 
+test('public CSP evidence cannot silently accept inline-style bypass directives', () => {
+  const target = ISSUE119_HEADER_TARGETS[0];
+  for (const directive of [
+    "style-src 'self' 'unsafe-inline'",
+    "style-src-elem 'unsafe-inline'",
+    "style-src-attr 'unsafe-inline'",
+  ]) {
+    const result = classifyIssue119Response(target, response(200, `${goodCSP}; ${directive}`));
+    assert.equal(result.result, 'fail', `public 200/404 acceptance must reject ${directive}`);
+  }
+  assert.equal(classifyIssue119Response(target, response(200,
+    goodCSP.replace("default-src 'self'", "default-src 'self' 'unsafe-inline'"))).result, 'fail',
+  'default-src also permits inline styles when no more specific style directive exists');
+});
+
 test('quoted attribute values may contain > and fake scripts without hiding real nonce evidence', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   const valid = htmlDoc('<div data-note="> <script nonce=EVIL>fake</script>">safe</div>' +

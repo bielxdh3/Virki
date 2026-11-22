@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import PublicLandingPage from "./page";
+import PublicNotFoundPage from "./not-found";
 import { buildPublicContentSecurityPolicy } from "../public-csp";
 
 test("public landing omits the portal link until an explicit URL is configured", () => {
@@ -41,13 +42,24 @@ test("public landing rejects unsafe portal URLs", () => {
 test("public site CSP authorizes its framework scripts with a nonce and retains the existing restrictions", () => {
   const production = buildPublicContentSecurityPolicy("production", "testNonce123");
   assert.equal(production.split("; ").find((directive) => directive.startsWith("script-src ")), "script-src 'self' 'nonce-testNonce123'");
-  for (const directive of ["default-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data:", "font-src 'self'", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'", "upgrade-insecure-requests"]) {
+  for (const directive of ["default-src 'self'", "style-src 'self'", "img-src 'self' data:", "font-src 'self'", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'", "upgrade-insecure-requests"]) {
     assert.ok(production.split("; ").includes(directive), directive);
   }
   assert.doesNotMatch(production, /unsafe-eval/u);
   const development = buildPublicContentSecurityPolicy("development", "testNonce123");
   assert.equal(development.split("; ").find((directive) => directive.startsWith("script-src ")), "script-src 'self' 'nonce-testNonce123' 'unsafe-eval'");
   assert.doesNotMatch(development, /upgrade-insecure-requests/u);
+});
+
+test("production public CSP cannot authorize arbitrary inline styles on the 404 page", () => {
+  const policy = buildPublicContentSecurityPolicy("production", "testNonce123");
+  assert.ok(policy.split("; ").includes("style-src 'self'"));
+  assert.doesNotMatch(policy, /'unsafe-inline'/u);
+  const html = renderToStaticMarkup(createElement(PublicNotFoundPage));
+  assert.match(html, /404/u);
+  assert.match(html, /Voltar ao início/u);
+  assert.doesNotMatch(html, /\sstyle=/u);
+  assert.doesNotMatch(html, /<style\b/u);
 });
 
 test("robots safely falls back for empty, malformed or non-origin public URL configuration", () => {

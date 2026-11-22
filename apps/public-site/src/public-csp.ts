@@ -2,8 +2,9 @@ export function buildPublicContentSecurityPolicy(nodeEnv: string | undefined, no
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'${nodeEnv === "development" ? " 'unsafe-eval'" : ""}`,
-    // The framework's default not-found document still uses inline styles.
-    "style-src 'self' 'unsafe-inline'",
+    // Custom not-found page uses the same external stylesheet as the landing
+    // page. No framework fallback inline styles need an unsafe-inline escape.
+    "style-src 'self'",
     "img-src 'self' data:",
     "font-src 'self'",
     "connect-src 'self'",

@@ -406,6 +406,14 @@ export function classifyIssue119Response(target, response) {
   const script = directiveSources(csp, 'script-src');
   const element = directiveSources(csp, 'script-src-elem');
   const attribute = directiveSources(csp, 'script-src-attr');
+  // The public site has an external stylesheet and a custom 404. Neither
+  // response needs inline CSS. Refuse any style policy that reintroduces the
+  // inline-style escape hatch even when script nonces are correct.
+  const style = directiveSources(csp, 'style-src');
+  const inlineStyleAllowed = hasUnsafeInline(style.sources) ||
+    ['style-src-elem', 'style-src-attr'].some(
+      (name) => hasUnsafeInline(directiveSources(csp, name).sources)) ||
+    (!style.present && hasUnsafeInline(directiveSources(csp, 'default-src').sources));
   const sources = script.sources;
   const elementSources = element.sources;
   const attributeSources = attribute.sources;
@@ -421,6 +429,7 @@ export function classifyIssue119Response(target, response) {
   const accepted = response.status === target.expected && htmlDocument &&
     !hasPoweredBy && hstsPresent && singleCsp && cspSandboxAllowsScripts(csp) &&
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
+    !inlineStyleAllowed &&
     (!element.present || elementSources.some((source) =>
       /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
     nonceSources.length === 1 && nonceMatches && document.inlineExecutableScripts > 0;
@@ -430,6 +439,7 @@ export function classifyIssue119Response(target, response) {
     cspPolicy: singleCsp ? 'single' : 'multiple-or-missing',
     scriptNonce: nonceMatches ? 'matched' : 'missing-or-mismatched',
     unsafeInlineScript: hasUnsafeInline(sources) || subdirectiveUnsafe,
+    unsafeInlineStyle: inlineStyleAllowed,
     result: accepted ? 'pass' : 'fail' };
 }
 
