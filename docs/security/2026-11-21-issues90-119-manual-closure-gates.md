@@ -56,6 +56,8 @@ Offline reconstruction: `bash scripts/security/issue90-replay-index.sh <pinned-b
 
 **V44 incremental boundary:** the replay index now covers **22 immutable patches (V23–V44)**. New privileged and ordinary Go regressions explicitly prove that Ed25519 signatures made for C4 V3 owner-approval or candidate-receipt domains cannot be substituted for synthetic V15 owner permits, cannot alter/burn the V40 trusted claim history, and do not prevent a later genuine V15 test permit from being accepted exactly once. This is a DEV-only *negative separation test*, not real C4 release wiring or monotonic independent authority. See the V44 experiment document.
 
+**V45 test-infrastructure refinement:** a pre-existing fake V15 protobuf stream copied generated message state by value, leading Go vet to report `copylocks` and prior invocations to disable that analyzer. V45 uses protobuf-aware reset/merge semantics in the synthetic receiver fixture, preserving packet behavior. The WSL full filesync `-race` suite and **unrestricted Go vet** passed, and hosted CI now enforces unrestricted vet. Immutable patch replay is **23/23 (V23–V45)**. No production functionality or release authority was activated.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)

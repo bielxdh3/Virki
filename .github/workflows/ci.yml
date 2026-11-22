@@ -153,6 +153,7 @@ jobs:
             b6231f822efcd8f0be7956c93e189a30418c51b4
             5c732ac1f0873141eacfc88cc2f222f543fd4d6d
             a3e5add39cd2ac188314ba4b79294a391cc7fc4c
+            7952e6dc2599b447fa97b86dda77e27416de8c7e
           )
           i=0
           while read -r digest patch; do
@@ -193,7 +194,7 @@ jobs:
             -run '^TestC1V(24IndependentReceiverProcess|28AdversarialMultiProcessCustodyAndSwapRace|29SupervisorAncestorRejectsWritableRootPath|30RootSupervisorExecutableCustody|31PrivilegedCrossUIDLaunchRequiresTrustedHelperWithoutFlag|36RootBrokerCopiesIntoIndependentPublicationAuthority|37AuthenticatedUnixRightsHandoff|38RootBrokerAmbiguousFsyncRequiresOwnerReauthorization|39DurableTestPermitAndAuthenticatedPublication|40AuthenticatedLedgerDetectsValidHexTamperAndRollback|44C4SignaturesCannotAuthorizeV15TestPermit|44V40RefusesC4DomainWithoutBurningClaim)$' \
             | tee "$RUNNER_TEMP/issue90-privileged-fixture.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-privileged-fixture.log"
-          "$toolchain/go/bin/go" vet -mod=vendor -copylocks=false ./session/filesync
+          "$toolchain/go/bin/go" vet -mod=vendor ./session/filesync
 
       - name: Production control tests
         run: npm run test:production-revision

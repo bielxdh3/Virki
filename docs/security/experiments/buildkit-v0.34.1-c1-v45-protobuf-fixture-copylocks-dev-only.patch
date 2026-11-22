@@ -1,0 +1,26 @@
+diff --git a/session/filesync/sealed_guard_v15_test.go b/session/filesync/sealed_guard_v15_test.go
+index 3557f29..e10e9a5 100644
+--- a/session/filesync/sealed_guard_v15_test.go
++++ b/session/filesync/sealed_guard_v15_test.go
+@@ -9,6 +9,7 @@ import (
+ 	"github.com/stretchr/testify/require"
+ 	"github.com/tonistiigi/fsutil/types"
+ 	"google.golang.org/grpc"
++	"google.golang.org/protobuf/proto"
+ )
+ 
+ type v15PacketFixtureStream struct {
+@@ -22,7 +23,12 @@ func (f *v15PacketFixtureStream) RecvMsg(dst any) error {
+ 	}
+ 	p := f.packets[0]
+ 	f.packets = f.packets[1:]
+-	*dst.(*types.Packet) = *p
++	// Packet embeds protobuf message state containing synchronization fields.
++	// Never copy its struct by value; keep the fixture equivalent to a wire
++	// receive without copying internal locks or aliasing the source packet.
++	target := dst.(*types.Packet)
++	proto.Reset(target)
++	proto.Merge(target, p)
+ 	return nil
+ }
+ 
