@@ -30,24 +30,29 @@ const LINUX_NATIVE_SKIP = process.platform !== "linux"
     ? "Non-root Linux user required for native C4 daemon integration test"
     : false);
 
-function syntheticCanonicalContext(name, contents) {
+function syntheticCanonicalContext(name, contents, entries = [
+  { kind: "F", path: "payload.txt", mode: 0o644, data: contents },
+]) {
   const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
   const sized = (b) => Buffer.concat([u64(b.length), b]);
-  const pathBytes = Buffer.from("payload.txt", "utf8");
-  const fileBytes = Buffer.from(contents, "utf8");
   const header = Buffer.concat([
     Buffer.from("virki-context-stream-v1\0", "utf8"),
     sized(Buffer.from(name, "utf8")),
   ]);
-  const entry = Buffer.concat([
-    Buffer.from("F"), sized(pathBytes), u64(0o644), u64(fileBytes.length), fileBytes,
-  ]);
-  const tree = Buffer.concat([
-    Buffer.from("buildkit-worker-local-context-v2\0", "utf8"),
-    Buffer.from("F"), sized(pathBytes), u64(0o644), u64(fileBytes.length),
-    crypto.createHash("sha256").update(fileBytes).digest(),
-  ]);
-  return { buffer: Buffer.concat([header, entry]), treeDigest: `sha256:${sha256Hex(tree)}` };
+  const stream = [header];
+  const tree = [Buffer.from("buildkit-worker-local-context-v2\0", "utf8")];
+  for (const item of entries) {
+    const common = [Buffer.from(item.kind), sized(Buffer.from(item.path, "utf8")), u64(item.mode)];
+    stream.push(...common);
+    tree.push(...common);
+    if (item.kind !== "D") {
+      const bytes = Buffer.from(item.data ?? "", "utf8");
+      const size = u64(bytes.length);
+      stream.push(size, bytes);
+      tree.push(size, item.kind === "F" ? crypto.createHash("sha256").update(bytes).digest() : bytes);
+    }
+  }
+  return { buffer: Buffer.concat(stream), treeDigest: `sha256:${sha256Hex(Buffer.concat(tree))}`, entryCount: entries.length };
 }
 
 function buildSyntheticFixture(tmpDir, role = "runtime") {
@@ -92,7 +97,7 @@ function buildSyntheticFixture(tmpDir, role = "runtime") {
       treeDigest: canonicalContexts[name].treeDigest,
       streamDigest: `sha256:${sha256Hex(buf)}`,
       streamLength: buf.length,
-      entryCount: 1,
+      entryCount: canonicalContexts[name].entryCount,
     })),
   };
 
@@ -218,6 +223,40 @@ test("C1->C4 provenance recomputes the tree from stream bytes instead of trustin
   extra.contract.contexts[0].streamDigest = `sha256:${sha256Hex(extra.contextBuffers.source)}`;
   assert.throws(() => verifyBuildInputProvenance(extra.contract, extra.contextBuffers),
     /canonical context|entryCount mismatch/u, "trailing malformed entry bytes are never ignored");
+});
+
+test("C1->C4 accepts only Go WalkDir canonical stream traversal, including real parent directories", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-traversal-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const validEntries = [
+    { kind: "D", path: "a", mode: 0o755 },
+    { kind: "F", path: "a/x", mode: 0o644, data: "x" },
+    { kind: "F", path: "a-b", mode: 0o644, data: "y" },
+    { kind: "L", path: "z-link", mode: 0o777, data: "a/x" },
+  ];
+  const verify = (entries) => {
+    const fx = buildSyntheticFixture(tmpDir);
+    const item = syntheticCanonicalContext("source", "", entries);
+    fx.contextBuffers.source = item.buffer;
+    fx.contract.contexts[0].streamLength = item.buffer.length;
+    fx.contract.contexts[0].streamDigest = `sha256:${sha256Hex(item.buffer)}`;
+    fx.contract.contexts[0].treeDigest = item.treeDigest;
+    fx.contract.contexts[0].entryCount = item.entryCount;
+    return verifyBuildInputProvenance(fx.contract, fx.contextBuffers);
+  };
+  verify(validEntries);
+  for (const invalidEntries of [
+    [{ kind: "F", path: "missing-parent/file", mode: 0o644, data: "x" }],
+    [validEntries[2], validEntries[0], validEntries[1], validEntries[3]],
+    [{ kind: "F", path: "a", mode: 0o644, data: "x" },
+      { kind: "F", path: "a/x", mode: 0o644, data: "y" }],
+    [{ kind: "D", path: "a", mode: 0o755 },
+      { kind: "F", path: "a/z", mode: 0o644, data: "z" },
+      { kind: "F", path: "a/b", mode: 0o644, data: "b" }],
+  ]) {
+    assert.throws(() => verify(invalidEntries), /canonical context .* (?:parent|traversal) invalid/u,
+      "self-consistent digest cannot make a structurally impossible BuildKit WalkDir stream canonical");
+  }
 });
 
 test("C1->C4 state serializes independent writers and retains its Linux lock inode", { skip: process.platform !== "linux" }, async (t) => {

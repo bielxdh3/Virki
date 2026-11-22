@@ -30,11 +30,35 @@ const ASCII_SPACE = '[\\t\\n\\f\\r ]';
 const asciiTrim = (value) => value.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
 const asciiSpaces = /[\t\n\f\r ]+/;
 
-function directiveSources(csp, directiveName) {
-  const expression = new RegExp(`^${directiveName}(?:${ASCII_SPACE}|$)`, 'i');
-  const directive = csp.split(';').map(asciiTrim).find((item) => expression.test(item));
-  return { present: directive !== undefined,
-    sources: directive === undefined ? [] : directive.split(asciiSpaces).slice(1) };
+function inspectCspDirectives(csp) {
+  const directives = new Map();
+  let duplicate = false;
+  let malformed = false;
+  for (const component of csp.split(';')) {
+    const raw = asciiTrim(component);
+    if (!raw) continue;
+    const [rawName, ...sources] = raw.split(asciiSpaces);
+    // CSP directive names are ASCII case-insensitive; one is enough to
+    // define the effective policy. Browsers ignore *later* duplicates.
+    // Even identical duplicates are ambiguous for our strict security
+    // receipt, and must not silently pass (including unknown directives).
+    if (!/^[a-z][a-z0-9-]*$/i.test(rawName)) {
+      malformed = true;
+      continue;
+    }
+    const name = rawName.toLowerCase();
+    if (directives.has(name)) {
+      duplicate = true;
+      continue;
+    }
+    directives.set(name, sources);
+  }
+  return { directives, duplicate, malformed };
+}
+
+function directiveSources(policy, directiveName) {
+  return { present: policy.directives.has(directiveName),
+    sources: policy.directives.get(directiveName) ?? [] };
 }
 
 function inspectScriptTag(tag) {
@@ -155,18 +179,17 @@ function hasUnsafeInline(sources) {
   return sources.some((source) => source.toLowerCase() === "'unsafe-inline'");
 }
 
-// Enforced CSP sandbox can disable all script execution, independently of
-// script-src nonces. Reject missing allow-scripts, duplicated/ambiguous
-// sandbox directives and case variants that fail to grant script execution.
-// This conservatively tests executability; it does NOT prove browser hydration
-// or full origin/cookie/session behavior of a sandboxed document.
+// Enforced CSP sandbox can disable script execution OR silently assign the
+// document an opaque origin even when nonce-bearing scripts execute. This
+// receipt checks same-origin CSS/hydration, so require both allow-scripts and
+// allow-same-origin if sandbox is present. This does not attest a live session.
 function cspSandboxAllowsScripts(csp) {
   const sandbox = csp.split(';').map(asciiTrim)
     .filter((part) => /^sandbox(?:[\t\n\f\r ]|$)/i.test(part));
   if (sandbox.length === 0) return true;
   if (sandbox.length !== 1) return false;
-  return sandbox[0].split(asciiSpaces).slice(1)
-    .some((token) => token.toLowerCase() === 'allow-scripts');
+  const flags = new Set(sandbox[0].split(asciiSpaces).slice(1).map((token) => token.toLowerCase()));
+  return flags.has('allow-scripts') && flags.has('allow-same-origin');
 }
 
 // Return the FIRST appropriate raw-text end-tag candidate, or reject the
@@ -470,7 +493,8 @@ export function classifyIssue119Response(target, response) {
   // only the first could falsely approve a 200/404 page whose second policy
   // blocks its scripts. Until we evaluate each policy independently, refuse
   // any comma-separated/ambiguous policy list rather than claiming hydration.
-  const singleCsp = csp !== '' && !csp.includes(',');
+  const policy = inspectCspDirectives(csp);
+  const singleCsp = csp !== '' && !csp.includes(',') && !policy.duplicate && !policy.malformed;
   const hsts = headers.get('strict-transport-security') ?? '';
   const hasPoweredBy = headers.has('x-powered-by');
   const isAccessRedirect = target.surface === 'access-protected' && response.status === 302;
@@ -488,16 +512,16 @@ export function classifyIssue119Response(target, response) {
       note: 'Redirect response does not prove Portal origin, authenticated headers or recovery' };
   }
 
-  const script = directiveSources(csp, 'script-src');
-  const element = directiveSources(csp, 'script-src-elem');
-  const attribute = directiveSources(csp, 'script-src-attr');
+  const script = directiveSources(policy, 'script-src');
+  const element = directiveSources(policy, 'script-src-elem');
+  const attribute = directiveSources(policy, 'script-src-attr');
   // The public site has an external stylesheet and a custom 404. Neither
   // response needs inline CSS. Refuse any style policy that reintroduces the
   // inline-style escape hatch even when script nonces are correct.
-  const style = directiveSources(csp, 'style-src');
-  const styleElement = directiveSources(csp, 'style-src-elem');
-  const styleAttribute = directiveSources(csp, 'style-src-attr');
-  const defaultSources = directiveSources(csp, 'default-src');
+  const style = directiveSources(policy, 'style-src');
+  const styleElement = directiveSources(policy, 'style-src-elem');
+  const styleAttribute = directiveSources(policy, 'style-src-attr');
+  const defaultSources = directiveSources(policy, 'default-src');
   const inlineStyleAllowed = hasUnsafeInline(style.sources) ||
     hasUnsafeInline(styleElement.sources) || hasUnsafeInline(styleAttribute.sources) ||
     (!style.present && hasUnsafeInline(defaultSources.sources));
@@ -556,7 +580,7 @@ export function classifyIssue119Response(target, response) {
 
   return { ...common, csp: csp ? 'present' : 'missing',
     htmlDocument: htmlDocument ? 'confirmed' : 'not-confirmed',
-    cspPolicy: singleCsp ? 'single' : 'multiple-or-missing',
+    cspPolicy: singleCsp ? 'single' : policy.duplicate ? 'duplicate-or-multiple-or-missing' : 'multiple-or-missing',
     scriptNonce: nonceMatches ? 'matched' : 'missing-or-mismatched',
     unsafeInlineScript: hasUnsafeInline(sources) || subdirectiveUnsafe,
     unsafeInlineStyle: inlineStyleAllowed,

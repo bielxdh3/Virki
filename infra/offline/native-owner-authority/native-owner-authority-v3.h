@@ -902,8 +902,75 @@ static bool v3_stream_hash_bytes(int fd, uint64_t length, uint64_t *offset,
   return true;
 }
 
+/* A stream/tree pair can be internally hash-consistent without representing
+ * any directory walk BuildKit could have performed. Verify path grammar,
+ * witnessed parent directories and the Go filepath.WalkDir depth-first,
+ * byte-sorted basename order while consuming only bounded stack memory.
+ * A malformed stream must never become C4's canonical provenance evidence. */
+typedef struct {
+  char previous[1024];
+  size_t previous_len;
+  bool previous_directory;
+  char ancestor_path[1024];
+  uint16_t ancestor_lengths[1024];
+  size_t depth;
+} v3_walk_state;
+
+static bool v3_walk_path_follows(const v3_walk_state *walk, const char *path, size_t length) {
+  size_t previous_at = 0, current_at = 0;
+  while (previous_at < walk->previous_len && current_at < length) {
+    const size_t previous_start = previous_at, current_start = current_at;
+    while (previous_at < walk->previous_len && walk->previous[previous_at] != '/') previous_at++;
+    while (current_at < length && path[current_at] != '/') current_at++;
+    const size_t previous_size = previous_at - previous_start, current_size = current_at - current_start;
+    const size_t smaller = previous_size < current_size ? previous_size : current_size;
+    const int order = memcmp(walk->previous + previous_start, path + current_start, smaller);
+    if (order != 0) return order < 0;
+    if (previous_size != current_size) return previous_size < current_size;
+    if (current_at == length) return false; /* duplicate or prefix regression */
+    if (previous_at == walk->previous_len) return walk->previous_directory;
+    previous_at++;
+    current_at++;
+  }
+  return false;
+}
+
+static bool v3_walk_accept_path(v3_walk_state *walk, const char *path, size_t length, uint8_t kind) {
+  if (!walk || !path || length == 0 || length >= sizeof(walk->previous) ||
+      path[0] == '/' || path[length - 1] == '/') return false;
+  size_t segment_start = 0, parent_length = 0;
+  for (size_t i = 0; i <= length; i++) {
+    const char c = i == length ? '/' : path[i];
+    if (c == '\0' || c == '\\') return false;
+    if (c != '/') continue;
+    const size_t segment_length = i - segment_start;
+    if (segment_length == 0 ||
+        (segment_length == 1 && path[segment_start] == '.') ||
+        (segment_length == 2 && path[segment_start] == '.' && path[segment_start + 1] == '.')) return false;
+    if (i < length) parent_length = i;
+    segment_start = i + 1;
+  }
+  while (walk->depth != 0) {
+    const size_t ancestor_length = walk->ancestor_lengths[walk->depth - 1];
+    if (ancestor_length == parent_length &&
+        memcmp(walk->ancestor_path, path, ancestor_length) == 0) break;
+    walk->depth--;
+  }
+  if (parent_length != 0 && walk->depth == 0) return false;
+  if (walk->previous_len != 0 && !v3_walk_path_follows(walk, path, length)) return false;
+  if (kind == 'D') {
+    if (walk->depth >= sizeof(walk->ancestor_lengths) / sizeof(walk->ancestor_lengths[0])) return false;
+    memcpy(walk->ancestor_path, path, length);
+    walk->ancestor_lengths[walk->depth++] = (uint16_t)length;
+  }
+  memcpy(walk->previous, path, length);
+  walk->previous_len = length;
+  walk->previous_directory = kind == 'D';
+  return true;
+}
+
 /* Recompute the canonical tree hash from the sealed linear stream, without
- * materializing its paths or trusting a separately supplied tree digest. */
+ * trusting a separately supplied tree digest or arbitrary stream ordering. */
 static bool v3_verify_context_stream_tree(int fd, uint64_t length,
     const char *name, const char *expected_tree) {
   static const char prefix[] = "virki-context-stream-v1\0";
@@ -919,15 +986,19 @@ static bool v3_verify_context_stream_tree(int fd, uint64_t length,
   virki_abi_sha256_ctx tree;
   virki_abi_sha256_init(&tree);
   virki_abi_sha256_update(&tree, (const uint8_t *)VIRKI_BUILDKIT_TREE_PREFIX_V2, VIRKI_BUILDKIT_TREE_PREFIX_V2_LEN);
+  v3_walk_state walk = {0};
   while (offset < length) {
     uint8_t kind;
     uint64_t path_len, mode, size;
     if (!v3_stream_read(fd, length, &offset, &kind, 1) || (kind != 'D' && kind != 'L' && kind != 'F') ||
-        !v3_stream_uint(fd, length, &offset, &path_len) || path_len == 0) return false;
+        !v3_stream_uint(fd, length, &offset, &path_len) || path_len == 0 || path_len >= 1024) return false;
+    char path[1024];
+    if (!v3_stream_read(fd, length, &offset, path, (size_t)path_len) ||
+        !v3_walk_accept_path(&walk, path, (size_t)path_len, kind)) return false;
     virki_abi_sha256_update(&tree, &kind, 1);
     virki_abi_write_uint64(&tree, path_len);
-    if (!v3_stream_hash_bytes(fd, length, &offset, path_len, &tree, true) ||
-        !v3_stream_uint(fd, length, &offset, &mode) || mode > 07777) return false;
+    virki_abi_sha256_update(&tree, (const uint8_t *)path, (size_t)path_len);
+    if (!v3_stream_uint(fd, length, &offset, &mode) || mode > 07777) return false;
     virki_abi_write_uint64(&tree, mode);
     if (kind == 'D') continue;
     if (!v3_stream_uint(fd, length, &offset, &size)) return false;

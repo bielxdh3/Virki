@@ -160,6 +160,75 @@ test('two independent CSP headers are not mistaken for one passing hydration pol
   assert.equal(result.cspPolicy, 'multiple-or-missing');
 });
 
+test('duplicate CSP directives never attest strict policy, including first-wins browser semantics', () => {
+  const html = htmlDoc('<script nonce="SAFE">window.__hydrated = true</script>');
+  const duplicatePairs = [
+    // The browser ignores the later directive: neither conflict nor duplicate
+    // is a second independently enforced CSP policy. Our receipt still fails
+    // closed rather than certifying an ambiguous configuration.
+    ["script-src-elem 'nonce-SAFE'", "script-src-elem 'nonce-EVIL'"],
+    ["script-src-elem 'nonce-SAFE'", "script-src-elem https:"],
+    ["script-src-elem 'nonce-SAFE'", "script-src-elem 'nonce-SAFE'"],
+    ["script-src-elem 'nonce-EVIL'", "script-src-elem 'nonce-SAFE'"],
+    ["script-src-attr 'none'", "script-src-attr 'unsafe-inline'"],
+    ["script-src-attr 'none'", "script-src-attr 'none'"],
+    ["SCRIPT-SRC-ATTR 'none'", "script-src-attr 'none'"],
+    ["script-src 'self' 'nonce-SAFE' 'strict-dynamic'", "script-src 'nonce-SAFE'"],
+    ["style-src-elem 'self'", "STYLE-SRC-ELEM https:"],
+    ["style-src-attr 'none'", "style-src-attr 'none'"],
+    ["default-src 'self'", "default-src 'self'"],
+    ["object-src 'none'", "object-src 'none'"],
+    ["unknown-future-directive 'none'", "UNKNOWN-FUTURE-DIRECTIVE 'none'"],
+  ];
+  for (const target of ISSUE119_HEADER_TARGETS.slice(0, 2)) {
+    for (const [first, second] of duplicatePairs) {
+      let csp = `${goodCSP}; ${first}; ${second}`;
+      if (first.toLowerCase().startsWith('script-src ') ||
+          first.toLowerCase().startsWith('default-src ') ||
+          first.toLowerCase().startsWith('object-src ')) {
+        const directiveName = first.split(' ')[0].toLowerCase();
+        csp = `${goodCSP.split('; ').filter((d) => !d.startsWith(`${directiveName} `)).join('; ')}; ${first}; ${second}`;
+      }
+      const result = classifyIssue119Response(target, response(target.expected, csp, html));
+      assert.equal(result.result, 'fail', `${target.surface} must refuse duplicate ${first} / ${second}`);
+      assert.equal(result.cspPolicy, 'duplicate-or-multiple-or-missing', 'ambiguity should be visible in sanitized receipt');
+    }
+    // A CSP can contain multiple different directives; reject duplicates,
+    // never a legitimate distinct directive or ordinary whitespace.
+    for (const tail of ["", "; script-src-elem 'nonce-SAFE'", "; script-src-attr 'none'",
+      "; style-src-elem 'self'", "; style-src-attr 'none'",
+      "; script-src-elem 'nonce-SAFE'; script-src-attr 'none'; style-src-elem 'self'; style-src-attr 'none'"]) {
+      const result = classifyIssue119Response(target,
+        response(target.expected, `${goodCSP}; style-src 'self'${tail}`, html));
+      assert.equal(result.result, 'pass', `${target.surface} single-instance policy must pass: ${tail}`);
+      assert.equal(result.cspPolicy, 'single');
+    }
+  }
+});
+
+test('CSP sandbox cannot forge a same-origin hydration receipt with an opaque document origin', () => {
+  const html = htmlDoc('<script nonce="SAFE">window.__hydrated = true</script>');
+  for (const target of ISSUE119_HEADER_TARGETS.slice(0, 2)) {
+    // A sandbox without allow-same-origin still permits nonce-bearing scripts
+    // when allow-scripts is present, but isolates the document into an opaque
+    // origin. It cannot attest the public same-origin stylesheet/hydration
+    // contract simply because the expected nonce appears in the HTML.
+    for (const sandbox of [
+      'sandbox allow-scripts',
+      'sandbox ALLOW-SCRIPTS',
+      'sandbox allow-scripts allow-forms',
+    ]) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, `${goodCSP}; ${sandbox}`, html)).result, 'fail',
+      `${target.surface} must refuse an opaque-origin document: ${sandbox}`);
+    }
+    for (const tail of ['', '; sandbox allow-scripts allow-same-origin']) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, `${goodCSP}${tail}`, html)).result, 'pass');
+    }
+  }
+});
+
 test('public CSP evidence cannot silently accept inline-style bypass directives', () => {
   const target = ISSUE119_HEADER_TARGETS[0];
   for (const directive of [
@@ -615,7 +684,7 @@ test('CSP meta policies cannot silently override an otherwise passing header non
   'empty legacy language fallback is not an inert non-JavaScript MIME');
 });
 
-test('enforced CSP sandbox without allow-scripts prevents executable nonce receipt', () => {
+test('enforced CSP sandbox needs both script execution and same-origin rights for the public receipt', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   for (const policy of ['sandbox', 'sandbox allow-same-origin',
     'sandbox allow-popups', 'SANDBOX allow-forms', 'sandbox allow-scripts; sandbox']) {
@@ -623,8 +692,11 @@ test('enforced CSP sandbox without allow-scripts prevents executable nonce recei
       'fail', policy);
   }
   assert.equal(classifyIssue119Response(base, response(200,
-    `${goodCSP}; sandbox allow-scripts`)).result, 'pass',
-  'sandbox with allow-scripts permits code execution, not guaranteed hydration');
+    `${goodCSP}; sandbox allow-scripts`)).result, 'fail',
+  'sandbox with allow-scripts permits JavaScript but forces an opaque origin, so it cannot attest same-origin hydration');
+  assert.equal(classifyIssue119Response(base, response(200,
+    `${goodCSP}; sandbox allow-scripts allow-same-origin`)).result, 'pass',
+  'both explicit sandbox flags permit same-origin scripts without weakening the nonce policy');
 });
 
 test('raw-text false template closures cannot transform inert scripts into executable evidence', () => {

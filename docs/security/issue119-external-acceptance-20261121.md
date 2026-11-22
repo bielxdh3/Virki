@@ -99,4 +99,20 @@ while preserving narrow nonceable `script-src-elem` and explicit
 `script-src-attr 'none'` controls. This is a corrected *static security policy
 receipt*, not evidence of a successful application XSS or live deployment.
 
+**2026-11-22 duplicate-directive and sandbox-origin regressions (PR #141,
+not deployed):** A reviewer reproduced a policy-acceptance P2: the offline
+classifier inspected only the first CSP directive of a name, returning PASS
+when it was followed by conflicting or identical `script-src-elem` or
+`script-src-attr` declarations. The complete policy is now parsed for
+case-insensitive duplicates of **any** directive, including unknown future
+directives, and the static receipt refuses all such ambiguity. This does
+not misstate browser semantics: later duplicate directives are normally
+ignored, not intersected or automatically permission-expanding. Separate
+RED→GREEN and actual disposable Microsoft Edge trials proved an enforced
+`sandbox allow-scripts` executes nonce scripts in an **opaque** origin (`null`)
+and denies cookie access, whereas adding `allow-same-origin` restores the
+ordinary origin. The same-origin public CSS/hydration receipt now requires
+both sandbox flags when sandbox is present. Neither result proves any live
+edge, Access, or OIDC acceptance.
+
 **Explicit boundary:** These documents and offline CI classifiers have no credentials and never modify Cloudflare, DNS, Tunnel, services or production state. Neither opt-in `--live` probe runs from CI or by default. A successful public-header probe does not certify TLS, Access, authenticated OIDC, session security or a live origin release.

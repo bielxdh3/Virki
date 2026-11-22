@@ -82,6 +82,20 @@ the synthetic C1→C4 evidence agreement only: it **does not** establish a
 trusted C1 producer, signed-owner operational authorization, monotonic
 root-of-trust, or deployment custody, and cannot close issue #90.
 
+**C1→C4 canonical stream traversal follow-up (post-`fb3f58f`, not deployed):**
+An independently self-consistent pair of stream SHA-256 and tree digest was
+accepted despite a file whose parent directory never appeared, reordered
+sibling basenames, duplicate file paths, or a traversal segment. None can be
+emitted by Go's canonical `filepath.WalkDir`, so they must not attest the
+BuildKit provenance contract. RED→GREEN regressions now exercise both the
+non-authorizing Node contract and the **actual native C4 V3 FD/tree parser**
+compiled directly into a disposable test executable. Both reject invalid
+paths and order while accepting the legitimate depth-first directory,
+regular-file and symlink sequence; the native verifier checks bounded raw
+bytes without a second trusted source or a supplied hash shortcut. This is a
+real defensive parser correction, **not** a signed-owner approval, independent
+anti-root rollback guarantee or operationally provisioned C1→C4 publication.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)

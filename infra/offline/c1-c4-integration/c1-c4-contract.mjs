@@ -118,6 +118,9 @@ function verifyCanonicalContextStream(buf, name, expectedEntries, expectedTreeDi
 
   const tree = createHash("sha256").update(CONTEXT_TREE_PREFIX);
   const seenPaths = new Set();
+  const activeDirectories = [];
+  let previousSegments = null;
+  let previousWasDirectory = false;
   let entries = 0;
   while (at < buf.length) {
     const kind = take(1);
@@ -129,6 +132,34 @@ function verifyCanonicalContextStream(buf, name, expectedEntries, expectedTreeDi
     validateRelPath(relPath, `canonical context ${name} entry path`);
     demand(!seenPaths.has(relPath), `canonical context ${name} entry path duplicated`);
     seenPaths.add(relPath);
+    // BuildKit's producer uses Go filepath.WalkDir: parent directories must
+    // precede their children, with depth-first traversal and byte-sorted
+    // basenames. A digest of arbitrary tagged records is not proof of a
+    // canonical FileSync context, even if its SHA-256 is self-consistent.
+    const segments = relPath.split("/");
+    const parent = segments.slice(0, -1).join("/");
+    while (activeDirectories.length > 0 && activeDirectories.at(-1) !== parent) {
+      activeDirectories.pop();
+    }
+    demand(parent === "" || activeDirectories.at(-1) === parent,
+      `canonical context ${name} parent invalid`);
+    if (previousSegments !== null) {
+      let shared = 0;
+      while (shared < segments.length && shared < previousSegments.length &&
+        segments[shared] === previousSegments[shared]) shared++;
+      if (shared === previousSegments.length) {
+        demand(previousWasDirectory && segments.length === previousSegments.length + 1,
+          `canonical context ${name} traversal invalid`);
+      } else {
+        demand(shared < segments.length &&
+          Buffer.compare(Buffer.from(previousSegments[shared], "utf8"),
+            Buffer.from(segments[shared], "utf8")) < 0,
+        `canonical context ${name} traversal invalid`);
+      }
+    }
+    if (kind[0] === 0x44) activeDirectories.push(relPath);
+    previousSegments = segments;
+    previousWasDirectory = kind[0] === 0x44;
     const mode = uint64();
     demand(mode <= 0o7777, `canonical context ${name} entry mode invalid`);
     const sized = (bytes) => {
