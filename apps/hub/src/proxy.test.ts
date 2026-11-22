@@ -55,6 +55,23 @@ test("unknown hosts are denied and the hub requires a valid Access assertion", a
   assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", { headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged" } }), env)).status, 403);
 });
 
+test("static asset exceptions do not bypass the session gate for extension-shaped private routes", async () => {
+  const portalHeaders = { host: "portal.biel.dev.br" };
+  const asset = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/hub-mark.svg", { headers: portalHeaders }), env);
+  assert.equal(asset.status, 200, "the one shipped public branding asset remains available");
+
+  for (const path of ["/admin/audit.txt", "/admin/private.js", "/admin/private.svg", "/account/security.xml", "/account/export.map", "/api/private.css"]) {
+    const portal = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: portalHeaders }), env);
+    assert.equal(portal.status, 307, `portal private route must not become public by suffix: ${path}`);
+    assert.equal(portal.headers.get("cache-control"), "no-store", path);
+
+    const hub = await evaluateProxyRequest(new NextRequest(`https://hub.biel.dev.br${path}`, {
+      headers: { host: "hub.biel.dev.br" }
+    }), { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" });
+    assert.equal(hub.status, 307, `native Hub private route must still require a session: ${path}`);
+  }
+});
+
 test("portal OIDC endpoints are public to clients while account surfaces still require a session", async () => {
   for (const path of ["/.well-known/openid-configuration", "/auth", "/auth/abcdefghijklmnop", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/session/end/confirm", "/session/end/success", "/interaction/abcdefghijklmnop"]) {
     assert.equal((await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env)).status, 200, path);

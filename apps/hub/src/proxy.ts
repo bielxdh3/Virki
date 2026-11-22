@@ -27,7 +27,10 @@ const OIDC_ROOT_ROUTES = new Set([
   "/me",
   "/token/revocation",
 ]);
-const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml|woff2?)$/iu;
+// Only explicitly shipped public assets bypass the session gate. A suffix-only
+// exception could turn a future /admin/report.txt or /account/export.js into
+// an unauthenticated route merely because its name resembles a static file.
+const PUBLIC_ASSET_PATHS = new Set(["/hub-mark.svg"]);
 
 /**
  * Per-request nonce CSP (https://nextjs.org/docs/app/guides/content-security-policy).
@@ -188,7 +191,7 @@ function isPublicPath(pathname: string, surface: "hub" | "portal" | "local"): bo
   if (
     PUBLIC_ROUTES.has(pathname) ||
     pathname.startsWith("/_next/") ||
-    PUBLIC_FILE_PATTERN.test(pathname)
+    PUBLIC_ASSET_PATHS.has(pathname)
   ) return true;
   if (surface !== "hub" && (pathname.startsWith("/.well-known/") || pathname.startsWith("/interaction/"))) return true;
   if (surface !== "hub" && pathname.startsWith("/resume/")) return true;
