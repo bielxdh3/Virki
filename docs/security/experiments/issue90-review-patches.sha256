@@ -19,3 +19,4 @@ a20084bcced441d2604e11f8436979ee5db11df720f5d2cf344e01e4e5cadf46  docs/security/
 a3b00cd447c0bc5b1628e7575997a72cbadc63a623fd76b0ada34120ef96242b  docs/security/experiments/buildkit-v0.34.1-c1-v41-peer-preflight-dev-only.patch
 abe97dbc03449866e1349cc6280aecc0b9aef45ca80f28eeebb6c7af60e20f00  docs/security/experiments/buildkit-v0.34.1-c1-v42-protected-parent-no-xdev-dev-only.patch
 f180f1af520eed9ba34fd52987b7ea58cc4799f51905856eac9a6a9e2ec9f71c  docs/security/experiments/buildkit-v0.34.1-c1-v43-cross-mount-fixture-portability-dev-only.patch
+cb02a52d42bcba6d31c5c4e3520c787ebe9c752151fee6dc3e806c146dfcff22  docs/security/experiments/buildkit-v0.34.1-c1-v44-c4-domain-refusal-dev-only.patch

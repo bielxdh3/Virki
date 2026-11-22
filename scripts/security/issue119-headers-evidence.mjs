@@ -91,10 +91,11 @@ function inspectScriptTag(tag) {
       type = value;
     }
     // An omitted type does not always mean JavaScript: a nonempty HTML
-    // `language` attribute is used as a legacy type fallback. We cannot
-    // browser-decode arbitrary attribute values here, so refuse this syntax
-    // instead of treating an inert text/python block as a hydration receipt.
-    if (name === 'language' && value !== null && asciiTrim(value) !== '') return invalid();
+    // `language` attribute is used as a legacy type fallback. Even a raw
+    // whitespace-only value is nonempty and becomes an inert legacy MIME
+    // type (e.g. "text/ "), not an omitted language. Refuse every nonempty
+    // value rather than fabricating a hydration receipt.
+    if (name === 'language' && value !== null && value !== '') return invalid();
   }
   if (type !== null && typeof type !== 'string') return invalid();
   const kind = asciiTrim(type ?? '').toLowerCase();
@@ -276,6 +277,10 @@ function inspectHtmlDocument(body, mime) {
     // a mismatched nonce. This bounded scanner does not implement select's
     // insertion mode, so refuse a select document rather than issue false PASS.
     if (tag === 'select') return fail();
+    // HTML5 uses a separate "in frameset" insertion mode which ignores
+    // script start tags. A nonce on such an ignored script cannot provide
+    // evidence of executable hydration. Fail closed on this legacy surface.
+    if (tag === 'frameset' || tag === 'frame') return fail();
     // With scripting enabled, HTML5 treats <noscript> as raw text until its
     // first actual closing tag. Do not interpret apparent <style>/<script>
     // start tags inside it: doing so could skip the real </noscript>, hide
@@ -308,6 +313,18 @@ function inspectHtmlDocument(body, mime) {
       }
       const after = rawTextCloseOffset(body, at, tag);
       if (after < 0) return fail();
+      if (tag === 'script') {
+        // Script-data double escaping differs from ordinary raw-text: after
+        // `<!--<script>` the first apparent `</script>` does NOT end the
+        // element, it only exits the double-escaped state. A naive first-close
+        // search would count a later fake nonce-bearing <script> as executable.
+        // This bounded parser cannot model every script tokenizer state; reject
+        // potential double-escape sequences instead of issuing false PASS.
+        const contentThroughClose = body.slice(at, after);
+        const escapedStart = contentThroughClose.indexOf('<!--');
+        if (escapedStart >= 0 && /<script(?=[\t\n\f\r \/>])/i.test(
+          contentThroughClose.slice(escapedStart + 4))) return fail();
+      }
       at = after;
       continue;
     }

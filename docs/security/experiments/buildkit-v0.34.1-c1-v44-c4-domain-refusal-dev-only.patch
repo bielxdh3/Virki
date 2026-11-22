@@ -1,0 +1,190 @@
+diff --git a/session/filesync/sealed_publication_c4_v44_linux_test.go b/session/filesync/sealed_publication_c4_v44_linux_test.go
+new file mode 100644
+index 0000000..7f1eb77
+--- /dev/null
++++ b/session/filesync/sealed_publication_c4_v44_linux_test.go
+@@ -0,0 +1,184 @@
++//go:build linux
++
++package filesync
++
++import (
++	"bytes"
++	"crypto/ed25519"
++	"crypto/rand"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++// V44 is a DEV-only negative compatibility regression. These are the exact
++// signed-message domains from the native C4 V3 protocol, NOT release permits.
++// A valid owner approval or CANDIDATE_VERIFIED signature must NEVER be
++// interchangeable with the synthetic V15 authorization accepted by V40/V41.
++// This test neither imports a native C4 approval nor enables a C4 release path.
++const (
++	v44C4ApprovalDomain = "VIRKI_OFFLINE_OWNER_APPROVAL_V3\x00"
++	v44C4ReceiptDomain  = "VIRKI_C4_CANDIDATE_RECEIPT_V3\x00"
++)
++
++func v44TestPermit(m V15SealedManifest) V15OwnerPermit {
++	return V15OwnerPermit{
++		Domain: V15OwnerDomain, ApprovalID: "v44-test-only",
++		ManifestDigest: m.Digest, WorkerID: m.WorkerID,
++		SessionID: m.SessionID, ContextName: m.ContextName,
++		Nonce: m.Nonce, Epoch: 7, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++	}
++}
++
++func v44ForeignSignature(private ed25519.PrivateKey, domain string, payload []byte) []byte {
++	message := append([]byte(domain), payload...)
++	return ed25519.Sign(private, message)
++}
++
++func TestC1V44C4SignaturesCannotAuthorizeV15TestPermit(t *testing.T) {
++	manifest := v15PacketManifest()
++	public, private, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	permit := v44TestPermit(manifest)
++	permit.Signature = ed25519.Sign(private, v15PermitBytes(permit))
++	if err := NewV15LocalReplayLedger(7).VerifyAndClaim(manifest, permit, public); err != nil {
++		t.Fatalf("control V15 test permit must be valid: %v", err)
++	}
++
++	for _, tc := range []struct{ name, domain, payload string }{
++		{"owner-approval", v44C4ApprovalDomain, "VROA_AP3-synthetic-unsigned-envelope"},
++		{"candidate-receipt", v44C4ReceiptDomain, `{"version":3,"status":"CANDIDATE_VERIFIED","deployAuthorized":false,"releaseSignature":false}`},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			foreignMessage := append([]byte(tc.domain), []byte(tc.payload)...)
++			foreignSignature := ed25519.Sign(private, foreignMessage)
++			if !ed25519.Verify(public, foreignMessage, foreignSignature) {
++				t.Fatal("C4-domain signature fixture is not cryptographically valid")
++			}
++			candidate := permit
++			candidate.Signature = foreignSignature
++			if err := NewV15LocalReplayLedger(7).VerifyAndClaim(manifest, candidate, public); err == nil ||
++				!strings.Contains(err.Error(), "signature failed") {
++				t.Fatalf("foreign C4 signature must fail the real V15 verifier: %v", err)
++			}
++		})
++	}
++
++	// Even re-signing a V15-shaped payload with the TEST signer cannot turn a
++	// candidate marker into a V15 permit by switching only its domain field.
++	wrongDomain := permit
++	wrongDomain.Domain = v44C4ReceiptDomain
++	wrongDomain.Signature = ed25519.Sign(private, v15PermitBytes(wrongDomain))
++	if err := NewV15LocalReplayLedger(7).VerifyAndClaim(manifest, wrongDomain, public); err == nil {
++		t.Fatal("a correctly signed non-V15 domain was admitted as a test permit")
++	}
++
++	// A genuine test permit is scoped to the exact frozen manifest, not a
++	// separate C4 approval, OCI graph, destination or release admission.
++	otherManifest := manifest
++	otherManifest.Nonce = strings.Repeat("f", 32)
++	otherManifest.Digest = v15ManifestDigest(otherManifest)
++	if err := NewV15LocalReplayLedger(7).VerifyAndClaim(otherManifest, permit, public); err == nil {
++		t.Fatal("V15 test permit crossed its sealed-manifest boundary")
++	}
++}
++
++// Opt-in root-only DEV fixture exercises the actual V40 durable claim path,
++// not merely the in-memory V15 verifier. No peer socket, SCM_RIGHTS, source
++// tree or publication destination is opened. Invalid C4 signatures must not
++// burn the replay ledger or its independently provisioned local checkpoint.
++func TestC1V44V40RefusesC4DomainWithoutBurningClaim(t *testing.T) {
++	if os.Getenv("VIRKI_V44_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("requires explicit, disposable Linux root V44 fixture")
++	}
++	base, err := os.MkdirTemp("/var/tmp", "virki-c4-v44-test-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = os.RemoveAll(base) })
++	ledger := filepath.Join(base, "ledger")
++	anchorDir := v40TrustDir(ledger)
++	for _, dir := range []string{ledger, anchorDir} {
++		if err := os.Mkdir(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	manifest := v15PacketManifest()
++	public, private, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	key := make([]byte, 32)
++	if _, err := rand.Read(key); err != nil {
++		t.Fatal(err)
++	}
++	checkpoint := v40InitialCheckpoint(ledger, public, key)
++	for _, item := range []struct {
++		path string
++		data []byte
++		mode os.FileMode
++	}{
++		{filepath.Join(ledger, v40LogName), nil, 0600},
++		{filepath.Join(anchorDir, v40KeyName), key, 0400},
++		{filepath.Join(anchorDir, v40CheckpointName), checkpoint, 0600},
++	} {
++		if err := os.WriteFile(item.path, item.data, item.mode); err != nil {
++			t.Fatal(err)
++		}
++		fd, err := os.Open(item.path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := fd.Sync(); err != nil {
++			_ = fd.Close()
++			t.Fatal(err)
++		}
++		if err := fd.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for _, dir := range []string{ledger, anchorDir} {
++		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := unix.Fsync(fd); err != nil {
++			_ = unix.Close(fd)
++			t.Fatal(err)
++		}
++		if err := unix.Close(fd); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	permit := v44TestPermit(manifest)
++	for _, domain := range []string{v44C4ApprovalDomain, v44C4ReceiptDomain} {
++		foreign := permit
++		foreign.Signature = v44ForeignSignature(private, domain, []byte("synthetic-c4-proof-not-release"))
++		if err := claimV39DurableTestOwnerPermit(ledger, manifest, foreign, public, 7, 8); err == nil ||
++			!strings.Contains(err.Error(), "signature failed") {
++			t.Fatalf("V40 accepted a %q-domain signature: %v", domain, err)
++		}
++		log, err := os.ReadFile(filepath.Join(ledger, v40LogName))
++		if err != nil || len(log) != 0 {
++			t.Fatalf("invalid foreign signature mutated V40 replay ledger: len=%d err=%v", len(log), err)
++		}
++		gotCheckpoint, err := os.ReadFile(filepath.Join(anchorDir, v40CheckpointName))
++		if err != nil || !bytes.Equal(gotCheckpoint, checkpoint) {
++			t.Fatalf("invalid foreign signature mutated V40 checkpoint: err=%v", err)
++		}
++	}
++	permit.Signature = ed25519.Sign(private, v15PermitBytes(permit))
++	if err := claimV39DurableTestOwnerPermit(ledger, manifest, permit, public, 7, 8); err != nil {
++		t.Fatalf("valid DEV V15 permit was burned by rejected C4 signatures: %v", err)
++	}
++	if err := claimV39DurableTestOwnerPermit(ledger, manifest, permit, public, 7, 8); err == nil {
++		t.Fatal("V40 accepted replay of a consumed V15 permit")
++	}
++}

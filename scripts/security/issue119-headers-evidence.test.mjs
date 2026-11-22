@@ -179,6 +179,54 @@ test('HTML select insertion mode cannot hide executable wrong-nonce scripts behi
   'fail', 'select insertion mode is deliberately outside this bounded acceptance parser');
 });
 
+test('frameset insertion mode cannot fabricate an executable nonce-bearing script', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const markup of [
+    '<frameset><script nonce="SAFE">boot()</script></frameset>',
+    '<frameset cols="100%"><frame src="about:blank"><script nonce="SAFE">boot()</script></frameset>',
+    '<frameset><noframes>fallback</noframes><script nonce="SAFE">boot()</script></frameset>',
+    '<frame src="about:blank"><script nonce="SAFE">boot()</script>',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(markup))).result, 'fail', markup);
+  }
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE">boot()</script>'))).result, 'pass',
+  'normal script receipt remains valid');
+});
+
+test('whitespace-only legacy script language is not equivalent to omitted language', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const language of [' ', '\t', '\n', '\r', '\f', ' \t\n\f ']) {
+    const html = htmlDoc(`<script nonce="SAFE" language="${language}">boot()</script>`);
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, html)).result,
+      'fail', `nonempty legacy language is not a JavaScript script type: ${JSON.stringify(language)}`);
+  }
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE" language="">boot()</script>'))).result,
+  'pass', 'empty language remains equivalent to no legacy language');
+});
+
+test('script-data double escaping cannot fabricate a later executable script nonce', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const prefix of [
+    '<script type="application/json"><!--<script></script>',
+    '<script nomodule><!--<script></script>',
+    '<script type="application/json"><!--<SCRIPT ></script>',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(`${prefix}<script nonce="SAFE">boot()</script>`))).result,
+    'fail', 'an apparent closing tag in a double-escaped script is not its actual end');
+  }
+  for (const markup of [
+    '<script type="application/json"><!-- harmless -->{}</script><script nonce="SAFE">boot()</script>',
+    '<script type="application/json">{"text":"<script>"}</script><script nonce="SAFE">boot()</script>',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(markup))).result, 'pass', 'ordinary inert data precedes a real script');
+  }
+});
+
 test('actual nonce attributes and quoted decimal HSTS are recognized without lowercasing nonce values', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   const quoted = response(200, "script-src 'nonce-SAFE'", goodHTML,
