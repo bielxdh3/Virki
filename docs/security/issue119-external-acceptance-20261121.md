@@ -82,8 +82,21 @@ for every CSS asset in both its 200 and 404 documents. Any missing/redirected
 asset, non-200 response, non-`text/css` content type, or empty content fails
 the gate; the parser never supplies an external URL to this HTTP client. A
 RED→GREEN production-smoke contract test makes this mandatory. The local
-Docker daemon is not available in this environment: actual OCI proof must be
-read from the hosted `Validate` job at the exact new SHA, rather than assumed
-from this source-level test or a separate local Next application build.
+Docker daemon is not available in this environment. The hosted `Validate`
+job **passed the actual OCI runtime smoke at `4a033ba`** on 2026-11-22;
+that receipt applies only to that SHA, not to subsequent changes or the
+public deployed edge.
+
+**2026-11-22 CSP3 script-source override correction (subsequent PR #141
+development, not deployed):** The public 200/404 classifier accepted a
+`script-src-elem 'nonce-SAFE' https://attacker.invalid` policy as PASS even
+though it admitted a foreign script source alongside the legitimate nonce.
+It likewise overlooked `script-src-attr 'unsafe-hashes' 'sha256-...'`, which
+can admit inline event handlers without the `unsafe-inline` keyword. A new
+RED→GREEN test verifies rejection of foreign schemes, hashes and attribute
+allowances, as well as additional or duplicate `script-src-elem` nonces,
+while preserving narrow nonceable `script-src-elem` and explicit
+`script-src-attr 'none'` controls. This is a corrected *static security policy
+receipt*, not evidence of a successful application XSS or live deployment.
 
 **Explicit boundary:** These documents and offline CI classifiers have no credentials and never modify Cloudflare, DNS, Tunnel, services or production state. Neither opt-in `--live` probe runs from CI or by default. A successful public-header probe does not certify TLS, Access, authenticated OIDC, session security or a live origin release.

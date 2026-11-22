@@ -19,6 +19,7 @@ import {
   loadAndVerifyAuthState,
   recoverAuthStateWithEpochFence,
   sha256Hex,
+  verifyBuildInputProvenance,
 } from "./c1-c4-contract.mjs";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -29,17 +30,38 @@ const LINUX_NATIVE_SKIP = process.platform !== "linux"
     ? "Non-root Linux user required for native C4 daemon integration test"
     : false);
 
+function syntheticCanonicalContext(name, contents) {
+  const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
+  const sized = (b) => Buffer.concat([u64(b.length), b]);
+  const pathBytes = Buffer.from("payload.txt", "utf8");
+  const fileBytes = Buffer.from(contents, "utf8");
+  const header = Buffer.concat([
+    Buffer.from("virki-context-stream-v1\0", "utf8"),
+    sized(Buffer.from(name, "utf8")),
+  ]);
+  const entry = Buffer.concat([
+    Buffer.from("F"), sized(pathBytes), u64(0o644), u64(fileBytes.length), fileBytes,
+  ]);
+  const tree = Buffer.concat([
+    Buffer.from("buildkit-worker-local-context-v2\0", "utf8"),
+    Buffer.from("F"), sized(pathBytes), u64(0o644), u64(fileBytes.length),
+    crypto.createHash("sha256").update(fileBytes).digest(),
+  ]);
+  return { buffer: Buffer.concat([header, entry]), treeDigest: `sha256:${sha256Hex(tree)}` };
+}
+
 function buildSyntheticFixture(tmpDir, role = "runtime") {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const pinSha256 = sha256Hex(publicKey.export({ type: "spki", format: "der" }));
 
-  const contextBuffers = {
-    "source": Buffer.from("SYNTHETIC_C1_SOURCE_TAR_V1\n", "utf8"),
-    "dockerfile": Buffer.from("FROM scratch\nCOPY . /\n", "utf8"),
-    "offline-npm-cacache": Buffer.from("SYNTHETIC_NPM_CACACHE_V1\n", "utf8"),
-    "offline-prisma-engines": Buffer.from("SYNTHETIC_PRISMA_ENGINES_V1\n", "utf8"),
+  const canonicalContexts = {
+    "source": syntheticCanonicalContext("source", "SYNTHETIC_C1_SOURCE_TAR_V1\n"),
+    "dockerfile": syntheticCanonicalContext("dockerfile", "FROM scratch\nCOPY . /\n"),
+    "offline-npm-cacache": syntheticCanonicalContext("offline-npm-cacache", "SYNTHETIC_NPM_CACACHE_V1\n"),
+    "offline-prisma-engines": syntheticCanonicalContext("offline-prisma-engines", "SYNTHETIC_PRISMA_ENGINES_V1\n"),
   };
+  const contextBuffers = Object.fromEntries(Object.entries(canonicalContexts).map(([name, value]) => [name, value.buffer]));
 
   const fileSyncManifest = {
     ignoreSource: "root-dockerignore",
@@ -67,7 +89,7 @@ function buildSyntheticFixture(tmpDir, role = "runtime") {
     role,
     contexts: Object.entries(contextBuffers).map(([name, buf]) => ({
       name,
-      treeDigest: `sha256:${sha256Hex(Buffer.from(`tree:${name}`, "utf8"))}`,
+      treeDigest: canonicalContexts[name].treeDigest,
       streamDigest: `sha256:${sha256Hex(buf)}`,
       streamLength: buf.length,
       entryCount: 1,
@@ -161,6 +183,41 @@ test("C1->C4 integration contract accepts valid synthetic runtime and migrator c
     assert.equal(res.signAckStatus, 22);
     assert.equal(res.contractSha256, fx.contractDigestHex);
   }
+});
+
+test("C1->C4 provenance recomputes the tree from stream bytes instead of trusting a matching stream SHA", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-tree-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const fixture = buildSyntheticFixture(tmpDir);
+  // A matching hash of an arbitrary or modified stream is not a proof that
+  // its independent, approved BuildKit v2 tree digest describes those bytes.
+  fixture.contextBuffers.source = Buffer.from("not a BuildKit canonical context stream", "utf8");
+  fixture.contract.contexts[0].streamLength = fixture.contextBuffers.source.length;
+  fixture.contract.contexts[0].streamDigest = `sha256:${sha256Hex(fixture.contextBuffers.source)}`;
+  assert.throws(() => verifyBuildInputProvenance(fixture.contract, fixture.contextBuffers),
+    /canonical context|treeDigest mismatch/u);
+
+  const valid = buildSyntheticFixture(tmpDir);
+  verifyBuildInputProvenance(valid.contract, valid.contextBuffers);
+  const altered = Buffer.from(valid.contextBuffers.source);
+  altered[altered.length - 2] ^= 1;
+  valid.contextBuffers.source = altered;
+  valid.contract.contexts[0].streamDigest = `sha256:${sha256Hex(altered)}`;
+  assert.throws(() => verifyBuildInputProvenance(valid.contract, valid.contextBuffers),
+    /treeDigest mismatch/u,
+  "re-hashing a mutated but structurally valid stream never re-authorizes the prior tree digest");
+
+  const badCount = buildSyntheticFixture(tmpDir);
+  badCount.contract.contexts[0].entryCount = 2;
+  assert.throws(() => verifyBuildInputProvenance(badCount.contract, badCount.contextBuffers),
+    /entryCount mismatch/u, "a signed entry count must match what the bytes actually contain");
+
+  const extra = buildSyntheticFixture(tmpDir);
+  extra.contextBuffers.source = Buffer.concat([extra.contextBuffers.source, Buffer.from("F")]);
+  extra.contract.contexts[0].streamLength = extra.contextBuffers.source.length;
+  extra.contract.contexts[0].streamDigest = `sha256:${sha256Hex(extra.contextBuffers.source)}`;
+  assert.throws(() => verifyBuildInputProvenance(extra.contract, extra.contextBuffers),
+    /canonical context|entryCount mismatch/u, "trailing malformed entry bytes are never ignored");
 });
 
 test("C1->C4 state serializes independent writers and retains its Linux lock inode", { skip: process.platform !== "linux" }, async (t) => {

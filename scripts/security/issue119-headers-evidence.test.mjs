@@ -175,6 +175,39 @@ test('public CSP evidence cannot silently accept inline-style bypass directives'
   'default-src also permits inline styles when no more specific style directive exists');
 });
 
+test('CSP3 effective script element and attribute directives cannot broaden the nonce-only receipt', () => {
+  const document = htmlDoc('<script nonce="SAFE">window.__hydrated=true</script>');
+  for (const target of ISSUE119_HEADER_TARGETS.slice(0, 2)) {
+    for (const directive of [
+      "script-src-elem 'nonce-SAFE' https://attacker.invalid",
+      "script-src-elem 'nonce-SAFE' https:",
+      "script-src-elem 'self' 'nonce-SAFE' data:",
+      "script-src-elem 'nonce-SAFE' 'nonce-EVIL'",
+      "script-src-elem 'nonce-SAFE' 'nonce-SAFE'",
+      "script-src-elem 'self' 'nonce-SAFE' 'unsafe-eval'",
+      "script-src-attr 'unsafe-hashes' 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='",
+      "script-src-attr 'nonce-SAFE'",
+      "script-src 'self' 'nonce-SAFE' 'strict-dynamic' 'unsafe-hashes' 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='",
+    ]) {
+      const csp = directive.startsWith('script-src ') ?
+        goodCSP.replace(/script-src [^;]+/u, directive) : `${goodCSP}; ${directive}`;
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, csp, document)).result, 'fail',
+      `${target.surface} must refuse script source expansion: ${directive}`);
+    }
+    for (const directive of [
+      "script-src-elem 'nonce-SAFE'",
+      "script-src-elem 'self' 'nonce-SAFE'",
+      "script-src-elem 'nonce-SAFE'; script-src-attr 'none'",
+      "script-src-elem 'self' 'nonce-SAFE' 'strict-dynamic'; script-src-attr 'none'",
+    ]) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, `${goodCSP}; ${directive}`, document)).result, 'pass',
+      `${target.surface} must retain narrow nonceable controls: ${directive}`);
+    }
+  }
+});
+
 test('CSS subdirectives cannot defeat the public external stylesheet acceptance receipt', () => {
   const html = htmlDoc('<script nonce="SAFE">boot()</script>',
     '<link rel="stylesheet" href="/_next/static/css/site.css">');

@@ -516,9 +516,30 @@ export function classifyIssue119Response(target, response) {
   const sources = script.sources;
   const elementSources = element.sources;
   const attributeSources = attribute.sources;
+  // These are acceptance receipts for the deliberately narrow public CSP,
+  // not a general CSP interpreter. A script-src-elem override may retain the
+  // expected nonce but add a foreign host, scheme, data:, or a hash that lets
+  // unrelated scripts execute. script-src-attr can also permit hashed inline
+  // handlers without spelling 'unsafe-inline'. Neither may silently expand
+  // the application's reviewed nonce-only executable-script policy.
+  const nonceSource = /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i;
+  const narrowlyPermittedScriptSources = (items) => items.every((source) =>
+    source.toLowerCase() === "'self'" || source.toLowerCase() === "'strict-dynamic'" ||
+    nonceSource.test(source));
+  const scriptPolicySafe = narrowlyPermittedScriptSources(sources) &&
+    (!element.present || narrowlyPermittedScriptSources(elementSources)) &&
+    (!attribute.present ||
+      (attributeSources.length === 1 && attributeSources[0].toLowerCase() === "'none'"));
   // A more permissive element/attribute directive overrides script-src for
   // that execution type. Checking only script-src would be a false PASS.
   const nonceSources = sources.filter((source) => /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source));
+  // An additional nonce in script-src-elem broadens the executable element
+  // allowlist even if the expected nonce is present. The same nonce repeated
+  // is ambiguous policy evidence; require exactly one, equal to script-src.
+  const elementNonceSources = elementSources.filter((source) => nonceSource.test(source));
+  const elementNonceSafe = !element.present ||
+    (elementNonceSources.length === 1 && nonceSources.length === 1 &&
+      elementNonceSources[0].slice(7, -1) === nonceSources[0].slice(7, -1));
   const document = inspectHtmlDocument(response.body ?? '', mime);
   const tags = document.nonces;
   const nonceValues = new Set(nonceSources.map((source) => source.slice(7, -1)));
@@ -527,10 +548,9 @@ export function classifyIssue119Response(target, response) {
   const htmlDocument = document.valid;
   const accepted = response.status === target.expected && htmlDocument &&
     !hasPoweredBy && hstsPresent && singleCsp && cspSandboxAllowsScripts(csp) &&
-    sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
+    sources.length > 0 && scriptPolicySafe && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
     !inlineStyleAllowed && stylesheetPolicySafe &&
-    (!element.present || elementSources.some((source) =>
-      /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
+    elementNonceSafe &&
     nonceSources.length === 1 && nonceMatches && document.inlineExecutableScripts > 0 &&
     document.stylesheets > 0;
 

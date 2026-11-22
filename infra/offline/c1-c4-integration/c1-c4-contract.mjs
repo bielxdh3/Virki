@@ -89,6 +89,78 @@ function pathsOverlap(a, b) {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
+const CONTEXT_STREAM_PREFIX = Buffer.from("virki-context-stream-v1\0", "utf8");
+const CONTEXT_TREE_PREFIX = Buffer.from("buildkit-worker-local-context-v2\0", "utf8");
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+// Mirror the bounded, byte-oriented C4 V3 stream/tree verification instead of
+// confusing a SHA of caller-provided arbitrary bytes with a BuildKit tree.
+// This does not attest the producer, filesystem custody or any release right.
+function verifyCanonicalContextStream(buf, name, expectedEntries, expectedTreeDigest) {
+  let at = 0;
+  const take = (count) => {
+    demand(Number.isSafeInteger(count) && count >= 0 && count <= buf.length - at,
+      `canonical context ${name} stream truncated or malformed`);
+    const part = buf.subarray(at, at + count);
+    at += count;
+    return part;
+  };
+  const uint64 = () => {
+    const value = take(8).readBigUInt64BE();
+    demand(value <= BigInt(Number.MAX_SAFE_INTEGER), `canonical context ${name} has oversized field`);
+    return Number(value);
+  };
+  const sizedBytes = () => take(uint64());
+  demand(take(CONTEXT_STREAM_PREFIX.length).equals(CONTEXT_STREAM_PREFIX),
+    `canonical context ${name} stream prefix invalid`);
+  demand(sizedBytes().equals(Buffer.from(name, "utf8")),
+    `canonical context ${name} stream name invalid`);
+
+  const tree = createHash("sha256").update(CONTEXT_TREE_PREFIX);
+  const seenPaths = new Set();
+  let entries = 0;
+  while (at < buf.length) {
+    const kind = take(1);
+    demand(kind[0] === 0x44 || kind[0] === 0x4c || kind[0] === 0x46,
+      `canonical context ${name} entry kind invalid`);
+    const pathBytes = sizedBytes();
+    let relPath;
+    try { relPath = UTF8_DECODER.decode(pathBytes); } catch { fail(`canonical context ${name} entry path is not UTF-8`); }
+    validateRelPath(relPath, `canonical context ${name} entry path`);
+    demand(!seenPaths.has(relPath), `canonical context ${name} entry path duplicated`);
+    seenPaths.add(relPath);
+    const mode = uint64();
+    demand(mode <= 0o7777, `canonical context ${name} entry mode invalid`);
+    const sized = (bytes) => {
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64BE(BigInt(bytes.length));
+      tree.update(length).update(bytes);
+    };
+    const rawMode = Buffer.alloc(8);
+    rawMode.writeBigUInt64BE(BigInt(mode));
+    tree.update(kind);
+    sized(pathBytes);
+    tree.update(rawMode);
+    if (kind[0] !== 0x44) {
+      const size = uint64();
+      const payload = take(size);
+      const sizeBytes = Buffer.alloc(8);
+      sizeBytes.writeBigUInt64BE(BigInt(size));
+      tree.update(sizeBytes);
+      if (kind[0] === 0x4c) {
+        demand(size > 0 && !payload.includes(0), `canonical context ${name} link invalid`);
+        tree.update(payload);
+      } else {
+        tree.update(createHash("sha256").update(payload).digest());
+      }
+    }
+    entries++;
+    demand(entries <= expectedEntries, `canonical context ${name} entryCount mismatch`);
+  }
+  demand(entries === expectedEntries, `canonical context ${name} entryCount mismatch`);
+  demand(`sha256:${tree.digest("hex")}` === expectedTreeDigest, `${name} treeDigest mismatch`);
+}
+
 /** 1. Build input & artifact provenance (C1/C4 64 MiB ceiling + 4 canonical contexts). */
 export function verifyBuildInputProvenance(contract, contextBuffers = {}) {
   demand(isPlainObject(contract), "contract must be a plain object");
@@ -120,6 +192,7 @@ export function verifyBuildInputProvenance(contract, contextBuffers = {}) {
     demand(Buffer.isBuffer(buf), `missing synthetic context bytes for ${expectedName}`);
     demand(buf.length === ctx.streamLength, `${expectedName} byte length mismatch`);
     demand(`sha256:${sha256Hex(buf)}` === ctx.streamDigest, `${expectedName} streamDigest mismatch`);
+    verifyCanonicalContextStream(buf, expectedName, ctx.entryCount, ctx.treeDigest);
   }
 }
 

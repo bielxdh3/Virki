@@ -68,6 +68,20 @@ Offline reconstruction: `bash scripts/security/issue90-replay-index.sh <pinned-b
 
 **V48 final-fsync recovery fence:** independently reproduced recoverable EIO on V40's final intent-unlink parent fsync previously returned failure yet left no pending marker, permitting a different legitimate synthetic permit on restart despite missing manual reconciliation. V48 introduces a distinct last-fsync fault seam and, after a recoverable error, restores and durably fsyncs the manual-recovery marker before unlocking, preserving the previously committed HMAC log/checkpoint. Focused Linux root `-race` tests now exercise this precise fault with both same and distinct permits refused across subprocess restarts. Persistent storage EIO can prevent any software marker from being durable; this is explicitly not a claim of hardware failure immunity or external monotonic C4 release authority. V23–V47 patches remain unchanged; replay now covers **26/26 (V23–V48)**. See the V48 experiment document.
 
+**C1→C4 Node contract stream/tree parity (PR #141 follow-up):** The non-authorizing
+integration candidate previously checked an input stream's SHA-256 against a
+caller-provided stream digest without independently recomputing the claimed
+BuildKit v2 tree digest. A re-hashed arbitrary or modified stream could pass
+that synthetic provenance step with an inconsistent tree claim. The contract
+now parses the bounded BuildKit canonical v1 stream, re-hashes its v2 tree
+representation, checks entry count, mode, paths and stream exhaustion, and
+refuses independently changed tree claims. Regression RED→GREEN and valid
+structured synthetic controls run under Linux; the native C4 V3 verifier's
+existing independent FD/tree verification remains untouched. This improves
+the synthetic C1→C4 evidence agreement only: it **does not** establish a
+trusted C1 producer, signed-owner operational authorization, monotonic
+root-of-trust, or deployment custody, and cannot close issue #90.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)
