@@ -57,10 +57,16 @@ test("unknown hosts are denied and the hub requires a valid Access assertion", a
 
 test("static asset exceptions do not bypass the session gate for extension-shaped private routes", async () => {
   const portalHeaders = { host: "portal.biel.dev.br" };
-  const asset = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/hub-mark.svg", { headers: portalHeaders }), env);
-  assert.equal(asset.status, 200, "the one shipped public branding asset remains available");
+  for (const assetPath of ["/hub-mark.svg", "/icon.svg"]) {
+    const asset = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${assetPath}`, { headers: portalHeaders }), env);
+    assert.equal(asset.status, 200, `shipped public branding asset stays available: ${assetPath}`);
+    const nativeHub = await evaluateProxyRequest(new NextRequest(`https://hub.biel.dev.br${assetPath}`, {
+      headers: { host: "hub.biel.dev.br" }
+    }), { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" });
+    assert.equal(nativeHub.status, 200, `native Hub public metadata remains reachable: ${assetPath}`);
+  }
 
-  for (const path of ["/admin/audit.txt", "/admin/private.js", "/admin/private.svg", "/account/security.xml", "/account/export.map", "/api/private.css"]) {
+  for (const path of ["/admin/audit.txt", "/admin/private.js", "/admin/private.svg", "/admin/icon.svg", "/account/icon.svg", "/account/security.xml", "/account/export.map", "/api/private.css"]) {
     const portal = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: portalHeaders }), env);
     assert.equal(portal.status, 307, `portal private route must not become public by suffix: ${path}`);
     assert.equal(portal.headers.get("cache-control"), "no-store", path);

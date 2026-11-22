@@ -30,7 +30,10 @@ const OIDC_ROOT_ROUTES = new Set([
 // Only explicitly shipped public assets bypass the session gate. A suffix-only
 // exception could turn a future /admin/report.txt or /account/export.js into
 // an unauthenticated route merely because its name resembles a static file.
-const PUBLIC_ASSET_PATHS = new Set(["/hub-mark.svg"]);
+// Next App Router also serves app/icon.svg as public /icon.svg metadata.
+// Keep each exception exact: /admin/icon.svg and other extension-shaped
+// account resources must still require their normal authorization boundary.
+const PUBLIC_ASSET_PATHS = new Set(["/hub-mark.svg", "/icon.svg"]);
 
 /**
  * Per-request nonce CSP (https://nextjs.org/docs/app/guides/content-security-policy).
