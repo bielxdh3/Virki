@@ -327,7 +327,7 @@ function inspectHtmlDocument(body, mime) {
         // potential double-escape sequences instead of issuing false PASS.
         const contentThroughClose = body.slice(at, after);
         const escapedStart = contentThroughClose.indexOf('<!--');
-        if (escapedStart >= 0 && /<script(?=[\t\n\f\r \/>])/i.test(
+        if (escapedStart >= 0 && /<script(?=[\t\n\f\r \x2f>])/i.test(
           contentThroughClose.slice(escapedStart + 4))) return fail();
       }
       at = after;
