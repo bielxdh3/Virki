@@ -2,6 +2,8 @@
 
 V39 is an **incremental, unwired BuildKit experiment** after the immutable V38 tree. The existing 16 patches and SHA-256 records V23–V38 are unchanged. No production FileSync admission, C4 release, deploy, Cloudflare change, merge or issue closure occurs.
 
+**Successor correction V40 supersedes this original V39 guarantee:** bare SHA-256 claim keys validate syntax but do not authenticate historical rows. A one-digit valid-hex mutation can remove a consumed claim from the replay set and allow the same signed test permit to be claimed again. Therefore the original V39 implementation **is not an integrity-aware replay fence**. Its immutable patch/hash remain for historical verification; only the incremental V40 chained-HMAC/checkpoint mechanism is eligible for the revised DEV replay claims. Statements below about rejecting corruption mean malformed/truncated records only, NOT valid-hex or rollback attacks.
+
 ## Narrow guarantee and trust boundary
 
 The V15 permit is an **Ed25519-signed test-only** fixture under `virki-c1-v15-test-owner-permit-1`; the actual C4 owner service **does not issue** it. The synthetic broker's independently trusted supervisor provides the frozen manifest, verification key, acceptable epoch interval, ledger path, peer PID/UID/GID and destination. None is accepted from the sender. A dedicated root real/effective UID process with a root:root `0700` ledger directory and root:root `0600`, nlink=1 **pre-provisioned** log is required; the log must be durably created by a trusted supervisor *before* any broker use. Missing log is a refusal, never silently recreated as an empty replay history.

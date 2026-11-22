@@ -1,0 +1,964 @@
+diff --git a/session/filesync/sealed_publication_ledger_v39_linux.go b/session/filesync/sealed_publication_ledger_v39_linux.go
+index 632edbf..824b8fa 100644
+--- a/session/filesync/sealed_publication_ledger_v39_linux.go
++++ b/session/filesync/sealed_publication_ledger_v39_linux.go
+@@ -4,165 +4,35 @@ package filesync
+ 
+ import (
+ 	"crypto/ed25519"
+-	"crypto/sha256"
+-	"encoding/hex"
+ 	"errors"
+ 	"fmt"
+-	"io"
+ 	"net"
+-	"os"
+-	"path/filepath"
+-	"strconv"
+-	"strings"
+-	"time"
+ 
+ 	"golang.org/x/sys/unix"
+ )
+ 
+ const v39LedgerMaxBytes = 1024 * 1024
+ 
+-// claimV39DurableTestOwnerPermit reserves a TEST-DOMAIN V15 signed owner
+-// permit BEFORE accepting any descriptor/network bytes. The ledger file must
+-// be provisioned and durably synced by a trusted root supervisor BEFORE the
+-// broker is available; its absence is a terminal refusal, never an empty
+-// auto-created replay history. The public key,
+-// manifest, epoch floor and ledger directory must be supplied by a distinct
+-// trusted supervisor, never by the untrusted sender. This is an UNWIRED DEV
+-// reference, not actual C4 owner signing/rollout authorization.
++// V39 permit entrypoints now require the incremental V40 authenticated
++// history, independently trusted root-only key and rollback checkpoint.
++// Previous unauthenticated V39 lines are NOT accepted or auto-migrated.
++// This is an UNWIRED test-domain reference, never owner C4 authority.
+ func claimV39DurableTestOwnerPermit(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
+ 	trustedPub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64) error {
+ 	return claimV39DurableTestOwnerPermitWithSync(ledgerDir, m, p, trustedPub,
+ 		minimumEpoch, maximumEpoch, unix.Fsync)
+ }
+ 
+-// withSync is a private deterministic fault injection seam. The normal
+-// entrypoint above always uses the real Linux fsync syscall.
++// Private fault injection; the ordinary production-inaccessible entrypoint
++// always uses the real fsync syscall.
+ func claimV39DurableTestOwnerPermitWithSync(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
+ 	trustedPub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64, syncFile func(int) error) error {
+-	if os.Getuid() != 0 || os.Geteuid() != 0 || minimumEpoch == 0 ||
+-		maximumEpoch < minimumEpoch || p.Epoch > maximumEpoch || syncFile == nil ||
+-		!filepath.IsAbs(ledgerDir) || filepath.Clean(ledgerDir) != ledgerDir || ledgerDir == "/" {
+-		return errors.New("C1 V39 requires trusted root-owned canonical ledger and positive owner epoch floor")
+-	}
+-	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+-	if err != nil {
+-		return err
+-	}
+-	defer unix.Close(rootFD)
+-	if err := validateV24TrustedSupervisorAncestors(rootFD, ledgerDir); err != nil {
+-		return fmt.Errorf("C1 V39 ledger ancestor untrusted: %w", err)
+-	}
+-	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(ledgerDir, "/"), &unix.OpenHow{
+-		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
+-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
+-	})
+-	if err != nil {
+-		return err
+-	}
+-	defer unix.Close(parentFD)
+-	var parentStat unix.Stat_t
+-	if err := unix.Fstat(parentFD, &parentStat); err != nil {
+-		return err
+-	}
+-	if parentStat.Mode&unix.S_IFMT != unix.S_IFDIR || parentStat.Uid != 0 ||
+-		parentStat.Gid != 0 || parentStat.Mode&07777 != 0700 {
+-		return errors.New("C1 V39 durable ledger parent must be trusted root:root 0700")
+-	}
+-	fd, err := unix.Openat(parentFD, ".virki-v39-claims",
+-		unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+-	if err != nil {
+-		return err
+-	}
+-	f := os.NewFile(uintptr(fd), "v39-claims")
+-	defer f.Close()
+-	var st unix.Stat_t
+-	if err := unix.Fstat(fd, &st); err != nil {
+-		return err
+-	}
+-	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != 0 || st.Gid != 0 ||
+-		st.Mode&07777 != 0600 || st.Nlink != 1 || st.Size > v39LedgerMaxBytes {
+-		return errors.New("C1 V39 claim ledger has untrusted metadata or exceeded bounded size")
+-	}
+-	deadline := time.Now().Add(3 * time.Second)
+-	for {
+-		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+-			break
+-		} else if !errors.Is(err, unix.EWOULDBLOCK) || time.Now().After(deadline) {
+-			return fmt.Errorf("C1 V39 exclusive durable claim lock unavailable: %w", err)
+-		}
+-		time.Sleep(10 * time.Millisecond)
+-	}
+-	defer unix.Flock(fd, unix.LOCK_UN)
+-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+-		return err
+-	}
+-	data, err := io.ReadAll(io.LimitReader(f, v39LedgerMaxBytes+1))
+-	if err != nil || len(data) > v39LedgerMaxBytes {
+-		return errors.New("C1 V39 durable claim log malformed or unbounded")
+-	}
+-	floor := minimumEpoch
+-	claims := make(map[string]struct{})
+-	if len(data) > 0 {
+-		if data[len(data)-1] != '\n' {
+-			return errors.New("C1 V39 incomplete persistent claim record; manual review required")
+-		}
+-		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+-			fields := strings.Split(line, " ")
+-			if len(fields) != 3 || fields[0] != "V39" || len(fields[2]) != 64 {
+-				return errors.New("C1 V39 malformed persistent claim record")
+-			}
+-			epoch, err := strconv.ParseUint(fields[1], 10, 64)
+-			if err != nil || epoch == 0 {
+-				return errors.New("C1 V39 invalid persistent epoch")
+-			}
+-			keyBytes, err := hex.DecodeString(fields[2])
+-			if err != nil || len(keyBytes) != sha256.Size {
+-				return errors.New("C1 V39 invalid persistent claim key")
+-			}
+-			if _, exists := claims[fields[2]]; exists {
+-				return errors.New("C1 V39 duplicated persistent claim key")
+-			}
+-			claims[fields[2]] = struct{}{}
+-			if epoch > floor {
+-				floor = epoch
+-			}
+-		}
+-	}
+-	// Reuse existing signed-permit validation/expiry checks, but never rely on
+-	// its volatile map for replay; that is enforced by the fsynced root ledger.
+-	if err := NewV15LocalReplayLedger(floor).VerifyAndClaim(m, p, trustedPub); err != nil {
+-		return fmt.Errorf("C1 V39 signed owner permit refused: %w", err)
+-	}
+-	hash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", V15OwnerDomain, p.Epoch, p.ApprovalID)))
+-	key := hex.EncodeToString(hash[:])
+-	if _, exists := claims[key]; exists {
+-		return errors.New("C1 V39 signed owner permit replayed after restart or concurrent claim")
+-	}
+-	row := fmt.Sprintf("V39 %d %s\n", p.Epoch, key)
+-	if len(data)+len(row) > v39LedgerMaxBytes {
+-		return errors.New("C1 V39 durable ledger full; refuse until independent operator migration")
+-	}
+-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+-		return err
+-	}
+-	if n, err := f.Write([]byte(row)); err != nil || n != len(row) {
+-		return errors.New("C1 V39 ambiguous claim write; never publish")
+-	}
+-	if err := syncFile(fd); err != nil {
+-		return fmt.Errorf("C1 V39 ambiguous claim file fsync; never publish: %w", err)
+-	}
+-	if err := unix.Fsync(parentFD); err != nil {
+-		return fmt.Errorf("C1 V39 ambiguous ledger parent fsync; never publish: %w", err)
+-	}
+-	return nil
++	return claimV40AuthenticatedTestPermitWithSync(ledgerDir, m, p,
++		trustedPub, minimumEpoch, maximumEpoch, syncFile)
+ }
+ 
+-// publishV39FromAuthorizedTestPeer is an UNWIRED, synthetic test composition:
+-// the independently trusted V15 test permit is claimed and made durable
+-// BEFORE any SCM_RIGHTS receive, source read, or publication side effect.
+-// Even if a later handoff or publish fails, the permit is consumed. The
+-// real C4 approval, operational receiver identity and crash-recovery state
+-// machine DO NOT exist here. Do not connect this to a production RPC.
++// An UNWIRED synthetic composition: claim persisted before reading SCM_RIGHTS.
++// A later peer/publication failure consumes the permit and cannot be retried.
+ func publishV39FromAuthorizedTestPeer(ledgerDir string, conn *net.UnixConn,
+ 	expectedPID int, expectedUID, expectedGID uint32, dest string,
+ 	manifest V15SealedManifest, permit V15OwnerPermit,
+diff --git a/session/filesync/sealed_publication_ledger_v39_linux_test.go b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+index b3a2ba4..44631c2 100644
+--- a/session/filesync/sealed_publication_ledger_v39_linux_test.go
++++ b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+@@ -73,20 +73,39 @@ func TestC1V39DurableTestPermitAndAuthenticatedPublication(t *testing.T) {
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+ 	require.NoError(t, os.Chmod(base, 0711))
++	manifest := v15PacketManifest()
++	pub, priv, err := ed25519.GenerateKey(rand.Reader)
++	require.NoError(t, err)
++	macKey := make([]byte, 32)
++	_, err = rand.Read(macKey)
++	require.NoError(t, err)
+ 	ledgerFile := func(dir string) string { return filepath.Join(dir, ".virki-v39-claims") }
+ 	provision := func(name string) string {
+ 		dir := filepath.Join(base, name)
+ 		require.NoError(t, os.Mkdir(dir, 0700))
+ 		require.NoError(t, os.WriteFile(ledgerFile(dir), nil, 0600))
++		trust := v40TrustDir(dir)
++		require.NoError(t, os.Mkdir(trust, 0700))
++		require.NoError(t, os.WriteFile(filepath.Join(trust, v40KeyName), macKey, 0400))
++		require.NoError(t, os.WriteFile(filepath.Join(trust, v40CheckpointName),
++			v40InitialCheckpoint(dir, pub, macKey), 0600))
++		for _, path := range []string{ledgerFile(dir), filepath.Join(trust, v40KeyName),
++			filepath.Join(trust, v40CheckpointName)} {
++			file, err := os.Open(path)
++			require.NoError(t, err)
++			require.NoError(t, file.Sync())
++			require.NoError(t, file.Close())
++		}
++		td, err := unix.Open(trust, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		require.NoError(t, err)
++		require.NoError(t, unix.Fsync(td))
++		require.NoError(t, unix.Close(td))
+ 		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+ 		require.NoError(t, err)
+ 		require.NoError(t, unix.Fsync(fd), "fixture ledger must exist durably before broker use")
+ 		require.NoError(t, unix.Close(fd))
+ 		return dir
+ 	}
+-	manifest := v15PacketManifest()
+-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+-	require.NoError(t, err)
+ 	sign := func(approval string, epoch uint64) V15OwnerPermit {
+ 		p := V15OwnerPermit{
+ 			Domain: V15OwnerDomain, ApprovalID: approval, ManifestDigest: manifest.Digest,
+@@ -188,7 +207,7 @@ func TestC1V39DurableTestPermitAndAuthenticatedPublication(t *testing.T) {
+ 			return unix.EIO
+ 		})
+ 		require.True(t, reached)
+-		require.ErrorContains(t, err, "ambiguous claim file fsync")
++		require.ErrorContains(t, err, "ambiguous log fsync")
+ 		require.Error(t, claim(dir, bad), "no successful publication after uncertain claim write")
+ 	})
+ 
+diff --git a/session/filesync/sealed_publication_ledger_v40_linux.go b/session/filesync/sealed_publication_ledger_v40_linux.go
+new file mode 100644
+index 0000000..6b63565
+--- /dev/null
++++ b/session/filesync/sealed_publication_ledger_v40_linux.go
+@@ -0,0 +1,411 @@
++//go:build linux
++
++package filesync
++
++import (
++	"crypto/ed25519"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++const (
++	v40KeyName        = ".virki-v40-key"
++	v40CheckpointName = ".virki-v40-checkpoint"
++	v40PendingName    = ".virki-v40-checkpoint.pending"
++	v40IntentName     = ".virki-v40-inflight"
++	v40LogName        = ".virki-v39-claims"
++)
++
++// The trust directory is a distinct root-owned sibling of the ledger. The
++// trusted supervisor provisions its 0400 random key, 0600 authenticated
++// genesis checkpoint and empty ledger BEFORE starting the broker. Rollback of
++// BOTH ledger and independent checkpoint by a compromised root is outside
++// this root-trusting DEV threat model: production needs an external monotonic
++// owner authority (e.g. C4/TPM), not this synthetic replay fence.
++func v40TrustDir(ledgerDir string) string { return ledgerDir + "-anchor" }
++
++func v40MAC(key []byte, domain string, fields ...string) string {
++	m := hmac.New(sha256.New, key)
++	_, _ = m.Write([]byte(domain))
++	for _, field := range fields {
++		_, _ = m.Write([]byte{0})
++		_, _ = m.Write([]byte(field))
++	}
++	return hex.EncodeToString(m.Sum(nil))
++}
++
++func v40Genesis(ledgerDir string, pub ed25519.PublicKey, key []byte) string {
++	return v40MAC(key, "virki-v40-test-genesis", ledgerDir, hex.EncodeToString(pub))
++}
++
++func v40CheckpointBytes(ledgerDir string, pub ed25519.PublicKey, key []byte,
++	count, floor uint64, tip string) []byte {
++	data := fmt.Sprintf("V40A %d %d %s", count, floor, tip)
++	tag := v40MAC(key, "virki-v40-test-anchor", ledgerDir, hex.EncodeToString(pub), data)
++	return []byte(data + " " + tag + "\n")
++}
++
++func v40InitialCheckpoint(ledgerDir string, pub ed25519.PublicKey, key []byte) []byte {
++	return v40CheckpointBytes(ledgerDir, pub, key, 0, 0, v40Genesis(ledgerDir, pub, key))
++}
++
++func v40CanonicalHash(s string) bool {
++	if len(s) != 64 {
++		return false
++	}
++	b, err := hex.DecodeString(s)
++	return err == nil && len(b) == sha256.Size && hex.EncodeToString(b) == s
++}
++
++func v40OpenRootDir(rootFD int, path string) (int, error) {
++	if err := validateV24TrustedSupervisorAncestors(rootFD, path); err != nil {
++		return -1, fmt.Errorf("V40 untrusted ancestor: %w", err)
++	}
++	fd, err := unix.Openat2(rootFD, strings.TrimPrefix(path, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
++	})
++	if err != nil {
++		return -1, err
++	}
++	var st unix.Stat_t
++	if err := unix.Fstat(fd, &st); err != nil {
++		_ = unix.Close(fd)
++		return -1, err
++	}
++	if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != 0 || st.Gid != 0 || st.Mode&07777 != 0700 {
++		_ = unix.Close(fd)
++		return -1, errors.New("V40 trust directory must be root:root 0700")
++	}
++	return fd, nil
++}
++
++// Never follow symlinks, accept link aliases, or trust a descriptor whose
++// pathname has been replaced. Recheck each pinned inode after lock/commit.
++func v40CheckFileIdentity(dirFD, fd int, name string, mode uint32) error {
++	var st, named unix.Stat_t
++	if err := unix.Fstat(fd, &st); err != nil {
++		return err
++	}
++	if err := unix.Fstatat(dirFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
++		return err
++	}
++	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&07777 != mode ||
++		st.Uid != 0 || st.Gid != 0 || st.Nlink != 1 ||
++		named.Mode&unix.S_IFMT != unix.S_IFREG ||
++		st.Dev != named.Dev || st.Ino != named.Ino {
++		return fmt.Errorf("V40 %s untrusted mode, owner, links or inode", name)
++	}
++	return nil
++}
++
++func v40ReadProtected(dirFD int, name string, mode uint32, limit int64) ([]byte, error) {
++	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return nil, err
++	}
++	f := os.NewFile(uintptr(fd), name)
++	defer f.Close()
++	if err := v40CheckFileIdentity(dirFD, fd, name, mode); err != nil {
++		return nil, err
++	}
++	data, err := io.ReadAll(io.LimitReader(f, limit+1))
++	if err != nil || int64(len(data)) > limit {
++		return nil, errors.New("V40 trust file unreadable or outside size limit")
++	}
++	if err := v40CheckFileIdentity(dirFD, fd, name, mode); err != nil {
++		return nil, err
++	}
++	return data, nil
++}
++
++func v40NoPending(trustFD int) error {
++	for _, name := range []string{v40PendingName, v40IntentName} {
++		var st unix.Stat_t
++		err := unix.Fstatat(trustFD, name, &st, unix.AT_SYMLINK_NOFOLLOW)
++		if errors.Is(err, unix.ENOENT) {
++			continue
++		}
++		if err != nil {
++			return err
++		}
++		return fmt.Errorf("V40 %s remains: ambiguous crash, manual recovery only", name)
++	}
++	return nil
++}
++
++func v40VerifyHistory(log []byte, anchor []byte, ledgerDir string,
++	pub ed25519.PublicKey, key []byte) (map[string]struct{}, uint64, uint64, string, error) {
++	fail := func() (map[string]struct{}, uint64, uint64, string, error) {
++		return nil, 0, 0, "", errors.New("V40 authenticated claim history/anchor mismatch: fail closed")
++	}
++	if len(key) != 32 || len(pub) != ed25519.PublicKeySize || len(anchor) == 0 ||
++		anchor[len(anchor)-1] != '\n' || len(anchor) > 256 {
++		return fail()
++	}
++	fields := strings.Split(strings.TrimSuffix(string(anchor), "\n"), " ")
++	if len(fields) != 5 || fields[0] != "V40A" ||
++		!v40CanonicalHash(fields[3]) || !v40CanonicalHash(fields[4]) {
++		return fail()
++	}
++	count, errCount := strconv.ParseUint(fields[1], 10, 64)
++	floor, errFloor := strconv.ParseUint(fields[2], 10, 64)
++	if errCount != nil || errFloor != nil ||
++		strconv.FormatUint(count, 10) != fields[1] ||
++		strconv.FormatUint(floor, 10) != fields[2] {
++		return fail()
++	}
++	prefix := strings.Join(fields[:4], " ")
++	if !hmac.Equal([]byte(fields[4]), []byte(v40MAC(key, "virki-v40-test-anchor",
++		ledgerDir, hex.EncodeToString(pub), prefix))) {
++		return fail()
++	}
++	tip := v40Genesis(ledgerDir, pub, key)
++	claims := make(map[string]struct{})
++	var n, high uint64
++	if len(log) > 0 {
++		if log[len(log)-1] != '\n' {
++			return fail()
++		}
++		for _, line := range strings.Split(strings.TrimSuffix(string(log), "\n"), "\n") {
++			fields := strings.Split(line, " ")
++			if len(fields) != 4 || fields[0] != "V40" ||
++				!v40CanonicalHash(fields[2]) || !v40CanonicalHash(fields[3]) {
++				return fail()
++			}
++			epoch, err := strconv.ParseUint(fields[1], 10, 64)
++			if err != nil || epoch == 0 || strconv.FormatUint(epoch, 10) != fields[1] ||
++				epoch < high {
++				return fail()
++			}
++			next := v40MAC(key, "virki-v40-test-row", ledgerDir, tip, fields[1], fields[2])
++			if !hmac.Equal([]byte(next), []byte(fields[3])) {
++				return fail()
++			}
++			if _, exists := claims[fields[2]]; exists {
++				return fail()
++			}
++			claims[fields[2]] = struct{}{}
++			high = epoch
++			tip = next
++			n++
++		}
++	}
++	if n != count || high != floor || tip != fields[3] {
++		return fail()
++	}
++	return claims, count, floor, tip, nil
++}
++
++func claimV40AuthenticatedTestPermitWithSync(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
++	pub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64, syncLog func(int) error) error {
++	return claimV40AuthenticatedTestPermitWithHooks(ledgerDir, m, p, pub, minimumEpoch,
++		maximumEpoch, syncLog, unix.Fsync, unix.Fsync)
++}
++
++// DEV-only injection seams for log fsync, checkpoint file fsync and checkpoint
++// directory fsync. Any uncertain result is terminal and not publishable.
++func claimV40AuthenticatedTestPermitWithHooks(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
++	pub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64,
++	syncLog, syncCheckpoint, syncTrustParent func(int) error) error {
++	if os.Getuid() != 0 || os.Geteuid() != 0 || minimumEpoch == 0 ||
++		maximumEpoch < minimumEpoch || p.Epoch > maximumEpoch ||
++		len(pub) != ed25519.PublicKeySize || syncLog == nil ||
++		syncCheckpoint == nil || syncTrustParent == nil ||
++		!filepath.IsAbs(ledgerDir) || filepath.Clean(ledgerDir) != ledgerDir ||
++		ledgerDir == "/" {
++		return errors.New("V40 requires canonical pre-provisioned trusted root ledger and valid epoch/key")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(rootFD)
++	ledgerFD, err := v40OpenRootDir(rootFD, ledgerDir)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(ledgerFD)
++	trustFD, err := v40OpenRootDir(rootFD, v40TrustDir(ledgerDir))
++	if err != nil {
++		return fmt.Errorf("V40 independent trust directory refused: %w", err)
++	}
++	defer unix.Close(trustFD)
++	fd, err := unix.Openat(ledgerFD, v40LogName, unix.O_RDWR|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(fd)
++	if err := v40CheckFileIdentity(ledgerFD, fd, v40LogName, 0600); err != nil {
++		return err
++	}
++	deadline := time.Now().Add(3 * time.Second)
++	for {
++		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
++			break
++		} else if !errors.Is(err, unix.EWOULDBLOCK) || time.Now().After(deadline) {
++			return fmt.Errorf("V40 exclusive claim lock unavailable: %w", err)
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	defer unix.Flock(fd, unix.LOCK_UN)
++	if err := v40CheckFileIdentity(ledgerFD, fd, v40LogName, 0600); err != nil {
++		return err
++	}
++	if err := v40NoPending(trustFD); err != nil {
++		return err
++	}
++	key, err := v40ReadProtected(trustFD, v40KeyName, 0400, 32)
++	if err != nil || len(key) != 32 {
++		return errors.New("V40 root-only independent MAC key missing or malformed")
++	}
++	anchor, err := v40ReadProtected(trustFD, v40CheckpointName, 0600, 256)
++	if err != nil {
++		return fmt.Errorf("V40 trusted checkpoint unavailable: %w", err)
++	}
++	if _, err := unix.Seek(fd, 0, io.SeekStart); err != nil {
++		return err
++	}
++	log, err := v40ReadBoundedFD(fd, v39LedgerMaxBytes)
++	if err != nil || len(log) > v39LedgerMaxBytes {
++		return errors.New("V40 ledger unreadable/overflow")
++	}
++	claims, count, floor, tip, err := v40VerifyHistory(log, anchor, ledgerDir, pub, key)
++	if err != nil {
++		return err
++	}
++	effectiveFloor := minimumEpoch
++	if floor > effectiveFloor {
++		effectiveFloor = floor
++	}
++	if err := NewV15LocalReplayLedger(effectiveFloor).VerifyAndClaim(m, p, pub); err != nil {
++		return fmt.Errorf("V40 signed test owner permit refused: %w", err)
++	}
++	keyHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", V15OwnerDomain, p.Epoch, p.ApprovalID)))
++	claimKey := hex.EncodeToString(keyHash[:])
++	if _, exists := claims[claimKey]; exists {
++		return errors.New("V40 signed owner permit replayed after restart or concurrent claim")
++	}
++	epoch := strconv.FormatUint(p.Epoch, 10)
++	next := v40MAC(key, "virki-v40-test-row", ledgerDir, tip, epoch, claimKey)
++	row := []byte("V40 " + epoch + " " + claimKey + " " + next + "\n")
++	if len(log)+len(row) > v39LedgerMaxBytes || count == ^uint64(0) {
++		return errors.New("V40 ledger full, refuse until independently authorized migration")
++	}
++	// Persist an independent in-flight marker BEFORE mutating the ledger.
++	// A crash/EIO between log append and checkpoint replacement MUST NOT
++	// accidentally look like a clean, publishable history after restart,
++	// even if both log and checkpoint happen to persist.
++	intentFD, err := unix.Openat(trustFD, v40IntentName, unix.O_WRONLY|unix.O_CREAT|
++		unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
++	if err != nil {
++		return fmt.Errorf("V40 cannot fence pending transaction: %w", err)
++	}
++	if n, writeErr := unix.Write(intentFD, []byte("V40_INFLIGHT\n")); writeErr != nil || n != len("V40_INFLIGHT\n") {
++		_ = unix.Close(intentFD)
++		return errors.New("V40 ambiguous durable transaction intent: publication forbidden")
++	}
++	if err := unix.Fsync(intentFD); err != nil {
++		_ = unix.Close(intentFD)
++		return fmt.Errorf("V40 transaction intent fsync failed: %w", err)
++	}
++	if err := unix.Close(intentFD); err != nil {
++		return err
++	}
++	if err := unix.Fsync(trustFD); err != nil {
++		return fmt.Errorf("V40 transaction intent parent fsync failed: %w", err)
++	}
++	if _, err := unix.Seek(fd, 0, io.SeekEnd); err != nil {
++		return err
++	}
++	if n, err := unix.Write(fd, row); err != nil || n != len(row) {
++		return errors.New("V40 ambiguous log write; publication forbidden")
++	}
++	if err := syncLog(fd); err != nil {
++		return fmt.Errorf("V40 ambiguous log fsync; publication forbidden: %w", err)
++	}
++	if err := unix.Fsync(ledgerFD); err != nil {
++		return fmt.Errorf("V40 ambiguous ledger parent fsync; publication forbidden: %w", err)
++	}
++	newFloor := floor
++	if p.Epoch > newFloor {
++		newFloor = p.Epoch
++	}
++	checkpoint := v40CheckpointBytes(ledgerDir, pub, key, count+1, newFloor, next)
++	pendingFD, err := unix.Openat(trustFD, v40PendingName, unix.O_WRONLY|unix.O_CREAT|
++		unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
++	if err != nil {
++		return fmt.Errorf("V40 unable to establish exclusive pending checkpoint: %w", err)
++	}
++	if n, writeErr := unix.Write(pendingFD, checkpoint); writeErr != nil || n != len(checkpoint) {
++		_ = unix.Close(pendingFD)
++		return errors.New("V40 ambiguous pending checkpoint write, manual recovery")
++	}
++	if err := syncCheckpoint(pendingFD); err != nil {
++		_ = unix.Close(pendingFD)
++		return fmt.Errorf("V40 ambiguous checkpoint fsync, manual recovery: %w", err)
++	}
++	if err := unix.Close(pendingFD); err != nil {
++		return err
++	}
++	if err := v40CheckFileIdentity(ledgerFD, fd, v40LogName, 0600); err != nil {
++		return err
++	}
++	if err := unix.Renameat2(trustFD, v40PendingName, trustFD, v40CheckpointName, 0); err != nil {
++		return fmt.Errorf("V40 ambiguous atomic checkpoint replacement, manual recovery: %w", err)
++	}
++	if err := syncTrustParent(trustFD); err != nil {
++		return fmt.Errorf("V40 ambiguous checkpoint parent fsync, manual recovery: %w", err)
++	}
++	if err := v40CheckFileIdentity(ledgerFD, fd, v40LogName, 0600); err != nil {
++		return err
++	}
++	current, err := v40ReadProtected(trustFD, v40CheckpointName, 0600, 256)
++	if err != nil || !hmac.Equal(current, checkpoint) {
++		return errors.New("V40 newly committed checkpoint untrusted; never publish")
++	}
++	if err := unix.Unlinkat(trustFD, v40IntentName, 0); err != nil {
++		return fmt.Errorf("V40 cannot clear durable transaction fence: %w", err)
++	}
++	if err := unix.Fsync(trustFD); err != nil {
++		return fmt.Errorf("V40 transaction fence clearing fsync failed: %w", err)
++	}
++	if err := v40NoPending(trustFD); err != nil {
++		return err
++	}
++	return nil
++}
++
++// Read without an os.File wrapper/finalizer around the locked descriptor.
++// An independently finalized duplicate wrapper could close the flock FD.
++func v40ReadBoundedFD(fd, limit int) ([]byte, error) {
++	buf := make([]byte, 0, 4096)
++	part := make([]byte, 4096)
++	for len(buf) <= limit {
++		n, err := unix.Read(fd, part)
++		if n > 0 {
++			buf = append(buf, part[:n]...)
++		}
++		if err == unix.EINTR {
++			continue
++		}
++		if err != nil {
++			return nil, err
++		}
++		if n == 0 {
++			return buf, nil
++		}
++	}
++	return nil, errors.New("V40 ledger limit exceeded")
++}
+diff --git a/session/filesync/sealed_publication_ledger_v40_linux_test.go b/session/filesync/sealed_publication_ledger_v40_linux_test.go
+new file mode 100644
+index 0000000..597c0cc
+--- /dev/null
++++ b/session/filesync/sealed_publication_ledger_v40_linux_test.go
+@@ -0,0 +1,305 @@
++//go:build linux
++
++package filesync
++
++import (
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/json"
++	"net"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// A separate synthetic fixture isolates tamper tests from the V39 positive
++// path. It cannot attest production C4/TPM or a maliciously compromised root.
++func TestC1V40AuthenticatedLedgerDetectsValidHexTamperAndRollback(t *testing.T) {
++	if os.Getenv("VIRKI_V40_CHILD") == "claim" {
++		raw, err := base64.StdEncoding.DecodeString(os.Getenv("VIRKI_V40_CLAIM"))
++		require.NoError(t, err)
++		var cfg v39ChildClaim
++		require.NoError(t, json.Unmarshal(raw, &cfg))
++		if err := claimV39DurableTestOwnerPermit(cfg.Ledger, cfg.Manifest, cfg.Permit, cfg.Public, 7, 8); err != nil {
++			_, _ = os.Stdout.WriteString("CLAIM_REFUSED\n")
++		} else {
++			_, _ = os.Stdout.WriteString("CLAIM_ACCEPTED\n")
++		}
++		return
++	}
++	if os.Getenv("VIRKI_V40_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("V40 requires explicit isolated root fixture")
++	}
++	base, err := os.MkdirTemp("/var/tmp", "virki-v40-tamper-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++	require.NoError(t, os.Chmod(base, 0711))
++	manifest := v15PacketManifest()
++	pub, private, err := ed25519.GenerateKey(rand.Reader)
++	require.NoError(t, err)
++	key := make([]byte, 32)
++	_, err = rand.Read(key)
++	require.NoError(t, err)
++	sign := func(approval string, epoch uint64) V15OwnerPermit {
++		p := V15OwnerPermit{
++			Domain: V15OwnerDomain, ApprovalID: approval, ManifestDigest: manifest.Digest,
++			WorkerID: manifest.WorkerID, SessionID: manifest.SessionID,
++			ContextName: manifest.ContextName, Nonce: manifest.Nonce,
++			Epoch: epoch, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++		}
++		p.Signature = ed25519.Sign(private, v15PermitBytes(p))
++		return p
++	}
++	provision := func(name string) string {
++		t.Helper()
++		dir := filepath.Join(base, name)
++		trust := v40TrustDir(dir)
++		require.NoError(t, os.Mkdir(dir, 0700))
++		require.NoError(t, os.Mkdir(trust, 0700))
++		files := []struct {
++			path string
++			data []byte
++			mode os.FileMode
++		}{
++			{filepath.Join(dir, v40LogName), nil, 0600},
++			{filepath.Join(trust, v40KeyName), key, 0400},
++			{filepath.Join(trust, v40CheckpointName), v40InitialCheckpoint(dir, pub, key), 0600},
++		}
++		for _, item := range files {
++			require.NoError(t, os.WriteFile(item.path, item.data, item.mode))
++			f, err := os.Open(item.path)
++			require.NoError(t, err)
++			require.NoError(t, f.Sync())
++			require.NoError(t, f.Close())
++		}
++		for _, path := range []string{dir, trust} {
++			d, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++			require.NoError(t, err)
++			require.NoError(t, unix.Fsync(d))
++			require.NoError(t, unix.Close(d))
++		}
++		return dir
++	}
++	claim := func(dir string, p V15OwnerPermit) error {
++		return claimV39DurableTestOwnerPermit(dir, manifest, p, pub, 7, 8)
++	}
++	assertRestartRefused := func(dir string, permit V15OwnerPermit) {
++		t.Helper()
++		self, err := os.Executable()
++		require.NoError(t, err)
++		cfg, err := json.Marshal(v39ChildClaim{dir, manifest, permit, pub})
++		require.NoError(t, err)
++		cmd := exec.Command(self, "-test.run=^TestC1V40AuthenticatedLedgerDetectsValidHexTamperAndRollback$")
++		cmd.Env = append(os.Environ(), "VIRKI_V40_CHILD=claim",
++			"VIRKI_V40_CLAIM="+base64.StdEncoding.EncodeToString(cfg))
++		output, err := cmd.CombinedOutput()
++		require.NoError(t, err, "%s", output)
++		require.Contains(t, string(output), "CLAIM_REFUSED")
++		require.NotContains(t, string(output), "CLAIM_ACCEPTED")
++	}
++	refusePublication := func(dir string, p V15OwnerPermit) {
++		t.Helper()
++		dest := filepath.Join(base, "must-not-exist")
++		err := publishV39FromAuthorizedTestPeer(dir, &net.UnixConn{}, 12345,
++			60014, 60014, dest, manifest, p, pub, 7, 8)
++		require.Error(t, err)
++		_, err = os.Lstat(dest)
++		require.ErrorIs(t, err, os.ErrNotExist)
++	}
++	t.Run("valid hexadecimal mutation of signed replay key", func(t *testing.T) {
++		dir := provision("hex")
++		first := sign("first", 7)
++		require.NoError(t, claim(dir, first))
++		file := filepath.Join(dir, v40LogName)
++		raw, err := os.ReadFile(file)
++		require.NoError(t, err)
++		fields := strings.Fields(string(raw))
++		require.Len(t, fields, 4)
++		require.True(t, v40CanonicalHash(fields[2]))
++		broken := []byte(fields[2])
++		if broken[4] == 'a' {
++			broken[4] = 'b'
++		} else {
++			broken[4] = 'a'
++		}
++		tampered := strings.Replace(string(raw), fields[2], string(broken), 1)
++		require.NoError(t, os.WriteFile(file, []byte(tampered), 0600))
++		require.True(t, v40CanonicalHash(string(broken)), "attack preserves exact valid 64-digit lowercase hex format")
++		require.ErrorContains(t, claim(dir, first), "authenticated claim history")
++		require.ErrorContains(t, claim(dir, sign("second", 7)), "authenticated claim history")
++		assertRestartRefused(dir, first)
++		refusePublication(dir, first)
++	})
++	t.Run("intermediate record mutation stays syntactically valid", func(t *testing.T) {
++		dir := provision("middle")
++		for _, id := range []string{"a", "b", "c"} {
++			require.NoError(t, claim(dir, sign(id, 7)))
++		}
++		file := filepath.Join(dir, v40LogName)
++		raw, err := os.ReadFile(file)
++		require.NoError(t, err)
++		lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
++		require.Len(t, lines, 3)
++		fields := strings.Split(lines[1], " ")
++		require.Len(t, fields, 4)
++		flipped := []byte(fields[2])
++		if flipped[0] == 'f' {
++			flipped[0] = 'e'
++		} else {
++			flipped[0] = 'f'
++		}
++		fields[2] = string(flipped)
++		lines[1] = strings.Join(fields, " ")
++		require.NoError(t, os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0600))
++		require.ErrorContains(t, claim(dir, sign("b", 7)), "authenticated claim history")
++		assertRestartRefused(dir, sign("b", 7))
++		refusePublication(dir, sign("b", 7))
++	})
++	t.Run("truncation, rollback, inode replacement and independent checkpoint rollback", func(t *testing.T) {
++		dir := provision("rollback")
++		anchorFile := filepath.Join(v40TrustDir(dir), v40CheckpointName)
++		logFile := filepath.Join(dir, v40LogName)
++		genesis, err := os.ReadFile(anchorFile)
++		require.NoError(t, err)
++		first := sign("earlier", 7)
++		require.NoError(t, claim(dir, first))
++		firstLog, err := os.ReadFile(logFile)
++		require.NoError(t, err)
++		require.NoError(t, claim(dir, sign("later", 8)))
++		fullLog, err := os.ReadFile(logFile)
++		require.NoError(t, err)
++		fullAnchor, err := os.ReadFile(anchorFile)
++		require.NoError(t, err)
++		// Roll back only the ledger to a previously valid prefix, with a fresh
++		// root-owned inode. Even a legitimate older chain cannot bypass anchor.
++		require.NoError(t, os.Remove(logFile))
++		require.NoError(t, os.WriteFile(logFile, firstLog, 0600))
++		require.ErrorContains(t, claim(dir, first), "authenticated claim history")
++		assertRestartRefused(dir, first)
++		// A reset checkpoint cannot authorize a still-current, longer log.
++		require.NoError(t, os.WriteFile(logFile, fullLog, 0600))
++		require.NoError(t, os.WriteFile(anchorFile, genesis, 0600))
++		require.ErrorContains(t, claim(dir, first), "authenticated claim history")
++		assertRestartRefused(dir, first)
++		// An empty log with the independently retained nonzero checkpoint
++		// must fail. Resetting BOTH files would require compromising the
++		// trust principal and cannot be solved with a same-root MAC key.
++		require.NoError(t, os.WriteFile(anchorFile, fullAnchor, 0600))
++		require.NoError(t, os.WriteFile(logFile, nil, 0600))
++		require.ErrorContains(t, claim(dir, first), "authenticated claim history")
++		refusePublication(dir, first)
++	})
++	t.Run("authenticated anchor and key tamper cannot fake replay history", func(t *testing.T) {
++		dir := provision("anchor-tamper")
++		first := sign("anchor-first", 7)
++		require.NoError(t, claim(dir, first))
++		anchor := filepath.Join(v40TrustDir(dir), v40CheckpointName)
++		raw, err := os.ReadFile(anchor)
++		require.NoError(t, err)
++		fields := strings.Fields(string(raw))
++		require.Len(t, fields, 5)
++		digest := []byte(fields[4])
++		digest[3] = 'a'
++		if fields[4][3] == 'a' {
++			digest[3] = 'b'
++		}
++		fields[4] = string(digest)
++		require.NoError(t, os.WriteFile(anchor, []byte(strings.Join(fields, " ")+"\n"), 0600))
++		require.ErrorContains(t, claim(dir, first), "authenticated claim history")
++		assertRestartRefused(dir, first)
++	})
++	t.Run("fsync errors never authorize or silently repair historical claims", func(t *testing.T) {
++		for _, fault := range []string{"log", "checkpoint", "checkpoint-parent"} {
++			t.Run(fault, func(t *testing.T) {
++				dir := provision("fault-" + fault)
++				first := sign("fault-"+fault, 7)
++				syncLog := unix.Fsync
++				syncCheckpoint := unix.Fsync
++				syncParent := unix.Fsync
++				switch fault {
++				case "log":
++					syncLog = func(int) error { return unix.EIO }
++				case "checkpoint":
++					syncCheckpoint = func(int) error { return unix.EIO }
++				case "checkpoint-parent":
++					syncParent = func(int) error { return unix.EIO }
++				}
++				err := claimV40AuthenticatedTestPermitWithHooks(dir, manifest, first, pub,
++					7, 8, syncLog, syncCheckpoint, syncParent)
++				require.Error(t, err)
++				// The same signed permit is never re-admitted; rollback to the
++				// clean genesis after a failure is forbidden without oversight.
++				require.Error(t, claim(dir, first))
++				assertRestartRefused(dir, first)
++				refusePublication(dir, first)
++				// Even a different, freshly signed permit must be rejected
++				// after a durably ambiguous transaction, including restart.
++				next := sign("different-after-"+fault, 8)
++				require.ErrorContains(t, claim(dir, next), "ambiguous crash")
++				assertRestartRefused(dir, next)
++				refusePublication(dir, next)
++				if fault == "checkpoint" {
++					_, err := os.Lstat(filepath.Join(v40TrustDir(dir), v40PendingName))
++					require.NoError(t, err, "unsynced checkpoint retained as crash evidence")
++				}
++			})
++		}
++	})
++	t.Run("fresh epoch remains live only after verified prior claim", func(t *testing.T) {
++		dir := provision("positive")
++		require.NoError(t, claim(dir, sign("first", 7)))
++		require.NoError(t, claim(dir, sign("next", 8)))
++		require.ErrorContains(t, claim(dir, sign("first", 7)), "stale")
++		raw, err := os.ReadFile(filepath.Join(dir, v40LogName))
++		require.NoError(t, err)
++		anchor, err := os.ReadFile(filepath.Join(v40TrustDir(dir), v40CheckpointName))
++		require.NoError(t, err)
++		claims, count, floor, _, err := v40VerifyHistory(raw, anchor, dir, pub, key)
++		require.NoError(t, err)
++		require.Len(t, claims, 2)
++		require.Equal(t, uint64(2), count)
++		require.Equal(t, uint64(8), floor)
++		_, err = os.Lstat(filepath.Join(v40TrustDir(dir), v40IntentName))
++		require.ErrorIs(t, err, os.ErrNotExist, "successful commit must clear in-flight marker")
++		_, err = os.Lstat(filepath.Join(v40TrustDir(dir), v40PendingName))
++		require.ErrorIs(t, err, os.ErrNotExist, "successful commit must clear pending checkpoint")
++	})
++	t.Run("legacy unauthenticated V39 records cannot be imported silently", func(t *testing.T) {
++		dir := provision("legacy")
++		synthetic := "V39 7 " + strings.Repeat("a", 64) + "\n"
++		require.NoError(t, os.WriteFile(filepath.Join(dir, v40LogName), []byte(synthetic), 0600))
++		permit := sign("legacy-test", 7)
++		require.ErrorContains(t, claim(dir, permit), "authenticated claim history")
++		assertRestartRefused(dir, permit)
++		refusePublication(dir, permit)
++	})
++	t.Run("same-sized root key replacement cannot authenticate prior history", func(t *testing.T) {
++		dir := provision("key-replaced")
++		first := sign("key-first", 7)
++		require.NoError(t, claim(dir, first))
++		file := filepath.Join(v40TrustDir(dir), v40KeyName)
++		newKey := make([]byte, len(key))
++		_, err := rand.Read(newKey)
++		require.NoError(t, err)
++		require.NoError(t, os.WriteFile(file, newKey, 0400))
++		require.ErrorContains(t, claim(dir, first), "authenticated claim history")
++		assertRestartRefused(dir, first)
++		refusePublication(dir, first)
++	})
++	t.Run("untrusted trust anchor replaced or symlinked always fails", func(t *testing.T) {
++		dir := provision("symlink")
++		first := sign("first", 7)
++		require.NoError(t, claim(dir, first))
++		keyPath := filepath.Join(v40TrustDir(dir), v40KeyName)
++		require.NoError(t, os.Remove(keyPath))
++		require.NoError(t, os.Symlink("/dev/null", keyPath))
++		require.Error(t, claim(dir, sign("second", 7)))
++	})
++}

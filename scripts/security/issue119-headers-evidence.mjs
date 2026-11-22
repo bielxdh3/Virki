@@ -40,7 +40,11 @@ function inspectScriptTag(tag) {
   const seen = new Set();
   while (pos < tag.length) {
     while (/\s/.test(tag[pos] ?? '')) pos++;
-    if (tag[pos] === '>' || tag[pos] === '/') break;
+    if (tag[pos] === '>') break;
+    // A slash before nonterminal content is reprocessed by HTML5 as an
+    // attribute separator. Refuse even terminal script '/>' syntax rather
+    // than hiding nomodule or a non-executable type behind early stopping.
+    if (tag[pos] === '/') return invalid();
     const start = pos;
     while (pos < tag.length && !/[\s=/>]/.test(tag[pos])) pos++;
     if (pos === start) return invalid();
@@ -198,7 +202,9 @@ function inspectHtmlDocument(body, mime) {
     // HTML5 never accepts whitespace after `<` or `</` as a tag opener.
     // Normalizing `< style>` to `<style>` would incorrectly consume a real
     // following script as raw text and hide a CSP nonce mismatch.
-    const match = /^<(\/?)([a-z][a-z0-9:-]*)\b/i.exec(raw);
+    // A word boundary is insufficient: <style.foo> must not enter the style
+    // raw-text state, nor can <script.foo> count as an executable script.
+    const match = /^<(\/?)([a-z][a-z0-9:-]*)(?=[\s/>])/i.exec(raw);
     if (!match) return fail();
     const closing = match[1] === '/';
     const tag = match[2].toLowerCase();

@@ -148,6 +148,7 @@ jobs:
             fcaf997a3f72c64904a04fd5c240db44773f0b13
             86064bbbfdd3c6ebd9dfc6afc3bcd61938bfa10d
             0acbf322c771b6c00a2803438fda77ac82c81a40
+            50d92e619251b1b4a889f9c6f6d7489ce2a56f6f
           )
           i=0
           while read -r digest patch; do
@@ -183,9 +184,9 @@ jobs:
           # Synthetic peers run under distinct identities with a disposable
           # private Unix-domain listener for V37; no production endpoint or deploy.
           sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
-            VIRKI_V24_RUN_ROOT_FIXTURE=1 VIRKI_V36_RUN_ROOT_FIXTURE=1 VIRKI_V37_RUN_ROOT_FIXTURE=1 VIRKI_V38_RUN_ROOT_FIXTURE=1 VIRKI_V39_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test \
+            VIRKI_V24_RUN_ROOT_FIXTURE=1 VIRKI_V36_RUN_ROOT_FIXTURE=1 VIRKI_V37_RUN_ROOT_FIXTURE=1 VIRKI_V38_RUN_ROOT_FIXTURE=1 VIRKI_V39_RUN_ROOT_FIXTURE=1 VIRKI_V40_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test \
             -mod=vendor -race -count=1 -timeout 180s -v ./session/filesync \
-            -run '^TestC1V(24IndependentReceiverProcess|28AdversarialMultiProcessCustodyAndSwapRace|29SupervisorAncestorRejectsWritableRootPath|30RootSupervisorExecutableCustody|31PrivilegedCrossUIDLaunchRequiresTrustedHelperWithoutFlag|36RootBrokerCopiesIntoIndependentPublicationAuthority|37AuthenticatedUnixRightsHandoff|38RootBrokerAmbiguousFsyncRequiresOwnerReauthorization|39DurableTestPermitAndAuthenticatedPublication)$' \
+            -run '^TestC1V(24IndependentReceiverProcess|28AdversarialMultiProcessCustodyAndSwapRace|29SupervisorAncestorRejectsWritableRootPath|30RootSupervisorExecutableCustody|31PrivilegedCrossUIDLaunchRequiresTrustedHelperWithoutFlag|36RootBrokerCopiesIntoIndependentPublicationAuthority|37AuthenticatedUnixRightsHandoff|38RootBrokerAmbiguousFsyncRequiresOwnerReauthorization|39DurableTestPermitAndAuthenticatedPublication|40AuthenticatedLedgerDetectsValidHexTamperAndRollback)$' \
             | tee "$RUNNER_TEMP/issue90-privileged-fixture.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-privileged-fixture.log"
 
