@@ -240,6 +240,27 @@ test('actual nonce attributes and quoted decimal HSTS are recognized without low
     htmlDoc('<script data-nonce="SAFE" nonce="SAFE">boot()</script>'))).result, 'pass');
 });
 
+test('CSP3 nonceable rejects script attributes containing script/style/link start-token sequences', () => {
+  const target = ISSUE119_HEADER_TARGETS[0];
+  for (const suspicious of [
+    'data-note="<script"',
+    'data-note="<STYLE"',
+    'data-note="<link"',
+    'data-note="&lt;script"',
+    'data-note="&#x3c;style"',
+    'data-note="&#60;link"',
+    'x<script="ordinary"',
+  ]) {
+    const candidate = response(200, goodCSP,
+      htmlDoc(`<script ${suspicious} nonce="SAFE">boot()</script>`));
+    assert.equal(classifyIssue119Response(target, candidate).result, 'fail',
+      `nonce must not authorize script containing ${suspicious}`);
+  }
+  assert.equal(classifyIssue119Response(target, response(200, goodCSP,
+    htmlDoc('<script data-note="ordinary" nonce="SAFE">boot()</script>'))).result,
+  'pass', 'ordinary attributes remain valid nonceable script evidence');
+});
+
 test('a real executable script is required even with valid HTML5 skeleton, comments and inert templates', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   const real = htmlDoc('<!-- <script nonce="EVIL">ignored</script> -->' +

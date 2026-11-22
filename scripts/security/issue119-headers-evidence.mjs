@@ -75,6 +75,16 @@ function inspectScriptTag(tag) {
         value = tag.slice(valueStart, pos);
       }
     }
+    // CSP3's "Is element nonceable?" algorithm does not authorize a script
+    // whose attribute name/value contains a case-insensitive <script, <style
+    // or <link sequence. HTML attribute references can introduce those tokens
+    // after parsing (e.g. &lt;script or &#x3c;style). This bounded tokenizer
+    // does not decode all HTML5 entities: refuse any reference marker in a
+    // script attribute instead of manufacturing a false nonce authorization.
+    if (/<(?:script|style|link)/i.test(name) ||
+        (value !== null && (/<(?:script|style|link)/i.test(value) || value.includes('&')))) {
+      return invalid();
+    }
     // Parse whole attribute names: data-nonce, x-nonce or a quoted string
     // containing ' nonce=' are never the script element's nonce attribute.
     // A CSP nonce is a Base64/Base64url token. Reject entity-encoded or

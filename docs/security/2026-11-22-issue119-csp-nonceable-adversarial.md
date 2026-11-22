@@ -1,0 +1,13 @@
+# Issue #119 — CSP3 nonceable-attribute false-PASS regression
+
+This incremental PR #141 security change fixes a false positive in the **read-only HTTP evidence classifier**, not in production CSP headers. An independent reviewer reproduced that `<script data-note="<script" nonce="SAFE">boot()</script>` was classified `pass` for `script-src 'nonce-SAFE'`, even though CSP3's **Is element nonceable?** algorithm refuses nonce authorization when a script attribute name or value contains the case-insensitive `<script`, `<style` or `<link` substring. The same ambiguity arises from HTML character references decoded by a browser, including `&lt;link` and `&#x3c;style`.
+
+The classifier now rejects those literal markers in all script attribute names/values. It also conservatively rejects `&` in any script attribute value, because its bounded HTML tokenizer does not implement the full HTML5 character-reference decoder and cannot safely attest how the browser sees that attribute. Ordinary attributes remain accepted. This may produce safe false **negatives** for unusual script URLs containing ampersands, but must never produce a false nonce execution PASS.
+
+## Verification
+
+- A new focused adversarial test was first run red (`actual: pass`, `expected: fail`) against the existing classifier. After the fix, `node --test` on the three issue #119 offline evidence suites passed **32/32, no skips**, and `npm run lint`, `npm run secrets:scan` and `git diff --check` passed under Node 22.23.5.
+- An isolated single-session **Microsoft Edge headless/Playwright** synthetic CSP browser probe (script in the ignored `.scratch/issue90-closure-20261121/` directory) served `script-src 'nonce-SAFE'`: the `data-note="ordinary"` control executed; literal `<script`, mixed-case `<STYLE` and entity-decoded `&lt;link` variants did **not** execute despite their correct nonce. No real host or production endpoint was contacted.
+- The existing production-revision suite was re-run without modifying assertions on WSL Linux/Node22: **373 total, 358 PASS, 0 FAIL, 15 SKIP**. The previous 16 Windows FAIL were POSIX/native-Linux checks that passed in this Linux run. The remaining skips include native non-WSL/privileged installed release fixtures and other owner-gated workflows; they are not release proof.
+
+These results strengthen static acceptance and local browser alignment, **not** origin, TLS configuration, authenticated production operation or owner-signed C4 release authority. Existing live public 200/404 pages still fail issue #119 CSP/header checks until separately authorized deployment. No Cloudflare change, merge or production deployment was made.
