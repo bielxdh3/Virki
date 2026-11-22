@@ -329,3 +329,16 @@ test("the actual OCI runtime smoke exercises native ADMIN login, recovery, denia
   assert.match(source, /"cf-access-jwt-assertion": "forged"/u,
     "the native OCI image must ignore an untrusted Access assertion rather than requiring it");
 });
+
+test("production-image public 200/404 smoke actually fetches the CSS assets it attests", () => {
+  const source = readFileSync(path.join(repositoryRoot, "scripts", "production-runtime-smoke.mjs"), "utf8");
+  assert.match(source, /extractIssue119PublicStylesheetPaths/u,
+    "OCI runtime smoke must use the same bounded stylesheet HTML parser as the header classifier");
+  assert.match(source, /for \(const cssPath of stylesheetPaths\)/u,
+    "OCI smoke must inspect each same-origin stylesheet referenced by the actual HTML");
+  assert.match(source, /await requestOnce\(`http:\/\/127\.0\.0\.1:\$\{publicPort\}\$\{cssPath\}`/u,
+    "OCI smoke must GET actual CSS from the disposable release, not merely check the URL text");
+  assert.match(source, /css\.statusCode !== 200/u);
+  assert.match(source, /css\.headers\["content-type"\]/u);
+  assert.match(source, /css\.body\.trim\(\)/u);
+});

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { ISSUE119_HEADER_TARGETS, classifyIssue119Response,
+import { ISSUE119_HEADER_TARGETS, classifyIssue119Response, extractIssue119PublicStylesheetPaths,
   collectIssue119HeaderEvidence } from './issue119-headers-evidence.mjs';
 
 const stylesheet = '<link rel="stylesheet" href="/_next/static/css/site.css">';
@@ -266,6 +266,21 @@ test('public 200/404 CSS receipt requires an applicable real same-origin Next st
       'pass', `public ${target.expected} valid stylesheet and inert content must pass`);
     }
   }
+});
+
+test('disposable production CSS probe receives only paths accepted by the HTML stylesheet parser', () => {
+  const script = '<script nonce="SAFE">boot()</script>';
+  assert.deepEqual(extractIssue119PublicStylesheetPaths(htmlDoc(script), 'text/html'),
+    ['/_next/static/css/site.css']);
+  assert.deepEqual(extractIssue119PublicStylesheetPaths(htmlDoc(script,
+    '<link href="/_next/static/css/second.css" rel="stylesheet" nonce="SAFE">'), 'text/html'),
+  ['/_next/static/css/site.css', '/_next/static/css/second.css']);
+  for (const doc of [
+    htmlDoc(script, '', false),
+    htmlDoc(script, '<link href="https://attacker.invalid/missing.css" rel="stylesheet">', false),
+    htmlDoc(script, '<base href="https://attacker.invalid/">'),
+    htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/missing.css" media="print">', false),
+  ]) assert.deepEqual(extractIssue119PublicStylesheetPaths(doc, 'text/html'), []);
 });
 
 test('quoted attribute values may contain > and fake scripts without hiding real nonce evidence', () => {

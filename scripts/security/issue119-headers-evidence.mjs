@@ -251,6 +251,7 @@ function inspectHtmlDocument(body, mime) {
   const nonces = [];
   let inlineExecutableScripts = 0;
   let stylesheets = 0;
+  const stylesheetPaths = [];
   while (at < body.length) {
     const lt = body.indexOf('<', at);
     if (lt < 0) break;
@@ -394,6 +395,7 @@ function inspectHtmlDocument(body, mime) {
               !['', 'all', 'screen'].includes(asciiTrim(media).toLowerCase()))) ||
             (type !== undefined && type?.toLowerCase() !== 'text/css')) return fail();
           stylesheets++;
+          stylesheetPaths.push(href);
         }
       }
     }
@@ -448,7 +450,15 @@ function inspectHtmlDocument(body, mime) {
     if (tag === 'script' && closing) return fail();
   }
   return phase === 6 && inert.length === 0 && asciiTrim(body.slice(at)) === ''
-    ? { valid: true, nonces, inlineExecutableScripts, stylesheets } : fail();
+    ? { valid: true, nonces, inlineExecutableScripts, stylesheets, stylesheetPaths } : fail();
+}
+
+// Reuse the exact fail-closed HTML5-bounded CSS attribute inspection for the
+// disposable OCI runtime GET. This returns only validated same-origin Next
+// asset paths, never a user-supplied absolute URL or a live response body.
+export function extractIssue119PublicStylesheetPaths(body, mime) {
+  const inspected = inspectHtmlDocument(body, mime);
+  return inspected.valid && inspected.stylesheets > 0 ? [...inspected.stylesheetPaths] : [];
 }
 
 export function classifyIssue119Response(target, response) {

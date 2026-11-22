@@ -75,4 +75,15 @@ receipt **does not fetch or hash the stylesheet** and cannot prove the asset
 exists: actual resource delivery/hydration still requires the separate real
 browser/HTTP/OCI runtime gates. No live deployment is attested.
 
+**Disposable OCI CSS fetch gate (follow-up):** The production-image runtime
+smoke now derives the verified stylesheet paths from the *same* bounded
+HTML/CSP parser, then issues loopback-only GETs to the exact disposable image
+for every CSS asset in both its 200 and 404 documents. Any missing/redirected
+asset, non-200 response, non-`text/css` content type, or empty content fails
+the gate; the parser never supplies an external URL to this HTTP client. A
+RED→GREEN production-smoke contract test makes this mandatory. The local
+Docker daemon is not available in this environment: actual OCI proof must be
+read from the hosted `Validate` job at the exact new SHA, rather than assumed
+from this source-level test or a separate local Next application build.
+
 **Explicit boundary:** These documents and offline CI classifiers have no credentials and never modify Cloudflare, DNS, Tunnel, services or production state. Neither opt-in `--live` probe runs from CI or by default. A successful public-header probe does not certify TLS, Access, authenticated OIDC, session security or a live origin release.

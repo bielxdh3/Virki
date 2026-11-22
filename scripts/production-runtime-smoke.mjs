@@ -3,7 +3,8 @@ import { request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { createDisposableDockerSession } from "./lib/disposable-docker-session.mjs";
 import { isCanonicalNativeAdminRedirect } from "./lib/native-hub-login-redirect.mjs";
-import { classifyIssue119Response, ISSUE119_HEADER_TARGETS } from "./security/issue119-headers-evidence.mjs";
+import { classifyIssue119Response, extractIssue119PublicStylesheetPaths,
+  ISSUE119_HEADER_TARGETS } from "./security/issue119-headers-evidence.mjs";
 
 const image = process.env.VIRKI_RUNTIME_IMAGE?.trim();
 if (!image) throw new Error("Runtime smoke requires VIRKI_RUNTIME_IMAGE.");
@@ -133,6 +134,21 @@ try {
       /<style\b/iu.test(observed.body) ||
       /[\t\n\f\r ]style[\t\n\f\r ]*=/iu.test(observed.body)) {
       throw new Error(`Production image public ${observed.statusCode} requires external-only CSS.`);
+    }
+    // A syntactically valid same-origin href is not proof that this exact OCI
+    // image actually serves it: fetch every validated stylesheet from the
+    // disposable container's loopback port, refusing missing/HTML/error CSS.
+    const stylesheetPaths = extractIssue119PublicStylesheetPaths(observed.body,
+      observed.headers["content-type"] ?? "");
+    if (stylesheetPaths.length === 0) throw new Error("Production image must declare a real public CSS asset.");
+    for (const cssPath of stylesheetPaths) {
+      const css = await requestOnce(`http://127.0.0.1:${publicPort}${cssPath}`, {});
+      const contentType = css.headers["content-type"];
+      if (css.statusCode !== 200 || typeof contentType !== "string" ||
+        !/^text\/css(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*[A-Za-z0-9_-]+)?$/i.test(contentType) ||
+        !css.body.trim()) {
+        throw new Error(`Production image public ${observed.statusCode} stylesheet asset is unavailable or not CSS.`);
+      }
     }
   }
   if (!publicNotFound.body.includes('id="not-found-title"') ||
