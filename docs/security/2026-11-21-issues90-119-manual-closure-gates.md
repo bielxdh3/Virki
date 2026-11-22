@@ -54,6 +54,12 @@ Offline reconstruction: `bash scripts/security/issue90-replay-index.sh <pinned-b
 
 ## Fourth PR after merges
 
+### Incremental DEV-only V42 evidence (PR #141)
+
+V42 adds `RESOLVE_NO_XDEV` when pinning the V36/V38 root-owned publication destination parent. The Linux root fixture now verifies that a private destination beneath a separately mounted `/tmp` is rejected with `EXDEV` before publication; positive V36–V38 fixtures run under `/var/tmp` on the tested root filesystem. Privileged WSL V36–V40 root tests, ordinary filesync `-race`, and Go vet passed. The cumulative V42 BuildKit Git tree is `b6231f822efcd8f0be7956c93e189a30418c51b4`; the replay index now checks **20 immutable patches, V23–V42**. This is synthetic DEV evidence only, not real owner authorization, an anti-root-rollback witness or production release.
+
+The issue #119 static HTML evidence classifier now conservatively refuses `<select>` because its simplified tokenizer does not implement HTML5's special insertion mode; previously an ignored raw-text tag in a select could conceal an executable script with a wrong nonce and yield false PASS. The expanded offline Node suite passed **27/27**. This is still not evidence of live browser hydration or deployed CSP.
+
 PR #140 is a separate V29-only review branch, originally for the same ancestor-custody correction in #90. Its V29 patch content is already present verbatim in merged PR #139, which additionally includes V30/V31. #140 is therefore **duplicate work**, not an unmerged security dependency; its conflict with current `main` is expected. Preserve it until a separately authorized administrative decision on closing the redundant PR. Do **not** merge its stale files over the newer V31/V32 chain.
 
 **Decision rule:** both issues remain OPEN until every originally mandatory acceptance criterion is either proved in the correct deployed context or explicitly judged out of scope by the owner with a documented reason. A green PR or `main` CI is not a substitute for the missing edge/operational assurance.

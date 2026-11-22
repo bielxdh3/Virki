@@ -270,6 +270,12 @@ function inspectHtmlDocument(body, mime) {
     // Fail closed on foreign-content elements rather than making incorrect
     // security claims using namespace-blind tag-name heuristics.
     if (tag === 'svg' || tag === 'math') return fail();
+    // HTML5's "in select" insertion mode ignores start tags such as style,
+    // iframe, noembed and noframes, but still processes script start tags.
+    // Treating those ignored tags as raw-text would conceal a live script with
+    // a mismatched nonce. This bounded scanner does not implement select's
+    // insertion mode, so refuse a select document rather than issue false PASS.
+    if (tag === 'select') return fail();
     // With scripting enabled, HTML5 treats <noscript> as raw text until its
     // first actual closing tag. Do not interpret apparent <style>/<script>
     // start tags inside it: doing so could skip the real </noscript>, hide

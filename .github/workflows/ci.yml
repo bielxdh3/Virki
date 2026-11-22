@@ -150,6 +150,7 @@ jobs:
             0acbf322c771b6c00a2803438fda77ac82c81a40
             50d92e619251b1b4a889f9c6f6d7489ce2a56f6f
             bd76aa00d4a62fa04523f4be26692de11dfb229d
+            b6231f822efcd8f0be7956c93e189a30418c51b4
           )
           i=0
           while read -r digest patch; do

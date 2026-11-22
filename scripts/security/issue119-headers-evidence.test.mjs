@@ -166,6 +166,19 @@ test('quoted attribute values may contain > and fake scripts without hiding real
     'pass', 'valid quoted > stays inside a single HTML attribute');
 });
 
+test('HTML select insertion mode cannot hide executable wrong-nonce scripts behind ignored raw-text tags', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  for (const tag of ['style', 'iframe', 'noembed', 'noframes', 'title', 'noscript']) {
+    const html = htmlDoc('<script nonce="SAFE">ok()</script>' +
+      `<select><${tag}><script nonce="EVIL">bad()</script></${tag}></select>`);
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, html)).result,
+      'fail', `HTML5 in-select mode ignores <${tag}> but processes <script>`);
+  }
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc('<script nonce="SAFE">ok()</script><select><option>entry</option></select>'))).result,
+  'fail', 'select insertion mode is deliberately outside this bounded acceptance parser');
+});
+
 test('actual nonce attributes and quoted decimal HSTS are recognized without lowercasing nonce values', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   const quoted = response(200, "script-src 'nonce-SAFE'", goodHTML,
