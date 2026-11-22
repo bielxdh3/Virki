@@ -121,10 +121,10 @@ test("public not-found document renders normally with fresh script nonces", asyn
   expect(response?.status()).toBe(404);
   expect(response?.headers()["x-powered-by"]).toBeUndefined();
   const cspDirectives = response?.headers()["content-security-policy"]?.split(";").map((value) => value.trim());
-  // The custom 404 uses the external public stylesheet; do not reintroduce
-  // the inline-CSS exception previously required by Next's fallback page.
-  expect(cspDirectives).toContain("style-src 'self'");
-  expect(cspDirectives?.some((directive) => directive.includes("'unsafe-inline'"))).toBe(false);
+  // This isolated E2E server runs in development, where Next's overlay injects
+  // inline styles. The production-image smoke enforces strict style-src 'self'.
+  expect(cspDirectives).toContain("style-src 'self' 'unsafe-inline'");
+  expect(cspDirectives?.find((directive) => directive.startsWith("script-src "))).not.toContain("'unsafe-inline'");
   await expect(page.getByRole("heading", { name: "Virki", exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { level: 1, name: "404", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Voltar ao início", exact: true })).toHaveAttribute("href", "/");

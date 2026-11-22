@@ -62,6 +62,18 @@ test("production public CSP cannot authorize arbitrary inline styles on the 404 
   assert.doesNotMatch(html, /<style\b/u);
 });
 
+test("development Next overlay styles stay isolated from strict production CSP", () => {
+  const development = buildPublicContentSecurityPolicy("development", "testNonce123");
+  const production = buildPublicContentSecurityPolicy("production", "testNonce123");
+  const unspecified = buildPublicContentSecurityPolicy(undefined, "testNonce123");
+  assert.ok(development.split("; ").includes("style-src 'self' 'unsafe-inline'"),
+    "the local Next development overlay injects inline styles and must not generate browser CSP errors");
+  assert.ok(production.split("; ").includes("style-src 'self'"));
+  assert.ok(unspecified.split("; ").includes("style-src 'self'"));
+  assert.doesNotMatch(production, /'unsafe-inline'/u);
+  assert.doesNotMatch(unspecified, /'unsafe-inline'/u);
+});
+
 test("robots safely falls back for empty, malformed or non-origin public URL configuration", () => {
   for (const value of ["", " ", "invalid", "javascript:alert(1)", "https://user:secret@example.invalid", "https://example.invalid/path", "https://example.invalid?query=1", "https://public.example.invalid/"]) {
     const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
