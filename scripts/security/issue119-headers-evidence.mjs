@@ -410,10 +410,20 @@ export function classifyIssue119Response(target, response) {
   // response needs inline CSS. Refuse any style policy that reintroduces the
   // inline-style escape hatch even when script nonces are correct.
   const style = directiveSources(csp, 'style-src');
+  const styleElement = directiveSources(csp, 'style-src-elem');
+  const styleAttribute = directiveSources(csp, 'style-src-attr');
   const inlineStyleAllowed = hasUnsafeInline(style.sources) ||
-    ['style-src-elem', 'style-src-attr'].some(
-      (name) => hasUnsafeInline(directiveSources(csp, name).sources)) ||
+    hasUnsafeInline(styleElement.sources) || hasUnsafeInline(styleAttribute.sources) ||
     (!style.present && hasUnsafeInline(directiveSources(csp, 'default-src').sources));
+  // style-src-elem overrides style-src. A page with style-src 'self' but
+  // style-src-elem 'none' (or a foreign-only source) cannot load its external
+  // stylesheet, yet the old static receipt reported PASS. Require only the
+  // same-origin stylesheet source when overridden; style attributes may be
+  // separately disabled, but never given an inline/hash escape hatch.
+  const stylesheetPolicySafe = (!styleElement.present ||
+    (styleElement.sources.length === 1 && styleElement.sources[0].toLowerCase() === "'self'")) &&
+    (!styleAttribute.present ||
+    (styleAttribute.sources.length === 1 && styleAttribute.sources[0].toLowerCase() === "'none'"));
   const sources = script.sources;
   const elementSources = element.sources;
   const attributeSources = attribute.sources;
@@ -429,7 +439,7 @@ export function classifyIssue119Response(target, response) {
   const accepted = response.status === target.expected && htmlDocument &&
     !hasPoweredBy && hstsPresent && singleCsp && cspSandboxAllowsScripts(csp) &&
     sources.length > 0 && !hasUnsafeInline(sources) && !subdirectiveUnsafe &&
-    !inlineStyleAllowed &&
+    !inlineStyleAllowed && stylesheetPolicySafe &&
     (!element.present || elementSources.some((source) =>
       /^'nonce-[A-Za-z0-9+/_-]+={0,2}'$/i.test(source) && nonceValues.has(source.slice(7, -1)))) &&
     nonceSources.length === 1 && nonceMatches && document.inlineExecutableScripts > 0;

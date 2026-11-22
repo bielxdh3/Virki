@@ -32,4 +32,16 @@ and these invariants on the published PR SHA when hosted CI runs. A green local
 receipt is not a public/deployed receipt; the production edge still needs a
 separately authorized rollout, provenance and independently verified results.
 
+**2026-11-22 CSS subdirective adversarial correction (PR #141, not deployed):**
+An isolated Edge/Playwright response with valid nonce-bound inline JavaScript,
+`style-src 'self'` and overriding `style-src-elem 'none'` demonstrated an actual
+CSS blocking violation: the script executed, the external stylesheet did not
+apply, yet the old static HTTP classifier returned PASS. The classifier now
+refuses a `style-src-elem` override unless it grants exactly the same-origin
+external stylesheet, and conservatively allows `style-src-attr` only when it
+explicitly denies inline attributes. Negative and positive 200/404 fixtures
+passed RED→GREEN. This corrects a false *CSS acceptance receipt*, not an
+application XSS or privilege escalation; real deployed styling and transport
+still require separately authorized production/browser verification.
+
 **Explicit boundary:** These documents and offline CI classifiers have no credentials and never modify Cloudflare, DNS, Tunnel, services or production state. Neither opt-in `--live` probe runs from CI or by default. A successful public-header probe does not certify TLS, Access, authenticated OIDC, session security or a live origin release.

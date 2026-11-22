@@ -173,6 +173,32 @@ test('public CSP evidence cannot silently accept inline-style bypass directives'
   'default-src also permits inline styles when no more specific style directive exists');
 });
 
+test('CSS subdirectives cannot defeat the public external stylesheet acceptance receipt', () => {
+  const html = htmlDoc('<script nonce="SAFE">boot()</script>',
+    '<link rel="stylesheet" href="/_next/static/css/site.css">');
+  const base = `${goodCSP}; style-src 'self'`;
+  for (const target of ISSUE119_HEADER_TARGETS.slice(0, 2)) {
+    for (const directive of [
+      "style-src-elem 'none'",
+      'style-src-elem',
+      'style-src-elem https://attacker.invalid',
+      "style-src-elem 'self' https://attacker.invalid",
+      "style-src-attr 'unsafe-hashes' 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='",
+      'style-src-attr',
+    ]) {
+      const result = classifyIssue119Response(target,
+        response(target.expected, `${base}; ${directive}`, html));
+      assert.equal(result.result, 'fail', `${target.surface} must refuse ${directive}`);
+    }
+    for (const directives of ['', "; style-src-elem 'self'", "; style-src-attr 'none'",
+      "; style-src-elem 'self'; style-src-attr 'none'"]) {
+      const result = classifyIssue119Response(target,
+        response(target.expected, base + directives, html));
+      assert.equal(result.result, 'pass', `${target.surface} should accept ${directives}`);
+    }
+  }
+});
+
 test('quoted attribute values may contain > and fake scripts without hiding real nonce evidence', () => {
   const base = ISSUE119_HEADER_TARGETS[0];
   const valid = htmlDoc('<div data-note="> <script nonce=EVIL>fake</script>">safe</div>' +
