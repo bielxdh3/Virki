@@ -940,6 +940,10 @@ static bool v3_walk_path_follows(const v3_walk_state *walk, const char *path, si
  * scalar rejection; never allow a forged sealed stream to bypass the stricter
  * producer-to-approver contract through arbitrary raw pathname octets. */
 static bool v3_walk_valid_utf8(const uint8_t *bytes, size_t length) {
+  /* Node's fatal TextDecoder otherwise strips an initial UTF-8 BOM and may
+   * validate a different pathname than the raw bytes signed by C4. Admit no
+   * such aliases on either side of the provenance boundary. */
+  if (length >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf) return false;
   size_t utf16_units = 0;
   for (size_t i = 0; i < length;) {
     const uint8_t lead = bytes[i];

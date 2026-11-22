@@ -372,17 +372,20 @@ test('public 200/404 CSS receipt requires an applicable real same-origin Next st
 
 test('disposable production CSS probe receives only paths accepted by the HTML stylesheet parser', () => {
   const script = '<script nonce="SAFE">boot()</script>';
-  assert.deepEqual(extractIssue119PublicStylesheetPaths(htmlDoc(script), 'text/html'),
+  const acceptedMime = 'text/html; charset=utf-8';
+  assert.deepEqual(extractIssue119PublicStylesheetPaths(htmlDoc(script), acceptedMime),
     ['/_next/static/css/site.css']);
   assert.deepEqual(extractIssue119PublicStylesheetPaths(htmlDoc(script,
-    '<link href="/_next/static/css/second.css" rel="stylesheet" nonce="SAFE">'), 'text/html'),
+    '<link href="/_next/static/css/second.css" rel="stylesheet" nonce="SAFE">'), acceptedMime),
   ['/_next/static/css/site.css', '/_next/static/css/second.css']);
+  assert.deepEqual(extractIssue119PublicStylesheetPaths(htmlDoc(script), 'text/html'), [],
+    'without an HTTP charset, HTML sniffing could contradict this UTF-8 parser');
   for (const doc of [
     htmlDoc(script, '', false),
     htmlDoc(script, '<link href="https://attacker.invalid/missing.css" rel="stylesheet">', false),
     htmlDoc(script, '<base href="https://attacker.invalid/">'),
     htmlDoc(script, '<link rel="stylesheet" href="/_next/static/css/missing.css" media="print">', false),
-  ]) assert.deepEqual(extractIssue119PublicStylesheetPaths(doc, 'text/html'), []);
+  ]) assert.deepEqual(extractIssue119PublicStylesheetPaths(doc, acceptedMime), []);
 });
 
 test('quoted attribute values may contain > and fake scripts without hiding real nonce evidence', () => {
@@ -465,6 +468,60 @@ test('actual nonce attributes and quoted decimal HSTS are recognized without low
   assert.equal(classifyIssue119Response(base, response(200, "default-src 'self'; script-src 'nonce-safe'", goodHTML)).result, 'fail');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
     htmlDoc('<script data-nonce="SAFE" nonce="SAFE">boot()</script>'))).result, 'pass');
+});
+
+test('HSTS receipt rejects duplicate, valueless and malformed security directives', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const classify = (hsts) => classifyIssue119Response(base, response(200, goodCSP, goodHTML,
+    { 'strict-transport-security': hsts })).result;
+  // RFC 6797 section 6.1 requires every directive at most once. Chromium's
+  // HSTS parser rejects duplicate max-age, duplicate includeSubDomains and
+  // includeSubDomains with a value rather than adopting the first valid age.
+  for (const invalid of [
+    'max-age=2592000; max-age',
+    'max-age=2592000; INCLUDEsubdomains; includesubdomains',
+    'max-age=2592000; includeSubDomains=1',
+    'max-age=2592000; includeSubDomains="false"',
+    'max-age=2592000; custom; CUSTOM',
+    'max-age=2592000; invalid directive',
+    'max-age=2592000; custom=value with spaces',
+  ]) {
+    assert.equal(classify(invalid), 'fail', `malformed or duplicated HSTS must not attest browser policy: ${invalid}`);
+  }
+  for (const valid of [
+    'max-age=2592000',
+    'MAX-AGE="2592000"; includeSubDomains',
+    'max-age=2592000; includeSubDomains; preload',
+    'max-age=2592000; custom=token',
+  ]) {
+    assert.equal(classify(valid), 'pass', `legitimate HSTS remains acceptable: ${valid}`);
+  }
+});
+
+test('HTML receipt refuses charset disagreement that invents an executable script absent in the browser', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const before = Buffer.from('<!doctype html><html><head>' + stylesheet + '</head><body>', 'ascii');
+  const embedded = Buffer.from('<script nonce="SAFE">boot()</script>', 'ascii');
+  const after = Buffer.from('</body></html>', 'ascii');
+  const raw = Buffer.concat([before, Buffer.from([0x1b, 0x24, 0x42]), embedded,
+    Buffer.from([0x1b, 0x28, 0x42]), after]);
+  const interpretedAsUtf8 = new TextDecoder('utf-8').decode(raw);
+  const interpretedAsIso2022 = new TextDecoder('iso-2022-jp').decode(raw);
+  assert.match(interpretedAsUtf8, /<script nonce="SAFE">boot\(\)<\/script>/u);
+  assert.doesNotMatch(interpretedAsIso2022, /<script\b/iu,
+    'ISO-2022-JP browser decoding must not interpret the shifted bytes as a script tag');
+  for (const mime of [
+    'text/html; charset=iso-2022-jp', 'text/html; charset=windows-1252',
+    'text/html; charset=shift_jis', 'text/html',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, interpretedAsUtf8,
+      { 'content-type': mime })).result, 'fail',
+    `UTF-8-decoded evidence cannot attest an HTML document whose declared charset is ${mime}`);
+  }
+  for (const mime of ['text/html; charset=utf-8', 'text/html; charset="UTF-8"']) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP, goodHTML,
+      { 'content-type': mime })).result, 'pass', 'actual UTF-8 documents remain accepted');
+  }
 });
 
 test('external script tags never attest executable hydration without a real inline nonce', () => {

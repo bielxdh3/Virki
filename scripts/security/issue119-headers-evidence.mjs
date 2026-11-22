@@ -163,15 +163,42 @@ function hasValidHstsAge(value) {
   // HTTP optional whitespace is SP / HTAB, NOT JavaScript's Unicode \s.
   // A non-breaking space is allowed as an HTTP obs-text octet but is not
   // grammar whitespace: accepting it can falsely attest a malformed HSTS.
-  const maxAge = value.split(';').map((part) => part.replace(/^[ \t]+|[ \t]+$/g, ''))
-    .filter((part) => /^max-age[ \t]*=/i.test(part));
-  if (maxAge.length !== 1) return false;
-  // RFC 6797 permits a decimal age either unquoted or within double quotes.
-  // Never accept only the numeric prefix of malformed values like 1e6.
-  const match = /^max-age[ \t]*=[ \t]*(?:"([0-9]+)"|([0-9]+))[ \t]*$/i.exec(maxAge[0]);
-  if (!match) return false;
-  const seconds = Number(match[1] ?? match[2]);
-  return Number.isSafeInteger(seconds) && seconds > 0;
+  // RFC 6797 requires ALL directive names to be unique (case-insensitive),
+  // including optional and unknown directives. Chromium also rejects a
+  // valueless max-age and any valued includeSubDomains. Checking only a
+  // well-formed max-age substring would forge a positive browser HSTS receipt.
+  const token = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+  const quotedValue = /^"[\t\x20-\x21\x23-\x5b\x5d-\x7e]*"$/;
+  const seen = new Set();
+  let validAge = false;
+  for (const component of value.split(';')) {
+    const part = component.replace(/^[ \t]+|[ \t]+$/g, '');
+    if (!part) continue;
+    const equalsAt = part.indexOf('=');
+    const rawName = equalsAt < 0 ? part : part.slice(0, equalsAt);
+    const name = rawName.replace(/[ \t]+$/g, '');
+    if (!token.test(name)) return false;
+    const canonicalName = name.toLowerCase();
+    if (seen.has(canonicalName)) return false;
+    seen.add(canonicalName);
+    if (canonicalName === 'max-age') {
+      // RFC 6797 permits decimal seconds unquoted or in a quoted string.
+      // Reject 1e6, empty values, and extra tokens rather than parsing a prefix.
+      const match = /^max-age[ \t]*=[ \t]*(?:"([0-9]+)"|([0-9]+))[ \t]*$/i.exec(part);
+      if (!match) return false;
+      const seconds = Number(match[1] ?? match[2]);
+      if (!Number.isSafeInteger(seconds) || seconds <= 0) return false;
+      validAge = true;
+    } else if (canonicalName === 'includesubdomains') {
+      if (equalsAt !== -1) return false;
+    } else if (equalsAt !== -1) {
+      // Unknown directives are permitted but must still follow HTTP token or
+      // quoted-string syntax. A narrower quoted subset fails closed.
+      const rawValue = part.slice(equalsAt + 1).replace(/^[ \t]+|[ \t]+$/g, '');
+      if (!token.test(rawValue) && !quotedValue.test(rawValue)) return false;
+    }
+  }
+  return validAge;
 }
 
 function hasUnsafeInline(sources) {
@@ -264,7 +291,12 @@ function inspectHtmlDocument(body, mime) {
   // A NBSP next to text/html or a charset separator is not valid MIME OWS
   // and cannot establish a browser-executable HTML receipt.
   const mimeValue = mime.replace(/^[ \t]+|[ \t]+$/g, '');
-  if (!/^text\/html(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:[\w-]+|"[\w-]+")[ \t]*)?$/i.test(mimeValue)) return fail();
+  // fetchTarget always decodes bytes as UTF-8. A legacy HTML charset can
+  // reinterpret ASCII-looking <script> bytes inside another encoding's shift
+  // state (e.g. ISO-2022-JP), producing a false executable nonce receipt.
+  // An absent charset also permits HTML sniffing/meta overrides. Require an
+  // explicit matching HTTP UTF-8 declaration rather than guessing.
+  if (!/^text\/html[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|"utf-8")[ \t]*$/i.test(mimeValue)) return fail();
   // HTML5 DOCTYPE delimiters also use ASCII whitespace, not JavaScript \s.
   const start = /^[\t\n\f\r ]*<!doctype[\t\n\f\r ]+html[\t\n\f\r ]*>/i.exec(body);
   if (!start) return fail();
@@ -598,7 +630,9 @@ async function fetchTarget(target) {
   let body = '';
   if (target.method === 'GET' && response.body) {
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    // Strict UTF-8: do not certify a byte stream that was decoded through
+    // replacement characters instead of the declared HTML charset.
+    const decoder = new TextDecoder('utf-8', { fatal: true });
     let size = 0;
     try {
       while (true) {

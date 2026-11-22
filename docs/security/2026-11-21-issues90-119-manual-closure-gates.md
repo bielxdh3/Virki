@@ -35,6 +35,8 @@ This is a **technical acceptance ledger**, not a release authorization. PRs #137
 - A further independent check identified a public-metadata false denial: Next serves `apps/hub/src/app/icon.svg` as `/icon.svg`, which the tightened exact whitelist had omitted. The subsequent focused correction explicitly admits `/icon.svg` on public/native surfaces while keeping `/admin/icon.svg`, `/account/icon.svg` and all other extension-shaped private routes authenticated. The same patch replaces an empty native-only offline image test with a real Linux rejection proof for malformed Docker archives despite internally matching untrusted envelope hashes. Details and no-production limitations: `docs/security/2026-11-22-issues90-119-icon-and-native-fixture.md`.
 - Additional PR #141 CSP-evidence adversarial probes reproduced three independent false-PASS cases in the bounded HTML classifier: HTML5 `frameset` insertion mode ignores an apparent script; nonempty whitespace-only legacy `<script language>` does not imply an executable JavaScript type; and HTML5 script-data double-escaped `<!--<script>` sequences make the first apparent `</script>` nonterminal, leaving an apparent subsequent nonced script inert. The classifier now rejects these unsupported constructions conservatively. Offline Node regression coverage rose to **30 cases**, passing under both Windows and Linux; this is **not** a substitute for live browser hydration or a production origin security receipt.
 - New reviewer P2 on `c1d60b0`: HTML5 script preparation distinguishes an actually empty `type` from nonempty whitespace-only `type=" "`, and the `module` keyword is ASCII case-insensitive **without trimming** (`type=" module "` is not a module script). The previous tokenizer trimmed both before classification and could report a false executable nonce receipt. The fix tests raw exact empty/module attributes separately, trimming only JavaScript MIME essences. A red-to-green regression includes both inert cases plus positive genuine empty, exact module and MIME-essence scripts; the three offline issue #119 suites now pass **31/31**. Static policy classification is still not browser hydration proof.
+- **PR #141 HSTS directive validation follow-up (DEV-only):** The HTTP acceptance classifier previously extracted a valid `max-age` substring while ignoring a second valueless `max-age`, repeated `includeSubDomains`, a valued `includeSubDomains`, duplicate unknown directives or malformed unknown tokens. This produced static `pass` results for policies that violate RFC 6797's unique-directive grammar; Chromium explicitly rejects repeated `max-age`/`includeSubDomains` and valued `includeSubDomains`. A new RED test reproduced the false `pass` on `max-age=2592000; max-age`. The classifier now validates case-insensitive uniqueness and narrow token/value syntax across the complete directive list, checks `includeSubDomains` is valueless and requires exactly one valid positive decimal `max-age`. Good quoted-age and optional-policy controls remain accepted. Four targeted offline suites pass **60/60** after the charset follow-up below. No live HSTS setting, Cloudflare policy, or production deployment was changed; this does not attest active edge behavior.
+- **PR #141 HTML charset mismatch follow-up (independent browser P2, DEV-only):** The public 200/404 receipt formerly accepted any `text/html` charset (or none) but its HTTP collector always decoded the downloaded bytes with UTF-8. A reviewer reproduced `pass` for an ISO-2022-JP document whose shifted bytes looked like an executable `<script nonce="SAFE">` in the UTF-8 string while the actual ISO-2022-JP browser DOM contained **no script element**. The initial RED regression reproduced the false `pass`, using raw bytes with the ISO-2022-JP escape sequence and the two competing decoders. The collector now decodes with **fatal UTF-8** and the HTML receipt requires an **explicit UTF-8 Content-Type charset**, refusing ambiguous encoding/HTML-sniffing cases. Positive UTF-8 controls and the stylesheet-path acceptance fixture still pass; four offline suites are **60/60 PASS, 0 SKIP**. The browser check used a disposable offline document, not the production public site. This does not prove live hydration, OIDC, Access or origin custody.
 
 **Current closure recommendation #119: NO.** TLS 1.2 minimum and all 12 handshakes are **complete**, not a pending authorization. Remaining: verify the private Tunnel/origin transport boundary, separately authorize deployment of already merged application hardening, then prove 200/404 CSP/headers on the active SHA and controlled authenticated Access/OIDC/recovery evidence. Do not change `ssl=flexible`, Tunnel, DNS or Access without fresh explicit authorization.
 
@@ -107,6 +109,22 @@ remains accepted. The C4 validator now enforces the same fail-closed path
 grammar with a bounded UTF-8 decoder. This improves native/Node consistency;
 it does **not** create signing authority, key custody, protected publication,
 or trusted monotonic host state, and no live C1/C4 release was activated.
+
+**Leading UTF-8 BOM path-alias follow-up (post-`c9f14db`, DEV only):** A new
+RED→GREEN adversarial case exposed another discrepancy between Node C1 and the
+real native C4 stream verifier. `TextDecoder('utf-8', { fatal: true })` drops a
+leading UTF-8 BOM (`EF BB BF`) from each independently decoded pathname. In
+particular, `EF BB BF 2E` and `EF BB BF 2E 2E` decode to forbidden `.` and
+`..` paths in Node, while native C4 had accepted the original byte strings
+with internally valid stream/tree digests. Conversely, Node had accepted the
+raw bytes for BOM-prefixed regular names after silently deleting that prefix.
+Both verifiers now reject an initial pathname BOM *before* any decoding, so
+neither can attest an alias between raw bytes and decoded filesystem path.
+The non-ASCII UTF-8 filename positive control remains valid. Focused tests
+failed on the pre-fix implementation and passed after the fix; native C4
+AddressSanitizer/UBSan tests and the Go/C4 bridge also passed. This is a parser
+parity fix, not a signed owner release, independently anchored anti-rollback
+witness, production host custody, or authorization to activate publication.
 
 ## Fourth PR after merges
 

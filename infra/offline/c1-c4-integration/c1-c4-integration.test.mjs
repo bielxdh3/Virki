@@ -259,6 +259,26 @@ test("C1->C4 accepts only Go WalkDir canonical stream traversal, including real 
   }
 });
 
+test("C1->C4 rejects leading UTF-8 BOM path aliases before Node decoding", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-bom-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const verify = (relative) => {
+    const fx = buildSyntheticFixture(tmpDir);
+    const item = syntheticCanonicalContext("source", "", [{ kind: "F", path: relative, mode: 0o644, data: "x" }]);
+    fx.contextBuffers.source = item.buffer;
+    Object.assign(fx.contract.contexts[0], {
+      streamLength: item.buffer.length, streamDigest: `sha256:${sha256Hex(item.buffer)}`,
+      treeDigest: item.treeDigest, entryCount: item.entryCount,
+    });
+    return verifyBuildInputProvenance(fx.contract, fx.contextBuffers);
+  };
+  verify("dados-á.txt");
+  for (const relative of ["\uFEFFsafe.txt", "\uFEFF.", "\uFEFF.."]) {
+    assert.throws(() => verify(relative), /leading UTF-8 BOM|invalid.*path/u,
+      "a self-consistent stream must not alias a different pathname after TextDecoder strips a BOM");
+  }
+});
+
 test("C1->C4 state serializes independent writers and retains its Linux lock inode", { skip: process.platform !== "linux" }, async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-writers-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));

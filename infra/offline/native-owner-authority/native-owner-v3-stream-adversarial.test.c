@@ -87,6 +87,11 @@ int main(void) {
   static const stream_entry_fixture valid_utf8[] = {{'F', "dados-\xc3\xa1.txt", 0644, "x"}};
   static const stream_entry_fixture invalid_utf8[] = {{'F', "payload-\xff", 0644, "x"}};
   static const stream_entry_fixture invalid_surrogate[] = {{'F', "payload-\xed\xa0\x80", 0644, "x"}};
+  /* TextDecoder's default BOM handling drops EF BB BF at the beginning of
+   * each pathname. Node then rejects the resulting '.' / '..' segments;
+   * native C4 must not sign a stream that fails the C1 contract. */
+  static const stream_entry_fixture bom_dot[] = {{'F', "\xef\xbb\xbf.", 0644, "x"}};
+  static const stream_entry_fixture bom_dotdot[] = {{'F', "\xef\xbb\xbf..", 0644, "x"}};
   if (fixture_native_accepts(missing_parent, 1)) { puts("FAIL: missing parent accepted"); return 3; }
   if (fixture_native_accepts(reversed, 2)) { puts("FAIL: unsorted entries accepted"); return 4; }
   if (fixture_native_accepts(forged_traversal, 1)) { puts("FAIL: traversal path accepted"); return 5; }
@@ -96,6 +101,8 @@ int main(void) {
   if (!fixture_native_accepts(valid_utf8, 1)) { puts("FAIL: valid UTF-8 name rejected"); return 9; }
   if (fixture_native_accepts(invalid_utf8, 1)) { puts("FAIL: invalid UTF-8 name accepted"); return 10; }
   if (fixture_native_accepts(invalid_surrogate, 1)) { puts("FAIL: UTF-8 encoded surrogate accepted"); return 11; }
+  if (fixture_native_accepts(bom_dot, 1)) { puts("FAIL: leading UTF-8 BOM hides a dot segment from Node"); return 13; }
+  if (fixture_native_accepts(bom_dotdot, 1)) { puts("FAIL: leading UTF-8 BOM hides a parent segment from Node"); return 14; }
   char too_long[514];
   memset(too_long, 'x', sizeof(too_long) - 1);
   too_long[sizeof(too_long) - 1] = '\0';

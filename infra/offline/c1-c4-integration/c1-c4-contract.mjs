@@ -127,6 +127,12 @@ function verifyCanonicalContextStream(buf, name, expectedEntries, expectedTreeDi
     demand(kind[0] === 0x44 || kind[0] === 0x4c || kind[0] === 0x46,
       `canonical context ${name} entry kind invalid`);
     const pathBytes = sizedBytes();
+    // TextDecoder strips an initial UTF-8 BOM by default, silently changing
+    // the pathname whose raw bytes are bound into the C1/C4 tree hash. Reject
+    // this alias before decoding so the Node receipt and native C4 agree.
+    demand(!(pathBytes.length >= 3 && pathBytes[0] === 0xef &&
+      pathBytes[1] === 0xbb && pathBytes[2] === 0xbf),
+    `canonical context ${name} entry path has leading UTF-8 BOM`);
     let relPath;
     try { relPath = UTF8_DECODER.decode(pathBytes); } catch { fail(`canonical context ${name} entry path is not UTF-8`); }
     validateRelPath(relPath, `canonical context ${name} entry path`);
