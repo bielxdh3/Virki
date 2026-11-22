@@ -1,0 +1,30 @@
+diff --git a/session/filesync/sealed_publication_broker_v36_linux_test.go b/session/filesync/sealed_publication_broker_v36_linux_test.go
+index ecbca73..9c29372 100644
+--- a/session/filesync/sealed_publication_broker_v36_linux_test.go
++++ b/session/filesync/sealed_publication_broker_v36_linux_test.go
+@@ -54,13 +54,20 @@ func TestC1V36RootBrokerCopiesIntoIndependentPublicationAuthority(t *testing.T)
+ 	require.Equal(t, uint32(0700), stat.Mode&0777)
+ 
+ 	t.Run("reject cross-mount root-owned destination before publication", func(t *testing.T) {
+-		var rootStat, tmpStat unix.Stat_t
++		var rootStat unix.Stat_t
+ 		require.NoError(t, unix.Stat("/", &rootStat))
+-		require.NoError(t, unix.Stat("/tmp", &tmpStat))
+-		if rootStat.Dev == tmpStat.Dev {
+-			t.Skip("/tmp shares root filesystem on this host; no cross-mount proof available")
++		crossMountRoot := ""
++		for _, candidate := range []string{"/dev/shm", "/tmp"} {
++			var candidateStat unix.Stat_t
++			if err := unix.Stat(candidate, &candidateStat); err == nil && candidateStat.Dev != rootStat.Dev {
++				crossMountRoot = candidate
++				break
++			}
++		}
++		if crossMountRoot == "" {
++			t.Skip("no separate writable cross-mount fixture available on this host")
+ 		}
+-		mountedBase, err := os.MkdirTemp("/tmp", "virki-v42-cross-mount-")
++		mountedBase, err := os.MkdirTemp(crossMountRoot, "virki-v43-cross-mount-")
+ 		require.NoError(t, err)
+ 		t.Cleanup(func() { require.NoError(t, os.RemoveAll(mountedBase)) })
+ 		require.NoError(t, os.Chmod(mountedBase, 0711))
