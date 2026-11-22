@@ -47,6 +47,10 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=1e6' }),
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000junk' }),
     response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000; max-age=3000' }),
+    // RFC 7230 OWS permits SP / HTAB, not arbitrary JS Unicode whitespace.
+    // A JavaScript \s or trim() check would fabricate browser HSTS evidence.
+    response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age=2592000\u00a0' }),
+    response(200, goodCSP, goodHTML, { 'strict-transport-security': 'max-age\u00a0=2592000' }),
     response(200, goodCSP, goodHTML, { 'content-type': 'application/json' }),
     response(200, goodCSP, goodHTML, { 'content-type': 'text/plain' }),
     response(200, goodCSP, goodHTML, { 'content-type': 'text/html; boundary=forged' }),
@@ -164,6 +168,9 @@ test('actual nonce attributes and quoted decimal HSTS are recognized without low
   const quoted = response(200, "script-src 'nonce-SAFE'", goodHTML,
     { 'strict-transport-security': 'max-age="2592000"' });
   assert.equal(classifyIssue119Response(base, quoted).result, 'pass');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP, goodHTML,
+    { 'strict-transport-security': 'max-age \t= \t2592000' })).result, 'pass',
+  'HTTP SP and HTAB remain valid optional whitespace');
   assert.equal(classifyIssue119Response(base, response(200, "script-src 'nonce-safe'", goodHTML)).result, 'fail');
   assert.equal(classifyIssue119Response(base, response(200, goodCSP,
     htmlDoc('<script data-nonce="SAFE" nonce="SAFE">boot()</script>'))).result, 'pass');

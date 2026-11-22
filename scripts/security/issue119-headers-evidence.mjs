@@ -111,12 +111,15 @@ function inspectScriptTag(tag) {
 }
 
 function hasValidHstsAge(value) {
-  const maxAge = value.split(';').map((part) => part.trim())
-    .filter((part) => /^max-age\s*=/i.test(part));
+  // HTTP optional whitespace is SP / HTAB, NOT JavaScript's Unicode \s.
+  // A non-breaking space is allowed as an HTTP obs-text octet but is not
+  // grammar whitespace: accepting it can falsely attest a malformed HSTS.
+  const maxAge = value.split(';').map((part) => part.replace(/^[ \t]+|[ \t]+$/g, ''))
+    .filter((part) => /^max-age[ \t]*=/i.test(part));
   if (maxAge.length !== 1) return false;
   // RFC 6797 permits a decimal age either unquoted or within double quotes.
   // Never accept only the numeric prefix of malformed values like 1e6.
-  const match = /^max-age\s*=\s*(?:"([0-9]+)"|([0-9]+))\s*$/i.exec(maxAge[0]);
+  const match = /^max-age[ \t]*=[ \t]*(?:"([0-9]+)"|([0-9]+))[ \t]*$/i.exec(maxAge[0]);
   if (!match) return false;
   const seconds = Number(match[1] ?? match[2]);
   return Number.isSafeInteger(seconds) && seconds > 0;
