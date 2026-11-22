@@ -59,6 +59,8 @@ Offline reconstruction: `bash scripts/security/issue90-replay-index.sh <pinned-b
 
 **V45 test-infrastructure refinement:** a pre-existing fake V15 protobuf stream copied generated message state by value, leading Go vet to report `copylocks` and prior invocations to disable that analyzer. V45 uses protobuf-aware reset/merge semantics in the synthetic receiver fixture, preserving packet behavior. The WSL full filesync `-race` suite and **unrestricted Go vet** passed, and hosted CI now enforces unrestricted vet. Immutable patch replay is **23/23 (V23–V45)**. No production functionality or release authority was activated.
 
+**V46 cross-process and crash-state proof:** an incremental test-only root fixture launches six separate Go test processes against the same synthetic V40 permit and ledger and requires exactly one durable acceptance, five refusals and a verified one-record HMAC checkpoint. A separate durably persisted in-flight marker before any log append refuses valid claims across restarts without modifying the empty ledger or trusted genesis checkpoint. WSL `-race` and unrestricted vet passed. The hosted no-skip privileged matrix now selects V46. This is **24/24 immutable patches (V23–V46)**, with no new production release authority or auto-recovery.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)
