@@ -23,39 +23,46 @@ const JAVASCRIPT_MIME_ESSENCES = new Set([
 
 export const ISSUE119_HEADER_TARGETS = TARGETS;
 
+// HTML5 attribute/tag delimiters and CSP directive separators are ASCII
+// whitespace only. JavaScript's \s/trim() additionally accept NBSP, VT and
+// other Unicode spaces, which can fabricate script evidence in both parsers.
+const ASCII_SPACE = '[\\t\\n\\f\\r ]';
+const asciiTrim = (value) => value.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
+const asciiSpaces = /[\t\n\f\r ]+/;
+
 function directiveSources(csp, directiveName) {
-  const expression = new RegExp(`^${directiveName}(?:\\s|$)`, 'i');
-  const directive = csp.split(';').map((item) => item.trim()).find((item) => expression.test(item));
+  const expression = new RegExp(`^${directiveName}(?:${ASCII_SPACE}|$)`, 'i');
+  const directive = csp.split(';').map(asciiTrim).find((item) => expression.test(item));
   return { present: directive !== undefined,
-    sources: directive === undefined ? [] : directive.split(/\s+/).slice(1) };
+    sources: directive === undefined ? [] : directive.split(asciiSpaces).slice(1) };
 }
 
 function inspectScriptTag(tag) {
   const invalid = () => ({ valid: false, executable: false, nonce: null });
-  const opening = /^<script\b/i.exec(tag);
+  const opening = /^<script(?=[\t\n\f\r />])/i.exec(tag);
   if (!opening) return invalid();
   let pos = opening[0].length;
   let nonce = null;
   let type = null;
   const seen = new Set();
   while (pos < tag.length) {
-    while (/\s/.test(tag[pos] ?? '')) pos++;
+    while (/[\t\n\f\r ]/.test(tag[pos] ?? '')) pos++;
     if (tag[pos] === '>') break;
     // A slash before nonterminal content is reprocessed by HTML5 as an
     // attribute separator. Refuse even terminal script '/>' syntax rather
     // than hiding nomodule or a non-executable type behind early stopping.
     if (tag[pos] === '/') return invalid();
     const start = pos;
-    while (pos < tag.length && !/[\s=/>]/.test(tag[pos])) pos++;
+    while (pos < tag.length && !/[\t\n\f\r =/>]/.test(tag[pos])) pos++;
     if (pos === start) return invalid();
     const name = tag.slice(start, pos).toLowerCase();
     if (seen.has(name)) return invalid();
     seen.add(name);
-    while (/\s/.test(tag[pos] ?? '')) pos++;
+    while (/[\t\n\f\r ]/.test(tag[pos] ?? '')) pos++;
     let value = null;
     if (tag[pos] === '=') {
       pos++;
-      while (/\s/.test(tag[pos] ?? '')) pos++;
+      while (/[\t\n\f\r ]/.test(tag[pos] ?? '')) pos++;
       if (tag[pos] === '"' || tag[pos] === "'") {
         const quote = tag[pos++];
         const end = tag.indexOf(quote, pos);
@@ -64,7 +71,7 @@ function inspectScriptTag(tag) {
         pos = end + 1;
       } else {
         const valueStart = pos;
-        while (pos < tag.length && !/[\s>]/.test(tag[pos])) pos++;
+        while (pos < tag.length && !/[\t\n\f\r >]/.test(tag[pos])) pos++;
         value = tag.slice(valueStart, pos);
       }
     }
@@ -87,10 +94,10 @@ function inspectScriptTag(tag) {
     // `language` attribute is used as a legacy type fallback. We cannot
     // browser-decode arbitrary attribute values here, so refuse this syntax
     // instead of treating an inert text/python block as a hydration receipt.
-    if (name === 'language' && value !== null && value.trim() !== '') return invalid();
+    if (name === 'language' && value !== null && asciiTrim(value) !== '') return invalid();
   }
   if (type !== null && typeof type !== 'string') return invalid();
-  const kind = (type ?? '').trim().toLowerCase();
+  const kind = asciiTrim(type ?? '').toLowerCase();
   // HTML script data blocks (JSON, LD+JSON, importmaps, speculation rules or
   // unknown MIME types) do not execute. Likewise modern module-capable
   // browsers skip classic scripts with the exact boolean `nomodule` HTML
@@ -126,11 +133,11 @@ function hasUnsafeInline(sources) {
 // This conservatively tests executability; it does NOT prove browser hydration
 // or full origin/cookie/session behavior of a sandboxed document.
 function cspSandboxAllowsScripts(csp) {
-  const sandbox = csp.split(';').map((part) => part.trim())
-    .filter((part) => /^sandbox(?:\s|$)/i.test(part));
+  const sandbox = csp.split(';').map(asciiTrim)
+    .filter((part) => /^sandbox(?:[\t\n\f\r ]|$)/i.test(part));
   if (sandbox.length === 0) return true;
   if (sandbox.length !== 1) return false;
-  return sandbox[0].split(/\s+/).slice(1)
+  return sandbox[0].split(asciiSpaces).slice(1)
     .some((token) => token.toLowerCase() === 'allow-scripts');
 }
 
@@ -141,14 +148,14 @@ function cspSandboxAllowsScripts(csp) {
 // refuse any extra attributes/ambiguous end-tag syntax rather than skipping
 // the actual boundary and claiming hydration passed.
 function rawTextCloseOffset(body, afterStartTag, name) {
-  const start = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
+  const start = new RegExp(`</${name}(?=${ASCII_SPACE}|[/>])`, 'gi');
   start.lastIndex = afterStartTag;
   const match = start.exec(body);
   if (!match) return -1;
   const end = body.indexOf('>', start.lastIndex);
   if (end < 0) return -1;
   const token = body.slice(match.index, end + 1);
-  const simpleEndTag = new RegExp(`^</${name}\\s*>$`, 'i');
+  const simpleEndTag = new RegExp(`^</${name}${ASCII_SPACE}*>$`, 'i');
   return simpleEndTag.test(token) ? end + 1 : -1;
 }
 
@@ -204,7 +211,7 @@ function inspectHtmlDocument(body, mime) {
     // following script as raw text and hide a CSP nonce mismatch.
     // A word boundary is insufficient: <style.foo> must not enter the style
     // raw-text state, nor can <script.foo> count as an executable script.
-    const match = /^<(\/?)([a-z][a-z0-9:-]*)(?=[\s/>])/i.exec(raw);
+    const match = /^<(\/?)([a-z][a-z0-9:-]*)(?=[\t\n\f\r />])/i.exec(raw);
     if (!match) return fail();
     const closing = match[1] === '/';
     const tag = match[2].toLowerCase();
