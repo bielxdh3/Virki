@@ -169,8 +169,13 @@ function rawTextCloseOffset(body, afterStartTag, name) {
 // markup fails closed rather than manufacturing a passing nonce receipt.
 function inspectHtmlDocument(body, mime) {
   const fail = () => ({ valid: false, nonces: [] });
-  if (!/^text\/html(?:\s*;\s*charset\s*=\s*(?:[\w-]+|"[\w-]+")\s*)?$/i.test(mime.trim())) return fail();
-  const start = /^\s*<!doctype\s+html\s*>/i.exec(body);
+  // HTTP field-value whitespace is SP / HTAB, not JavaScript Unicode trim.
+  // A NBSP next to text/html or a charset separator is not valid MIME OWS
+  // and cannot establish a browser-executable HTML receipt.
+  const mimeValue = mime.replace(/^[ \t]+|[ \t]+$/g, '');
+  if (!/^text\/html(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:[\w-]+|"[\w-]+")[ \t]*)?$/i.test(mimeValue)) return fail();
+  // HTML5 DOCTYPE delimiters also use ASCII whitespace, not JavaScript \s.
+  const start = /^[\t\n\f\r ]*<!doctype[\t\n\f\r ]+html[\t\n\f\r ]*>/i.exec(body);
   if (!start) return fail();
   let at = start[0].length;
   let phase = 0; // html open, head open/closed, body open/closed, html closed
@@ -179,7 +184,7 @@ function inspectHtmlDocument(body, mime) {
   while (at < body.length) {
     const lt = body.indexOf('<', at);
     if (lt < 0) break;
-    if (phase === 6 && body.slice(at).trim()) return fail();
+    if (phase === 6 && asciiTrim(body.slice(at))) return fail();
     if (body.startsWith('<!--', lt)) {
       // WHATWG HTML treats `<!-->` and `<!--->` as immediately closed,
       // not as comments extending to a later `-->`. A string search could
@@ -310,7 +315,7 @@ function inspectHtmlDocument(body, mime) {
     } else if (['html', 'head', 'body'].includes(tag)) return fail();
     if (tag === 'script' && closing) return fail();
   }
-  return phase === 6 && inert.length === 0 && body.slice(at).trim() === ''
+  return phase === 6 && inert.length === 0 && asciiTrim(body.slice(at)) === ''
     ? { valid: true, nonces } : fail();
 }
 
