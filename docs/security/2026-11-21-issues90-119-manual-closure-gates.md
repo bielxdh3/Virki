@@ -126,6 +126,24 @@ AddressSanitizer/UBSan tests and the Go/C4 bridge also passed. This is a parser
 parity fix, not a signed owner release, independently anchored anti-rollback
 witness, production host custody, or authorization to activate publication.
 
+**Deep UTF-8 WalkDir path compatibility follow-up (post-`713d2d9`, DEV only):**
+Independent audit reproduced a self-consistent Go-style canonical stream that
+Node C1 accepts but the native C4 verifier rejected. Six nested components of
+70 CJK codepoints each are legal on Linux (210 octets per basename), totaling
+425 UTF-16 units but **1265 UTF-8 bytes** in the final relative path. The
+native parser had hard-coded `1024`-byte buffers and rejected the stream even
+though its Unicode/WalkDir contract allows 512 UTF-16 units. A real C4 test
+binary compiled from production C reproduced the denial (**RED exit 15**),
+while the Node provenance test accepted the same path/tree layout. C4 now
+allocates bounded path buffers of `3 * 512 + 1` bytes (the safe UTF-8 upper
+bound for 512 UTF-16 units), retaining bytewise traversal checks and all
+UTF-8/security grammar rules. Positive native/Node fixtures also cover a
+near-maximum **512-unit / 1526-byte** pathname with individual basenames
+under Linux `NAME_MAX`. Both the original 1024-octet denial and new upper
+boundary are tested, without relaxing any test or gate. This addresses a
+legitimate build-context **availability** defect, not a signature bypass or
+permission to sign, publish, merge, deploy, or provision owner authority.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)

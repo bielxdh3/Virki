@@ -907,11 +907,17 @@ static bool v3_stream_hash_bytes(int fd, uint64_t length, uint64_t *offset,
  * witnessed parent directories and the Go filepath.WalkDir depth-first,
  * byte-sorted basename order while consuming only bounded stack memory.
  * A malformed stream must never become C4's canonical provenance evidence. */
+#define V3_WALK_MAX_UTF16_UNITS 512u
+/* Node bounds the decoded pathname to 512 UTF-16 units, not 1023 UTF-8
+ * octets. Each BMP scalar uses at most three UTF-8 bytes per UTF-16 unit;
+ * supplementary scalars use four bytes per TWO UTF-16 units. Reserve the
+ * exact safe upper bound plus one byte, even for deep legal CJK paths. */
+#define V3_WALK_PATH_BUFFER_BYTES (V3_WALK_MAX_UTF16_UNITS * 3u + 1u)
 typedef struct {
-  char previous[1024];
+  char previous[V3_WALK_PATH_BUFFER_BYTES];
   size_t previous_len;
   bool previous_directory;
-  char ancestor_path[1024];
+  char ancestor_path[V3_WALK_PATH_BUFFER_BYTES];
   uint16_t ancestor_lengths[1024];
   size_t depth;
 } v3_walk_state;
@@ -948,7 +954,7 @@ static bool v3_walk_valid_utf8(const uint8_t *bytes, size_t length) {
   for (size_t i = 0; i < length;) {
     const uint8_t lead = bytes[i];
     if (lead < 0x80) {
-      if (++utf16_units > 512) return false;
+      if (++utf16_units > V3_WALK_MAX_UTF16_UNITS) return false;
       i++;
       continue;
     }
@@ -972,7 +978,7 @@ static bool v3_walk_valid_utf8(const uint8_t *bytes, size_t length) {
     /* Node validateRelPath caps JS UTF-16 string length at 512, not
      * UTF-8 octet count. Supplementary code points occupy two units. */
     utf16_units += count == 3 ? 2 : 1;
-    if (utf16_units > 512) return false;
+    if (utf16_units > V3_WALK_MAX_UTF16_UNITS) return false;
     i += count + 1;
   }
   return true;
@@ -1040,8 +1046,9 @@ static bool v3_verify_context_stream_tree(int fd, uint64_t length,
     uint8_t kind;
     uint64_t path_len, mode, size;
     if (!v3_stream_read(fd, length, &offset, &kind, 1) || (kind != 'D' && kind != 'L' && kind != 'F') ||
-        !v3_stream_uint(fd, length, &offset, &path_len) || path_len == 0 || path_len >= 1024) return false;
-    char path[1024];
+        !v3_stream_uint(fd, length, &offset, &path_len) || path_len == 0 ||
+        path_len >= sizeof(walk.previous)) return false;
+    char path[V3_WALK_PATH_BUFFER_BYTES];
     if (!v3_stream_read(fd, length, &offset, path, (size_t)path_len) ||
         !v3_walk_accept_path(&walk, path, (size_t)path_len, kind)) return false;
     virki_abi_sha256_update(&tree, &kind, 1);

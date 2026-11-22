@@ -21,7 +21,9 @@ static void fixture_write_sized(uint8_t **cursor, const char *text, size_t size)
 }
 
 static bool fixture_native_accepts(const stream_entry_fixture *entries, size_t count) {
-  uint8_t buffer[4096], *cursor = buffer;
+  /* Valid deep UTF-8 WalkDir streams exceed the old 4 KiB test fixture.
+   * Keep all bytes in a bounded disposable buffer, not a forged digest. */
+  uint8_t buffer[8192], *cursor = buffer;
   static const char prefix[] = "virki-context-stream-v1\0";
   fixture_write_bytes(&cursor, prefix, sizeof(prefix) - 1);
   fixture_write_sized(&cursor, "source", 6);
@@ -108,6 +110,54 @@ int main(void) {
   too_long[sizeof(too_long) - 1] = '\0';
   const stream_entry_fixture long_path[] = {{'F', too_long, 0644, "x"}};
   if (fixture_native_accepts(long_path, 1)) { puts("FAIL: path over 512 UTF-16 code units accepted"); return 12; }
+  /* Six filesystem components of 70 CJK codepoints each fit NAME_MAX=255
+   * bytes per component and Node's 512 UTF-16 unit pathname limit. They
+   * exceed the native C4 parser's historical 1024-byte raw pathname cap.
+   * Verify the actual production parser accepts this genuine Go WalkDir
+   * depth-first sequence, not just a single synthetic long basename. */
+  char segment[211];
+  for (size_t i = 0; i < 70; i++) memcpy(segment + i * 3, "\xe4\xb8\xad", 3);
+  segment[210] = '\0';
+  char nested_paths[6][1400];
+  stream_entry_fixture unicode_walk[6];
+  for (size_t i = 0; i < 6; i++) {
+    const int n = i == 0
+        ? snprintf(nested_paths[i], sizeof(nested_paths[i]), "%s", segment)
+        : snprintf(nested_paths[i], sizeof(nested_paths[i]), "%s/%s", nested_paths[i - 1], segment);
+    if (n < 0 || (size_t)n >= sizeof(nested_paths[i])) abort();
+    unicode_walk[i] = (stream_entry_fixture){ i == 5 ? 'F' : 'D', nested_paths[i],
+        i == 5 ? 0644 : 0755, i == 5 ? "x" : NULL };
+  }
+  if (strlen(nested_paths[5]) != 1265) abort(); /* 425 UTF-16 units, 1265 UTF-8 octets */
+  if (!fixture_native_accepts(unicode_walk, 6)) {
+    puts("FAIL: valid deep CJK WalkDir stream rejected by C4 byte cap"); return 15;
+  }
+  /* Near the exact UTF-16 limit, six real basenames of 85,85,85,85,85,82
+   * CJK scalars fit the filesystem's 255-byte component limit while giving
+   * 512 UTF-16 units and 1526 UTF-8 bytes in the final relative pathname. */
+  const size_t near_limit_chars[6] = {85, 85, 85, 85, 85, 82};
+  char near_limit_paths[6][1600];
+  stream_entry_fixture near_limit_walk[6];
+  for (size_t i = 0; i < 6; i++) {
+    const size_t parent_bytes = i == 0 ? 0 : strlen(near_limit_paths[i - 1]);
+    size_t used = parent_bytes;
+    if (i != 0) {
+      memcpy(near_limit_paths[i], near_limit_paths[i - 1], parent_bytes);
+      near_limit_paths[i][used++] = '/';
+    }
+    for (size_t j = 0; j < near_limit_chars[i]; j++) {
+      memcpy(near_limit_paths[i] + used, "\xe4\xb8\xad", 3);
+      used += 3;
+    }
+    if (used >= sizeof(near_limit_paths[i])) abort();
+    near_limit_paths[i][used] = '\0';
+    near_limit_walk[i] = (stream_entry_fixture){ i == 5 ? 'F' : 'D', near_limit_paths[i],
+        i == 5 ? 0644 : 0755, i == 5 ? "x" : NULL };
+  }
+  if (strlen(near_limit_paths[5]) != 1526) abort();
+  if (!fixture_native_accepts(near_limit_walk, 6)) {
+    puts("FAIL: valid maximum 512-UTF16-unit CJK WalkDir stream rejected"); return 16;
+  }
   puts("C4_NATIVE_CANONICAL_WALK_STREAM_PASS");
   return 0;
 }

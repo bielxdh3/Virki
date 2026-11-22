@@ -279,6 +279,43 @@ test("C1->C4 rejects leading UTF-8 BOM path aliases before Node decoding", (t) =
   }
 });
 
+test("C1->C4 Node provenance admits valid deep multibyte WalkDir paths within 512 UTF-16 units", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-cjk-depth-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const segment = "中".repeat(70);
+  const entries = Array.from({ length: 6 }, (_, i) => ({
+    kind: i === 5 ? "F" : "D", path: Array(i + 1).fill(segment).join("/"),
+    mode: i === 5 ? 0o644 : 0o755, data: i === 5 ? "x" : undefined,
+  }));
+  const finalPath = entries[5].path;
+  assert.equal(finalPath.length, 425);
+  assert.equal(Buffer.byteLength(finalPath, "utf8"), 1265);
+  assert.ok(Buffer.byteLength(segment) < 255, "each component is filesystem-valid");
+  const fx = buildSyntheticFixture(tmpDir);
+  const item = syntheticCanonicalContext("source", "", entries);
+  fx.contextBuffers.source = item.buffer;
+  Object.assign(fx.contract.contexts[0], {
+    streamLength: item.buffer.length, streamDigest: `sha256:${sha256Hex(item.buffer)}`,
+    treeDigest: item.treeDigest, entryCount: item.entryCount,
+  });
+  verifyBuildInputProvenance(fx.contract, fx.contextBuffers);
+  const nearLimitComponents = [85, 85, 85, 85, 85, 82].map((n) => "中".repeat(n));
+  const nearLimit = nearLimitComponents.map((_, i) => ({
+    kind: i === 5 ? "F" : "D", path: nearLimitComponents.slice(0, i + 1).join("/"),
+    mode: i === 5 ? 0o644 : 0o755, data: i === 5 ? "x" : undefined,
+  }));
+  assert.equal(nearLimit.at(-1).path.length, 512);
+  assert.equal(Buffer.byteLength(nearLimit.at(-1).path, "utf8"), 1526);
+  const fxMax = buildSyntheticFixture(tmpDir);
+  const maximalItem = syntheticCanonicalContext("source", "", nearLimit);
+  fxMax.contextBuffers.source = maximalItem.buffer;
+  Object.assign(fxMax.contract.contexts[0], {
+    streamLength: maximalItem.buffer.length, streamDigest: `sha256:${sha256Hex(maximalItem.buffer)}`,
+    treeDigest: maximalItem.treeDigest, entryCount: maximalItem.entryCount,
+  });
+  verifyBuildInputProvenance(fxMax.contract, fxMax.contextBuffers);
+});
+
 test("C1->C4 state serializes independent writers and retains its Linux lock inode", { skip: process.platform !== "linux" }, async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-writers-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
