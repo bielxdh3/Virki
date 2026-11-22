@@ -104,6 +104,8 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce=SAFE\u000bignored>boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script><style\u00a0id=x><script nonce="EVIL">bad()</script></style>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script><script nonce="EVIL"\u00a0type="application/json">bad()</script>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script><div data=x"><script nonce="EVIL">bad()</script>" />')),
+    response(200, goodCSP, htmlDoc("<script nonce=\"SAFE\">good()</script><div data=x'><script nonce=\"EVIL\">bad()</script>' />")),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="\u00a0module\u00a0">boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE" type="\u2003module\u2003">boot()</script>')),
     response(200, "default-src 'none'; script-src\u00a0'nonce-SAFE'", goodHTML),
@@ -146,6 +148,14 @@ test('two independent CSP headers are not mistaken for one passing hydration pol
   const result = classifyIssue119Response(base, value);
   assert.equal(result.result, 'fail');
   assert.equal(result.cspPolicy, 'multiple-or-missing');
+});
+
+test('quoted attribute values may contain > and fake scripts without hiding real nonce evidence', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const valid = htmlDoc('<div data-note="> <script nonce=EVIL>fake</script>">safe</div>' +
+    '<script nonce="SAFE">boot()</script>');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP, valid)).result,
+    'pass', 'valid quoted > stays inside a single HTML attribute');
 });
 
 test('actual nonce attributes and quoted decimal HSTS are recognized without lowercasing nonce values', () => {

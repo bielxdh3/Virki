@@ -194,14 +194,46 @@ function inspectHtmlDocument(body, mime) {
       at = end + 3;
       continue;
     }
+    // HTML5 only enters a quoted attribute value immediately after '='
+    // (with optional ASCII spaces). A quote embedded in an UNQUOTED value
+    // is a parse error, but does not shield the next '>' from the browser.
+    // Reject that syntax instead of swallowing a later wrong-nonce script.
     let quote = null;
+    let attrState = 'outside';
     let end = lt + 1;
     for (; end < body.length; end++) {
       const char = body[end];
       if (quote) {
-        if (char === quote) quote = null;
-      } else if (char === '"' || char === "'") quote = char;
-      else if (char === '>') break;
+        if (char === quote) {
+          quote = null;
+          attrState = 'after-quote';
+        }
+        continue;
+      }
+      if (char === '>') break;
+      if (attrState === 'before-value') {
+        if (/[\t\n\f\r ]/.test(char)) continue;
+        if (char === '"' || char === "'") {
+          quote = char;
+          attrState = 'quoted';
+          continue;
+        }
+        attrState = 'unquoted';
+      }
+      if (attrState === 'unquoted') {
+        if (/[\t\n\f\r ]/.test(char)) attrState = 'outside';
+        else if (char === '"' || char === "'") return fail();
+        continue;
+      }
+      if (attrState === 'after-quote') {
+        if (/[\t\n\f\r /]/.test(char)) {
+          attrState = 'outside';
+          continue;
+        }
+        return fail();
+      }
+      if (char === '=') attrState = 'before-value';
+      else if (char === '"' || char === "'") return fail();
     }
     if (end === body.length) return fail();
     const raw = body.slice(lt, end + 1);
