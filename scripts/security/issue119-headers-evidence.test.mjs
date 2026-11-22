@@ -103,6 +103,7 @@ test('unsafe-inline, powered-by, mismatched nonce, missing HSTS and wrong 404 al
     response(200, goodCSP, htmlDoc('<script nonce=SAFE\u00a0ignored>boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce=SAFE\u000bignored>boot()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script><style\u00a0id=x><script nonce="EVIL">bad()</script></style>')),
+    response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script><style\u00a0><script nonce="EVIL">bad()</script></style>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script><script nonce="EVIL"\u00a0type="application/json">bad()</script>')),
     response(200, goodCSP, htmlDoc('<script nonce="SAFE">good()</script><div data=x"><script nonce="EVIL">bad()</script>" />')),
     response(200, goodCSP, htmlDoc("<script nonce=\"SAFE\">good()</script><div data=x'><script nonce=\"EVIL\">bad()</script>' />")),
@@ -295,6 +296,7 @@ test('CSP meta policies cannot silently override an otherwise passing header non
     '<meta http-equiv="Content-Security-Policy" content="script-src &#39;none&#39;">',
     '<meta/http-equiv="Content-Security-Policy" content="script-src \'none\'">',
     '<meta /http-equiv="Content-Security-Policy" content="script-src \'none\'">',
+    '<meta name="x"http-equiv="Content-Security-Policy" content="script-src \'none\'">',
   ]) {
     assert.equal(classifyIssue119Response(base, response(200, goodCSP,
       htmlDoc('<script nonce="SAFE">boot()</script>', head))).result, 'fail', head);
