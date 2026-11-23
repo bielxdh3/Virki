@@ -242,13 +242,14 @@ jobs:
           # and the V51R preclaim security fix. Keep the earlier experimental
           # direct-V51 V52 patch solely as historical DEV evidence.
           four="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v51r-to-v52-four-protected-dev.patch"
-          echo "07caeb1ff5783417d47c8f933df712585c114f86849120a4fa236a24378bd724  $four" | sha256sum --check
+          echo "a348f5edb2eacde213932fb7b74b9ca7f478be2cd332a5b140ea7dd81d6d1104  $four" | sha256sum --check
           git -C "$scratch" apply --cached --check "$four"
           git -C "$scratch" apply --cached "$four"
-          test "$(git -C "$scratch" write-tree)" = 5ea8b640cc5c96785c0612d7c1e0172e5e78c772
+          test "$(git -C "$scratch" write-tree)" = 5b2a745318a884d182c0e7a06fa49b627baa4455
           git -C "$scratch" checkout-index -f --all
           # Four different nonroot Linux senders make independently
-          # authenticated V50 FD handoffs into four V36 root-owned snapshots.
+          # authenticated V50 FD handoffs into four V36 root-owned snapshots;
+          # a four-process same-UID negative control must fail before claims.
           # V52's one TEST scope cannot complete C4 and has no owner signer.
           sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
             VIRKI_V52_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test \

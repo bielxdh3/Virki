@@ -15,6 +15,23 @@ directories, V15 nonces, approvals, FileSync sessions, V36 destinations
 and data. The V40 ledger and its root-only independent trust checkpoint
 are shared, so all four individual claims are durable and replay-proof.
 
+The group preclaim requires **pairwise-distinct sender UIDs as well as
+PIDs**. A negative-control test launches four live processes with distinct
+PIDs but the same UID `60020`; V52 must reject that group before creating
+the group fence, consuming any V40 permit or publishing any V36 context.
+A second negative control lies in the caller-supplied `SenderUID` fields,
+claiming four distinct UIDs for those same-UID processes; kernel
+SO_PEERCRED authentication must reject the lie before any fence or claim.
+
+V15 has no per-`ApprovalID` revocation list. The durable V40 mechanism
+provides epoch-floor revocation: each claim reloads the authenticated
+checkpoint under the exclusive ledger lock, and a previously advanced floor
+rejects lower-epoch permits. A V52 regression advances the floor to epoch 8
+after all four group preclaims but before the first V52 claim; the epoch-7
+group is rejected with no V36 publication, no V52 permit consumption and a
+durable FENCED marker. This is epoch-wide revocation, not individual permit
+revocation or a production owner-revocation authority.
+
 **THIS IS NOT A COMPLETE C4 CANDIDATE OR OWNER APPROVAL.** The test owner
 service is a deliberately nonauthorizing `localcontext.Service` double:
 its independently precomputed per-context tree commitments are handed
@@ -43,11 +60,13 @@ checks:
   across all four contexts, with four owner TEST-side session IDs and tree
   digests. Rejects any previously consumed partial scope.
 - The canonical four required context names in protocol order, unique
-  V15 permit approval IDs, nonces, sessions, sender PIDs and destinations.
+  V15 permit approval IDs, nonces, sessions, sender PIDs, sender UIDs and
+  destinations.
 - Four distinct cryptographically valid signed **V15 test-domain**
   permits (not V3 signatures), frozen V15 manifests and canonical paths.
 - All four live senders' kernel SO_PEERCRED/PID/UID/GID *before* claiming
-  any permit; V50 again checks SCM_CREDENTIALS on each actual FD message.
+  any permit; sender UIDs and PIDs must both be pairwise distinct. V50 again
+  checks SCM_CREDENTIALS on each actual FD message.
 
 A root:root 0700 separately provisioned fence directory contains an
 O_EXCL, O_NOFOLLOW, root-owned single-link 0600 group status file pinned
@@ -115,9 +134,9 @@ There is no automatic group recovery or production release path.
 - **Canonical additive V52 patch, after V51R**:
   `infra/offline/patches/buildkit-v0.34.1-c1-v51r-to-v52-four-protected-dev.patch`
 - Canonical V52 patch SHA-256:
-  `07caeb1ff5783417d47c8f933df712585c114f86849120a4fa236a24378bd724`
+  `a348f5edb2eacde213932fb7b74b9ca7f478be2cd332a5b140ea7dd81d6d1104`
 - Replayed canonical V51R+V52 Git tree:
-  `5ea8b640cc5c96785c0612d7c1e0172e5e78c772`.
+  `5b2a745318a884d182c0e7a06fa49b627baa4455`.
 - Retained pre-rebase V52 DEV source patch:
   `infra/offline/patches/buildkit-v0.34.1-c1-v51-to-v52-four-protected-dev.patch`
   with original patch SHA-256:
@@ -135,9 +154,9 @@ preflight during this failed composition. The rebased V52 patch adds a
 DEV-only exception **only while the scope is already group-pending**, with
 the record's generation required to equal the authorized V3 generation.
 Outside that pending gate, a mismatched V15 nonce continues to fail before
-claim. A dedicated Manager regression and the full 17-subtest root/race
-four-UID fixture now pass **GREEN**; V51R's standalone P2 regressions remain
-green. This does not relax normal/prod builds or prove owner authorization.
+claim. A dedicated Manager regression, the 20-subtest root/race V52 suite
+and V51R's standalone P2 regressions now pass **GREEN**.
+This does not relax normal/prod builds or prove owner authorization.
 The new privileged Linux suite is mandatory without SKIP and runs
 from a disposable /var/tmp destination with real process UIDs.
 No historical patch, cumulative Git tree, original V51 patch or
@@ -148,7 +167,7 @@ owner-signing capability was modified.
 - `VIRKI_V52_RUN_ROOT_FIXTURE=1 go test -race -mod=vendor
   -tags virki_c1c4_dev -count=1 ./session/filesync
   -run TestC1V52FourProtectedContextsOneSolve`: **PASS**,
-  17 subtests using Linux WSL root plus real nonroot UIDs:
+  20 subtests using Linux WSL root plus real nonroot UIDs:
   four-context acceptance; external candidate/causal gate before fsync;
   faults before/after first, second, third and fourth;
   canceled context after second and **after fourth before READY**;
@@ -160,6 +179,19 @@ owner-signing capability was modified.
   interrupted PENDING; and genuine `os.Exit(77)` of the **root
   supervisor after first V40+V36 publication** with durable one-row
   ledger, protected first output and non-replayable PENDING marker.
+- **RED→GREEN sender-UID isolation:** four real processes with distinct
+  PIDs but shared UID `60020` were accepted by the earlier V52 patch,
+  consuming four V40 permits and reaching `READY`. The retained regression
+  now requires rejection during preclaim; after the fix it verifies zero
+  V40 claims, no group fence and no V36 publication. A companion spoofing
+  regression gives those same-UID processes distinct declared UID fields;
+  kernel SO_PEERCRED rejects the false identity before any claim or fence.
+- **Epoch-floor revocation after preclaim:** a separately signed epoch-8
+  permit advances the durable V40 floor after V52 has authenticated all four
+  epoch-7 publishers but before the first group claim. The stale V52 permit is
+  rejected at the irreversible V40 boundary; no context is published, the
+  only ledger row is the epoch-advance claim, the group is FENCED and the
+  TEST scope is aborted. Individual ApprovalID revocation is not implemented.
 - Behavioral **RED→GREEN** for premature C4 candidate exposure:
   removing the V52 `Complete` pending guard caused the fourth-context
   test to **FAIL**. Restoring it byte-for-byte passed with `-race`.

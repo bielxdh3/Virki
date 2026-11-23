@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..531ca610e1271910c4cd4f9ccc5efa98ea8ec1c6
 --- /dev/null
 +++ b/session/filesync/sealed_publication_v52_group_dev_linux.go
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,328 @@
 +//go:build linux && virki_c1c4_dev
 +
 +package filesync
@@ -108,6 +108,7 @@ index 0000000000000000000000000000000000000000..531ca610e1271910c4cd4f9ccc5efa98
 +	sessions := make(map[string]bool, len(names))
 +	destinations := make(map[string]bool, len(names))
 +	senderPIDs := make(map[int]bool, len(names))
++	senderUIDs := make(map[uint32]bool, len(names))
 +	parent := ""
 +	for i, input := range group.Inputs {
 +		m, p, rec := input.Manifest, input.TestPermit, input.Record
@@ -134,11 +135,13 @@ index 0000000000000000000000000000000000000000..531ca610e1271910c4cd4f9ccc5efa98
 +		}
 +		if approvalIDs[p.ApprovalID] || testNonces[p.Nonce] ||
 +			sessions[m.SessionID] || senderPIDs[input.SenderPID] ||
++			senderUIDs[input.SenderUID] ||
 +			destinations[input.Destination] {
-+			return nil, errors.New("V52 DEV group reuses a test permit, sender, session or destination")
++			return nil, errors.New("V52 DEV group reuses a test permit, sender UID/PID, session or destination")
 +		}
 +		approvalIDs[p.ApprovalID], testNonces[p.Nonce] = true, true
 +		sessions[m.SessionID], senderPIDs[input.SenderPID] = true, true
++		senderUIDs[input.SenderUID] = true
 +		destinations[input.Destination] = true
 +		if input.SenderUID == 0 || input.SenderGID == 0 || input.SenderPID <= 1 ||
 +			input.Conn == nil || !filepath.IsAbs(input.Destination) ||
@@ -334,7 +337,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3c0c8b111bc49155acc2058265340fa8203a295a
 --- /dev/null
 +++ b/session/filesync/sealed_publication_v52_group_dev_linux_test.go
-@@ -0,0 +1,711 @@
+@@ -0,0 +1,799 @@
 +//go:build linux && virki_c1c4_dev
 +
 +package filesync
@@ -447,6 +450,10 @@ index 0000000000000000000000000000000000000000..3c0c8b111bc49155acc2058265340fa8
 +}
 +
 +func v52NewPhysicalFixture(t *testing.T) *v52RealFixture {
++	return v52NewPhysicalFixtureWithUIDs(t, false)
++}
++
++func v52NewPhysicalFixtureWithUIDs(t *testing.T, sameUID bool) *v52RealFixture {
 +	t.Helper()
 +	v52RequireRootFixture(t)
 +	f := &v52RealFixture{t: t}
@@ -555,6 +562,9 @@ index 0000000000000000000000000000000000000000..3c0c8b111bc49155acc2058265340fa8
 +	names := localcontext.RequiredContextNames()
 +	for i, name := range names {
 +		uid := uint32(60020 + i)
++		if sameUID {
++			uid = 60020
++		}
 +		sourceDir := filepath.Join(f.base, "source-"+strconv.Itoa(i))
 +		if err := os.Mkdir(sourceDir, 0700); err != nil {
 +			t.Fatal(err)
@@ -824,6 +834,87 @@ index 0000000000000000000000000000000000000000..3c0c8b111bc49155acc2058265340fa8
 +		}
 +		if f.owner.completeCalls.Load() != 0 || f.owner.abortCalls.Load() != 0 {
 +			t.Fatal("V52 must not submit anything to candidate/owner completion")
++		}
++	})
++	t.Run("four distinct PIDs sharing one UID are refused before fence or permits", func(t *testing.T) {
++		f := v52NewPhysicalFixtureWithUIDs(t, true)
++		uid := f.group.Inputs[0].SenderUID
++		seenPIDs := make(map[int]bool, len(f.group.Inputs))
++		for _, input := range f.group.Inputs {
++			if input.SenderUID != uid {
++				t.Fatalf("fixture did not reuse UID: got %d, expected %d", input.SenderUID, uid)
++			}
++			if seenPIDs[input.SenderPID] {
++				t.Fatalf("fixture reused sender PID %d", input.SenderPID)
++			}
++			seenPIDs[input.SenderPID] = true
++		}
++		out, err := PublishV52DevFourProtectedContexts(f.ctx, f.manager, f.scope, f.group)
++		if err == nil {
++			log, logErr := os.ReadFile(filepath.Join(f.ledger, v40LogName))
++			published := 0
++			for _, input := range f.group.Inputs {
++				if _, statErr := os.Lstat(input.Destination); statErr == nil {
++					published++
++				}
++			}
++			fence, fenceErr := f.fenceText()
++			t.Fatalf("V52 accepted four distinct PIDs sharing UID %d: records=%d claims=%d logErr=%v fence=%q fenceErr=%v", uid, len(out), bytes.Count(log, []byte{10}), logErr, fence, fenceErr)
++		}
++		f.assertNoCandidate(t, 0)
++		if _, err := os.Lstat(filepath.Join(f.group.FenceDir, "v52-"+f.group.GroupGeneration+".state")); !errors.Is(err, os.ErrNotExist) {
++			t.Fatalf("duplicate UID must be rejected before creating a group fence: %v", err)
++		}
++	})
++	t.Run("same kernel UID cannot be disguised by distinct declared UIDs", func(t *testing.T) {
++		f := v52NewPhysicalFixtureWithUIDs(t, true)
++		for i := range f.group.Inputs {
++			f.group.Inputs[i].SenderUID = uint32(60020 + i)
++		}
++		_, err := PublishV52DevFourProtectedContexts(f.ctx, f.manager, f.scope, f.group)
++		if err == nil || !strings.Contains(err.Error(), "pre-claim kernel authentication") {
++			t.Fatalf("forged distinct SenderUID values bypassed kernel peer authentication: %v", err)
++		}
++		f.assertNoCandidate(t, 0)
++		if _, err := os.Lstat(filepath.Join(f.group.FenceDir, "v52-"+f.group.GroupGeneration+".state")); !errors.Is(err, os.ErrNotExist) {
++			t.Fatalf("forged SenderUID metadata must be rejected before group fence creation: %v", err)
++		}
++	})
++	t.Run("epoch-floor revocation between group preclaim and first V40 claim is honored", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		before := func(i int) error {
++			if i != 0 {
++				return nil
++			}
++			m := f.group.Inputs[0].Manifest
++			revocation := V15OwnerPermit{
++				Domain: V15OwnerDomain, ApprovalID: "v52-epoch-floor-revocation",
++				ManifestDigest: m.Digest, WorkerID: m.WorkerID, SessionID: m.SessionID,
++				ContextName: m.ContextName, Nonce: m.Nonce, Epoch: 8,
++				ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++			}
++			revocation.Signature = ed25519.Sign(f.permitPriv, v15PermitBytes(revocation))
++			return claimV40AuthenticatedTestPermitWithSync(f.ledger, m, revocation,
++				f.group.TestPermitKey, 7, 8, unix.Fsync)
++		}
++		out, err := publishV52FourProtectedContexts(f.ctx, f.manager, f.scope, f.group, before, nil)
++		if err == nil || !strings.Contains(err.Error(), "stale against local test floor") || len(out) != 0 {
++			t.Fatalf("V52 used a permit revoked by the durable epoch floor after preclaim: records=%d err=%v", len(out), err)
++		}
++		log, readErr := os.ReadFile(filepath.Join(f.ledger, v40LogName))
++		if readErr != nil || bytes.Count(log, []byte{10}) != 1 {
++			t.Fatalf("only the independent epoch-advance claim may remain: rows=%d err=%v", bytes.Count(log, []byte{10}), readErr)
++		}
++		for i, input := range f.group.Inputs {
++			if _, statErr := os.Lstat(input.Destination); !errors.Is(statErr, os.ErrNotExist) {
++				t.Fatalf("revoked V52 permit published context %d: %v", i, statErr)
++			}
++		}
++		if state, stateErr := f.fenceText(); stateErr != nil || state != v52Fenced {
++			t.Fatalf("revoked group must remain durably fenced: %q %v", state, stateErr)
++		}
++		if f.owner.completeCalls.Load() != 0 || f.owner.abortCalls.Load() != 1 {
++			t.Fatalf("revoked group reached candidate or escaped abort: complete=%d abort=%d", f.owner.completeCalls.Load(), f.owner.abortCalls.Load())
 +		}
 +	})
 +	t.Run("fourth context remains invisible to candidate until group fsync", func(t *testing.T) {
