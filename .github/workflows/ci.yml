@@ -65,7 +65,7 @@ jobs:
         run: node scripts/tooling-audit-policy.mjs
 
       - name: Test Prisma tooling policy
-        run: node --test scripts/tooling-audit-policy.test.mjs
+        run: node --test scripts/tooling-audit-policy.test.mjs scripts/prisma6-config-runtime-compat.test.mjs
 
   production-audit:
     name: Audit production dependency tree
