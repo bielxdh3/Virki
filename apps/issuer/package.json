@@ -10,7 +10,7 @@
   "dependencies": {
     "@virki/auth": "0.1.0",
     "@virki/database": "0.1.0",
-    "oidc-provider": "9.14.0"
+    "oidc-provider": "9.15.1"
   },
   "devDependencies": {
     "@types/oidc-provider": "^9.13.1"
