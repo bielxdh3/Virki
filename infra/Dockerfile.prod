@@ -43,7 +43,7 @@ RUN set -eux; \
   cp -a node_modules/.bin/tsx /runtime-artifacts/node_modules/.bin/tsx; \
   cp -a "node_modules/@esbuild/$esbuild_platform" /runtime-artifacts/node_modules/@esbuild/; \
   cp -a "node_modules/@node-rs/$argon2_platform/$argon2_binary" /runtime-artifacts/node_modules/@node-rs/argon2/; \
-  cp -a node_modules/.prisma /runtime-artifacts/node_modules/.prisma; \
+  cp -a packages/database/node_modules/.prisma /runtime-artifacts/node_modules/.prisma; \
   cp -a apps/hub/node_modules/.prisma /runtime-artifacts/apps-hub-prisma; \
   cp -a apps/issuer/src /runtime-artifacts/issuer-src; \
   cp -a packages/auth/src /runtime-artifacts/auth-src; \
@@ -86,6 +86,7 @@ COPY --from=production-dependencies /app/packages/auth/package.json ./packages/a
 COPY --from=production-dependencies /app/packages/database/package.json ./packages/database/package.json
 COPY --from=production-dependencies /app/packages/oidc-node/package.json ./packages/oidc-node/package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --from=production-dependencies /app/packages/database/node_modules ./packages/database/node_modules
 
 COPY --from=build /app/apps/public-site/.next ./apps/public-site/.next
 COPY --from=build /app/apps/public-site/public ./apps/public-site/public
