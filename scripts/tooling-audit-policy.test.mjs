@@ -117,6 +117,22 @@ test("keeps Prisma CLI, Client, Config, workspace manifests and lockfile on one 
   assert.equal(lockfile.packages["node_modules/@prisma/config"]?.version, configVersion);
 });
 
+test("Prisma configuration overrides satisfy the installed Config's exact dependency contracts", () => {
+  const config = lockfile.packages["node_modules/@prisma/config"] ??
+    lockfile.packages["packages/database/node_modules/@prisma/config"];
+  assert.ok(config, "Prisma Config must be installed and pinned");
+  for (const name of ["deepmerge-ts", "effect"]) {
+    const required = config.dependencies?.[name];
+    assert.match(required ?? "", /^\d+\.\d+\.\d+$/u, `${name} must be an exact Prisma Config dependency`);
+    assert.equal(rootPackage.overrides?.["@prisma/config"]?.[name], required,
+      `${name} must not be overridden to a version rejected by Prisma Config`);
+    const installed = lockfile.packages[`packages/database/node_modules/@prisma/config/node_modules/${name}`] ??
+      lockfile.packages[`packages/database/node_modules/${name}`] ??
+      lockfile.packages[`node_modules/${name}`];
+    assert.equal(installed?.version, required, `${name} installed version must satisfy Prisma Config`);
+  }
+});
+
 test("keeps Node engines, type declarations, CI and runtime images on Node 22", () => {
   assert.match(rootPackage.engines?.node ?? "", /^>=22\.\d+\.\d+\s+<23$/u);
   assert.match(rootPackage.devDependencies?.["@types/node"] ?? "", /^22\./u);

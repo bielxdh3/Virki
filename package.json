@@ -87,7 +87,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.65.1",
-    "@types/node": "26.6.6",
+    "@types/node": "22.20.0",
     "concurrently": "^10.0.7",
     "cross-env": "^10.1.0",
     "eslint": "^10.15.0",
@@ -99,8 +99,8 @@
   "overrides": {
     "prisma": "6.19.3",
     "@prisma/config": {
-      "deepmerge-ts": "8.0.2",
-      "effect": "3.22.5"
+      "deepmerge-ts": "7.1.5",
+      "effect": "3.21.0"
     },
     "minimatch": "11.0.4",
     "concurrently": {

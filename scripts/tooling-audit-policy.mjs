@@ -7,7 +7,7 @@ export const EXPECTED_TOOLING_VERSIONS = {
   prisma: "6.19.3",
   "@prisma/client": "6.19.3",
   "@prisma/config": "6.19.3",
-  "deepmerge-ts": "8.0.2"
+  "deepmerge-ts": "7.1.5"
 };
 
 const expectedCounts = { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 };
