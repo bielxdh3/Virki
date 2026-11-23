@@ -1,0 +1,1349 @@
+diff --git a/session/filesync/sealed_publication_v52_group_dev_linux.go b/session/filesync/sealed_publication_v52_group_dev_linux.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..531ca610e1271910c4cd4f9ccc5efa98ea8ec1c6
+--- /dev/null
++++ b/session/filesync/sealed_publication_v52_group_dev_linux.go
+@@ -0,0 +1,325 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"bytes"
++	"context"
++	"crypto/ed25519"
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++	"time"
++
++	"github.com/moby/buildkit/util/localcontext"
++	"golang.org/x/sys/unix"
++)
++
++// V52DevProtectedInput describes ONE independent, already-accepted and
++// kernel-authenticated nonroot FileSync publisher. All four inputs share one
++// V3 TEST-only Manager scope and a separately rooted V40 replay ledger.
++// Vertex/snapshot identifiers remain test inputs, NOT witnessed solver facts.
++type V52DevProtectedInput struct {
++	Conn        *net.UnixConn
++	SenderPID   int
++	SenderUID   uint32
++	SenderGID   uint32
++	Destination string
++	Manifest    V15SealedManifest
++	TestPermit  V15OwnerPermit
++	Record      localcontext.Consumption
++}
++
++type V52DevProtectedGroup struct {
++	// GroupGeneration is the exact one-use V3 TEST solve generation (32
++	// lowercase hex), independent from all four distinct V15 test nonces.
++	GroupGeneration string
++	LedgerDir       string
++	FenceDir        string // pre-provisioned root:root 0700, never user-controlled
++	TestPermitKey   ed25519.PublicKey
++	MinimumEpoch    uint64
++	MaximumEpoch    uint64
++	Inputs          [4]V52DevProtectedInput
++}
++
++const (
++	v52Pending = "V52_PENDING_DEV_NO_CANDIDATE\n"
++	v52Fenced  = "V52_FENCED_DEV_NO_CANDIDATE\n"
++	v52Ready   = "V52_FOUR_CONTEXTS_READY_DEV_NOT_OWNER_AUTHORIZED\n"
++)
++
++// PublishV52DevFourProtectedContexts consumes FOUR distinct authentic V50
++// SCM_RIGHTS handoffs and signed V15 TEST-domain permits. It submits the
++// root-owned V36 copies to one existing V3 TEST Manager scope and returns only
++// after CausalInputs proves all four observations, remeasured from protected
++// roots. NEVER invokes SolveScope.Complete/C4, signs, exports or deploys.
++// Every failure aborts the scope and persists an inert group fence.
++func PublishV52DevFourProtectedContexts(ctx context.Context, manager *localcontext.Manager,
++	scope *localcontext.SolveScope, group V52DevProtectedGroup) (records []localcontext.Consumption, err error) {
++	return publishV52FourProtectedContexts(ctx, manager, scope, group, nil, nil)
++}
++
++// Hook functions exist ONLY inside the DEV-tagged package for deterministic
++// fault injection. Not part of any production call graph or exported API.
++func publishV52FourProtectedContexts(ctx context.Context, manager *localcontext.Manager,
++	scope *localcontext.SolveScope, group V52DevProtectedGroup,
++	before, after func(int) error) (records []localcontext.Consumption, err error) {
++	if ctx == nil || manager == nil || scope == nil || os.Getuid() != 0 || os.Geteuid() != 0 {
++		return nil, errors.New("V52 DEV needs root, Manager and an existing separate V3 TEST scope")
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	// Prove the context's actual owner-scoped identity before registering an
++	// abort on it: a caller with context.Background must not burn permits or
++	// mutate another solve's authority through an invalid abort attempt.
++	expected, err := scope.DevV52ExpectedFour(ctx, manager)
++	if err != nil {
++		return nil, err
++	}
++	// An aborted scope cannot supply CausalInputs or Complete, even if a
++	// later V40 fsync is ambiguous or the individual copies remain on disk.
++	defer func() {
++		if err == nil {
++			return
++		}
++		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
++		defer cancel()
++		err = errors.Join(err, scope.Abort(abortCtx, err))
++		records = nil
++	}()
++
++	if group.GroupGeneration != expected.Nonce || !v52CanonicalNonce(group.GroupGeneration) ||
++		group.MinimumEpoch == 0 || group.MaximumEpoch < group.MinimumEpoch ||
++		len(group.TestPermitKey) != ed25519.PublicKeySize {
++		return nil, errors.New("V52 DEV group generation/epoch/key is not the independent approved TEST scope")
++	}
++	names := localcontext.RequiredContextNames()
++	approvalIDs := make(map[string]bool, len(names))
++	testNonces := make(map[string]bool, len(names))
++	sessions := make(map[string]bool, len(names))
++	destinations := make(map[string]bool, len(names))
++	senderPIDs := make(map[int]bool, len(names))
++	parent := ""
++	for i, input := range group.Inputs {
++		m, p, rec := input.Manifest, input.TestPermit, input.Record
++		if rec.Name != names[i] || m.ContextName != names[i] ||
++			rec.WorkerID != expected.WorkerID || m.WorkerID != expected.WorkerID ||
++			m.SessionID != rec.SessionID || m.SessionID != expected.SessionIDs[names[i]] ||
++			rec.Generation != group.GroupGeneration ||
++			(rec.TreeDigest != "" && rec.TreeDigest != expected.TreeDigests[names[i]]) ||
++			m.Digest == "" || v15ManifestDigest(m) != m.Digest {
++			return nil, fmt.Errorf("V52 DEV input %d disagrees with V3 TEST scope or frozen V15 manifest", i)
++		}
++		if err := validateV15Request(V15SnapshotRequest{Root: "v52-test-only",
++			ContextName: m.ContextName, WorkerID: m.WorkerID, SessionID: m.SessionID,
++			Nonce: m.Nonce, Files: m.Files, ExcludePatterns: m.ExcludePatterns}); err != nil {
++			return nil, fmt.Errorf("V52 DEV invalid manifest %d: %w", i, err)
++		}
++		if p.Domain != V15OwnerDomain || p.ApprovalID == "" ||
++			p.ManifestDigest != m.Digest || p.ContextName != m.ContextName ||
++			p.WorkerID != m.WorkerID || p.SessionID != m.SessionID ||
++			p.Nonce != m.Nonce || p.Epoch < group.MinimumEpoch ||
++			p.Epoch > group.MaximumEpoch ||
++			!ed25519.Verify(group.TestPermitKey, v15PermitBytes(p), p.Signature) {
++			return nil, fmt.Errorf("V52 DEV distinct V15 test-domain permit %d is invalid", i)
++		}
++		if approvalIDs[p.ApprovalID] || testNonces[p.Nonce] ||
++			sessions[m.SessionID] || senderPIDs[input.SenderPID] ||
++			destinations[input.Destination] {
++			return nil, errors.New("V52 DEV group reuses a test permit, sender, session or destination")
++		}
++		approvalIDs[p.ApprovalID], testNonces[p.Nonce] = true, true
++		sessions[m.SessionID], senderPIDs[input.SenderPID] = true, true
++		destinations[input.Destination] = true
++		if input.SenderUID == 0 || input.SenderGID == 0 || input.SenderPID <= 1 ||
++			input.Conn == nil || !filepath.IsAbs(input.Destination) ||
++			filepath.Clean(input.Destination) != input.Destination {
++			return nil, fmt.Errorf("V52 DEV sender/destination %d cannot be trusted", i)
++		}
++		if i == 0 {
++			parent = filepath.Dir(input.Destination)
++		} else if filepath.Dir(input.Destination) != parent {
++			return nil, errors.New("V52 DEV group destinations must share one protected root-only parent")
++		}
++		// Authenticate all four live kernel connectors BEFORE the first V40
++		// claim. A malicious fourth peer cannot consume any earlier permit.
++		if err := v41AuthenticatePeerBeforeClaim(input.Conn, input.SenderPID,
++			input.SenderUID, input.SenderGID); err != nil {
++			return nil, fmt.Errorf("V52 DEV sender %d failed pre-claim kernel authentication: %w", i, err)
++		}
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	fence, err := v52CreateGroupFence(group.FenceDir, group.GroupGeneration)
++	if err != nil {
++		return nil, err
++	}
++	defer fence.Close()
++	// The group is permanently non-replayable once the PENDING fence has been
++	// fsynced. An EIO/crash before READY leaves no automatic recovery path.
++	defer func() {
++		if err != nil {
++			err = errors.Join(err, fence.write(v52Fenced))
++		}
++	}()
++	capability, err := scope.DevV52BeginProtectedGroup(ctx, manager)
++	if err != nil {
++		return nil, fmt.Errorf("V52 DEV cannot lock CausalInputs/Complete before first claim: %w", err)
++	}
++
++	for i, input := range group.Inputs {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		if before != nil {
++			if err := before(i); err != nil {
++				return nil, fmt.Errorf("V52 DEV interpublication fault before %s: %w", names[i], err)
++			}
++		}
++		if err := PublishV51DevContextToV3(ctx, manager, group.LedgerDir, input.Conn,
++			input.SenderPID, input.SenderUID, input.SenderGID, input.Destination,
++			input.Manifest, input.TestPermit, group.TestPermitKey,
++			group.MinimumEpoch, group.MaximumEpoch, input.Record); err != nil {
++			return nil, fmt.Errorf("V52 DEV protected context %d/%d (%s) rejected: %w", i+1, len(names), names[i], err)
++		}
++		if after != nil {
++			if err := after(i); err != nil {
++				return nil, fmt.Errorf("V52 DEV interpublication fault after %s: %w", names[i], err)
++			}
++		}
++	}
++	// A cancellation after the FOURTH ContextConsumed but before the final
++	// protected-root measurements must still abort and fence the group.
++	if err := ctx.Err(); err != nil {
++		return nil, fmt.Errorf("V52 DEV canceled before four-context revalidation: %w", err)
++	}
++	worker, _, observed, err := scope.DevV52PendingCausalInputs(ctx, manager, capability)
++	if err != nil {
++		return nil, fmt.Errorf("V52 DEV incomplete V3 TEST four-context scope: %w", err)
++	}
++	if worker != expected.WorkerID || len(observed) != len(group.Inputs) {
++		return nil, errors.New("V52 DEV scope returned an inconsistent four-context group")
++	}
++	// Cross-check that every actual byte handed to Manager still matches its
++	// independently root-owned V36 publication before returning CausalInputs.
++	records = make([]localcontext.Consumption, len(group.Inputs))
++	for i, item := range observed {
++		if item.Name != names[i] || item.WorkerID != expected.WorkerID ||
++			item.SessionID != group.Inputs[i].Manifest.SessionID ||
++			item.Generation != group.GroupGeneration ||
++			item.TreeDigest != expected.TreeDigests[names[i]] ||
++			item.TreeDigestSchema != expected.TreeSchema {
++			return nil, fmt.Errorf("V52 DEV CausalInputs context %d diverged from V3 TEST scope", i)
++		}
++		recheck, data, readErr := v51MeasureProtectedPublication(
++			group.Inputs[i].Destination, group.Inputs[i].Manifest)
++		if readErr != nil || recheck.TreeDigest != item.TreeDigest ||
++			recheck.StreamDigest != item.StreamDigest ||
++			recheck.StreamLength != item.StreamLength ||
++			recheck.RegularFileBytes != item.RegularFileBytes ||
++			recheck.EntryCount != item.EntryCount || !bytes.Equal(data, item.StreamBytes) {
++			return nil, fmt.Errorf("V52 DEV protected context %s changed after V3 admission: %w", names[i],
++				errors.Join(readErr, errors.New("published bytes differ from authorized causal stream")))
++		}
++		item.StreamBytes = bytes.Clone(item.StreamBytes)
++		records[i] = item
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, fmt.Errorf("V52 DEV canceled before durable group readiness: %w", err)
++	}
++	if err := fence.write(v52Ready); err != nil {
++		return nil, fmt.Errorf("V52 DEV four-context readiness fsync uncertain; never candidate: %w", err)
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, fmt.Errorf("V52 DEV canceled before completing protected TEST scope: %w", err)
++	}
++	if err := scope.DevV52MarkFourReady(ctx, manager, capability); err != nil {
++		return nil, fmt.Errorf("V52 DEV four-context TEST scope cannot be exposed: %w", err)
++	}
++	return records, nil
++}
++
++func v52CanonicalNonce(nonce string) bool {
++	if len(nonce) != 32 {
++		return false
++	}
++	for _, char := range nonce {
++		if char < '0' || char > '9' && (char < 'a' || char > 'f') {
++			return false
++		}
++	}
++	return true
++}
++
++type v52GroupFence struct {
++	dirFD int
++	fd    int
++	name  string
++}
++
++func v52CreateGroupFence(dir, generation string) (*v52GroupFence, error) {
++	if !v52CanonicalNonce(generation) || !filepath.IsAbs(dir) ||
++		filepath.Clean(dir) != dir || dir == "/" {
++		return nil, errors.New("V52 DEV group fence path/generation must be canonical")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return nil, err
++	}
++	defer unix.Close(rootFD)
++	dirFD, err := v40OpenRootDir(rootFD, dir)
++	if err != nil {
++		return nil, fmt.Errorf("V52 DEV root-only fence directory untrusted: %w", err)
++	}
++	name := "v52-" + generation + ".state"
++	fd, err := unix.Openat(dirFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|
++		unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
++	if err != nil {
++		_ = unix.Close(dirFD)
++		return nil, fmt.Errorf("V52 DEV replayed or inaccessible group fence: %w", err)
++	}
++	fence := &v52GroupFence{dirFD: dirFD, fd: fd, name: name}
++	if err := fence.write(v52Pending); err != nil {
++		_ = fence.Close()
++		return nil, fmt.Errorf("V52 DEV cannot durably fence group attempt: %w", err)
++	}
++	return fence, nil
++}
++
++func (f *v52GroupFence) write(status string) error {
++	if f == nil {
++		return errors.New("V52 DEV group fence missing")
++	}
++	if err := v40CheckFileIdentity(f.dirFD, f.fd, f.name, 0600); err != nil {
++		return err
++	}
++	if err := unix.Ftruncate(f.fd, 0); err != nil {
++		return err
++	}
++	data := []byte(status)
++	if n, err := unix.Pwrite(f.fd, data, 0); err != nil || n != len(data) {
++		return errors.New("V52 DEV group fence write incomplete")
++	}
++	if err := unix.Fsync(f.fd); err != nil {
++		return err
++	}
++	if err := v40CheckFileIdentity(f.dirFD, f.fd, f.name, 0600); err != nil {
++		return err
++	}
++	return unix.Fsync(f.dirFD)
++}
++
++func (f *v52GroupFence) Close() error {
++	if f == nil {
++		return nil
++	}
++	return errors.Join(unix.Close(f.fd), unix.Close(f.dirFD))
++}
++
++// Keep the marker forever: READY means an inert DEV four-context measurement,
++// never an owner-approved C4 candidate. PENDING/FENCED require new permits,
++// a new V3 TEST generation and an independent root-owned attempt.
+diff --git a/session/filesync/sealed_publication_v52_group_dev_linux_test.go b/session/filesync/sealed_publication_v52_group_dev_linux_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c0c8b111bc49155acc2058265340fa8203a295a
+--- /dev/null
++++ b/session/filesync/sealed_publication_v52_group_dev_linux_test.go
+@@ -0,0 +1,711 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"bytes"
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync/atomic"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/moby/buildkit/util/localcontext"
++	"golang.org/x/sys/unix"
++)
++
++// A V3 TEST-only authority double supplies independent, precomputed context
++// commitments to the REAL Manager. It cannot sign, create a C4 receipt or
++// authorize production. The real native V3 verifier is tested separately.
++type v52NonauthorizingTESTScope struct {
++	auth          localcontext.Authorization
++	abortCalls    atomic.Int32
++	completeCalls atomic.Int32
++}
++
++func (s *v52NonauthorizingTESTScope) Begin(context.Context, localcontext.Binding) (localcontext.Authorization, error) {
++	return s.auth, nil
++}
++func (s *v52NonauthorizingTESTScope) Complete(context.Context, localcontext.Completion) error {
++	s.completeCalls.Add(1)
++	return errors.New("V52 TEST forbids all C4 candidate/production completion")
++}
++func (s *v52NonauthorizingTESTScope) Abort(context.Context, string, string) error {
++	s.abortCalls.Add(1)
++	return nil
++}
++
++type v52RealFixture struct {
++	t           *testing.T
++	base        string
++	ledger      string
++	trust       string
++	initialCP   []byte
++	group       V52DevProtectedGroup
++	owner       *v52NonauthorizingTESTScope
++	manager     *localcontext.Manager
++	scope       *localcontext.SolveScope
++	ctx         context.Context
++	permitPriv  ed25519.PrivateKey
++	expectBytes [4][]byte
++	connections [4]*net.UnixConn
++	cmds        [4]*exec.Cmd
++}
++
++func v52RequireRootFixture(t *testing.T) {
++	t.Helper()
++	if os.Getenv("VIRKI_V52_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("V52 DEV requires explicitly enabled disposable Linux root multi-UID tests")
++	}
++	for i := 0; i < 4; i++ {
++		if _, err := user.LookupId(strconv.Itoa(60020 + i)); err == nil {
++			t.Skipf("V52 nonroot test UID %d belongs to an existing user", 60020+i)
++		}
++	}
++}
++
++func v52ChildSender(t *testing.T) bool {
++	t.Helper()
++	if os.Getenv("VIRKI_V52_TEST_CHILD") != "sender" {
++		return false
++	}
++	expectedUID, err := strconv.Atoi(os.Getenv("VIRKI_V52_UID"))
++	if err != nil || os.Getuid() != expectedUID || os.Geteuid() != expectedUID {
++		t.Fatal("V52 test sender is not running under the expected distinct UID")
++	}
++	source, err := os.Open(os.Getenv("VIRKI_V52_SOURCE"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer source.Close()
++	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{
++		Name: os.Getenv("VIRKI_V52_SOCKET"), Net: "unix"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	if _, _, err := conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(int(source.Fd())), nil); err != nil {
++		t.Fatal(err)
++	}
++	// Remain alive until the root supervisor closes the socket or cleans up.
++	// SO_PEERCRED and SCM_CREDENTIALS must identify this *living* child, not
++	// an inherited/forwarded descriptor from another process.
++	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
++	var reply [1]byte
++	_, _ = conn.Read(reply[:])
++	return true
++}
++
++func v52NewPhysicalFixture(t *testing.T) *v52RealFixture {
++	t.Helper()
++	v52RequireRootFixture(t)
++	f := &v52RealFixture{t: t}
++	var err error
++	f.base, err = os.MkdirTemp("/var/tmp", "virki-v52-physical-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		for i := range f.cmds {
++			if f.connections[i] != nil {
++				_ = f.connections[i].Close()
++			}
++			if f.cmds[i] != nil && f.cmds[i].ProcessState == nil {
++				_ = f.cmds[i].Process.Kill()
++				_ = f.cmds[i].Wait()
++			}
++		}
++		_ = os.RemoveAll(f.base)
++	})
++	if err := os.Chmod(f.base, 0711); err != nil {
++		t.Fatal(err)
++	}
++	f.ledger = filepath.Join(f.base, "ledger")
++	f.trust = v40TrustDir(f.ledger)
++	protected := filepath.Join(f.base, "protected")
++	f.group = V52DevProtectedGroup{
++		GroupGeneration: strings.Repeat("a", 32),
++		LedgerDir:       f.ledger,
++		FenceDir:        filepath.Join(f.base, "group-fence"),
++		MinimumEpoch:    7, MaximumEpoch: 8,
++	}
++	for _, dir := range []string{f.ledger, f.trust, protected, f.group.FenceDir} {
++		if err := os.Mkdir(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	pub, private, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	f.group.TestPermitKey, f.permitPriv = pub, private
++	macKey := make([]byte, 32)
++	if _, err := rand.Read(macKey); err != nil {
++		t.Fatal(err)
++	}
++	f.initialCP = v40InitialCheckpoint(f.ledger, pub, macKey)
++	for path, content := range map[string][]byte{
++		filepath.Join(f.ledger, v40LogName):       nil,
++		filepath.Join(f.trust, v40KeyName):        macKey,
++		filepath.Join(f.trust, v40CheckpointName): f.initialCP,
++	} {
++		mode := os.FileMode(0600)
++		if filepath.Base(path) == v40KeyName {
++			mode = 0400
++		}
++		if err := os.WriteFile(path, content, mode); err != nil {
++			t.Fatal(err)
++		}
++		file, err := os.Open(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := file.Sync(); err != nil {
++			t.Fatal(err)
++		}
++		if err := file.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for _, dir := range []string{f.trust, f.ledger} {
++		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := unix.Fsync(fd); err != nil {
++			t.Fatal(err)
++		}
++		_ = unix.Close(fd)
++	}
++	self, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	input, err := os.Open(self)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer input.Close()
++	helper := filepath.Join(f.base, "v52-nonroot-sender")
++	output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := io.Copy(output, input); err != nil {
++		t.Fatal(err)
++	}
++	if err := output.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(helper, 0555); err != nil {
++		t.Fatal(err)
++	}
++
++	identities, digests, sessions := map[string]string{}, map[string]string{}, map[string]string{}
++	names := localcontext.RequiredContextNames()
++	for i, name := range names {
++		uid := uint32(60020 + i)
++		sourceDir := filepath.Join(f.base, "source-"+strconv.Itoa(i))
++		if err := os.Mkdir(sourceDir, 0700); err != nil {
++			t.Fatal(err)
++		}
++		data := []byte("V52 independent nonroot physically published " + name + "\n")
++		filename := filepath.Join(sourceDir, "app.js")
++		if err := os.WriteFile(filename, data, 0600); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.Chown(filename, int(uid), int(uid)); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.Chown(sourceDir, int(uid), int(uid)); err != nil {
++			t.Fatal(err)
++		}
++		m := V15SealedManifest{
++			Schema:      "virki-c1-v15-memory-fs-1",
++			ContextName: name, WorkerID: "worker-v52-test",
++			SessionID: "sess-" + name,
++			Nonce:     fmt.Sprintf("%032x", 100+i),
++			Files:     []V15FilePin{{Path: "app.js", SHA256: v15Hash(data), Size: int64(len(data))}},
++			Bytes:     int64(len(data)),
++		}
++		m.Digest = v15ManifestDigest(m)
++		p := V15OwnerPermit{
++			Domain: V15OwnerDomain, ApprovalID: "v52-test-permit-" + strconv.Itoa(i),
++			ManifestDigest: m.Digest, WorkerID: m.WorkerID,
++			SessionID: m.SessionID, ContextName: m.ContextName,
++			Nonce: m.Nonce, Epoch: 7, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++		}
++		p.Signature = ed25519.Sign(private, v15PermitBytes(p))
++		// The expected tree originates from an INDEPENDENT root-controlled
++		// reference, never from the untrusted sender's mutable filesystem.
++		reference := filepath.Join(protected, "reference-"+strconv.Itoa(i))
++		if err := os.Mkdir(reference, 0700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(filepath.Join(reference, "app.js"), data, 0600); err != nil {
++			t.Fatal(err)
++		}
++		obs, stream, err := BuildLocalContextStream(reference, name, MaxLocalContextStreamBytes)
++		if err != nil {
++			t.Fatal(err)
++		}
++		f.expectBytes[i] = stream
++		identities[name], digests[name], sessions[name] = "ctxid-"+name, obs.TreeDigest, m.SessionID
++		socket := filepath.Join(f.base, "peer-"+strconv.Itoa(i)+".sock")
++		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := v50ArmPasscredBeforeAccept(listener); err != nil {
++			_ = listener.Close()
++			t.Fatal(err)
++		}
++		if err := os.Chown(socket, 0, int(uid)); err != nil {
++			_ = listener.Close()
++			t.Fatal(err)
++		}
++		if err := os.Chmod(socket, 0660); err != nil {
++			_ = listener.Close()
++			t.Fatal(err)
++		}
++		cmd := exec.Command(helper, "-test.run=^TestC1V52FourProtectedContextsOneSolve$")
++		cmd.Env = []string{
++			"PATH=/usr/bin:/bin", "VIRKI_V52_TEST_CHILD=sender",
++			"VIRKI_V52_UID=" + strconv.Itoa(int(uid)),
++			"VIRKI_V52_SOURCE=" + sourceDir,
++			"VIRKI_V52_SOCKET=" + socket,
++		}
++		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
++			Uid: uid, Gid: uid, Groups: []uint32{},
++		}}
++		if err := cmd.Start(); err != nil {
++			_ = listener.Close()
++			t.Fatal(err)
++		}
++		f.cmds[i] = cmd
++		if err := listener.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++			_ = listener.Close()
++			t.Fatal(err)
++		}
++		conn, err := listener.AcceptUnix()
++		_ = listener.Close()
++		if err != nil {
++			t.Fatal(err)
++		}
++		f.connections[i] = conn
++		f.group.Inputs[i] = V52DevProtectedInput{
++			Conn: conn, SenderPID: cmd.Process.Pid,
++			SenderUID: uid, SenderGID: uid,
++			Destination: filepath.Join(protected, "candidate-"+strconv.Itoa(i)),
++			Manifest:    m, TestPermit: p,
++			Record: localcontext.Consumption{
++				Name: name, WorkerID: m.WorkerID, SessionID: m.SessionID,
++				Generation:        f.group.GroupGeneration,
++				VertexDigest:      "sha256:" + strings.Repeat("c", 64),
++				SnapshotID:        "snap-v52-" + strconv.Itoa(i),
++				VertexOutputIndex: 0,
++			},
++		}
++	}
++	intent, err := localcontext.NewExporterIntent("image", 0, map[string]string{
++		"name": "127.0.0.1:5000/virki/v52-test:dev",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	f.owner = &v52NonauthorizingTESTScope{auth: localcontext.Authorization{
++		Token:      "v52-test-scope",
++		Generation: f.group.GroupGeneration, WorkerID: "worker-v52-test",
++		ContextIdentities: identities, ContextTreeDigests: digests,
++		ContextTreeDigestSchema: LocalContextTreeDigestSchema,
++		ContextSessionIDsV8:     sessions, ExporterPolicy: intent,
++		ExpectedImage: localcontext.ImageDescriptor{
++			MediaType: "application/vnd.oci.image.manifest.v1+json",
++			Digest:    "sha256:" + strings.Repeat("b", 64), Size: 2048,
++		}, ExpiresAt: time.Now().Add(time.Hour),
++	}}
++	f.manager, err = localcontext.NewManager(f.owner, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	f.ctx, f.scope, err = f.manager.BeginSolve(context.Background(), localcontext.Binding{
++		JobID: "job-v52-test", Role: "runtime", Nonce: f.group.GroupGeneration,
++		ApprovalID:       "v52-nonauthorizing-test-scope",
++		ApprovalEnvelope: base64.StdEncoding.EncodeToString([]byte("V52 ONLY TEST SERVICE; NO OWNER SIGNATURE")),
++		Exporter:         intent,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return f
++}
++
++func (f *v52RealFixture) fenceText() (string, error) {
++	raw, err := os.ReadFile(filepath.Join(f.group.FenceDir, "v52-"+f.group.GroupGeneration+".state"))
++	return string(raw), err
++}
++
++func (f *v52RealFixture) assertNoCandidate(t *testing.T, count int) {
++	t.Helper()
++	if _, _, _, err := f.scope.CausalInputs(); err == nil {
++		t.Fatal("incomplete/aborted V52 group unexpectedly exposes CausalInputs")
++	}
++	if f.owner.completeCalls.Load() != 0 || f.owner.abortCalls.Load() != 1 {
++		t.Fatalf("V52 requested candidate or did not abort TEST owner: complete=%d abort=%d",
++			f.owner.completeCalls.Load(), f.owner.abortCalls.Load())
++	}
++	for i, input := range f.group.Inputs {
++		_, err := os.Lstat(input.Destination)
++		if i < count && err != nil {
++			t.Fatalf("V52 protected earlier root %d missing despite spent permit: %v", i, err)
++		}
++		if i >= count && !errors.Is(err, os.ErrNotExist) {
++			t.Fatalf("V52 group published unexpected later context %d: %v", i, err)
++		}
++	}
++	log, err := os.ReadFile(filepath.Join(f.ledger, v40LogName))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := bytes.Count(log, []byte{10}); got != count {
++		t.Fatalf("V52 V40 permit claims=%d want=%d", got, count)
++	}
++}
++
++func TestC1V52FourProtectedContextsOneSolve(t *testing.T) {
++	if v52ChildSender(t) {
++		return
++	}
++	if os.Getenv("VIRKI_V52_TEST_CHILD") == "crash-supervisor" {
++		f := v52NewPhysicalFixture(t)
++		fmt.Fprintf(os.Stdout, "V52_CRASH_ROOT=%s\n", f.base)
++		_, _ = publishV52FourProtectedContexts(f.ctx, f.manager, f.scope, f.group,
++			nil, func(i int) error {
++				if i == 0 {
++					// Abrupt supervisor exit: no deferred group cleanup/Abort,
++					// no completed owner scope, no V52 READY marker.
++					os.Exit(77)
++				}
++				return nil
++			})
++		os.Exit(78) // Never accidentally count a successful normal return.
++	}
++	v52RequireRootFixture(t)
++	t.Run("four independent UIDs and permits feed one TEST manager", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		out, err := PublishV52DevFourProtectedContexts(f.ctx, f.manager, f.scope, f.group)
++		if err != nil {
++			t.Fatalf("V52 four protected contexts must be admitted: %v", err)
++		}
++		if len(out) != 4 {
++			t.Fatalf("V52 expected four observations, got %d", len(out))
++		}
++		worker, _, fromScope, err := f.scope.CausalInputs()
++		if err != nil || worker != "worker-v52-test" || len(fromScope) != 4 {
++			t.Fatalf("V52 incomplete single solve: worker=%q count=%d err=%v", worker, len(fromScope), err)
++		}
++		// The public causal snapshot must NOT alias the Manager's private
++		// 4-context stream buffers. A caller mutating its returned slice must
++		// not poison any subsequent C4 evidence rehash/candidate attempt.
++		if len(fromScope[0].StreamBytes) == 0 {
++			t.Fatal("V52 CausalInputs has no physical source stream")
++		}
++		fromScope[0].StreamBytes[0] ^= 0xff
++		_, _, fresh, err := f.scope.CausalInputs()
++		if err != nil || len(fresh) != 4 || !bytes.Equal(fresh[0].StreamBytes, f.expectBytes[0]) {
++			t.Fatalf("V52 CausalInputs returned aliased mutable stream bytes: err=%v", err)
++		}
++		// Exercise the separate storage-ownership guarantee too. A new
++		// nonauthorizing TEST scope consumes the already real/verified V36
++		// streams by reference, then its caller modifies those original
++		// buffers. The Manager must retain pristine data, not the alias.
++		bufferManager, err := localcontext.NewManager(f.owner, true)
++		if err != nil {
++			t.Fatal(err)
++		}
++		bufferCtx, bufferScope, err := bufferManager.BeginSolve(context.Background(), localcontext.Binding{
++			JobID: "job-v52-buffer-ownership-test", Role: "runtime",
++			Nonce: f.group.GroupGeneration, ApprovalID: "v52-only-buffer-test",
++			ApprovalEnvelope: base64.StdEncoding.EncodeToString([]byte("TEST BUFFER CLONE ONLY")),
++			Exporter:         f.owner.auth.ExporterPolicy,
++		})
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, actual := range out {
++			entry := actual
++			entry.StreamBytes = bytes.Clone(actual.StreamBytes)
++			if err := bufferManager.ContextConsumed(bufferCtx, entry); err != nil {
++				t.Fatalf("V52 independent Manager refused actual published bytes: %v", err)
++			}
++			entry.StreamBytes[0] ^= 0xff
++		}
++		_, _, bufferRecords, err := bufferScope.CausalInputs()
++		if err != nil || len(bufferRecords) != 4 {
++			t.Fatalf("V52 Manager lost copied storage: count=%d err=%v", len(bufferRecords), err)
++		}
++		for i := range bufferRecords {
++			if !bytes.Equal(bufferRecords[i].StreamBytes, f.expectBytes[i]) {
++				t.Fatalf("V52 Manager stored caller-mutated source buffer for %d", i)
++			}
++		}
++		for i, name := range localcontext.RequiredContextNames() {
++			obs, stream, err := v51MeasureProtectedPublication(
++				f.group.Inputs[i].Destination, f.group.Inputs[i].Manifest)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if out[i].Name != name || out[i].SessionID != f.group.Inputs[i].Manifest.SessionID ||
++				out[i].TreeDigest != obs.TreeDigest || out[i].StreamDigest != obs.StreamDigest ||
++				!bytes.Equal(out[i].StreamBytes, stream) ||
++				!bytes.Equal(stream, f.expectBytes[i]) {
++				t.Fatalf("V52 context %s did not come from independently published protected bytes", name)
++			}
++			if err := claimV39DurableTestOwnerPermit(f.ledger, f.group.Inputs[i].Manifest,
++				f.group.Inputs[i].TestPermit, f.group.TestPermitKey, 7, 8); err == nil {
++				t.Fatalf("V52 V40 permit %s replayed after publication", name)
++			}
++		}
++		if state, err := f.fenceText(); err != nil || state != v52Ready {
++			t.Fatalf("V52 expected inert READY marker: %q %v", state, err)
++		}
++		if _, err := v52CreateGroupFence(f.group.FenceDir, f.group.GroupGeneration); err == nil {
++			t.Fatal("V52 allowed duplicate group generation after successful attempt")
++		}
++		if f.owner.completeCalls.Load() != 0 || f.owner.abortCalls.Load() != 0 {
++			t.Fatal("V52 must not submit anything to candidate/owner completion")
++		}
++	})
++	t.Run("fourth context remains invisible to candidate until group fsync", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		seenPending := false
++		out, err := publishV52FourProtectedContexts(f.ctx, f.manager, f.scope, f.group, nil, func(i int) error {
++			if i != 3 {
++				return nil
++			}
++			// Another Go caller may possess a reference to ctx/scope/manager,
++			// but NOT the one-shot capability held by the V52 coordinator.
++			forged := &localcontext.DevV52GroupCapability{}
++			if err := f.scope.DevV52MarkFourReady(f.ctx, f.manager, forged); err == nil {
++				return errors.New("V52 other caller forged readiness without coordinator capability")
++			}
++			if _, _, _, err := f.scope.DevV52PendingCausalInputs(f.ctx, f.manager, forged); err == nil {
++				return errors.New("V52 other caller bypassed private pending causal stream")
++			}
++			if _, err := f.scope.DevV52BeginProtectedGroup(f.ctx, f.manager); err == nil {
++				return errors.New("V52 other caller acquired duplicate group capability")
++			}
++			// All four Manager.ContextConsumed calls have returned. A different
++			// goroutine trying to complete or read the group must still fail
++			// until every protected root is rehashed and READY is fsynced.
++			if _, _, _, err := f.scope.CausalInputs(); err == nil ||
++				!strings.Contains(err.Error(), "V52 DEV group still pending") {
++				return fmt.Errorf("premature causal inputs after fourth context: %v", err)
++			}
++			if err := f.scope.Complete(f.ctx, localcontext.Output{}); err == nil ||
++				!strings.Contains(err.Error(), "V52 DEV group not durably ready") {
++				return fmt.Errorf("premature C4 candidate completion after fourth context: %v", err)
++			}
++			if f.owner.completeCalls.Load() != 0 {
++				return errors.New("pending group reached forbidden candidate service")
++			}
++			seenPending = true
++			return nil
++		})
++		if err != nil || !seenPending || len(out) != 4 {
++			t.Fatalf("V52 fourth-context candidate gate failed: pending=%t count=%d err=%v", seenPending, len(out), err)
++		}
++		if _, _, records, err := f.scope.CausalInputs(); err != nil || len(records) != 4 {
++			t.Fatalf("V52 READY must expose four causal inputs: count=%d err=%v", len(records), err)
++		}
++	})
++	for _, tc := range []struct {
++		name         string
++		beforeStep   int
++		afterStep    int
++		spent        int
++		rollback     bool
++		changeRoot   bool
++		cancelOnStep bool
++		cancelFourth bool
++	}{
++		{name: "fault before first", beforeStep: 0, afterStep: -1, spent: 0},
++		{name: "fault after first", beforeStep: -1, afterStep: 0, spent: 1},
++		{name: "fault after second", beforeStep: -1, afterStep: 1, spent: 2},
++		{name: "fault after third", beforeStep: -1, afterStep: 2, spent: 3},
++		{name: "fault before fourth incomplete", beforeStep: 3, afterStep: -1, spent: 3},
++		{name: "rollback trust anchor between contexts", beforeStep: -1, afterStep: -1, spent: 1, rollback: true},
++		{name: "post admission tamper before final measurement", beforeStep: -1, afterStep: -1, spent: 4, changeRoot: true},
++		{name: "cancel after second", beforeStep: -1, afterStep: -1, spent: 2, cancelOnStep: true},
++		{name: "cancel after fourth before READY fsync", beforeStep: -1, afterStep: -1, spent: 4, cancelOnStep: true, cancelFourth: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			f := v52NewPhysicalFixture(t)
++			ctx := f.ctx
++			var cancel context.CancelFunc
++			if tc.cancelOnStep {
++				ctx, cancel = context.WithCancel(f.ctx)
++				defer cancel()
++			}
++			before := func(i int) error {
++				if i == tc.beforeStep {
++					return errors.New("injected intercontext fault")
++				}
++				return nil
++			}
++			after := func(i int) error {
++				if i == tc.afterStep {
++					return errors.New("injected intercontext fault")
++				}
++				if tc.rollback && i == 0 {
++					return os.WriteFile(filepath.Join(f.trust, v40CheckpointName), f.initialCP, 0600)
++				}
++				if tc.changeRoot && i == 2 {
++					return os.WriteFile(filepath.Join(f.group.Inputs[0].Destination, "app.js"),
++						[]byte("UNAUTHORIZED ROOT WRITE"), 0600)
++				}
++				if tc.cancelOnStep && ((i == 1 && !tc.cancelFourth) || (i == 3 && tc.cancelFourth)) {
++					cancel()
++				}
++				return nil
++			}
++			got, err := publishV52FourProtectedContexts(ctx, f.manager, f.scope, f.group, before, after)
++			if err == nil || len(got) != 0 {
++				t.Fatalf("V52 failure must not expose candidate observations: count=%d err=%v", len(got), err)
++			}
++			if state, stateErr := f.fenceText(); stateErr != nil || state != v52Fenced {
++				t.Fatalf("V52 failed group not durably fenced: state=%q err=%v", state, stateErr)
++			}
++			f.assertNoCandidate(t, tc.spent)
++			if _, err := v52CreateGroupFence(f.group.FenceDir, f.group.GroupGeneration); err == nil {
++				t.Fatal("V52 partial/crashed group generation was replayable")
++			}
++		})
++	}
++	t.Run("preclaim repeated permit refused without spending any", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		p := f.group.Inputs[3].TestPermit
++		p.ApprovalID = f.group.Inputs[0].TestPermit.ApprovalID
++		p.Signature = ed25519.Sign(f.permitPriv, v15PermitBytes(p))
++		f.group.Inputs[3].TestPermit = p
++		if _, err := PublishV52DevFourProtectedContexts(f.ctx, f.manager, f.scope, f.group); err == nil {
++			t.Fatal("duplicate V15 test permit must be rejected before first V40 claim")
++		}
++		f.assertNoCandidate(t, 0)
++	})
++	t.Run("unscoped context cannot consume V40 permit even with required Manager", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		if out, err := PublishV52DevFourProtectedContexts(context.Background(), f.manager, f.scope, f.group); err == nil || len(out) != 0 {
++			t.Fatalf("V52 accepted context.Background without its separately authorized scope: count=%d err=%v", len(out), err)
++		}
++		log, err := os.ReadFile(filepath.Join(f.ledger, v40LogName))
++		if err != nil || len(log) != 0 || f.owner.completeCalls.Load() != 0 {
++			t.Fatalf("V52 unscoped caller burned claim or candidate: ledger=%q err=%v", log, err)
++		}
++	})
++	t.Run("optional Manager cannot silently no-op ContextConsumed", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		optional, err := localcontext.NewManager(f.owner, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, scope, err := optional.BeginSolve(context.Background(), localcontext.Binding{
++			JobID: "job-v52-optional", Role: "runtime", Nonce: f.group.GroupGeneration,
++			ApprovalID:       "v52-optional-not-authorized",
++			ApprovalEnvelope: base64.StdEncoding.EncodeToString([]byte("V52 OPTIONAL DEV REFUSAL")),
++			Exporter:         f.owner.auth.ExporterPolicy,
++		})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if out, err := PublishV52DevFourProtectedContexts(ctx, optional, scope, f.group); err == nil || len(out) != 0 {
++			t.Fatalf("V52 optional Manager falsely admitted four contexts: count=%d err=%v", len(out), err)
++		}
++		log, err := os.ReadFile(filepath.Join(f.ledger, v40LogName))
++		if err != nil || len(log) != 0 || f.owner.completeCalls.Load() != 0 {
++			t.Fatalf("V52 optional Manager spent permit or candidate: ledger=%q err=%v", log, err)
++		}
++	})
++	t.Run("fourth wrong kernel UID refused before first claim", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		f.group.Inputs[3].SenderUID++
++		if _, err := PublishV52DevFourProtectedContexts(f.ctx, f.manager, f.scope, f.group); err == nil {
++			t.Fatal("wrong fourth real kernel UID must reject entire group preclaim")
++		}
++		f.assertNoCandidate(t, 0)
++	})
++	t.Run("crash pending group fence cannot resume or spend any claim", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		fence, err := v52CreateGroupFence(f.group.FenceDir, f.group.GroupGeneration)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := fence.Close(); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := PublishV52DevFourProtectedContexts(f.ctx, f.manager, f.scope, f.group); err == nil {
++			t.Fatal("preexisting interrupted V52 PENDING fence must prohibit group replay")
++		}
++		f.assertNoCandidate(t, 0)
++		if state, err := f.fenceText(); err != nil || state != v52Pending {
++			t.Fatalf("V52 crash fence unexpectedly cleared: %q %v", state, err)
++		}
++	})
++	t.Run("abrupt root process death after first real publication is fenced", func(t *testing.T) {
++		self, err := os.Executable()
++		if err != nil {
++			t.Fatal(err)
++		}
++		cmd := exec.Command(self, "-test.run=^TestC1V52FourProtectedContextsOneSolve$")
++		cmd.Env = []string{"PATH=/usr/bin:/bin", "VIRKI_V52_RUN_ROOT_FIXTURE=1",
++			"VIRKI_V52_TEST_CHILD=crash-supervisor"}
++		out, err := cmd.CombinedOutput()
++		var exited *exec.ExitError
++		if !errors.As(err, &exited) || exited.ExitCode() != 77 {
++			t.Fatalf("V52 must really crash after the first protected V40/V36 publication: %v %s", err, out)
++		}
++		var base string
++		for _, line := range strings.Split(string(out), "\n") {
++			if strings.HasPrefix(line, "V52_CRASH_ROOT=") {
++				base = strings.TrimPrefix(line, "V52_CRASH_ROOT=")
++			}
++		}
++		if !strings.HasPrefix(base, "/var/tmp/virki-v52-physical-") ||
++			filepath.Clean(base) != base || base == "/var/tmp/virki-v52-physical-" {
++			t.Fatalf("V52 crashed child returned invalid cleanup root: %q", base)
++		}
++		t.Cleanup(func() { _ = os.RemoveAll(base) })
++		fenceDir := filepath.Join(base, "group-fence")
++		fenceName := "v52-" + strings.Repeat("a", 32) + ".state"
++		marker, err := os.ReadFile(filepath.Join(fenceDir, fenceName))
++		if err != nil || string(marker) != v52Pending {
++			t.Fatalf("V52 abrupt crash must leave durable PENDING fence: %q %v", marker, err)
++		}
++		log, err := os.ReadFile(filepath.Join(base, "ledger", v40LogName))
++		if err != nil || bytes.Count(log, []byte{10}) != 1 {
++			t.Fatalf("V52 abrupt crash must retain exactly one durable V40 claim: %q %v", log, err)
++		}
++		for i := 0; i < 4; i++ {
++			_, err := os.Lstat(filepath.Join(base, "protected", "candidate-"+strconv.Itoa(i)))
++			if i == 0 && err != nil || i > 0 && !errors.Is(err, os.ErrNotExist) {
++				t.Fatalf("V52 unexpected root after crash at context %d: %v", i, err)
++			}
++		}
++		if _, err := v52CreateGroupFence(fenceDir, strings.Repeat("a", 32)); err == nil {
++			t.Fatal("V52 abrupt-crash group attempt was replayable")
++		}
++	})
++}
+diff --git a/util/localcontext/dev_v51_preflight_linux.go b/util/localcontext/dev_v51_preflight_linux.go
+index ef06fb5c0d66470b83f09a2d6f94973c0ec1447c..abcf3afe176fe28a214aa5e1ee909f37c6d22e40 100644
+--- a/util/localcontext/dev_v51_preflight_linux.go
++++ b/util/localcontext/dev_v51_preflight_linux.go
+@@ -39,9 +39,17 @@ func (m *Manager) DevV51Preflight(ctx context.Context, manifestNonce string, rec
+ 		!time.Now().Before(scope.auth.ExpiresAt) {
+ 		return errors.New("V51R DEV protected publication has expired or terminating owner scope")
+ 	}
+-	if manifestNonce == "" || manifestNonce != scope.auth.Generation ||
+-		manifestNonce != scope.binding.Nonce ||
+-		(record.Generation != "" && record.Generation != manifestNonce) {
++	// In the ordinary standalone V51 path the V15 TEST nonce equals the V3
++	// solve generation. A V52 protected group instead has FOUR distinct V15
++	// TEST nonces under ONE approved V3 solve generation. Allow that distinct
++	// nonce only while V52's protected pending gate is held; the caller must
++	// identify the exact approved V3 generation in the record. The real V15
++	// permit and manifest nonce are still signature-checked by V39/V40 before
++	// any claim, and the Manager independently rechecks ContextConsumed.
++	if manifestNonce == "" || scope.auth.Generation != scope.binding.Nonce ||
++		(record.Generation != "" && record.Generation != scope.auth.Generation) ||
++		(manifestNonce != scope.auth.Generation &&
++			(!scope.devV52GroupPending || record.Generation != scope.auth.Generation)) {
+ 		return errors.New("V51R DEV protected publication generation differs from approved owner scope")
+ 	}
+ 	if !isRequiredContext(record.Name) || record.WorkerID != scope.auth.WorkerID ||
+diff --git a/util/localcontext/dev_v51_preflight_linux_test.go b/util/localcontext/dev_v51_preflight_linux_test.go
+index 1460c03911da5aecf5252dcd7bbaaf78700f0977..ceb1a673c7de6c8b69b72f773db36266202a56d0 100644
+--- a/util/localcontext/dev_v51_preflight_linux_test.go
++++ b/util/localcontext/dev_v51_preflight_linux_test.go
+@@ -38,6 +38,42 @@ func TestDevV51PreflightAuthorizesWithoutConsumingScope(t *testing.T) {
+ 	}
+ }
+ 
++func TestDevV51PreflightV52DistinctPermitNonceRequiresPendingGroup(t *testing.T) {
++	service := &v8OwnerSessionFixture{sessions: v8SessionPins()}
++	manager, err := NewManager(service, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, scope, err := manager.BeginSolve(context.Background(), testBinding())
++	if err != nil {
++		t.Fatal(err)
++	}
++	record := testConsumption("source")
++	record.Generation = testNonce
++	individualV15Nonce := strings.Repeat("a", 32)
++	if individualV15Nonce == testNonce {
++		individualV15Nonce = strings.Repeat("b", 32)
++	}
++	if err := manager.DevV51Preflight(ctx, individualV15Nonce, record); err == nil {
++		t.Fatal("distinct V15 nonce must not be accepted outside an active V52 group")
++	}
++	capability, err := scope.DevV52BeginProtectedGroup(ctx, manager)
++	if err != nil || capability == nil {
++		t.Fatalf("could not start controlled DEV group: %v", err)
++	}
++	if err := manager.DevV51Preflight(ctx, individualV15Nonce, record); err != nil {
++		t.Fatalf("V52 group should admit an individual signed V15 nonce under the shared V3 scope: %v", err)
++	}
++	record.Generation = strings.Repeat("f", 32)
++	if err := manager.DevV51Preflight(ctx, individualV15Nonce, record); err == nil {
++		t.Fatal("V52 group must reject a different V3 generation even while pending")
++	}
++	if len(scope.records) != 0 || !scope.devV52GroupPending ||
++		service.completeCalls != 0 || service.abortCalls != 0 || service.beginCalls != 1 {
++		t.Fatal("group-nonce preflight must be read-only and not bypass the pending gate")
++	}
++}
++
+ func TestDevV51PreflightRefusesUnboundOrTerminatingScopesWithoutSideEffects(t *testing.T) {
+ 	tests := []struct {
+ 		name   string
+diff --git a/util/localcontext/observer.go b/util/localcontext/observer.go
+index 604dc2c072e62280c446f01e018ba8035dc7bf5d..740774a72f037dd197e05f2f57d53a5c767d6eea 100644
+--- a/util/localcontext/observer.go
++++ b/util/localcontext/observer.go
+@@ -4,6 +4,7 @@
+ package localcontext
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"crypto/sha256"
+ 	"encoding/base64"
+@@ -371,6 +372,12 @@ type SolveScope struct {
+ 	closed                                  bool
+ 	completionAttempted                     bool
+ 	abortRequested                          bool
++	// Only the DEV-tagged V52 coordinator can activate this extra gate.
++	// Default false: ordinary BuildKit and native V3 flows are unchanged.
++	devV52GroupPending bool
++	// Opaque capability pointer: no other caller can lift the pending gate
++	// merely by holding a copy of the solve ctx/scope/Manager.
++	devV52GroupCapability any
+ }
+ 
+ // RequiresNativeOCIContent is a local service-selection property, not a
+@@ -538,6 +545,20 @@ func (m *Manager) ContextConsumed(ctx context.Context, record Consumption) error
+ 	if record.TreeDigest != scope.auth.ContextTreeDigests[record.Name] {
+ 		return fmt.Errorf("worker local-context tree digest does not match owner approval for %q", record.Name)
+ 	}
++	if len(record.StreamBytes) != 0 {
++		// A V3 stream may come from a physical FileSync producer; keep an
++		// independently owned buffer so the caller cannot mutate stored
++		// evidence after ContextConsumed returns. Never copy unbounded bytes.
++		if len(record.StreamBytes) > 64<<20 ||
++			record.StreamLength != int64(len(record.StreamBytes)) {
++			return fmt.Errorf("local-context stream %q exceeds budget or length", record.Name)
++		}
++		streamHash := sha256.Sum256(record.StreamBytes)
++		if record.StreamDigest != "sha256:"+hex.EncodeToString(streamHash[:]) {
++			return fmt.Errorf("local-context stream %q is not hash-consistent", record.Name)
++		}
++		record.StreamBytes = bytes.Clone(record.StreamBytes)
++	}
+ 	record.Generation = scope.auth.Generation
+ 	scope.records[record.Name] = record
+ 	return nil
+@@ -551,6 +572,9 @@ func (s *SolveScope) CausalInputs() (string, ExporterIntent, []Consumption, erro
+ 	}
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
++	if s.devV52GroupPending {
++		return "", ExporterIntent{}, nil, errors.New("V52 DEV group still pending protected four-context verification")
++	}
+ 	if s.closed || s.completionAttempted || s.abortRequested {
+ 		return "", ExporterIntent{}, nil, errors.New("local-context solve scope is terminating")
+ 	}
+@@ -566,6 +590,7 @@ func (s *SolveScope) CausalInputs() (string, ExporterIntent, []Consumption, erro
+ 		if !ok {
+ 			return "", ExporterIntent{}, nil, fmt.Errorf("local-context causal proof is missing approved context %q", name)
+ 		}
++		record.StreamBytes = bytes.Clone(record.StreamBytes)
+ 		contexts = append(contexts, record)
+ 	}
+ 	return s.auth.WorkerID, s.auth.ExporterPolicy, contexts, nil
+@@ -597,6 +622,10 @@ func (s *SolveScope) Complete(ctx context.Context, output Output) error {
+ 	s.manager.lifecycleMu.Lock()
+ 	defer s.manager.lifecycleMu.Unlock()
+ 	s.mu.Lock()
++	if s.devV52GroupPending {
++		s.mu.Unlock()
++		return errors.New("V52 DEV group not durably ready; C4 candidate completion forbidden")
++	}
+ 	if s.closed {
+ 		s.mu.Unlock()
+ 		return errors.New("local-context solve scope is already closed")
+@@ -657,6 +686,7 @@ func (s *SolveScope) Complete(ctx context.Context, output Output) error {
+ 			s.mu.Unlock()
+ 			return fmt.Errorf("successful role output is missing approved local context %q", name)
+ 		}
++		record.StreamBytes = bytes.Clone(record.StreamBytes)
+ 		contexts = append(contexts, record)
+ 	}
+ 	if output.Image != s.auth.ExpectedImage {
+diff --git a/util/localcontext/observer_v52_dev_linux.go b/util/localcontext/observer_v52_dev_linux.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ee061fc4da9de0a048651f82b642d9e70817dc2
+--- /dev/null
++++ b/util/localcontext/observer_v52_dev_linux.go
+@@ -0,0 +1,140 @@
++//go:build linux && virki_c1c4_dev
++
++package localcontext
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"maps"
++	"time"
++)
++
++// DevV52ScopeExpectations is only an inspectable copy of an ALREADY admitted
++// scope's context commitments. It does not create, sign or authorize owner
++// approval, and is absent from normal BuildKit/production builds.
++type DevV52ScopeExpectations struct {
++	Nonce       string
++	WorkerID    string
++	TreeSchema  string
++	TreeDigests map[string]string
++	SessionIDs  map[string]string
++}
++
++// DevV52GroupCapability is a nonzero-sized, opaque in-process capability.
++// Only the coordinator that first transitions this scope to PENDING receives
++// the live pointer. Another holder of ctx/scope/Manager cannot forge or
++// reacquire it while the group is pending. This is a Go ownership boundary
++// between trusted DEV callers, not a sandbox against arbitrary same-process
++// unsafe memory access, and grants NO C4 signing authority.
++type DevV52GroupCapability struct{ private byte }
++
++// DevV52ExpectedFour requires a fresh, correctly bound Manager/SolveScope
++// before the broker spends the first synthetic V15 permit.
++func (s *SolveScope) DevV52ExpectedFour(ctx context.Context, manager *Manager) (DevV52ScopeExpectations, error) {
++	if ctx == nil || manager == nil || s == nil || s.manager != manager {
++		return DevV52ScopeExpectations{}, errors.New("V52 DEV missing or mismatched Manager scope")
++	}
++	if !manager.required || manager.service == nil {
++		return DevV52ScopeExpectations{}, errors.New("V52 DEV requires fail-closed Manager with an independently provisioned TEST owner service")
++	}
++	if got, ok := ctx.Value(scopeKey{}).(*SolveScope); !ok || got != s {
++		return DevV52ScopeExpectations{}, errors.New("V52 DEV context does not carry the exact approved solve scope")
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed || s.abortRequested || s.completionAttempted || time.Now().After(s.auth.ExpiresAt) {
++		return DevV52ScopeExpectations{}, errors.New("V52 DEV solve scope expired or terminating")
++	}
++	if len(s.records) != 0 {
++		return DevV52ScopeExpectations{}, errors.New("V52 DEV requires an empty fresh solve scope")
++	}
++	if s.auth.Generation != s.binding.Nonce || len(s.auth.ContextSessionIDsV8) != len(requiredContexts) ||
++		len(s.auth.ContextTreeDigests) != len(requiredContexts) {
++		return DevV52ScopeExpectations{}, errors.New("V52 DEV requires exactly four independently approved V3 context commitments")
++	}
++	return DevV52ScopeExpectations{
++		Nonce: s.auth.Generation, WorkerID: s.auth.WorkerID,
++		TreeSchema:  s.auth.ContextTreeDigestSchema,
++		TreeDigests: maps.Clone(s.auth.ContextTreeDigests),
++		SessionIDs:  maps.Clone(s.auth.ContextSessionIDsV8),
++	}, nil
++}
++
++// DevV52BeginProtectedGroup prevents a caller holding a copied SolveScope
++// reference from triggering CausalInputs or C4 Complete between the fourth
++// ContextConsumed and the final four-root remeasurement/fence fsync.
++func (s *SolveScope) DevV52BeginProtectedGroup(ctx context.Context, manager *Manager) (*DevV52GroupCapability, error) {
++	if _, err := s.DevV52ExpectedFour(ctx, manager); err != nil {
++		return nil, err
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.devV52GroupPending || s.closed || s.abortRequested || s.completionAttempted || len(s.records) != 0 {
++		return nil, errors.New("V52 DEV group already pending, used or terminating")
++	}
++	capability := &DevV52GroupCapability{private: 1}
++	s.devV52GroupPending = true
++	s.devV52GroupCapability = capability
++	return capability, nil
++}
++
++// DevV52PendingCausalInputs is available only to the protected coordinator.
++// The ordinary CausalInputs and Complete remain gated while this method
++// validates the four records. This method signs and authorizes nothing.
++func (s *SolveScope) DevV52PendingCausalInputs(ctx context.Context, manager *Manager, capability *DevV52GroupCapability) (string, ExporterIntent, []Consumption, error) {
++	if ctx == nil || s == nil || manager == nil || s.manager != manager {
++		return "", ExporterIntent{}, nil, errors.New("V52 DEV pending scope/manager unavailable")
++	}
++	if err := ctx.Err(); err != nil {
++		return "", ExporterIntent{}, nil, fmt.Errorf("V52 DEV pending causal scope canceled: %w", err)
++	}
++	if got, ok := ctx.Value(scopeKey{}).(*SolveScope); !ok || got != s {
++		return "", ExporterIntent{}, nil, errors.New("V52 DEV pending causal request belongs to another solve")
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if capability == nil || s.devV52GroupCapability != capability ||
++		!s.devV52GroupPending || s.closed || s.abortRequested || s.completionAttempted ||
++		time.Now().After(s.auth.ExpiresAt) || len(s.records) != len(requiredContexts) {
++		return "", ExporterIntent{}, nil, errors.New("V52 DEV pending group is not exactly four valid protected observations")
++	}
++	result := make([]Consumption, 0, len(requiredContexts))
++	for _, name := range requiredContexts {
++		record, ok := s.records[name]
++		if !ok {
++			return "", ExporterIntent{}, nil, errors.New("V52 DEV pending group missing required context")
++		}
++		record.StreamBytes = append([]byte(nil), record.StreamBytes...)
++		result = append(result, record)
++	}
++	return s.auth.WorkerID, s.auth.ExporterPolicy, result, nil
++}
++
++// DevV52MarkFourReady lifts the extra candidate/causal gate only AFTER the
++// coordinator has rechecked every root and synced the inert READY marker.
++// This is NOT C4 authorization and does not call Complete.
++func (s *SolveScope) DevV52MarkFourReady(ctx context.Context, manager *Manager, capability *DevV52GroupCapability) error {
++	if ctx == nil || manager == nil || s == nil || s.manager != manager {
++		return errors.New("V52 DEV ready scope/manager unavailable")
++	}
++	if err := ctx.Err(); err != nil {
++		return fmt.Errorf("V52 DEV ready scope canceled: %w", err)
++	}
++	if got, ok := ctx.Value(scopeKey{}).(*SolveScope); !ok || got != s {
++		return errors.New("V52 DEV ready context does not match the protected group")
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if err := ctx.Err(); err != nil {
++		return fmt.Errorf("V52 DEV ready scope canceled while protected: %w", err)
++	}
++	if capability == nil || s.devV52GroupCapability != capability ||
++		!s.devV52GroupPending || s.closed || s.abortRequested || s.completionAttempted ||
++		time.Now().After(s.auth.ExpiresAt) || len(s.records) != len(requiredContexts) {
++		return errors.New("V52 DEV cannot expose incomplete or terminated group")
++	}
++	s.devV52GroupPending = false
++	s.devV52GroupCapability = nil
++	return nil
++}

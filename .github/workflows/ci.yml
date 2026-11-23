@@ -238,13 +238,14 @@ jobs:
             -v ./util/localcontext -run '^TestVROAV3ServiceWithRealManagerAndNativeDaemon$' \
             | tee "$RUNNER_TEMP/issue90-v51-native-c4.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51-native-c4.log"
-          # V52 is a wholly additive DEV-only group after the separately
-          # pinned V23–V50 and V51 trees. Never rewrite historical patches.
-          four="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v51-to-v52-four-protected-dev.patch"
-          echo "d3b2dcc83ea2e715ab41554b87a0b02536d47ae68bb2eb8be6845e3452a21030  $four" | sha256sum --check
+          # V52 is now rebased as a separate additive patch AFTER both V51
+          # and the V51R preclaim security fix. Keep the earlier experimental
+          # direct-V51 V52 patch solely as historical DEV evidence.
+          four="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v51r-to-v52-four-protected-dev.patch"
+          echo "07caeb1ff5783417d47c8f933df712585c114f86849120a4fa236a24378bd724  $four" | sha256sum --check
           git -C "$scratch" apply --cached --check "$four"
           git -C "$scratch" apply --cached "$four"
-          test "$(git -C "$scratch" write-tree)" = 009e67ba1dbba47c58cf12ba9afdac7e86c81a6f
+          test "$(git -C "$scratch" write-tree)" = 5ea8b640cc5c96785c0612d7c1e0172e5e78c772
           git -C "$scratch" checkout-index -f --all
           # Four different nonroot Linux senders make independently
           # authenticated V50 FD handoffs into four V36 root-owned snapshots.

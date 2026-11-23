@@ -28,7 +28,7 @@ The native C4 V3 receiver still has its separate existing test suite.
 
 ## Code and authority boundary
 
-V52 is an **additive** BuildKit patch applied after original V51, only
+V52 is an **additive** BuildKit patch applied after original V51 **and V51R**, only
 compiled on Linux with `-tags virki_c1c4_dev` for the coordinator,
 TEST gates and tests. It adds
 `session/filesync/PublishV52DevFourProtectedContexts`, an additive
@@ -108,15 +108,36 @@ There is no automatic group recovery or production release path.
   `6d2225efbfd67865e08a726678b1a13361441eb5` (28 patches unchanged)
 - Frozen V51 tree:
   `b0b1507f6edd67f232728046263dda4fe8f4529e`
-- **New separate V52 patch**:
+- V51R preclaim patch SHA-256:
+  `86825e203a417970a2895c54201e28d18498ab53613d4abb07e90a377c3c15ce`
+- V51R tree (before V52):
+  `bbf1938fe2ab81f7d1ca96d52d0e382bb5154dc9`
+- **Canonical additive V52 patch, after V51R**:
+  `infra/offline/patches/buildkit-v0.34.1-c1-v51r-to-v52-four-protected-dev.patch`
+- Canonical V52 patch SHA-256:
+  `07caeb1ff5783417d47c8f933df712585c114f86849120a4fa236a24378bd724`
+- Replayed canonical V51R+V52 Git tree:
+  `5ea8b640cc5c96785c0612d7c1e0172e5e78c772`.
+- Retained pre-rebase V52 DEV source patch:
   `infra/offline/patches/buildkit-v0.34.1-c1-v51-to-v52-four-protected-dev.patch`
-- V52 patch SHA-256:
+  with original patch SHA-256:
   `d3b2dcc83ea2e715ab41554b87a0b02536d47ae68bb2eb8be6845e3452a21030`
-- Replayed V52 Git tree:
-  `009e67ba1dbba47c58cf12ba9afdac7e86c81a6f`.
+  and old V51-direct tree `009e67ba1dbba47c58cf12ba9afdac7e86c81a6f`.
+  This reference patch is **not applied by the final CI**.
 
-The CI workflow separately verifies V51 and its tests **before**
-applying V52, then independently verifies V52's patch SHA-256/tree.
+The CI workflow separately verifies V51 and V51R plus their tests **before**
+applying the canonical V52 patch, then independently verifies its SHA-256/tree.
+The initial direct replay of the two independent worker patches exposed a
+real **RED**: V51R's standalone preflight required each signed V15 nonce
+to equal the shared V3 generation, whereas V52 correctly has four distinct
+signed V15 TEST nonces under one V3 TEST scope. No V40 claim passed the
+preflight during this failed composition. The rebased V52 patch adds a
+DEV-only exception **only while the scope is already group-pending**, with
+the record's generation required to equal the authorized V3 generation.
+Outside that pending gate, a mismatched V15 nonce continues to fail before
+claim. A dedicated Manager regression and the full 17-subtest root/race
+four-UID fixture now pass **GREEN**; V51R's standalone P2 regressions remain
+green. This does not relax normal/prod builds or prove owner authorization.
 The new privileged Linux suite is mandatory without SKIP and runs
 from a disposable /var/tmp destination with real process UIDs.
 No historical patch, cumulative Git tree, original V51 patch or
