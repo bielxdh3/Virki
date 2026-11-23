@@ -367,9 +367,21 @@ func TestV3NativeDaemonVerifiesSealedEvidenceAndKeepsReleaseDisabled(t *testing.
 		envelope, envelopeRaw, input, streams := makeV3Fixture(t, ownerPublic, ownerPrivate)
 		token, approvalFD := v3Begin(t, daemon, envelope, envelopeRaw)
 		resp := v3Verify(t, daemon, envelope, envelopeRaw, input, streams, token, approvalFD)
-		receipt, err := VerifyV3CandidateReceipt(resp, receiptPublic, "c4-test-receipt")
+		evidence, _ := v3Evidence(t, envelopeRaw, input)
+		request, err := BuildV3Request(envelope, envelopeRaw, CmdV3VerifyCandidate, token, evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt, err := VerifyV3CandidateReceipt(resp, receiptPublic, "c4-test-receipt", request)
 		if err != nil {
 			t.Fatalf("verify signed V3 candidate receipt: %v", err)
+		}
+		// Replay a genuine, test-only C4 signature across builds. It is still
+		// cryptographically valid, but its approved job binding is different.
+		swapped := request
+		copy(swapped.JobID[:], "other-build-job")
+		if _, err := VerifyV3CandidateReceipt(resp, receiptPublic, "c4-test-receipt", swapped); err == nil {
+			t.Fatal("signed C4 receipt replayed into a different BuildKit job")
 		}
 		if receipt.EvidenceSHA256 == "" || receipt.OutputImageID != input.OutputImageID ||
 			receipt.OwnerKeyID != "c4-test-receipt" || receipt.ApprovalKeyID != input.KeyID ||

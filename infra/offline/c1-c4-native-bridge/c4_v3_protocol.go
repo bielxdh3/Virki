@@ -443,12 +443,22 @@ func DecodeResponseFrameV3(raw []byte) (ResponseFrame, error) {
 	return resp, nil
 }
 
-func VerifyV3CandidateReceipt(resp ResponseFrame, receiptPublicKey ed25519.PublicKey, expectedKeyID string) (V3CandidateReceipt, error) {
+// VerifyV3CandidateReceipt checks both C4's signature and the exact BuildKit
+// verification request that caused it. A valid receipt for another scope,
+// build, worker, or evidence digest must never satisfy this request.
+func VerifyV3CandidateReceipt(resp ResponseFrame, receiptPublicKey ed25519.PublicKey, expectedKeyID string, expected RequestFrame) (V3CandidateReceipt, error) {
 	var receipt V3CandidateReceipt
+	if expected.Version != ProtocolVersionV3 || expected.Cmd != CmdV3VerifyCandidate ||
+		expected.Epoch == 0 || !isLowerHex(fixedValue(expected.ScopeToken[:]), 64) ||
+		!isLowerHex(fixedValue(expected.ApprovalEnvelopeSHA256[:]), 64) ||
+		!isLowerHex(fixedValue(expected.TranscriptSHA256[:]), 64) {
+		return receipt, errors.New("expected V3 candidate verification request is incomplete")
+	}
 	if len(receiptPublicKey) != ed25519.PublicKeySize {
 		return receipt, errors.New("receipt Ed25519 public key must be 32 bytes")
 	}
-	if resp.Status != StatusOK || resp.AckJSONLen == 0 || resp.AckJSONLen > uint32(len(resp.AckJSON)) {
+	if resp.Version != ProtocolVersionV3 || string(resp.Magic[:]) != ProtocolMagicV3 ||
+		resp.Status != StatusOK || resp.AckJSONLen == 0 || resp.AckJSONLen > uint32(len(resp.AckJSON)) {
 		return receipt, fmt.Errorf("V3 candidate verification failed with status %d", resp.Status)
 	}
 	if fixedValue(resp.OwnerKeyID[:]) != expectedKeyID {
@@ -472,6 +482,40 @@ func VerifyV3CandidateReceipt(resp ResponseFrame, receiptPublicKey ed25519.Publi
 	}
 	if receipt.Version != 3 || receipt.Status != "CANDIDATE_VERIFIED" || receipt.DeployAuthorized || receipt.WorkerReceiptPairAdmitted || receipt.ReleaseSignature {
 		return receipt, errors.New("V3 receipt violates non-authorizing invariant")
+	}
+	if receipt.OwnerKeyID != expectedKeyID ||
+		receipt.ApprovalKeyID != fixedValue(expected.ApprovalKeyID[:]) ||
+		receipt.ApprovalID != fixedValue(expected.ApprovalID[:]) ||
+		receipt.ApprovalSerial != fixedValue(expected.ApprovalSerial[:]) ||
+		receipt.ScopeToken != fixedValue(expected.ScopeToken[:]) ||
+		receipt.ApprovalEnvelopeSHA256 != fixedValue(expected.ApprovalEnvelopeSHA256[:]) ||
+		receipt.EvidenceSHA256 != fixedValue(expected.TranscriptSHA256[:]) ||
+		receipt.JobID != fixedValue(expected.JobID[:]) ||
+		receipt.Role != fixedValue(expected.Role[:]) ||
+		receipt.Nonce != fixedValue(expected.Nonce[:]) ||
+		receipt.SourceCommit != fixedValue(expected.SourceCommit[:]) ||
+		receipt.BuildPlanSHA256 != fixedValue(expected.BuildPlanSHA256[:]) ||
+		receipt.ExecutablePolicySHA256 != fixedValue(expected.ExecutablePolicySHA256[:]) ||
+		receipt.FileSyncManifestSHA256 != fixedValue(expected.ArchiveSHA256[:]) ||
+		receipt.WorkerID != fixedValue(expected.SessionID[:]) ||
+		receipt.OutputImageID != fixedValue(expected.OutputImageID[:]) ||
+		receipt.Epoch != expected.Epoch || receipt.Epoch != resp.Epoch ||
+		receipt.SequenceNumber == 0 || receipt.SequenceNumber != resp.SequenceNumber {
+		return receipt, errors.New("C4 signed candidate receipt does not match its V3 request and response")
+	}
+	if len(receipt.ContextTreeDigests) != ContextCount ||
+		len(receipt.ContextStreamDigests) != ContextCount ||
+		len(receipt.ContextStreamLengths) != ContextCount {
+		return receipt, errors.New("C4 signed candidate receipt has incomplete context claims")
+	}
+	for i := 0; i < ContextCount; i++ {
+		if receipt.ContextTreeDigests[i] != fixedValue(expected.ExpectedTreeDigests[i][:]) ||
+			// C4's signed receipt records the observed raw SHA-256 hex;
+			// the C1 request uses the sha256: prefix in its wire digest.
+			receipt.ContextStreamDigests[i] != strings.TrimPrefix(fixedValue(expected.ExpectedStreamDigests[i][:]), "sha256:") ||
+			receipt.ContextStreamLengths[i] != expected.ExpectedStreamLengths[i] {
+			return receipt, fmt.Errorf("C4 signed candidate receipt context %d differs from V3 request", i)
+		}
 	}
 	return receipt, nil
 }
