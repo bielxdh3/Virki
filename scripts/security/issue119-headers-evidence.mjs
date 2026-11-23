@@ -429,12 +429,19 @@ function inspectHtmlDocument(body, mime) {
       else if (inert.pop() !== tag) return fail();
       continue;
     }
-    if (tag === 'iframe' && !closing && !inert.length) {
+    let liveAttrs = null;
+    if (!closing && !inert.length) {
+      // Inline HTML event handler attributes execute JavaScript independently
+      // of nonce-bearing script elements. The strict CSP blocks them and emits
+      // violations; a receipt that ignores those violations must never pass.
+      // Parse full attribute names and reject ambiguous/duplicate syntax so
+      // broken slash/quote states cannot hide a live onload/onerror handler.
+      liveAttrs = readTagAttributes(raw, tag);
+      if (!liveAttrs || [...liveAttrs.keys()].some((name) => /^on[a-z]/.test(name))) return fail();
       // A srcdoc document inherits the parent's CSP but runs its own scripts.
       // Its violations do not bubble to the parent document, and its script
       // elements are absent from document.scripts in the parent.
-      const attrs = readTagAttributes(raw, 'iframe');
-      if (!attrs || attrs.has('srcdoc')) return fail();
+      if (tag === 'iframe' && liveAttrs.has('srcdoc')) return fail();
     }
     if (!inert.length) {
       // This public app's production HTML uses an external Next CSS asset.
@@ -447,8 +454,7 @@ function inspectHtmlDocument(body, mime) {
       // foreign origin, despite a superficially acceptable /_next CSS href.
       if (tag === 'base') return fail();
       if (tag === 'link' && !closing) {
-        const attrs = readTagAttributes(raw, 'link');
-        if (!attrs) return fail();
+        const attrs = liveAttrs;
         const rel = attrs.get('rel') ?? '';
         if (rel.includes('&')) return fail();
         const relTokens = asciiTrim(rel).toLowerCase().split(asciiSpaces);

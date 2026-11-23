@@ -834,3 +834,34 @@ test('declarative Shadow DOM templates and iframe srcdoc cannot conceal active w
     htmlDoc(safe + '<iframe><script nonce="EVIL">fallback()</script></iframe>'))).result,
   'pass');
 });
+
+test('live HTML on* handlers cannot pass the nonce-only CSP receipt', () => {
+  const safe = '<script nonce="SAFE">window.__safe = true</script>';
+  const active = [
+    htmlDoc(safe).replace('<body>', '<body onload="window.__event = true">'),
+    htmlDoc(safe).replace(stylesheet,
+      '<link rel="stylesheet" href="/_next/static/css/site.css" onload="window.__event = true">'),
+    htmlDoc(safe + '<img src="/missing" OnErRoR="window.__event = true">'),
+    htmlDoc(safe + '<div ONCLICK = "window.__event = true">click</div>'),
+    htmlDoc(safe + '<img src="/missing" onerror="one()" onerror="two()">'),
+    htmlDoc(safe + '<img/onerror="window.__event = true" src="/missing">'),
+    htmlDoc('<script nonce="SAFE" onerror="window.__event = true">window.__safe = true</script>'),
+  ];
+  for (const target of ISSUE119_HEADER_TARGETS.slice(0, 2)) {
+    for (const html of active) {
+      assert.equal(classifyIssue119Response(target, response(target.expected, goodCSP, html)).result,
+        'fail', `live event handler accepted on ${target.surface}: ${html}`);
+    }
+    for (const inert of [
+      '<template id="ordinary"><img src="/missing" onerror="ignored()"></template>',
+      '<template><link rel="stylesheet" href="/ignored.css" onload="ignored()"></template>',
+      '<noscript><img src="/missing" onerror="ignored()"></noscript>',
+      '<!-- <img src="/missing" onerror="ignored()"> -->',
+      '<div data-onload="ordinary" data-onerror="ordinary">ordinary</div>',
+    ]) {
+      assert.equal(classifyIssue119Response(target,
+        response(target.expected, goodCSP, htmlDoc(safe + inert))).result,
+      'pass', `inert or data-attribute markup stays accepted: ${inert}`);
+    }
+  }
+});
