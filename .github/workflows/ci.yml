@@ -276,6 +276,16 @@ jobs:
           git -C "$scratch" apply --cached "$v53"
           test "$(git -C "$scratch" write-tree)" = c399a293604e2a55d695c5f73b89a2bbc7906e35
           git -C "$scratch" checkout-index -f --all
+          # V54 closes a saved-credential gap in the V53 receiver policy.
+          # Real/effective UID/GID equality is insufficient: saved UID/GID 0
+          # can be restored with setuid/setgid even after capabilities are
+          # cleared and NoNewPrivs is set. Keep V53 immutable and layer V54.
+          v54="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v53-to-v54-saved-uid-guard-dev.patch"
+          echo "273e94f1a3f18118377fd8d709f6f3088809a2358190300aedbfc91411f70a48  $v54" | sha256sum --check
+          git -C "$scratch" apply --cached --unidiff-zero --check "$v54"
+          git -C "$scratch" apply --cached --unidiff-zero "$v54"
+          test "$(git -C "$scratch" write-tree)" = 5d5ae2375e43bd1eed89e462ed184ae7466d9448
+          git -C "$scratch" checkout-index -f --all
           "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
             -race -count=1 -timeout 180s -v ./session/filesync \
             -run '^TestC1V53LegacySameUIDCheckRenameNegativeControl$' \
@@ -286,11 +296,12 @@ jobs:
             VIRKI_V53_RUN_ROOT_FIXTURE=1 VIRKI_V52_RUN_ROOT_FIXTURE=1 \
             "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
             -race -count=1 -timeout 180s -v ./session/filesync \
-            -run '^TestC1V(52FourProtectedContextsOneSolve|53FileSyncToRootBrokerSameUIDStageRace)$' \
-            | tee "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
-          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
-          grep -Fq -- '--- PASS: TestC1V52FourProtectedContextsOneSolve (' "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
-          grep -Fq -- '--- PASS: TestC1V53FileSyncToRootBrokerSameUIDStageRace (' "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
+            -run '^TestC1V(52FourProtectedContextsOneSolve|53FileSyncToRootBrokerSameUIDStageRace|54ReceiverIdentityRejectsSavedRootUIDGID)$' \
+            | tee "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          grep -Fq -- '--- PASS: TestC1V52FourProtectedContextsOneSolve (' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          grep -Fq -- '--- PASS: TestC1V53FileSyncToRootBrokerSameUIDStageRace (' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          grep -Fq -- '--- PASS: TestC1V54ReceiverIdentityRejectsSavedRootUIDGID (' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
           # The build-tag is absent in normal BuildKit. All normal packages
           # must keep compiling with the V53 extra gate left at its zero value.
           "$toolchain/go/bin/go" test -mod=vendor -run '^$' ./session/filesync ./util/localcontext ./source/local ./solver/llbsolver ./cmd/buildkitd/config ./cmd/buildkitd
