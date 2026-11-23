@@ -810,3 +810,27 @@ test('network failure is inconclusive and CLI refuses network without explicit -
   assert.match(cli.stderr, /No network request made/);
   assert.equal(cli.stdout, '');
 });
+
+test('declarative Shadow DOM templates and iframe srcdoc cannot conceal active wrong-nonce scripts', () => {
+  const base = ISSUE119_HEADER_TARGETS[0];
+  const safe = '<script nonce="SAFE">window.__safe = true</script>';
+  for (const hidden of [
+    '<div><template shadowrootmode="open"><script nonce="EVIL">window.__bad = true</script></template></div>',
+    '<div><template SHADOWROOTMODE="closed"><script nonce="EVIL">window.__bad = true</script></template></div>',
+    '<div><template/shadowrootmode="open"><script nonce="EVIL">window.__bad = true</script></template></div>',
+    '<iframe srcdoc="&lt;script nonce=EVIL&gt;parent.__bad = true&lt;/script&gt;"></iframe>',
+    '<iframe SRCDOC="&lt;script nonce=EVIL&gt;parent.__bad = true&lt;/script&gt;"></iframe>',
+    '<iframe/srcdoc="&lt;script nonce=EVIL&gt;parent.__bad = true&lt;/script&gt;"></iframe>',
+  ]) {
+    assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+      htmlDoc(safe + hidden))).result, 'fail', hidden);
+  }
+  // Ordinary inert markup must remain supported; only declarative shadow
+  // roots and srcdoc are executable subdocuments that require fail-closed.
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc(safe + '<template id="ordinary"><script nonce="EVIL">inert()</script></template>'))).result,
+  'pass');
+  assert.equal(classifyIssue119Response(base, response(200, goodCSP,
+    htmlDoc(safe + '<iframe><script nonce="EVIL">fallback()</script></iframe>'))).result,
+  'pass');
+});

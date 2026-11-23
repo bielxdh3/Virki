@@ -237,11 +237,11 @@ function rawTextCloseRange(body, afterStartTag, name) {
   return simpleEndTag.test(token) ? { start: match.index, after: end + 1 } : null;
 }
 
-// Parse only the attributes needed to approve an external stylesheet. Refuse
-// duplicate/ambiguous names and HTML entity references rather than guessing
-// how the browser will resolve a URL, media condition, or disabled flag.
-function readLinkAttributes(raw) {
-  const opening = /^<link(?=[\t\n\f\r />])/i.exec(raw);
+// Parse only the attributes needed to approve an external stylesheet or to
+// exclude executable embedded contexts. Refuse duplicate/ambiguous names and
+// HTML entity references instead of guessing browser parsing semantics.
+function readTagAttributes(raw, tagName) {
+  const opening = new RegExp(`^<${tagName}(?=${ASCII_SPACE}|[/>])`, 'i').exec(raw);
   if (!opening) return null;
   const attrs = new Map();
   let pos = opening[0].length;
@@ -418,9 +418,23 @@ function inspectHtmlDocument(body, mime) {
     }
     if (tag === 'noscript' && closing) return fail();
     if (tag === 'template') {
-      if (!closing) inert.push(tag);
+      if (!closing) {
+        // Declarative Shadow DOM moves template content into a live shadow
+        // tree. Scripts inside execute and inline styles are subject to CSP,
+        // so the ordinary inert-template shortcut would hide violations.
+        const attrs = readTagAttributes(raw, 'template');
+        if (!attrs || attrs.has('shadowrootmode')) return fail();
+        inert.push(tag);
+      }
       else if (inert.pop() !== tag) return fail();
       continue;
+    }
+    if (tag === 'iframe' && !closing && !inert.length) {
+      // A srcdoc document inherits the parent's CSP but runs its own scripts.
+      // Its violations do not bubble to the parent document, and its script
+      // elements are absent from document.scripts in the parent.
+      const attrs = readTagAttributes(raw, 'iframe');
+      if (!attrs || attrs.has('srcdoc')) return fail();
     }
     if (!inert.length) {
       // This public app's production HTML uses an external Next CSS asset.
@@ -433,7 +447,7 @@ function inspectHtmlDocument(body, mime) {
       // foreign origin, despite a superficially acceptable /_next CSS href.
       if (tag === 'base') return fail();
       if (tag === 'link' && !closing) {
-        const attrs = readLinkAttributes(raw);
+        const attrs = readTagAttributes(raw, 'link');
         if (!attrs) return fail();
         const rel = attrs.get('rel') ?? '';
         if (rel.includes('&')) return fail();

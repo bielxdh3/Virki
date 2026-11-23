@@ -79,6 +79,16 @@ function assertCriticalStyles(path, styles, responses) {
   assert.equal(styles.authPageDisplay, 'grid', `${path}: .auth-page layout CSS was not applied`);
 }
 
+async function collectCspViolations(page) {
+  const byFrame = await Promise.all(page.frames().map(async (frame) => {
+    const violations = await frame.evaluate(() => window.__issue119Violations ?? null);
+    assert.ok(Array.isArray(violations),
+      `CSP violation collector unavailable in frame ${frame.url()}`);
+    return violations;
+  }));
+  return byFrame.flat();
+}
+
 test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 404 styles in a real HTML5 browser', { timeout: 90000 }, async () => {
   const port = await reservePort();
   const node = spawn(process.execPath, [join(root, 'node_modules/next/dist/bin/next'), 'start',
@@ -186,10 +196,10 @@ test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 4
           !script.type || script.type === 'module' || /javascript|ecmascript/iu.test(script.type))
           .map((script) => ({ nonce: script.nonce, inline: !script.src && !!script.textContent?.trim() })),
         styleTagNonces: [...document.querySelectorAll('style')].map((style) => style.nonce),
-        violations: window.__issue119Violations,
         heading: document.querySelector('h1')?.textContent ?? '',
         hasNext: !!window.next
       }));
+      inspected.violations = await collectCspViolations(page);
       assert.ok(inspected.scripts.some((script) => script.inline), `${path}: missing hydration bootstrap`);
       snapshots.push({ path, inspected, nonce, styles: await inspectCriticalStyles(page), stylesheetResponses });
       await page.close();
@@ -236,5 +246,37 @@ test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 4
     await browser?.close();
     if (proxy) await new Promise((resolveClose) => proxy.close(resolveClose));
     node.kill();
+  }
+});
+
+test('browser evidence detects CSP violations inside iframe srcdoc even when the parent has none', async () => {
+  const browser = await chromium.launch({ headless: true,
+    ...(process.env.VIRKI_ISSUE119_BROWSER_CHANNEL
+      ? { channel: process.env.VIRKI_ISSUE119_BROWSER_CHANNEL } : {}) });
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      window.__issue119Violations = [];
+      document.addEventListener('securitypolicyviolation', (event) =>
+        window.__issue119Violations.push(event.effectiveDirective));
+    });
+    const csp = "default-src 'self'; script-src 'nonce-SAFE'; style-src 'self'";
+    await page.route('https://issue119.invalid/', (route) => route.fulfill({
+      status: 200, headers: { 'content-type': 'text/html; charset=utf-8',
+        'content-security-policy': csp },
+      body: '<!doctype html><html><head></head><body>' +
+        '<script nonce="SAFE">window.__safe = true</script>' +
+        '<iframe srcdoc="&lt;script nonce=EVIL&gt;parent.__evil = true&lt;/script&gt;"></iframe>' +
+        '</body></html>'
+    }));
+    await page.goto('https://issue119.invalid/', { waitUntil: 'networkidle' });
+    assert.equal(page.frames().length, 2, 'the controlled srcdoc frame must exist');
+    assert.deepEqual(await page.evaluate(() => window.__issue119Violations), [],
+      'a parent-only listener cannot see the child-frame CSP failure');
+    assert.ok((await collectCspViolations(page)).includes('script-src-elem'),
+      'the acceptance gate must see script violations from every frame');
+    await page.close();
+  } finally {
+    await browser.close();
   }
 });
