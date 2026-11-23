@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export const OWNER_APPROVAL_DOMAIN = Buffer.from("VIRKI_C1_C4_OWNER_APPROVAL_V1\0", "utf8");
@@ -365,8 +365,22 @@ function writeAllSync(fd, buf) {
 }
 
 function writeAtomicState(filePath, nextState) {
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  // A successful rename is not necessarily a durable commit until its parent
+  // directory fsync succeeds. Previously an EIO at that final fsync returned
+  // an error yet allowed a different authorization transition on restart.
+  // Persist an independent fail-closed intent BEFORE touching the state. A
+  // crash or ambiguous fsync keeps the marker and requires manual reconciliation.
+  const pendingPath = `${filePath}.pending`;
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  const pendingFd = openSync(pendingPath, flags, 0o600);
+  try {
+    fsyncSync(pendingFd);
+  } finally {
+    closeSync(pendingFd);
+  }
+  fsyncParentDir(filePath);
+
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
   const fd = openSync(tmpPath, flags, 0o600);
   try {
     const data = canonicalJsonBytes(nextState);
@@ -380,6 +394,40 @@ function writeAtomicState(filePath, nextState) {
   closeSync(fd);
   renameSync(tmpPath, filePath);
   fsyncParentDir(filePath);
+  unlinkSync(pendingPath);
+  try {
+    fsyncParentDir(filePath);
+  } catch (error) {
+    // An unlink followed by an ambiguous directory fsync may already have
+    // removed the only crash-recovery fence. Restore and sync it before
+    // allowing any new transaction to inspect this state. If the filesystem
+    // cannot persist this marker, fail rather than manufacture durability.
+    try {
+      const restoreFd = openSync(pendingPath, flags, 0o600);
+      try {
+        fsyncSync(restoreFd);
+      } finally {
+        closeSync(restoreFd);
+      }
+      fsyncParentDir(filePath);
+    } catch (restoreError) {
+      throw new AggregateError([error, restoreError],
+        "C1->C4 ambiguous final intent fsync: durable recovery fence unavailable", { cause: restoreError });
+    }
+    throw error;
+  }
+}
+
+function assertNoAmbiguousStateTransition(filePath) {
+  try {
+    // lstat, not exists: a dangling symlink or other substituted marker is
+    // itself a reason to refuse, never evidence that the intent is absent.
+    lstatSync(`${filePath}.pending`);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  fail("ambiguous auth state transition pending manual reconciliation");
 }
 
 function withAuthStateLock(filePath, fn) {
@@ -444,6 +492,7 @@ export function initAnchoredAuthState(filePath, anchorSha) {
 }
 
 export function loadAndVerifyAuthState(filePath) {
+  assertNoAmbiguousStateTransition(filePath);
   const fd = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   let raw;
   try {
@@ -453,6 +502,7 @@ export function loadAndVerifyAuthState(filePath) {
   } finally {
     closeSync(fd);
   }
+  assertNoAmbiguousStateTransition(filePath);
   const state = JSON.parse(raw);
   demand(isPlainObject(state) && state.version === 1 && GIT_SHA.test(state.anchorSha ?? ""), "invalid auth state header");
   demand(typeof state.faulted === "boolean", "missing faulted flag");
